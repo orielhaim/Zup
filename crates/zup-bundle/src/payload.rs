@@ -50,6 +50,40 @@ pub trait PayloadSource {
     ) -> Result<PayloadReader, PayloadError>;
 }
 
+/// Selects an embedded package for executable paths and a directory for
+/// developer workflows. Executable packages are fully verified on creation.
+pub enum AutoPayloadSource {
+    Directory(DirectoryPayloadSource),
+    Bundle(super::BundlePayloadSource),
+}
+
+impl AutoPayloadSource {
+    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, super::BundleError> {
+        let path = path.into();
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.is_file() {
+            let bundle = super::EmbeddedBundle::open(&path)?;
+            Ok(Self::Bundle(bundle.payload_source()))
+        } else {
+            Ok(Self::Directory(DirectoryPayloadSource::new(path)))
+        }
+    }
+}
+
+impl PayloadSource for AutoPayloadSource {
+    fn open(
+        &self,
+        path: &RelativePath,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<PayloadReader, PayloadError> {
+        match self {
+            Self::Directory(source) => source.open(path, expected_sha256, expected_size),
+            Self::Bundle(source) => source.open(path, expected_sha256, expected_size),
+        }
+    }
+}
+
 /// Development/build payload provider rooted at a source tree.
 pub struct DirectoryPayloadSource {
     root: PathBuf,

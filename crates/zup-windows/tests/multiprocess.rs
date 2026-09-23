@@ -208,6 +208,82 @@ async fn multi_process_named_pipe_handshake_and_execute() {
 }
 
 #[tokio::test]
+async fn authenticated_machine_worker_reads_embedded_bundle_payload() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    let payload = project.join("dist");
+    std::fs::create_dir_all(&payload).unwrap();
+    std::fs::create_dir_all(root.path().join("state")).unwrap();
+    std::fs::create_dir_all(root.path().join("work")).unwrap();
+    std::fs::create_dir_all(root.path().join("target")).unwrap();
+    std::fs::write(payload.join("App.exe"), b"hello-app").unwrap();
+    let manifest = r#"
+schema = 1
+[app]
+id = "com.acme.app"
+name = "Acme"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "machine"
+[install.directory]
+machine = "${known.program_files}/Acme"
+[[files]]
+source = "**/*"
+destination = "${install}"
+"#;
+    std::fs::write(project.join("zup.toml"), manifest).unwrap();
+    let parsed = zup_manifest::parse(manifest).unwrap();
+    let installer = zup_manifest::parse_and_compile(manifest).unwrap();
+    let build = zup_build::materialize(&project.join("zup.toml"), &parsed, installer).unwrap();
+    let package = zup_bundle::BundleWriter::encode(&build).unwrap();
+    let runtime = root.path().join("runtime.exe");
+    let setup = root.path().join("Setup.exe");
+    std::fs::write(&runtime, b"MZ worker runtime").unwrap();
+    zup_bundle::append_bundle_to_executable(&runtime, &setup, &package).unwrap();
+
+    let dest = root.path().join("target/App.exe");
+    let dest_str = dest.display().to_string();
+    let execution = ExecutionPlan {
+        files: vec![FileOperation {
+            key: ResourceKey::File {
+                destination: dest_str.clone(),
+            },
+            kind: FileOperationKind::Create,
+            destination: tpath(&dest_str),
+            source_relative: RelativePath::new("App.exe").unwrap(),
+            precondition: FilePrecondition::Absent,
+            expected_sha256: digest(b"hello-app"),
+            expected_size: 9,
+            conflict: None,
+        }],
+        summary: ExecutionSummary {
+            files_create: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        execute_with_test_worker(
+            &execution,
+            "1.0.0",
+            &setup,
+            &root.path().join("state"),
+            &root.path().join("work"),
+            None,
+        )
+        .await,
+        "committed"
+    );
+    assert_eq!(std::fs::read(dest).unwrap(), b"hello-app");
+    let maintenance = root
+        .path()
+        .join("state/maintenance/com.acme.app/machine/1.0.0/Setup.exe");
+    assert!(zup_bundle::EmbeddedBundle::open(maintenance).is_ok());
+}
+
+#[tokio::test]
 async fn worker_transaction_with_file_shortcut_and_service() {
     let dir = TempDir::new().unwrap();
     let payload_root = dir.path().join("payload");

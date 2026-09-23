@@ -76,6 +76,62 @@ pub fn move_durable(from: &Path, to: &Path) -> Result<(), DurableError> {
     publish_replace(from, to)
 }
 
+/// Copy a file to a new path and durably publish it without replacing an
+/// existing artifact. The temporary file is a sibling so publication stays
+/// on the destination volume.
+pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), DurableError> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| DurableError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+    if destination.exists() {
+        return Err(DurableError::Win32 {
+            path: destination.display().to_string(),
+            message: "destination already exists".into(),
+        });
+    }
+    let name = destination
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let temp = destination.with_file_name(format!(".{name}.zup-tmp-{}", std::process::id()));
+    let result = (|| {
+        let mut input = std::fs::File::open(source).map_err(|error| DurableError::Io {
+            path: source.display().to_string(),
+            source: error,
+        })?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|source| DurableError::Io {
+                path: temp.display().to_string(),
+                source,
+            })?;
+        std::io::copy(&mut input, &mut output).map_err(|source| DurableError::Io {
+            path: temp.display().to_string(),
+            source,
+        })?;
+        output.sync_all().map_err(|source| DurableError::Io {
+            path: temp.display().to_string(),
+            source,
+        })?;
+        if destination.exists() {
+            return Err(DurableError::Win32 {
+                path: destination.display().to_string(),
+                message: "destination already exists".into(),
+            });
+        }
+        publish_new(&temp, destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 fn temp_sibling(path: &Path) -> PathBuf {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     path.with_file_name(format!(".{name}.zup-tmp"))
@@ -155,6 +211,20 @@ fn publish_replace(from: &Path, to: &Path) -> Result<(), DurableError> {
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     };
+    if ok == 0 {
+        return Err(DurableError::Win32 {
+            path: to.display().to_string(),
+            message: format!("MoveFileExW failed ({})", unsafe { GetLastError() }),
+        });
+    }
+    Ok(())
+}
+
+fn publish_new(from: &Path, to: &Path) -> Result<(), DurableError> {
+    let from_w = to_wide(&from.display().to_string());
+    let to_w = to_wide(&to.display().to_string());
+    // SAFETY: both paths are valid NUL-terminated UTF-16 strings.
+    let ok = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
     if ok == 0 {
         return Err(DurableError::Win32 {
             path: to.display().to_string(),

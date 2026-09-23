@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use zup_bundle::DirectoryPayloadSource;
+use zup_bundle::AutoPayloadSource;
 use zup_core::{AppId, SelectedScope};
 use zup_exec::ExecutionPlan;
 use zup_transaction::{
@@ -525,6 +525,10 @@ pub fn execute_local_blocking(
     request: RuntimeRequest,
     cancel: impl CancellationProbe + Send + 'static,
 ) -> InstallOutcome {
+    let payload = match AutoPayloadSource::from_path(request.payload_root.clone()) {
+        Ok(source) => source,
+        Err(error) => return InstallOutcome::Failed(format!("payload package: {error}")),
+    };
     let lock_key = InstallationLock::lock_key(
         request.app_id.as_str(),
         match request.scope {
@@ -552,7 +556,6 @@ pub fn execute_local_blocking(
             Ok(_) => return InstallOutcome::Failed("recovery identity mismatch".into()),
             Err(error) => return InstallOutcome::Failed(error.to_string()),
         };
-        let payload = DirectoryPayloadSource::new(request.payload_root.clone());
         let mut executor = ProductionExecutor {
             inner: WindowsFileExecutor::new(
                 payload,
@@ -614,7 +617,6 @@ pub fn execute_local_blocking(
         return InstallOutcome::Cancelled;
     }
 
-    let payload = DirectoryPayloadSource::new(request.payload_root.clone());
     let mut executor = ProductionExecutor {
         inner: WindowsFileExecutor::new(
             payload,

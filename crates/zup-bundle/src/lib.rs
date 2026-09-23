@@ -5,6 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+mod format;
 mod payload;
 
-pub use payload::{DirectoryPayloadSource, PayloadError, PayloadReader, PayloadSource};
+pub use format::{
+    BundleError, BundlePayloadSource, BundleWriter, EmbeddedBundle, PortableBuildPlan,
+    append_bundle_file_to_executable, append_bundle_to_executable, build_self_contained_executable,
+};
+pub use payload::{
+    AutoPayloadSource, DirectoryPayloadSource, PayloadError, PayloadReader, PayloadSource,
+};

@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tokio-util = { version = "0.7", features = ["codec"] }
 zup-windows.workspace = true
 zup-build.workspace = true
+zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true
@@ -24,6 +25,8 @@ zup-plan.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 uuid.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true

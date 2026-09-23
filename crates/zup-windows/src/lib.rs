@@ -32,7 +32,8 @@ pub use cmdline::{
     parse_command_line, path_entry_matches, quote_arg, split_command_line,
 };
 pub use durable::{
-    DurableError, InstallationLock, create_durable, move_durable, volume_root, write_durable,
+    DurableError, InstallationLock, copy_new_durable, create_durable, move_durable, volume_root,
+    write_durable,
 };
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,

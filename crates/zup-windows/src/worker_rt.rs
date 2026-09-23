@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use zup_bundle::DirectoryPayloadSource;
+use zup_bundle::AutoPayloadSource;
 use zup_protocol::{
     Capabilities, FILE_TRANSACTIONS_V1, Message, PROTOCOL_VERSION, ProgressKind, ProgressReport,
     SequenceTracker, SessionId, WireEnvelope, WorkerHello,
@@ -174,6 +174,8 @@ async fn run_worker_inner(
         _ => return Err(WorkerError::Protocol("invalid install scope".into())),
     };
     let payload_root = PathBuf::from(exec.payload_root);
+    let payload = AutoPayloadSource::from_path(payload_root.clone())
+        .map_err(|e| WorkerError::Transaction(format!("payload package: {e}")))?;
     let state_root = PathBuf::from(exec.state_root);
     let work_root = PathBuf::from(exec.work_root);
 
@@ -204,6 +206,10 @@ async fn run_worker_inner(
         crate::ledger::InstallLedgerStore::new(&state_root)
             .validate_plan(&app_id, scope, &plan)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+        if scope == zup_core::SelectedScope::Machine && !plan.uninstall && payload_root.is_file() {
+            publish_machine_maintenance(&payload_root, &state_root, &app_id, &app_version)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+        }
     }
 
     let store = FilesystemTransactionStore::new(&state_root);
@@ -228,7 +234,6 @@ async fn run_worker_inner(
             .map_err(|e| WorkerError::Transaction(e.to_string()))?
     };
 
-    let payload = DirectoryPayloadSource::new(payload_root);
     let mut executor = WorkerFileExecutor {
         inner: WindowsFileExecutor::new(
             payload,
@@ -331,6 +336,32 @@ async fn run_worker_inner(
     Ok(outcome)
 }
 
+fn publish_machine_maintenance(
+    executable: &std::path::Path,
+    state_root: &std::path::Path,
+    app_id: &zup_core::AppId,
+    version: &semver::Version,
+) -> Result<(), String> {
+    let target = state_root
+        .join("maintenance")
+        .join(app_id.as_str())
+        .join("machine")
+        .join(version.to_string())
+        .join("Setup.exe");
+    if target.exists() {
+        let source_file = std::fs::File::open(executable).map_err(|e| e.to_string())?;
+        let target_file = std::fs::File::open(&target).map_err(|e| e.to_string())?;
+        let source = zup_core::hash_reader(source_file).map_err(|e| e.to_string())?;
+        let existing = zup_core::hash_reader(target_file).map_err(|e| e.to_string())?;
+        return if source == existing {
+            Ok(())
+        } else {
+            Err("a different maintenance package already exists for this version".into())
+        };
+    }
+    crate::durable::copy_new_durable(executable, &target).map_err(|e| e.to_string())
+}
+
 /// Split reader into a background task that cancels on `Cancel` messages.
 fn split_reader(
     mut reader: ClientReader,
@@ -367,7 +398,7 @@ async fn send_and_close(
 
 /// Worker-side file executor wrapper (cancellation-aware).
 struct WorkerFileExecutor {
-    inner: WindowsFileExecutor<DirectoryPayloadSource>,
+    inner: WindowsFileExecutor<AutoPayloadSource>,
     cancel: TokenProbe,
 }
 
