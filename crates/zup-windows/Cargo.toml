@@ -1,0 +1,48 @@
+[package]
+name = "zup-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windows backend for zup"
+
+[features]
+test-launcher = []
+
+[[bin]]
+name = "zup-test-worker"
+path = "src/bin/test_worker.rs"
+required-features = ["test-launcher"]
+
+[dependencies]
+futures-util = { version = "0.3", features = ["sink"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing.workspace = true
+uuid.workspace = true
+windows-link.workspace = true
+windows-registry.workspace = true
+windows-result.workspace = true
+lnks.workspace = true
+windows-service.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-plan.workspace = true
+zup-platform.workspace = true
+zup-protocol.workspace = true
+zup-transaction.workspace = true
+
+[build-dependencies]
+windows-bindgen.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+zup-build.workspace = true
+zup-manifest.workspace = true

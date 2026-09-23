@@ -1,0 +1,20 @@
+[package]
+name = "zup-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Authoring and configuration layer for zup"
+
+[dependencies]
+miette.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_spanned.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+serde_json.workspace = true

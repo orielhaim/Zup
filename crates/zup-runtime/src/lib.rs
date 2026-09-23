@@ -1,0 +1,18 @@
+//! Runtime orchestration for zup installations.
+//!
+//! Tokio owns asynchronous session orchestration. The synchronous transaction
+//! engine runs under `spawn_blocking`.
+
+#![forbid(unsafe_code)]
+
+mod events;
+mod session;
+
+pub use events::{RuntimeEvent, RuntimeState};
+pub use session::{
+    CancellationHandle, InstallOutcome, RecoveryStatus, RuntimeRequest, RuntimeSession,
+    SessionError, discover_recovery, run_install, run_local_install,
+};
+
+pub use uuid::Uuid;
+pub use zup_protocol::SessionId;

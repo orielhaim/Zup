@@ -1,0 +1,27 @@
+[package]
+name = "zup-transaction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transaction graph, durable journal, and recovery engine for zup"
+
+[dependencies]
+fs-transaction.workspace = true
+jiff.workspace = true
+miette.workspace = true
+petgraph.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-platform.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

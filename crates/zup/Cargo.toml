@@ -1,0 +1,29 @@
+[package]
+name = "zup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Developer-facing CLI for zup"
+
+[[bin]]
+name = "zup"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+miette.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+zup-windows.workspace = true
+zup-build.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-manifest.workspace = true
+zup-plan.workspace = true
+zup-runtime.workspace = true
+zup-transaction.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

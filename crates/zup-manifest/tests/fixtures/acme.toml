@@ -1,0 +1,83 @@
+schema = 1
+
+[app]
+id = "com.acme.acme"
+name = "Acme"
+version = "1.4.0"
+publisher = "Acme Inc."
+main = "Acme.exe"
+
+[source]
+directory = "dist"
+
+[install]
+scope = "either"
+
+[install.directory]
+user = "${known.local_app_data}/Programs/Acme"
+machine = "${known.program_files}/Acme"
+
+[[components]]
+id = "core"
+name = "Application"
+required = true
+
+[[components]]
+id = "cli"
+name = "Command-line tools"
+default = true
+requires = ["core"]
+
+[[components]]
+id = "service"
+name = "Background service"
+default = false
+requires = ["core"]
+
+[[files]]
+source = "**/*"
+destination = "${install}"
+component = "core"
+
+[[shortcuts]]
+location = "start-menu"
+name = "Acme"
+target = "${install}/Acme.exe"
+component = "core"
+
+[[path]]
+value = "${install}/bin"
+component = "cli"
+
+[[services]]
+id = "acme-agent"
+name = "acme-agent"
+display_name = "Acme Agent"
+binary = "${install}/acme-agent.exe"
+start = "automatic"
+component = "service"
+
+[[protocols]]
+scheme = "acme"
+executable = "${install}/Acme.exe"
+args = ["--url", "%1"]
+
+[[file_types]]
+extension = ".acme"
+id = "Acme.Document"
+description = "Acme Document"
+executable = "${install}/Acme.exe"
+
+[[actions]]
+id = "register-special-device"
+type = "exec"
+component = "service"
+privilege = "machine"
+
+[actions.apply]
+command = "${install}/setup-helper.exe"
+args = ["register"]
+
+[actions.rollback]
+command = "${install}/setup-helper.exe"
+args = ["unregister"]

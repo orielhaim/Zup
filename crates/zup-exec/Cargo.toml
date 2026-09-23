@@ -1,0 +1,20 @@
+[package]
+name = "zup-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Desired-versus-observed execution delta planner for zup"
+
+[dependencies]
+miette.workspace = true
+semver.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zup-core.workspace = true
+zup-platform.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+serde_json.workspace = true

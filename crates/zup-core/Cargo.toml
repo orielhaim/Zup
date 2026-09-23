@@ -1,0 +1,16 @@
+[package]
+name = "zup-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-independent installer engine primitives for zup"
+
+[dependencies]
+semver.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
