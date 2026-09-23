@@ -104,6 +104,7 @@ pub enum ManagedResource {
     Service,
     Protocol,
     FileType,
+    UninstallEntry,
 }
 
 /// One executable (or barrier) transaction node.
@@ -354,6 +355,33 @@ pub fn compile_transaction(
             &mut managed_ids,
         )?;
     }
+    for entry in &execution.uninstall_entries {
+        let id = OperationId::resource("write_uninstall_entry", &entry.key);
+        push(
+            TransactionNode {
+                id: id.clone(),
+                phase: Phase::ManagedIntegration,
+                kind: NodeKind::ManagedIntegration {
+                    key: entry.key.clone(),
+                    delta: if entry.previous.is_some() {
+                        Delta::Replace
+                    } else {
+                        Delta::Create
+                    },
+                    resource: ManagedResource::UninstallEntry,
+                },
+                rollback: RollbackCapability::Automatic,
+                declaration_order: 0,
+                meta: NodeMeta {
+                    managed: Some(zup_exec::ManagedOperation::UninstallEntry(entry.clone())),
+                    ..Default::default()
+                },
+            },
+            &mut order,
+            &mut nodes,
+        );
+        managed_ids.push(id);
+    }
 
     let mut managed_removal_ids = Vec::new();
     let mut file_removal_ids = Vec::new();
@@ -370,6 +398,7 @@ pub fn compile_transaction(
             zup_exec::OwnedResource::ProgId { .. } | zup_exec::OwnedResource::Extension { .. } => {
                 ManagedResource::FileType
             }
+            zup_exec::OwnedResource::UninstallEntry { .. } => ManagedResource::UninstallEntry,
         };
         let id = OperationId::resource("remove_owned", &removal.key);
         push(

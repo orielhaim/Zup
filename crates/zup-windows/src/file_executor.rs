@@ -243,10 +243,15 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 });
             }
         };
-        let ResourceKey::File { destination } = key else {
-            return Err(WindowsFileExecutorError::Unsupported {
-                id: node.id.to_string(),
-            });
+        let destination = match key {
+            ResourceKey::File { destination } | ResourceKey::Maintenance { destination, .. } => {
+                destination
+            }
+            _ => {
+                return Err(WindowsFileExecutorError::Unsupported {
+                    id: node.id.to_string(),
+                });
+            }
         };
         let destination = Path::new(destination);
         match &node.kind {
@@ -363,12 +368,12 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             .join(&self.tx_id)
             .join("staging")
             .join(sanitize(vol_name))
-            .join(format!("{}.payload", sanitize(&format!("{key:?}"))))
+            .join(format!("{}.payload", resource_token(key)))
     }
 
     fn backup_path_for_key(&self, key: &ResourceKey) -> PathBuf {
         self.backup_dir()
-            .join(format!("{}.bak", sanitize(&format!("{key:?}"))))
+            .join(format!("{}.bak", resource_token(key)))
     }
 
     fn removal_backup(&self, destination: &Path) -> PathBuf {
@@ -875,4 +880,9 @@ fn sanitize(s: &str) -> String {
             }
         })
         .collect()
+}
+
+fn resource_token(key: &ResourceKey) -> String {
+    let digest = sha2::Sha256::digest(format!("{key:?}").as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

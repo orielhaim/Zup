@@ -320,12 +320,14 @@ async fn run_elevated_worker(
             zup_transaction::NodeKind::ManagedIntegration {
                 resource: zup_transaction::ManagedResource::PathEntry
                     | zup_transaction::ManagedResource::Protocol
-                    | zup_transaction::ManagedResource::FileType,
+                    | zup_transaction::ManagedResource::FileType
+                    | zup_transaction::ManagedResource::UninstallEntry,
                 ..
             } | zup_transaction::NodeKind::OwnedRemoval {
                 resource: zup_transaction::ManagedResource::PathEntry
                     | zup_transaction::ManagedResource::Protocol
-                    | zup_transaction::ManagedResource::FileType,
+                    | zup_transaction::ManagedResource::FileType
+                    | zup_transaction::ManagedResource::UninstallEntry,
                 ..
             }
         )
@@ -504,7 +506,8 @@ fn validate_request(request: &RuntimeRequest) -> Result<(), SessionError> {
                     | zup_transaction::ManagedResource::Service
                     | zup_transaction::ManagedResource::PathEntry
                     | zup_transaction::ManagedResource::Protocol
-                    | zup_transaction::ManagedResource::FileType,
+                    | zup_transaction::ManagedResource::FileType
+                    | zup_transaction::ManagedResource::UninstallEntry,
                 ..
             } => {}
             zup_transaction::NodeKind::OwnedRemoval { .. } => {}
@@ -599,6 +602,7 @@ pub fn execute_local_blocking(
     if let Err(e) = InstallLedgerStore::new(&request.state_root).validate_plan(
         &request.app_id,
         request.scope,
+        &request.app_version,
         &plan,
     ) {
         return InstallOutcome::Failed(e.to_string());
@@ -765,8 +769,10 @@ fn extract_file_identity(
     match &operation.kind {
         zup_transaction::NodeKind::StageFile { key }
         | zup_transaction::NodeKind::FileMutation { key, .. } => {
-            let ResourceKey::File { destination } = key else {
-                return Err("not a file resource".into());
+            let destination = match key {
+                ResourceKey::File { destination }
+                | ResourceKey::Maintenance { destination, .. } => destination,
+                _ => return Err("not a file resource".into()),
             };
             let dest = std::path::PathBuf::from(destination);
             let source_relative = operation

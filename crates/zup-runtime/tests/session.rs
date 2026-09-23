@@ -52,6 +52,7 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
         services: vec![],
         protocols: vec![],
         file_types: vec![],
+        uninstall_entries: vec![],
         external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,

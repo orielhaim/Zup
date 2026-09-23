@@ -1,5 +1,6 @@
 //! Ownership-aware PATH, protocol, ProgID, and extension mutations.
 
+use std::collections::BTreeMap;
 use windows_link::link;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
 use zup_core::{ResourceKey, SelectedScope};
@@ -38,6 +39,21 @@ pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, Integra
         ManagedOperation::Protocol(op) => apply_protocol(op),
         ManagedOperation::ProgId(op) => apply_progid(op),
         ManagedOperation::Extension(op) => apply_extension(op),
+        ManagedOperation::UninstallEntry(op) => {
+            if read_uninstall_entry(op.scope, &op.key_path)? != op.previous {
+                return Err(IntegrationError::Drift(format!(
+                    "uninstall entry {} changed",
+                    op.key_path
+                )));
+            }
+            write_uninstall_entry(op.scope, &op.key_path, Some(&op.installed))?;
+            Ok(OperationReceipt::UninstallEntry {
+                scope: op.scope,
+                key_path: op.key_path.clone(),
+                previous: op.previous.clone(),
+                installed: Some(op.installed.clone()),
+            })
+        }
     }
 }
 
@@ -122,6 +138,18 @@ fn removal_receipt(node: &TransactionNode) -> Result<OperationReceipt, Integrati
             previous: previous.clone(),
             installed: installed.clone(),
         }),
+        (
+            ResourceKey::UninstallEntry { app_id },
+            OwnedResource::UninstallEntry {
+                scope: owned_scope,
+                state,
+            },
+        ) if *owned_scope == scope => Ok(OperationReceipt::UninstallEntry {
+            scope,
+            key_path: format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}"),
+            previous: None,
+            installed: Some(state.clone()),
+        }),
         _ => Err(IntegrationError::Unsupported),
     }
 }
@@ -187,6 +215,17 @@ fn inverted_removal_receipt(
         } => OperationReceipt::Extension {
             scope,
             extension,
+            previous: installed,
+            installed: previous,
+        },
+        OperationReceipt::UninstallEntry {
+            scope,
+            key_path,
+            previous,
+            installed,
+        } => OperationReceipt::UninstallEntry {
+            scope,
+            key_path,
             previous: installed,
             installed: previous,
         },
@@ -301,6 +340,15 @@ pub fn reconcile_owned_removal(
             Ok(current) => compare_removal(&current, previous, installed),
             Err(_) => ReconcileResult::Ambiguous,
         },
+        OperationReceipt::UninstallEntry {
+            scope,
+            key_path,
+            previous,
+            installed,
+        } => match read_uninstall_entry(*scope, key_path) {
+            Ok(current) => compare_removal(&current, previous, installed),
+            Err(_) => ReconcileResult::Ambiguous,
+        },
         _ => return Err(IntegrationError::Unsupported),
     };
     if status == ReconcileResult::Applied {
@@ -377,6 +425,19 @@ pub fn rollback_managed(receipt: &OperationReceipt) -> Result<(), IntegrationErr
                 return Err(IntegrationError::Drift(format!("extension {extension}")));
             }
             write_extension(*scope, extension, previous)
+        }
+        OperationReceipt::UninstallEntry {
+            scope,
+            key_path,
+            previous,
+            installed,
+        } => {
+            if read_uninstall_entry(*scope, key_path)? != *installed {
+                return Err(IntegrationError::Drift(format!(
+                    "uninstall entry {key_path}"
+                )));
+            }
+            write_uninstall_entry(*scope, key_path, previous.as_ref())
         }
         _ => Err(IntegrationError::Unsupported),
     }
@@ -472,6 +533,24 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
                 })
             } else {
                 ReconcileResult::NotApplied
+            }
+        }
+        ManagedOperation::UninstallEntry(op) => {
+            let current = match read_uninstall_entry(op.scope, &op.key_path) {
+                Ok(value) => value,
+                Err(_) => return Ok(ReconcileResult::Ambiguous),
+            };
+            if current.as_ref() == Some(&op.installed) {
+                ReconcileResult::AppliedWithReceipt(OperationReceipt::UninstallEntry {
+                    scope: op.scope,
+                    key_path: op.key_path.clone(),
+                    previous: op.previous.clone(),
+                    installed: Some(op.installed.clone()),
+                })
+            } else if current == op.previous {
+                ReconcileResult::NotApplied
+            } else {
+                ReconcileResult::Ambiguous
             }
         }
     };
@@ -671,6 +750,92 @@ fn classes(scope: SelectedScope, create: bool) -> Result<Key, IntegrationError> 
     })
     .map_err(regerr)
 }
+
+pub(crate) fn read_uninstall_entry(
+    scope: SelectedScope,
+    key_path: &str,
+) -> Result<Option<zup_exec::UninstallEntryState>, IntegrationError> {
+    let root = match scope {
+        SelectedScope::User => &CURRENT_USER,
+        SelectedScope::Machine => &LOCAL_MACHINE,
+    };
+    let Some(key) = open_optional(root, key_path, false)? else {
+        return Ok(None);
+    };
+    if key.keys().map_err(regerr)?.next().is_some() {
+        return Err(IntegrationError::Drift(format!(
+            "uninstall key {key_path} has child keys"
+        )));
+    }
+    let mut values = BTreeMap::new();
+    for (name, raw) in key.values().map_err(regerr)? {
+        let value = match raw.ty() {
+            Type::String => {
+                zup_exec::UninstallEntryValue::String(String::try_from(raw).map_err(regerr)?)
+            }
+            Type::U32 => zup_exec::UninstallEntryValue::Dword(u32::try_from(raw).map_err(regerr)?),
+            _ => {
+                return Err(IntegrationError::Drift(format!(
+                    "uninstall value {name} has unsupported registry type"
+                )));
+            }
+        };
+        values.insert(name, value);
+    }
+    Ok(Some(zup_exec::UninstallEntryState { values }))
+}
+
+pub fn inspect_uninstall_registration(
+    scope: SelectedScope,
+    app_id: &str,
+) -> Result<Option<zup_exec::UninstallEntryState>, IntegrationError> {
+    let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
+    read_uninstall_entry(scope, &key_path)
+}
+
+fn write_uninstall_entry(
+    scope: SelectedScope,
+    key_path: &str,
+    state: Option<&zup_exec::UninstallEntryState>,
+) -> Result<(), IntegrationError> {
+    let root = match scope {
+        SelectedScope::User => &CURRENT_USER,
+        SelectedScope::Machine => &LOCAL_MACHINE,
+    };
+    let Some(state) = state else {
+        if let Some(key) = open_optional(root, key_path, true)? {
+            if key.keys().map_err(regerr)?.next().is_some() {
+                return Err(IntegrationError::Drift(format!(
+                    "uninstall key {key_path} gained child keys"
+                )));
+            }
+            root.remove_tree(key_path)
+                .or_else(ignore_missing)
+                .map_err(regerr)?;
+        }
+        return Ok(());
+    };
+    let key = root.create(key_path).map_err(regerr)?;
+    let names = key
+        .values()
+        .map_err(regerr)?
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    for name in names {
+        key.remove_value(&name)
+            .or_else(ignore_missing)
+            .map_err(regerr)?;
+    }
+    for (name, value) in &state.values {
+        match value {
+            zup_exec::UninstallEntryValue::String(value) => key.set_string(name, value),
+            zup_exec::UninstallEntryValue::Dword(value) => key.set_u32(name, *value),
+        }
+        .map_err(regerr)?;
+    }
+    Ok(())
+}
+
 fn environment_key(scope: SelectedScope, create: bool) -> Result<Option<Key>, IntegrationError> {
     let (root, path) = match scope {
         SelectedScope::User => (&CURRENT_USER, "Environment"),
@@ -1302,6 +1467,7 @@ mod tests {
             path_entries: vec![],
             services: vec![],
             file_types: vec![],
+            uninstall_entries: vec![],
             external_actions: vec![],
             protocols: schemes
                 .iter()
@@ -1440,6 +1606,7 @@ mod tests {
             services: vec![],
             protocols: vec![],
             file_types: vec![],
+            uninstall_entries: vec![],
             external_actions: vec![],
             summary: zup_exec::ExecutionSummary::default(),
         };
@@ -1536,6 +1703,7 @@ mod tests {
             services: vec![operation],
             protocols: vec![],
             file_types: vec![],
+            uninstall_entries: vec![],
             external_actions: vec![],
             summary: zup_exec::ExecutionSummary::default(),
         };
@@ -1658,5 +1826,81 @@ mod tests {
                 command: command("user-edit")
             }
         );
+    }
+
+    #[test]
+    fn apps_and_features_registration_reconciles_and_refuses_drifted_rollback() {
+        let app_id = format!("com.zup.arp-{}", uuid::Uuid::now_v7().simple());
+        let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
+        let _cleanup = RegistryCleanup::classes(vec![]);
+        let mut values = BTreeMap::new();
+        values.insert(
+            "DisplayName".into(),
+            zup_exec::UninstallEntryValue::String("Acme".into()),
+        );
+        values.insert(
+            "EstimatedSize".into(),
+            zup_exec::UninstallEntryValue::Dword(42),
+        );
+        let installed = zup_exec::UninstallEntryState { values };
+        let op = zup_exec::UninstallEntryOperation {
+            key: ResourceKey::UninstallEntry {
+                app_id: app_id.clone(),
+            },
+            scope: SelectedScope::User,
+            key_path: key_path.clone(),
+            previous: None,
+            installed: installed.clone(),
+        };
+        let plan = compile_transaction(&zup_exec::ExecutionPlan {
+            uninstall_entries: vec![op],
+            ..Default::default()
+        })
+        .unwrap();
+        let node = plan
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    NodeKind::ManagedIntegration {
+                        resource: zup_transaction::ManagedResource::UninstallEntry,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let receipt = apply_managed(node).unwrap();
+        assert_eq!(
+            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
+            Some(installed.clone())
+        );
+        assert!(matches!(
+            reconcile_managed(node).unwrap(),
+            ReconcileResult::AppliedWithReceipt(OperationReceipt::UninstallEntry { .. })
+        ));
+        rollback_managed(&receipt).unwrap();
+        assert_eq!(
+            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
+            None
+        );
+
+        let receipt = apply_managed(node).unwrap();
+        let changed = zup_exec::UninstallEntryState {
+            values: BTreeMap::from([(
+                "DisplayName".into(),
+                zup_exec::UninstallEntryValue::String("Changed externally".into()),
+            )]),
+        };
+        write_uninstall_entry(SelectedScope::User, &key_path, Some(&changed)).unwrap();
+        assert!(matches!(
+            rollback_managed(&receipt),
+            Err(IntegrationError::Drift(_))
+        ));
+        assert_eq!(
+            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
+            Some(changed)
+        );
+        CURRENT_USER.remove_tree(&key_path).unwrap();
     }
 }

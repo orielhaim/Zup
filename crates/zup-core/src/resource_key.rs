@@ -12,6 +12,14 @@ use crate::model::{FileExtension, ShortcutLocation};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKey {
+    Maintenance {
+        app_id: String,
+        version: String,
+        destination: String,
+    },
+    UninstallEntry {
+        app_id: String,
+    },
     File {
         destination: String,
     },

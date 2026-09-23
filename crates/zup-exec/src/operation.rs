@@ -203,6 +203,15 @@ pub struct FileTypeOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallEntryOperation {
+    pub key: ResourceKey,
+    pub scope: SelectedScope,
+    pub key_path: String,
+    pub previous: Option<crate::UninstallEntryState>,
+    pub installed: crate::UninstallEntryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedOperation {
     Shortcut(ShortcutOperation),
@@ -211,6 +220,7 @@ pub enum ManagedOperation {
     Protocol(ProtocolOperation),
     ProgId(FileTypeOperation),
     Extension(FileTypeOperation),
+    UninstallEntry(UninstallEntryOperation),
 }
 
 /// Opaque external action execution node.
@@ -275,6 +285,7 @@ pub struct ExecutionPlan {
     pub services: Vec<ServiceOperation>,
     pub protocols: Vec<ProtocolOperation>,
     pub file_types: Vec<FileTypeOperation>,
+    pub uninstall_entries: Vec<UninstallEntryOperation>,
     pub external_actions: Vec<ExternalActionOperation>,
     pub summary: ExecutionSummary,
 }

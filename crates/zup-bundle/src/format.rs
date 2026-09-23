@@ -1,4 +1,5 @@
-//! Versioned, content-addressed bundle objects and PE overlay location.
+//! Versioned, content-addressed bundle objects stored in an Authenticode-hashed
+//! PE RCDATA resource.
 
 use std::{
     collections::BTreeMap,
@@ -16,12 +17,13 @@ use zup_core::{
 };
 
 const MAGIC: &[u8; 8] = b"ZUPBNDL\0";
-const FOOTER: &[u8; 8] = b"ZUPLOC\0\0";
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 const HEADER_LEN: u64 = 60;
-const FOOTER_LEN: u64 = 64;
 const MAX_METADATA: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
+const MAX_RESOURCE_SIZE: u64 = u32::MAX as u64;
+const RESOURCE_TYPE_RCDATA: usize = 10;
+const RESOURCE_ID_BUNDLE: usize = 1;
 
 #[derive(Debug, Error)]
 pub enum BundleError {
@@ -31,6 +33,26 @@ pub enum BundleError {
     Json(#[from] serde_json::Error),
     #[error("bundle is truncated, corrupt, unsupported, or has unsafe offsets")]
     Invalid,
+    #[error(
+        "installer package is {size} bytes; the Windows RCDATA resource limit is {limit} bytes"
+    )]
+    ResourceTooLarge { size: u64, limit: u64 },
+    #[error("bundle index is {size} bytes; the metadata limit is {limit} bytes")]
+    MetadataTooLarge { size: u64, limit: u64 },
+    #[error(
+        "installer has {count} unique payload blobs; numeric RCDATA identifiers allow at most {limit}"
+    )]
+    TooManyBlobs { count: usize, limit: usize },
+    #[error("cannot allocate {size} bytes while processing the installer resource")]
+    ResourceAllocation { size: u64 },
+    #[error("PE resource API failed: {0}")]
+    ResourceApi(u32),
+    #[error("PE resource APIs are available only on Windows")]
+    ResourcesUnavailable,
+    #[error(
+        "runtime already has an Authenticode certificate table; embed resources before signing"
+    )]
+    RuntimeAlreadySigned,
     #[error("payload verification failed for {0}")]
     Payload(String),
 }
@@ -59,6 +81,7 @@ pub struct PayloadEntry {
 #[serde(deny_unknown_fields)]
 struct BlobIndex {
     digest: Sha256Digest,
+    resource_id: u16,
     offset: u64,
     compressed_size: u64,
     size: u64,
@@ -115,11 +138,18 @@ impl BundleWriter {
         })?;
         let mut compressed = Vec::new();
         let mut blobs = Vec::new();
-        for (digest, bytes) in contents {
+        if contents.len() > u16::MAX as usize - 1 {
+            return Err(BundleError::TooManyBlobs {
+                count: contents.len(),
+                limit: u16::MAX as usize - 1,
+            });
+        }
+        for (index, (digest, bytes)) in contents.into_iter().enumerate() {
             let encoded = zstd::stream::encode_all(Cursor::new(&bytes), 9)?;
             let offset = compressed.len() as u64;
             blobs.push(BlobIndex {
                 digest,
+                resource_id: u16::try_from(index + 2).map_err(|_| BundleError::Invalid)?,
                 offset,
                 compressed_size: encoded.len() as u64,
                 size: bytes.len() as u64,
@@ -140,7 +170,10 @@ impl BundleWriter {
         };
         let meta = serde_json::to_vec(&metadata)?;
         if meta.len() as u64 > MAX_METADATA {
-            return Err(BundleError::Invalid);
+            return Err(BundleError::MetadataTooLarge {
+                size: meta.len() as u64,
+                limit: MAX_METADATA,
+            });
         }
         let meta_hash = Sha256::digest(&meta);
         let mut out = Vec::with_capacity(HEADER_LEN as usize + meta.len() + compressed.len());
@@ -224,9 +257,16 @@ impl BundleWriter {
         })?;
         let mut offset = 0u64;
         let mut blobs = Vec::with_capacity(objects.len());
-        for (digest, spool) in &objects {
+        if objects.len() > u16::MAX as usize - 1 {
+            return Err(BundleError::TooManyBlobs {
+                count: objects.len(),
+                limit: u16::MAX as usize - 1,
+            });
+        }
+        for (index, (digest, spool)) in objects.iter().enumerate() {
             blobs.push(BlobIndex {
                 digest: *digest,
+                resource_id: u16::try_from(index + 2).map_err(|_| BundleError::Invalid)?,
                 offset,
                 compressed_size: spool.compressed_size,
                 size: spool.size,
@@ -247,7 +287,10 @@ impl BundleWriter {
         };
         let meta = serde_json::to_vec(&metadata)?;
         if meta.len() as u64 > MAX_METADATA {
-            return Err(BundleError::Invalid);
+            return Err(BundleError::MetadataTooLarge {
+                size: meta.len() as u64,
+                limit: MAX_METADATA,
+            });
         }
         let mut out = std::fs::OpenOptions::new()
             .write(true)
@@ -267,27 +310,22 @@ impl BundleWriter {
     }
 }
 
-/// Validated package located in a standalone bundle or a PE overlay.
+/// Validated content index from the executable's RCDATA resources.
 pub struct EmbeddedBundle {
     path: PathBuf,
-    package_offset: u64,
-    package_len: u64,
     metadata: Metadata,
 }
 
 impl EmbeddedBundle {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BundleError> {
         let path = path.as_ref().to_path_buf();
-        let mut file = File::open(&path)?;
+        let temporary = tempfile::tempdir()?;
+        let package_path = temporary.path().join("bundle.index");
+        extract_bundle_resource(&path, &package_path)?;
+        let mut file = File::open(&package_path)?;
         let len = file.metadata()?.len();
-        let (start, package_len) = locate_package(&mut file, len)?;
-        let metadata = parse_metadata(&mut file, start, package_len)?;
-        let bundle = Self {
-            path,
-            package_offset: start,
-            package_len,
-            metadata,
-        };
+        let metadata = parse_metadata(&mut file, 0, len, true)?;
+        let bundle = Self { path, metadata };
         bundle.verify_all()?;
         Ok(bundle)
     }
@@ -326,28 +364,16 @@ impl EmbeddedBundle {
     pub fn payload_source(&self) -> BundlePayloadSource {
         BundlePayloadSource {
             path: self.path.clone(),
-            package_offset: self.package_offset,
-            package_len: self.package_len,
             blobs: self.metadata.blobs.clone(),
             entries: self.metadata.plan.entries.clone(),
         }
     }
     fn verify_all(&self) -> Result<(), BundleError> {
-        for entry in &self.metadata.plan.entries {
-            let blob = self
-                .metadata
-                .blobs
-                .iter()
-                .find(|b| b.digest == entry.blob)
-                .ok_or(BundleError::Invalid)?;
-            let mut decoder = open_blob(&self.path, self.package_offset, self.package_len, blob)?;
+        for blob in &self.metadata.blobs {
+            let mut decoder = open_blob(&self.path, blob)?;
             let (size, hash) = hash_reader(&mut decoder)?;
-            if size != blob.size
-                || hash != blob.digest
-                || size != entry.size
-                || hash != entry.sha256
-            {
-                return Err(BundleError::Payload(entry.path.to_string()));
+            if size != blob.size || hash != blob.digest {
+                return Err(BundleError::Payload(blob.digest.to_string()));
             }
         }
         Ok(())
@@ -357,8 +383,6 @@ impl EmbeddedBundle {
 #[derive(Clone)]
 pub struct BundlePayloadSource {
     path: PathBuf,
-    package_offset: u64,
-    package_len: u64,
     blobs: Vec<BlobIndex>,
     entries: Vec<PayloadEntry>,
 }
@@ -370,6 +394,33 @@ impl crate::PayloadSource for BundlePayloadSource {
         expected_sha256: &Sha256Digest,
         expected_size: u64,
     ) -> Result<crate::PayloadReader, crate::PayloadError> {
+        if path.as_str() == "__zup_maintenance__.exe" {
+            let file = File::open(&self.path).map_err(|source| crate::PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+            let (size, digest) = hash_reader(file).map_err(|source| crate::PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+            if size != expected_size {
+                return Err(crate::PayloadError::SizeMismatch {
+                    path: path.to_string(),
+                    expected: expected_size,
+                    found: size,
+                });
+            }
+            if digest != *expected_sha256 {
+                return Err(crate::PayloadError::DigestMismatch {
+                    path: path.to_string(),
+                });
+            }
+            let file = File::open(&self.path).map_err(|source| crate::PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+            return Ok(Box::new(file));
+        }
         let entry = self
             .entries
             .iter()
@@ -384,17 +435,20 @@ impl crate::PayloadSource for BundlePayloadSource {
             .ok_or_else(|| crate::PayloadError::NotFound {
                 path: path.to_string(),
             })?;
-        let decoder = open_blob(&self.path, self.package_offset, self.package_len, blob).map_err(
-            |source| crate::PayloadError::Read {
-                path: path.to_string(),
-                source: std::io::Error::other(source.to_string()),
-            },
-        )?;
+        let decoder = open_blob(&self.path, blob).map_err(|source| crate::PayloadError::Read {
+            path: path.to_string(),
+            source: std::io::Error::other(source.to_string()),
+        })?;
         Ok(Box::new(decoder))
     }
 }
 
-fn parse_metadata(file: &mut File, start: u64, package_len: u64) -> Result<Metadata, BundleError> {
+fn parse_metadata(
+    file: &mut File,
+    start: u64,
+    package_len: u64,
+    resource_index: bool,
+) -> Result<Metadata, BundleError> {
     if package_len < HEADER_LEN {
         return Err(BundleError::Invalid);
     }
@@ -407,12 +461,21 @@ fn parse_metadata(file: &mut File, start: u64, package_len: u64) -> Result<Metad
     let features = u64::from_le_bytes(header[12..20].try_into().unwrap());
     let meta_len = u64::from_le_bytes(header[20..28].try_into().unwrap());
     if features != 0
-        || meta_len > MAX_METADATA
-        || HEADER_LEN
-            .checked_add(meta_len)
-            .is_none_or(|n| n > package_len)
+        || HEADER_LEN.checked_add(meta_len).is_none_or(|n| {
+            if resource_index {
+                n != package_len
+            } else {
+                n > package_len
+            }
+        })
     {
         return Err(BundleError::Invalid);
+    }
+    if meta_len > MAX_METADATA {
+        return Err(BundleError::MetadataTooLarge {
+            size: meta_len,
+            limit: MAX_METADATA,
+        });
     }
     let meta_size = usize::try_from(meta_len).map_err(|_| BundleError::Invalid)?;
     let mut bytes = vec![0; meta_size];
@@ -451,20 +514,23 @@ fn parse_metadata(file: &mut File, start: u64, package_len: u64) -> Result<Metad
         .ok_or(BundleError::Invalid)?;
     let mut previous = 0u64;
     let mut by_digest = BTreeMap::new();
+    let mut resource_ids = std::collections::BTreeSet::new();
     for blob in &metadata.blobs {
         let end = blob
             .offset
             .checked_add(blob.compressed_size)
             .ok_or(BundleError::Invalid)?;
         if blob.offset != previous
-            || end > data_len
+            || (!resource_index && end > data_len)
+            || blob.resource_id < 2
+            || !resource_ids.insert(blob.resource_id)
             || by_digest.insert(blob.digest, blob.size).is_some()
         {
             return Err(BundleError::Invalid);
         }
         previous = end;
     }
-    if previous != data_len {
+    if !resource_index && previous != data_len {
         return Err(BundleError::Invalid);
     }
     for entry in &metadata.plan.entries {
@@ -476,195 +542,44 @@ fn parse_metadata(file: &mut File, start: u64, package_len: u64) -> Result<Metad
 }
 
 fn open_blob(
-    path: &Path,
-    package_offset: u64,
-    package_len: u64,
+    executable: &Path,
     blob: &BlobIndex,
 ) -> Result<
-    zstd::stream::read::Decoder<'static, std::io::BufReader<std::io::Take<File>>>,
+    zstd::stream::read::Decoder<'static, std::io::BufReader<std::io::Cursor<Vec<u8>>>>,
     BundleError,
 > {
-    let mut file = File::open(path)?;
-    let data_start = package_offset
-        .checked_add(HEADER_LEN)
-        .ok_or(BundleError::Invalid)?;
-    // Metadata length is recovered from the fixed header.
-    file.seek(SeekFrom::Start(package_offset + 20))?;
-    let mut b = [0; 8];
-    file.read_exact(&mut b)?;
-    let meta_len = u64::from_le_bytes(b);
-    let pos = data_start
-        .checked_add(meta_len)
-        .and_then(|n| n.checked_add(blob.offset))
-        .ok_or(BundleError::Invalid)?;
-    let end = blob
-        .offset
-        .checked_add(blob.compressed_size)
-        .ok_or(BundleError::Invalid)?;
-    if end > package_len.saturating_sub(HEADER_LEN + meta_len) {
+    let bytes = read_resource(executable, blob.resource_id as usize)?;
+    if bytes.len() as u64 != blob.compressed_size {
         return Err(BundleError::Invalid);
     }
-    file.seek(SeekFrom::Start(pos))?;
-    Ok(zstd::stream::read::Decoder::new(
-        file.take(blob.compressed_size),
-    )?)
+    Ok(zstd::stream::read::Decoder::new(std::io::Cursor::new(
+        bytes,
+    ))?)
 }
-
-fn locate_package(file: &mut File, len: u64) -> Result<(u64, u64), BundleError> {
-    if len >= FOOTER_LEN
-        && let Ok(found) = footer_at(file, len - FOOTER_LEN, len - FOOTER_LEN)
-    {
-        return Ok(found);
-    }
-    let cert = pe_certificate_range(file, len)?;
-    if let Some((offset, size)) = cert {
-        if offset >= FOOTER_LEN {
-            return footer_at(file, offset - FOOTER_LEN, offset - FOOTER_LEN);
-        }
-        let _ = size;
-    }
-    Err(BundleError::Invalid)
-}
-fn footer_at(file: &mut File, at: u64, package_end: u64) -> Result<(u64, u64), BundleError> {
-    file.seek(SeekFrom::Start(at))?;
-    let mut b = [0; 64];
-    file.read_exact(&mut b)?;
-    if &b[..8] != FOOTER
-        || u32::from_le_bytes(b[8..12].try_into().unwrap()) != 1
-        || b[12..16] != [0; 4]
-    {
-        return Err(BundleError::Invalid);
-    }
-    let start = u64::from_le_bytes(b[16..24].try_into().unwrap());
-    let size = u64::from_le_bytes(b[24..32].try_into().unwrap());
-    if start.checked_add(size) != Some(at) || at != package_end || size < HEADER_LEN {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(start))?;
-    let mut h = [0; 8];
-    file.read_exact(&mut h)?;
-    if &h != MAGIC {
-        return Err(BundleError::Invalid);
-    }
-    let mut hash = Sha256::new();
-    file.seek(SeekFrom::Start(start))?;
-    let mut take = file.take(size);
-    std::io::copy(&mut take, &mut HashWriter(&mut hash))?;
-    if hash.finalize().as_slice() != &b[32..64] {
-        return Err(BundleError::Invalid);
-    }
-    Ok((start, size))
-}
-struct HashWriter<'a>(&'a mut Sha256);
-impl Write for HashWriter<'_> {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.update(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn pe_certificate_range(file: &mut File, len: u64) -> Result<Option<(u64, u64)>, BundleError> {
-    if len < 0x40 {
-        return Ok(None);
-    }
-    file.seek(SeekFrom::Start(0x3c))?;
-    let mut p = [0; 4];
-    file.read_exact(&mut p)?;
-    let pe = u32::from_le_bytes(p) as u64;
-    if pe.checked_add(24).is_none_or(|n| n > len) {
-        return Ok(None);
-    }
-    file.seek(SeekFrom::Start(pe))?;
-    let mut sig = [0; 4];
-    file.read_exact(&mut sig)?;
-    if &sig != b"PE\0\0" {
-        return Ok(None);
-    }
-    let mut coff = [0; 20];
-    file.read_exact(&mut coff)?;
-    let opt_len = u16::from_le_bytes(coff[16..18].try_into().unwrap()) as u64;
-    let opt = pe + 24;
-    if opt.checked_add(opt_len).is_none_or(|n| n > len) || opt_len < 2 {
-        return Ok(None);
-    }
-    file.seek(SeekFrom::Start(opt))?;
-    let mut magic = [0; 2];
-    file.read_exact(&mut magic)?;
-    let dir_base = match u16::from_le_bytes(magic) {
-        0x10b => 96u64,
-        0x20b => 112u64,
-        _ => return Ok(None),
-    };
-    let security = opt
-        .checked_add(dir_base + 8 * 4)
-        .ok_or(BundleError::Invalid)?;
-    if security + 8 > opt + opt_len {
-        return Ok(None);
-    }
-    file.seek(SeekFrom::Start(security))?;
-    let mut entry = [0; 8];
-    file.read_exact(&mut entry)?;
-    let offset = u32::from_le_bytes(entry[..4].try_into().unwrap()) as u64;
-    let size = u32::from_le_bytes(entry[4..].try_into().unwrap()) as u64;
-    if offset == 0 && size == 0 {
-        return Ok(None);
-    }
-    if offset.checked_add(size) != Some(len) || size == 0 {
-        return Ok(None);
-    }
-    Ok(Some((offset, size)))
-}
-
-/// Append a package plus an authenticated locator footer to a PE executable.
-/// The footer sits immediately before any later Authenticode certificate table.
-pub fn append_bundle_to_executable(
-    executable: &Path,
-    output: &Path,
-    package: &[u8],
-) -> Result<u64, BundleError> {
-    if output.exists() {
-        return Err(BundleError::Invalid);
-    }
-    let temp = output.with_extension(format!("tmp-{}", std::process::id()));
-    let mut src = File::open(executable)?;
-    let mut dst = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    std::io::copy(&mut src, &mut dst)?;
-    let start = dst.stream_position()?;
-    dst.write_all(package)?;
-    let mut footer = Vec::with_capacity(64);
-    footer.extend_from_slice(FOOTER);
-    footer.extend_from_slice(&1u32.to_le_bytes());
-    footer.extend_from_slice(&0u32.to_le_bytes());
-    footer.extend_from_slice(&start.to_le_bytes());
-    footer.extend_from_slice(&(package.len() as u64).to_le_bytes());
-    footer.extend_from_slice(&Sha256::digest(package));
-    dst.write_all(&footer)?;
-    dst.sync_all()?;
-    let size = start + package.len() as u64 + FOOTER_LEN;
-    drop(dst);
-    std::fs::rename(&temp, output)?;
-    Ok(size)
-}
-
-/// Build a self-contained executable without holding the package contents in
-/// memory. Both payload compression and the final PE overlay are streamed.
+/// Build the final installer artifact. Authenticode signing must happen after
+/// this returns so the signature covers the package resource.
 pub fn build_self_contained_executable(
     executable: &Path,
     output: &Path,
     plan: &BuildPlan,
 ) -> Result<(u64, u64), BundleError> {
     validate_unsigned_pe(executable)?;
-    let temp = tempfile::tempdir()?;
-    let package = temp.path().join("installer.zupbundle");
+    let temporary = tempfile::tempdir()?;
+    let package = temporary.path().join("installer.zupbundle");
     let package_size = BundleWriter::write_file(plan, &package)?;
-    let exe_size = append_bundle_file_to_executable(executable, output, &package)?;
-    Ok((exe_size, package_size + FOOTER_LEN))
+    embed_bundle_file(executable, output, &package)?;
+    Ok((std::fs::metadata(output)?.len(), package_size))
+}
+
+/// Embed a prebuilt bundle file as RCDATA resource 1. This is also used by
+/// installer integration tests to exercise the exact native resource path.
+pub fn embed_bundle_file(
+    executable: &Path,
+    output: &Path,
+    package: &Path,
+) -> Result<(), BundleError> {
+    validate_unsigned_pe(executable)?;
+    embed_bundle_resource(executable, output, package)
 }
 
 fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
@@ -673,84 +588,263 @@ fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
     if len < 0x40 {
         return Err(BundleError::Invalid);
     }
-    let mut dos = [0; 2];
+    let mut dos = [0u8; 2];
     file.read_exact(&mut dos)?;
     if &dos != b"MZ" {
         return Err(BundleError::Invalid);
     }
     file.seek(SeekFrom::Start(0x3c))?;
-    let mut pe_offset = [0; 4];
-    file.read_exact(&mut pe_offset)?;
-    let pe_offset = u32::from_le_bytes(pe_offset) as u64;
-    if pe_offset.checked_add(4).is_none_or(|end| end > len) {
+    let mut offset = [0u8; 4];
+    file.read_exact(&mut offset)?;
+    let pe = u32::from_le_bytes(offset) as u64;
+    if pe.checked_add(24).is_none_or(|end| end > len) {
         return Err(BundleError::Invalid);
     }
-    file.seek(SeekFrom::Start(pe_offset))?;
-    let mut signature = [0; 4];
+    file.seek(SeekFrom::Start(pe))?;
+    let mut signature = [0u8; 4];
     file.read_exact(&mut signature)?;
     if &signature != b"PE\0\0" {
         return Err(BundleError::Invalid);
     }
-    if pe_certificate_range(&mut file, len)?.is_some() {
+    let mut coff = [0u8; 20];
+    file.read_exact(&mut coff)?;
+    let optional_len = u16::from_le_bytes(coff[16..18].try_into().unwrap()) as u64;
+    let optional = pe + 24;
+    if optional
+        .checked_add(optional_len)
+        .is_none_or(|end| end > len)
+        || optional_len < 2
+    {
         return Err(BundleError::Invalid);
+    }
+    file.seek(SeekFrom::Start(optional))?;
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic)?;
+    let data_directory_offset = match u16::from_le_bytes(magic) {
+        0x10b => 96,
+        0x20b => 112,
+        _ => return Err(BundleError::Invalid),
+    };
+    let security = optional + data_directory_offset + 8 * 4;
+    if security + 8 > optional + optional_len {
+        return Err(BundleError::Invalid);
+    }
+    file.seek(SeekFrom::Start(security))?;
+    let mut certificate = [0u8; 8];
+    file.read_exact(&mut certificate)?;
+    if certificate != [0; 8] {
+        return Err(BundleError::RuntimeAlreadySigned);
     }
     Ok(())
 }
 
-pub fn append_bundle_file_to_executable(
+#[cfg(windows)]
+fn embed_bundle_resource(
     executable: &Path,
     output: &Path,
     package: &Path,
-) -> Result<u64, BundleError> {
-    if output.exists() {
+) -> Result<(), BundleError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_link::link;
+    type Handle = *mut core::ffi::c_void;
+    type Bool = i32;
+    type Dword = u32;
+    link!("kernel32.dll" "system" fn BeginUpdateResourceW(filename: *const u16, delete_existing: Bool) -> Handle);
+    link!("kernel32.dll" "system" fn UpdateResourceW(update: Handle, resource_type: *const u16, name: *const u16, language: u16, data: *const core::ffi::c_void, size: Dword) -> Bool);
+    link!("kernel32.dll" "system" fn EndUpdateResourceW(update: Handle, discard: Bool) -> Bool);
+    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
+    if output.exists() || output == executable {
         return Err(BundleError::Invalid);
     }
-    let temp = output.with_extension(format!("tmp-{}", std::process::id()));
-    let mut src = File::open(executable)?;
-    let mut dst = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    std::io::copy(&mut src, &mut dst)?;
-    let start = dst.stream_position()?;
-    let package_size = std::fs::metadata(package)?.len();
-    let mut hash = Sha256::new();
-    {
-        let mut tee = HashingWriter {
-            output: &mut dst,
-            hash: &mut hash,
-        };
-        std::io::copy(&mut File::open(package)?, &mut tee)?;
-    }
-    let mut footer = Vec::with_capacity(FOOTER_LEN as usize);
-    footer.extend_from_slice(FOOTER);
-    footer.extend_from_slice(&1u32.to_le_bytes());
-    footer.extend_from_slice(&0u32.to_le_bytes());
-    footer.extend_from_slice(&start.to_le_bytes());
-    footer.extend_from_slice(&package_size.to_le_bytes());
-    footer.extend_from_slice(&hash.finalize());
-    dst.write_all(&footer)?;
-    dst.sync_all()?;
-    let size = start
-        .checked_add(package_size)
-        .and_then(|n| n.checked_add(FOOTER_LEN))
+    let mut package_file = File::open(package)?;
+    let package_size = package_file.metadata()?.len();
+    let mut header = [0u8; HEADER_LEN as usize];
+    package_file.read_exact(&mut header)?;
+    let metadata_size = u64::from_le_bytes(header[20..28].try_into().unwrap());
+    let index_size = HEADER_LEN
+        .checked_add(metadata_size)
         .ok_or(BundleError::Invalid)?;
-    drop(dst);
-    std::fs::rename(&temp, output)?;
-    Ok(size)
+    if metadata_size > MAX_METADATA {
+        return Err(BundleError::MetadataTooLarge {
+            size: metadata_size,
+            limit: MAX_METADATA,
+        });
+    }
+    if index_size > MAX_RESOURCE_SIZE {
+        return Err(BundleError::ResourceTooLarge {
+            size: index_size,
+            limit: MAX_RESOURCE_SIZE,
+        });
+    }
+    let metadata = parse_metadata(&mut package_file, 0, package_size, false)?;
+    if metadata.blobs.len() > u16::MAX as usize - 1 {
+        return Err(BundleError::TooManyBlobs {
+            count: metadata.blobs.len(),
+            limit: u16::MAX as usize - 1,
+        });
+    }
+    for blob in &metadata.blobs {
+        if blob.compressed_size > MAX_RESOURCE_SIZE {
+            return Err(BundleError::ResourceTooLarge {
+                size: blob.compressed_size,
+                limit: MAX_RESOURCE_SIZE,
+            });
+        }
+    }
+    let index = read_package_range(&mut package_file, 0, index_size)?;
+    std::fs::copy(executable, output)?;
+    let wide: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
+    let update = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
+    if update.is_null() {
+        let _ = std::fs::remove_file(output);
+        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
+    }
+    let apply = |id: usize, data: &[u8]| -> Result<(), u32> {
+        let size = u32::try_from(data.len()).map_err(|_| 87u32)?;
+        let ok = unsafe {
+            UpdateResourceW(
+                update,
+                RESOURCE_TYPE_RCDATA as *const u16,
+                id as *const u16,
+                0,
+                data.as_ptr().cast(),
+                size,
+            )
+        };
+        if ok == 0 {
+            Err(unsafe { GetLastError() })
+        } else {
+            Ok(())
+        }
+    };
+    let result = (|| {
+        apply(RESOURCE_ID_BUNDLE, &index).map_err(BundleError::ResourceApi)?;
+        let data_start = index_size;
+        for blob in &metadata.blobs {
+            let start = data_start
+                .checked_add(blob.offset)
+                .ok_or(BundleError::Invalid)?;
+            let bytes = read_package_range(&mut package_file, start, blob.compressed_size)?;
+            apply(blob.resource_id as usize, &bytes).map_err(BundleError::ResourceApi)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        unsafe {
+            EndUpdateResourceW(update, 1);
+        }
+        let _ = std::fs::remove_file(output);
+        return Err(error);
+    }
+    if unsafe { EndUpdateResourceW(update, 0) } == 0 {
+        let error = unsafe { GetLastError() };
+        let _ = std::fs::remove_file(output);
+        return Err(BundleError::ResourceApi(error));
+    }
+    Ok(())
 }
 
-struct HashingWriter<'a, W> {
-    output: &'a mut W,
-    hash: &'a mut Sha256,
+fn read_package_range(file: &mut File, offset: u64, size: u64) -> Result<Vec<u8>, BundleError> {
+    let requested_size = size;
+    let size = usize::try_from(requested_size).map_err(|_| BundleError::ResourceAllocation {
+        size: requested_size,
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| BundleError::ResourceAllocation {
+            size: requested_size,
+        })?;
+    bytes.resize(size, 0);
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
-impl<W: Write> Write for HashingWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let written = self.output.write(bytes)?;
-        self.hash.update(&bytes[..written]);
-        Ok(written)
+#[cfg(not(windows))]
+fn embed_bundle_resource(_: &Path, _: &Path, package: &Path) -> Result<(), BundleError> {
+    let size = std::fs::metadata(package)?.len();
+    if size > MAX_RESOURCE_SIZE {
+        return Err(BundleError::ResourceTooLarge {
+            size,
+            limit: MAX_RESOURCE_SIZE,
+        });
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.output.flush()
+    Err(BundleError::ResourcesUnavailable)
+}
+
+#[cfg(windows)]
+fn read_resource(executable: &Path, resource_id: usize) -> Result<Vec<u8>, BundleError> {
+    use std::{os::windows::ffi::OsStrExt, ptr};
+    use windows_link::link;
+    type Handle = *mut core::ffi::c_void;
+    type Dword = u32;
+    link!("kernel32.dll" "system" fn LoadLibraryExW(filename: *const u16, file: Handle, flags: Dword) -> Handle);
+    link!("kernel32.dll" "system" fn FindResourceW(module: Handle, name: *const u16, resource_type: *const u16) -> Handle);
+    link!("kernel32.dll" "system" fn LoadResource(module: Handle, resource: Handle) -> Handle);
+    link!("kernel32.dll" "system" fn SizeofResource(module: Handle, resource: Handle) -> Dword);
+    link!("kernel32.dll" "system" fn LockResource(resource: Handle) -> *const core::ffi::c_void);
+    link!("kernel32.dll" "system" fn FreeLibrary(module: Handle) -> i32);
+    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
+    let wide: Vec<u16> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let module = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), 0x0000_0002) };
+    if module.is_null() {
+        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
     }
+    let resource = unsafe {
+        FindResourceW(
+            module,
+            resource_id as *const u16,
+            RESOURCE_TYPE_RCDATA as *const u16,
+        )
+    };
+    let result = if resource.is_null() {
+        Err(BundleError::Invalid)
+    } else {
+        let size = unsafe { SizeofResource(module, resource) } as usize;
+        if size == 0 {
+            Err(BundleError::Invalid)
+        } else {
+            let loaded = unsafe { LoadResource(module, resource) };
+            let data = if loaded.is_null() {
+                ptr::null()
+            } else {
+                unsafe { LockResource(loaded) }
+            };
+            if data.is_null() {
+                Err(BundleError::ResourceApi(unsafe { GetLastError() }))
+            } else {
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(size)
+                    .map_err(|_| BundleError::ResourceAllocation { size: size as u64 })?;
+                bytes.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(data.cast::<u8>(), size)
+                });
+                Ok(bytes)
+            }
+        }
+    };
+    unsafe {
+        FreeLibrary(module);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn extract_bundle_resource(executable: &Path, output: &Path) -> Result<(), BundleError> {
+    std::fs::write(output, read_resource(executable, RESOURCE_ID_BUNDLE)?)?;
+    Ok(())
+}
+#[cfg(not(windows))]
+fn extract_bundle_resource(_: &Path, _: &Path) -> Result<(), BundleError> {
+    Err(BundleError::ResourcesUnavailable)
+}
+
+#[cfg(not(windows))]
+fn read_resource(_: &Path, _: usize) -> Result<Vec<u8>, BundleError> {
+    Err(BundleError::ResourcesUnavailable)
 }

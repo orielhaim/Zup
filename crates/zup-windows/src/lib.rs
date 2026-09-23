@@ -42,8 +42,8 @@ pub use file_executor::{
 };
 pub use inspect::{InspectError, inspect_files, inspect_target, inspect_target_with};
 pub use integration::{
-    IntegrationError, apply_managed, apply_owned_removal, notify_committed_path_change,
-    reconcile_managed, reconcile_owned_removal, rollback_managed,
+    IntegrationError, apply_managed, apply_owned_removal, inspect_uninstall_registration,
+    notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
 };
 pub use known_folders::WindowsKnownFolderResolver;
 pub use ledger::{InstallLedgerStore, LedgerError};
@@ -64,7 +64,7 @@ pub use shortcuts::{FakeShortcutReader, ShortcutReader, WindowsShortcutReader};
 pub use transport::launch_worker_for_test;
 pub use transport::{
     ProcessHandle, TransportError, UserSid, is_process_elevated, launch_elevated_worker, pipe_name,
-    pipe_path, verify_client_pid, verify_server_pid,
+    pipe_path, verify_client_pid, verify_server_pid, wait_for_process_exit,
 };
 pub use worker::{
     WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,

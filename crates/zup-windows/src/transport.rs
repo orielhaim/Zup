@@ -201,6 +201,23 @@ pub fn is_process_elevated() -> Result<bool, TransportError> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
+/// Wait until a process exits. A missing process means it has already exited.
+pub fn wait_for_process_exit(pid: u32) -> Result<(), TransportError> {
+    let process = unsafe { win::OpenProcess(win::SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return Ok(());
+    }
+    let result = unsafe { win::WaitForSingleObject(process, u32::MAX) };
+    unsafe {
+        win::CloseHandle(process);
+    }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(last_error("WaitForSingleObject"))
+    }
+}
+
 pub fn verify_server_pid(raw: isize, expected: u32) -> Result<(), TransportError> {
     let mut found = 0;
     // SAFETY: raw is a connected named-pipe handle owned by the caller.

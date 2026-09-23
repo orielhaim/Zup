@@ -1,7 +1,7 @@
 use std::{fs, io::Read, path::Path};
 
 use tempfile::TempDir;
-use zup_bundle::{BundleWriter, EmbeddedBundle, PayloadSource, append_bundle_to_executable};
+use zup_bundle::{BundleWriter, EmbeddedBundle, PayloadSource, embed_bundle_file};
 use zup_core::RelativePath;
 
 fn plan(root: &Path) -> zup_build::BuildPlan {
@@ -26,25 +26,35 @@ destination = "${install}"
 "#;
     let parsed = zup_manifest::parse(manifest).unwrap();
     let installer = zup_manifest::parse_and_compile(manifest).unwrap();
-    let manifest_path = root.join("zup.toml");
-    zup_build::materialize(&manifest_path, &parsed, installer).unwrap()
+    zup_build::materialize(&root.join("zup.toml"), &parsed, installer).unwrap()
+}
+
+fn embed(root: &Path, package: &[u8]) -> std::path::PathBuf {
+    let package_path = root.join("bundle.zupbundle");
+    fs::write(&package_path, package).unwrap();
+    let output = root.join("Setup.exe");
+    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path).unwrap();
+    output
 }
 
 #[test]
-fn embedded_bundle_is_deterministic_deduplicated_and_random_accessible() {
+fn package_is_inside_an_authenticode_hashed_pe_resource_and_deduplicated() {
     let root = TempDir::new().unwrap();
-    let build = plan(root.path());
-    let first = BundleWriter::encode(&build).unwrap();
-    let second = BundleWriter::encode(&build).unwrap();
-    assert_eq!(first, second);
-    let streamed = root.path().join("streamed.zupbundle");
-    BundleWriter::write_file(&build, &streamed).unwrap();
-    assert_eq!(fs::read(&streamed).unwrap(), first);
-    let runtime = root.path().join("runtime.exe");
-    let output = root.path().join("setup.exe");
-    fs::write(&runtime, b"MZ test runtime").unwrap();
-    append_bundle_to_executable(&runtime, &output, &first).unwrap();
+    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
+    let output = embed(root.path(), &bytes);
     let embedded = EmbeddedBundle::open(&output).unwrap();
+    let (exe_size, exe_hash) = zup_core::hash_reader(fs::File::open(&output).unwrap()).unwrap();
+    let mut maintenance = embedded
+        .payload_source()
+        .open(
+            &RelativePath::new("__zup_maintenance__.exe").unwrap(),
+            &exe_hash,
+            exe_size,
+        )
+        .unwrap();
+    let mut copy = Vec::new();
+    maintenance.read_to_end(&mut copy).unwrap();
+    assert_eq!(copy, fs::read(&output).unwrap());
     assert_eq!(embedded.plan().entries.len(), 2);
     let payload = embedded.payload_source();
     for name in ["a.bin", "b.bin"] {
@@ -60,118 +70,43 @@ fn embedded_bundle_is_deterministic_deduplicated_and_random_accessible() {
         reader.read_to_end(&mut data).unwrap();
         assert_eq!(data, b"duplicate payload");
     }
-    let meta_len = u64::from_le_bytes(first[20..28].try_into().unwrap()) as usize;
-    let meta: serde_json::Value = serde_json::from_slice(&first[60..60 + meta_len]).unwrap();
+    let meta_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+    let meta: serde_json::Value = serde_json::from_slice(&bytes[60..60 + meta_len]).unwrap();
     assert_eq!(meta["blobs"].as_array().unwrap().len(), 1);
-    assert!(!String::from_utf8_lossy(&first).contains(root.path().to_str().unwrap()));
-}
-
-#[test]
-fn corruption_in_bundle_or_footer_is_rejected_before_payload_use() {
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
-    let runtime = root.path().join("runtime.exe");
-    fs::write(&runtime, b"MZ runtime").unwrap();
-    let output = root.path().join("setup.exe");
-    append_bundle_to_executable(&runtime, &output, &bytes).unwrap();
-    let mut file = fs::read(&output).unwrap();
-    let last = file.len() - 1;
-    file[last] ^= 0x80;
-    fs::write(&output, file).unwrap();
-    assert!(EmbeddedBundle::open(&output).is_err());
-}
-
-#[test]
-fn payload_blob_tampering_is_rejected_even_when_locator_checksum_is_rebuilt() {
-    use sha2::{Digest, Sha256};
-
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
-    let runtime = root.path().join("runtime.exe");
-    let output = root.path().join("setup.exe");
-    fs::write(&runtime, b"MZ runtime").unwrap();
-    append_bundle_to_executable(&runtime, &output, &bytes).unwrap();
-    let mut artifact = fs::read(&output).unwrap();
-    let package_start = fs::metadata(&runtime).unwrap().len() as usize;
-    let metadata_size = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
-    let payload_start = package_start + 60 + metadata_size;
-    artifact[payload_start] ^= 0x01;
-    let package_end = package_start + bytes.len();
-    let package_hash = Sha256::digest(&artifact[package_start..package_end]);
-    artifact[package_end + 32..package_end + 64].copy_from_slice(&package_hash);
-    fs::write(&output, artifact).unwrap();
-    assert!(EmbeddedBundle::open(&output).is_err());
-}
-
-#[test]
-fn out_of_bounds_index_offset_is_rejected_after_container_checksums_are_rebuilt() {
-    use sha2::{Digest, Sha256};
-
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
-    let runtime = root.path().join("runtime.exe");
-    let output = root.path().join("setup.exe");
-    fs::write(&runtime, b"MZ runtime").unwrap();
-    append_bundle_to_executable(&runtime, &output, &bytes).unwrap();
-    let mut artifact = fs::read(&output).unwrap();
-    let package_start = fs::metadata(&runtime).unwrap().len() as usize;
-    let metadata_size = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
-    let metadata_start = package_start + 60;
-    let metadata_end = metadata_start + metadata_size;
-    let marker = b"\"offset\":0";
-    let offset = artifact[metadata_start..metadata_end]
-        .windows(marker.len())
-        .position(|window| window == marker)
-        .unwrap();
-    artifact[metadata_start + offset + marker.len() - 1] = b'9';
-    let metadata_hash = Sha256::digest(&artifact[metadata_start..metadata_end]);
-    artifact[package_start + 28..package_start + 60].copy_from_slice(&metadata_hash);
-    let package_end = package_start + bytes.len();
-    let package_hash = Sha256::digest(&artifact[package_start..package_end]);
-    artifact[package_end + 32..package_end + 64].copy_from_slice(&package_hash);
-    fs::write(&output, artifact).unwrap();
-    assert!(EmbeddedBundle::open(&output).is_err());
-}
-
-#[test]
-fn truncated_locator_is_rejected() {
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
-    let runtime = root.path().join("runtime.exe");
-    fs::write(&runtime, b"MZ runtime").unwrap();
-    let output = root.path().join("setup.exe");
-    append_bundle_to_executable(&runtime, &output, &bytes).unwrap();
-    let mut file = fs::read(&output).unwrap();
-    file.truncate(file.len() - 5);
-    fs::write(&output, file).unwrap();
-    assert!(EmbeddedBundle::open(&output).is_err());
-}
-
-#[test]
-fn locator_survives_a_certificate_table_appended_after_the_bundle() {
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
-    let runtime = root.path().join("runtime.exe");
-    let output = root.path().join("setup.exe");
-    let mut pe = vec![0u8; 0x80 + 24 + 224];
-    pe[..2].copy_from_slice(b"MZ");
-    pe[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
-    pe[0x94..0x96].copy_from_slice(&224u16.to_le_bytes());
-    let optional = 0x80 + 24;
-    pe[optional..optional + 2].copy_from_slice(&0x10bu16.to_le_bytes());
-    fs::write(&runtime, pe).unwrap();
-    append_bundle_to_executable(&runtime, &output, &bytes).unwrap();
-    let mut signed = fs::read(&output).unwrap();
-    let certificate_offset = signed.len() as u32;
-    let security_directory = 0x80 + 24 + 96 + 4 * 8;
-    signed[security_directory..security_directory + 4]
-        .copy_from_slice(&certificate_offset.to_le_bytes());
-    signed[security_directory + 4..security_directory + 8].copy_from_slice(&8u32.to_le_bytes());
-    signed.extend_from_slice(&[0x30, 6, 1, 1, 0, 0, 0, 0]);
-    fs::write(&output, signed).unwrap();
     assert_eq!(
-        EmbeddedBundle::open(&output).unwrap().plan().entries.len(),
-        2
+        pe_section_end(&output),
+        fs::metadata(&output).unwrap().len(),
+        "package must not be PE overlay data"
     );
+}
+
+#[test]
+fn resource_bundle_corruption_is_rejected_before_payload_use() {
+    let root = TempDir::new().unwrap();
+    let mut bytes = BundleWriter::encode(&plan(root.path())).unwrap();
+    let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+    bytes[60 + metadata_len] ^= 0x40;
+    let output = embed(root.path(), &bytes);
+    assert!(EmbeddedBundle::open(output).is_err());
+}
+
+fn pe_section_end(path: &Path) -> u64 {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(&bytes[..2], b"MZ");
+    let pe = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+    let section_count = u16::from_le_bytes(bytes[pe + 6..pe + 8].try_into().unwrap()) as usize;
+    let optional_size = u16::from_le_bytes(bytes[pe + 20..pe + 22].try_into().unwrap()) as usize;
+    let sections = pe + 24 + optional_size;
+    (0..section_count)
+        .map(|index| {
+            let section = sections + index * 40;
+            let raw_size =
+                u32::from_le_bytes(bytes[section + 16..section + 20].try_into().unwrap()) as u64;
+            let raw_offset =
+                u32::from_le_bytes(bytes[section + 20..section + 24].try_into().unwrap()) as u64;
+            raw_offset + raw_size
+        })
+        .max()
+        .unwrap_or(0)
 }

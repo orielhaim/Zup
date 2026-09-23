@@ -150,7 +150,8 @@ async fn run_worker_inner(
                     | zup_transaction::ManagedResource::Service
                     | zup_transaction::ManagedResource::PathEntry
                     | zup_transaction::ManagedResource::Protocol
-                    | zup_transaction::ManagedResource::FileType,
+                    | zup_transaction::ManagedResource::FileType
+                    | zup_transaction::ManagedResource::UninstallEntry,
                 ..
             } => {}
             zup_transaction::NodeKind::OwnedRemoval { .. } => {}
@@ -204,12 +205,8 @@ async fn run_worker_inner(
             .repair_committed(&app_id, scope)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
         crate::ledger::InstallLedgerStore::new(&state_root)
-            .validate_plan(&app_id, scope, &plan)
+            .validate_plan(&app_id, scope, &app_version, &plan)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-        if scope == zup_core::SelectedScope::Machine && !plan.uninstall && payload_root.is_file() {
-            publish_machine_maintenance(&payload_root, &state_root, &app_id, &app_version)
-                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-        }
     }
 
     let store = FilesystemTransactionStore::new(&state_root);
@@ -334,32 +331,6 @@ async fn run_worker_inner(
     .await;
     let _ = reader_task.await;
     Ok(outcome)
-}
-
-fn publish_machine_maintenance(
-    executable: &std::path::Path,
-    state_root: &std::path::Path,
-    app_id: &zup_core::AppId,
-    version: &semver::Version,
-) -> Result<(), String> {
-    let target = state_root
-        .join("maintenance")
-        .join(app_id.as_str())
-        .join("machine")
-        .join(version.to_string())
-        .join("Setup.exe");
-    if target.exists() {
-        let source_file = std::fs::File::open(executable).map_err(|e| e.to_string())?;
-        let target_file = std::fs::File::open(&target).map_err(|e| e.to_string())?;
-        let source = zup_core::hash_reader(source_file).map_err(|e| e.to_string())?;
-        let existing = zup_core::hash_reader(target_file).map_err(|e| e.to_string())?;
-        return if source == existing {
-            Ok(())
-        } else {
-            Err("a different maintenance package already exists for this version".into())
-        };
-    }
-    crate::durable::copy_new_durable(executable, &target).map_err(|e| e.to_string())
 }
 
 /// Split reader into a background task that cancels on `Cancel` messages.
@@ -490,8 +461,10 @@ fn extract_file(
     match &operation.kind {
         zup_transaction::NodeKind::StageFile { key }
         | zup_transaction::NodeKind::FileMutation { key, .. } => {
-            let zup_core::ResourceKey::File { destination } = key else {
-                return Err("not a file resource".into());
+            let destination = match key {
+                zup_core::ResourceKey::File { destination }
+                | zup_core::ResourceKey::Maintenance { destination, .. } => destination,
+                _ => return Err("not a file resource".into()),
             };
             let dest = std::path::PathBuf::from(destination);
             let source_relative = operation

@@ -104,6 +104,7 @@ pub fn plan_execution(
         services,
         protocols,
         file_types,
+        uninstall_entries: Vec::new(),
         external_actions,
         summary,
     })

@@ -11,6 +11,7 @@ pub type Handle = *mut c_void;
 
 pub const TOKEN_QUERY: Dword = 0x0008;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
+pub const SYNCHRONIZE: Dword = 0x0010_0000;
 pub const TOKEN_USER: Dword = 1;
 pub const TOKEN_ELEVATION: Dword = 20;
 pub const SEE_MASK_NOCLOSEPROCESS: Dword = 0x0000_0040;
@@ -68,6 +69,8 @@ link!("advapi32.dll" "system" fn ConvertSidToStringSidW(sid: *const c_void, stri
 link!("advapi32.dll" "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(string: *const u16, revision: Dword, descriptor: *mut *mut c_void, size: *mut Dword) -> Bool);
 link!("kernel32.dll" "system" fn GetCurrentProcess() -> Handle);
 link!("kernel32.dll" "system" fn OpenProcess(access: Dword, inherit: Bool, pid: Dword) -> Handle);
+link!("kernel32.dll" "system" fn WaitForSingleObject(handle: Handle, milliseconds: Dword) -> Dword);
+link!("kernel32.dll" "system" fn CloseHandle(handle: Handle) -> Bool);
 link!("kernel32.dll" "system" fn GetNamedPipeClientProcessId(pipe: Handle, pid: *mut Dword) -> Bool);
 link!("kernel32.dll" "system" fn GetNamedPipeServerProcessId(pipe: Handle, pid: *mut Dword) -> Bool);
 link!("kernel32.dll" "system" fn GetProcessId(process: Handle) -> Dword);

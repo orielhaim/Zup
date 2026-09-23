@@ -185,6 +185,7 @@ async fn multi_process_named_pipe_handshake_and_execute() {
         services: vec![],
         protocols: vec![],
         file_types: vec![],
+        uninstall_entries: vec![],
         external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,
@@ -237,29 +238,51 @@ destination = "${install}"
     let parsed = zup_manifest::parse(manifest).unwrap();
     let installer = zup_manifest::parse_and_compile(manifest).unwrap();
     let build = zup_build::materialize(&project.join("zup.toml"), &parsed, installer).unwrap();
-    let package = zup_bundle::BundleWriter::encode(&build).unwrap();
-    let runtime = root.path().join("runtime.exe");
     let setup = root.path().join("Setup.exe");
-    std::fs::write(&runtime, b"MZ worker runtime").unwrap();
-    zup_bundle::append_bundle_to_executable(&runtime, &setup, &package).unwrap();
+    zup_bundle::build_self_contained_executable(&std::env::current_exe().unwrap(), &setup, &build)
+        .unwrap();
 
     let dest = root.path().join("target/App.exe");
     let dest_str = dest.display().to_string();
+    let maintenance_path = root
+        .path()
+        .join("state/maintenance/com.acme.app/machine/1.0.0/Setup.exe");
+    let maintenance_str = maintenance_path.display().to_string();
+    let (maintenance_size, maintenance_hash) =
+        hash_reader(std::fs::File::open(&setup).unwrap()).unwrap();
     let execution = ExecutionPlan {
-        files: vec![FileOperation {
-            key: ResourceKey::File {
-                destination: dest_str.clone(),
+        files: vec![
+            FileOperation {
+                key: ResourceKey::File {
+                    destination: dest_str.clone(),
+                },
+                kind: FileOperationKind::Create,
+                destination: tpath(&dest_str),
+                source_relative: RelativePath::new("App.exe").unwrap(),
+                precondition: FilePrecondition::Absent,
+                expected_sha256: digest(b"hello-app"),
+                expected_size: 9,
+                conflict: None,
             },
-            kind: FileOperationKind::Create,
-            destination: tpath(&dest_str),
-            source_relative: RelativePath::new("App.exe").unwrap(),
-            precondition: FilePrecondition::Absent,
-            expected_sha256: digest(b"hello-app"),
-            expected_size: 9,
-            conflict: None,
-        }],
+            FileOperation {
+                key: ResourceKey::Maintenance {
+                    app_id: "com.acme.app".into(),
+                    version: "1.0.0".into(),
+                    destination: maintenance_str.clone(),
+                },
+                kind: FileOperationKind::Create,
+                destination: tpath(&maintenance_str),
+                source_relative: RelativePath::new("__zup_maintenance__.exe").unwrap(),
+                precondition: FilePrecondition::Absent,
+                expected_sha256: maintenance_hash,
+                expected_size: maintenance_size,
+                conflict: None,
+            },
+        ],
         summary: ExecutionSummary {
-            files_create: 1,
+            files_create: 2,
+            write_bytes: maintenance_size + 9,
+            total_desired_bytes: maintenance_size + 9,
             ..Default::default()
         },
         ..Default::default()
@@ -281,6 +304,18 @@ destination = "${install}"
         .path()
         .join("state/maintenance/com.acme.app/machine/1.0.0/Setup.exe");
     assert!(zup_bundle::EmbeddedBundle::open(maintenance).is_ok());
+    let ledger = InstallLedgerStore::new(root.path().join("state"))
+        .load(
+            &AppId::new("com.acme.app").unwrap(),
+            zup_core::SelectedScope::Machine,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        ledger.resources.keys().any(
+            |key| matches!(key, ResourceKey::Maintenance { version, .. } if version == "1.0.0")
+        )
+    );
 }
 
 #[tokio::test]
@@ -342,6 +377,7 @@ async fn worker_transaction_with_file_shortcut_and_service() {
         path_entries: vec![],
         protocols: vec![],
         file_types: vec![],
+        uninstall_entries: vec![],
         external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,

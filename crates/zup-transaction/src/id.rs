@@ -87,6 +87,10 @@ impl fmt::Display for OperationId {
 
 fn format_key(key: &ResourceKey) -> String {
     match key {
+        ResourceKey::Maintenance {
+            app_id, version, ..
+        } => format!("maintenance:{app_id}:{version}"),
+        ResourceKey::UninstallEntry { app_id } => format!("uninstall:{app_id}"),
         ResourceKey::File { destination } => format!("file:{destination}"),
         ResourceKey::Shortcut { location, name } => format!("shortcut:{location}:{name}"),
         ResourceKey::PathEntry { value } => format!("path:{value}"),

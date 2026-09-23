@@ -52,13 +52,100 @@ pub fn plan_target_lifecycle(
         .map(inspect_owned_matches)
         .transpose()?
         .unwrap_or_default();
-    Ok(plan_lifecycle(
-        action,
-        target,
-        snapshot.as_ref(),
-        ledger.as_ref(),
-        &matches,
-    )?)
+    let mut execution =
+        plan_lifecycle(action, target, snapshot.as_ref(), ledger.as_ref(), &matches)?;
+    if let Some(target) = target
+        && let Some(maintenance) = target
+            .files
+            .iter()
+            .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
+    {
+        let app_id = target.app.id.to_string();
+        let key = ResourceKey::UninstallEntry {
+            app_id: app_id.clone(),
+        };
+        let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
+        let current = crate::integration::read_uninstall_entry(scope, &key_path)
+            .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?;
+        let previous = match (
+            ledger
+                .as_ref()
+                .and_then(|ledger| ledger.resources.get(&key)),
+            current,
+        ) {
+            (None, None) => None,
+            (
+                Some(OwnedResource::UninstallEntry {
+                    scope: owned_scope,
+                    state,
+                }),
+                Some(current),
+            ) if *owned_scope == scope && *state == current => Some(state.clone()),
+            _ => {
+                return Err(WindowsPlanError::OwnedInspection(format!(
+                    "Apps & Features registration {app_id} is occupied or changed"
+                )));
+            }
+        };
+        let scope_name = match scope {
+            SelectedScope::User => "user",
+            SelectedScope::Machine => "machine",
+        };
+        let state_root = state_root.to_string_lossy().into_owned();
+        let maintenance_path = maintenance.destination.as_path();
+        let command = |action: &str| {
+            crate::cmdline::format_command_line(
+                maintenance_path,
+                &[
+                    action.to_owned(),
+                    "--scope".into(),
+                    scope_name.into(),
+                    "--state-root".into(),
+                    state_root.clone(),
+                ],
+            )
+        };
+        let mut values = BTreeMap::new();
+        let mut string = |name: &str, value: String| {
+            values.insert(
+                name.to_owned(),
+                zup_exec::UninstallEntryValue::String(value),
+            );
+        };
+        string("DisplayName", target.app.name.to_string());
+        string("DisplayVersion", target.app.version.to_string());
+        string(
+            "Publisher",
+            target
+                .app
+                .publisher
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
+        );
+        string("InstallLocation", target.install_directory.to_string());
+        let estimated_kb = target
+            .summary
+            .install_bytes
+            .div_ceil(1024)
+            .min(u32::MAX as u64) as u32;
+        string("DisplayIcon", format!("{},0", maintenance_path.display()));
+        string("UninstallString", command("uninstall"));
+        string("ModifyPath", command("modify"));
+        values.insert(
+            "EstimatedSize".into(),
+            zup_exec::UninstallEntryValue::Dword(estimated_kb),
+        );
+        execution
+            .uninstall_entries
+            .push(zup_exec::UninstallEntryOperation {
+                key,
+                scope,
+                key_path,
+                previous,
+                installed: zup_exec::UninstallEntryState { values },
+            });
+    }
+    Ok(execution)
 }
 
 fn inspect_owned_matches(
@@ -167,6 +254,19 @@ fn inspect_owned_matches(
                     extension.as_str(),
                 ))?
                 .is_some_and(|state| state == *installed)
+            }
+            OwnedResource::UninstallEntry { scope, state } => {
+                let ResourceKey::UninstallEntry { app_id } = key else {
+                    return Err(WindowsPlanError::OwnedInspection(
+                        "uninstall entry key mismatch".into(),
+                    ));
+                };
+                let path =
+                    format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
+                *scope == ledger.scope
+                    && owned_registry_state(crate::integration::read_uninstall_entry(
+                        *scope, &path,
+                    ))? == Some(Some(state.clone()))
             }
         };
         matches.insert(key.clone(), found);

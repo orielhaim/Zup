@@ -159,6 +159,15 @@ pub fn plan_lifecycle(
 fn target_keys(target: &TargetPlan) -> BTreeSet<ResourceKey> {
     let mut keys = BTreeSet::new();
     keys.extend(target.files.iter().map(|item| item.key.clone()));
+    if target
+        .files
+        .iter()
+        .any(|item| matches!(item.key, ResourceKey::Maintenance { .. }))
+    {
+        keys.insert(ResourceKey::UninstallEntry {
+            app_id: target.app.id.to_string(),
+        });
+    }
     keys.extend(target.shortcuts.iter().map(|item| item.key.clone()));
     keys.extend(target.path_entries.iter().map(|item| item.key.clone()));
     keys.extend(target.services.iter().map(|item| item.key.clone()));

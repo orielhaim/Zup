@@ -97,6 +97,22 @@ pub enum OwnedResource {
         previous: ServiceState,
         installed: ServiceState,
     },
+    UninstallEntry {
+        scope: SelectedScope,
+        state: UninstallEntryState,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallEntryState {
+    pub values: BTreeMap<String, UninstallEntryValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum UninstallEntryValue {
+    String(String),
+    Dword(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -135,6 +135,30 @@ component = "docs"
         .join("1.0.0")
         .join("Setup.exe");
     assert!(maintenance.is_file());
+    let registration =
+        zup_windows::inspect_uninstall_registration(zup_core::SelectedScope::User, &app_id)
+            .unwrap()
+            .unwrap();
+    let values = &registration.values;
+    assert_eq!(
+        values["DisplayName"],
+        zup_exec::UninstallEntryValue::String("Zup E2E".into())
+    );
+    assert_eq!(
+        values["DisplayVersion"],
+        zup_exec::UninstallEntryValue::String("1.0.0".into())
+    );
+    assert!(
+        matches!(values["EstimatedSize"], zup_exec::UninstallEntryValue::Dword(size) if size > 0)
+    );
+    let zup_exec::UninstallEntryValue::String(uninstall) = &values["UninstallString"] else {
+        panic!("UninstallString is not REG_SZ")
+    };
+    let zup_exec::UninstallEntryValue::String(modify) = &values["ModifyPath"] else {
+        panic!("ModifyPath is not REG_SZ")
+    };
+    assert!(uninstall.contains(&maintenance.to_string_lossy().to_string()));
+    assert!(modify.contains(&maintenance.to_string_lossy().to_string()));
     fs::remove_file(&setup).unwrap();
     fs::remove_dir_all(project.path()).unwrap();
 
@@ -149,6 +173,110 @@ component = "docs"
     assert!(!install.join("readme.txt").exists());
     run(&maintenance, "uninstall", &[]);
     assert!(!install.join("app.exe").exists());
+    assert!(
+        zup_windows::inspect_uninstall_registration(zup_core::SelectedScope::User, &app_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!maintenance.exists());
+    assert!(!state.path().join("maintenance").join(&app_id).exists());
+    assert!(
+        zup_windows::InstallLedgerStore::new(state.path())
+            .load(
+                &zup_core::AppId::new(&app_id).unwrap(),
+                zup_core::SelectedScope::User
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(!state.path().join("transactions").exists());
+    assert!(!state.path().join("work").exists());
+    assert!(!state.path().join("installations").exists());
+    let lock_key = zup_windows::InstallationLock::lock_key(&app_id, "user");
+    assert!(!state.path().join(format!("{lock_key}.lock")).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn uninstall_preserves_a_drifted_apps_and_features_entry() {
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join("dist")).unwrap();
+    fs::write(project.path().join("dist/app.exe"), b"app payload").unwrap();
+    let app_id = format!("com.zup.arpdrift{}", uuid::Uuid::now_v7().simple());
+    let install_name = format!("ZupArpDrift-{}", uuid::Uuid::now_v7().simple());
+    fs::write(
+        project.path().join("zup.toml"),
+        format!(
+            "schema = 1\n[app]\nid = \"{app_id}\"\nname = \"ARP Drift\"\nversion = \"1.0.0\"\n[source]\ndirectory = \"dist\"\n[install]\nscope = \"user\"\n[install.directory]\nuser = \"${{known.local_app_data}}/Programs/{install_name}\"\n[[files]]\nsource = \"**/*\"\ndestination = \"${{install}}\"\n"
+        ),
+    )
+    .unwrap();
+    let setup = project.path().join("Setup.exe");
+    let build = Command::new(env!("CARGO_BIN_EXE_zup"))
+        .current_dir(outside.path())
+        .args(["build", "--manifest"])
+        .arg(project.path().join("zup.toml"))
+        .arg("--output")
+        .arg(&setup)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = |exe: &std::path::Path, command: &str| {
+        Command::new(exe)
+            .current_dir(outside.path())
+            .args([command, "--scope", "user", "--state-root"])
+            .arg(state.path())
+            .output()
+            .unwrap()
+    };
+    assert!(run(&setup, "install").status.success());
+    let maintenance = state
+        .path()
+        .join("maintenance")
+        .join(&app_id)
+        .join("user/1.0.0/Setup.exe");
+    let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
+    windows_registry::CURRENT_USER
+        .options()
+        .read()
+        .write()
+        .open(&key_path)
+        .unwrap()
+        .set_string("DisplayName", "Changed outside zup")
+        .unwrap();
+    let uninstall = run(&maintenance, "uninstall");
+    assert!(
+        uninstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    let remaining =
+        zup_windows::inspect_uninstall_registration(zup_core::SelectedScope::User, &app_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        remaining.values["DisplayName"],
+        zup_exec::UninstallEntryValue::String("Changed outside zup".into())
+    );
+    assert!(!maintenance.exists());
+    assert!(
+        zup_windows::InstallLedgerStore::new(state.path())
+            .load(
+                &zup_core::AppId::new(&app_id).unwrap(),
+                zup_core::SelectedScope::User
+            )
+            .unwrap()
+            .is_none()
+    );
+    windows_registry::CURRENT_USER
+        .remove_tree(&key_path)
+        .unwrap();
 }
 
 #[cfg(windows)]
@@ -234,6 +362,14 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
         .unwrap();
     assert_eq!(ledger.version.to_string(), "1.0.0");
     assert!(maintenance_v1.is_file());
+    let registration =
+        zup_windows::inspect_uninstall_registration(zup_core::SelectedScope::User, &app_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        registration.values["DisplayVersion"],
+        zup_exec::UninstallEntryValue::String("1.0.0".into())
+    );
     fs::remove_dir(install.join("block.dat")).unwrap();
     assert!(run(&maintenance_v1, "repair").status.success());
     assert!(run(&setup_v2, "upgrade").status.success());
@@ -251,4 +387,13 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
         .unwrap()
         .unwrap();
     assert_eq!(upgraded.version.to_string(), "2.0.0");
+    assert!(!maintenance_v1.exists());
+    let registration =
+        zup_windows::inspect_uninstall_registration(zup_core::SelectedScope::User, &app_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        registration.values["DisplayVersion"],
+        zup_exec::UninstallEntryValue::String("2.0.0".into())
+    );
 }

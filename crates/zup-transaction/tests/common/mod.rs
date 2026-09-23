@@ -68,6 +68,7 @@ pub fn sample_execution() -> ExecutionPlan {
         services: vec![],
         protocols: vec![],
         file_types: vec![],
+        uninstall_entries: vec![],
         external_actions: vec![ExternalActionOperation {
             key: ResourceKey::ExternalAction {
                 id: ActionId::new("setup").unwrap(),

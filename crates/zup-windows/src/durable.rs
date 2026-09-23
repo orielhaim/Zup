@@ -298,6 +298,28 @@ impl InstallationLock {
         }
     }
 
+    /// Remove the lock marker after uninstall when no cooperating process
+    /// currently holds it. The file is deleted while its byte-range lock is
+    /// held so a new installer cannot race the cleanup.
+    pub fn remove_if_unheld(state_root: &Path, key: &str) -> Result<(), DurableError> {
+        let Some(lock) = Self::try_acquire(state_root, key)? else {
+            return Ok(());
+        };
+        let path = state_root.join(format!("{key}.lock"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(DurableError::Io {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        }
+        drop(lock);
+        Ok(())
+    }
+
     pub fn key(&self) -> &str {
         &self.key
     }

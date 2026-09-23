@@ -17,7 +17,7 @@ mod plan;
 
 pub use ledger::{
     ExtensionState, INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource, ProgIdState,
-    ProtocolState, ServiceState, ShortcutState,
+    ProtocolState, ServiceState, ShortcutState, UninstallEntryState, UninstallEntryValue,
 };
 pub use lifecycle::{LifecycleAction, LifecycleError, plan_lifecycle};
 pub use observe::{
@@ -31,6 +31,6 @@ pub use operation::{
     FileOperationKind, FilePrecondition, FileTypeOperation, FileTypeOperationKind,
     ManagedOperation, PathOperation, PathOperationKind, ProtocolOperation, ProtocolOperationKind,
     RemovalKind, RemovalOperation, ServiceOperation, ServiceOperationKind, ShortcutOperation,
-    ShortcutOperationKind,
+    ShortcutOperationKind, UninstallEntryOperation,
 };
 pub use plan::{ExecutionPlanError, normalize_path_entry, path_contains_entry, plan_execution};

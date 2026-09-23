@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use zup_core::{AppId, ComponentId, SelectedScope};
+use zup_core::{AppId, ComponentId, RelativePath, ResourceKey, SelectedScope, hash_reader};
 use zup_exec::{LifecycleAction, RemovalKind};
 use zup_runtime::{InstallOutcome, RuntimeRequest};
 
@@ -28,6 +28,8 @@ enum Commands {
     Modify(ManifestCommand),
     Repair(RepairCommand),
     Uninstall(UninstallCommand),
+    #[command(name = "__uninstall_runner", hide = true)]
+    UninstallRunner(UninstallRunnerCommand),
     Recover(RecoverCommand),
     #[command(name = "__worker", hide = true)]
     Worker {
@@ -97,6 +99,14 @@ struct UninstallCommand {
 }
 
 #[derive(Debug, Args)]
+struct UninstallRunnerCommand {
+    #[arg(long)]
+    wait_pid: u32,
+    #[command(flatten)]
+    uninstall: UninstallCommand,
+}
+
+#[derive(Debug, Args)]
 struct RecoverCommand {
     #[arg(long)]
     transaction_id: uuid::Uuid,
@@ -135,6 +145,15 @@ fn main() -> miette::Result<()> {
             args.install,
         )?,
         Some(Commands::Uninstall(args)) => run_uninstall(args)?,
+        Some(Commands::UninstallRunner(args)) => {
+            zup_windows::wait_for_process_exit(args.wait_pid)
+                .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
+            let cleanup_path =
+                zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+            let result = run_uninstall(args.uninstall);
+            schedule_runner_cleanup(&cleanup_path);
+            result?;
+        }
         Some(Commands::Recover(args)) => run_recover(args)?,
         Some(Commands::Worker { bootstrap }) => run_worker_mode(&bootstrap)?,
         Some(Commands::WorkerHelp) => {
@@ -252,7 +271,7 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
         zup_bundle::build_self_contained_executable(&runtime, &output, &build)
             .map_err(|e| miette::miette!("installer output: {e}"))?;
     println!(
-        "{} ({} bytes total; {} bytes bundle and locator; {} bytes over runtime)",
+        "{} ({} bytes total; {} bytes RCDATA package; {} bytes over runtime)",
         output.display(),
         size,
         bundle_size,
@@ -322,24 +341,49 @@ fn run_embedded_transition(
         request.components.disable.insert(id);
     }
     let install = zup_plan::plan(&build, &request).map_err(|e| miette::miette!("plan: {e}"))?;
-    let target =
+    let mut target =
         zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
             .map_err(|e| miette::miette!("target: {e}"))?;
+    if action != LifecycleAction::Uninstall {
+        let (size, sha256) = hash_reader(
+            std::fs::File::open(&executable)
+                .map_err(|error| miette::miette!("installer executable: {error}"))?,
+        )
+        .map_err(|error| miette::miette!("installer executable: {error}"))?;
+        let scope_name = match scope {
+            SelectedScope::User => "user",
+            SelectedScope::Machine => "machine",
+        };
+        let destination = state_root
+            .join("maintenance")
+            .join(app_id.as_str())
+            .join(scope_name)
+            .join(target.app.version.to_string())
+            .join("Setup.exe");
+        let destination = zup_platform::TargetPath::new(destination)
+            .map_err(|error| miette::miette!("maintenance destination: {error}"))?;
+        target.files.push(zup_platform::TargetFile {
+            key: ResourceKey::Maintenance {
+                app_id: app_id.to_string(),
+                version: target.app.version.to_string(),
+                destination: destination.to_string(),
+            },
+            source_relative: RelativePath::new("__zup_maintenance__.exe").unwrap(),
+            destination,
+            size,
+            sha256,
+            privilege: scope.privilege(),
+        });
+        target.summary.file_count += 1;
+        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
+        target.summary.resource_count += 1;
+    }
     let execution =
         zup_windows::plan_target_lifecycle(action, &app_id, scope, Some(&target), &state_root)
             .map_err(|e| miette::miette!("lifecycle plan: {e}"))?;
-    if action != LifecycleAction::Uninstall && scope == SelectedScope::User {
-        publish_maintenance_candidate(
-            &executable,
-            &state_root,
-            &app_id,
-            scope,
-            &target.app.version,
-        )?;
-    }
     let work_root = state_root.join("work");
     execute(RuntimeRequest {
-        app_id,
+        app_id: app_id.clone(),
         app_version: target.app.version.clone(),
         scope,
         execution_plan: execution,
@@ -348,50 +392,6 @@ fn run_embedded_transition(
         payload_root: executable,
         recovery_id: None,
     })
-}
-
-fn publish_maintenance_candidate(
-    executable: &Path,
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    version: &semver::Version,
-) -> miette::Result<PathBuf> {
-    let scope_name = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    let target = state_root
-        .join("maintenance")
-        .join(app_id.as_str())
-        .join(scope_name)
-        .join(version.to_string())
-        .join("Setup.exe");
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| miette::miette!("maintenance directory: {e}"))?;
-    }
-    if target.exists() {
-        let existing = zup_core::hash_reader(
-            std::fs::File::open(&target)
-                .map_err(|e| miette::miette!("maintenance package: {e}"))?,
-        )
-        .map_err(|e| miette::miette!("maintenance package: {e}"))?;
-        let source = zup_core::hash_reader(
-            std::fs::File::open(executable)
-                .map_err(|e| miette::miette!("installer executable: {e}"))?,
-        )
-        .map_err(|e| miette::miette!("installer executable: {e}"))?;
-        if existing != source {
-            return Err(miette::miette!(
-                "a different maintenance package already exists for version {version}"
-            ));
-        }
-        return Ok(target);
-    }
-    zup_windows::copy_new_durable(executable, &target)
-        .map_err(|e| miette::miette!("maintenance package publish: {e}"))?;
-    Ok(target)
 }
 
 fn run_manifest_transition(action: LifecycleAction, args: ManifestCommand) -> miette::Result<()> {
@@ -484,6 +484,14 @@ fn run_manifest_transition(action: LifecycleAction, args: ManifestCommand) -> mi
 
 fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+    if executable
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("\\maintenance\\")
+    {
+        launch_uninstall_runner(&executable, &args)?;
+        return Ok(());
+    }
     let embedded = zup_bundle::EmbeddedBundle::open(&executable).ok();
     let scope = embedded.as_ref().map_or_else(
         || SelectedScope::from(args.scope),
@@ -508,13 +516,17 @@ fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
     };
     let state_root = choose_state_root(args.state_root, scope)?;
     if embedded.is_some() {
-        return run_embedded_transition(
+        let result = run_embedded_transition(
             LifecycleAction::Uninstall,
             scope,
-            Some(state_root),
+            Some(state_root.clone()),
             vec![],
             vec![],
         );
+        if result.is_ok() {
+            remove_uninstall_lock(&state_root, &app_id, scope)?;
+        }
+        return result;
     }
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&app_id, scope)
@@ -529,16 +541,75 @@ fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
     )
     .map_err(|error| miette::miette!("uninstall plan: {error}"))?;
     let work_root = args.work_root.unwrap_or_else(|| state_root.join("work"));
-    execute(RuntimeRequest {
-        app_id,
+    let result = execute(RuntimeRequest {
+        app_id: app_id.clone(),
         app_version: ledger.version,
         scope,
         execution_plan: execution,
         payload_root: state_root.join("unused-payload"),
-        state_root,
+        state_root: state_root.clone(),
         work_root,
         recovery_id: None,
-    })
+    });
+    if result.is_ok() {
+        remove_uninstall_lock(&state_root, &app_id, scope)?;
+    }
+    result
+}
+
+fn remove_uninstall_lock(
+    state_root: &Path,
+    app_id: &AppId,
+    scope: SelectedScope,
+) -> miette::Result<()> {
+    let scope = match scope {
+        SelectedScope::User => "user",
+        SelectedScope::Machine => "machine",
+    };
+    let key = zup_windows::InstallationLock::lock_key(app_id.as_str(), scope);
+    zup_windows::InstallationLock::remove_if_unheld(state_root, &key)
+        .map_err(|error| miette::miette!("remove uninstall lock: {error}"))
+}
+
+fn launch_uninstall_runner(executable: &Path, args: &UninstallCommand) -> miette::Result<()> {
+    let temporary =
+        std::env::temp_dir().join(format!("zup-uninstall-{}.exe", uuid::Uuid::now_v7()));
+    zup_windows::copy_new_durable(executable, &temporary)
+        .map_err(|error| miette::miette!("prepare uninstall runner: {error}"))?;
+    let mut command = std::process::Command::new(&temporary);
+    command
+        .arg("__uninstall_runner")
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string());
+    command.arg("--scope").arg(match args.scope {
+        ScopeArg::User => "user",
+        ScopeArg::Machine => "machine",
+    });
+    if let Some(value) = &args.app_id {
+        command.arg("--app-id").arg(value);
+    }
+    if let Some(value) = &args.state_root {
+        command.arg("--state-root").arg(value);
+    }
+    if let Some(value) = &args.work_root {
+        command.arg("--work-root").arg(value);
+    }
+    command
+        .spawn()
+        .map_err(|error| miette::miette!("start uninstall runner: {error}"))?;
+    Ok(())
+}
+
+fn schedule_runner_cleanup(path: &Path) {
+    let path = path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '{}' -Force -ErrorAction SilentlyContinue",
+        std::process::id(),
+        path
+    );
+    let _ = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .spawn();
 }
 
 fn run_recover(args: RecoverCommand) -> miette::Result<()> {

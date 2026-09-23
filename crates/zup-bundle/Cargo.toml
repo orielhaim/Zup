@@ -15,6 +15,7 @@ zstd.workspace = true
 tempfile.workspace = true
 zup-core.workspace = true
 zup-build.workspace = true
+windows-link.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

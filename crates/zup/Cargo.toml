@@ -22,11 +22,12 @@ zup-core.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true
 zup-plan.workspace = true
+zup-platform.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 uuid.workspace = true
-semver.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true
+windows-registry.workspace = true

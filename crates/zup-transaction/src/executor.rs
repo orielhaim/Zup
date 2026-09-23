@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::plan::TransactionNode;
 use zup_core::{SelectedScope, Sha256Digest};
-use zup_exec::{ExtensionState, ProgIdState, ProtocolState, ServiceState, ShortcutState};
+use zup_exec::{
+    ExtensionState, ProgIdState, ProtocolState, ServiceState, ShortcutState, UninstallEntryState,
+};
 use zup_platform::TargetPath;
 
 /// Result of reconciling a node whose durable state is `Running`.
@@ -93,6 +95,12 @@ pub enum OperationReceipt {
         extension: String,
         previous: ExtensionState,
         installed: ExtensionState,
+    },
+    UninstallEntry {
+        scope: SelectedScope,
+        key_path: String,
+        previous: Option<UninstallEntryState>,
+        installed: Option<UninstallEntryState>,
     },
     /// Generic marker for unsupported or opaque nodes in tests.
     Opaque,
