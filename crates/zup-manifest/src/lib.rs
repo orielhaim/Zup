@@ -17,12 +17,14 @@ mod error;
 mod model;
 mod parse;
 mod plugin;
+mod schema;
 
-pub use compile::{compile, parse_and_compile};
+pub use compile::{compile, parse_and_compile, parse_and_compile_named};
 pub use error::ManifestError;
 pub use model::{Manifest, SCHEMA_VERSION, Updates};
-pub use parse::parse;
+pub use parse::{parse, parse_named};
 pub use plugin::Plugin;
+pub use schema::{schema, schema_json};
 
 pub use zup_core::{
     App, AppId, Component, ComponentId, Condition, FileExtension, FileMapping, FileType,

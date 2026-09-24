@@ -1,0 +1,741 @@
+{
+  "$id": "https://zup.dev/schema/zup.toml.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "zup installer manifest",
+  "description": "Declarative application installer manifest for zup.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "app": {
+      "$ref": "#/$defs/App"
+    },
+    "ui": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UiBranding"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "source": {
+      "$ref": "#/$defs/Source"
+    },
+    "install": {
+      "$ref": "#/$defs/Install"
+    },
+    "updates": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Updates"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Component"
+      },
+      "default": []
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Plugin"
+      },
+      "default": []
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileMapping"
+      },
+      "default": []
+    },
+    "shortcuts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Shortcut"
+      },
+      "default": []
+    },
+    "path": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PathEntry"
+      },
+      "default": []
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Service"
+      },
+      "default": []
+    },
+    "protocols": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Protocol"
+      },
+      "default": []
+    },
+    "file_types": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileType"
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "app",
+    "source",
+    "install"
+  ],
+  "examples": [
+    {
+      "schema": 1,
+      "app": {
+        "id": "com.example.acme",
+        "name": "Acme",
+        "version": "1.0.0"
+      },
+      "source": {
+        "directory": "dist"
+      },
+      "install": {
+        "scope": "user",
+        "allow_directory_override": true,
+        "directory": {
+          "user": "${known.local_app_data}/Acme"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "App": {
+      "description": "Application identity and display metadata.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/AppId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "version": {
+          "type": "string"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "main": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "version"
+      ]
+    },
+    "AppId": {
+      "description": "Stable logical application identifier.",
+      "type": "string"
+    },
+    "NonEmptyString": {
+      "description": "Non-empty display name or label.",
+      "type": "string"
+    },
+    "Template": {
+      "description": "A path or command template using zup variables such as ${install} and ${known.local_app_data}.",
+      "type": "string",
+      "examples": [
+        "${install}/app.exe",
+        "${known.program_files}/Acme"
+      ]
+    },
+    "UiBranding": {
+      "type": "object",
+      "properties": {
+        "logo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "accent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "theme": {
+          "$ref": "#/$defs/UiTheme",
+          "default": "system"
+        },
+        "license_link": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "legal_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "UiTheme": {
+      "type": "string",
+      "enum": [
+        "system",
+        "light",
+        "dark"
+      ]
+    },
+    "Source": {
+      "description": "Payload source for the installer (build-time, not install-time).",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory"
+      ]
+    },
+    "Install": {
+      "description": "Installation scope and destination templates.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/InstallScope"
+        },
+        "directory": {
+          "$ref": "#/$defs/InstallDirectory",
+          "default": {
+            "user": null,
+            "machine": null
+          }
+        },
+        "allow_directory_override": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope"
+      ]
+    },
+    "InstallScope": {
+      "description": "Scope an installer may target.",
+      "type": "string",
+      "enum": [
+        "user",
+        "machine",
+        "either"
+      ]
+    },
+    "InstallDirectory": {
+      "description": "Unresolved install-root templates by scope.",
+      "type": "object",
+      "properties": {
+        "user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "machine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "Updates": {
+      "description": "Build-time update repository settings.",
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "channel",
+        "root"
+      ]
+    },
+    "Component": {
+      "description": "A selectable application component.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ComponentId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "default": {
+          "type": "boolean",
+          "default": true
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentId"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "ComponentId": {
+      "description": "Stable logical component identifier.",
+      "type": "string"
+    },
+    "Plugin": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source"
+      ]
+    },
+    "Condition": {
+      "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
+      "type": "string",
+      "examples": [
+        "component(\"docs\")",
+        "!component(\"debug\")"
+      ]
+    },
+    "FileMapping": {
+      "description": "Declarative file mapping. Patterns are not expanded here.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "destination": {
+          "$ref": "#/$defs/Template"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "allow_empty": {
+          "description": "Allow a pattern that matches zero files. Default: reject.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "destination"
+      ]
+    },
+    "Shortcut": {
+      "description": "High-level application launcher intent.",
+      "type": "object",
+      "properties": {
+        "location": {
+          "$ref": "#/$defs/ShortcutLocation"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "target": {
+          "$ref": "#/$defs/Template"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "working_directory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "location",
+        "name",
+        "target"
+      ]
+    },
+    "ShortcutLocation": {
+      "description": "Portable application-shortcut location.",
+      "type": "string",
+      "enum": [
+        "start-menu",
+        "desktop"
+      ]
+    },
+    "PathEntry": {
+      "description": "A logical PATH entry to add to the installation-appropriate scope.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/Template"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value"
+      ]
+    },
+    "Service": {
+      "description": "Platform-neutral service intent.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ServiceId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "binary": {
+          "$ref": "#/$defs/Template"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "start": {
+          "$ref": "#/$defs/ServiceStart"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "binary",
+        "start"
+      ]
+    },
+    "ServiceId": {
+      "description": "Stable logical service identifier.",
+      "type": "string"
+    },
+    "ServiceStart": {
+      "description": "Platform-neutral service start policy.",
+      "type": "string",
+      "enum": [
+        "automatic",
+        "manual",
+        "disabled"
+      ]
+    },
+    "Protocol": {
+      "description": "URI-scheme launch capability.",
+      "type": "object",
+      "properties": {
+        "scheme": {
+          "$ref": "#/$defs/ProtocolScheme"
+        },
+        "executable": {
+          "$ref": "#/$defs/Template"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scheme",
+        "executable"
+      ]
+    },
+    "ProtocolScheme": {
+      "description": "URI scheme such as `acme` in `acme://`.",
+      "type": "string"
+    },
+    "FileType": {
+      "description": "File extension registration intent. Does not set default handlers.",
+      "type": "object",
+      "properties": {
+        "extension": {
+          "$ref": "#/$defs/FileExtension"
+        },
+        "id": {
+          "$ref": "#/$defs/FileTypeId"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "executable": {
+          "$ref": "#/$defs/Template"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "id",
+        "executable"
+      ]
+    },
+    "FileExtension": {
+      "description": "A bare file extension such as `.acme`.",
+      "type": "string"
+    },
+    "FileTypeId": {
+      "description": "Stable logical file-type identifier (for example a ProgID-like name).",
+      "type": "string"
+    }
+  }
+}

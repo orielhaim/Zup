@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "build")]
+use clap::CommandFactory;
+use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
+#[cfg(feature = "build")]
+use std::io::IsTerminal;
 use zup_core::{AppId, ComponentId, RelativePath, ResourceKey, SelectedScope, hash_reader};
 use zup_exec::{LifecycleAction, RemovalKind};
 use zup_plan::{PluginArchitecture, PluginHostFacts, PluginOperatingSystem};
@@ -23,21 +27,45 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Build a signed-ready installer package.
     #[cfg(feature = "build")]
     Build(BuildCommand),
+    /// Create a small, editable zup.toml project.
+    #[cfg(feature = "build")]
+    Init(InitCommand),
+    /// Validate a manifest and its build inputs.
+    #[cfg(feature = "build")]
+    Check(CheckCommand),
+    /// Inspect the real installation plan without changing the machine.
+    #[cfg(feature = "build")]
+    Plan(PlanCommand),
+    /// Print or write the authoritative zup.toml JSON Schema.
+    #[cfg(feature = "build")]
+    Schema(SchemaCommand),
+    /// Validate and format zup.toml while preserving comments.
+    #[cfg(feature = "build")]
+    Fmt(FmtCommand),
+    /// Generate shell completions for zup.
+    #[cfg(feature = "build")]
+    Completions(CompletionsCommand),
+    /// Install an embedded or source-manifest application.
     Install(ManifestCommand),
+    /// Upgrade an installed application.
     Upgrade(ManifestCommand),
+    /// Check for or install a verified update.
     Update(UpdateCommand),
+    /// Change selected components for an installed application.
     Modify(ManifestCommand),
+    /// Restore owned resources that have drifted.
     Repair(RepairCommand),
+    /// Remove an installed application and its owned resources.
     Uninstall(UninstallCommand),
     #[command(name = "__uninstall_runner", hide = true)]
     UninstallRunner(UninstallRunnerCommand),
+    /// Recover an interrupted transaction.
     Recover(RecoverCommand),
     #[command(name = "__worker", hide = true)]
-    Worker {
-        bootstrap: String,
-    },
+    Worker { bootstrap: String },
     /// Print the protocol/worker bootstrap format for tests.
     #[command(hide = true)]
     WorkerHelp,
@@ -55,13 +83,15 @@ struct UpdateCommand {
 
 #[derive(Debug, Subcommand)]
 enum UpdateCommands {
+    /// Check for an update without downloading it.
     Check,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ScopeArg {
     User,
     Machine,
+    Either,
 }
 
 impl From<ScopeArg> for SelectedScope {
@@ -69,6 +99,7 @@ impl From<ScopeArg> for SelectedScope {
         match value {
             ScopeArg::User => Self::User,
             ScopeArg::Machine => Self::Machine,
+            ScopeArg::Either => Self::User,
         }
     }
 }
@@ -83,7 +114,7 @@ fn default_install_scope(scope: zup_core::InstallScope) -> SelectedScope {
 #[derive(Debug, Args)]
 struct ManifestCommand {
     #[cfg(feature = "build")]
-    #[arg(long, default_value = "zup.toml")]
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
     manifest: PathBuf,
     #[arg(long, value_enum, default_value = "user")]
     scope: ScopeArg,
@@ -95,6 +126,10 @@ struct ManifestCommand {
     enable: Vec<String>,
     #[arg(long = "disable")]
     disable: Vec<String>,
+    #[arg(long = "install-directory", alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
+    install_directory: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    ui: bool,
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +142,8 @@ struct RepairCommand {
 
 #[derive(Debug, Args)]
 struct UninstallCommand {
+    #[arg(long, hide = true)]
+    ui: bool,
     #[arg(long)]
     app_id: Option<String>,
     #[arg(long, value_enum, default_value = "user")]
@@ -121,8 +158,6 @@ struct UninstallCommand {
 struct UninstallRunnerCommand {
     #[arg(long)]
     wait_pid: u32,
-    #[arg(long, default_value_t = false)]
-    ui: bool,
     #[command(flatten)]
     uninstall: UninstallCommand,
 }
@@ -144,14 +179,86 @@ struct RecoverCommand {
 #[cfg(feature = "build")]
 #[derive(Debug, Args)]
 struct BuildCommand {
-    #[arg(long, default_value = "zup.toml")]
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
     manifest: PathBuf,
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     output: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::FilePath)]
     runtime: Option<PathBuf>,
     #[arg(long, default_value_t = default_build_target())]
     target: String,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct InitCommand {
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    app_id: Option<String>,
+    #[arg(long, default_value = "0.1.0")]
+    version: String,
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    source: Option<String>,
+    #[arg(long, value_enum)]
+    scope: Option<ScopeArg>,
+    #[arg(long)]
+    main: Option<String>,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    non_interactive: bool,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct CheckCommand {
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct PlanCommand {
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+    #[arg(long, value_enum, default_value = "user")]
+    scope: ScopeArg,
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+    #[arg(long = "enable")]
+    enable: Vec<String>,
+    #[arg(long = "disable")]
+    disable: Vec<String>,
+    #[arg(long = "install-directory", alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
+    install_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct SchemaCommand {
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    output: Option<PathBuf>,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct FmtCommand {
+    #[arg(long, default_value = "zup.toml", value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+    #[arg(long)]
+    check: bool,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct CompletionsCommand {
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 pub fn run() -> miette::Result<()> {
@@ -160,6 +267,18 @@ pub fn run() -> miette::Result<()> {
     match cli.command {
         #[cfg(feature = "build")]
         Some(Commands::Build(args)) => run_build(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Init(args)) => run_init(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Check(args)) => run_check(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Plan(args)) => run_plan(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Schema(args)) => run_schema(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Fmt(args)) => run_fmt(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Completions(args)) => run_completions(args)?,
         Some(Commands::Install(args)) => run_manifest_transition(LifecycleAction::Install, args)?,
         Some(Commands::Upgrade(args)) => run_manifest_transition(LifecycleAction::Upgrade, args)?,
         Some(Commands::Update(args)) => run_update(args)?,
@@ -176,7 +295,7 @@ pub fn run() -> miette::Result<()> {
                 .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
             let cleanup_path =
                 zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
-            let result = if args.ui {
+            let result = if args.uninstall.ui {
                 let executable = zup_windows::current_exe()
                     .map_err(|error| miette::miette!("executable: {error}"))?;
                 let bundle = zup_bundle::EmbeddedBundle::open(&executable)
@@ -232,6 +351,43 @@ fn default_state_root(scope: SelectedScope) -> miette::Result<PathBuf> {
     }
 }
 
+fn install_directory_template(path: &Path) -> miette::Result<zup_core::Template> {
+    let value = path.to_string_lossy();
+    if value.contains("${") {
+        return Err(miette::miette!(
+            "install directory must not contain template variables: {value}"
+        ));
+    }
+    zup_core::Template::parse(&value).map_err(|error| miette::miette!("install directory: {error}"))
+}
+
+fn persisted_install_directory(
+    ledger: Option<&zup_exec::InstallLedger>,
+) -> Option<zup_core::Template> {
+    ledger
+        .and_then(|ledger| ledger.install_directory.as_ref())
+        .and_then(|path| zup_core::Template::parse(&path.to_string()).ok())
+}
+
+fn choose_install_directory(
+    explicit: Option<&Path>,
+    ledger: Option<&zup_exec::InstallLedger>,
+    allowed: bool,
+) -> miette::Result<Option<zup_core::Template>> {
+    if let Some(path) = explicit {
+        if !allowed {
+            return Err(miette::miette!(
+                "this application does not allow choosing an install directory"
+            ));
+        }
+        return install_directory_template(path).map(Some);
+    }
+    if !allowed {
+        return Ok(None);
+    }
+    Ok(persisted_install_directory(ledger))
+}
+
 fn choose_state_root(path: Option<PathBuf>, scope: SelectedScope) -> miette::Result<PathBuf> {
     match path {
         Some(path) if scope == SelectedScope::Machine => {
@@ -272,13 +428,14 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
         .manifest
         .canonicalize()
         .map_err(|e| miette::miette!("manifest: {e}"))?;
-    let source =
-        std::fs::read_to_string(&manifest_path).map_err(|e| miette::miette!("manifest: {e}"))?;
-    let manifest = zup_manifest::parse(&source).map_err(|e| miette::miette!("manifest: {e}"))?;
-    let installer =
-        zup_manifest::parse_and_compile(&source).map_err(|e| miette::miette!("installer: {e}"))?;
-    let build = zup_build::materialize(&manifest_path, &manifest, installer)
-        .map_err(|e| miette::miette!("materialize: {e}"))?;
+    let interactive = std::io::stdout().is_terminal();
+    if interactive {
+        println!("→ Validating manifest");
+    }
+    let (_, _, _, build) = load_project(&manifest_path)?;
+    if interactive {
+        println!("→ Materializing payload");
+    }
     let target = args.target;
     let runtime = match args.runtime {
         Some(path) => path
@@ -306,6 +463,9 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
         return Err(miette::miette!(
             "runtime target `{runtime_target}` does not match requested target `{target}`"
         ));
+    }
+    if interactive {
+        println!("→ Compiling plugins");
     }
     let plugin_artifacts = zup_plugin_build::compile_plugins(&build, &target)
         .map_err(|error| miette::miette!("plugin compilation: {error}"))?;
@@ -335,19 +495,359 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
             .unwrap_or_else(|| Path::new("."))
             .join(format!("{name}-Setup.exe"))
     });
-    let runtime_size = std::fs::metadata(&runtime)
-        .map_err(|e| miette::miette!("runtime: {e}"))?
-        .len();
-    let (size, bundle_size) =
+    if interactive {
+        println!("→ Compressing and embedding");
+    }
+    let (size, _) =
         zup_bundle::build_self_contained_executable(&runtime, &output, &build, &plugin_artifacts)
             .map_err(|e| miette::miette!("installer output: {e}"))?;
+    let payload_bytes: u64 = build.files.iter().map(|file| file.size).sum();
+    let updates = build
+        .installer
+        .updates
+        .as_ref()
+        .map(|updates| updates.channel.as_str())
+        .unwrap_or("not configured");
     println!(
-        "{} ({} bytes total; {} bytes RCDATA package; {} bytes over runtime)",
-        output.display(),
-        size,
-        bundle_size,
-        size - runtime_size,
+        "Built {} {}",
+        build.installer.app.name, build.installer.app.version
     );
+    println!("  Installer   {}", output.display());
+    println!("  Size        {}", zup_presentation::format_bytes(size));
+    println!("  Target      {}", target);
+    println!(
+        "  Payload     {} files · {}",
+        build.files.len(),
+        zup_presentation::format_bytes(payload_bytes)
+    );
+    println!("  Plugins     {}", plugin_artifacts.len());
+    println!("  Updates     {updates}");
+    println!("\n✓ Ready to sign");
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn toml_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            character if character.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(output, "\\u{:04X}", character as u32);
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+#[cfg(feature = "build")]
+fn slug(value: &str) -> String {
+    let mut output = String::new();
+    let mut separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if !output.is_empty() && !separator {
+            output.push('-');
+            separator = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        "app".into()
+    } else {
+        output
+    }
+}
+
+#[cfg(feature = "build")]
+fn run_init(args: InitCommand) -> miette::Result<()> {
+    let manifest_path = args.manifest.canonicalize().unwrap_or_else(|_| {
+        if args.manifest.is_absolute() {
+            args.manifest.clone()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&args.manifest)
+        }
+    });
+    if manifest_path.exists() && !args.force {
+        return Err(miette::miette!(
+            "{} already exists; pass --force to replace it",
+            manifest_path.display()
+        ));
+    }
+    let interactive = !args.non_interactive && std::io::stdin().is_terminal();
+    let directory_name = manifest_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("app");
+    let mut name = args.name;
+    let mut app_id = args.app_id;
+    let mut source = args.source;
+    let mut scope = args.scope;
+    let mut main = args.main;
+    if interactive {
+        if name.is_none() {
+            name = Some(
+                inquire::Text::new("Application name")
+                    .with_default(directory_name)
+                    .prompt()
+                    .map_err(|error| miette::miette!("prompt: {error}"))?,
+            );
+        }
+        if app_id.is_none() {
+            let default_id = format!("com.example.{}", slug(name.as_deref().unwrap_or("app")));
+            app_id = Some(
+                inquire::Text::new("Application ID")
+                    .with_default(&default_id)
+                    .prompt()
+                    .map_err(|error| miette::miette!("prompt: {error}"))?,
+            );
+        }
+        if source.is_none() {
+            source = Some(
+                inquire::Text::new("Source directory")
+                    .with_default("dist")
+                    .prompt()
+                    .map_err(|error| miette::miette!("prompt: {error}"))?,
+            );
+        }
+        if scope.is_none() {
+            let value = inquire::Select::new("Install scope", vec!["user", "machine", "either"])
+                .with_starting_cursor(0)
+                .prompt()
+                .map_err(|error| miette::miette!("prompt: {error}"))?;
+            scope = Some(match value {
+                "machine" => ScopeArg::Machine,
+                "either" => ScopeArg::Either,
+                _ => ScopeArg::User,
+            });
+        }
+        if main.is_none() {
+            main = Some(
+                inquire::Text::new("Main executable")
+                    .with_default("app.exe")
+                    .prompt()
+                    .map_err(|error| miette::miette!("prompt: {error}"))?,
+            );
+        }
+    }
+    let name = name.ok_or_else(|| miette::miette!("--name is required in non-interactive mode"))?;
+    let app_id =
+        app_id.ok_or_else(|| miette::miette!("--app-id is required in non-interactive mode"))?;
+    let source = source.unwrap_or_else(|| "dist".into());
+    let scope = scope.unwrap_or(ScopeArg::User);
+    let main = main.unwrap_or_else(|| "app.exe".into());
+    semver::Version::parse(&args.version).map_err(|error| miette::miette!("version: {error}"))?;
+    let scope_name = match scope {
+        ScopeArg::User => "user",
+        ScopeArg::Machine => "machine",
+        ScopeArg::Either => "either",
+    };
+    let install_name = slug(&name);
+    let mut document = format!(
+        "#:schema https://zup.dev/schema/zup.toml.json\n\nschema = 1\n\n[app]\nid = {}\nname = {}\nversion = {}\nmain = {}\n\n[source]\ndirectory = {}\n\n[install]\nscope = {}\nallow_directory_override = true\n\n[install.directory]\n",
+        toml_string(&app_id),
+        toml_string(&name),
+        toml_string(&args.version),
+        toml_string(&main),
+        toml_string(&source),
+        toml_string(scope_name),
+    );
+    if scope != ScopeArg::Machine {
+        document.push_str(&format!(
+            "user = \"${{known.local_app_data}}/{install_name}\"\n"
+        ));
+    }
+    if scope != ScopeArg::User {
+        document.push_str(&format!(
+            "machine = \"${{known.program_files}}/{install_name}\"\n"
+        ));
+    }
+    if let Some(parent) = manifest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| miette::miette!("project directory: {error}"))?;
+        let source_path = Path::new(&source);
+        let source_path = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            parent.join(source_path)
+        };
+        std::fs::create_dir_all(source_path)
+            .map_err(|error| miette::miette!("source directory: {error}"))?;
+    }
+    std::fs::write(&manifest_path, document)
+        .map_err(|error| miette::miette!("write manifest: {error}"))?;
+    println!("Created {}", manifest_path.display());
+    println!("Next: edit zup.toml, then run zup check");
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn load_project(
+    path: &Path,
+) -> miette::Result<(
+    String,
+    zup_manifest::Manifest,
+    zup_core::Installer,
+    zup_plan::BuildPlan,
+)> {
+    let manifest_path = path
+        .canonicalize()
+        .map_err(|error| miette::miette!("manifest: {error}"))?;
+    let source = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| miette::miette!("manifest: {error}"))?;
+    let manifest_name = manifest_path.display().to_string();
+    let manifest =
+        zup_manifest::parse_named(&source, &manifest_name).map_err(miette::Report::new)?;
+    let installer = zup_manifest::parse_and_compile_named(&source, &manifest_name)
+        .map_err(miette::Report::new)?;
+    let build = zup_build::materialize(&manifest_path, &manifest, installer.clone())
+        .map_err(miette::Report::new)?;
+    Ok((source, manifest, installer, build))
+}
+
+#[cfg(feature = "build")]
+fn run_check(args: CheckCommand) -> miette::Result<()> {
+    let (_, _, _, build) = load_project(&args.manifest)?;
+    if !build.installer.plugins.is_empty() {
+        zup_plugin_build::compile_plugins(&build, &default_build_target())
+            .map_err(|error| miette::miette!("plugin check: {error}"))?;
+    } else {
+        let scopes = match build.installer.install.scope {
+            zup_core::InstallScope::User => vec![SelectedScope::User],
+            zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
+            zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
+        };
+        for scope in scopes {
+            let install = zup_plan::plan(&build, &zup_plan::PlanRequest::new(scope))
+                .map_err(miette::Report::new)?;
+            zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
+                .map_err(|error| miette::miette!("target check: {error}"))?;
+        }
+    }
+    println!("✓ {} is valid", build.installer.app.name);
+    println!("  Components  {}", build.installer.components.len());
+    println!("  Files       {}", build.files.len());
+    println!("  Plugins     {}", build.installer.plugins.len());
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn run_plan(args: PlanCommand) -> miette::Result<()> {
+    let (_, _, installer, build) = load_project(&args.manifest)?;
+    let scope = SelectedScope::from(args.scope);
+    let state_root = choose_state_root(args.state_root, scope)?;
+    let prior = zup_windows::InstallLedgerStore::new(&state_root)
+        .load(&installer.app.id, scope)
+        .map_err(|error| miette::miette!("ledger: {error}"))?;
+    let mut request = zup_plan::PlanRequest::new(scope);
+    request.install_directory = choose_install_directory(
+        args.install_directory.as_deref(),
+        prior.as_ref(),
+        installer.install.allow_directory_override,
+    )?;
+    for raw in args.enable {
+        let id =
+            ComponentId::new(&raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        request.components.enable.insert(id);
+    }
+    for raw in args.disable {
+        let id =
+            ComponentId::new(&raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        request.components.disable.insert(id);
+    }
+    let install = zup_plan::plan(&build, &request).map_err(miette::Report::new)?;
+    let target =
+        zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
+            .map_err(|error| miette::miette!("target: {error}"))?;
+    let execution = zup_windows::plan_target_lifecycle(
+        LifecycleAction::Install,
+        &installer.app.id,
+        scope,
+        Some(&target),
+        &state_root,
+    )
+    .map_err(|error| miette::miette!("execution plan: {error}"))?;
+    let mut preview = zup_presentation::PlanPreview::from_execution_plan(&execution, scope);
+    preview.application = installer.app.name.to_string();
+    preview.version = installer.app.version.to_string();
+    preview.install_directory = target.install_directory.to_string();
+    if args.json {
+        let value = serde_json::json!({
+            "preview": preview,
+            "execution": execution,
+            "target": target,
+        });
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+    } else {
+        println!("{}", preview.human());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn run_schema(args: SchemaCommand) -> miette::Result<()> {
+    let json = zup_manifest::schema_json().map_err(|error| miette::miette!("schema: {error}"))?;
+    if let Some(path) = args.output {
+        std::fs::write(&path, format!("{json}\n"))
+            .map_err(|error| miette::miette!("write schema: {error}"))?;
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn run_fmt(args: FmtCommand) -> miette::Result<()> {
+    let path = args
+        .manifest
+        .canonicalize()
+        .map_err(|error| miette::miette!("manifest: {error}"))?;
+    let source =
+        std::fs::read_to_string(&path).map_err(|error| miette::miette!("manifest: {error}"))?;
+    zup_manifest::parse_named(&source, &path.display().to_string()).map_err(miette::Report::new)?;
+    let document = source
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| miette::miette!("format manifest: {error}"))?;
+    let mut formatted = document.to_string();
+    if !formatted.ends_with('\n') {
+        formatted.push('\n');
+    }
+    if args.check {
+        if formatted != source {
+            return Err(miette::miette!("{} is not formatted", path.display()));
+        }
+        println!("{} is formatted", path.display());
+    } else if formatted != source {
+        std::fs::write(&path, formatted)
+            .map_err(|error| miette::miette!("write manifest: {error}"))?;
+        println!("Formatted {}", path.display());
+    } else {
+        println!("{} is already formatted", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn run_completions(args: CompletionsCommand) -> miette::Result<()> {
+    let mut command = Cli::command();
+    clap_complete::generate(args.shell, &mut command, "zup", &mut std::io::stdout());
     Ok(())
 }
 
@@ -357,9 +857,15 @@ fn run_embedded_transition(
     state: Option<PathBuf>,
     enable: Vec<String>,
     disable: Vec<String>,
+    install_directory: Option<PathBuf>,
 ) -> miette::Result<()> {
     execute(prepare_embedded_transition(
-        action, scope, state, enable, disable,
+        action,
+        scope,
+        state,
+        enable,
+        disable,
+        install_directory,
     )?)
 }
 
@@ -369,6 +875,7 @@ fn prepare_embedded_transition(
     state: Option<PathBuf>,
     enable: Vec<String>,
     disable: Vec<String>,
+    install_directory: Option<PathBuf>,
 ) -> miette::Result<RuntimeRequest> {
     prepare_embedded_transition_with_cancellation(
         action,
@@ -376,6 +883,7 @@ fn prepare_embedded_transition(
         state,
         enable,
         disable,
+        install_directory,
         &zup_plan::NeverCancelled,
     )
 }
@@ -386,6 +894,7 @@ fn prepare_embedded_transition_with_cancellation(
     state: Option<PathBuf>,
     enable: Vec<String>,
     disable: Vec<String>,
+    install_directory: Option<PathBuf>,
     cancellation: &dyn zup_plan::CancellationQuery,
 ) -> miette::Result<RuntimeRequest> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
@@ -409,6 +918,7 @@ fn prepare_embedded_transition_with_cancellation(
             payload_root: executable,
             enable,
             disable,
+            install_directory,
         },
         cancellation,
         || {
@@ -430,6 +940,7 @@ struct EmbeddedPreparation<'a> {
     payload_root: PathBuf,
     enable: Vec<String>,
     disable: Vec<String>,
+    install_directory: Option<PathBuf>,
 }
 
 fn prepare_embedded_request<E>(
@@ -449,8 +960,18 @@ where
         payload_root,
         enable,
         disable,
+        install_directory,
     } = preparation;
     let app_id = build.installer.app.id.clone();
+    let selected_install_directory = if action == LifecycleAction::Uninstall {
+        None
+    } else {
+        choose_install_directory(
+            install_directory.as_deref(),
+            prior.as_ref(),
+            build.installer.install.allow_directory_override,
+        )?
+    };
     if action == LifecycleAction::Uninstall {
         let ledger = prior.ok_or_else(|| miette::miette!("installation not found"))?;
         let execution =
@@ -471,6 +992,7 @@ where
     }
 
     let mut request = zup_plan::PlanRequest::new(scope);
+    request.install_directory = selected_install_directory;
     if matches!(
         action,
         LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
@@ -604,6 +1126,11 @@ fn plugin_host_facts() -> miette::Result<PluginHostFacts> {
 
 fn run_manifest_transition(action: LifecycleAction, args: ManifestCommand) -> miette::Result<()> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+    if args.ui {
+        let bundle = zup_bundle::EmbeddedBundle::open(&executable)
+            .map_err(|error| miette::miette!("installer package: {error}"))?;
+        return run_graphical_frontend(executable, &bundle, true, false);
+    }
     match zup_bundle::EmbeddedBundle::open(&executable) {
         Ok(bundle) => {
             let scope = if bundle.plan().installer.install.scope == zup_core::InstallScope::Machine
@@ -612,7 +1139,14 @@ fn run_manifest_transition(action: LifecycleAction, args: ManifestCommand) -> mi
             } else {
                 SelectedScope::from(args.scope)
             };
-            run_embedded_transition(action, scope, args.state_root, args.enable, args.disable)
+            run_embedded_transition(
+                action,
+                scope,
+                args.state_root,
+                args.enable,
+                args.disable,
+                args.install_directory,
+            )
         }
         Err(error) if error.is_missing_resource() => run_manifest_source_transition(action, args),
         Err(error) => Err(miette::miette!("installer package: {error}")),
@@ -630,19 +1164,18 @@ fn run_manifest_source_transition(
         .manifest
         .canonicalize()
         .map_err(|error| miette::miette!("manifest: {error}"))?;
-    let source = std::fs::read_to_string(&manifest_path)
-        .map_err(|error| miette::miette!("manifest: {error}"))?;
-    let manifest =
-        zup_manifest::parse(&source).map_err(|error| miette::miette!("manifest: {error}"))?;
-    let installer = zup_manifest::parse_and_compile(&source)
-        .map_err(|error| miette::miette!("installer: {error}"))?;
+    let (_, manifest, installer, build) = load_project(&manifest_path)?;
     let app_id = installer.app.id.clone();
     let prior = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&app_id, scope)
         .map_err(|error| miette::miette!("ledger: {error}"))?;
-    let build = zup_build::materialize(&manifest_path, &manifest, installer)
-        .map_err(|error| miette::miette!("materialize: {error}"))?;
+    let allow_directory_override = installer.install.allow_directory_override;
     let mut request = zup_plan::PlanRequest::new(scope);
+    request.install_directory = choose_install_directory(
+        args.install_directory.as_deref(),
+        prior.as_ref(),
+        allow_directory_override,
+    )?;
     if matches!(action, LifecycleAction::Repair { .. })
         && (!args.enable.is_empty() || !args.disable.is_empty())
     {
@@ -800,6 +1333,11 @@ fn run_update(args: UpdateCommand) -> miette::Result<()> {
 
 fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+    if args.ui {
+        let bundle = zup_bundle::EmbeddedBundle::open(&executable)
+            .map_err(|error| miette::miette!("installer package: {error}"))?;
+        return run_graphical_frontend(executable, &bundle, true, false);
+    }
     if executable
         .to_string_lossy()
         .to_ascii_lowercase()
@@ -842,6 +1380,7 @@ fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
             Some(state_root.clone()),
             vec![],
             vec![],
+            None,
         );
         if result.is_ok() {
             remove_uninstall_lock(&state_root, &app_id, scope)?;
@@ -918,6 +1457,7 @@ fn launch_uninstall_runner(
     command.arg("--scope").arg(match args.scope {
         ScopeArg::User => "user",
         ScopeArg::Machine => "machine",
+        ScopeArg::Either => "user",
     });
     if let Some(value) = &args.app_id {
         command.arg("--app-id").arg(value);
@@ -1143,6 +1683,72 @@ fn run_graphical_frontend(
         version: installer.app.version.to_string(),
         description: installer.app.description.clone(),
     };
+    let mut initial_request = zup_plan::PlanRequest::new(selected_scope);
+    if let Some((_, ledger)) = installed.as_ref() {
+        for component in &installer.components {
+            if ledger.selected_components.contains(&component.id) {
+                initial_request
+                    .components
+                    .enable
+                    .insert(component.id.clone());
+            } else if !component.required {
+                initial_request
+                    .components
+                    .disable
+                    .insert(component.id.clone());
+            }
+        }
+    } else {
+        for component in &installer.components {
+            if component.default || component.required {
+                initial_request
+                    .components
+                    .enable
+                    .insert(component.id.clone());
+            } else {
+                initial_request
+                    .components
+                    .disable
+                    .insert(component.id.clone());
+            }
+        }
+    }
+    if let Some(path) = persisted_install_directory(installed.as_ref().map(|(_, ledger)| ledger)) {
+        initial_request.install_directory = Some(path);
+    }
+    let preview = zup_plan::plan(
+        &bundle
+            .build_plan()
+            .map_err(|error| miette::miette!("installer plan: {error}"))?,
+        &initial_request,
+    )
+    .ok()
+    .map(|install| {
+        let mut preview = zup_presentation::PlanPreview::from_install_plan(&install);
+        if let Ok(target) = zup_windows::resolve_target(
+            &install,
+            &zup_windows::WindowsTargetContext::new(selected_scope),
+        ) {
+            preview.install_directory = target.install_directory.to_string();
+            preview.estimated_bytes = target.summary.install_bytes;
+            preview.requires_elevation = target.summary.requires_elevation;
+        }
+        preview
+    });
+    let install_directory = preview
+        .as_ref()
+        .map(|preview| preview.install_directory.clone())
+        .or_else(|| {
+            installed
+                .as_ref()
+                .and_then(|(_, ledger)| ledger.install_directory.as_ref().map(ToString::to_string))
+        });
+    let estimated_bytes = preview
+        .as_ref()
+        .map_or(0, |preview| preview.estimated_bytes);
+    let requires_elevation = preview
+        .as_ref()
+        .is_some_and(|preview| preview.requires_elevation);
     let surface = if maintenance_launch {
         let (_scope, ledger) = installed
             .as_ref()
@@ -1159,6 +1765,13 @@ fn run_graphical_frontend(
                 })
                 .collect(),
             updates_enabled: installer.updates.is_some(),
+            scope: selected_scope,
+            install_directory,
+            health: zup_presentation::InstallationHealth {
+                state: "Ready".into(),
+                summary: "Up to date".into(),
+                drift_count: 0,
+            },
         }
     } else {
         zup_ui::Surface::Installer {
@@ -1174,6 +1787,11 @@ fn run_graphical_frontend(
                 },
                 selected_scope,
                 components,
+                install_directory: install_directory.clone(),
+                allow_directory_override: installer.install.allow_directory_override,
+                estimated_bytes,
+                requires_elevation,
+                preview: preview.clone(),
             },
         }
     };
@@ -1194,7 +1812,7 @@ fn run_graphical_frontend(
             .send(zup_ui::UiCommand::ConfirmUninstall)
             .map_err(|error| miette::miette!("start uninstall session: {error}"))?;
     }
-    zup_ui::run(surface, commands_tx, events_rx);
+    zup_ui::run_with_branding(surface, commands_tx, events_rx, installer.ui.clone());
     Ok(())
 }
 
@@ -1210,9 +1828,11 @@ fn ui_backend(
 
     let cancel_slot = Arc::new(Mutex::new(None::<zup_runtime::CancellationHandle>));
     let retry_slot = Arc::new(Mutex::new(None::<RetryIntent>));
+    let log_slot = Arc::new(Mutex::new(None::<String>));
     let bridge = UiOperationBridge {
         cancel_slot: cancel_slot.clone(),
         retry_slot: retry_slot.clone(),
+        log_slot: log_slot.clone(),
         events: events.clone(),
     };
     for command in commands {
@@ -1231,6 +1851,20 @@ fn ui_backend(
             C::DismissUninstall => {
                 let _ = events.send(E::DismissUninstall);
             }
+            C::Close => {
+                let _ = events.send(E::Quit);
+            }
+            C::OpenLog => {
+                if let Some(path) = log_slot.lock().expect("log state").clone() {
+                    open_log_path(&path);
+                } else {
+                    let _ = events.send(E::LogPath(session_log_path().display().to_string()));
+                }
+            }
+            C::CopyDiagnostics => {
+                let summary = diagnostic_summary(log_slot.lock().expect("log state").as_deref());
+                copy_to_clipboard(&summary);
+            }
             C::Update => {
                 let exe = executable.clone();
                 let events = events.clone();
@@ -1241,7 +1875,17 @@ fn ui_backend(
                     .as_ref()
                     .map_or_else(|| "unknown".into(), |(_, _, version)| version.to_string());
                 std::thread::spawn(move || {
-                    let result = update_from_ui(&exe, scope);
+                    let status_events = events.clone();
+                    let result = update_from_ui(&exe, scope, move |state| {
+                        let _ = status_events.send(zup_ui::UiEvent::UpdateStatus(
+                            zup_presentation::UpdatePresentation {
+                                channel: None,
+                                state: state.into(),
+                                current: None,
+                                available: None,
+                            },
+                        ));
+                    });
                     match result {
                         Ok(Some((current, available))) => {
                             let _ = events.send(E::UpdateAvailable { current, available });
@@ -1258,7 +1902,35 @@ fn ui_backend(
                     }
                 });
             }
-            C::Install { scope, components } => {
+            C::Preview {
+                scope,
+                components,
+                install_directory,
+            } => {
+                let events = events.clone();
+                let executable = executable.clone();
+                let has_installation = installed.is_some();
+                std::thread::spawn(move || {
+                    if let Err(error) = request_ui_preview(
+                        executable,
+                        scope,
+                        components,
+                        install_directory.map(PathBuf::from),
+                        has_installation,
+                        &events,
+                    ) {
+                        let _ = events.send(zup_ui::UiEvent::Error {
+                            message: error.to_string(),
+                            recovery_required: false,
+                        });
+                    }
+                });
+            }
+            C::Install {
+                scope,
+                components,
+                install_directory,
+            } => {
                 start_ui_transition(
                     executable.clone(),
                     scope,
@@ -1268,6 +1940,7 @@ fn ui_backend(
                         LifecycleAction::Install
                     },
                     components,
+                    install_directory.map(PathBuf::from),
                     false,
                     bridge.clone(),
                 );
@@ -1281,6 +1954,7 @@ fn ui_backend(
                     scope,
                     LifecycleAction::Modify,
                     components,
+                    None,
                     false,
                     bridge.clone(),
                 );
@@ -1295,6 +1969,7 @@ fn ui_backend(
                     scope,
                     LifecycleAction::Repair { force_files: false },
                     components,
+                    None,
                     false,
                     bridge.clone(),
                 );
@@ -1324,6 +1999,7 @@ fn ui_backend(
                         }
                     };
                     let args = UninstallCommand {
+                        ui: true,
                         app_id: Some(app_id),
                         scope: match scope {
                             SelectedScope::User => ScopeArg::User,
@@ -1349,6 +2025,7 @@ fn ui_backend(
                         scope,
                         LifecycleAction::Uninstall,
                         vec![],
+                        None,
                         true,
                         bridge.clone(),
                     );
@@ -1361,12 +2038,102 @@ fn ui_backend(
                         intent.scope,
                         intent.action,
                         intent.components,
+                        intent.install_directory.clone(),
                         intent.cleanup_lock,
                         bridge.clone(),
                     );
                 }
             }
         }
+    }
+}
+
+fn request_ui_preview(
+    executable: PathBuf,
+    scope: SelectedScope,
+    selected: Vec<ComponentId>,
+    install_directory: Option<PathBuf>,
+    has_installation: bool,
+    events: &std::sync::mpsc::Sender<zup_ui::UiEvent>,
+) -> miette::Result<()> {
+    let enable = selected.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let disabled = zup_bundle::EmbeddedBundle::open(&executable)
+        .ok()
+        .map(|bundle| {
+            bundle
+                .plan()
+                .installer
+                .components
+                .iter()
+                .filter(|item| !item.required && !selected.contains(&item.id))
+                .map(|item| item.id.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let request = prepare_embedded_transition_with_cancellation(
+        if has_installation {
+            LifecycleAction::Upgrade
+        } else {
+            LifecycleAction::Install
+        },
+        scope,
+        None,
+        enable,
+        disabled,
+        install_directory,
+        &zup_plan::NeverCancelled,
+    )?;
+    let bundle = zup_bundle::EmbeddedBundle::open(&executable)
+        .map_err(|error| miette::miette!("installer package: {error}"))?;
+    let installer = &bundle.plan().installer;
+    let mut preview =
+        zup_presentation::PlanPreview::from_execution_plan(&request.execution_plan, scope);
+    preview.application = installer.app.name.to_string();
+    preview.version = installer.app.version.to_string();
+    preview.install_directory = request
+        .execution_plan
+        .install_directory
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    events
+        .send(zup_ui::UiEvent::PlanReady(preview))
+        .map_err(|error| miette::miette!("preview channel: {error}"))?;
+    Ok(())
+}
+
+fn session_log_path() -> PathBuf {
+    std::env::temp_dir().join("zup-ui.log")
+}
+
+fn open_log_path(path: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
+fn diagnostic_summary(path: Option<&str>) -> String {
+    match path {
+        Some(path) => format!(
+            "zup diagnostic\nlog: {path}\nNo environment variables or secrets are included."
+        ),
+        None => "zup diagnostic\nNo session log is available yet.".into(),
+    }
+}
+
+fn copy_to_clipboard(value: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("clip").arg(value).output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = value;
     }
 }
 
@@ -1382,6 +2149,7 @@ struct RetryIntent {
     scope: SelectedScope,
     action: LifecycleAction,
     components: Vec<ComponentId>,
+    install_directory: Option<PathBuf>,
     cleanup_lock: bool,
 }
 
@@ -1389,6 +2157,7 @@ struct RetryIntent {
 struct UiOperationBridge {
     cancel_slot: std::sync::Arc<std::sync::Mutex<Option<zup_runtime::CancellationHandle>>>,
     retry_slot: std::sync::Arc<std::sync::Mutex<Option<RetryIntent>>>,
+    log_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     events: std::sync::mpsc::Sender<zup_ui::UiEvent>,
 }
 
@@ -1397,6 +2166,7 @@ fn start_ui_transition(
     scope: SelectedScope,
     action: LifecycleAction,
     selected: Vec<ComponentId>,
+    install_directory: Option<PathBuf>,
     cleanup_lock: bool,
     bridge: UiOperationBridge,
 ) {
@@ -1406,6 +2176,7 @@ fn start_ui_transition(
         scope,
         action,
         components: selected.clone(),
+        install_directory: install_directory.clone(),
         cleanup_lock,
     });
     let events = bridge.events.clone();
@@ -1430,7 +2201,13 @@ fn start_ui_transition(
             })
             .unwrap_or_default();
         let request = prepare_embedded_transition_with_cancellation(
-            action, scope, None, enable, disabled, &cancel,
+            action,
+            scope,
+            None,
+            enable,
+            disabled,
+            install_directory,
+            &cancel,
         );
         let request = match request {
             Ok(request) => request,
@@ -1455,8 +2232,12 @@ fn start_ui_transition(
         let (runtime_events, _) = tokio::sync::broadcast::channel(256);
         let mut rx = runtime_events.subscribe();
         let event_tx = events.clone();
+        let log_slot = bridge.log_slot.clone();
         let pump = std::thread::spawn(move || {
             while let Ok(event) = rx.blocking_recv() {
+                if let zup_runtime::RuntimeEvent::LogPath { path } = &event {
+                    *log_slot.lock().expect("log state") = Some(path.clone());
+                }
                 let terminal = matches!(
                     event,
                     zup_runtime::RuntimeEvent::Completed { .. }
@@ -1538,6 +2319,7 @@ fn installed_components(
 fn update_from_ui(
     executable: &Path,
     scope: SelectedScope,
+    mut status: impl FnMut(&str),
 ) -> Result<Option<(String, String)>, String> {
     let bundle = zup_bundle::EmbeddedBundle::open(executable).map_err(|e| e.to_string())?;
     let installer = &bundle.plan().installer;
@@ -1560,11 +2342,15 @@ fn update_from_ui(
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+    status("Checking for updates…");
     match runtime
         .block_on(client.check(&ledger.version))
         .map_err(|e| e.to_string())?
     {
-        zup_update::CheckResult::UpToDate { current: _ } => Ok(None),
+        zup_update::CheckResult::UpToDate { current: _ } => {
+            status("Up to date");
+            Ok(None)
+        }
         zup_update::CheckResult::UpdateAvailable {
             current,
             available,
@@ -1574,10 +2360,18 @@ fn update_from_ui(
                 .join("updates")
                 .join("downloads")
                 .join(format!("Setup-{}.exe", uuid::Uuid::now_v7()));
+            status("Downloading update…");
             runtime
                 .block_on(client.download(&target, &destination))
                 .map_err(|e| e.to_string())?;
+            status("Verifying update…");
+            status("Ready to install");
             std::process::Command::new(destination)
+                .arg("upgrade")
+                .arg("--scope")
+                .arg(scope.to_string())
+                .arg("--state-root")
+                .arg(&state)
                 .spawn()
                 .map_err(|e| e.to_string())?;
             Ok(Some((current.to_string(), available.to_string())))
@@ -1676,6 +2470,7 @@ source = "plugins/helper.wasm"
                 payload_root: root.path().to_path_buf(),
                 enable: Vec::new(),
                 disable: Vec::new(),
+                install_directory: None,
             },
             &zup_plan::NeverCancelled,
             || {
@@ -1703,6 +2498,7 @@ source = "plugins/helper.wasm"
                 payload_root: root.path().to_path_buf(),
                 enable: Vec::new(),
                 disable: Vec::new(),
+                install_directory: None,
             },
             &cancel,
             || Ok(FakeExecutor),

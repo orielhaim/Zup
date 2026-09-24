@@ -52,4 +52,7 @@ pub enum RuntimeEvent {
         kind: String,
         message: String,
     },
+    LogPath {
+        path: String,
+    },
 }

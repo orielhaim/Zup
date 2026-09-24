@@ -38,6 +38,18 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
+    #[error("UI accent must be a six-digit hex color such as #2563eb")]
+    #[diagnostic(
+        code(zup_manifest::invalid_ui_accent),
+        help("use a value such as \"#2563eb\" or omit [ui].accent")
+    )]
+    InvalidUiAccent {
+        #[source_code]
+        src: Option<Src>,
+        #[label("invalid UI accent")]
+        span: Option<SourceSpan>,
+    },
+
     /// Two components share an id.
     #[error("duplicate component id `{id}`")]
     #[diagnostic(code(zup_manifest::duplicate_component))]
@@ -45,6 +57,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate component id")]
         span: Option<SourceSpan>,
     },
 
@@ -55,6 +68,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate service id")]
         span: Option<SourceSpan>,
     },
 
@@ -64,6 +78,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate plugin id")]
         span: Option<SourceSpan>,
     },
 
@@ -73,6 +88,7 @@ pub enum ManifestError {
         path: String,
         #[source_code]
         src: Option<Src>,
+        #[label("invalid plugin source")]
         span: Option<SourceSpan>,
     },
 
@@ -84,6 +100,7 @@ pub enum ManifestError {
         context: String,
         #[source_code]
         src: Option<Src>,
+        #[label("unknown component `{id}`")]
         span: Option<SourceSpan>,
     },
 
@@ -94,6 +111,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("component depends on itself")]
         span: Option<SourceSpan>,
     },
 
@@ -104,6 +122,7 @@ pub enum ManifestError {
         path: String,
         #[source_code]
         src: Option<Src>,
+        #[label("component dependency cycle")]
         span: Option<SourceSpan>,
     },
 
@@ -114,6 +133,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("required component must be enabled")]
         span: Option<SourceSpan>,
     },
 
@@ -127,6 +147,7 @@ pub enum ManifestError {
         scope: InstallScope,
         #[source_code]
         src: Option<Src>,
+        #[label("missing install directory")]
         span: Option<SourceSpan>,
     },
 
@@ -140,6 +161,7 @@ pub enum ManifestError {
         scope: InstallScope,
         #[source_code]
         src: Option<Src>,
+        #[label("recursive install directory")]
         span: Option<SourceSpan>,
     },
 
@@ -150,6 +172,7 @@ pub enum ManifestError {
         scheme: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate protocol scheme")]
         span: Option<SourceSpan>,
     },
 
@@ -160,6 +183,7 @@ pub enum ManifestError {
         id: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate file type id")]
         span: Option<SourceSpan>,
     },
 
@@ -170,22 +194,27 @@ pub enum ManifestError {
         extension: String,
         #[source_code]
         src: Option<Src>,
+        #[label("duplicate file type extension")]
         span: Option<SourceSpan>,
     },
 }
 
 impl ManifestError {
-    pub(crate) fn from_toml(err: toml::de::Error, source: &str) -> Self {
+    pub(crate) fn from_toml_named(err: toml::de::Error, source: &str, name: &str) -> Self {
         Self::Invalid {
             message: err.to_string(),
-            src: Some(named_source(source)),
+            src: Some(named_source_named(name, source)),
             span: err.span().map(source_span),
         }
     }
 
-    /// Attach source text to an error that was produced without it.
     pub fn with_source(self, source: &str) -> Self {
-        let src = Some(named_source(source));
+        self.with_source_named(source, "zup.toml")
+    }
+
+    pub fn with_source_named(self, source: &str, name: &str) -> Self {
+        let src = Some(named_source_named(name, source));
+        let inferred = infer_span(&self, source);
         match self {
             Self::Invalid {
                 message,
@@ -193,7 +222,14 @@ impl ManifestError {
                 src: existing,
             } => Self::Invalid {
                 message,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::InvalidUiAccent {
                 span,
+                src: existing,
+            } => Self::InvalidUiAccent {
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::UnsupportedSchema {
@@ -204,7 +240,7 @@ impl ManifestError {
             } => Self::UnsupportedSchema {
                 supported,
                 found,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicateComponent {
@@ -213,7 +249,7 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicateComponent {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicateService {
@@ -222,7 +258,7 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicateService {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicatePlugin {
@@ -231,7 +267,7 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicatePlugin {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::InvalidPluginSource {
@@ -240,7 +276,7 @@ impl ManifestError {
                 src: existing,
             } => Self::InvalidPluginSource {
                 path,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::UnknownComponent {
@@ -251,7 +287,7 @@ impl ManifestError {
             } => Self::UnknownComponent {
                 id,
                 context,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::ComponentSelfDependency {
@@ -260,7 +296,7 @@ impl ManifestError {
                 src: existing,
             } => Self::ComponentSelfDependency {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::ComponentCycle {
@@ -269,7 +305,7 @@ impl ManifestError {
                 src: existing,
             } => Self::ComponentCycle {
                 path,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::RequiredComponentDisabled {
@@ -278,7 +314,7 @@ impl ManifestError {
                 src: existing,
             } => Self::RequiredComponentDisabled {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::MissingInstallDirectory {
@@ -287,7 +323,7 @@ impl ManifestError {
                 src: existing,
             } => Self::MissingInstallDirectory {
                 scope,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::RecursiveInstallDirectory {
@@ -296,7 +332,7 @@ impl ManifestError {
                 src: existing,
             } => Self::RecursiveInstallDirectory {
                 scope,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicateProtocol {
@@ -305,7 +341,7 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicateProtocol {
                 scheme,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicateFileType {
@@ -314,7 +350,7 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicateFileType {
                 id,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
             Self::DuplicateExtension {
@@ -323,18 +359,96 @@ impl ManifestError {
                 src: existing,
             } => Self::DuplicateExtension {
                 extension,
-                span,
+                span: span.or(inferred),
                 src: existing.or(src),
             },
         }
     }
 }
 
-pub(crate) fn named_source(src: &str) -> Src {
-    Arc::new(NamedSource::new("zup.toml", src.to_owned()))
+fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
+    match error {
+        ManifestError::Invalid { message, .. } => {
+            if message.contains("[updates]") {
+                value_span(source, "channel")
+            } else {
+                None
+            }
+        }
+        ManifestError::UnsupportedSchema { .. } => value_span(source, "schema"),
+        ManifestError::InvalidUiAccent { .. } => value_span(source, "accent"),
+        ManifestError::DuplicateComponent { id, .. }
+        | ManifestError::UnknownComponent { id, .. }
+        | ManifestError::ComponentSelfDependency { id, .. }
+        | ManifestError::RequiredComponentDisabled { id, .. }
+        | ManifestError::DuplicateService { id, .. }
+        | ManifestError::DuplicatePlugin { id, .. } => source
+            .find(id.as_str())
+            .map(|start| source_span(start..start + id.len())),
+        ManifestError::InvalidPluginSource { path, .. } => source
+            .find(path.as_str())
+            .map(|start| source_span(start..start + path.len())),
+        ManifestError::ComponentCycle { path, .. } => {
+            let id = path.split(" → ").next()?;
+            source
+                .find(id)
+                .map(|start| source_span(start..start + id.len()))
+        }
+        ManifestError::MissingInstallDirectory { .. }
+        | ManifestError::RecursiveInstallDirectory { .. } => value_span(source, "scope"),
+        ManifestError::DuplicateProtocol { scheme, .. } => source
+            .find(scheme)
+            .map(|start| source_span(start..start + scheme.len())),
+        ManifestError::DuplicateFileType { id, .. } => source
+            .find(id)
+            .map(|start| source_span(start..start + id.len())),
+        ManifestError::DuplicateExtension { extension, .. } => source
+            .find(extension)
+            .map(|start| source_span(start..start + extension.len())),
+    }
+}
+
+fn value_span(source: &str, key: &str) -> Option<SourceSpan> {
+    let key_start = source.find(key)?;
+    let after_key = key_start + key.len();
+    let equals = source[after_key..].find('=')? + after_key;
+    let value_start = source[equals + 1..]
+        .find(|character: char| !character.is_whitespace())
+        .map(|offset| equals + 1 + offset)?;
+    let line_end = source[value_start..]
+        .find('\n')
+        .map(|offset| value_start + offset)
+        .unwrap_or(source.len());
+    let value = source[value_start..line_end].trim_end();
+    Some(source_span(value_start..value_start + value.len()))
+}
+
+pub(crate) fn named_source_named(name: &str, src: &str) -> Src {
+    Arc::new(NamedSource::new(name, src.to_owned()))
 }
 
 pub(crate) fn source_span(range: Range<usize>) -> SourceSpan {
     let len = range.end.saturating_sub(range.start);
     SourceSpan::new(range.start.into(), len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ManifestError;
+
+    #[test]
+    fn attaches_inferred_source_span() {
+        let error = ManifestError::UnknownComponent {
+            id: "cli-tools".into(),
+            context: "file mapping".into(),
+            src: None,
+            span: None,
+        }
+        .with_source("component = \"cli-tools\"\n");
+        let ManifestError::UnknownComponent { src, span, .. } = error else {
+            panic!("unexpected diagnostic variant");
+        };
+        assert!(src.is_some());
+        assert!(span.is_some());
+    }
 }

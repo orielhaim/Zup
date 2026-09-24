@@ -249,6 +249,7 @@ when = 'component("extra")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: zup_plan::ComponentOverrides::none(),
         },
         facts(),
@@ -273,6 +274,7 @@ when = 'component("extra")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: zup_plan::ComponentOverrides {
                 enable: [component_id("extra")].into_iter().collect(),
                 ..Default::default()

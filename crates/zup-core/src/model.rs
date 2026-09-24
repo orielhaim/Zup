@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -13,11 +14,12 @@ use crate::template::Template;
 use crate::value::ValueError;
 
 /// Application identity and display metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct App {
     pub id: AppId,
     pub name: NonEmptyString,
+    #[schemars(with = "String")]
     pub version: Version,
     #[serde(default)]
     pub publisher: Option<NonEmptyString>,
@@ -27,17 +29,47 @@ pub struct App {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiBranding {
+    #[serde(default, alias = "icon")]
+    pub logo: Option<Template>,
+    #[serde(default)]
+    pub accent: Option<String>,
+    #[serde(default)]
+    pub theme: UiTheme,
+    #[serde(default, alias = "license_url")]
+    pub license_link: Option<String>,
+    #[serde(default, alias = "legal")]
+    pub legal_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// Installation scope and destination templates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Install {
     pub scope: InstallScope,
     #[serde(default)]
     pub directory: InstallDirectory,
+    #[serde(
+        default,
+        alias = "allow_install_directory",
+        alias = "allow_install_dir"
+    )]
+    pub allow_directory_override: bool,
 }
 
 /// Scope an installer may target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallScope {
     User,
@@ -68,7 +100,7 @@ impl std::fmt::Display for InstallScope {
 }
 
 /// Unresolved install-root templates by scope.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstallDirectory {
     #[serde(default)]
@@ -78,7 +110,7 @@ pub struct InstallDirectory {
 }
 
 /// A selectable application component.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Component {
     pub id: ComponentId,
@@ -97,7 +129,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PluginBinding {
     pub id: PluginId,
@@ -108,7 +140,7 @@ pub struct PluginBinding {
 }
 
 /// Declarative file mapping. Patterns are not expanded here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileMapping {
     pub source: String,
@@ -123,7 +155,9 @@ pub struct FileMapping {
 }
 
 /// Portable application-shortcut location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShortcutLocation {
     StartMenu,
@@ -140,7 +174,7 @@ impl std::fmt::Display for ShortcutLocation {
 }
 
 /// High-level application launcher intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Shortcut {
     pub location: ShortcutLocation,
@@ -157,7 +191,7 @@ pub struct Shortcut {
 }
 
 /// A logical PATH entry to add to the installation-appropriate scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
     pub value: Template,
@@ -168,7 +202,7 @@ pub struct PathEntry {
 }
 
 /// Platform-neutral service start policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceStart {
     Automatic,
@@ -177,7 +211,7 @@ pub enum ServiceStart {
 }
 
 /// Platform-neutral service intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub id: ServiceId,
@@ -195,7 +229,7 @@ pub struct Service {
 }
 
 /// URI-scheme launch capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Protocol {
     pub scheme: ProtocolScheme,
@@ -207,7 +241,7 @@ pub struct Protocol {
 }
 
 /// File extension registration intent. Does not set default handlers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileType {
     pub extension: FileExtension,
@@ -220,7 +254,8 @@ pub struct FileType {
 }
 
 /// A bare file extension such as `.acme`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
+#[schemars(transparent)]
 pub struct FileExtension(String);
 
 impl FileExtension {
@@ -265,7 +300,7 @@ impl<'de> Deserialize<'de> for FileExtension {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Privilege {
     User,
@@ -273,7 +308,7 @@ pub enum Privilege {
 }
 
 /// Payload source for the installer (build-time, not install-time).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Source {
     pub directory: PathBuf,
 }

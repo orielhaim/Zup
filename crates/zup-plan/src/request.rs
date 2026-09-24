@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-use zup_core::ComponentId;
+use zup_core::{ComponentId, Template};
 
 use crate::error::SelectedScope;
 
@@ -36,6 +36,8 @@ pub struct PlanRequest {
     pub scope: SelectedScope,
     #[serde(default)]
     pub components: ComponentOverrides,
+    #[serde(default)]
+    pub install_directory: Option<Template>,
 }
 
 impl PlanRequest {
@@ -44,6 +46,7 @@ impl PlanRequest {
         Self {
             scope,
             components: ComponentOverrides::none(),
+            install_directory: None,
         }
     }
 }

@@ -269,7 +269,9 @@ source = "plugins/helper.wasm"
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("source plugin JIT is disabled"), "{stderr}");
+    assert!(stderr.contains("active plugin `helper`"), "{stderr}");
+    assert!(stderr.contains("source plugin JIT"), "{stderr}");
+    assert!(stderr.contains("is disabled"), "{stderr}");
 }
 
 #[cfg(windows)]
@@ -763,6 +765,7 @@ mod generated_file_lifecycle {
         let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).unwrap();
         BuildPlan {
             installer: Installer {
+                ui: None,
                 app: App {
                     id: app_id.clone(),
                     name: NonEmptyString::new("Configure Lifecycle").unwrap(),
@@ -781,6 +784,7 @@ mod generated_file_lifecycle {
                         ),
                         machine: None,
                     },
+                    allow_directory_override: false,
                 },
                 components: vec![Component {
                     id: ComponentId::new("core").unwrap(),

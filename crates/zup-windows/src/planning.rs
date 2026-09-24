@@ -102,6 +102,7 @@ pub fn plan_target_lifecycle(
                     scope_name.into(),
                     "--state-root".into(),
                     state_root.clone(),
+                    "--ui".into(),
                 ],
             )
         };

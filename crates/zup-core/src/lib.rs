@@ -27,7 +27,7 @@ pub use installer::{Installer, UpdateConfig};
 pub use model::{
     App, Component, FileExtension, FileMapping, FileType, Install, InstallDirectory, InstallScope,
     PathEntry, PluginBinding, Privilege, Protocol, Service, ServiceStart, Shortcut,
-    ShortcutLocation, Source,
+    ShortcutLocation, Source, UiBranding, UiTheme,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use resource_key::ResourceKey;

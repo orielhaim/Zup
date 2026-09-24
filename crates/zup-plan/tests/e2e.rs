@@ -86,6 +86,7 @@ fn machine_plan_with_service_enabled() {
     let (_dir, build) = acme_project();
     let request = PlanRequest {
         scope: SelectedScope::Machine,
+        install_directory: None,
         components: ComponentOverrides {
             enable: ids(&["service"]),
             disable: BTreeSet::new(),

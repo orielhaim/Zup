@@ -22,6 +22,7 @@ pub fn digest(b: &[u8]) -> Sha256Digest {
 pub fn sample_execution() -> ExecutionPlan {
     ExecutionPlan {
         selected_components: vec![],
+        install_directory: None,
         uninstall: false,
         removals: vec![],
         files: vec![

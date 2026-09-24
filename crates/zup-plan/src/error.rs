@@ -24,6 +24,13 @@ pub enum PlanError {
     #[diagnostic(code(zup_plan::scope_required))]
     ScopeRequired { scope: SelectedScope },
 
+    #[error("install directory override is not allowed by the manifest")]
+    #[diagnostic(
+        code(zup_plan::install_directory_override_not_allowed),
+        help("set [install] allow_directory_override = true to expose the path control")
+    )]
+    InstallDirectoryOverrideNotAllowed,
+
     /// The ordinary planner cannot execute an active plugin.
     #[error("active plugin `{plugin_id}` requires the plugin planning seam")]
     #[diagnostic(code(zup_plan::plugin_planning_required))]

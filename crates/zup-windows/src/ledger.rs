@@ -493,6 +493,7 @@ impl InstallLedgerStore {
             previous.unwrap_or_else(|| InstallLedger::new(record.app_id.clone(), scope));
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
+        ledger.install_directory = record.plan.install_directory.clone();
         for node in &record.plan.nodes {
             let key = match &node.kind {
                 NodeKind::ManagedIntegration { key, .. } | NodeKind::FileMutation { key, .. } => {
@@ -1013,6 +1014,7 @@ mod tests {
         let value = TargetPath::new(PathBuf::from(entry)).unwrap();
         let execution = ExecutionPlan {
             selected_components: vec![],
+            install_directory: None,
             uninstall: false,
             removals: vec![],
             files: Vec::new(),
@@ -1275,6 +1277,7 @@ mod tests {
         let command = zup_platform::CommandSpec::new(target.clone(), vec!["--svc".into()]);
         let execution = ExecutionPlan {
             selected_components: vec![],
+            install_directory: None,
             uninstall: false,
             removals: vec![],
             files: vec![],

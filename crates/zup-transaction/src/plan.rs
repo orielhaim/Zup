@@ -146,6 +146,8 @@ pub struct TransactionAudit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionPlan {
     pub selected_components: Vec<zup_core::ComponentId>,
+    #[serde(default)]
+    pub install_directory: Option<zup_platform::TargetPath>,
     pub uninstall: bool,
     pub retired_keys: Vec<ResourceKey>,
     pub nodes: Vec<TransactionNode>,
@@ -561,6 +563,7 @@ pub fn compile_transaction(
 
     Ok(TransactionPlan {
         selected_components: execution.selected_components.clone(),
+        install_directory: execution.install_directory.clone(),
         uninstall: execution.uninstall,
         retired_keys: execution.removals.iter().map(|op| op.key.clone()).collect(),
         nodes,

@@ -7,7 +7,7 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{Sha256Digest, materialize};
-use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId};
+use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, Template};
 use zup_manifest::{parse, parse_and_compile};
 use zup_plan::{
     ComponentOverrides, InstallPlan, PlanError, PlanRequest, ResourceKey, SelectedScope, plan,
@@ -138,6 +138,30 @@ fn either_machine_selects_machine_directory() {
     );
 }
 
+#[test]
+fn author_gated_install_directory_override_reaches_the_plan() {
+    let source = BASE.replace(
+        "[install.directory]",
+        "allow_directory_override = true\n\n[install.directory]",
+    );
+    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
+    let mut request = PlanRequest::new(SelectedScope::User);
+    request.install_directory = Some(Template::parse(r"C:\Apps\Acme").unwrap());
+    let result = plan(&build, &request).unwrap();
+    assert_eq!(result.install_directory.to_string(), r"C:\Apps\Acme");
+}
+
+#[test]
+fn install_directory_override_is_rejected_when_not_authored() {
+    let build = build_plan_from(BASE, &[("dist/a.txt", b"a")]);
+    let mut request = PlanRequest::new(SelectedScope::User);
+    request.install_directory = Some(Template::parse(r"C:\Apps\Acme").unwrap());
+    assert!(matches!(
+        plan(&build, &request),
+        Err(PlanError::InstallDirectoryOverrideNotAllowed)
+    ));
+}
+
 // --- Components ---
 
 const GRAPH: &str = r#"
@@ -180,6 +204,7 @@ fn defaults_select_required_and_default() {
 fn required_component_always_selected() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&[], &["cli"]),
     })
     .unwrap();
@@ -190,6 +215,7 @@ fn required_component_always_selected() {
 fn explicit_enable_pulls_transitive_dependencies() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&["developer"], &[]),
     })
     .unwrap();
@@ -200,6 +226,7 @@ fn explicit_enable_pulls_transitive_dependencies() {
 fn explicit_disable_of_default() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&[], &["cli"]),
     })
     .unwrap();
@@ -210,6 +237,7 @@ fn explicit_disable_of_default() {
 fn disable_required_errors() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&[], &["core"]),
     });
     assert!(matches!(
@@ -222,6 +250,7 @@ fn disable_required_errors() {
 fn disable_required_dependency_conflicts() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&["developer"], &["core"]),
     });
     assert!(matches!(
@@ -249,6 +278,7 @@ requires = ["base"]
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&[], &["base"]),
         },
     );
@@ -262,6 +292,7 @@ requires = ["base"]
 fn enable_and_disable_same_id_errors() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&["cli"], &["cli"]),
     });
     assert!(matches!(
@@ -274,6 +305,7 @@ fn enable_and_disable_same_id_errors() {
 fn unknown_override_errors() {
     let result = graph_plan(PlanRequest {
         scope: SelectedScope::User,
+        install_directory: None,
         components: overrides(&["nope"], &[]),
     });
     assert!(matches!(
@@ -312,6 +344,7 @@ when = '!component("cli")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&["cli"], &[]),
         },
     )
@@ -326,6 +359,7 @@ when = '!component("cli")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&[], &["cli"]),
         },
     )
@@ -362,6 +396,7 @@ when = 'component("core") && component("cli")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&[], &["cli"]),
         },
     )
@@ -372,6 +407,7 @@ when = 'component("core") && component("cli")'
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&["cli"], &[]),
         },
     )
@@ -674,6 +710,7 @@ component = "service"
         &build,
         &PlanRequest {
             scope: SelectedScope::User,
+            install_directory: None,
             components: overrides(&["service"], &[]),
         },
     )

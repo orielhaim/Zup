@@ -310,6 +310,7 @@ mod transaction_fingerprint {
     fn build_plan() -> BuildPlan {
         BuildPlan {
             installer: Installer {
+                ui: None,
                 app: App {
                     id: AppId::new("com.example.fingerprint").unwrap(),
                     name: NonEmptyString::new("Fingerprint").unwrap(),
@@ -325,6 +326,7 @@ mod transaction_fingerprint {
                         user: Some(Template::parse("${known.local_app_data}/Fingerprint").unwrap()),
                         machine: None,
                     },
+                    allow_directory_override: false,
                 },
                 components: vec![Component {
                     id: ComponentId::new("core").unwrap(),

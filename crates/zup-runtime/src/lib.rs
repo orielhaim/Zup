@@ -5,9 +5,11 @@
 
 #![forbid(unsafe_code)]
 
+mod diagnostics;
 mod events;
 mod session;
 
+pub use diagnostics::SessionLog;
 pub use events::{RuntimeEvent, RuntimeState};
 pub use session::{
     CancellationHandle, InstallOutcome, RecoveryStatus, RuntimeRequest, RuntimeSession,

@@ -257,6 +257,8 @@ pub struct ExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
     pub selected_components: Vec<zup_core::ComponentId>,
+    #[serde(default)]
+    pub install_directory: Option<TargetPath>,
     pub uninstall: bool,
     pub removals: Vec<RemovalOperation>,
     pub files: Vec<FileOperation>,

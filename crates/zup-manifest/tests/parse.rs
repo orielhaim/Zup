@@ -6,7 +6,7 @@ use rstest::rstest;
 use semver::Version;
 use zup_manifest::{
     App, AppId, Install, InstallDirectory, InstallScope, Manifest, ManifestError, NonEmptyString,
-    SCHEMA_VERSION, Source, Template, Variable, parse,
+    SCHEMA_VERSION, Source, Template, Variable, parse, parse_and_compile,
 };
 
 fn minimal(scope: &str) -> String {
@@ -127,6 +127,7 @@ fn valid_minimal_manifest() {
         parsed,
         Manifest {
             schema: SCHEMA_VERSION,
+            ui: None,
             app: App {
                 id: AppId::new("com.example.acme").unwrap(),
                 name: NonEmptyString::new("Acme").unwrap(),
@@ -144,6 +145,7 @@ fn valid_minimal_manifest() {
                     user: Some(Template::parse("${known.local_app_data}/Acme").unwrap()),
                     machine: Some(Template::parse("${known.program_files}/Acme").unwrap()),
                 },
+                allow_directory_override: false,
             },
             updates: None,
             components: Vec::new(),
@@ -273,6 +275,22 @@ description = "Hello""#,
         Some("Acme.exe".to_owned())
     );
     assert_eq!(manifest.app.description.as_deref(), Some("Hello"));
+}
+
+#[test]
+fn ui_branding_is_optional_and_constrained() {
+    let source = minimal("user").replace(
+        "[install]",
+        "[ui]\naccent = \"#2563eb\"\ntheme = \"dark\"\n\n[install]",
+    );
+    let manifest = parse_and_compile(&source).unwrap();
+    let ui = manifest.ui.unwrap();
+    assert_eq!(ui.accent.as_deref(), Some("#2563eb"));
+    assert_eq!(ui.theme, zup_core::UiTheme::Dark);
+
+    let invalid = source.replace("#2563eb", "blue");
+    let error = parse_and_compile(&invalid).unwrap_err();
+    assert!(matches!(error, ManifestError::InvalidUiAccent { .. }));
 }
 
 #[rstest]

@@ -3,8 +3,10 @@
 //! Values are strongly typed with `zup-core` domain types. TOML-specific
 //! structure lives here; the compiled output is `zup_core::Installer`.
 
+use schemars::JsonSchema;
 use zup_core::{
     App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
+    UiBranding,
 };
 
 use crate::plugin::Plugin;
@@ -17,6 +19,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Manifest {
     pub schema: u32,
     pub app: App,
+    pub ui: Option<UiBranding>,
     pub source: Source,
     pub install: Install,
     pub updates: Option<Updates>,
@@ -31,7 +34,7 @@ pub struct Manifest {
 }
 
 /// Build-time update repository settings.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Updates {
     pub repository: String,

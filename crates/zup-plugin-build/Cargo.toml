@@ -18,5 +18,5 @@ zup-plugin-contract = { workspace = true, features = ["compiler"] }
 tempfile.workspace = true
 zup-manifest.workspace = true
 wat = "1"
-wit-component = { version = "=0.258.0", features = ["dummy-module"] }
-wit-parser = "=0.258.0"
+wit-component = { version = "=0.259.0", features = ["dummy-module"] }
+wit-parser = "=0.259.0"

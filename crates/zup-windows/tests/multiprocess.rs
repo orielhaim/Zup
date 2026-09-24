@@ -194,6 +194,7 @@ async fn multi_process_named_pipe_handshake_and_execute() {
     let dest_str = dest.display().to_string();
     let execution = ExecutionPlan {
         selected_components: vec![],
+        install_directory: None,
         uninstall: false,
         removals: vec![],
         files: vec![FileOperation {
@@ -457,6 +458,7 @@ async fn worker_transaction_with_file_shortcut_and_service() {
     let _cleanup = ServiceCleanup(name.clone());
     let execution = ExecutionPlan {
         selected_components: vec![],
+        install_directory: None,
         uninstall: false,
         removals: vec![],
         files: vec![FileOperation {

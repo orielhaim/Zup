@@ -1307,6 +1307,7 @@ mod tests {
     fn plan_with_plugins(count: usize) -> BuildPlan {
         BuildPlan {
             installer: Installer {
+                ui: None,
                 app: App {
                     id: AppId::new("com.example.bundle-limits").unwrap(),
                     name: NonEmptyString::new("Bundle Limits").unwrap(),
@@ -1324,6 +1325,7 @@ mod tests {
                         ),
                         machine: None,
                     },
+                    allow_directory_override: false,
                 },
                 components: Vec::new(),
                 plugins: (0..count)

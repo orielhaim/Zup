@@ -1460,6 +1460,7 @@ mod tests {
     fn protocol_execution(schemes: &[String]) -> zup_exec::ExecutionPlan {
         zup_exec::ExecutionPlan {
             selected_components: vec![],
+            install_directory: None,
             uninstall: false,
             removals: vec![],
             files: vec![],
@@ -1585,6 +1586,7 @@ mod tests {
         let link_path = TargetPath::new(directory.path().join("App.lnk")).unwrap();
         let execution = zup_exec::ExecutionPlan {
             selected_components: vec![],
+            install_directory: None,
             uninstall: false,
             removals: vec![],
             files: vec![],
@@ -1693,6 +1695,7 @@ mod tests {
         };
         let execution = zup_exec::ExecutionPlan {
             selected_components: vec![],
+            install_directory: None,
             uninstall: false,
             removals: vec![],
             files: vec![],

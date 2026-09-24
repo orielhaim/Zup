@@ -94,6 +94,7 @@ pub fn plan_execution(
 
     Ok(ExecutionPlan {
         selected_components: target.selected_components.clone(),
+        install_directory: Some(target.install_directory.clone()),
         uninstall: false,
         removals: Vec::new(),
         files,

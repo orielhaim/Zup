@@ -9,6 +9,8 @@ description = "Runtime orchestration layer for zup"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2"
 semver.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = [

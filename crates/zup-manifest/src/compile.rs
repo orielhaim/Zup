@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zup_core::{ComponentId, Install, InstallScope, Installer, PluginBinding};
+use zup_core::{ComponentId, Install, InstallScope, Installer, PluginBinding, UiBranding};
 
 use crate::error::ManifestError;
 use crate::model::Manifest;
@@ -14,6 +14,7 @@ use crate::plugin::is_valid_source;
 /// graph checks, and install-directory coverage. No filesystem access.
 pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
     validate_install(&manifest.install)?;
+    validate_ui(manifest.ui.as_ref())?;
     if let Some(updates) = &manifest.updates
         && (updates.channel.is_empty()
             || updates.channel.len() > 32
@@ -34,6 +35,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
 
     let Manifest {
         app,
+        ui,
         install,
         components,
         files,
@@ -56,6 +58,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
 
     Ok(Installer {
         app,
+        ui,
         updates: None,
         install,
         components,
@@ -71,8 +74,29 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
 
 /// Parse and compile in one step, attaching source text to diagnostics.
 pub fn parse_and_compile(source: &str) -> Result<Installer, ManifestError> {
-    let manifest = crate::parse::parse(source)?;
-    compile(manifest).map_err(|err| err.with_source(source))
+    parse_and_compile_named(source, "zup.toml")
+}
+
+pub fn parse_and_compile_named(source: &str, name: &str) -> Result<Installer, ManifestError> {
+    let manifest = crate::parse::parse_named(source, name)?;
+    compile(manifest).map_err(|err| err.with_source_named(source, name))
+}
+
+fn validate_ui(ui: Option<&UiBranding>) -> Result<(), ManifestError> {
+    let Some(accent) = ui.and_then(|ui| ui.accent.as_deref()) else {
+        return Ok(());
+    };
+    let valid = accent.strip_prefix('#').is_some_and(|value| {
+        value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ManifestError::InvalidUiAccent {
+            src: None,
+            span: None,
+        })
+    }
 }
 
 fn validate_install(install: &Install) -> Result<(), ManifestError> {

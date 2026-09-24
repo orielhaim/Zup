@@ -48,6 +48,7 @@ fn empty_aot() -> Vec<u8> {
 
 fn installer() -> Installer {
     Installer {
+        ui: None,
         app: App {
             id: AppId::new("com.example.runtime").unwrap(),
             name: NonEmptyString::new("Runtime").unwrap(),
@@ -63,6 +64,7 @@ fn installer() -> Installer {
                 user: Some(Template::parse("${known.local_app_data}/Runtime").unwrap()),
                 machine: None,
             },
+            allow_directory_override: false,
         },
         components: Vec::new(),
         plugins: vec![PluginBinding {

@@ -122,19 +122,26 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
         "component selection complete"
     );
 
-    let raw_directory = match (scope, installer.install.scope) {
-        (SelectedScope::User, _) => installer
-            .install
-            .directory
-            .user
-            .clone()
-            .ok_or(PlanError::ScopeRequired { scope })?,
-        (SelectedScope::Machine, _) => installer
-            .install
-            .directory
-            .machine
-            .clone()
-            .ok_or(PlanError::ScopeRequired { scope })?,
+    let raw_directory = if let Some(directory) = &request.install_directory {
+        if !installer.install.allow_directory_override {
+            return Err(PlanError::InstallDirectoryOverrideNotAllowed);
+        }
+        directory.clone()
+    } else {
+        match (scope, installer.install.scope) {
+            (SelectedScope::User, _) => installer
+                .install
+                .directory
+                .user
+                .clone()
+                .ok_or(PlanError::ScopeRequired { scope })?,
+            (SelectedScope::Machine, _) => installer
+                .install
+                .directory
+                .machine
+                .clone()
+                .ok_or(PlanError::ScopeRequired { scope })?,
+        }
     };
 
     let install_directory = resolve_install_directory(&raw_directory, &installer.app)?;

@@ -9,7 +9,15 @@ default-run = "zup"
 
 [features]
 default = []
-build = ["dep:zup-build", "dep:zup-manifest", "dep:zup-plugin-build"]
+build = [
+  "dep:zup-build",
+  "dep:zup-manifest",
+  "dep:zup-plugin-build",
+  "dep:clap_complete",
+  "dep:inquire",
+  "dep:serde_json",
+  "dep:toml_edit",
+]
 
 [[bin]]
 name = "zup"
@@ -22,7 +30,11 @@ path = "src/setup.rs"
 
 [dependencies]
 clap.workspace = true
+clap_complete = { workspace = true, optional = true }
+inquire = { workspace = true, optional = true }
 miette.workspace = true
+serde_json = { workspace = true, optional = true }
+toml_edit = { workspace = true, optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 zup-windows.workspace = true
@@ -36,6 +48,7 @@ zup-exec.workspace = true
 zup-manifest = { workspace = true, optional = true }
 zup-plan.workspace = true
 zup-platform.workspace = true
+zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-update.workspace = true
@@ -50,8 +63,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-base64 = "0.22"
+base64 = "0.23.1"
 tempfile.workspace = true
 windows-registry.workspace = true
-wit-component = { version = "=0.258.0", features = ["dummy-module"] }
-wit-parser = "=0.258.0"
+wit-component = { version = "=0.259.0", features = ["dummy-module"] }
+wit-parser = "=0.259.0"

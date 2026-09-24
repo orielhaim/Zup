@@ -34,6 +34,7 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
     std::fs::write(payload_root.join(source_relative.as_str()), b"hello").unwrap();
     let execution = ExecutionPlan {
         selected_components: vec![],
+        install_directory: None,
         uninstall: false,
         removals: vec![],
         files: vec![FileOperation {

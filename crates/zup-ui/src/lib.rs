@@ -6,15 +6,22 @@
 use std::collections::BTreeSet;
 use std::sync::mpsc::{Receiver, Sender};
 
-use gpui_kit::base::StyledExt;
+use gpui_kit::base::{Disableable, StyledExt};
 use gpui_kit::component::button::*;
-use gpui_kit::component::{ActiveTheme, Root, Theme};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::{
-    AppContext, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions, application, assets,
-    div, px, rgb, size,
+    AppContext, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled,
+    Window, WindowBounds, WindowOptions, application, assets, div, px, rgb, size,
 };
-use zup_core::{ComponentId, SelectedScope};
+use zup_core::{ComponentId, SelectedScope, UiBranding, UiTheme};
+use zup_presentation::{
+    DiagnosticPresentation, InstallationHealth, OperationPhase, PlanPreview, UpdatePresentation,
+};
 use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +52,9 @@ pub enum Surface {
         installed_version: String,
         components: Vec<ComponentOption>,
         updates_enabled: bool,
+        scope: SelectedScope,
+        install_directory: Option<String>,
+        health: InstallationHealth,
     },
 }
 
@@ -54,6 +64,11 @@ pub struct InstallModel {
     pub scopes: Vec<SelectedScope>,
     pub selected_scope: SelectedScope,
     pub components: Vec<ComponentOption>,
+    pub install_directory: Option<String>,
+    pub allow_directory_override: bool,
+    pub estimated_bytes: u64,
+    pub requires_elevation: bool,
+    pub preview: Option<PlanPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +76,12 @@ pub enum UiCommand {
     Install {
         scope: SelectedScope,
         components: Vec<ComponentId>,
+        install_directory: Option<String>,
+    },
+    Preview {
+        scope: SelectedScope,
+        components: Vec<ComponentId>,
+        install_directory: Option<String>,
     },
     Update,
     Modify {
@@ -72,6 +93,9 @@ pub enum UiCommand {
     Retry,
     ConfirmUninstall,
     DismissUninstall,
+    OpenLog,
+    CopyDiagnostics,
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +125,9 @@ pub enum UiEvent {
         message: String,
         recovery_required: bool,
     },
+    PlanReady(PlanPreview),
+    UpdateStatus(UpdatePresentation),
+    LogPath(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +148,7 @@ pub struct ProgressModel {
     pub completed: u64,
     pub total: u64,
     pub action: String,
+    pub phase: OperationPhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +160,9 @@ pub struct UiModel {
     pub error: Option<String>,
     pub update_status: Option<String>,
     pub repair_drift: Vec<String>,
+    pub diagnostic: Option<DiagnosticPresentation>,
+    pub update: Option<UpdatePresentation>,
+    pub log_path: Option<String>,
     pub close_requested: bool,
 }
 
@@ -149,6 +180,9 @@ impl UiModel {
             error: None,
             update_status: None,
             repair_drift: Vec::new(),
+            diagnostic: None,
+            update: None,
+            log_path: None,
             close_requested: false,
         }
     }
@@ -159,9 +193,12 @@ impl UiModel {
             completed: 0,
             total: 0,
             action: "Preparing…".into(),
+            phase: OperationPhase::Prepare,
         });
         self.error = None;
+        self.diagnostic = None;
         self.blockers.clear();
+        self.close_requested = false;
     }
 
     pub fn request_cancel(&mut self) {
@@ -178,6 +215,33 @@ impl UiModel {
         } else {
             true
         }
+    }
+
+    pub fn has_customization(&self) -> bool {
+        match &self.surface {
+            Surface::Installer { install, .. } => {
+                install.scopes.len() > 1
+                    || install
+                        .components
+                        .iter()
+                        .any(|component| !component.required)
+                    || install.allow_directory_override
+            }
+            Surface::Maintenance { components, .. } => {
+                components.iter().any(|component| !component.required)
+            }
+        }
+    }
+
+    pub fn set_install_directory(&mut self, directory: Option<String>) -> bool {
+        let Surface::Installer { install, .. } = &mut self.surface else {
+            return false;
+        };
+        if !install.allow_directory_override && directory.is_some() {
+            return false;
+        }
+        install.install_directory = directory;
+        true
     }
 
     pub fn set_component_selected(&mut self, id: &ComponentId, selected: bool) -> bool {
@@ -200,31 +264,84 @@ impl UiModel {
             UiEvent::Runtime(event) => self.apply_runtime(event),
             UiEvent::Quit => {}
             UiEvent::ConfirmUninstall => self.state = ViewState::ConfirmUninstall,
-            UiEvent::DismissUninstall => self.state = ViewState::Maintenance,
+            UiEvent::DismissUninstall => {
+                self.state = if matches!(self.surface, Surface::Installer { .. }) {
+                    ViewState::Options
+                } else {
+                    ViewState::Maintenance
+                }
+            }
             UiEvent::CancellationWaiting => self.request_cancel(),
             UiEvent::Progress {
                 completed,
                 total,
                 action,
             } => {
+                let waiting_for_cancel = self.state == ViewState::WaitingForSafeCancel;
                 self.progress = Some(ProgressModel {
                     completed,
                     total,
+                    phase: OperationPhase::from_action(&action),
                     action,
                 });
-                self.state = ViewState::Running;
+                self.state = if waiting_for_cancel {
+                    ViewState::WaitingForSafeCancel
+                } else {
+                    ViewState::Running
+                };
             }
             UiEvent::UpdateAvailable { current, available } => {
                 self.update_status = Some(format!("Update available · {current} → {available}"));
+                self.update = Some(UpdatePresentation {
+                    channel: None,
+                    state: "Update available".into(),
+                    current: Some(current),
+                    available: Some(available),
+                });
             }
             UiEvent::UpToDate { current } => {
                 self.update_status = Some(format!("Up to date · {current}"));
+                self.update = Some(UpdatePresentation {
+                    channel: None,
+                    state: "Up to date".into(),
+                    current: Some(current),
+                    available: None,
+                });
+            }
+            UiEvent::PlanReady(preview) => {
+                if let Surface::Installer { install, .. } = &mut self.surface {
+                    install.preview = Some(preview);
+                }
+            }
+            UiEvent::UpdateStatus(update) => {
+                self.update_status = Some(update.state.clone());
+                self.update = Some(update);
+            }
+            UiEvent::LogPath(path) => {
+                self.log_path = Some(path);
             }
             UiEvent::RepairFinished { drifted_resources } => {
-                self.repair_drift = drifted_resources;
+                self.repair_drift = drifted_resources.clone();
+                if let Surface::Maintenance { health, .. } = &mut self.surface {
+                    health.drift_count = drifted_resources.len();
+                    health.state = if drifted_resources.is_empty() {
+                        "Healthy"
+                    } else {
+                        "Changed"
+                    }
+                    .into();
+                    health.summary = if drifted_resources.is_empty() {
+                        "All managed files match".into()
+                    } else {
+                        "Some managed files were left untouched".into()
+                    };
+                }
             }
             UiEvent::OperationFinished(outcome) => match outcome {
-                InstallOutcome::Committed => self.state = ViewState::Success,
+                InstallOutcome::Committed => {
+                    self.state = ViewState::Success;
+                    self.close_requested = false;
+                }
                 InstallOutcome::RolledBack | InstallOutcome::Cancelled => {
                     self.state = if matches!(self.surface, Surface::Installer { .. }) {
                         ViewState::Options
@@ -232,9 +349,19 @@ impl UiModel {
                         ViewState::Maintenance
                     };
                     self.progress = None;
+                    self.error = None;
+                    self.diagnostic = None;
+                    self.close_requested = false;
                 }
-                InstallOutcome::RecoveryRequired => self.state = ViewState::RecoveryRequired,
+                InstallOutcome::RecoveryRequired => {
+                    self.diagnostic = Some(DiagnosticPresentation::from_message(
+                        "recovery required",
+                        true,
+                    ));
+                    self.state = ViewState::RecoveryRequired;
+                }
                 InstallOutcome::Failed(message) => {
+                    self.diagnostic = Some(DiagnosticPresentation::from_message(&message, false));
                     self.error = Some(message);
                     self.state = ViewState::Error;
                 }
@@ -243,6 +370,10 @@ impl UiModel {
                 message,
                 recovery_required,
             } => {
+                self.diagnostic = Some(DiagnosticPresentation::from_message(
+                    &message,
+                    recovery_required,
+                ));
                 self.error = Some(message);
                 self.state = if recovery_required {
                     ViewState::RecoveryRequired
@@ -274,6 +405,7 @@ impl UiModel {
                 self.progress = Some(ProgressModel {
                     completed,
                     total,
+                    phase: OperationPhase::from_action(&action),
                     action,
                 });
                 self.state = if waiting_for_cancel {
@@ -283,10 +415,21 @@ impl UiModel {
                 };
             }
             RuntimeEvent::RollingBack => self.action("Restoring the previous state…"),
-            RuntimeEvent::Completed { .. } => self.state = ViewState::Success,
+            RuntimeEvent::Completed { .. } => {
+                self.state = ViewState::Success;
+                self.close_requested = false;
+            }
+            RuntimeEvent::LogPath { path } => {
+                self.log_path = Some(path);
+            }
             RuntimeEvent::Failed { kind, message } => {
+                let recovery_required = kind == "recovery_required";
+                self.diagnostic = Some(DiagnosticPresentation::from_message(
+                    &message,
+                    recovery_required,
+                ));
                 self.error = Some(message);
-                self.state = if kind == "recovery_required" {
+                self.state = if recovery_required {
                     ViewState::RecoveryRequired
                 } else {
                     ViewState::Error
@@ -299,21 +442,36 @@ impl UiModel {
                 RuntimeState::Executing => self.action("Installing files…"),
                 RuntimeState::RollingBack => self.action("Restoring the previous state…"),
                 RuntimeState::Completed => self.state = ViewState::Success,
-                RuntimeState::Cancelled => self.state = ViewState::Maintenance,
+                RuntimeState::Cancelled => {
+                    self.state = if matches!(self.surface, Surface::Installer { .. }) {
+                        ViewState::Options
+                    } else {
+                        ViewState::Maintenance
+                    };
+                }
                 RuntimeState::Failed => self.state = ViewState::Error,
             },
         }
     }
 
     fn action(&mut self, action: &str) {
-        self.state = ViewState::Running;
+        let waiting_for_cancel = self.state == ViewState::WaitingForSafeCancel;
+        self.state = if waiting_for_cancel {
+            ViewState::WaitingForSafeCancel
+        } else {
+            ViewState::Running
+        };
         self.progress
             .get_or_insert(ProgressModel {
                 completed: 0,
                 total: 0,
                 action: action.into(),
+                phase: OperationPhase::from_action(action),
             })
             .action = action.into();
+        if let Some(progress) = &mut self.progress {
+            progress.phase = OperationPhase::from_action(action);
+        }
     }
 }
 
@@ -331,12 +489,42 @@ fn friendly_action(id: &str) -> String {
 }
 
 pub fn run(surface: Surface, commands: Sender<UiCommand>, events: Receiver<UiEvent>) {
+    run_with_branding(surface, commands, events, None)
+}
+
+fn parse_accent(value: Option<&str>) -> u32 {
+    value
+        .and_then(|value| value.strip_prefix('#'))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .unwrap_or(0x2563eb)
+}
+
+pub fn run_with_branding(
+    surface: Surface,
+    commands: Sender<UiCommand>,
+    events: Receiver<UiEvent>,
+    branding: Option<UiBranding>,
+) {
     application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        match branding
+            .as_ref()
+            .map(|branding| branding.theme)
+            .unwrap_or(UiTheme::System)
+        {
+            UiTheme::System => Theme::sync_system_appearance(None, cx),
+            UiTheme::Light => Theme::change(ThemeMode::Light, None, cx),
+            UiTheme::Dark => Theme::change(ThemeMode::Dark, None, cx),
+        }
         let theme = Theme::global_mut(cx);
-        let accent = rgb(0x2563eb).into();
-        let accent_hover = rgb(0x1d4ed8).into();
-        let accent_active = rgb(0x1e40af).into();
+        let accent_value = parse_accent(
+            branding
+                .as_ref()
+                .and_then(|branding| branding.accent.as_deref()),
+        );
+        let accent = rgb(accent_value).into();
+        let accent_hover = rgb(accent_value).into();
+        let accent_active = rgb(accent_value).into();
         let accent_foreground = rgb(0xffffff).into();
         theme.colors.accent = accent;
         theme.colors.ring = accent;
@@ -348,25 +536,44 @@ pub fn run(surface: Surface, commands: Sender<UiCommand>, events: Receiver<UiEve
         theme.colors.button_primary_hover = accent_hover;
         theme.colors.button_primary_active = accent_active;
         theme.colors.button_primary_foreground = accent_foreground;
+        theme.radius = px(10.0);
+        theme.radius_lg = px(16.0);
+        theme.focus_ring = true;
+        Theme::sync_base(cx);
         let events = std::sync::Arc::new(std::sync::Mutex::new(events));
-        let bounds = Bounds::centered(None, size(px(480.0), px(540.0)), cx);
+        let bounds = Bounds::centered(None, size(px(640.0), px(620.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            is_resizable: false,
+            is_resizable: true,
             ..Default::default()
         };
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
-                let title = match &surface {
-                    Surface::Installer { identity, .. } | Surface::Maintenance { identity, .. } => {
-                        identity.name.clone()
-                    }
+                let (title, suffix) = match &surface {
+                    Surface::Installer { identity, .. } => (identity.name.clone(), "Setup"),
+                    Surface::Maintenance { identity, .. } => (identity.name.clone(), "Maintenance"),
                 };
-                window.set_window_title(&format!("{title} Setup"));
+                window.set_window_title(&format!("{title} {suffix}"));
+                let default_directory = match &surface {
+                    Surface::Installer { install, .. } => {
+                        install.install_directory.clone().unwrap_or_default()
+                    }
+                    Surface::Maintenance {
+                        install_directory, ..
+                    } => install_directory.clone().unwrap_or_default(),
+                };
+                let install_directory_input =
+                    cx.new(|cx| InputState::new(window, cx).default_value(default_directory));
                 let view = cx.new(|_| {
                     let selected_scope = match &surface {
                         Surface::Installer { install, .. } => install.selected_scope,
                         _ => SelectedScope::User,
+                    };
+                    let selected_install_directory = match &surface {
+                        Surface::Installer { install, .. } => install.install_directory.clone(),
+                        Surface::Maintenance {
+                            install_directory, ..
+                        } => install_directory.clone(),
                     };
                     InstallerView {
                         model: UiModel::new(surface),
@@ -374,8 +581,13 @@ pub fn run(surface: Surface, commands: Sender<UiCommand>, events: Receiver<UiEve
                         events: events.clone(),
                         selected_components: BTreeSet::new(),
                         selected_scope,
+                        selected_install_directory,
+                        install_directory_input: Some(install_directory_input),
                         initialized_components: false,
                         editing_components: false,
+                        customizing: false,
+                        showing_changes: false,
+                        details_open: false,
                     }
                 });
                 let weak = view.downgrade();
@@ -417,8 +629,13 @@ struct InstallerView {
     events: std::sync::Arc<std::sync::Mutex<Receiver<UiEvent>>>,
     selected_components: BTreeSet<ComponentId>,
     selected_scope: SelectedScope,
+    selected_install_directory: Option<String>,
+    install_directory_input: Option<Entity<InputState>>,
     initialized_components: bool,
     editing_components: bool,
+    customizing: bool,
+    showing_changes: bool,
+    details_open: bool,
 }
 
 impl Render for InstallerView {
@@ -446,51 +663,87 @@ impl Render for InstallerView {
         }
         #[cfg(windows)]
         update_windows_taskbar(window, &self.model);
+        let current_install_directory = self
+            .install_directory_input
+            .as_ref()
+            .and_then(|state| {
+                let value = state.read(cx).value().to_string();
+                (!value.trim().is_empty()).then_some(value)
+            })
+            .or_else(|| self.selected_install_directory.clone());
         let mut body = div()
             .v_flex()
-            .gap_4()
+            .gap_5()
             .p_6()
-            .w(px(460.0))
+            .w_full()
+            .max_w(px(720.0))
             .min_h(px(420.0))
+            .overflow_y_scrollbar()
             .bg(cx.theme().colors.background)
             .text_color(cx.theme().colors.foreground);
 
         match &self.model.surface {
             Surface::Installer { identity, install } => {
-                body = body.child(identity_view(identity)).child(installer_body(
-                    &self.model,
-                    install,
-                    &self.selected_components,
-                    self.selected_scope,
-                    &self.commands,
-                    cx.entity(),
-                ));
+                body = body
+                    .child(identity_view(identity, Theme::global(cx)))
+                    .child(installer_body(
+                        &self.model,
+                        install,
+                        InstallerRenderOptions {
+                            selected: &self.selected_components,
+                            scope: self.selected_scope,
+                            selected_install_directory: current_install_directory.clone(),
+                            install_directory_input: self.install_directory_input.clone(),
+                            customizing: self.customizing,
+                            showing_changes: self.showing_changes,
+                            theme: Theme::global(cx),
+                            commands: &self.commands,
+                            entity: cx.entity(),
+                        },
+                    ));
             }
             Surface::Maintenance {
                 identity,
                 installed_version,
                 components,
                 updates_enabled,
+                scope,
+                install_directory,
+                health,
             } => {
-                body = body.child(identity_view(identity)).child(
-                    div()
-                        .v_flex()
-                        .gap_2()
-                        .child(text_line("Installed version", installed_version, 13.0))
-                        .child(maintenance_actions(
-                            &self.model,
-                            &self.commands,
-                            *updates_enabled,
-                            components,
-                            &self.selected_components,
-                            self.editing_components,
-                            cx.entity(),
-                        ))
-                        .child(repair_summary(&self.model)),
-                );
+                body = body
+                    .child(identity_view(identity, Theme::global(cx)))
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_4()
+                            .child(maintenance_summary(
+                                installed_version,
+                                *scope,
+                                install_directory.as_deref(),
+                                components.len(),
+                                health,
+                            ))
+                            .child(maintenance_actions(
+                                &self.model,
+                                &self.commands,
+                                *updates_enabled,
+                                components,
+                                &self.selected_components,
+                                self.editing_components,
+                                cx.entity(),
+                            ))
+                            .child(repair_summary(&self.model, Theme::global(cx))),
+                    );
             }
         }
-        body = body.child(status_view(&self.model, &self.commands));
+        body = body.child(status_view(
+            &self.model,
+            &self.commands,
+            self.details_open,
+            Theme::global(cx),
+            cx.entity(),
+        ));
         let _ = cx;
         body
     }
@@ -580,7 +833,7 @@ fn update_windows_taskbar(window: &Window, model: &UiModel) {
     });
 }
 
-fn identity_view(identity: &ProductIdentity) -> impl IntoElement {
+fn identity_view(identity: &ProductIdentity, theme: &Theme) -> impl IntoElement {
     div()
         .v_flex()
         .gap_1()
@@ -593,10 +846,10 @@ fn identity_view(identity: &ProductIdentity) -> impl IntoElement {
                     div()
                         .size(px(42.0))
                         .rounded(px(12.0))
-                        .bg(rgb(0x2563eb))
+                        .bg(theme.colors.accent)
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(0xffffff))
+                        .text_color(theme.colors.accent_foreground)
                         .child("Z"),
                 )
                 .child(
@@ -612,7 +865,7 @@ fn identity_view(identity: &ProductIdentity) -> impl IntoElement {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(0x69717d))
+                                .text_color(theme.colors.muted_foreground)
                                 .child(format!(
                                     "{}  ·  {}",
                                     identity.publisher.as_deref().unwrap_or(""),
@@ -639,109 +892,267 @@ fn text_line(label: &str, value: &str, size: f32) -> impl IntoElement {
         .child(value.to_owned())
 }
 
+struct InstallerRenderOptions<'a> {
+    selected: &'a BTreeSet<ComponentId>,
+    scope: SelectedScope,
+    selected_install_directory: Option<String>,
+    install_directory_input: Option<Entity<InputState>>,
+    customizing: bool,
+    showing_changes: bool,
+    theme: &'a Theme,
+    commands: &'a Sender<UiCommand>,
+    entity: Entity<InstallerView>,
+}
+
 fn installer_body(
     model: &UiModel,
     install: &InstallModel,
-    selected: &BTreeSet<ComponentId>,
-    scope: SelectedScope,
-    commands: &Sender<UiCommand>,
-    entity: Entity<InstallerView>,
+    options: InstallerRenderOptions<'_>,
 ) -> impl IntoElement {
+    let InstallerRenderOptions {
+        selected,
+        scope,
+        selected_install_directory,
+        install_directory_input,
+        customizing,
+        showing_changes,
+        theme,
+        commands,
+        entity,
+    } = options;
     let heading = install
         .existing_version
         .as_ref()
-        .map_or("Ready to install".into(), |v| format!("Upgrade from {v}"));
-    let mut body = div().v_flex().gap_3().child(
-        div()
-            .text_size(px(16.0))
-            .font_weight(FontWeight::MEDIUM)
-            .child(heading),
-    );
-    if install.scopes.len() > 1 {
-        let user = entity.clone();
-        let machine = entity.clone();
-        body = body.child(
-            div()
-                .v_flex()
-                .gap_2()
-                .child("Install for")
-                .child(
-                    gpui_kit::base::Radio::new("scope-user")
-                        .aria_label("Just me")
-                        .checked(scope == SelectedScope::User)
-                        .on_change(move |checked, _, _, cx| {
-                            if checked {
-                                user.update(cx, |this, cx| {
-                                    this.selected_scope = SelectedScope::User;
-                                    cx.notify();
-                                })
-                            }
-                        }),
-                )
-                .child("Just me")
-                .child(
-                    gpui_kit::base::Radio::new("scope-machine")
-                        .aria_label("Everyone")
-                        .checked(scope == SelectedScope::Machine)
-                        .on_change(move |checked, _, _, cx| {
-                            if checked {
-                                machine.update(cx, |this, cx| {
-                                    this.selected_scope = SelectedScope::Machine;
-                                    cx.notify();
-                                })
-                            }
-                        }),
-                )
-                .child("Everyone"),
-        );
-    }
-    for component in &install.components {
-        let enabled = selected.contains(&component.id);
-        let id = component.id.clone();
-        let row = entity.clone();
-        body = body.child(
+        .map_or("Install".into(), |version| {
+            format!("Upgrade from {version}")
+        });
+    let location = selected_install_directory
+        .or_else(|| install.install_directory.clone())
+        .unwrap_or_else(|| "The default location".into());
+    let summary = div()
+        .v_flex()
+        .gap_2()
+        .p_4()
+        .rounded(theme.radius_lg)
+        .bg(theme.colors.popover)
+        .child(
             div()
                 .h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    gpui_kit::base::Checkbox::new(format!("component-{}", component.id))
-                        .aria_label(component.name.clone())
-                        .checked(enabled)
-                        .disabled(component.required)
-                        .on_change(move |checked, _, _, cx| {
-                            row.update(cx, |this, cx| {
-                                if checked == gpui_kit::base::CheckboxState::Checked {
-                                    this.selected_components.insert(id.clone());
-                                } else {
-                                    this.selected_components.remove(&id);
-                                }
-                                this.model.set_component_selected(
-                                    &id,
-                                    checked == gpui_kit::base::CheckboxState::Checked,
-                                );
-                                cx.notify();
-                            })
-                        }),
-                )
-                .child(
+                .justify_between()
+                .child("Install to")
+                .child(location.clone()),
+        )
+        .child(
+            div()
+                .h_flex()
+                .justify_between()
+                .text_color(theme.colors.muted_foreground)
+                .child("Download size")
+                .child(zup_presentation::format_bytes(install.estimated_bytes)),
+        )
+        .child(
+            div()
+                .h_flex()
+                .justify_between()
+                .text_color(theme.colors.muted_foreground)
+                .child("Permissions")
+                .child(if install.requires_elevation {
+                    "Administrator approval required"
+                } else {
+                    "Current user"
+                }),
+        );
+    let mut body = div()
+        .v_flex()
+        .gap_4()
+        .child(
+            div()
+                .text_size(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(heading),
+        )
+        .child(summary);
+
+    let has_choices = install.scopes.len() > 1
+        || install
+            .components
+            .iter()
+            .any(|component| !component.required)
+        || install.allow_directory_override;
+    if has_choices {
+        let customize = entity.clone();
+        body = body.child(
+            Button::new("customize")
+                .label(if customizing {
+                    "Hide customization"
+                } else {
+                    "Customize"
+                })
+                .on_click(move |_, _, cx| {
+                    customize.update(cx, |view, cx| {
+                        view.customizing = !view.customizing;
+                        cx.notify();
+                    })
+                }),
+        );
+    }
+
+    if customizing {
+        if install.scopes.len() > 1 {
+            let scope_entity = entity.clone();
+            let scope_entity_machine = scope_entity.clone();
+            let selected_index = if scope == SelectedScope::Machine {
+                1
+            } else {
+                0
+            };
+            body = body.child(
+                div().v_flex().gap_2().child("Install for").child(
+                    RadioGroup::new("install-scope")
+                        .selected_index(Some(selected_index))
+                        .child(
+                            Radio::new("scope-user")
+                                .label("Just me")
+                                .checked(scope == SelectedScope::User)
+                                .on_change(move |checked, _, cx| {
+                                    if *checked {
+                                        scope_entity.update(cx, |view, cx| {
+                                            view.selected_scope = SelectedScope::User;
+                                            cx.notify();
+                                        })
+                                    }
+                                }),
+                        )
+                        .child(
+                            Radio::new("scope-machine")
+                                .label("Everyone")
+                                .checked(scope == SelectedScope::Machine)
+                                .on_change(move |checked, _, cx| {
+                                    if *checked {
+                                        scope_entity_machine.update(cx, |view, cx| {
+                                            view.selected_scope = SelectedScope::Machine;
+                                            cx.notify();
+                                        })
+                                    }
+                                }),
+                        ),
+                ),
+            );
+        }
+        if install.allow_directory_override {
+            body = body.child(
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child("Install directory")
+                    .child(
+                        install_directory_input
+                            .as_ref()
+                            .map(|state| Input::new(state).aria_label("Install directory").into_any_element())
+                            .unwrap_or_else(|| div().child(location.clone()).into_any_element()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.colors.muted_foreground)
+                            .child("The author allows this application to be moved before installation."),
+                    ),
+            );
+        }
+        if !install.components.is_empty() {
+            let mut components = div().v_flex().gap_2().child("Application components");
+            for component in &install.components {
+                let enabled = selected.contains(&component.id);
+                let id = component.id.clone();
+                let row = entity.clone();
+                let label = if component.required {
+                    format!("{} · Required", component.name)
+                } else {
+                    component.name.clone()
+                };
+                let control = Checkbox::new(format!("component-{}", component.id))
+                    .label(label)
+                    .accessibility_label(if component.required {
+                        format!("{} (required)", component.name)
+                    } else {
+                        component.name.clone()
+                    })
+                    .checked(enabled)
+                    .disabled(component.required)
+                    .on_change(move |checked, _, cx| {
+                        row.update(cx, |view, cx| {
+                            if *checked {
+                                view.selected_components.insert(id.clone());
+                            } else {
+                                view.selected_components.remove(&id);
+                            }
+                            view.model.set_component_selected(&id, *checked);
+                            cx.notify();
+                        })
+                    });
+                components = components.child(
                     div()
                         .v_flex()
                         .gap_1()
-                        .child(component.name.clone())
-                        .child(component.description.clone().unwrap_or_default())
-                        .text_size(px(13.0)),
-                ),
-        );
+                        .child(control)
+                        .child(component.description.clone().unwrap_or_default()),
+                );
+            }
+            body = body.child(components);
+        }
     }
+
+    if model.state == ViewState::Options {
+        let preview_entity = entity.clone();
+        let preview_commands = commands.clone();
+        let preview_selected = selected.clone();
+        let preview_input = install_directory_input.clone();
+        let preview_scope = scope;
+        body = body.child(
+            Button::new("what-will-change")
+                .label(if showing_changes {
+                    "Hide changes"
+                } else {
+                    "What will change"
+                })
+                .on_click(move |_, _, cx| {
+                    let directory = preview_input
+                        .as_ref()
+                        .map(|state| state.read(cx).value().to_string())
+                        .filter(|value| !value.trim().is_empty());
+                    let _ = preview_commands.send(UiCommand::Preview {
+                        scope: preview_scope,
+                        components: preview_selected.iter().cloned().collect(),
+                        install_directory: directory,
+                    });
+                    preview_entity.update(cx, |view, cx| {
+                        view.showing_changes = true;
+                        cx.notify();
+                    });
+                }),
+        );
+        if showing_changes {
+            body = body.child(match &install.preview {
+                Some(preview) => change_preview(preview, theme).into_any_element(),
+                None => div()
+                    .p_4()
+                    .rounded(theme.radius_lg)
+                    .bg(theme.colors.muted)
+                    .child("Preparing the change preview…")
+                    .into_any_element(),
+            });
+        }
+    }
+
     if model.state == ViewState::Options {
         let commands = commands.clone();
         let enabled = selected.clone();
-        let scope = if install.scopes.contains(&scope) {
+        let selected_scope = if install.scopes.contains(&scope) {
             scope
         } else {
             install.selected_scope
         };
+        let input = install_directory_input.clone();
         body = body.child(
             Button::new("install")
                 .primary()
@@ -750,15 +1161,92 @@ fn installer_body(
                 } else {
                     "Install"
                 })
-                .on_click(move |_, _, _| {
+                .on_click(move |_, _, cx| {
+                    let directory = input
+                        .as_ref()
+                        .map(|state| state.read(cx).value().to_string())
+                        .filter(|value| !value.trim().is_empty());
                     let _ = commands.send(UiCommand::Install {
-                        scope,
+                        scope: selected_scope,
                         components: enabled.iter().cloned().collect(),
+                        install_directory: directory,
                     });
                 }),
         );
     }
     body
+}
+
+fn change_preview(preview: &PlanPreview, theme: &Theme) -> impl IntoElement {
+    let mut content = div()
+        .v_flex()
+        .gap_3()
+        .p_4()
+        .rounded(theme.radius_lg)
+        .bg(theme.colors.muted);
+    for group in &preview.groups {
+        content = content.child(
+            div()
+                .v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(group.title.clone()),
+                )
+                .children(group.changes.iter().map(|change| {
+                    div()
+                        .h_flex()
+                        .justify_between()
+                        .gap_3()
+                        .text_size(px(13.0))
+                        .child(format!("{}  {}", change.kind.label(), change.label))
+                        .child(change.location.clone().unwrap_or_else(|| {
+                            if change.requires_elevation {
+                                "Elevation"
+                            } else {
+                                ""
+                            }
+                            .into()
+                        }))
+                })),
+        );
+    }
+    content
+}
+
+fn maintenance_summary(
+    version: &str,
+    scope: SelectedScope,
+    install_directory: Option<&str>,
+    component_count: usize,
+    health: &InstallationHealth,
+) -> impl IntoElement {
+    let mut summary = div()
+        .v_flex()
+        .gap_2()
+        .child(text_line("Installed version", version, 13.0))
+        .child(text_line(
+            "Installed for",
+            if scope == SelectedScope::User {
+                "Current user"
+            } else {
+                "Everyone"
+            },
+            13.0,
+        ));
+    if let Some(directory) = install_directory {
+        summary = summary.child(text_line("Location", directory, 13.0));
+    }
+    summary = summary.child(text_line("Components", &component_count.to_string(), 13.0));
+    summary.child(
+        div()
+            .h_flex()
+            .justify_between()
+            .text_size(px(13.0))
+            .child("Health")
+            .child(health.summary.clone()),
+    )
 }
 
 fn maintenance_actions(
@@ -793,21 +1281,23 @@ fn maintenance_actions(
                     .gap_2()
                     .items_center()
                     .child(
-                        gpui_kit::base::Checkbox::new(format!("modify-component-{}", component.id))
-                            .aria_label(component.name.clone())
+                        Checkbox::new(format!("modify-component-{}", component.id))
+                            .label(component.name.clone())
+                            .accessibility_label(if component.required {
+                                format!("{} (required)", component.name)
+                            } else {
+                                component.name.clone()
+                            })
                             .checked(selected.contains(&component.id))
                             .disabled(component.required)
-                            .on_change(move |state, _, _, cx| {
+                            .on_change(move |checked, _, cx| {
                                 row.update(cx, |this, cx| {
-                                    if state == gpui_kit::base::CheckboxState::Checked {
+                                    if *checked {
                                         this.selected_components.insert(id.clone());
                                     } else {
                                         this.selected_components.remove(&id);
                                     }
-                                    this.model.set_component_selected(
-                                        &id,
-                                        state == gpui_kit::base::CheckboxState::Checked,
-                                    );
+                                    this.model.set_component_selected(&id, *checked);
                                     cx.notify();
                                 })
                             }),
@@ -846,18 +1336,11 @@ fn maintenance_actions(
     let mut group = div().v_flex().gap_2();
     if updates_enabled {
         let commands = commands.clone();
-        group = group.child(
-            Button::new("update")
-                .label(
-                    model
-                        .update_status
-                        .as_deref()
-                        .unwrap_or("Check for updates"),
-                )
-                .on_click(move |_, _, _| {
-                    let _ = commands.send(UiCommand::Update);
-                }),
-        );
+        group = group.child(Button::new("update").label("Check for updates").on_click(
+            move |_, _, _| {
+                let _ = commands.send(UiCommand::Update);
+            },
+        ));
     }
     let modify = entity;
     group = group.child(
@@ -888,38 +1371,73 @@ fn maintenance_actions(
     )
 }
 
-fn status_view(model: &UiModel, commands: &Sender<UiCommand>) -> impl IntoElement {
+fn status_view(
+    model: &UiModel,
+    commands: &Sender<UiCommand>,
+    details_open: bool,
+    theme: &Theme,
+    entity: Entity<InstallerView>,
+) -> impl IntoElement {
     match model.state {
         ViewState::Running | ViewState::WaitingForSafeCancel => {
-            let progress = model.progress.as_ref();
-            let label = progress.map_or("Preparing…", |p| p.action.as_str());
-            let pct = progress
-                .filter(|p| p.total > 0)
-                .map(|p| ((p.completed.min(p.total) as f32 / p.total as f32) * 100.0) as u32);
-            let commands = commands.clone();
-            let bar = pct.map_or_else(
-                || div().h(px(6.0)).w_full().rounded(px(4.0)).bg(rgb(0xe5e7eb)),
-                |value| {
+            let progress = model.progress.clone().unwrap_or(ProgressModel {
+                completed: 0,
+                total: 0,
+                action: "Preparing…".into(),
+                phase: OperationPhase::Prepare,
+            });
+            let percent = (progress.total > 0).then(|| {
+                (progress.completed.min(progress.total) as f32 / progress.total as f32) * 100.0
+            });
+            let cancel = commands.clone();
+            let phase = progress.phase;
+            let timeline = div().h_flex().gap_2().children(
+                [
+                    OperationPhase::Prepare,
+                    OperationPhase::Files,
+                    OperationPhase::System,
+                    OperationPhase::Finish,
+                ]
+                .into_iter()
+                .map(|item| {
+                    let active = item == phase;
                     div()
-                        .h(px(6.0))
-                        .w_full()
-                        .rounded(px(4.0))
-                        .bg(rgb(0xe5e7eb))
-                        .child(
-                            div()
-                                .h(px(6.0))
-                                .w(px(4.0 * value as f32))
-                                .rounded(px(4.0))
-                                .bg(rgb(0x2563eb)),
-                        )
-                },
+                        .text_size(px(11.0))
+                        .text_color(if active {
+                            theme.colors.accent
+                        } else {
+                            theme.colors.muted_foreground
+                        })
+                        .child(if active {
+                            format!("● {}", item.title())
+                        } else {
+                            item.title().into()
+                        })
+                }),
             );
             div()
                 .v_flex()
                 .gap_3()
-                .child(label.to_owned())
-                .child(bar)
-                .child(pct.map_or("Working…".into(), |value| format!("{value}%")))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                    "{} · {}",
+                    phase.title(),
+                    progress.action
+                )))
+                .child(
+                    Progress::new("operation-progress")
+                        .loading(progress.total == 0)
+                        .value(percent.unwrap_or(0.0))
+                        .accessibility_label(format!(
+                            "{}: {}",
+                            phase.title(),
+                            percent.map_or_else(
+                                || "working".into(),
+                                |value| format!("{value:.0} percent")
+                            )
+                        )),
+                )
+                .child(percent.map_or_else(|| "Working…".into(), |value| format!("{value:.0}%")))
+                .child(timeline)
                 .child(if model.close_requested {
                     "The window will stay open until this operation reaches a safe end.".to_owned()
                 } else {
@@ -933,32 +1451,42 @@ fn status_view(model: &UiModel, commands: &Sender<UiCommand>) -> impl IntoElemen
                             "Cancel"
                         })
                         .on_click(move |_, _, _| {
-                            let _ = commands.send(UiCommand::Cancel);
+                            let _ = cancel.send(UiCommand::Cancel);
                         }),
                 )
         }
         ViewState::Blocked => {
-            let commands = commands.clone();
+            let retry = commands.clone();
             let cancel = commands.clone();
             div()
                 .v_flex()
-                .gap_2()
-                .child("Close these applications to continue")
-                .children(model.blockers.iter().cloned())
+                .gap_3()
                 .child(
-                    Button::new("retry")
-                        .primary()
-                        .label("Retry")
-                        .on_click(move |_, _, _| {
-                            let _ = commands.send(UiCommand::Retry);
-                        }),
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Close these applications to continue"),
+                )
+                .children(
+                    model
+                        .blockers
+                        .iter()
+                        .cloned()
+                        .map(|item| div().text_size(px(13.0)).child(item)),
                 )
                 .child(
-                    Button::new("cancel-blocked")
-                        .label("Cancel")
-                        .on_click(move |_, _, _| {
-                            let _ = cancel.send(UiCommand::Cancel);
-                        }),
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(Button::new("retry").primary().label("Retry").on_click(
+                            move |_, _, _| {
+                                let _ = retry.send(UiCommand::Retry);
+                            },
+                        ))
+                        .child(Button::new("cancel-blocked").label("Cancel").on_click(
+                            move |_, _, _| {
+                                let _ = cancel.send(UiCommand::Cancel);
+                            },
+                        )),
                 )
         }
         ViewState::ConfirmUninstall => {
@@ -966,39 +1494,132 @@ fn status_view(model: &UiModel, commands: &Sender<UiCommand>) -> impl IntoElemen
             let dismiss = commands.clone();
             div()
                 .v_flex()
-                .gap_2()
+                .gap_3()
                 .child("Remove this application and its managed resources?")
                 .child(
-                    Button::new("confirm-uninstall")
-                        .primary()
-                        .label("Uninstall")
-                        .on_click(move |_, _, _| {
-                            let _ = confirm.send(UiCommand::ConfirmUninstall);
-                        }),
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("confirm-uninstall")
+                                .danger()
+                                .label("Uninstall")
+                                .on_click(move |_, _, _| {
+                                    let _ = confirm.send(UiCommand::ConfirmUninstall);
+                                }),
+                        )
+                        .child(
+                            Button::new("cancel-uninstall")
+                                .label("Keep application")
+                                .on_click(move |_, _, _| {
+                                    let _ = dismiss.send(UiCommand::DismissUninstall);
+                                }),
+                        ),
+                )
+        }
+        ViewState::Success => {
+            let close = commands.clone();
+            div()
+                .v_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .text_color(theme.colors.success)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Finished successfully"),
                 )
                 .child(
-                    Button::new("cancel-uninstall")
-                        .label("Keep application")
+                    Button::new("close")
+                        .label("Close")
                         .on_click(move |_, _, _| {
-                            let _ = dismiss.send(UiCommand::DismissUninstall);
+                            let _ = close.send(UiCommand::Close);
                         }),
                 )
         }
-        ViewState::Success => div()
-            .text_color(rgb(0x18794e))
-            .child("Finished successfully"),
-        ViewState::RecoveryRequired => div().text_color(rgb(0xb42318)).child(
-            model
-                .error
-                .clone()
-                .unwrap_or_else(|| "Recovery is required".into()),
-        ),
-        ViewState::Error => div().text_color(rgb(0xb42318)).child(
-            model
-                .error
-                .clone()
-                .unwrap_or_else(|| "The operation failed".into()),
-        ),
+        ViewState::RecoveryRequired | ViewState::Error => {
+            let diagnostic = model.diagnostic.clone().unwrap_or_else(|| {
+                DiagnosticPresentation::from_message(
+                    model.error.as_deref().unwrap_or("The operation failed"),
+                    matches!(model.state, ViewState::RecoveryRequired),
+                )
+            });
+            let retry = commands.clone();
+            let close = commands.clone();
+            let log = commands.clone();
+            let copy = commands.clone();
+            let details_entity = entity.clone();
+            let mut content = div()
+                .v_flex()
+                .gap_3()
+                .text_color(theme.colors.danger)
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(diagnostic.title.clone()),
+                )
+                .child(diagnostic.meaning.clone())
+                .child(diagnostic.recovery.clone());
+            if details_open && let Some(details) = &diagnostic.technical_details {
+                content = content.child(
+                    div()
+                        .p_3()
+                        .rounded(px(8.0))
+                        .bg(theme.colors.muted)
+                        .text_size(px(12.0))
+                        .child(details.clone()),
+                );
+            }
+            content
+                .child(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("error-retry")
+                                .primary()
+                                .label("Retry")
+                                .on_click(move |_, _, _| {
+                                    let _ = retry.send(UiCommand::Retry);
+                                }),
+                        )
+                        .child(Button::new("error-close").label("Close").on_click(
+                            move |_, _, _| {
+                                let _ = close.send(UiCommand::Close);
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("show-details")
+                                .label(if details_open {
+                                    "Hide details"
+                                } else {
+                                    "Show details"
+                                })
+                                .on_click(move |_, _, cx| {
+                                    details_entity.update(cx, |view, cx| {
+                                        view.details_open = !view.details_open;
+                                        cx.notify();
+                                    })
+                                }),
+                        )
+                        .child(
+                            Button::new("copy-diagnostics")
+                                .label("Copy diagnostics")
+                                .on_click(move |_, _, _| {
+                                    let _ = copy.send(UiCommand::CopyDiagnostics);
+                                }),
+                        )
+                        .child(Button::new("open-log").label("Open log").on_click(
+                            move |_, _, _| {
+                                let _ = log.send(UiCommand::OpenLog);
+                            },
+                        )),
+                )
+        }
         _ => div()
             .v_flex()
             .gap_2()
@@ -1011,14 +1632,14 @@ fn status_view(model: &UiModel, commands: &Sender<UiCommand>) -> impl IntoElemen
     }
 }
 
-fn repair_summary(model: &UiModel) -> impl IntoElement {
+fn repair_summary(model: &UiModel, theme: &Theme) -> impl IntoElement {
     if model.repair_drift.is_empty() {
         div()
     } else {
         div()
             .v_flex()
             .gap_1()
-            .text_color(rgb(0x7a4d00))
+            .text_color(theme.colors.warning)
             .child("Repair completed. These changed resources were left untouched:")
             .children(model.repair_drift.iter().cloned())
     }
@@ -1041,6 +1662,11 @@ mod tests {
                 scopes: vec![SelectedScope::User],
                 selected_scope: SelectedScope::User,
                 components: vec![],
+                install_directory: None,
+                allow_directory_override: false,
+                estimated_bytes: 0,
+                requires_elevation: false,
+                preview: None,
             },
         })
     }
@@ -1056,6 +1682,50 @@ mod tests {
         assert!(install.existing_version.is_none());
     }
 
+    #[test]
+    fn simple_installer_has_no_customization_surface() {
+        let model = installer();
+        assert!(!model.has_customization());
+    }
+
+    #[test]
+    fn author_gated_directory_is_a_lifecycle_selection() {
+        let mut model = installer();
+        let Surface::Installer { install, .. } = &mut model.surface else {
+            panic!()
+        };
+        install.allow_directory_override = true;
+        assert!(model.set_install_directory(Some(r"C:\Apps\Acme".into())));
+        assert!(model.has_customization());
+    }
+
+    #[test]
+    fn plan_preview_and_diagnostics_are_first_class_state() {
+        let mut model = installer();
+        let preview = PlanPreview {
+            application: "Acme".into(),
+            version: "1.0.0".into(),
+            scope: SelectedScope::User,
+            install_directory: r"C:\Apps\Acme".into(),
+            selected_components: vec![],
+            estimated_bytes: 42,
+            requires_elevation: false,
+            groups: vec![],
+        };
+        model.apply(UiEvent::PlanReady(preview));
+        let Surface::Installer { install, .. } = &model.surface else {
+            panic!()
+        };
+        assert_eq!(install.preview.as_ref().unwrap().estimated_bytes, 42);
+        model.apply(UiEvent::Error {
+            message: "blocked by running applications".into(),
+            recovery_required: false,
+        });
+        assert_eq!(
+            model.diagnostic.unwrap().kind,
+            zup_presentation::DiagnosticKind::Blocked
+        );
+    }
     #[test]
     fn existing_install_is_presented_as_upgrade() {
         let mut model = installer();
@@ -1100,6 +1770,11 @@ mod tests {
                 scopes: vec![SelectedScope::User],
                 selected_scope: SelectedScope::User,
                 components: vec![optional.clone(), required.clone()],
+                install_directory: None,
+                allow_directory_override: false,
+                estimated_bytes: 0,
+                requires_elevation: false,
+                preview: None,
             },
         });
         assert!(model.set_component_selected(&optional.id, false));
@@ -1173,6 +1848,19 @@ mod tests {
     }
 
     #[test]
+    fn progress_keeps_safe_cancellation_state_visible() {
+        let mut model = installer();
+        model.begin_operation();
+        model.request_cancel();
+        model.apply(UiEvent::Progress {
+            completed: 1,
+            total: 2,
+            action: "Installing files".into(),
+        });
+        assert_eq!(model.state, ViewState::WaitingForSafeCancel);
+    }
+
+    #[test]
     fn close_is_deferred_during_an_operation() {
         let mut model = installer();
         model.begin_operation();
@@ -1211,6 +1899,7 @@ mod windows_smoke {
             scope: SelectedScope::User,
             execution_plan: ExecutionPlan {
                 selected_components: vec![],
+                install_directory: None,
                 uninstall: false,
                 removals: vec![],
                 files: vec![FileOperation {
@@ -1285,6 +1974,7 @@ mod windows_smoke {
                 .send(UiCommand::Install {
                     scope: SelectedScope::User,
                     components: vec![],
+                    install_directory: None,
                 })
                 .unwrap();
             let surface = Surface::Installer {
@@ -1299,6 +1989,11 @@ mod windows_smoke {
                     scopes: vec![SelectedScope::User],
                     selected_scope: SelectedScope::User,
                     components: vec![],
+                    install_directory: None,
+                    allow_directory_override: false,
+                    estimated_bytes: 0,
+                    requires_elevation: false,
+                    preview: None,
                 },
             };
             run(surface, commands, events_rx);
@@ -1351,6 +2046,11 @@ mod windows_smoke {
                     scopes: vec![SelectedScope::User],
                     selected_scope: SelectedScope::User,
                     components: vec![],
+                    install_directory: None,
+                    allow_directory_override: false,
+                    estimated_bytes: 0,
+                    requires_elevation: false,
+                    preview: None,
                 },
             }),
             commands,
@@ -1359,6 +2059,11 @@ mod windows_smoke {
             selected_scope: SelectedScope::User,
             initialized_components: false,
             editing_components: false,
+            selected_install_directory: None,
+            install_directory_input: None,
+            customizing: false,
+            showing_changes: false,
+            details_open: false,
         });
         cx.update_window(view.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -1397,6 +2102,13 @@ mod windows_smoke {
             installed_version: "1.0.0".into(),
             components: vec![],
             updates_enabled: false,
+            scope: SelectedScope::User,
+            install_directory: None,
+            health: InstallationHealth {
+                state: "Ready".into(),
+                summary: "Up to date".into(),
+                drift_count: 0,
+            },
         });
         while let Ok(event) = event_rx.try_recv() {
             if matches!(event, RuntimeEvent::Completed { .. }) {

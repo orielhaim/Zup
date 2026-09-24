@@ -2,8 +2,10 @@
 //!
 //! Templates are parsed into parts. Variables are not resolved here.
 
+use std::borrow::Cow;
 use std::fmt;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -278,5 +280,23 @@ impl<'de> Deserialize<'de> for Template {
 impl Serialize for Template {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl JsonSchema for Template {
+    fn schema_name() -> Cow<'static, str> {
+        "Template".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        "zup_core::Template".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "A path or command template using zup variables such as ${install} and ${known.local_app_data}.",
+            "examples": ["${install}/app.exe", "${known.program_files}/Acme"]
+        })
     }
 }

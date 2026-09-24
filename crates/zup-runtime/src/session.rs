@@ -17,6 +17,7 @@ use zup_windows::{
     cleanup_payload_overlay, payload_overlay_base_root, verify_payload_overlay,
 };
 
+use crate::diagnostics::SessionLog;
 use crate::events::{RuntimeEvent, RuntimeState};
 
 /// Session errors (typed, not flattened).
@@ -273,9 +274,34 @@ pub async fn run_install_control(
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
+    let session_log = SessionLog::start(&request, "lifecycle");
+    if let Some(log) = &session_log {
+        let _ = events.send(RuntimeEvent::LogPath {
+            path: log.path().display().to_string(),
+        });
+        log.event(
+            "plan_validated",
+            serde_json::json!({ "total_work": request.execution_plan.summary.write_bytes }),
+        );
+    }
     let mut cleanup = OverlayCleanup::from_request(&request);
     let recovery = request.recovery_id.is_some();
     let result = run_install_control_inner(request, cancel, events).await;
+    match &result {
+        Ok(outcome) => {
+            if let Some(log) = &session_log {
+                log.event(
+                    "finished",
+                    serde_json::json!({ "outcome": format!("{outcome:?}") }),
+                );
+            }
+        }
+        Err(error) => {
+            if let Some(log) = &session_log {
+                log.event("failed", serde_json::json!({ "error": error.to_string() }));
+            }
+        }
+    }
     match result {
         Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
         Ok(_) => {}

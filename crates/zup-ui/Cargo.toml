@@ -9,6 +9,7 @@ description = "Native GPUI frontend for zup installers and maintenance"
 [dependencies]
 gpui-kit = "0.6"
 zup-core.workspace = true
+zup-presentation.workspace = true
 zup-runtime.workspace = true
 raw-window-handle = "0.6"
 

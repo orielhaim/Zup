@@ -16,6 +16,8 @@ pub struct InstallLedger {
     pub scope: SelectedScope,
     pub version: semver::Version,
     pub selected_components: Vec<ComponentId>,
+    #[serde(default)]
+    pub install_directory: Option<TargetPath>,
     pub committed_transaction: String,
     #[serde(with = "resource_map")]
     pub resources: BTreeMap<ResourceKey, OwnedResource>,
@@ -55,6 +57,7 @@ impl InstallLedger {
             scope,
             version: semver::Version::new(0, 0, 0),
             selected_components: Vec::new(),
+            install_directory: None,
             committed_transaction: String::new(),
             resources: BTreeMap::new(),
         }

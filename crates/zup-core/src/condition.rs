@@ -1,8 +1,10 @@
 //! Constrained boolean conditions over selected components.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -154,6 +156,24 @@ impl<'de> Deserialize<'de> for Condition {
 impl Serialize for Condition {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl JsonSchema for Condition {
+    fn schema_name() -> Cow<'static, str> {
+        "Condition".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        "zup_core::Condition".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
+            "examples": ["component(\"docs\")", "!component(\"debug\")"]
+        })
     }
 }
 

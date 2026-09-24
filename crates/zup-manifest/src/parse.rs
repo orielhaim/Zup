@@ -4,9 +4,10 @@ use serde::Deserialize;
 use serde_spanned::Spanned;
 use zup_core::{
     App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
+    UiBranding,
 };
 
-use crate::error::{ManifestError, named_source, source_span};
+use crate::error::{ManifestError, named_source_named, source_span};
 use crate::model::{Manifest, SCHEMA_VERSION};
 use crate::plugin::{Plugin, is_valid_source};
 
@@ -15,8 +16,12 @@ use crate::plugin::{Plugin, is_valid_source};
 /// Parsing is pure: it never touches the filesystem. Cross-reference and
 /// graph checks run later in [`crate::compile`].
 pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
+    parse_named(source, "zup.toml")
+}
+
+pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> {
     let raw: RawManifest =
-        toml::from_str(source).map_err(|err| ManifestError::from_toml(err, source))?;
+        toml::from_str(source).map_err(|err| ManifestError::from_toml_named(err, source, name))?;
 
     let schema_span = raw.schema.span();
     let schema = raw.schema.into_inner();
@@ -24,7 +29,7 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
         return Err(ManifestError::UnsupportedSchema {
             supported: SCHEMA_VERSION,
             found: schema,
-            src: Some(named_source(source)),
+            src: Some(named_source_named(name, source)),
             span: Some(source_span(schema_span)),
         });
     }
@@ -33,7 +38,7 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
         if !is_valid_source(&plugin.source) {
             return Err(ManifestError::InvalidPluginSource {
                 path: plugin.source.clone(),
-                src: Some(named_source(source)),
+                src: Some(named_source_named(name, source)),
                 span: None,
             });
         }
@@ -42,6 +47,7 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
     Ok(Manifest {
         schema,
         app: raw.app,
+        ui: raw.ui,
         source: raw.source,
         install: raw.install,
         updates: raw.updates,
@@ -61,6 +67,8 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
 struct RawManifest {
     schema: Spanned<u32>,
     app: App,
+    #[serde(default)]
+    ui: Option<UiBranding>,
     source: Source,
     install: Install,
     updates: Option<crate::model::Updates>,
