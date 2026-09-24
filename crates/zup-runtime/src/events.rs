@@ -20,15 +20,36 @@ pub enum RuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeEvent {
-    StateChanged { state: RuntimeState },
+    StateChanged {
+        state: RuntimeState,
+    },
     WaitingForElevation,
     WorkerConnected,
     PreflightStarted,
-    BlockingProcessesFound { detail: String },
-    StagingStarted { id: String },
-    StagingProgress { id: String, detail: String },
-    OperationStarted { id: String },
+    BlockingProcessesFound {
+        detail: String,
+    },
+    StagingStarted {
+        id: String,
+    },
+    StagingProgress {
+        id: String,
+        detail: String,
+    },
+    OperationStarted {
+        id: String,
+    },
+    Progress {
+        completed: u64,
+        total: u64,
+        action: String,
+    },
     RollingBack,
-    Completed { outcome: String },
-    Failed { kind: String, message: String },
+    Completed {
+        outcome: String,
+    },
+    Failed {
+        kind: String,
+        message: String,
+    },
 }

@@ -12,7 +12,8 @@ use zup_exec::{
 };
 use zup_platform::{CommandSpec, TargetPath};
 use zup_runtime::{
-    InstallOutcome, RuntimeRequest, SessionError, discover_recovery, run_local_install,
+    CancellationHandle, InstallOutcome, RuntimeEvent, RuntimeRequest, SessionError,
+    discover_recovery, run_install_control, run_local_install,
 };
 
 fn digest(b: &[u8]) -> Sha256Digest {
@@ -86,6 +87,30 @@ async fn local_user_scope_runs() {
     };
     assert_eq!(outcome, InstallOutcome::Committed);
     assert_eq!(std::fs::read(destination).unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn control_channel_reports_cumulative_progress_for_the_complete_plan() {
+    let request = sample_request(SelectedScope::User);
+    let (events, _) = tokio::sync::broadcast::channel(64);
+    let mut rx = events.subscribe();
+    let outcome = run_install_control(request, CancellationHandle::new(), events)
+        .await
+        .unwrap();
+    assert_eq!(outcome, InstallOutcome::Committed);
+
+    let progress = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            RuntimeEvent::Progress {
+                completed, total, ..
+            } => Some((completed, total)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(progress.len() >= 2);
+    assert!(progress.iter().all(|(_, total)| *total > 0));
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    assert_eq!(progress.last().unwrap().0, progress.last().unwrap().1);
 }
 
 #[tokio::test]

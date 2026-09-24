@@ -11,7 +11,7 @@ mod session;
 pub use events::{RuntimeEvent, RuntimeState};
 pub use session::{
     CancellationHandle, InstallOutcome, RecoveryStatus, RuntimeRequest, RuntimeSession,
-    SessionError, discover_recovery, run_install, run_local_install,
+    SessionError, discover_recovery, run_install, run_install_control, run_local_install,
 };
 
 pub use uuid::Uuid;

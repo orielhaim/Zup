@@ -188,6 +188,8 @@ async fn run_worker_inner(
             message: Message::Progress(ProgressReport {
                 kind: ProgressKind::OperationStarted,
                 detail: "transaction accepted".into(),
+                completed: None,
+                total: None,
             }),
         })
         .await
@@ -231,6 +233,26 @@ async fn run_worker_inner(
             .map_err(|e| WorkerError::Transaction(e.to_string()))?
     };
 
+    let total_work = transaction_work_total(&record.plan);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressReport>();
+    let mut progress_sequence = outgoing;
+    let progress_session = bootstrap.session_id;
+    let progress_task = tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            writer
+                .send(&WireEnvelope {
+                    version: PROTOCOL_VERSION,
+                    session_id: progress_session,
+                    sequence: progress_sequence,
+                    message: Message::Progress(progress),
+                })
+                .await
+                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+            progress_sequence = progress_sequence.saturating_add(1);
+        }
+        Ok::<_, WorkerError>((writer, progress_sequence))
+    });
+
     let mut executor = WorkerFileExecutor {
         inner: WindowsFileExecutor::new(
             payload,
@@ -239,6 +261,9 @@ async fn run_worker_inner(
             Box::new(NullProgress),
         ),
         cancel: TokenProbe(cancel.clone()),
+        progress: progress_tx.clone(),
+        completed_work: 0,
+        total_work,
     };
     for node in &record.plan.nodes {
         if matches!(
@@ -277,6 +302,20 @@ async fn run_worker_inner(
     })
     .await
     .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+
+    if matches!(&result, Ok((_, TransactionOutcome::Committed))) {
+        let _ = progress_tx.send(ProgressReport {
+            kind: ProgressKind::OperationProgress,
+            detail: "Finishing…".into(),
+            completed: Some(total_work),
+            total: Some(total_work),
+        });
+    }
+
+    drop(progress_tx);
+    let (writer, outgoing) = progress_task
+        .await
+        .map_err(|error| WorkerError::Protocol(error.to_string()))??;
 
     let (transaction_id, outcome) = match result {
         Ok((r, TransactionOutcome::Committed)) => {
@@ -368,9 +407,53 @@ async fn send_and_close(
 }
 
 /// Worker-side file executor wrapper (cancellation-aware).
+fn operation_work(operation: &TransactionNode) -> u64 {
+    if matches!(
+        operation.kind,
+        zup_transaction::NodeKind::StageFile { .. }
+            | zup_transaction::NodeKind::FileMutation { .. }
+    ) {
+        operation.meta.expected_size.unwrap_or(1).max(1)
+    } else {
+        1
+    }
+}
+
+fn transaction_work_total(plan: &TransactionPlan) -> u64 {
+    plan.nodes.iter().map(operation_work).sum::<u64>().max(1)
+}
+
+fn operation_action(operation: &TransactionNode) -> String {
+    match &operation.kind {
+        zup_transaction::NodeKind::StageFile { .. }
+        | zup_transaction::NodeKind::FileMutation { .. } => "Installing files…".into(),
+        zup_transaction::NodeKind::ManagedIntegration {
+            resource: zup_transaction::ManagedResource::Service,
+            ..
+        }
+        | zup_transaction::NodeKind::OwnedRemoval {
+            resource: zup_transaction::ManagedResource::Service,
+            ..
+        } => "Registering services…".into(),
+        zup_transaction::NodeKind::ManagedIntegration {
+            resource: zup_transaction::ManagedResource::Shortcut,
+            ..
+        }
+        | zup_transaction::NodeKind::OwnedRemoval {
+            resource: zup_transaction::ManagedResource::Shortcut,
+            ..
+        } => "Updating shortcuts…".into(),
+        zup_transaction::NodeKind::Barrier => "Finishing…".into(),
+        _ => "Updating application settings…".into(),
+    }
+}
+
 struct WorkerFileExecutor {
     inner: WindowsFileExecutor<AutoPayloadSource>,
     cancel: TokenProbe,
+    progress: tokio::sync::mpsc::UnboundedSender<ProgressReport>,
+    completed_work: u64,
+    total_work: u64,
 }
 
 struct TokenProbe(CancellationToken);
@@ -388,28 +471,38 @@ impl OperationExecutor for WorkerFileExecutor {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        if matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
-            return Ok(OperationReceipt::Control);
-        }
-        if matches!(
+        let receipt = if matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
+            Ok(OperationReceipt::Control)
+        } else if matches!(
             operation.kind,
             zup_transaction::NodeKind::ManagedIntegration { .. }
         ) {
-            return crate::integration::apply_managed(operation).map_err(|e| e.to_string());
-        }
-        if let zup_transaction::NodeKind::OwnedRemoval { resource, .. } = operation.kind {
-            return if resource == zup_transaction::ManagedResource::File {
+            crate::integration::apply_managed(operation).map_err(|e| e.to_string())
+        } else if let zup_transaction::NodeKind::OwnedRemoval { resource, .. } = operation.kind {
+            if resource == zup_transaction::ManagedResource::File {
                 self.inner
                     .apply_owned_file_removal(operation)
                     .map_err(|e| e.to_string())
             } else {
                 crate::integration::apply_owned_removal(operation).map_err(|e| e.to_string())
-            };
-        }
-        let (rel, dest) = extract_file(operation)?;
-        let receipt =
-            apply_node(&mut self.inner, operation, &rel, &dest).map_err(|e| e.to_string())?;
-        Ok(map_receipt(receipt))
+            }
+        } else {
+            let (rel, dest) = extract_file(operation)?;
+            apply_node(&mut self.inner, operation, &rel, &dest)
+                .map(map_receipt)
+                .map_err(|e| e.to_string())
+        }?;
+
+        self.completed_work = self
+            .completed_work
+            .saturating_add(operation_work(operation));
+        let _ = self.progress.send(ProgressReport {
+            kind: ProgressKind::OperationProgress,
+            detail: operation_action(operation),
+            completed: Some(self.completed_work.min(self.total_work)),
+            total: Some(self.total_work),
+        });
+        Ok(receipt)
     }
 
     fn rollback(

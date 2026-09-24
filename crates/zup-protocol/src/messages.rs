@@ -123,6 +123,10 @@ pub struct ExecuteTransaction {
 pub struct ProgressReport {
     pub kind: ProgressKind,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +137,7 @@ pub enum ProgressKind {
     StagingStarted,
     StagingProgress,
     OperationStarted,
+    OperationProgress,
     Verifying,
     RollingBack,
     Committed,

@@ -256,6 +256,8 @@ impl WorkerSession {
             message: Message::Progress(zup_protocol::ProgressReport {
                 kind: zup_protocol::ProgressKind::OperationStarted,
                 detail: "plan accepted".into(),
+                completed: None,
+                total: None,
             }),
         }))
     }

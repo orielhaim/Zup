@@ -84,6 +84,13 @@ pub struct CancellationHandle {
 }
 
 impl CancellationHandle {
+    /// Create a cooperative cancellation token for an externally hosted session.
+    pub fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+        }
+    }
+
     pub fn cancel(&self) {
         self.token.cancel();
     }
@@ -94,6 +101,12 @@ impl CancellationHandle {
 
     pub fn probe(&self) -> TokenProbe {
         TokenProbe(self.token.clone())
+    }
+}
+
+impl Default for CancellationHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -183,8 +196,94 @@ impl RuntimeSession {
 pub async fn run_install(
     request: RuntimeRequest,
 ) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
+    let session_id = zup_protocol::SessionId::new_v7();
+    let (events, _) = broadcast::channel(256);
+    let cancel = CancellationHandle::new();
+    let state = if request.scope == SelectedScope::Machine
+        || request.execution_plan.summary.requires_elevation
+    {
+        RuntimeState::WaitingForElevation
+    } else {
+        RuntimeState::Preparing
+    };
+    let outcome = run_install_control(request, cancel.clone(), events.clone()).await?;
+    Ok((
+        outcome,
+        RuntimeSession {
+            session_id,
+            state,
+            cancel,
+            events,
+        },
+    ))
+}
+
+/// Run an operation using control and event channels owned by a frontend.
+///
+/// The frontend can subscribe before this future starts and request safe
+/// cancellation without owning or terminating the worker process.
+pub async fn run_install_control(
+    request: RuntimeRequest,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
     if request.recovery_id.is_none() {
         validate_request(&request)?;
+    }
+
+    let mutating_paths = request
+        .execution_plan
+        .files
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.kind,
+                zup_exec::FileOperationKind::Create | zup_exec::FileOperationKind::Replace
+            )
+        })
+        .map(|file| file.destination.as_path().to_path_buf())
+        .chain(
+            request
+                .execution_plan
+                .removals
+                .iter()
+                .filter_map(|removal| {
+                    if let zup_core::ResourceKey::File { destination } = &removal.key {
+                        Some(std::path::PathBuf::from(destination))
+                    } else {
+                        None
+                    }
+                }),
+        )
+        .collect::<Vec<_>>();
+    let blocker_paths = mutating_paths
+        .iter()
+        .map(|path| path.as_path())
+        .collect::<Vec<_>>();
+    match zup_windows::preflight(&blocker_paths)
+        .map_err(|error| SessionError::Transaction(format!("Restart Manager preflight: {error}")))?
+    {
+        zup_windows::FilePreflight::Ready => {}
+        zup_windows::FilePreflight::Blocked {
+            processes,
+            reboot_reason,
+        } => {
+            let mut detail = processes
+                .iter()
+                .map(|process| format!("{} (PID {})", process.name, process.pid))
+                .collect::<Vec<_>>();
+            if detail.is_empty() {
+                detail.push(format!(
+                    "Windows requested a restart (reason {reboot_reason})"
+                ));
+            }
+            let _ = events.send(RuntimeEvent::BlockingProcessesFound {
+                detail: detail.join("\n"),
+            });
+            return Ok(InstallOutcome::Failed(
+                "blocked by running applications".into(),
+            ));
+        }
     }
 
     let needs_elevation = request.scope == SelectedScope::Machine
@@ -194,17 +293,37 @@ pub async fn run_install(
 
     if needs_elevation && !already_elevated {
         // Secure UAC worker route.
-        return run_elevated_worker(request).await;
+        return run_elevated_worker(request, cancel, events).await;
     }
 
     // Local (user-scope) or already-elevated privileged local path.
-    run_local_install(request).await
+    run_local_install_control(request, cancel, events).await
 }
 
 /// Run a user-scope (or already-elevated) installation locally.
 pub async fn run_local_install(
     request: RuntimeRequest,
 ) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
+    let session_id = zup_protocol::SessionId::new_v7();
+    let (events, _) = broadcast::channel(256);
+    let cancel = CancellationHandle::new();
+    let outcome = run_local_install_control(request, cancel.clone(), events.clone()).await?;
+    Ok((
+        outcome,
+        RuntimeSession {
+            session_id,
+            state: RuntimeState::Executing,
+            cancel,
+            events,
+        },
+    ))
+}
+
+async fn run_local_install_control(
+    request: RuntimeRequest,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
     if (request.scope == SelectedScope::Machine
         || request.execution_plan.summary.requires_elevation)
         && !zup_windows::is_process_elevated().map_err(|e| SessionError::Protocol(e.to_string()))?
@@ -213,18 +332,6 @@ pub async fn run_local_install(
             "machine mutation requires elevation".into(),
         ));
     }
-    let session_id = zup_protocol::SessionId::new_v7();
-    let (events, _) = broadcast::channel(256);
-    let cancel = CancellationHandle {
-        token: CancellationToken::new(),
-    };
-    let session = RuntimeSession {
-        session_id,
-        state: RuntimeState::Preparing,
-        cancel: cancel.clone(),
-        events: events.clone(),
-    };
-
     let _ = events.send(RuntimeEvent::StateChanged {
         state: RuntimeState::Preparing,
     });
@@ -234,33 +341,42 @@ pub async fn run_local_install(
     let _ = events.send(RuntimeEvent::StateChanged {
         state: RuntimeState::Executing,
     });
+    let total_work = compile_transaction(&request.execution_plan)
+        .map(|plan| transaction_work_total(&plan))
+        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+    let _ = events.send(RuntimeEvent::Progress {
+        completed: 0,
+        total: total_work,
+        action: "Preparing…".into(),
+    });
 
     let outcome = tokio::task::spawn_blocking({
         let cancel = cancel.probe();
-        move || execute_local_blocking(request, cancel)
+        let events = events.clone();
+        move || execute_local_blocking_with_events(request, cancel, Some(events))
     })
     .await
     .map_err(|e| SessionError::WorkerCrashed(e.to_string()))?;
 
+    if outcome == InstallOutcome::Committed {
+        let _ = events.send(RuntimeEvent::Progress {
+            completed: total_work,
+            total: total_work,
+            action: "Finishing…".into(),
+        });
+    }
+
     emit_outcome(&events, &outcome);
-    Ok((outcome, session))
+    Ok(outcome)
 }
 
 /// Elevated worker route (UAC + named pipe + one-shot worker).
 async fn run_elevated_worker(
     request: RuntimeRequest,
-) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
     let session_id = zup_protocol::SessionId::new_v7();
-    let (events, _) = broadcast::channel(256);
-    let cancel = CancellationHandle {
-        token: CancellationToken::new(),
-    };
-    let session = RuntimeSession {
-        session_id,
-        state: RuntimeState::WaitingForElevation,
-        cancel: cancel.clone(),
-        events: events.clone(),
-    };
 
     let _ = events.send(RuntimeEvent::WaitingForElevation);
 
@@ -300,6 +416,12 @@ async fn run_elevated_worker(
         });
     let plan_json =
         serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?;
+    let total_work = transaction_work_total(&plan);
+    let _ = events.send(RuntimeEvent::Progress {
+        completed: 0,
+        total: total_work,
+        action: "Preparing…".into(),
+    });
     let has_shortcut_service = plan.nodes.iter().any(|node| {
         matches!(
             node.kind,
@@ -442,7 +564,17 @@ async fn run_elevated_worker(
                     .map_err(|e| SessionError::Protocol(e.to_string()))?;
                 match message.message {
                 zup_protocol::Message::Progress(progress) => {
-                    let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
+                    if progress.kind == zup_protocol::ProgressKind::OperationProgress {
+                        if let (Some(completed), Some(total)) = (progress.completed, progress.total) {
+                            let _ = events.send(RuntimeEvent::Progress {
+                                completed,
+                                total,
+                                action: progress.detail,
+                            });
+                        }
+                    } else {
+                        let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
+                    }
                 }
                 zup_protocol::Message::Completed(completed) => {
                     let outcome = match completed.outcome.as_str() {
@@ -452,7 +584,7 @@ async fn run_elevated_worker(
                         other => return Err(SessionError::Protocol(format!("unknown worker outcome {other}"))),
                     };
                     emit_outcome(&events, &outcome);
-                    return Ok((outcome, session));
+                    return Ok(outcome);
                 }
                 zup_protocol::Message::Failed(failed) => return Err(SessionError::Transaction(failed.message)),
                 _ => return Err(SessionError::Protocol("unexpected worker message".into())),
@@ -524,9 +656,10 @@ fn validate_request(request: &RuntimeRequest) -> Result<(), SessionError> {
 }
 
 /// Blocking local execution with the production `WindowsFileExecutor`.
-pub fn execute_local_blocking(
+fn execute_local_blocking_with_events(
     request: RuntimeRequest,
     cancel: impl CancellationProbe + Send + 'static,
+    events: Option<broadcast::Sender<RuntimeEvent>>,
 ) -> InstallOutcome {
     let payload = match AutoPayloadSource::from_path(request.payload_root.clone()) {
         Ok(source) => source,
@@ -567,6 +700,9 @@ pub fn execute_local_blocking(
                 Box::new(NullProgress),
             ),
             cancel,
+            events,
+            completed_work: 0,
+            total_work: transaction_work_total(&record.plan),
         };
         note_plan_files(&mut executor.inner, &record.plan);
         return match zup_transaction::recover(
@@ -629,6 +765,9 @@ pub fn execute_local_blocking(
             Box::new(NullProgress),
         ),
         cancel,
+        events,
+        completed_work: 0,
+        total_work: transaction_work_total(&record.plan),
     };
 
     // Register the immutable payload identity under each transaction operation.
@@ -680,10 +819,54 @@ fn note_plan_files<P: zup_bundle::PayloadSource>(
     }
 }
 
+fn operation_work(operation: &TransactionNode) -> u64 {
+    if matches!(
+        operation.kind,
+        zup_transaction::NodeKind::StageFile { .. }
+            | zup_transaction::NodeKind::FileMutation { .. }
+    ) {
+        operation.meta.expected_size.unwrap_or(1).max(1)
+    } else {
+        1
+    }
+}
+
+fn transaction_work_total(plan: &zup_transaction::TransactionPlan) -> u64 {
+    plan.nodes.iter().map(operation_work).sum::<u64>().max(1)
+}
+
+fn operation_action(operation: &TransactionNode) -> String {
+    match &operation.kind {
+        zup_transaction::NodeKind::StageFile { .. }
+        | zup_transaction::NodeKind::FileMutation { .. } => "Installing files…".into(),
+        zup_transaction::NodeKind::ManagedIntegration {
+            resource: zup_transaction::ManagedResource::Service,
+            ..
+        }
+        | zup_transaction::NodeKind::OwnedRemoval {
+            resource: zup_transaction::ManagedResource::Service,
+            ..
+        } => "Registering services…".into(),
+        zup_transaction::NodeKind::ManagedIntegration {
+            resource: zup_transaction::ManagedResource::Shortcut,
+            ..
+        }
+        | zup_transaction::NodeKind::OwnedRemoval {
+            resource: zup_transaction::ManagedResource::Shortcut,
+            ..
+        } => "Updating shortcuts…".into(),
+        zup_transaction::NodeKind::Barrier => "Finishing…".into(),
+        _ => "Updating application settings…".into(),
+    }
+}
+
 /// Production `OperationExecutor` wrapping `WindowsFileExecutor`.
 struct ProductionExecutor<P: zup_bundle::PayloadSource, C: CancellationProbe> {
     inner: WindowsFileExecutor<P>,
     cancel: C,
+    events: Option<broadcast::Sender<RuntimeEvent>>,
+    completed_work: u64,
+    total_work: u64,
 }
 
 impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
@@ -695,29 +878,44 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        if matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
-            return Ok(OperationReceipt::Control);
+        if let Some(events) = &self.events {
+            let _ = events.send(RuntimeEvent::OperationStarted {
+                id: operation.id.to_string(),
+            });
         }
-        if matches!(
+        let receipt = if matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
+            Ok(OperationReceipt::Control)
+        } else if matches!(
             operation.kind,
             zup_transaction::NodeKind::ManagedIntegration { .. }
         ) {
-            return zup_windows::apply_managed(operation).map_err(|e| e.to_string());
-        }
-        if let zup_transaction::NodeKind::OwnedRemoval { resource, .. } = operation.kind {
-            return if resource == zup_transaction::ManagedResource::File {
+            zup_windows::apply_managed(operation).map_err(|e| e.to_string())
+        } else if let zup_transaction::NodeKind::OwnedRemoval { resource, .. } = operation.kind {
+            if resource == zup_transaction::ManagedResource::File {
                 self.inner
                     .apply_owned_file_removal(operation)
                     .map_err(|e| e.to_string())
             } else {
                 zup_windows::apply_owned_removal(operation).map_err(|e| e.to_string())
-            };
+            }
+        } else {
+            let (source_relative, dest) = extract_file_identity(operation)?;
+            zup_windows::apply_node(&mut self.inner, operation, &source_relative, &dest)
+                .map(map_receipt)
+                .map_err(|e| e.to_string())
+        }?;
+
+        self.completed_work = self
+            .completed_work
+            .saturating_add(operation_work(operation));
+        if let Some(events) = &self.events {
+            let _ = events.send(RuntimeEvent::Progress {
+                completed: self.completed_work.min(self.total_work),
+                total: self.total_work,
+                action: operation_action(operation),
+            });
         }
-        // Delegate file nodes to the Windows executor via apply_node.
-        let (source_relative, dest) = extract_file_identity(operation)?;
-        let receipt = zup_windows::apply_node(&mut self.inner, operation, &source_relative, &dest)
-            .map_err(|e| e.to_string())?;
-        Ok(map_receipt(receipt))
+        Ok(receipt)
     }
 
     fn rollback(

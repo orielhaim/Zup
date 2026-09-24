@@ -2,9 +2,11 @@
 
 use std::path::Path;
 
+use windows::Win32::System::RestartManager::{
+    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+};
+use windows::core::PCWSTR;
 use zup_exec::FileOperation;
-
-use crate::fs_bindings::{RmEndSession, RmGetList, RmRegisterResources, RmStartSession};
 
 /// A process/service blocking a target resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,14 +35,14 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
         return Ok(FilePreflight::Ready);
     }
 
-    // SAFETY: session handle is initialized below and always ended.
     unsafe {
         let mut session: u32 = 0;
         let mut key = [0u16; 32];
-        let rc = RmStartSession(&mut session, 0, key.as_mut_ptr());
-        if rc != 0 {
-            return Err(format!("RmStartSession failed ({rc})"));
+        let rc = RmStartSession(&mut session, None, windows::core::PWSTR(key.as_mut_ptr()));
+        if rc.0 != 0 {
+            return Err(format!("RmStartSession failed ({})", rc.0));
         }
+        let _session = RestartManagerSession(session);
 
         let wides: Vec<Vec<u16>> = files
             .iter()
@@ -52,65 +54,80 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
                     .collect()
             })
             .collect();
-        let ptrs: Vec<*const u16> = wides.iter().map(|w| w.as_ptr()).collect();
+        let ptrs: Vec<PCWSTR> = wides.iter().map(|w| PCWSTR(w.as_ptr())).collect();
 
-        let rc = RmRegisterResources(
-            session,
-            ptrs.len() as u32,
-            ptrs.as_ptr(),
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-        );
-        if rc != 0 {
-            RmEndSession(session);
-            return Err(format!("RmRegisterResources failed ({rc})"));
+        let rc = RmRegisterResources(session, Some(&ptrs), None, None);
+        if rc.0 != 0 {
+            return Err(format!("RmRegisterResources failed ({})", rc.0));
         }
 
         let mut needed: u32 = 0;
         let mut count: u32 = 0;
         let mut reboot: u32 = 0;
-        let mut buf: Vec<u8> = vec![0u8; 632 * 16];
-        let rc = RmGetList(
-            session,
-            &mut needed,
-            &mut count,
-            buf.as_mut_ptr().cast(),
-            &mut reboot,
-        );
-        RmEndSession(session);
-        // ERROR_MORE_DATA = 234: buffer too small, but we still have reasons.
-        if rc != 0 && rc != 234 {
-            return Err(format!("RmGetList failed ({rc})"));
-        }
-
-        if count == 0 && reboot == 0 {
-            return Ok(FilePreflight::Ready);
-        }
-
-        // Parse RM_PROCESS_INFO minimally: we only need pid + name when present.
-        let mut processes = Vec::new();
-        for i in 0..count as usize {
-            let base = i * 632;
-            if base + 4 > buf.len() {
-                break;
+        let rc = RmGetList(session, &mut needed, &mut count, None, &mut reboot);
+        if rc.0 == 234 {
+            let mut processes = vec![RM_PROCESS_INFO::default(); needed as usize];
+            let rc = RmGetList(
+                session,
+                &mut needed,
+                &mut count,
+                Some(processes.as_mut_ptr()),
+                &mut reboot,
+            );
+            if rc.0 != 0 {
+                return Err(format!("RmGetList failed ({})", rc.0));
             }
-            let pid = u32::from_le_bytes([buf[base], buf[base + 1], buf[base + 2], buf[base + 3]]);
-            // strAppName is a [u16; 255] starting after process (DWORD) + app status fields.
-            // Keep it simple: record pid only if name parse is unreliable.
-            processes.push(BlockingProcess {
-                pid,
-                name: format!("pid:{pid}"),
-                app_type: 0,
-                restartable: true,
-            });
+            processes.truncate(count.min(processes.len() as u32) as usize);
+            return Ok(blocked_or_ready(processes, reboot));
+        }
+        if rc.0 != 0 {
+            return Err(format!("RmGetList failed ({})", rc.0));
         }
 
-        Ok(FilePreflight::Blocked {
-            processes,
-            reboot_reason: reboot,
+        Ok(blocked_or_ready(Vec::new(), reboot))
+    }
+}
+
+struct RestartManagerSession(u32);
+
+impl Drop for RestartManagerSession {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = RmEndSession(self.0);
+        }
+    }
+}
+
+fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> FilePreflight {
+    let processes = processes
+        .into_iter()
+        .map(|process| {
+            let name_end = process
+                .strAppName
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(process.strAppName.len());
+            let name = String::from_utf16_lossy(&process.strAppName[..name_end]);
+            let name = if name.is_empty() {
+                format!("Process {}", process.Process.dwProcessId)
+            } else {
+                name
+            };
+            BlockingProcess {
+                pid: process.Process.dwProcessId,
+                name,
+                app_type: process.ApplicationType.0,
+                restartable: process.bRestartable.as_bool(),
+            }
         })
+        .collect::<Vec<_>>();
+    if processes.is_empty() && reboot_reason == 0 {
+        FilePreflight::Ready
+    } else {
+        FilePreflight::Blocked {
+            processes,
+            reboot_reason,
+        }
     }
 }
 

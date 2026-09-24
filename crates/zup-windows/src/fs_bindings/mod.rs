@@ -73,30 +73,6 @@ link!("kernel32.dll" "system" fn CreateDirectoryW(
 ) -> BOOL);
 link!("kernel32.dll" "system" fn GetFileAttributesW(lpfilename: LPCWSTR) -> DWORD);
 
-// Restart Manager (read-only discovery)
-link!("rstrtmgr.dll" "system" fn RmStartSession(
-    psessionhandle: *mut u32,
-    dwsessionflags: DWORD,
-    rgsessionkey: *mut u16,
-) -> u32);
-link!("rstrtmgr.dll" "system" fn RmEndSession(dwsessionhandle: u32) -> u32);
-link!("rstrtmgr.dll" "system" fn RmRegisterResources(
-    dwsessionhandle: u32,
-    nfiles: u32,
-    rgsfilenames: *const *const u16,
-    napplications: u32,
-    rgapplications: *const core::ffi::c_void,
-    nservices: u32,
-    rgsservicenames: *const *const u16,
-) -> u32);
-link!("rstrtmgr.dll" "system" fn RmGetList(
-    dwsessionhandle: u32,
-    pnprocinfoneeded: *mut u32,
-    pnprocinfo: *mut u32,
-    rgprocinfo: *mut core::ffi::c_void,
-    lpdwrebootreasons: *mut u32,
-) -> u32);
-
 // FOLDERID constants
 pub const FOLDERID_ProgramFiles: GUID = GUID {
     data1: 0x905e63b6,
