@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES};
 use zup_core::{
-    ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, RelativePath, Sha256Digest,
-    Template, hash_reader,
+    ComponentId, Condition, Frontend, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, RelativePath,
+    Sha256Digest, Template, hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -35,6 +35,10 @@ const RESOURCE_TYPE_RCDATA: usize = 10;
 const RESOURCE_ID_BUNDLE: usize = 1;
 const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
 const WINDOWS_ARM64_TARGET: &str = "aarch64-pc-windows-msvc";
+const PE_SUBSYSTEM_OFFSET: u64 = 68;
+const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = PE_SUBSYSTEM_OFFSET + 2;
+const IMAGE_SUBSYSTEM_CUI: u16 = 3;
+const IMAGE_SUBSYSTEM_GUI: u16 = 2;
 
 #[derive(Debug, Error)]
 pub enum BundleError {
@@ -44,6 +48,8 @@ pub enum BundleError {
     Json(#[from] serde_json::Error),
     #[error("bundle is truncated, corrupt, unsupported, or has unsafe offsets")]
     Invalid,
+    #[error("runtime frontend is {found:?}; expected {expected:?}")]
+    FrontendMismatch { expected: Frontend, found: Frontend },
     #[error("executable has no embedded bundle resource")]
     MissingResource,
     #[error(
@@ -598,6 +604,9 @@ impl EmbeddedBundle {
         Ok(bundle)
     }
 
+    pub fn frontend(&self) -> Frontend {
+        self.metadata.plan.installer.frontend
+    }
     pub fn plan(&self) -> &PortableBuildPlan {
         &self.metadata.plan
     }
@@ -964,6 +973,7 @@ pub fn build_self_contained_executable(
     plan: &BuildPlan,
     artifacts: &[CompiledPluginArtifact],
 ) -> Result<(u64, u64), BundleError> {
+    validate_pe_frontend(executable, plan.installer.frontend)?;
     validate_unsigned_pe(executable)?;
     let temporary = tempfile::tempdir()?;
     let package = temporary.path().join("installer.zupbundle");
@@ -992,8 +1002,42 @@ pub fn read_pe_target(path: &Path) -> Result<&'static str, BundleError> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeSubsystem {
+    Console,
+    Gui,
+}
+
+pub fn read_pe_subsystem(path: &Path) -> Result<PeSubsystem, BundleError> {
+    match read_pe_header(path)?.subsystem {
+        IMAGE_SUBSYSTEM_CUI => Ok(PeSubsystem::Console),
+        IMAGE_SUBSYSTEM_GUI => Ok(PeSubsystem::Gui),
+        _ => Err(BundleError::Invalid),
+    }
+}
+
+pub fn read_pe_frontend(path: &Path) -> Result<Frontend, BundleError> {
+    match read_pe_subsystem(path)? {
+        PeSubsystem::Console => Ok(Frontend::Console),
+        PeSubsystem::Gui => Ok(Frontend::Gui),
+    }
+}
+
+pub fn validate_pe_frontend(path: &Path, expected: Frontend) -> Result<(), BundleError> {
+    let found = read_pe_frontend(path)?;
+    let matches = match expected {
+        Frontend::Gui => found == Frontend::Gui,
+        Frontend::Console | Frontend::Headless => found == Frontend::Console,
+    };
+    if !matches {
+        return Err(BundleError::FrontendMismatch { expected, found });
+    }
+    Ok(())
+}
+
 struct PeHeader {
     machine: u16,
+    subsystem: u16,
     security_offset: u64,
 }
 
@@ -1027,7 +1071,7 @@ fn read_pe_header(path: &Path) -> Result<PeHeader, BundleError> {
     let optional_end = optional_offset
         .checked_add(optional_len)
         .ok_or(BundleError::Invalid)?;
-    if optional_len < 2 || optional_end > len || section_count == 0 {
+    if optional_len < PE_MIN_OPTIONAL_HEADER_SIZE || optional_end > len || section_count == 0 {
         return Err(BundleError::Invalid);
     }
     file.seek(SeekFrom::Start(optional_offset))?;
@@ -1048,6 +1092,12 @@ fn read_pe_header(path: &Path) -> Result<PeHeader, BundleError> {
     {
         return Err(BundleError::Invalid);
     }
+    let subsystem_offset = optional_offset
+        .checked_add(PE_SUBSYSTEM_OFFSET)
+        .ok_or(BundleError::Invalid)?;
+    file.seek(SeekFrom::Start(subsystem_offset))?;
+    let mut subsystem = [0u8; 2];
+    file.read_exact(&mut subsystem)?;
     let section_end = optional_end
         .checked_add(
             u64::from(section_count)
@@ -1060,6 +1110,7 @@ fn read_pe_header(path: &Path) -> Result<PeHeader, BundleError> {
     }
     Ok(PeHeader {
         machine,
+        subsystem: u16::from_le_bytes(subsystem),
         security_offset,
     })
 }
@@ -1308,6 +1359,7 @@ mod tests {
         BuildPlan {
             installer: Installer {
                 ui: None,
+                frontend: zup_core::Frontend::Gui,
                 app: App {
                     id: AppId::new("com.example.bundle-limits").unwrap(),
                     name: NonEmptyString::new("Bundle Limits").unwrap(),

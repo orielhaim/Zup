@@ -3,8 +3,8 @@
 use serde::Deserialize;
 use serde_spanned::Spanned;
 use zup_core::{
-    App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
-    UiBranding,
+    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
+    Shortcut, Source, UiBranding,
 };
 
 use crate::error::{ManifestError, named_source_named, source_span};
@@ -47,6 +47,7 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
     Ok(Manifest {
         schema,
         app: raw.app,
+        frontend: raw.frontend,
         ui: raw.ui,
         source: raw.source,
         install: raw.install,
@@ -67,6 +68,8 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
 struct RawManifest {
     schema: Spanned<u32>,
     app: App,
+    #[serde(default)]
+    frontend: Frontend,
     #[serde(default)]
     ui: Option<UiBranding>,
     source: Source,

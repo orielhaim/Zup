@@ -28,6 +28,7 @@ pub enum RuntimeEvent {
     PreflightStarted,
     BlockingProcessesFound {
         detail: String,
+        pids: Vec<u32>,
     },
     StagingStarted {
         id: String,

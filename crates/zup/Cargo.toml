@@ -8,16 +8,18 @@ description = "Developer-facing CLI for zup"
 default-run = "zup"
 
 [features]
-default = []
+default = ["gui"]
 build = [
   "dep:zup-build",
   "dep:zup-manifest",
   "dep:zup-plugin-build",
   "dep:clap_complete",
   "dep:inquire",
-  "dep:serde_json",
   "dep:toml_edit",
 ]
+gui = ["dep:zup-ui"]
+console = ["dep:cliclack", "dep:console", "dep:indicatif"]
+headless = []
 
 [[bin]]
 name = "zup"
@@ -28,14 +30,37 @@ required-features = ["build"]
 name = "zup-setup"
 path = "src/setup.rs"
 
+[[bin]]
+name = "zup-setup-gui"
+path = "src/setup_gui.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "zup-setup-console"
+path = "src/setup_console.rs"
+required-features = ["console"]
+
+[[bin]]
+name = "zup-setup-headless"
+path = "src/setup_headless.rs"
+required-features = ["headless"]
+
 [dependencies]
 clap.workspace = true
 clap_complete = { workspace = true, optional = true }
 inquire = { workspace = true, optional = true }
 miette.workspace = true
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
 toml_edit = { workspace = true, optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "time",
+  "sync",
+  "signal",
+] }
 tokio-util = { version = "0.7", features = ["codec"] }
 zup-windows.workspace = true
 zup-build = { workspace = true, optional = true }
@@ -52,7 +77,10 @@ zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-update.workspace = true
-zup-ui = { path = "../zup-ui" }
+zup-ui = { path = "../zup-ui", optional = true }
+cliclack = { workspace = true, optional = true }
+console = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
 uuid.workspace = true
 semver.workspace = true
 

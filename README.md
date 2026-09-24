@@ -4,6 +4,10 @@ A programmable application installer for the modern desktop.
 
 Zup is in very early development. The public API is not available yet.
 
+## Installer frontends
+
+See [GUI, console, and headless installer frontends](docs/frontends.md) for build-time selection, automation output, exit codes, elevation, and Server Core guidance.
+
 ## Plugins
 
 See [plugin authoring and runtime architecture](docs/plugins.md) and the [Rust configure example](examples/plugins/configure).

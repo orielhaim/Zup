@@ -1,37 +1,24 @@
-#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() -> std::process::ExitCode {
-    #[cfg(feature = "gui")]
-    let result = zup::run_as(zup_core::Frontend::Gui);
-    #[cfg(all(not(feature = "gui"), feature = "console"))]
-    let result = zup::run_as(zup_core::Frontend::Console);
-    #[cfg(all(not(feature = "gui"), not(feature = "console")))]
-    let result = zup::run_as(zup_core::Frontend::Headless);
-
-    if let Err(error) = result {
-        #[cfg(feature = "gui")]
+    if let Err(error) = zup::run_as(zup_core::Frontend::Gui) {
         let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-        #[cfg(feature = "gui")]
         let direct_launch = arguments.is_empty();
-        #[cfg(feature = "gui")]
         let uninstall_ui_launch = arguments.first().is_some_and(|argument| {
             argument == "__uninstall_runner" && arguments.iter().any(|item| item == "--ui")
         });
-        #[cfg(feature = "gui")]
         if direct_launch || uninstall_ui_launch {
             #[cfg(windows)]
             show_error(&error.to_string());
             #[cfg(not(windows))]
             eprintln!("{error:?}");
         }
-        #[cfg(not(feature = "gui"))]
-        eprintln!("{error:?}");
         return std::process::ExitCode::from(zup::process_exit_code(&error));
     }
     std::process::ExitCode::SUCCESS
 }
 
-#[cfg(all(windows, feature = "gui"))]
+#[cfg(windows)]
 fn show_error(message: &str) {
     use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     use windows::core::PCWSTR;

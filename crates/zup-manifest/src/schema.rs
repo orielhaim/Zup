@@ -1,7 +1,8 @@
 use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 use zup_core::{
-    App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
+    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
+    Shortcut, Source,
 };
 
 use crate::{Plugin, Updates};
@@ -12,6 +13,8 @@ use crate::{Plugin, Updates};
 struct SchemaManifest {
     schema: u32,
     app: App,
+    #[serde(default)]
+    frontend: Frontend,
     #[serde(default)]
     ui: Option<zup_core::UiBranding>,
     source: Source,
@@ -79,6 +82,11 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&super::schema_json().unwrap()).unwrap();
         assert_eq!(value["$id"], "https://zup.dev/schema/zup.toml.json");
+        assert_eq!(value["properties"]["frontend"]["default"], "gui");
+        assert_eq!(
+            value["$defs"]["Frontend"]["enum"],
+            serde_json::json!(["gui", "console", "headless"])
+        );
         assert!(
             value["properties"]["ui"].is_object() || value["properties"]["ui"]["anyOf"].is_array()
         );

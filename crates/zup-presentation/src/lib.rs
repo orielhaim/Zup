@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use zup_core::{ComponentId, ResourceKey, SelectedScope};
 use zup_exec::{
     ExecutionPlan, FileOperationKind, FileTypeOperationKind, PathOperationKind,
@@ -549,6 +549,7 @@ impl OperationPhase {
             || action.contains("path")
             || action.contains("protocol")
             || action.contains("registry")
+            || action.contains("settings")
         {
             Self::System
         } else if action.contains("finish") || action.contains("commit") {
@@ -673,6 +674,229 @@ pub struct UpdatePresentation {
     pub available: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Human,
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessOutcome {
+    Success,
+    Cancelled,
+    InvalidInvocation,
+    Configuration,
+    OwnershipConflict,
+    ElevationRequired,
+    VerificationFailure,
+    RecoveryRequired,
+    Failure,
+}
+
+impl ProcessOutcome {
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Cancelled => 2,
+            Self::InvalidInvocation | Self::Configuration => 3,
+            Self::OwnershipConflict => 4,
+            Self::ElevationRequired => 5,
+            Self::VerificationFailure => 6,
+            Self::RecoveryRequired => 7,
+            Self::Failure => 1,
+        }
+    }
+
+    pub fn from_message(message: &str) -> Self {
+        let normalized = message.to_ascii_lowercase();
+        if normalized.contains("cancelled")
+            || normalized.contains("canceled")
+            || normalized.contains("cancel was requested")
+        {
+            Self::Cancelled
+        } else if normalized.contains("elevation")
+            || normalized.contains("privilege")
+            || normalized.contains("administrator")
+        {
+            Self::ElevationRequired
+        } else if normalized.contains("recovery") || normalized.contains("journal") {
+            Self::RecoveryRequired
+        } else if normalized.contains("drift")
+            || normalized.contains("ownership")
+            || normalized.contains("occupied")
+            || normalized.contains("conflict")
+        {
+            Self::OwnershipConflict
+        } else if normalized.contains("verification")
+            || normalized.contains("signature")
+            || normalized.contains("trust")
+            || normalized.contains("tuf")
+        {
+            Self::VerificationFailure
+        } else if normalized.contains("configuration")
+            || normalized.contains("invalid")
+            || normalized.contains("required option")
+        {
+            Self::Configuration
+        } else {
+            Self::Failure
+        }
+    }
+}
+
+pub const AUTOMATION_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum AutomationEvent {
+    Started {
+        protocol_version: u32,
+        application: String,
+        version: String,
+        action: String,
+    },
+    Phase {
+        state: String,
+    },
+    Progress {
+        phase: OperationPhase,
+        completed: u64,
+        total: u64,
+        label: String,
+    },
+    Blocked {
+        message: String,
+        processes: Vec<u32>,
+    },
+    Cancelling {
+        state: String,
+    },
+    Completed {
+        outcome: ProcessOutcome,
+    },
+    Failed {
+        outcome: ProcessOutcome,
+        code: i32,
+        message: String,
+        diagnostic: Option<DiagnosticPresentation>,
+    },
+}
+
+impl AutomationEvent {
+    pub fn started(
+        application: impl Into<String>,
+        version: impl Into<String>,
+        action: impl Into<String>,
+    ) -> Self {
+        Self::Started {
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            application: application.into(),
+            version: version.into(),
+            action: action.into(),
+        }
+    }
+
+    pub fn progress(progress: &ProgressPresentation) -> Self {
+        Self::Progress {
+            phase: progress.phase,
+            completed: progress.completed,
+            total: progress.total,
+            label: progress.label.clone(),
+        }
+    }
+
+    pub fn blocked(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let processes = message
+            .split(|character: char| !character.is_ascii_digit())
+            .filter_map(|part| part.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+            .collect();
+        Self::Blocked { message, processes }
+    }
+
+    pub fn blocked_with_processes(
+        message: impl Into<String>,
+        processes: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        Self::Blocked {
+            message: message.into(),
+            processes: processes.into_iter().filter(|pid| *pid > 0).collect(),
+        }
+    }
+}
+
+pub type WireEvent = AutomationEvent;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationResult {
+    pub protocol_version: u32,
+    pub outcome: ProcessOutcome,
+    pub code: i32,
+    pub application: String,
+    pub version: String,
+    pub scope: Option<SelectedScope>,
+    pub install_directory: Option<String>,
+    pub log_path: Option<String>,
+    pub message: Option<String>,
+    pub drift: Vec<String>,
+}
+
+impl AutomationResult {
+    pub fn new(
+        outcome: ProcessOutcome,
+        application: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            outcome,
+            code: outcome.code(),
+            application: application.into(),
+            version: version.into(),
+            scope: None,
+            install_directory: None,
+            log_path: None,
+            message: None,
+            drift: Vec::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn to_jsonl<I>(events: I) -> Result<String, serde_json::Error>
+    where
+        I: IntoIterator<Item = AutomationEvent>,
+    {
+        let events = events.into_iter().collect::<Vec<_>>();
+        let valid_start = matches!(
+            events.first(),
+            Some(AutomationEvent::Started {
+                protocol_version,
+                ..
+            }) if *protocol_version == AUTOMATION_PROTOCOL_VERSION
+        );
+        if !valid_start {
+            return Err(serde_json::Error::custom(
+                "automation JSONL must begin with a versioned started event",
+            ));
+        }
+        let mut output = String::new();
+        for event in events {
+            output.push_str(&serde_json::to_string(&event)?);
+            output.push('\n');
+        }
+        Ok(output)
+    }
+}
+
+pub type ProcessResult = AutomationResult;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +921,10 @@ mod tests {
             OperationPhase::from_action("Registering services"),
             OperationPhase::System
         );
+        assert_eq!(
+            OperationPhase::from_action("Updating application settings"),
+            OperationPhase::System
+        );
         let progress = ProgressPresentation::new(3, 4, "Installing files");
         assert_eq!(progress.phase, OperationPhase::Files);
         assert_eq!(progress.percent(), Some(75));
@@ -708,5 +936,66 @@ mod tests {
             DiagnosticPresentation::from_message("blocked by running applications", false);
         assert_eq!(diagnostic.kind, DiagnosticKind::Blocked);
         assert!(diagnostic.recovery.contains("Retry"));
+    }
+
+    #[test]
+    fn automation_contract_has_stable_outcome_codes() {
+        assert_eq!(ProcessOutcome::Success.code(), 0);
+        assert_eq!(ProcessOutcome::Cancelled.code(), 2);
+        assert_eq!(ProcessOutcome::OwnershipConflict.code(), 4);
+        assert_eq!(ProcessOutcome::ElevationRequired.code(), 5);
+        assert_eq!(ProcessOutcome::VerificationFailure.code(), 6);
+        assert_eq!(ProcessOutcome::RecoveryRequired.code(), 7);
+        assert_eq!(
+            ProcessOutcome::from_message("verification failed"),
+            ProcessOutcome::VerificationFailure
+        );
+    }
+
+    #[test]
+    fn automation_jsonl_is_explicit_and_versioned() {
+        let events = [
+            AutomationEvent::started("Acme", "1.0.0", "install"),
+            AutomationEvent::progress(&ProgressPresentation::new(1, 2, "Installing files")),
+            AutomationEvent::Completed {
+                outcome: ProcessOutcome::Success,
+            },
+        ];
+        let output = AutomationResult::to_jsonl(events).unwrap();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["type"], "started");
+        assert_eq!(first["protocol_version"], AUTOMATION_PROTOCOL_VERSION);
+        let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(last["type"], "completed");
+    }
+
+    #[test]
+    fn typed_blocker_ids_do_not_parse_process_names() {
+        let event = AutomationEvent::blocked_with_processes(
+            "7-Zip.exe (PID 4820), Helper (PID 7312)",
+            [4820, 7312],
+        );
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["processes"], serde_json::json!([4820, 7312]));
+    }
+
+    #[test]
+    fn automation_jsonl_rejects_unversioned_starts() {
+        let error = AutomationResult::to_jsonl([AutomationEvent::Completed {
+            outcome: ProcessOutcome::Success,
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("versioned started"));
+    }
+
+    #[test]
+    fn blocked_output_exposes_process_ids() {
+        let event = AutomationEvent::blocked(
+            "blocked by running applications: Acme.exe (PID 4820), Helper (PID 7312)",
+        );
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["processes"], serde_json::json!([4820, 7312]));
     }
 }

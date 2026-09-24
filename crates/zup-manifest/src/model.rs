@@ -5,8 +5,8 @@
 
 use schemars::JsonSchema;
 use zup_core::{
-    App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
-    UiBranding,
+    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
+    Shortcut, Source, UiBranding,
 };
 
 use crate::plugin::Plugin;
@@ -19,6 +19,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Manifest {
     pub schema: u32,
     pub app: App,
+    pub frontend: Frontend,
     pub ui: Option<UiBranding>,
     pub source: Source,
     pub install: Install,

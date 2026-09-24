@@ -35,6 +35,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
 
     let Manifest {
         app,
+        frontend,
         ui,
         install,
         components,
@@ -58,6 +59,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
 
     Ok(Installer {
         app,
+        frontend,
         ui,
         updates: None,
         install,

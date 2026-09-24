@@ -10,8 +10,8 @@ use tempfile::TempDir;
 use zup_build::BuildPlan;
 use zup_bundle::{BundleWriter, CompiledPluginArtifact, EmbeddedBundle, PluginArtifact};
 use zup_core::{
-    App, AppId, ComponentId, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
-    PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
+    App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
+    NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
 };
 use zup_plan::{
     NeverCancelled, PluginArchitecture, PluginExecutor, PluginHostFacts, PluginOperatingSystem,
@@ -49,6 +49,7 @@ fn empty_aot() -> Vec<u8> {
 fn installer() -> Installer {
     Installer {
         ui: None,
+        frontend: Frontend::Gui,
         app: App {
             id: AppId::new("com.example.runtime").unwrap(),
             name: NonEmptyString::new("Runtime").unwrap(),

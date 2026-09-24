@@ -2,13 +2,21 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
 use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
+#[cfg(any(feature = "console", feature = "headless"))]
+use zup_bundle::EmbeddedBundle;
+#[cfg(feature = "headless")]
+use zup_bundle::read_pe_frontend;
+#[cfg(feature = "console")]
+use zup_bundle::{PeSubsystem, read_pe_subsystem};
+#[cfg(any(feature = "console", feature = "headless"))]
+use zup_core::Frontend;
 use zup_plugin_contract::HOST_TARGET;
 
 const PLUGIN_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
@@ -27,12 +35,48 @@ fn plugin_component() -> Vec<u8> {
         .unwrap()
 }
 
+fn selected_frontend() -> &'static str {
+    #[cfg(feature = "gui")]
+    {
+        "gui"
+    }
+    #[cfg(all(not(feature = "gui"), feature = "console"))]
+    {
+        "console"
+    }
+    #[cfg(all(not(feature = "gui"), not(feature = "console"), feature = "headless"))]
+    {
+        "headless"
+    }
+    #[cfg(not(any(feature = "gui", feature = "console", feature = "headless")))]
+    {
+        "headless"
+    }
+}
+
+fn setup_runtime() -> PathBuf {
+    #[cfg(feature = "gui")]
+    {
+        PathBuf::from(env!("CARGO_BIN_EXE_zup-setup"))
+    }
+    #[cfg(all(not(feature = "gui"), feature = "console"))]
+    {
+        PathBuf::from(env!("CARGO_BIN_EXE_zup-setup-console"))
+    }
+    #[cfg(all(not(feature = "gui"), not(feature = "console"), feature = "headless"))]
+    {
+        PathBuf::from(env!("CARGO_BIN_EXE_zup-setup-headless"))
+    }
+    #[cfg(not(any(feature = "gui", feature = "console", feature = "headless")))]
+    {
+        PathBuf::from(env!("CARGO_BIN_EXE_zup-setup"))
+    }
+}
+
 fn write_pluginless_project(root: &Path) {
     fs::create_dir_all(root.join("dist")).unwrap();
     fs::write(root.join("dist/app.bin"), b"payload").unwrap();
-    fs::write(
-        root.join("zup.toml"),
-        r#"
+    let manifest = r#"
 schema = 1
 [app]
 id = "com.example.runtime-target"
@@ -47,9 +91,12 @@ user = "${known.local_app_data}/RuntimeTarget"
 [[files]]
 source = "**/*"
 destination = "${install}"
-"#,
-    )
-    .unwrap();
+"#
+    .replace(
+        "schema = 1",
+        &format!("schema = 1\nfrontend = \"{}\"", selected_frontend()),
+    );
+    fs::write(root.join("zup.toml"), manifest).unwrap();
 }
 
 fn run_pluginless_build(project: &Path, runtime: &Path, target: &str) -> Output {
@@ -67,16 +114,35 @@ fn run_pluginless_build(project: &Path, runtime: &Path, target: &str) -> Output 
         .unwrap()
 }
 
+#[cfg(any(feature = "console", feature = "headless"))]
+fn run_pluginless_build_with_frontend(
+    project: &Path,
+    runtime: &Path,
+    target: &str,
+    frontend: &str,
+) -> Output {
+    let output = project.join("Setup.exe");
+    Command::new(env!("CARGO_BIN_EXE_zup"))
+        .args(["build", "--manifest"])
+        .arg(project.join("zup.toml"))
+        .arg("--runtime")
+        .arg(runtime)
+        .arg("--frontend")
+        .arg(frontend)
+        .arg("--target")
+        .arg(target)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap()
+}
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[test]
 fn build_accepts_matching_x64_runtime_target_without_plugins() {
     let project = TempDir::new().unwrap();
     write_pluginless_project(project.path());
-    let result = run_pluginless_build(
-        project.path(),
-        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
-        "x86_64-pc-windows-msvc",
-    );
+    let result = run_pluginless_build(project.path(), &setup_runtime(), "x86_64-pc-windows-msvc");
     assert!(
         result.status.success(),
         "{}",
@@ -84,16 +150,215 @@ fn build_accepts_matching_x64_runtime_target_without_plugins() {
     );
 }
 
+#[cfg(all(feature = "console", windows, target_arch = "x86_64"))]
+#[test]
+fn build_frontend_override_selects_the_console_runtime() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let runtime = Path::new(env!("CARGO_BIN_EXE_zup-setup-console"));
+    let result = run_pluginless_build_with_frontend(
+        project.path(),
+        runtime,
+        "x86_64-pc-windows-msvc",
+        "console",
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = project.path().join("Setup.exe");
+    let bundle = EmbeddedBundle::open(&output).unwrap();
+    assert_eq!(bundle.frontend(), Frontend::Console);
+    assert_eq!(read_pe_subsystem(&output).unwrap(), PeSubsystem::Console);
+}
+
+#[cfg(all(feature = "headless", windows, target_arch = "x86_64"))]
+#[test]
+fn manifest_frontend_selects_the_headless_runtime() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let manifest_path = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest_path).unwrap();
+    fs::write(
+        &manifest_path,
+        source.replacen(
+            &format!("frontend = \"{}\"", selected_frontend()),
+            "frontend = \"headless\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let runtime = Path::new(env!("CARGO_BIN_EXE_zup-setup-headless"));
+    let result = run_pluginless_build(project.path(), runtime, "x86_64-pc-windows-msvc");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = project.path().join("Setup.exe");
+    let bundle = EmbeddedBundle::open(&output).unwrap();
+    assert_eq!(bundle.frontend(), Frontend::Headless);
+    assert_eq!(read_pe_frontend(&output).unwrap(), Frontend::Console);
+}
+
+#[cfg(all(feature = "headless", windows, target_arch = "x86_64"))]
+#[test]
+fn build_rejects_a_headless_template_for_console_selection() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let result = run_pluginless_build_with_frontend(
+        project.path(),
+        Path::new(env!("CARGO_BIN_EXE_zup-setup-headless")),
+        "x86_64-pc-windows-msvc",
+        "console",
+    );
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("not the console template"), "{stderr}");
+}
+
+#[cfg(all(feature = "headless", windows, target_arch = "x86_64"))]
+#[test]
+fn headless_noninteractive_install_and_uninstall_emit_json() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let manifest_path = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest_path).unwrap();
+    fs::write(
+        &manifest_path,
+        source.replace("com.example.runtime-target", "com.example.headless-runtime"),
+    )
+    .unwrap();
+    let runtime = Path::new(env!("CARGO_BIN_EXE_zup-setup-headless"));
+    let build = run_pluginless_build_with_frontend(
+        project.path(),
+        runtime,
+        "x86_64-pc-windows-msvc",
+        "headless",
+    );
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let setup = project.path().join("Setup.exe");
+    let state = project.path().join("state");
+    let install = Command::new(&setup)
+        .args(["install", "--yes", "--output", "json", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&install.stdout).unwrap();
+    assert_eq!(value["outcome"], "success");
+    let uninstall = Command::new(&setup)
+        .args(["uninstall", "--yes", "--output", "json", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(
+        uninstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&uninstall.stdout).unwrap();
+    assert_eq!(value["outcome"], "success");
+
+    let install = Command::new(&setup)
+        .args(["install", "--yes", "--output", "jsonl", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(install.status.success());
+    let lines = String::from_utf8(install.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.first().unwrap()["type"], "started");
+    assert_eq!(lines.first().unwrap()["protocol_version"], 1);
+    assert_eq!(lines.last().unwrap()["type"], "completed");
+    assert_eq!(lines.last().unwrap()["outcome"], "success");
+
+    let uninstall = Command::new(&setup)
+        .args(["uninstall", "--yes", "--output", "jsonl", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(uninstall.status.success());
+    let lines = String::from_utf8(uninstall.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.first().unwrap()["type"], "started");
+    assert_eq!(lines.first().unwrap()["protocol_version"], 1);
+    assert_eq!(lines.last().unwrap()["type"], "completed");
+    assert_eq!(lines.last().unwrap()["outcome"], "success");
+}
+
+#[cfg(all(feature = "console", windows, target_arch = "x86_64"))]
+#[test]
+fn console_redirected_install_does_not_prompt() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let manifest_path = project.path().join("zup.toml");
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let app_id = format!("com.example.console-{suffix}");
+    let install_name = format!("ConsoleRuntime-{suffix}");
+    let source = fs::read_to_string(&manifest_path).unwrap();
+    fs::write(
+        &manifest_path,
+        source
+            .replace("com.example.runtime-target", &app_id)
+            .replace("RuntimeTarget", &install_name),
+    )
+    .unwrap();
+    let runtime = Path::new(env!("CARGO_BIN_EXE_zup-setup-console"));
+    let build = run_pluginless_build_with_frontend(
+        project.path(),
+        runtime,
+        "x86_64-pc-windows-msvc",
+        "console",
+    );
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let setup = project.path().join("Setup.exe");
+    let state = project.path().join("state");
+    let install = Command::new(&setup)
+        .args(["install", "--output", "json", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&install.stdout).unwrap();
+    assert_eq!(value["outcome"], "success");
+    let cleanup = Command::new(&setup)
+        .args(["uninstall", "--yes", "--state-root"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(cleanup.status.success());
+}
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[test]
 fn build_rejects_arm64_target_for_x64_runtime_without_plugins() {
     let project = TempDir::new().unwrap();
     write_pluginless_project(project.path());
-    let result = run_pluginless_build(
-        project.path(),
-        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
-        "aarch64-pc-windows-msvc",
-    );
+    let result = run_pluginless_build(project.path(), &setup_runtime(), "aarch64-pc-windows-msvc");
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
@@ -149,7 +414,9 @@ destination = "${install}"
         .arg("--manifest")
         .arg(project.path().join("zup.toml"))
         .arg("--runtime")
-        .arg(env!("CARGO_BIN_EXE_zup-setup"))
+        .arg(setup_runtime())
+        .arg("--frontend")
+        .arg(selected_frontend())
         .arg("--output")
         .arg(&output)
         .output()
@@ -208,7 +475,9 @@ source = "plugins/helper.wasm"
         .args(["build", "--manifest"])
         .arg(project.path().join("zup.toml"))
         .arg("--runtime")
-        .arg(env!("CARGO_BIN_EXE_zup-setup"))
+        .arg(setup_runtime())
+        .arg("--frontend")
+        .arg(selected_frontend())
         .arg("--target")
         .arg(HOST_TARGET)
         .arg("--output")
@@ -323,7 +592,9 @@ component = "docs"
         .args(["build", "--manifest"])
         .arg(project.path().join("zup.toml"))
         .arg("--runtime")
-        .arg(env!("CARGO_BIN_EXE_zup-setup"))
+        .arg(setup_runtime())
+        .arg("--frontend")
+        .arg(selected_frontend())
         .arg("--output")
         .arg(&setup)
         .output()
@@ -444,7 +715,9 @@ fn uninstall_preserves_a_drifted_apps_and_features_entry() {
         .args(["build", "--manifest"])
         .arg(project.path().join("zup.toml"))
         .arg("--runtime")
-        .arg(env!("CARGO_BIN_EXE_zup-setup"))
+        .arg(setup_runtime())
+        .arg("--frontend")
+        .arg(selected_frontend())
         .arg("--output")
         .arg(&setup)
         .output()
@@ -540,7 +813,9 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
             .args(["build", "--manifest"])
             .arg(root.join("zup.toml"))
             .arg("--runtime")
-            .arg(env!("CARGO_BIN_EXE_zup-setup"))
+            .arg(setup_runtime())
+            .arg("--frontend")
+            .arg(selected_frontend())
             .arg("--output")
             .arg(output)
             .output()
@@ -683,12 +958,7 @@ fn corrupt_embedded_setup_does_not_fall_back_to_local_manifest() {
     package[60 + metadata_len + 10] ^= 0x40;
     let package_path = project.path().join("corrupt.zupbundle");
     fs::write(&package_path, package).unwrap();
-    zup_bundle::embed_bundle_file(
-        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
-        &setup,
-        &package_path,
-    )
-    .unwrap();
+    zup_bundle::embed_bundle_file(&setup_runtime(), &setup, &package_path).unwrap();
     assert!(zup_bundle::EmbeddedBundle::open(&setup).is_err());
 
     fs::write(
@@ -720,6 +990,8 @@ user = "${known.local_app_data}/LocalManifest"
 
 #[cfg(all(feature = "build", windows, target_arch = "x86_64"))]
 mod generated_file_lifecycle {
+    use super::setup_runtime;
+
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -734,9 +1006,9 @@ mod generated_file_lifecycle {
     use zup_build::{BuildPlan, ResolvedPlugin};
     use zup_bundle::{BundleWriter, CompiledPluginArtifact, PluginArtifact};
     use zup_core::{
-        App, AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
-        NonEmptyString, PluginBinding, PluginId, RelativePath, ResourceKey, SelectedScope,
-        Sha256Digest, Template, hash_reader,
+        App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
+        Installer, NonEmptyString, PluginBinding, PluginId, RelativePath, ResourceKey,
+        SelectedScope, Sha256Digest, Template, hash_reader,
     };
     use zup_exec::OwnedResource;
     use zup_plugin_contract::{
@@ -766,6 +1038,7 @@ mod generated_file_lifecycle {
         BuildPlan {
             installer: Installer {
                 ui: None,
+                frontend: Frontend::Gui,
                 app: App {
                     id: app_id.clone(),
                     name: NonEmptyString::new("Configure Lifecycle").unwrap(),
@@ -855,12 +1128,7 @@ mod generated_file_lifecycle {
         let package_path = root.join(format!("{name}.zupbundle"));
         fs::write(&package_path, package).unwrap();
         let output = root.join(format!("{name}.exe"));
-        zup_bundle::embed_bundle_file(
-            Path::new(env!("CARGO_BIN_EXE_zup-setup")),
-            &output,
-            &package_path,
-        )
-        .unwrap();
+        zup_bundle::embed_bundle_file(&setup_runtime(), &output, &package_path).unwrap();
         let bundle = zup_bundle::EmbeddedBundle::open(&output).unwrap();
         let plugin_id = PluginId::new(PLUGIN_ID).unwrap();
         let metadata = bundle.plugin_artifact(&plugin_id).unwrap();

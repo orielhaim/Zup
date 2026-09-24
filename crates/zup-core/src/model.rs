@@ -53,6 +53,35 @@ pub enum UiTheme {
     Dark,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Frontend {
+    #[default]
+    Gui,
+    Console,
+    Headless,
+}
+
+impl Frontend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gui => "gui",
+            Self::Console => "console",
+            Self::Headless => "headless",
+        }
+    }
+
+    pub const fn is_headless(self) -> bool {
+        matches!(self, Self::Headless)
+    }
+}
+
+impl std::fmt::Display for Frontend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Installation scope and destination templates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

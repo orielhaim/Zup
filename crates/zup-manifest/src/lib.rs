@@ -28,8 +28,8 @@ pub use schema::{schema, schema_json};
 
 pub use zup_core::{
     App, AppId, Component, ComponentId, Condition, FileExtension, FileMapping, FileType,
-    FileTypeId, Install, InstallDirectory, InstallScope, Installer, NonEmptyString, PathEntry,
-    PluginBinding, PluginId, Privilege, Protocol, ProtocolScheme, Service, ServiceId, ServiceStart,
-    Shortcut, ShortcutLocation, Source, Template, TemplateError, TemplatePart, ValueError,
-    Variable,
+    FileTypeId, Frontend, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
+    PathEntry, PluginBinding, PluginId, Privilege, Protocol, ProtocolScheme, Service, ServiceId,
+    ServiceStart, Shortcut, ShortcutLocation, Source, Template, TemplateError, TemplatePart,
+    ValueError, Variable,
 };

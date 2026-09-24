@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use rstest::rstest;
 use semver::Version;
 use zup_manifest::{
-    App, AppId, Install, InstallDirectory, InstallScope, Manifest, ManifestError, NonEmptyString,
-    SCHEMA_VERSION, Source, Template, Variable, parse, parse_and_compile,
+    App, AppId, Frontend, Install, InstallDirectory, InstallScope, Manifest, ManifestError,
+    NonEmptyString, SCHEMA_VERSION, Source, Template, Variable, parse, parse_and_compile,
 };
 
 fn minimal(scope: &str) -> String {
@@ -128,6 +128,7 @@ fn valid_minimal_manifest() {
         Manifest {
             schema: SCHEMA_VERSION,
             ui: None,
+            frontend: Frontend::Gui,
             app: App {
                 id: AppId::new("com.example.acme").unwrap(),
                 name: NonEmptyString::new("Acme").unwrap(),
@@ -158,6 +159,27 @@ fn valid_minimal_manifest() {
             file_types: Vec::new(),
         }
     );
+}
+
+#[test]
+fn frontend_defaults_to_gui() {
+    let source = minimal("user");
+    let manifest = parse(&source).expect("valid manifest");
+    assert_eq!(manifest.frontend, Frontend::Gui);
+
+    let installer = parse_and_compile(&source).expect("valid installer");
+    assert_eq!(installer.frontend, Frontend::Gui);
+}
+
+#[test]
+fn frontend_override_is_parsed_and_preserved() {
+    let source =
+        minimal("user").replacen("schema = 1\n", "schema = 1\nfrontend = \"console\"\n", 1);
+    let manifest = parse(&source).expect("valid manifest");
+    assert_eq!(manifest.frontend, Frontend::Console);
+
+    let installer = parse_and_compile(&source).expect("valid installer");
+    assert_eq!(installer.frontend, Frontend::Console);
 }
 
 #[test]

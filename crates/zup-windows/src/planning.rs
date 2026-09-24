@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use thiserror::Error;
-use zup_core::{AppId, ResourceKey, SelectedScope, hash_reader};
+use zup_core::{AppId, Frontend, ResourceKey, SelectedScope, hash_reader};
 use zup_exec::{
     ExecutionPlan, InstallLedger, LifecycleAction, ObservedServiceState, ObservedShortcutState,
     OwnedResource, ServiceState, ShortcutState, plan_lifecycle,
@@ -44,6 +44,17 @@ pub fn plan_target_lifecycle(
     scope: SelectedScope,
     target: Option<&TargetPlan>,
     state_root: &Path,
+) -> Result<ExecutionPlan, WindowsPlanError> {
+    plan_target_lifecycle_with_frontend(action, app_id, scope, target, state_root, Frontend::Gui)
+}
+
+pub fn plan_target_lifecycle_with_frontend(
+    action: LifecycleAction,
+    app_id: &AppId,
+    scope: SelectedScope,
+    target: Option<&TargetPlan>,
+    state_root: &Path,
+    frontend: Frontend,
 ) -> Result<ExecutionPlan, WindowsPlanError> {
     let ledger = InstallLedgerStore::new(state_root).load(app_id, scope)?;
     let snapshot = target.map(inspect_target).transpose()?;
@@ -94,17 +105,23 @@ pub fn plan_target_lifecycle(
         let state_root = state_root.to_string_lossy().into_owned();
         let maintenance_path = maintenance.destination.as_path();
         let command = |action: &str| {
-            crate::cmdline::format_command_line(
-                maintenance_path,
-                &[
-                    action.to_owned(),
-                    "--scope".into(),
-                    scope_name.into(),
-                    "--state-root".into(),
-                    state_root.clone(),
-                    "--ui".into(),
-                ],
-            )
+            let mut arguments = vec![
+                action.to_owned(),
+                "--scope".into(),
+                scope_name.into(),
+                "--state-root".into(),
+                state_root.clone(),
+            ];
+            match frontend {
+                Frontend::Gui => arguments.push("--ui".into()),
+                Frontend::Headless => {
+                    arguments.push("--yes".into());
+                    arguments.push("--output".into());
+                    arguments.push("json".into());
+                }
+                Frontend::Console => {}
+            }
+            crate::cmdline::format_command_line(maintenance_path, &arguments)
         };
         let mut values = BTreeMap::new();
         let mut string = |name: &str, value: String| {
@@ -132,6 +149,10 @@ pub fn plan_target_lifecycle(
         string("DisplayIcon", format!("{},0", maintenance_path.display()));
         string("UninstallString", command("uninstall"));
         string("ModifyPath", command("modify"));
+        if frontend == Frontend::Headless {
+            values.insert("NoModify".into(), zup_exec::UninstallEntryValue::Dword(1));
+            values.insert("NoRepair".into(), zup_exec::UninstallEntryValue::Dword(1));
+        }
         values.insert(
             "EstimatedSize".into(),
             zup_exec::UninstallEntryValue::Dword(estimated_kb),

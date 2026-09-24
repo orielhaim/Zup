@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    App, Component, FileMapping, FileType, Install, PathEntry, PluginBinding, Protocol, Service,
-    Shortcut, UiBranding,
+    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, PluginBinding, Protocol,
+    Service, Shortcut, UiBranding,
 };
 
 /// Engine-facing installer representation.
@@ -16,6 +16,8 @@ use crate::model::{
 #[serde(deny_unknown_fields)]
 pub struct Installer {
     pub app: App,
+    #[serde(default)]
+    pub frontend: Frontend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiBranding>,
     pub updates: Option<UpdateConfig>,

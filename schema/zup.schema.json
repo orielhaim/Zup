@@ -13,6 +13,10 @@
     "app": {
       "$ref": "#/$defs/App"
     },
+    "frontend": {
+      "$ref": "#/$defs/Frontend",
+      "default": "gui"
+    },
     "ui": {
       "anyOf": [
         {
@@ -189,6 +193,14 @@
       "examples": [
         "${install}/app.exe",
         "${known.program_files}/Acme"
+      ]
+    },
+    "Frontend": {
+      "type": "string",
+      "enum": [
+        "gui",
+        "console",
+        "headless"
       ]
     },
     "UiBranding": {

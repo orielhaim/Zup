@@ -341,6 +341,8 @@ destination = "${install}"
     let parsed = zup_manifest::parse(manifest).unwrap();
     let installer = zup_manifest::parse_and_compile(manifest).unwrap();
     let build = zup_build::materialize(&project.join("zup.toml"), &parsed, installer).unwrap();
+    let mut build = build;
+    build.installer.frontend = zup_core::Frontend::Console;
     let setup = root.path().join("Setup.exe");
     zup_bundle::build_self_contained_executable(
         &std::env::current_exe().unwrap(),

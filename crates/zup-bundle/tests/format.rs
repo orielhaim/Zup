@@ -1,11 +1,13 @@
 use std::{fs, io::Read, path::Path};
 
 use tempfile::TempDir;
+#[cfg(windows)]
+use zup_bundle::build_self_contained_executable;
 use zup_bundle::{
     AutoPayloadSource, BundleError, BundleWriter, EmbeddedBundle, PayloadError, PayloadSource,
-    embed_bundle_file, read_pe_target,
+    embed_bundle_file, read_pe_frontend, read_pe_target, validate_pe_frontend,
 };
-use zup_core::RelativePath;
+use zup_core::{Frontend, RelativePath};
 
 #[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
@@ -13,6 +15,15 @@ fn pe_target_reads_the_current_test_executable() {
     assert_eq!(
         read_pe_target(&std::env::current_exe().unwrap()).unwrap(),
         zup_plugin_contract::HOST_TARGET,
+    );
+}
+
+#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+fn pe_frontend_reads_the_current_cui_test_executable() {
+    assert_eq!(
+        read_pe_frontend(&std::env::current_exe().unwrap()).unwrap(),
+        Frontend::Console
     );
 }
 
@@ -34,6 +45,56 @@ fn pe_target_rejects_non_pe_bytes() {
     assert!(matches!(
         read_pe_target(&runtime),
         Err(BundleError::Invalid)
+    ));
+}
+
+fn pe_bytes(subsystem: u16) -> Vec<u8> {
+    let mut bytes = vec![0u8; 0x170];
+    bytes[..2].copy_from_slice(b"MZ");
+    bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+    bytes[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+    bytes[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+    bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+    bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+    bytes[0x9c..0x9e].copy_from_slice(&subsystem.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn pe_frontend_reads_cui_and_gui_subsystems() {
+    let root = TempDir::new().unwrap();
+    let cui = root.path().join("cui.exe");
+    let gui = root.path().join("gui.exe");
+    fs::write(&cui, pe_bytes(3)).unwrap();
+    fs::write(&gui, pe_bytes(2)).unwrap();
+    assert_eq!(read_pe_frontend(&cui).unwrap(), Frontend::Console);
+    assert_eq!(read_pe_frontend(&gui).unwrap(), Frontend::Gui);
+}
+
+#[test]
+fn pe_frontend_rejects_unknown_subsystems() {
+    let root = TempDir::new().unwrap();
+    let runtime = root.path().join("runtime.exe");
+    fs::write(&runtime, pe_bytes(9)).unwrap();
+    assert!(matches!(
+        read_pe_frontend(&runtime),
+        Err(BundleError::Invalid)
+    ));
+}
+
+#[test]
+fn pe_frontend_validation_rejects_mismatches() {
+    let root = TempDir::new().unwrap();
+    let cui = root.path().join("cui.exe");
+    fs::write(&cui, pe_bytes(3)).unwrap();
+    assert!(validate_pe_frontend(&cui, Frontend::Console).is_ok());
+    assert!(matches!(
+        validate_pe_frontend(&cui, Frontend::Gui),
+        Err(BundleError::FrontendMismatch {
+            expected: Frontend::Gui,
+            found: Frontend::Console,
+        })
     ));
 }
 
@@ -111,6 +172,46 @@ fn package_is_inside_an_authenticode_hashed_pe_resource_and_deduplicated() {
         fs::metadata(&output).unwrap().len(),
         "package must not be PE overlay data"
     );
+}
+
+#[test]
+fn bundle_records_the_selected_frontend() {
+    let root = TempDir::new().unwrap();
+    let mut build = plan(root.path());
+    build.installer.frontend = Frontend::Console;
+    let bytes = BundleWriter::encode(&build, &[]).unwrap();
+    let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&bytes[60..60 + metadata_len]).unwrap();
+    assert_eq!(metadata["plan"]["installer"]["frontend"], "console");
+}
+
+#[cfg(windows)]
+#[test]
+fn self_contained_build_rejects_frontend_mismatch() {
+    let root = TempDir::new().unwrap();
+    let mut build = plan(root.path());
+    let found = read_pe_frontend(&std::env::current_exe().unwrap()).unwrap();
+    let expected = match found {
+        Frontend::Console => Frontend::Gui,
+        Frontend::Gui => Frontend::Console,
+        Frontend::Headless => Frontend::Gui,
+    };
+    build.installer.frontend = expected;
+    let error = build_self_contained_executable(
+        &std::env::current_exe().unwrap(),
+        &root.path().join("Setup.exe"),
+        &build,
+        &[],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        BundleError::FrontendMismatch {
+            expected: actual_expected,
+            found: actual_found,
+        } if actual_expected == expected && actual_found == found
+    ));
 }
 
 #[test]

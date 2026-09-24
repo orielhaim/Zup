@@ -12,8 +12,9 @@ use zup_exec::{
 };
 use zup_platform::{CommandSpec, TargetPath};
 use zup_runtime::{
-    CancellationHandle, InstallOutcome, RuntimeEvent, RuntimeRequest, SessionError,
-    discover_recovery, run_install_control, run_local_install,
+    CancellationHandle, ExecutionPolicy, InstallOutcome, OverlayPolicy, RuntimeEvent,
+    RuntimeRequest, SessionError, discover_recovery, run_install_control,
+    run_install_control_with_policy, run_local_install,
 };
 
 fn digest(b: &[u8]) -> Sha256Digest {
@@ -73,6 +74,26 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
         payload_overlay_base_root: None,
         recovery_id: None,
     }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn noninteractive_machine_scope_requires_an_already_elevated_process() {
+    if zup_windows::is_process_elevated().unwrap() {
+        return;
+    }
+    let request = sample_request(SelectedScope::Machine);
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let error = run_install_control_with_policy(
+        request,
+        CancellationHandle::new(),
+        events,
+        ExecutionPolicy::NonInteractive,
+        OverlayPolicy::Cleanup,
+    )
+    .await
+    .expect_err("unelevated noninteractive machine install must fail");
+    assert!(matches!(error, SessionError::ElevationRequired));
 }
 
 #[tokio::test]

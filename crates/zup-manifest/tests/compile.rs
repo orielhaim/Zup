@@ -3,7 +3,7 @@
 use std::fs;
 
 use rstest::rstest;
-use zup_core::{ComponentId, InstallScope, Installer, ServiceId};
+use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId};
 use zup_manifest::{ManifestError, compile, parse, parse_and_compile};
 
 fn fixture() -> String {
@@ -46,6 +46,7 @@ fn fixture_compiles_to_ir() {
 
     assert_eq!(installer.app.id.as_str(), "com.acme.acme");
     assert_eq!(installer.app.version.to_string(), "1.4.0");
+    assert_eq!(installer.frontend, Frontend::Gui);
     assert_eq!(installer.install.scope, InstallScope::Either);
     assert_eq!(installer.components.len(), 3);
     assert_eq!(installer.plugins.len(), 1);

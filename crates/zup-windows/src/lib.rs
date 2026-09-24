@@ -58,7 +58,7 @@ pub use pipe::{
     ClientReader, ClientWriter, HELLO_TIMEOUT, PipeError, PipeSecurity, PipeServer, ServerReader,
     ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,
 };
-pub use planning::{WindowsPlanError, plan_target_lifecycle};
+pub use planning::{WindowsPlanError, plan_target_lifecycle, plan_target_lifecycle_with_frontend};
 pub use registry::{
     RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader, read_path_value,
     split_path_value,

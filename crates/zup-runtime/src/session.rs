@@ -26,6 +26,9 @@ pub enum SessionError {
     #[error("plan validation failed: {0}")]
     PlanInvalid(String),
 
+    #[error("elevation required")]
+    ElevationRequired,
+
     #[error("elevation cancelled by user")]
     ElevationCancelled,
 
@@ -58,6 +61,7 @@ pub enum SessionError {
 }
 
 /// High-level install request (frontend-independent).
+#[derive(Clone)]
 pub struct RuntimeRequest {
     pub app_id: AppId,
     pub app_version: semver::Version,
@@ -106,6 +110,24 @@ impl Drop for OverlayCleanup {
             let _ = cleanup_payload_overlay(base, Some(root));
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPolicy {
+    Interactive,
+    NonInteractive,
+}
+
+impl ExecutionPolicy {
+    pub fn allows_elevation(self) -> bool {
+        matches!(self, Self::Interactive)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayPolicy {
+    Cleanup,
+    RetainOnBlocked,
 }
 
 /// Final outcome of a session.
@@ -274,6 +296,23 @@ pub async fn run_install_control(
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
+    run_install_control_with_policy(
+        request,
+        cancel,
+        events,
+        ExecutionPolicy::Interactive,
+        OverlayPolicy::Cleanup,
+    )
+    .await
+}
+
+pub async fn run_install_control_with_policy(
+    request: RuntimeRequest,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+    policy: ExecutionPolicy,
+    overlay_policy: OverlayPolicy,
+) -> Result<InstallOutcome, SessionError> {
     let session_log = SessionLog::start(&request, "lifecycle");
     if let Some(log) = &session_log {
         let _ = events.send(RuntimeEvent::LogPath {
@@ -286,7 +325,7 @@ pub async fn run_install_control(
     }
     let mut cleanup = OverlayCleanup::from_request(&request);
     let recovery = request.recovery_id.is_some();
-    let result = run_install_control_inner(request, cancel, events).await;
+    let result = run_install_control_inner(request, cancel, events, policy).await;
     match &result {
         Ok(outcome) => {
             if let Some(log) = &session_log {
@@ -304,6 +343,12 @@ pub async fn run_install_control(
     }
     match result {
         Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
+        Ok(InstallOutcome::Failed(ref message))
+            if overlay_policy == OverlayPolicy::RetainOnBlocked
+                && message == "blocked by running applications" =>
+        {
+            cleanup.retain()
+        }
         Ok(_) => {}
         Err(_) if recovery => cleanup.retain(),
         Err(_) => {}
@@ -315,8 +360,23 @@ async fn run_install_control_inner(
     request: RuntimeRequest,
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
+    policy: ExecutionPolicy,
 ) -> Result<InstallOutcome, SessionError> {
     validate_runtime_request(&request)?;
+
+    let needs_elevation = request.scope == SelectedScope::Machine
+        || request.execution_plan.summary.requires_elevation;
+    let already_elevated = if needs_elevation {
+        Some(
+            zup_windows::is_process_elevated()
+                .map_err(|e| SessionError::Protocol(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    if needs_elevation && already_elevated == Some(false) && !policy.allows_elevation() {
+        return Err(SessionError::ElevationRequired);
+    }
 
     let mutating_paths = request
         .execution_plan
@@ -347,6 +407,7 @@ async fn run_install_control_inner(
         .iter()
         .map(|path| path.as_path())
         .collect::<Vec<_>>();
+    let _ = events.send(RuntimeEvent::PreflightStarted);
     match zup_windows::preflight(&blocker_paths)
         .map_err(|error| SessionError::Transaction(format!("Restart Manager preflight: {error}")))?
     {
@@ -365,6 +426,7 @@ async fn run_install_control_inner(
                 ));
             }
             let _ = events.send(RuntimeEvent::BlockingProcessesFound {
+                pids: processes.iter().map(|process| process.pid).collect(),
                 detail: detail.join("\n"),
             });
             return Ok(InstallOutcome::Failed(
@@ -373,13 +435,7 @@ async fn run_install_control_inner(
         }
     }
 
-    let needs_elevation = request.scope == SelectedScope::Machine
-        || request.execution_plan.summary.requires_elevation;
-    let already_elevated =
-        zup_windows::is_process_elevated().map_err(|e| SessionError::Protocol(e.to_string()))?;
-
-    if needs_elevation && !already_elevated {
-        // Secure UAC worker route.
+    if needs_elevation && already_elevated == Some(false) {
         return run_elevated_worker(request, cancel, events).await;
     }
 
@@ -639,6 +695,7 @@ async fn run_elevated_worker(
             "worker hello authentication failed".into(),
         ));
     }
+    let _ = events.send(RuntimeEvent::WorkerConnected);
 
     writer
         .send(&zup_protocol::WireEnvelope {
@@ -747,10 +804,16 @@ fn emit_outcome(events: &broadcast::Sender<RuntimeEvent>, outcome: &InstallOutco
         }
         InstallOutcome::RolledBack => {
             let _ = events.send(RuntimeEvent::RollingBack);
+            let _ = events.send(RuntimeEvent::Completed {
+                outcome: "rolled_back".into(),
+            });
         }
         InstallOutcome::Cancelled => {
             let _ = events.send(RuntimeEvent::StateChanged {
                 state: RuntimeState::Cancelled,
+            });
+            let _ = events.send(RuntimeEvent::Completed {
+                outcome: "cancelled".into(),
             });
         }
         InstallOutcome::RecoveryRequired => {

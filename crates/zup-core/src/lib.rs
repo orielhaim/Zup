@@ -25,8 +25,8 @@ pub use ids::{
 };
 pub use installer::{Installer, UpdateConfig};
 pub use model::{
-    App, Component, FileExtension, FileMapping, FileType, Install, InstallDirectory, InstallScope,
-    PathEntry, PluginBinding, Privilege, Protocol, Service, ServiceStart, Shortcut,
+    App, Component, FileExtension, FileMapping, FileType, Frontend, Install, InstallDirectory,
+    InstallScope, PathEntry, PluginBinding, Privilege, Protocol, Service, ServiceStart, Shortcut,
     ShortcutLocation, Source, UiBranding, UiTheme,
 };
 pub use path::{RelativePath, RelativePathError};

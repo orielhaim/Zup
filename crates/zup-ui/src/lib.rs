@@ -389,7 +389,7 @@ impl UiModel {
             RuntimeEvent::WaitingForElevation => self.action("Waiting for approval…"),
             RuntimeEvent::WorkerConnected => self.action("Starting…"),
             RuntimeEvent::PreflightStarted => self.action("Checking for open applications…"),
-            RuntimeEvent::BlockingProcessesFound { detail } => {
+            RuntimeEvent::BlockingProcessesFound { detail, .. } => {
                 self.blockers = detail.lines().map(str::to_owned).collect();
                 self.state = ViewState::Blocked;
             }
@@ -1809,6 +1809,7 @@ mod tests {
         let mut model = installer();
         model.apply(UiEvent::Runtime(RuntimeEvent::BlockingProcessesFound {
             detail: "Editor.exe\nAgent.exe".into(),
+            pids: vec![4820, 7312],
         }));
         assert_eq!(model.state, ViewState::Blocked);
         assert_eq!(model.blockers, ["Editor.exe", "Agent.exe"]);

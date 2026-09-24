@@ -50,7 +50,7 @@ fs-transaction = "0.3"
 walkdir = "2"
 globset = "0.4"
 sha2 = "0.11"
-wasmtime = { version = "=49.0.0", default-features = false, features = [
+wasmtime = { version = "49.0", default-features = false, features = [
   "component-model",
   "runtime",
   "std",
@@ -59,6 +59,9 @@ wasmtime = { version = "=49.0.0", default-features = false, features = [
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+cliclack = "0.5.6"
+console = "0.16"
+indicatif = "0.18"
 inquire = "0.9"
 miette = { version = "7", features = ["fancy"] }
 toml_edit = "0.25"

@@ -278,8 +278,8 @@ mod transaction_fingerprint {
     use tempfile::TempDir;
     use zup_build::BuildPlan;
     use zup_core::{
-        App, AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
-        NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
+        App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
+        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
     };
     use zup_exec::LifecycleAction;
     use zup_plan::{
@@ -311,6 +311,7 @@ mod transaction_fingerprint {
         BuildPlan {
             installer: Installer {
                 ui: None,
+                frontend: Frontend::Gui,
                 app: App {
                     id: AppId::new("com.example.fingerprint").unwrap(),
                     name: NonEmptyString::new("Fingerprint").unwrap(),
