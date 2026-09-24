@@ -34,6 +34,7 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
         app: raw.app,
         source: raw.source,
         install: raw.install,
+        updates: raw.updates,
         components: raw.components,
         files: raw.files,
         shortcuts: raw.shortcuts,
@@ -52,6 +53,7 @@ struct RawManifest {
     app: App,
     source: Source,
     install: Install,
+    updates: Option<crate::model::Updates>,
     #[serde(default)]
     components: Vec<Component>,
     #[serde(default)]

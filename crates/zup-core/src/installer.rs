@@ -15,6 +15,7 @@ use crate::model::{
 #[serde(deny_unknown_fields)]
 pub struct Installer {
     pub app: App,
+    pub updates: Option<UpdateConfig>,
     pub install: Install,
     pub components: Vec<Component>,
     pub files: Vec<FileMapping>,
@@ -24,4 +25,13 @@ pub struct Installer {
     pub protocols: Vec<Protocol>,
     pub file_types: Vec<FileType>,
     pub actions: Vec<Action>,
+}
+
+/// Runtime update trust configuration embedded by the build step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConfig {
+    pub repository: String,
+    pub channel: String,
+    pub trusted_root: Vec<u8>,
 }

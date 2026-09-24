@@ -56,6 +56,25 @@ fn materialize_project(dir: &Path, files_block: &str) -> Result<zup_build::Build
     materialize(&manifest_path, &manifest, installer)
 }
 
+#[test]
+fn trusted_update_root_is_embedded_from_build_time_path() {
+    let dir = project(&[
+        ("dist/app.exe", b"app"),
+        ("keys/root.json", br#"{"signed":{"_type":"root"}}"#),
+    ]);
+    let source = format!(
+        "{}\n[updates]\nrepository = \"https://updates.example.com/acme\"\nchannel = \"stable\"\nroot = \"keys/root.json\"\n",
+        manifest_toml("")
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source).unwrap();
+    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    let updates = plan.installer.updates.unwrap();
+    assert_eq!(updates.repository, "https://updates.example.com/acme");
+    assert_eq!(updates.channel, "stable");
+    assert_eq!(updates.trusted_root, br#"{"signed":{"_type":"root"}}"#);
+}
+
 // --- Source root ---
 
 #[test]

@@ -25,6 +25,7 @@ zup-plan.workspace = true
 zup-platform.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
+zup-update.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

@@ -19,7 +19,7 @@ mod parse;
 
 pub use compile::{compile, parse_and_compile};
 pub use error::ManifestError;
-pub use model::{Manifest, SCHEMA_VERSION};
+pub use model::{Manifest, SCHEMA_VERSION, Updates};
 pub use parse::parse;
 
 pub use zup_core::{

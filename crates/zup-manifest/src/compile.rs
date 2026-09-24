@@ -13,11 +13,27 @@ use crate::model::Manifest;
 /// graph checks, and install-directory coverage. No filesystem access.
 pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
     validate_install(&manifest.install)?;
+    if let Some(updates) = &manifest.updates
+        && (updates.channel.is_empty()
+            || updates.channel.len() > 32
+            || !updates
+                .channel
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || updates.root.as_os_str().is_empty())
+    {
+        return Err(ManifestError::Invalid {
+            message: "[updates] requires a non-empty root path and a channel containing only lowercase ASCII letters, digits, and hyphens".into(),
+            src: None,
+            span: None,
+        });
+    }
     validate_components(&manifest.components)?;
     validate_resources(&manifest)?;
 
     Ok(Installer {
         app: manifest.app,
+        updates: None,
         install: manifest.install,
         components: manifest.components,
         files: manifest.files,

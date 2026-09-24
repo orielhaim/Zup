@@ -1,0 +1,24 @@
+[package]
+name = "zup-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TUF based application update client for zup"
+
+[dependencies]
+futures-util = "0.3"
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
+tough = { version = "0.24", features = ["http"] }
+url = "2"
+uuid.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+aws-lc-rs = "1"
+jiff.workspace = true
+tempfile.workspace = true

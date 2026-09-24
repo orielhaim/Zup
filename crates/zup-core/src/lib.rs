@@ -23,7 +23,7 @@ pub use digest::{DigestParseError, Sha256Digest, hash_reader};
 pub use ids::{
     ActionId, AppId, ComponentId, FileTypeId, NonEmptyString, ProtocolScheme, ServiceId,
 };
-pub use installer::Installer;
+pub use installer::{Installer, UpdateConfig};
 pub use model::{
     Action, ActionKind, App, Command, Component, FileExtension, FileMapping, FileType, Install,
     InstallDirectory, InstallScope, PathEntry, Privilege, Protocol, Service, ServiceStart,

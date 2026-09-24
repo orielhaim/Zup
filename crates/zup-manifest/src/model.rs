@@ -18,6 +18,7 @@ pub struct Manifest {
     pub app: App,
     pub source: Source,
     pub install: Install,
+    pub updates: Option<Updates>,
     pub components: Vec<Component>,
     pub files: Vec<FileMapping>,
     pub shortcuts: Vec<Shortcut>,
@@ -26,4 +27,13 @@ pub struct Manifest {
     pub protocols: Vec<Protocol>,
     pub file_types: Vec<FileType>,
     pub actions: Vec<Action>,
+}
+
+/// Build-time update repository settings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Updates {
+    pub repository: String,
+    pub channel: String,
+    pub root: std::path::PathBuf,
 }

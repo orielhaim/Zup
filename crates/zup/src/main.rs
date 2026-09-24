@@ -25,6 +25,7 @@ enum Commands {
     Build(BuildCommand),
     Install(ManifestCommand),
     Upgrade(ManifestCommand),
+    Update(UpdateCommand),
     Modify(ManifestCommand),
     Repair(RepairCommand),
     Uninstall(UninstallCommand),
@@ -38,6 +39,21 @@ enum Commands {
     /// Print the protocol/worker bootstrap format for tests.
     #[command(hide = true)]
     WorkerHelp,
+}
+
+#[derive(Debug, Args)]
+struct UpdateCommand {
+    #[command(subcommand)]
+    command: Option<UpdateCommands>,
+    #[arg(long, value_enum)]
+    scope: Option<ScopeArg>,
+    #[arg(long)]
+    state_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdateCommands {
+    Check,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -137,6 +153,7 @@ fn main() -> miette::Result<()> {
         Some(Commands::Build(args)) => run_build(args)?,
         Some(Commands::Install(args)) => run_manifest_transition(LifecycleAction::Install, args)?,
         Some(Commands::Upgrade(args)) => run_manifest_transition(LifecycleAction::Upgrade, args)?,
+        Some(Commands::Update(args)) => run_update(args)?,
         Some(Commands::Modify(args)) => run_manifest_transition(LifecycleAction::Modify, args)?,
         Some(Commands::Repair(args)) => run_manifest_transition(
             LifecycleAction::Repair {
@@ -480,6 +497,86 @@ fn run_manifest_transition(action: LifecycleAction, args: ManifestCommand) -> mi
         payload_root,
         recovery_id: None,
     })
+}
+
+fn run_update(args: UpdateCommand) -> miette::Result<()> {
+    let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+    let bundle = zup_bundle::EmbeddedBundle::open(&executable).map_err(|e| {
+        miette::miette!("update configuration requires an installed zup package: {e}")
+    })?;
+    let installer = &bundle.plan().installer;
+    let config = installer
+        .updates
+        .as_ref()
+        .ok_or_else(|| miette::miette!("updates are not configured in this package"))?;
+    let mut scope = if installer.install.scope == zup_core::InstallScope::Machine {
+        SelectedScope::Machine
+    } else {
+        args.scope
+            .map(SelectedScope::from)
+            .unwrap_or(SelectedScope::User)
+    };
+    let mut state_root = choose_state_root(args.state_root.clone(), scope)?;
+    let mut ledger = zup_windows::InstallLedgerStore::new(&state_root)
+        .load(&installer.app.id, scope)
+        .map_err(|e| miette::miette!("installation ledger: {e}"))?;
+    if ledger.is_none()
+        && args.scope.is_none()
+        && args.state_root.is_none()
+        && scope == SelectedScope::User
+    {
+        scope = SelectedScope::Machine;
+        state_root = choose_state_root(None, scope)?;
+        ledger = zup_windows::InstallLedgerStore::new(&state_root)
+            .load(&installer.app.id, scope)
+            .map_err(|e| miette::miette!("installation ledger: {e}"))?;
+    }
+    let ledger =
+        ledger.ok_or_else(|| miette::miette!("installation not found in selected scope"))?;
+    let update_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
+        default_state_root(SelectedScope::User)?
+    } else {
+        state_root.clone()
+    };
+    let client = zup_update::Client::new(config, installer.app.id.as_str(), &update_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| miette::miette!("update runtime: {e}"))?;
+    let result = runtime
+        .block_on(client.check(&ledger.version))
+        .map_err(|e| miette::miette!("update check: {e}"))?;
+    match result {
+        zup_update::CheckResult::UpToDate { current } => {
+            println!("up to date ({current})");
+        }
+        zup_update::CheckResult::UpdateAvailable {
+            current,
+            available,
+            target,
+        } => {
+            println!("update available: {current} → {available}");
+            if args.command.is_none() {
+                let downloaded = update_root
+                    .join("updates")
+                    .join("downloads")
+                    .join(format!("Setup-{}.exe", uuid::Uuid::now_v7()));
+                runtime
+                    .block_on(client.download(&target, &downloaded))
+                    .map_err(|e| miette::miette!("verified update download: {e}"))?;
+                let status = std::process::Command::new(&downloaded)
+                    .arg("upgrade")
+                    .arg("--scope")
+                    .arg(scope.to_string())
+                    .arg("--state-root")
+                    .arg(&state_root)
+                    .spawn()
+                    .map_err(|e| miette::miette!("start verified update: {e}"))?;
+                println!("started verified Setup.exe (pid {})", status.id());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {

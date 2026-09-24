@@ -128,6 +128,7 @@ fn valid_minimal_manifest() {
                     machine: Some(Template::parse("${known.program_files}/Acme").unwrap()),
                 },
             },
+            updates: None,
             components: Vec::new(),
             files: Vec::new(),
             shortcuts: Vec::new(),

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use tracing::{debug, info, info_span};
@@ -25,6 +26,30 @@ pub fn materialize(
     installer: Installer,
 ) -> Result<BuildPlan, BuildError> {
     let project_root = project_root(manifest_path);
+    let mut installer = installer;
+    if let Some(updates) = &manifest.updates {
+        let root_path = project_root.join(&updates.root);
+        let root_file = File::open(&root_path).map_err(|source| BuildError::Io {
+            path: root_path.clone(),
+            source,
+        })?;
+        let mut trusted_root = Vec::new();
+        root_file
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut trusted_root)
+            .map_err(|source| BuildError::Io {
+                path: root_path.clone(),
+                source,
+            })?;
+        if trusted_root.len() > 1024 * 1024 {
+            return Err(BuildError::UpdateRootTooLarge);
+        }
+        installer.updates = Some(zup_core::UpdateConfig {
+            repository: updates.repository.clone(),
+            channel: updates.channel.clone(),
+            trusted_root,
+        });
+    }
     let source_root = resolve_source_root(&project_root, &manifest.source.directory)?;
 
     let span = info_span!(

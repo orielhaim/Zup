@@ -120,6 +120,10 @@ pub enum BuildError {
     #[diagnostic(code(zup_build::size_overflow))]
     SizeOverflow,
 
+    #[error("trusted update root exceeds the 1 MiB build limit")]
+    #[diagnostic(code(zup_build::update_root_too_large))]
+    UpdateRootTooLarge,
+
     /// An I/O error occurred while resolving the source root.
     #[error("I/O error at `{path}`")]
     #[diagnostic(code(zup_build::io))]
