@@ -226,6 +226,18 @@ fn move_durable_publishes() {
 }
 
 #[test]
+fn move_durable_accepts_embedded_separator_path() {
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("work/a.bin");
+    let destination = dir.path().join("target/b.bin");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"payload").unwrap();
+    move_durable(&source, &destination).unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+}
+
+#[test]
 fn volume_root_is_absolute() {
     let dir = TempDir::new().unwrap();
     let v = volume_root(dir.path()).unwrap();
@@ -281,7 +293,6 @@ fn fresh_install_create() {
                 destination: dest.display().to_string(),
             },
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -304,7 +315,6 @@ fn fresh_install_create() {
             },
             delta: zup_exec::Delta::Create,
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 2,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -349,7 +359,6 @@ fn update_replace_keeps_backup() {
                 destination: dest.display().to_string(),
             },
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -365,7 +374,6 @@ fn update_replace_keeps_backup() {
             },
             delta: zup_exec::Delta::Replace,
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 2,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -415,7 +423,6 @@ fn plan_drift_create_when_target_appears() {
             },
             delta: zup_exec::Delta::Create,
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -455,7 +462,6 @@ fn plan_drift_replace_when_target_changed() {
             },
             delta: zup_exec::Delta::Replace,
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -484,7 +490,6 @@ fn reconcile_absent_and_applied() {
         id: OperationId::new("create"),
         phase: zup_transaction::Phase::FileMutation,
         kind: zup_transaction::NodeKind::Barrier,
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 0,
         meta: zup_transaction::NodeMeta::default(),
     };
@@ -526,7 +531,6 @@ fn large_file_staged_streaming() {
                 destination: dest.display().to_string(),
             },
         },
-        rollback: zup_transaction::RollbackCapability::Automatic,
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
     };

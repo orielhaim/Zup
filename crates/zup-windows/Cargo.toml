@@ -47,8 +47,10 @@ windows = { version = "0.62", features = [
 [build-dependencies]
 windows-bindgen.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["windows-bindgen"]
+
 [dev-dependencies]
-rstest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 zup-build.workspace = true

@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    ActionId, ActionKind, Command, FileExtension, FileTypeId, NonEmptyString, Privilege,
-    ProtocolScheme, RelativePath, ResourceKey, ServiceId, ServiceStart, Sha256Digest,
-    ShortcutLocation, Template,
+    FileExtension, FileTypeId, NonEmptyString, Privilege, ProtocolScheme, RelativePath,
+    ResourceKey, ServiceId, ServiceStart, Sha256Digest, ShortcutLocation, Template,
 };
 
 /// One active payload file in the desired installation.
@@ -73,20 +72,4 @@ pub struct PlannedFileType {
     pub description: Option<String>,
     pub executable: Template,
     pub privilege: Privilege,
-}
-
-/// One active opaque external action.
-///
-/// Side effects are invisible to the planner and future execution planner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedExternalAction {
-    pub key: ResourceKey,
-    pub id: ActionId,
-    pub kind: ActionKind,
-    pub apply: Command,
-    pub rollback: Option<Command>,
-    pub uninstall: Option<Command>,
-    pub privilege: Privilege,
-    /// Marker retained so planners never assume they understand side effects.
-    pub opaque: bool,
 }

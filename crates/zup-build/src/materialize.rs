@@ -14,6 +14,7 @@ use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
 use crate::plan::{BuildPlan, ResolvedFile};
+use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
 use crate::windows::validate_windows_destination;
 
 /// Materialize installer sources into a deterministic build plan.
@@ -26,6 +27,7 @@ pub fn materialize(
     installer: Installer,
 ) -> Result<BuildPlan, BuildError> {
     let project_root = project_root(manifest_path);
+    validate_plugin_declaration_count(manifest.plugins.len(), installer.plugins.len())?;
     let mut installer = installer;
     if let Some(updates) = &manifest.updates {
         let root_path = project_root.join(&updates.root);
@@ -51,6 +53,7 @@ pub fn materialize(
         });
     }
     let source_root = resolve_source_root(&project_root, &manifest.source.directory)?;
+    let plugins = resolve_plugins(&project_root, &manifest.plugins, &installer)?;
 
     let span = info_span!(
         "materialize",
@@ -94,6 +97,7 @@ pub fn materialize(
 
     Ok(BuildPlan {
         installer,
+        plugins,
         files: resolved,
         total_size,
     })

@@ -13,10 +13,10 @@ use crate::observe::{
     ObservedProtocolState, ObservedServiceState, ObservedShortcutState, PathEntryState,
 };
 use crate::operation::{
-    Conflict, ExecutionPlan, ExecutionSummary, ExternalActionOperation, FileOperation,
-    FileOperationKind, FilePrecondition, FileTypeOperation, FileTypeOperationKind, PathOperation,
-    PathOperationKind, ProtocolOperation, ProtocolOperationKind, ServiceOperation,
-    ServiceOperationKind, ShortcutOperation, ShortcutOperationKind,
+    Conflict, ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
+    FileTypeOperation, FileTypeOperationKind, PathOperation, PathOperationKind, ProtocolOperation,
+    ProtocolOperationKind, ServiceOperation, ServiceOperationKind, ShortcutOperation,
+    ShortcutOperationKind,
 };
 use crate::{
     ExtensionState, InstallLedger, OwnedResource, ProgIdState, ProtocolState, ServiceState,
@@ -75,7 +75,6 @@ pub fn plan_execution(
     let services = plan_services(target, snapshot, ledger, &mut summary);
     let protocols = plan_protocols(target, snapshot, ledger, &mut summary);
     let file_types = plan_file_types(target, snapshot, ledger, &mut summary);
-    let external_actions = plan_actions(target, &mut summary);
 
     info!(
         create = summary.files_create
@@ -90,7 +89,6 @@ pub fn plan_execution(
             + summary.services_conflict
             + summary.protocols_conflict
             + summary.file_types_conflict,
-        opaque = summary.opaque_actions,
         "execution plan complete"
     );
 
@@ -105,7 +103,6 @@ pub fn plan_execution(
         protocols,
         file_types,
         uninstall_entries: Vec::new(),
-        external_actions,
         summary,
     })
 }
@@ -912,27 +909,6 @@ fn extension_observed_matches(
         ) => a.eq_ignore_ascii_case(b),
         _ => false,
     }
-}
-
-fn plan_actions(
-    target: &TargetPlan,
-    summary: &mut ExecutionSummary,
-) -> Vec<ExternalActionOperation> {
-    let mut out = Vec::with_capacity(target.actions.len());
-    for action in &target.actions {
-        summary.opaque_actions += 1;
-        out.push(ExternalActionOperation {
-            key: action.key.clone(),
-            id: action.id.clone(),
-            kind: action.kind,
-            apply: action.apply.clone(),
-            rollback: action.rollback.clone(),
-            uninstall: action.uninstall.clone(),
-            privilege: action.privilege,
-            opaque: action.opaque,
-        });
-    }
-    out
 }
 
 /// Semantic command equality (path case/separator-insensitive; args exact).

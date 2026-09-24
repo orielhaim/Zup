@@ -1,26 +1,104 @@
-//! Desired-state planner: BuildPlan + choices → InstallPlan.
-
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracing::{info, info_span};
 use zup_build::BuildPlan;
-use zup_core::{ActionKind, ComponentId, Condition, InstallScope, Privilege, Template};
+use zup_core::{
+    ComponentId, Condition, InstallScope, PluginBinding, PluginId, Privilege, ResourceKey,
+};
 
 use crate::error::{PlanError, SelectedScope};
-use crate::plan_types::{InstallPlan, PlanSummary};
+use crate::plan_types::InstallPlan;
+use crate::plugins::{
+    CancellationQuery, CollisionIndex, MAX_PLUGIN_STRING_BYTES, PlannedInstallation,
+    PluginExecutor, PluginHostFacts, PluginPlanningContext, merge_plugin_proposal, sort_resources,
+    summarize_plan,
+};
 use crate::request::PlanRequest;
 use crate::resolve::{resolve_install_directory, resolve_template};
 use crate::resources::{
-    PlannedExternalAction, PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol,
-    PlannedService, PlannedShortcut,
+    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
+    PlannedShortcut,
 };
 use crate::select::select_components;
-use zup_core::ResourceKey;
 
-/// Compute a portable desired installation plan.
-///
-/// Pure and deterministic. Does not inspect the target machine.
+struct PreparedPlan {
+    plan: InstallPlan,
+    active_plugins: Vec<PluginBinding>,
+}
+
 pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, PlanError> {
+    let prepared = prepare_plan(build, request)?;
+    if let Some(binding) = prepared.active_plugins.first() {
+        return Err(PlanError::PluginPlanningRequired {
+            plugin_id: binding.id.clone(),
+        });
+    }
+    Ok(prepared.plan)
+}
+
+pub fn plan_with_plugins<E>(
+    build: &BuildPlan,
+    request: &PlanRequest,
+    host: PluginHostFacts,
+    executor: &mut E,
+    cancellation: &dyn CancellationQuery,
+) -> Result<PlannedInstallation, PlanError>
+where
+    E: PluginExecutor + ?Sized,
+{
+    let mut prepared = prepare_plan(build, request)?;
+    if prepared.active_plugins.is_empty() {
+        return Ok(PlannedInstallation {
+            plan: prepared.plan,
+            generated_files: Vec::new(),
+        });
+    }
+
+    let context = PluginPlanningContext {
+        app: prepared.plan.app.clone(),
+        install_directory: prepared.plan.install_directory.clone(),
+        scope: prepared.plan.scope,
+        selected_components: prepared.plan.selected_components.clone(),
+        host,
+    };
+    let mut collisions = CollisionIndex::from_plan(&prepared.plan)?;
+    let mut generated_files = Vec::new();
+    let mut total_resources = 0usize;
+    let mut total_generated_bytes = 0u64;
+
+    for binding in &prepared.active_plugins {
+        if cancellation.is_cancelled() {
+            return Err(PlanError::PluginCancelled {
+                plugin_id: binding.id.clone(),
+            });
+        }
+        let proposal = executor
+            .plan(binding, &context, cancellation)
+            .map_err(|failure| PlanError::PluginExecutionFailed {
+                plugin_id: binding.id.clone(),
+                failure,
+            })?;
+        merge_plugin_proposal(
+            &mut prepared.plan,
+            &mut generated_files,
+            &mut collisions,
+            binding,
+            proposal,
+            &mut total_resources,
+            &mut total_generated_bytes,
+        )?;
+    }
+
+    sort_resources(&mut prepared.plan, &mut generated_files);
+    prepared.plan.summary =
+        summarize_plan(&prepared.plan, prepared.plan.selected_components.len())?;
+    Ok(PlannedInstallation {
+        plan: prepared.plan,
+        generated_files,
+    })
+}
+
+fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan, PlanError> {
     let installer = &build.installer;
     let scope = request.scope;
 
@@ -187,38 +265,6 @@ pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, Pla
         });
     }
 
-    let mut actions = Vec::new();
-    for action in &installer.actions {
-        if !is_active(
-            action.component.as_ref(),
-            action.when.as_ref(),
-            &selected_set,
-        ) {
-            continue;
-        }
-        let privilege = action.privilege.unwrap_or(scope_privilege);
-        actions.push(PlannedExternalAction {
-            key: ResourceKey::ExternalAction {
-                id: action.id.clone(),
-            },
-            id: action.id.clone(),
-            kind: action.kind,
-            apply: resolve_command(&action.apply, &installer.app, &install_directory)?,
-            rollback: action
-                .rollback
-                .as_ref()
-                .map(|command| resolve_command(command, &installer.app, &install_directory))
-                .transpose()?,
-            uninstall: action
-                .uninstall
-                .as_ref()
-                .map(|command| resolve_command(command, &installer.app, &install_directory))
-                .transpose()?,
-            privilege,
-            opaque: matches!(action.kind, ActionKind::Exec),
-        });
-    }
-
     validate_active_collisions(
         &files,
         &shortcuts,
@@ -226,35 +272,9 @@ pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, Pla
         &services,
         &protocols,
         &file_types,
-        &actions,
     )?;
 
-    let summary = summarize(
-        &files,
-        &shortcuts,
-        &path_entries,
-        &services,
-        &protocols,
-        &file_types,
-        &actions,
-        selected.len(),
-        scope,
-    )?;
-
-    info!(
-        active_files = files.len(),
-        active_resources = shortcuts.len()
-            + path_entries.len()
-            + services.len()
-            + protocols.len()
-            + file_types.len()
-            + actions.len(),
-        install_bytes = summary.install_bytes,
-        requires_elevation = summary.requires_elevation,
-        "plan complete"
-    );
-
-    Ok(InstallPlan {
+    let mut plan = InstallPlan {
         app: installer.app.clone(),
         scope,
         install_directory,
@@ -265,19 +285,65 @@ pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, Pla
         services,
         protocols,
         file_types,
-        actions,
-        summary,
-    })
-}
+        summary: crate::plan_types::PlanSummary {
+            file_count: 0,
+            install_bytes: 0,
+            selected_component_count: 0,
+            resource_count: 0,
+            requires_elevation: false,
+        },
+    };
+    plan.summary = summarize_plan(&plan, plan.selected_components.len())?;
 
-fn resolve_command(
-    command: &zup_core::Command,
-    app: &zup_core::App,
-    install_directory: &Template,
-) -> Result<zup_core::Command, PlanError> {
-    Ok(zup_core::Command {
-        command: resolve_template(&command.command, app, install_directory)?,
-        args: command.args.clone(),
+    for plugin in &installer.plugins {
+        if plugin.id.as_str().len() > MAX_PLUGIN_STRING_BYTES {
+            return Err(PlanError::PluginResourceRejected {
+                plugin_id: plugin.id.clone(),
+                resource: "plugin id".to_owned(),
+                reason: format!("plugin id exceeds {} bytes", MAX_PLUGIN_STRING_BYTES),
+            });
+        }
+    }
+
+    let mut plugin_ids: BTreeMap<String, PluginId> = BTreeMap::new();
+    let mut active_plugins = Vec::new();
+    for plugin in &installer.plugins {
+        if !is_active(
+            plugin.component.as_ref(),
+            plugin.when.as_ref(),
+            &selected_set,
+        ) {
+            continue;
+        }
+        let identity = plugin.id.as_str().to_ascii_lowercase();
+        if let Some(existing) = plugin_ids.get(&identity) {
+            return Err(PlanError::PluginResourceCollision {
+                plugin_id: Some(plugin.id.clone()),
+                resource: "plugin id".to_owned(),
+                identity,
+                existing_plugin_id: Some(existing.clone()),
+                existing_resource: "plugin declaration".to_owned(),
+            });
+        }
+        plugin_ids.insert(identity, plugin.id.clone());
+        active_plugins.push(plugin.clone());
+    }
+
+    info!(
+        active_files = plan.files.len(),
+        active_resources = plan.shortcuts.len()
+            + plan.path_entries.len()
+            + plan.services.len()
+            + plan.protocols.len()
+            + plan.file_types.len(),
+        install_bytes = plan.summary.install_bytes,
+        requires_elevation = plan.summary.requires_elevation,
+        "plan complete"
+    );
+
+    Ok(PreparedPlan {
+        plan,
+        active_plugins,
     })
 }
 
@@ -311,7 +377,6 @@ fn is_active(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_active_collisions(
     files: &[PlannedFile],
     shortcuts: &[PlannedShortcut],
@@ -319,7 +384,6 @@ fn validate_active_collisions(
     services: &[PlannedService],
     protocols: &[PlannedProtocol],
     file_types: &[PlannedFileType],
-    actions: &[PlannedExternalAction],
 ) -> Result<(), PlanError> {
     let mut file_keys = BTreeSet::new();
     for file in files {
@@ -382,61 +446,5 @@ fn validate_active_collisions(
         }
     }
 
-    let mut action_keys = BTreeSet::new();
-    for action in actions {
-        if !action_keys.insert(action.key.clone()) {
-            return Err(PlanError::ActiveActionCollision {
-                id: action.id.to_string(),
-            });
-        }
-    }
-
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn summarize(
-    files: &[PlannedFile],
-    shortcuts: &[PlannedShortcut],
-    path_entries: &[PlannedPathEntry],
-    services: &[PlannedService],
-    protocols: &[PlannedProtocol],
-    file_types: &[PlannedFileType],
-    actions: &[PlannedExternalAction],
-    selected_component_count: usize,
-    scope: SelectedScope,
-) -> Result<PlanSummary, PlanError> {
-    let mut install_bytes = 0u64;
-    for file in files {
-        install_bytes = install_bytes
-            .checked_add(file.size)
-            .ok_or(PlanError::SizeOverflow)?;
-    }
-
-    let resource_count = shortcuts.len()
-        + path_entries.len()
-        + services.len()
-        + protocols.len()
-        + file_types.len()
-        + actions.len();
-
-    let requires_elevation = scope == SelectedScope::Machine
-        || files.iter().any(|r| r.privilege == Privilege::Machine)
-        || shortcuts.iter().any(|r| r.privilege == Privilege::Machine)
-        || path_entries
-            .iter()
-            .any(|r| r.privilege == Privilege::Machine)
-        || services.iter().any(|r| r.privilege == Privilege::Machine)
-        || protocols.iter().any(|r| r.privilege == Privilege::Machine)
-        || file_types.iter().any(|r| r.privilege == Privilege::Machine)
-        || actions.iter().any(|r| r.privilege == Privilege::Machine);
-
-    Ok(PlanSummary {
-        file_count: files.len(),
-        install_bytes,
-        selected_component_count,
-        resource_count,
-        opaque_action_count: actions.len(),
-        requires_elevation,
-    })
 }

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use zup_core::{ComponentId, Condition, Installer, RelativePath, Template};
+use zup_core::{ComponentId, Condition, Installer, PluginId, RelativePath, Template};
 
 use crate::digest::Sha256Digest;
 
@@ -29,11 +29,21 @@ pub struct ResolvedFile {
     pub condition: Option<Condition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlugin {
+    pub id: PluginId,
+    pub source: PathBuf,
+    pub source_relative: RelativePath,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+}
+
 /// Deterministic materialization result for one project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildPlan {
     /// Normalized installer IR the plan was produced from.
     pub installer: Installer,
+    pub plugins: Vec<ResolvedPlugin>,
     /// Resolved payload files, sorted by destination then source_relative.
     pub files: Vec<ResolvedFile>,
     /// Sum of file sizes.

@@ -11,14 +11,17 @@
 //! `DurableError::Unavailable` rather than lying.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
 use crate::fs_bindings::{
-    self, CREATE_ALWAYS, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
+    self, CREATE_NEW, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
     GetVolumePathNameW, HANDLE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
+
+static DURABLE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Durability errors. `Unavailable` means the platform cannot meet the contract.
 #[derive(Debug, Error)]
@@ -133,8 +136,8 @@ pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), Durable
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    path.with_file_name(format!(".{name}.zup-tmp"))
+    let sequence = DURABLE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".zup-{:x}-{sequence:x}", std::process::id()))
 }
 
 fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
@@ -147,7 +150,7 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
         })?;
     }
 
-    let wide = to_wide(&path.display().to_string());
+    let wide = to_wide_path(path);
     // SAFETY: `wide` is a valid NUL-terminated UTF-16 string.
     let handle = unsafe {
         CreateFileW(
@@ -155,7 +158,7 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
             GENERIC_WRITE,
             0,
             std::ptr::null_mut(),
-            CREATE_ALWAYS,
+            CREATE_NEW,
             fs_bindings::FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
         )
@@ -201,8 +204,8 @@ fn flush(handle: HANDLE) -> Result<(), DurableError> {
 }
 
 fn publish_replace(from: &Path, to: &Path) -> Result<(), DurableError> {
-    let from_w = to_wide(&from.display().to_string());
-    let to_w = to_wide(&to.display().to_string());
+    let from_w = to_wide_path(from);
+    let to_w = to_wide_path(to);
     // SAFETY: both paths are valid NUL-terminated UTF-16 strings.
     let ok = unsafe {
         MoveFileExW(
@@ -221,8 +224,8 @@ fn publish_replace(from: &Path, to: &Path) -> Result<(), DurableError> {
 }
 
 fn publish_new(from: &Path, to: &Path) -> Result<(), DurableError> {
-    let from_w = to_wide(&from.display().to_string());
-    let to_w = to_wide(&to.display().to_string());
+    let from_w = to_wide_path(from);
+    let to_w = to_wide_path(to);
     // SAFETY: both paths are valid NUL-terminated UTF-16 strings.
     let ok = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
     if ok == 0 {
@@ -339,6 +342,20 @@ fn sanitize(s: &str) -> String {
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn to_wide_path(path: &Path) -> Vec<u16> {
+    let value = path.to_string_lossy().replace('/', "\\");
+    let value = if value.starts_with(r"\\?\") {
+        value
+    } else if let Some(value) = value.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{value}")
+    } else if path.is_absolute() {
+        format!(r"\\?\{value}")
+    } else {
+        value
+    };
+    to_wide(&value)
 }
 
 fn win32_err(path: &Path, api: &str) -> DurableError {

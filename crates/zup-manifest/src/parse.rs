@@ -3,12 +3,12 @@
 use serde::Deserialize;
 use serde_spanned::Spanned;
 use zup_core::{
-    Action, App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut,
-    Source,
+    App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
 };
 
 use crate::error::{ManifestError, named_source, source_span};
 use crate::model::{Manifest, SCHEMA_VERSION};
+use crate::plugin::{Plugin, is_valid_source};
 
 /// Parse and field-validate a `zup.toml` manifest from source text.
 ///
@@ -29,6 +29,16 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
         });
     }
 
+    for plugin in &raw.plugins {
+        if !is_valid_source(&plugin.source) {
+            return Err(ManifestError::InvalidPluginSource {
+                path: plugin.source.clone(),
+                src: Some(named_source(source)),
+                span: None,
+            });
+        }
+    }
+
     Ok(Manifest {
         schema,
         app: raw.app,
@@ -36,13 +46,13 @@ pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
         install: raw.install,
         updates: raw.updates,
         components: raw.components,
+        plugins: raw.plugins,
         files: raw.files,
         shortcuts: raw.shortcuts,
         path: raw.path,
         services: raw.services,
         protocols: raw.protocols,
         file_types: raw.file_types,
-        actions: raw.actions,
     })
 }
 
@@ -57,6 +67,8 @@ struct RawManifest {
     #[serde(default)]
     components: Vec<Component>,
     #[serde(default)]
+    plugins: Vec<Plugin>,
+    #[serde(default)]
     files: Vec<FileMapping>,
     #[serde(default)]
     shortcuts: Vec<Shortcut>,
@@ -68,6 +80,4 @@ struct RawManifest {
     protocols: Vec<Protocol>,
     #[serde(default)]
     file_types: Vec<FileType>,
-    #[serde(default)]
-    actions: Vec<Action>,
 }

@@ -5,8 +5,8 @@ use zup_core::{App, ComponentId, Template};
 
 use crate::error::SelectedScope;
 use crate::resources::{
-    PlannedExternalAction, PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol,
-    PlannedService, PlannedShortcut,
+    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
+    PlannedShortcut,
 };
 
 /// Derived summary of a planned installation.
@@ -16,7 +16,6 @@ pub struct PlanSummary {
     pub install_bytes: u64,
     pub selected_component_count: usize,
     pub resource_count: usize,
-    pub opaque_action_count: usize,
     pub requires_elevation: bool,
 }
 
@@ -37,7 +36,6 @@ pub struct InstallPlan {
     pub services: Vec<PlannedService>,
     pub protocols: Vec<PlannedProtocol>,
     pub file_types: Vec<PlannedFileType>,
-    pub actions: Vec<PlannedExternalAction>,
 
     pub summary: PlanSummary,
 }

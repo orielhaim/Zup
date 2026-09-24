@@ -58,11 +58,19 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two actions share an id.
-    #[error("duplicate action id `{id}`")]
-    #[diagnostic(code(zup_manifest::duplicate_action))]
-    DuplicateAction {
+    #[error("duplicate plugin id `{id}`")]
+    #[diagnostic(code(zup_manifest::duplicate_plugin))]
+    DuplicatePlugin {
         id: String,
+        #[source_code]
+        src: Option<Src>,
+        span: Option<SourceSpan>,
+    },
+
+    #[error("invalid plugin source `{path}`")]
+    #[diagnostic(code(zup_manifest::invalid_plugin_source))]
+    InvalidPluginSource {
+        path: String,
         #[source_code]
         src: Option<Src>,
         span: Option<SourceSpan>,
@@ -217,12 +225,21 @@ impl ManifestError {
                 span,
                 src: existing.or(src),
             },
-            Self::DuplicateAction {
+            Self::DuplicatePlugin {
                 id,
                 span,
                 src: existing,
-            } => Self::DuplicateAction {
+            } => Self::DuplicatePlugin {
                 id,
+                span,
+                src: existing.or(src),
+            },
+            Self::InvalidPluginSource {
+                path,
+                span,
+                src: existing,
+            } => Self::InvalidPluginSource {
+                path,
                 span,
                 src: existing.or(src),
             },

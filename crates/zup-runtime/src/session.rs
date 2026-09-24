@@ -1,6 +1,6 @@
 //! Installation session dispatch, local execution, and recovery.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use zup_bundle::AutoPayloadSource;
@@ -12,7 +12,9 @@ use zup_transaction::{
     TransactionOutcome, TransactionStore, compile_transaction,
 };
 use zup_windows::{
-    FilePrecondition, InstallLedgerStore, InstallationLock, NullProgress, WindowsFileExecutor,
+    FilePrecondition, InstallLedgerStore, InstallationLock, NullProgress,
+    PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayIdentity, WindowsFileExecutor,
+    cleanup_payload_overlay, payload_overlay_base_root, verify_payload_overlay,
 };
 
 use crate::events::{RuntimeEvent, RuntimeState};
@@ -64,7 +66,45 @@ pub struct RuntimeRequest {
     pub work_root: PathBuf,
     /// Payload root for development `DirectoryPayloadSource`.
     pub payload_root: PathBuf,
+    pub payload_overlay_root: Option<PathBuf>,
+    pub payload_overlay_base_root: Option<PathBuf>,
     pub recovery_id: Option<TransactionId>,
+}
+
+struct OverlayCleanup {
+    base: Option<PathBuf>,
+    root: Option<PathBuf>,
+    retain: bool,
+}
+
+impl OverlayCleanup {
+    fn from_request(request: &RuntimeRequest) -> Self {
+        let root = request.payload_overlay_root.clone();
+        let base = request.payload_overlay_base_root.clone().or_else(|| {
+            root.as_ref()
+                .and_then(|_| payload_overlay_base_root(&request.state_root, request.scope).ok())
+        });
+        Self {
+            base,
+            root,
+            retain: false,
+        }
+    }
+
+    fn retain(&mut self) {
+        self.retain = true;
+    }
+}
+
+impl Drop for OverlayCleanup {
+    fn drop(&mut self) {
+        if !self.retain
+            && let Some(root) = &self.root
+            && let Some(base) = &self.base
+        {
+            let _ = cleanup_payload_overlay(base, Some(root));
+        }
+    }
 }
 
 /// Final outcome of a session.
@@ -101,6 +141,12 @@ impl CancellationHandle {
 
     pub fn probe(&self) -> TokenProbe {
         TokenProbe(self.token.clone())
+    }
+}
+
+impl zup_plan::CancellationQuery for CancellationHandle {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
     }
 }
 
@@ -227,9 +273,24 @@ pub async fn run_install_control(
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
-    if request.recovery_id.is_none() {
-        validate_request(&request)?;
+    let mut cleanup = OverlayCleanup::from_request(&request);
+    let recovery = request.recovery_id.is_some();
+    let result = run_install_control_inner(request, cancel, events).await;
+    match result {
+        Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
+        Ok(_) => {}
+        Err(_) if recovery => cleanup.retain(),
+        Err(_) => {}
     }
+    result
+}
+
+async fn run_install_control_inner(
+    request: RuntimeRequest,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
+    validate_runtime_request(&request)?;
 
     let mutating_paths = request
         .execution_plan
@@ -324,6 +385,23 @@ async fn run_local_install_control(
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
+    let mut cleanup = OverlayCleanup::from_request(&request);
+    let recovery = request.recovery_id.is_some();
+    let result = run_local_install_control_inner(request, cancel, events).await;
+    match result {
+        Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
+        Ok(_) => {}
+        Err(_) if recovery => cleanup.retain(),
+        Err(_) => {}
+    }
+    result
+}
+
+async fn run_local_install_control_inner(
+    request: RuntimeRequest,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
     if (request.scope == SelectedScope::Machine
         || request.execution_plan.summary.requires_elevation)
         && !zup_windows::is_process_elevated().map_err(|e| SessionError::Protocol(e.to_string()))?
@@ -335,9 +413,7 @@ async fn run_local_install_control(
     let _ = events.send(RuntimeEvent::StateChanged {
         state: RuntimeState::Preparing,
     });
-    if request.recovery_id.is_none() {
-        validate_request(&request)?;
-    }
+    validate_runtime_request(&request)?;
     let _ = events.send(RuntimeEvent::StateChanged {
         state: RuntimeState::Executing,
     });
@@ -394,6 +470,36 @@ async fn run_elevated_worker(
             || record.app_version != request.app_version
         {
             return Err(SessionError::Protocol("recovery identity mismatch".into()));
+        }
+        let identity = PayloadOverlayIdentity::from_transaction(
+            request.app_id.clone(),
+            request.app_version.clone(),
+            request.scope,
+            &record.plan,
+        )
+        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+        validate_overlay_identity(
+            &request.state_root,
+            request.scope,
+            &identity,
+            request.payload_overlay_root.as_deref(),
+            request.payload_overlay_base_root.as_deref(),
+            true,
+        )
+        .map_err(SessionError::PlanInvalid)?;
+        if identity.has_files() {
+            verify_payload_overlay(
+                request
+                    .payload_overlay_base_root
+                    .as_deref()
+                    .expect("validated overlay base"),
+                &identity,
+                request
+                    .payload_overlay_root
+                    .as_deref()
+                    .expect("validated overlay path"),
+            )
+            .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
         }
         record.plan
     } else {
@@ -538,6 +644,14 @@ async fn run_elevated_worker(
                 }
                 .into(),
                 payload_root: request.payload_root.display().to_string(),
+                payload_overlay_root: request
+                    .payload_overlay_root
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                payload_overlay_base_root: request
+                    .payload_overlay_base_root
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
                 state_root: request.state_root.display().to_string(),
                 work_root: request.work_root.display().to_string(),
                 recovery_id: request.recovery_id.map(|id| id.as_uuid()),
@@ -583,6 +697,10 @@ async fn run_elevated_worker(
                         "recovery_required" => InstallOutcome::RecoveryRequired,
                         other => return Err(SessionError::Protocol(format!("unknown worker outcome {other}"))),
                     };
+                    let mut cleanup = OverlayCleanup::from_request(&request);
+                    if matches!(outcome, InstallOutcome::RecoveryRequired) {
+                        cleanup.retain();
+                    }
                     emit_outcome(&events, &outcome);
                     return Ok(outcome);
                 }
@@ -624,7 +742,121 @@ fn emit_outcome(events: &broadcast::Sender<RuntimeEvent>, outcome: &InstallOutco
     }
 }
 
+fn validate_runtime_request(request: &RuntimeRequest) -> Result<(), SessionError> {
+    let Some(id) = request.recovery_id else {
+        return validate_request(request);
+    };
+    let record = FilesystemTransactionStore::new(&request.state_root)
+        .load(&id)
+        .map_err(|error| SessionError::Transaction(error.to_string()))?;
+    if record.app_id != request.app_id
+        || record.app_version != request.app_version
+        || record.scope != request.scope
+    {
+        return Err(SessionError::Protocol("recovery identity mismatch".into()));
+    }
+    let identity = PayloadOverlayIdentity::from_transaction(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &record.plan,
+    )
+    .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+    validate_overlay_identity(
+        &request.state_root,
+        request.scope,
+        &identity,
+        request.payload_overlay_root.as_deref(),
+        request.payload_overlay_base_root.as_deref(),
+        true,
+    )
+    .map_err(SessionError::PlanInvalid)?;
+    if identity.has_files() {
+        let overlay = request
+            .payload_overlay_root
+            .as_deref()
+            .expect("validated overlay path");
+        verify_payload_overlay(
+            request
+                .payload_overlay_base_root
+                .as_deref()
+                .expect("validated overlay base"),
+            &identity,
+            overlay,
+        )
+        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_overlay_identity(
+    state_root: &Path,
+    scope: zup_core::SelectedScope,
+    identity: &PayloadOverlayIdentity,
+    actual: Option<&Path>,
+    overlay_base_root: Option<&Path>,
+    recovery: bool,
+) -> Result<(), String> {
+    let expected_base =
+        payload_overlay_base_root(state_root, scope).map_err(|error| error.to_string())?;
+    if identity.has_files() {
+        let base = overlay_base_root.ok_or_else(|| {
+            "generated plugin payload requires a deterministic overlay base".to_owned()
+        })?;
+        if base != expected_base {
+            return Err(format!(
+                "payload overlay base mismatch: expected `{}`, found `{}`",
+                expected_base.display(),
+                base.display()
+            ));
+        }
+        let expected = identity
+            .path_under(base)
+            .ok_or_else(|| "generated payload identity has no path".to_owned())?;
+        let actual = actual.ok_or_else(|| {
+            "generated plugin payload requires a deterministic overlay".to_owned()
+        })?;
+        if actual != expected {
+            return Err(format!(
+                "payload overlay path mismatch: expected `{}`, found `{}`",
+                expected.display(),
+                actual.display()
+            ));
+        }
+        return Ok(());
+    }
+    if overlay_base_root.is_some() {
+        return Err("overlay base supplied without generated plugin payload".into());
+    }
+    if let Some(actual) = actual {
+        if recovery {
+            return Err("recovery supplied an overlay without generated plugin payload".into());
+        }
+        let namespace = expected_base.join(PAYLOAD_OVERLAY_DIRECTORY);
+        if !actual.is_absolute() || !actual.starts_with(namespace) {
+            return Err("payload overlay path is outside the state overlay namespace".into());
+        }
+    }
+    Ok(())
+}
+
 fn validate_request(request: &RuntimeRequest) -> Result<(), SessionError> {
+    let identity = PayloadOverlayIdentity::from_execution_plan(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &request.execution_plan,
+    )
+    .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+    validate_overlay_identity(
+        &request.state_root,
+        request.scope,
+        &identity,
+        request.payload_overlay_root.as_deref(),
+        request.payload_overlay_base_root.as_deref(),
+        false,
+    )
+    .map_err(SessionError::PlanInvalid)?;
     let plan = compile_transaction(&request.execution_plan)
         .map_err(|e| SessionError::PlanInvalid(e.to_string()))?;
     for node in &plan.nodes {
@@ -661,7 +893,18 @@ fn execute_local_blocking_with_events(
     cancel: impl CancellationProbe + Send + 'static,
     events: Option<broadcast::Sender<RuntimeEvent>>,
 ) -> InstallOutcome {
-    let payload = match AutoPayloadSource::from_path(request.payload_root.clone()) {
+    execute_local_blocking_with_events_inner(request, cancel, events)
+}
+
+fn execute_local_blocking_with_events_inner(
+    request: RuntimeRequest,
+    cancel: impl CancellationProbe + Send + 'static,
+    events: Option<broadcast::Sender<RuntimeEvent>>,
+) -> InstallOutcome {
+    let payload = match AutoPayloadSource::from_paths(
+        request.payload_root.clone(),
+        request.payload_overlay_root.clone(),
+    ) {
         Ok(source) => source,
         Err(error) => return InstallOutcome::Failed(format!("payload package: {error}")),
     };

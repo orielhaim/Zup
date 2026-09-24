@@ -4,9 +4,10 @@
 //! structure lives here; the compiled output is `zup_core::Installer`.
 
 use zup_core::{
-    Action, App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut,
-    Source,
+    App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut, Source,
 };
+
+use crate::plugin::Plugin;
 
 /// Currently supported manifest schema version.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -20,13 +21,13 @@ pub struct Manifest {
     pub install: Install,
     pub updates: Option<Updates>,
     pub components: Vec<Component>,
+    pub plugins: Vec<Plugin>,
     pub files: Vec<FileMapping>,
     pub shortcuts: Vec<Shortcut>,
     pub path: Vec<PathEntry>,
     pub services: Vec<Service>,
     pub protocols: Vec<Protocol>,
     pub file_types: Vec<FileType>,
-    pub actions: Vec<Action>,
 }
 
 /// Build-time update repository settings.

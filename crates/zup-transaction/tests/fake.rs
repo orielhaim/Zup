@@ -2,8 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-
 use zup_transaction::{
     OperationExecutor, OperationId, OperationReceipt, ReconcileResult, TransactionNode,
 };
@@ -18,7 +16,6 @@ pub struct FakeExecutor {
     pub fail_rollback_at: Option<usize>,
     pub reconcile_result: ReconcileResult,
     pub crash_after_applies: Option<usize>,
-    pub irreversible: BTreeMap<String, bool>,
 }
 
 impl FakeExecutor {

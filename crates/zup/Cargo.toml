@@ -7,9 +7,14 @@ repository.workspace = true
 description = "Developer-facing CLI for zup"
 default-run = "zup"
 
+[features]
+default = []
+build = ["dep:zup-build", "dep:zup-manifest", "dep:zup-plugin-build"]
+
 [[bin]]
 name = "zup"
 path = "src/main.rs"
+required-features = ["build"]
 
 [[bin]]
 name = "zup-setup"
@@ -21,11 +26,14 @@ miette.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 zup-windows.workspace = true
-zup-build.workspace = true
+zup-build = { workspace = true, optional = true }
 zup-bundle.workspace = true
+zup-plugin-build = { workspace = true, optional = true }
+zup-plugin-contract.workspace = true
+zup-plugin-runtime.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
-zup-manifest.workspace = true
+zup-manifest = { workspace = true, optional = true }
 zup-plan.workspace = true
 zup-platform.workspace = true
 zup-runtime.workspace = true
@@ -42,6 +50,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-rstest.workspace = true
+base64 = "0.22"
 tempfile.workspace = true
 windows-registry.workspace = true
+wit-component = { version = "=0.258.0", features = ["dummy-module"] }
+wit-parser = "=0.258.0"

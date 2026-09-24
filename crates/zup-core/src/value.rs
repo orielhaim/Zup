@@ -16,4 +16,7 @@ pub enum ValueError {
     /// A file extension is not a bare extension such as `.acme`.
     #[error("invalid file extension `{extension}`")]
     InvalidExtension { extension: String },
+
+    #[error("invalid plugin id `{id}`")]
+    InvalidPluginId { id: String },
 }

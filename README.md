@@ -4,6 +4,10 @@ A programmable application installer for the modern desktop.
 
 Zup is in very early development. The public API is not available yet.
 
+## Plugins
+
+See [plugin authoring and runtime architecture](docs/plugins.md) and the [Rust configure example](examples/plugins/configure).
+
 ## Windows installer artifacts
 
 `zup build` writes the package into the PE resource section: RCDATA resource 1

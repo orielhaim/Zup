@@ -576,25 +576,6 @@ value = "${install}/bin"
 }
 
 #[test]
-fn external_action_is_opaque() {
-    let source = with(
-        r#"
-[[actions]]
-id = "run"
-type = "exec"
-
-[actions.apply]
-command = "${install}/a.exe"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(SelectedScope::User)).unwrap();
-    assert_eq!(result.actions.len(), 1);
-    assert!(result.actions[0].opaque);
-    assert_eq!(result.summary.opaque_action_count, 1);
-}
-
-#[test]
 fn no_false_collision_for_distinct_resources() {
     let source = with(
         r#"
@@ -664,25 +645,6 @@ destination = "${install}/a.txt"
 }
 
 #[test]
-fn user_plan_with_machine_action_requires_elevation() {
-    let source = with(
-        r#"
-[[actions]]
-id = "register"
-type = "exec"
-privilege = "machine"
-
-[actions.apply]
-command = "${install}/helper.exe"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(SelectedScope::User)).unwrap();
-    assert!(result.summary.requires_elevation);
-    assert_eq!(result.actions[0].privilege, Privilege::Machine);
-}
-
-#[test]
 fn service_makes_plan_machine_privileged() {
     let source = with(
         r#"
@@ -745,13 +707,6 @@ component = "core"
 source = "b.txt"
 destination = "${install}/b.txt"
 component = "cli"
-
-[[actions]]
-id = "run"
-type = "exec"
-
-[actions.apply]
-command = "${install}/x.exe"
 "#,
     );
     let build = build_plan_from(
@@ -762,8 +717,7 @@ command = "${install}/x.exe"
     assert_eq!(result.summary.file_count, 1);
     assert_eq!(result.summary.install_bytes, 3);
     assert_eq!(result.summary.selected_component_count, 1);
-    assert_eq!(result.summary.opaque_action_count, 1);
-    assert_eq!(result.summary.resource_count, 1);
+    assert_eq!(result.summary.resource_count, 0);
 }
 
 // --- Determinism / serialization ---
@@ -829,19 +783,6 @@ args = ["--url", "%1"]
 extension = ".acme"
 id = "Acme.Document"
 executable = "${install}/bin/a.txt"
-
-[[actions]]
-id = "register"
-type = "exec"
-privilege = "user"
-
-[actions.apply]
-command = "${install}/helper.exe"
-args = ["register"]
-
-[actions.rollback]
-command = "${install}/helper.exe"
-args = ["unregister"]
 "#,
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);

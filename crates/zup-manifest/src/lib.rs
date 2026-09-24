@@ -16,16 +16,18 @@ mod compile;
 mod error;
 mod model;
 mod parse;
+mod plugin;
 
 pub use compile::{compile, parse_and_compile};
 pub use error::ManifestError;
 pub use model::{Manifest, SCHEMA_VERSION, Updates};
 pub use parse::parse;
+pub use plugin::Plugin;
 
 pub use zup_core::{
-    Action, ActionId, ActionKind, App, AppId, Command, Component, ComponentId, Condition,
-    FileExtension, FileMapping, FileType, FileTypeId, Install, InstallDirectory, InstallScope,
-    Installer, NonEmptyString, PathEntry, Privilege, Protocol, ProtocolScheme, Service, ServiceId,
-    ServiceStart, Shortcut, ShortcutLocation, Source, Template, TemplateError, TemplatePart,
-    ValueError, Variable,
+    App, AppId, Component, ComponentId, Condition, FileExtension, FileMapping, FileType,
+    FileTypeId, Install, InstallDirectory, InstallScope, Installer, NonEmptyString, PathEntry,
+    PluginBinding, PluginId, Privilege, Protocol, ProtocolScheme, Service, ServiceId, ServiceStart,
+    Shortcut, ShortcutLocation, Source, Template, TemplateError, TemplatePart, ValueError,
+    Variable,
 };

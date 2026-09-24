@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ActionId, FileTypeId, ProtocolScheme, ServiceId};
+use crate::ids::{FileTypeId, ProtocolScheme, ServiceId};
 use crate::model::{FileExtension, ShortcutLocation};
 
 /// Stable logical identity for one planned resource.
@@ -41,8 +41,5 @@ pub enum ResourceKey {
     },
     FileTypeExtension {
         extension: FileExtension,
-    },
-    ExternalAction {
-        id: ActionId,
     },
 }

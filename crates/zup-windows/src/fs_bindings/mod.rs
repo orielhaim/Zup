@@ -27,6 +27,17 @@ pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x80;
 pub const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x10;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: DWORD = 0x400;
 pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFF_FFFF;
+
+pub fn is_reparse_point(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    attributes != INVALID_FILE_ATTRIBUTES && attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
 pub const MOVEFILE_REPLACE_EXISTING: DWORD = 0x1;
 pub const MOVEFILE_WRITE_THROUGH: DWORD = 0x8;
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;

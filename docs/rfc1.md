@@ -9,7 +9,7 @@
 **Implementation language:** Rust
 **Primary authoring format:** Declarative, language-agnostic manifest
 **Default UI:** GPUI
-**Extension model:** Reserved for v2; WASM-first direction
+**Extension model:** Planner-only WebAssembly components with a typed WIT world
 
 ---
 
@@ -47,7 +47,7 @@ target = "${install}/myapp.exe"
 
 From this, `zup` should be able to produce a polished standalone installer with sensible installation, upgrade, repair, rollback, recovery, and uninstall semantics.
 
-At the same time, `zup` must not become a constrained "app packager" that only works for the easy 80% of applications. Installer authors must be able to describe complex component graphs, services, registry state, file associations, prerequisites, arbitrary layouts, advanced conditions, privileged operations, and eventually custom extensions.
+At the same time, `zup` must not become a constrained "app packager" that only works for the easy 80% of applications. Installer authors must be able to describe complex component graphs, services, registry state, file associations, prerequisites, arbitrary layouts, advanced conditions, privileged operations, and capability-scoped extensions when a corresponding WIT world is available.
 
 The default experience should be simple.
 
@@ -259,7 +259,7 @@ An installation transaction must be recoverable after interruption.
 
 Where atomic OS primitives exist, `zup` should use them.
 
-Where they do not exist, `zup` should use explicit journaling and compensating operations.
+Where they do not exist, `zup` should use explicit journaling, durable receipts, and ownership-aware rollback.
 
 ---
 
@@ -330,7 +330,7 @@ The manifest and UI formats should be declarative.
 
 Conditions should use a deliberately small side-effect-free expression language.
 
-Arbitrary computation belongs in executable hooks in v1 and extensions in v2.
+Arbitrary computation is outside the declarative manifest and belongs behind a versioned, capability-scoped WIT world.
 
 ---
 
@@ -394,7 +394,7 @@ It enables:
 * better diagnostics,
 * platform adaptation.
 
-Imperative execution remains an escape hatch, not the primary model.
+The declarative manifest provides no imperative execution escape hatch.
 
 ---
 
@@ -1166,7 +1166,6 @@ The following are expected to be native concepts rather than opaque scripts.
 ## Processes
 
 * run prerequisite
-* run helper executable
 * stop known application
 * restart application
 
@@ -1181,61 +1180,13 @@ Not every action is required on every platform.
 
 ---
 
-# 18. Custom Executable Actions in v1
+# 18. Application-Specific Extensions
 
-Full plugins are intentionally not part of v1.
+The current extension boundary is a planner-only WebAssembly component implementing `zup:plugin/planner@1.0.0` from the checked-in `wit/zup-plugin.wit`. A manifest binds a component by `id` and `source`, with optional `component` and `when` selection. The component receives typed planning context and returns typed installation resources or a typed `plugin-error`.
 
-There must still be an escape hatch for application-specific operations.
+`zup build` resolves and hashes the source, validates zero imports and the exact planner export and signature, AOT-compiles the component, verifies the AOT output, and embeds the verified artifact. The installer runtime uses the Component Model only; source-manifest lifecycle mode does not JIT plugins. Generated files join the ordinary plan, transaction, ownership, repair, and uninstall paths.
 
-A project may ship a helper executable:
-
-```toml
-[[actions]]
-id = "register-device-driver"
-type = "exec"
-command = "${install}/setup-helper.exe"
-args = ["register"]
-privilege = "machine"
-```
-
-A richer definition may provide compensating behavior:
-
-```toml
-[[actions]]
-id = "register-device-driver"
-type = "exec"
-
-apply.command = "${install}/setup-helper.exe"
-apply.args = ["register"]
-
-rollback.command = "${install}/setup-helper.exe"
-rollback.args = ["unregister"]
-
-uninstall.command = "${install}/setup-helper.exe"
-uninstall.args = ["unregister"]
-
-privilege = "machine"
-timeout = "30s"
-success_codes = [0]
-```
-
-These operations are explicitly **opaque**.
-
-`zup` cannot infer arbitrary side effects from external programs.
-
-Therefore the engine must distinguish between:
-
-```text
-fully managed action
-```
-
-and:
-
-```text
-opaque external action
-```
-
-The latter can participate in sequencing but cannot receive the same rollback guarantees unless the author supplies reliable compensating commands.
+The declarative manifest still has no executable custom actions. This milestone has no plugin-provided privileged action API; new capabilities require a separate, versioned WIT world. See [`docs/plugins.md`](plugins.md) for the authoring contract and example.
 
 ---
 
@@ -1351,7 +1302,7 @@ application registration
 
 The planner can reject or serialize conflicting operations.
 
-This also becomes useful when components or future extensions produce actions independently.
+This also becomes useful when components or planner extensions produce operations independently.
 
 ---
 
@@ -1366,13 +1317,12 @@ filesystem
 registry
 SCM
 shortcuts
-process execution
 network access
 ```
 
 Instead, `zup` provides:
 
-> **durable, journaled, recoverable transactions with compensating operations and atomic primitives where the OS provides them.**
+> **durable, journaled, recoverable transactions with precise rollback for engine-owned state and atomic primitives where the OS provides them.**
 
 This wording matters.
 
@@ -1685,8 +1635,6 @@ recreate shortcut
 ```
 
 not a full blind reinstall.
-
-Opaque custom actions cannot necessarily participate at this precision.
 
 ---
 
@@ -2796,9 +2744,7 @@ runtime version
 OS feature
 ```
 
-More complicated checks can use the v1 executable-hook escape hatch.
-
-V2 extensions can provide reusable detection providers.
+More complicated checks require an explicit built-in detection provider; a custom provider belongs to a separate capability-scoped WIT world.
 
 ---
 
@@ -2945,7 +2891,7 @@ hash content
 compile Installer IR
     │
     ▼
-validate action graph
+validate resource graph
     │
     ▼
 build payload/component objects
@@ -3090,9 +3036,10 @@ An installer often runs code at high privilege and is therefore a high-value att
 
 ## Extension threats
 
-* buggy custom helper,
-* malicious custom helper,
-* future plugin overreach.
+* buggy plugin planning,
+* malicious plugin output,
+* resource-limit or sandbox escape,
+* AOT or bundle metadata mismatch.
 
 ---
 
@@ -3118,137 +3065,45 @@ Privileged staging requires additional permissions and ownership controls beyond
 
 ---
 
-# 93. No Arbitrary Native Plugins in v1
+# 93. No Arbitrary Native Plugins
 
-v1 intentionally does not load third-party DLLs into the privileged installer process.
-
-This removes an entire class of:
-
-* ABI instability,
-* dependency collision,
-* memory unsafety,
-* privilege escalation surfaces.
-
-Advanced v1 behavior goes through explicit helper executables.
-
-Reusable plugins are reserved for v2.
+The installer does not load third-party DLLs or other native plugins into the privileged process. This removes an entire class of ABI instability, dependency collision, memory safety, and privilege-escalation surfaces. The manifest does not expose advanced behavior through helper executables.
 
 ---
 
-# 94. v2 Extension Model
+# 94. Implemented Planner World
 
-The long-term extension mechanism should be portable and capability-oriented.
+The current extension boundary is the checked-in `wit/zup-plugin.wit` world `plugin`. A component exports exactly `zup:plugin/planner@1.0.0` and its `plan` function. It must have zero imports and receives only explicit typed context: application identity, install directory and scope, host facts, and selected components.
 
-WASM is the preferred direction.
-
-Conceptually:
-
-```text
-zup host
-   │
-   ├── filesystem capability
-   ├── metadata capability
-   ├── network capability
-   ├── UI capability
-   └── platform capability
-          │
-          ▼
-        plugin.wasm
-```
-
-A plugin receives only capabilities declared by its extension type and manifest.
+The planner returns typed installation resources or a typed `plugin-error`. It does not inspect the environment, clock, filesystem, network, randomness, or other host state. The host remains responsible for resolving templates, validating collisions, applying elevation, and executing the resulting plan.
 
 ---
 
-# 95. Why WASM
+# 95. Build and Runtime Verification
 
-WASM offers several advantages over native DLL plugins:
+`zup build --target <TRIPLE>` resolves and hashes each declared component, rejects core modules, validates the exact import-free planner interface and signature, AOT-compiles it with the pinned Wasmtime configuration, verifies the AOT artifact, and embeds it with target, WIT digest, engine fingerprint, size, and digest metadata.
 
-* language independence,
-* sandboxing opportunities,
-* stable serialization boundary,
-* easier architecture portability,
-* reduced ABI coupling,
-* easier out-of-process or sandbox migration.
-
-`Wasmtime` is a mature Rust-hosted WebAssembly runtime and a natural low-level candidate.
+The installer runtime loads only those verified AOT artifacts through the Component Model. Source-manifest lifecycle mode does not JIT plugins. Generated files are merged into the normal plan and then use the same install, ownership, repair, upgrade, and uninstall transaction path as manifest files.
 
 ---
 
-# 96. Extism as a v2 Candidate
+# 96. Capability Expansion
 
-Extism is particularly interesting because it provides a higher-level plugin system over WebAssembly and supports plugin development from a broad set of languages, including Rust, JavaScript/TypeScript, Go, C#, C, Zig and others.
+The planner world is deliberately limited to planning. It has no plugin-provided privileged actions, custom action API, UI extension, or direct machine-mutation capability. Declarative resources use the host's existing ownership and elevation rules.
 
-That aligns strongly with the requirement that a C developer should not need Rust to extend `zup`.
-
-The final v2 design should decide whether:
-
-* `zup` defines its own Wasmtime/WIT component model,
-* uses Extism directly,
-* or adopts concepts from Extism while exposing a narrower installation-specific ABI.
+Any future filesystem, network, platform, UI, or other capability must be defined in a separate versioned WIT world with explicit capabilities and a defined lifecycle.
 
 ---
 
-# 97. Potential v2 Extension Types
+# 98. Language and Toolchain Boundary
 
-Possible extension categories include:
-
-```text
-custom action
-condition provider
-prerequisite detector
-payload source
-compression format
-signature/trust provider
-platform integration
-UI component
-release repository provider
-```
-
-These should not all receive the same privileges.
-
----
-
-# 98. Extension Capabilities
-
-A custom UI control does not need:
-
-```text
-write HKLM
-install service
-spawn elevated process
-```
-
-A custom privileged action may.
-
-Permissions should therefore be explicit.
-
-Example conceptual declaration:
-
-```text
-permissions:
-  filesystem.install-root: read-write
-  network: none
-  registry: none
-```
-
-The plugin model should be capability-based from its first version rather than retrofitted after an unrestricted plugin API ships.
+Rust is one example language, not the plugin ABI. Other Component Model toolchains can target the existing WIT world as their language support matures.
 
 ---
 
 # 99. Native Extensions
 
-Native extensions may eventually be useful for highly specialized integration.
-
-They should not be the default plugin model.
-
-If supported, safer models include:
-
-* isolated helper process,
-* explicit IPC,
-* versioned protocol,
-
-rather than dynamically loading arbitrary C ABI libraries directly into the core engine.
+Native extensions may eventually be useful for highly specialized integration, but they are not the default model. Any future native integration should use an isolated helper process, explicit IPC, and a versioned protocol rather than dynamically loading arbitrary C ABI libraries into the core engine.
 
 ---
 
@@ -4211,7 +4066,7 @@ transaction journal
 installation ledger
 update repository metadata
 frontend protocol
-future plugin protocol
+plugin WIT/API
 ```
 
 The implementation must not rely on:
@@ -4339,24 +4194,6 @@ extension = ".acme"
 prog_id = "Acme.Document"
 description = "Acme Document"
 executable = "${install}/Acme.exe"
-
-[[actions]]
-id = "register-special-device"
-type = "exec"
-when = 'component("service")'
-privilege = "machine"
-
-[actions.apply]
-command = "${install}/setup-helper.exe"
-args = ["register-device"]
-
-[actions.rollback]
-command = "${install}/setup-helper.exe"
-args = ["unregister-device"]
-
-[actions.uninstall]
-command = "${install}/setup-helper.exe"
-args = ["unregister-device"]
 
 [update]
 enabled = true
@@ -4678,7 +4515,7 @@ what processes are blocking?
 what disk space is required?
 ```
 
-Opaque executable actions are reported as opaque.
+Dry-run output describes only operations represented by validated resource types.
 
 ---
 
@@ -4720,7 +4557,7 @@ external commands
 network sources
 ```
 
-Opaque custom actions stand out clearly.
+No opaque manifest execution path appears in the plan.
 
 This is a meaningful improvement over treating the entire installer as arbitrary imperative code.
 
@@ -4948,7 +4785,7 @@ The underlying plan remains inspectable.
 
 # 187. Cross-Version Ownership
 
-Action IDs and resource ownership must survive upgrades.
+Stable resource identities and ownership must survive upgrades.
 
 Suppose v1 installs:
 
@@ -4975,9 +4812,8 @@ Some releases contain genuine state migrations that cannot be represented as sim
 
 These can use:
 
-* built-in migration action types,
-* executable migration helpers in v1,
-* reusable extensions in v2.
+* built-in migration operation types,
+* capability-scoped extensions when available.
 
 Migration metadata should include:
 
@@ -4990,23 +4826,13 @@ privilege
 
 ---
 
-# 189. Irreversible Actions
+# 189. Irreversible Operations
 
-Some operations cannot be reliably undone.
+The current declarative operation set is selected so the engine owns durable receipts and precise rollback.
 
-The action model must permit:
+An operation that cannot meet that contract must not be admitted by the current manifest or runtime. A separate extension WIT world must expose its rollback guarantee before the planner can schedule it.
 
-```text
-rollback = impossible
-```
-
-The planner can then:
-
-* sequence them late,
-* warn developer tooling,
-* avoid falsely promising transaction rollback.
-
-The default user UI does not need to expose internal action theory unless failure makes it relevant.
+The default user UI should surface failure and recovery state without exposing internal transaction mechanics.
 
 ---
 
@@ -5206,7 +5032,7 @@ Its conceptual product surface includes:
 * per-machine installation,
 * split UAC elevation,
 * managed files/directories,
-* registry actions,
+* registry operations,
 * shortcuts,
 * Windows services,
 * PATH/environment integration,
@@ -5215,7 +5041,6 @@ Its conceptual product surface includes:
 * installed-app registration,
 * Restart Manager integration,
 * prerequisites,
-* executable custom actions,
 * offline installers,
 * web installers,
 * payload verification,
@@ -5225,11 +5050,7 @@ Its conceptual product surface includes:
 * declarative custom frontend layout,
 * structured diagnostics.
 
-The defining limitation is:
-
-> **v1 has no general plugin ABI.**
-
-Complex application-specific behavior uses executable helpers.
+The current plugin milestone adds a narrow, planner-only WebAssembly component boundary. It uses the checked-in `zup:plugin/planner@1.0.0` WIT world, has no imports, and returns typed resources for the ordinary installation plan. It is not an unrestricted native-plugin ABI, privileged action API, or custom action escape hatch; new capabilities require separate WIT worlds.
 
 ---
 
@@ -5239,9 +5060,8 @@ v2 expands the extensibility and portability model rather than replacing the v1 
 
 Primary directions include:
 
-* WASM extension system,
-* extension capability model,
-* reusable custom actions,
+* additional capability-scoped extension worlds,
+* capability-scoped mutation providers,
 * custom condition providers,
 * payload/repository providers,
 * UI extensions,
@@ -5362,7 +5182,7 @@ NSIS:
 zup:
     installer is primarily desired state
     engine derives mutations
-    arbitrary code is an escape hatch
+    no arbitrary code path in the manifest
 ```
 
 This difference enables much stronger planning, recovery, auditing and ownership behavior.
@@ -5452,19 +5272,13 @@ The resulting system is approximately:
      │ WinTrust         │
      └──────────────────┘
 
-               future:
+               current extension boundary:
 
-       ┌────────────┬────────────┐
-       ▼            ▼            ▼
-    Windows       macOS        Linux
-
-               future:
-
-                    WASM
-                 extensions
+                    │
+       planner-only WebAssembly components
 ```
 
-The central boundary is the Installer IR and action engine.
+The central boundary is the Installer IR and resource-operation engine.
 
 Everything else can evolve around it.
 

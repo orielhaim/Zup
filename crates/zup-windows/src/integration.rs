@@ -1468,7 +1468,6 @@ mod tests {
             services: vec![],
             file_types: vec![],
             uninstall_entries: vec![],
-            external_actions: vec![],
             protocols: schemes
                 .iter()
                 .map(|scheme| ProtocolOperation {
@@ -1607,7 +1606,6 @@ mod tests {
             protocols: vec![],
             file_types: vec![],
             uninstall_entries: vec![],
-            external_actions: vec![],
             summary: zup_exec::ExecutionSummary::default(),
         };
         let store = FilesystemTransactionStore::new(directory.path());
@@ -1704,7 +1702,6 @@ mod tests {
             protocols: vec![],
             file_types: vec![],
             uninstall_entries: vec![],
-            external_actions: vec![],
             summary: zup_exec::ExecutionSummary::default(),
         };
         let store = FilesystemTransactionStore::new(directory.path());

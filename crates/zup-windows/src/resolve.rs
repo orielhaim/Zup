@@ -5,9 +5,9 @@ use tracing::{info, info_span};
 use zup_core::{ResourceKey, SelectedScope, ShortcutLocation};
 use zup_plan::InstallPlan;
 use zup_platform::{
-    CommandSpec, KnownFolder, KnownFolderResolver, TargetExternalAction, TargetFile,
-    TargetFileType, TargetPath, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol,
-    TargetService, TargetShortcut, TemplateResolveError, resolve_template_path,
+    CommandSpec, KnownFolder, KnownFolderResolver, TargetFile, TargetFileType, TargetPath,
+    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService, TargetShortcut,
+    TemplateResolveError, resolve_template_path,
 };
 
 use crate::cmdline;
@@ -179,40 +179,8 @@ pub fn resolve_target<R: KnownFolderResolver>(
         });
     }
 
-    let mut actions = Vec::with_capacity(plan.actions.len());
-    for action in &plan.actions {
-        actions.push(TargetExternalAction {
-            key: ResourceKey::ExternalAction {
-                id: action.id.clone(),
-            },
-            id: action.id.clone(),
-            kind: action.kind,
-            apply: CommandSpec::new(path(&action.apply.command)?, action.apply.args.clone()),
-            rollback: action
-                .rollback
-                .as_ref()
-                .map(|c| {
-                    Ok::<_, TargetResolveError>(CommandSpec::new(path(&c.command)?, c.args.clone()))
-                })
-                .transpose()?,
-            uninstall: action
-                .uninstall
-                .as_ref()
-                .map(|c| {
-                    Ok::<_, TargetResolveError>(CommandSpec::new(path(&c.command)?, c.args.clone()))
-                })
-                .transpose()?,
-            privilege: action.privilege,
-            opaque: action.opaque,
-        });
-    }
-
-    let resource_count = shortcuts.len()
-        + path_entries.len()
-        + services.len()
-        + protocols.len()
-        + file_types.len()
-        + actions.len();
+    let resource_count =
+        shortcuts.len() + path_entries.len() + services.len() + protocols.len() + file_types.len();
 
     let summary = TargetPlanSummary {
         file_count: files.len(),
@@ -242,7 +210,6 @@ pub fn resolve_target<R: KnownFolderResolver>(
         services,
         protocols,
         file_types,
-        actions,
         summary,
     })
 }

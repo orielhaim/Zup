@@ -78,6 +78,8 @@ async fn interrupted_uninstall_recovers_through_runtime_and_publishes_ledger() {
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         payload_root: payload,
+        payload_overlay_root: None,
+        payload_overlay_base_root: None,
         recovery_id: Some(record.transaction_id),
     })
     .await
@@ -127,7 +129,6 @@ fn target(root: &TempDir, version: &str, files: &[(&str, &[u8])]) -> TargetPlan 
         services: vec![],
         protocols: vec![],
         file_types: vec![],
-        actions: vec![],
         summary: TargetPlanSummary {
             file_count: files.len(),
             install_bytes: files.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
@@ -162,6 +163,8 @@ async fn transition(
         state_root,
         work_root: root.path().join("work"),
         payload_root: root.path().join("payload"),
+        payload_overlay_root: None,
+        payload_overlay_base_root: None,
         recovery_id: None,
     };
     run_local_install(request).await.unwrap().0
@@ -387,6 +390,8 @@ async fn failed_upgrade_rolls_back_and_keeps_previous_ledger() {
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         payload_root: payload,
+        payload_overlay_root: None,
+        payload_overlay_base_root: None,
         recovery_id: None,
     })
     .await

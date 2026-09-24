@@ -12,6 +12,7 @@ mod inspect;
 mod integration;
 mod known_folders;
 mod ledger;
+mod payload_overlay;
 mod pipe;
 mod planning;
 mod registry;
@@ -47,6 +48,12 @@ pub use integration::{
 };
 pub use known_folders::WindowsKnownFolderResolver;
 pub use ledger::{InstallLedgerStore, LedgerError};
+pub use payload_overlay::{
+    PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,
+    PayloadOverlayIdentity, cleanup_app_payload_overlays, cleanup_payload_overlay,
+    is_plugin_payload_path, materialize_payload_overlay, payload_overlay_base_root,
+    validate_payload_overlay_base, verify_payload_overlay,
+};
 pub use pipe::{
     ClientReader, ClientWriter, HELLO_TIMEOUT, PipeError, PipeSecurity, PipeServer, ServerReader,
     ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,

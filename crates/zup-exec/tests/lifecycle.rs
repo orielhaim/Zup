@@ -44,7 +44,6 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
         services: vec![],
         protocols: vec![],
         file_types: vec![],
-        actions: vec![],
         summary: TargetPlanSummary {
             file_count: 0,
             install_bytes: 0,

@@ -54,7 +54,6 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
         protocols: vec![],
         file_types: vec![],
         uninstall_entries: vec![],
-        external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,
             requires_elevation: scope == SelectedScope::Machine,
@@ -69,6 +68,8 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
         state_root: dir.join("state"),
         work_root: dir.join("work"),
         payload_root,
+        payload_overlay_root: None,
+        payload_overlay_base_root: None,
         recovery_id: None,
     }
 }
@@ -87,6 +88,150 @@ async fn local_user_scope_runs() {
     };
     assert_eq!(outcome, InstallOutcome::Committed);
     assert_eq!(std::fs::read(destination).unwrap(), b"hello");
+}
+
+#[tokio::test]
+async fn local_generated_overlay_is_used_and_cleaned_after_commit() {
+    let mut request = sample_request(SelectedScope::User);
+    request.execution_plan.files[0].source_relative =
+        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
+    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &request.execution_plan,
+    )
+    .unwrap();
+    let overlay = identity.path_under(&request.state_root).unwrap();
+    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
+    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+    std::fs::write(&overlay_file, b"hello").unwrap();
+    request.payload_overlay_root = Some(overlay.clone());
+    request.payload_overlay_base_root = Some(request.state_root.clone());
+    let destination = request.execution_plan.files[0]
+        .destination
+        .as_path()
+        .to_path_buf();
+
+    let (outcome, _) = run_local_install(request).await.unwrap();
+    assert_eq!(outcome, InstallOutcome::Committed);
+    assert_eq!(std::fs::read(destination).unwrap(), b"hello");
+    assert!(!overlay.exists());
+}
+
+#[tokio::test]
+async fn local_generated_overlay_is_cleaned_after_request_failure() {
+    let mut request = sample_request(SelectedScope::User);
+    request.execution_plan.files[0].source_relative =
+        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
+    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &request.execution_plan,
+    )
+    .unwrap();
+    let overlay = identity.path_under(&request.state_root).unwrap();
+    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
+    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+    std::fs::write(&overlay_file, b"hello").unwrap();
+    request.payload_overlay_root = Some(overlay.clone());
+    request.payload_overlay_base_root = Some(request.state_root.clone());
+    request.execution_plan.files[0].conflict = Some(zup_exec::Conflict::TargetNonFile {
+        path: "blocked".into(),
+    });
+
+    let error = run_local_install(request).await.unwrap_err();
+    assert!(matches!(error, SessionError::PlanInvalid(_)));
+    assert!(!overlay.exists());
+}
+
+#[tokio::test]
+async fn local_generated_overlay_is_cleaned_after_execution_failure() {
+    let mut request = sample_request(SelectedScope::User);
+    request.execution_plan.files[0].source_relative =
+        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
+    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &request.execution_plan,
+    )
+    .unwrap();
+    let overlay = identity.path_under(&request.state_root).unwrap();
+    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
+    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+    std::fs::write(&overlay_file, b"hello").unwrap();
+    request.payload_overlay_root = Some(overlay.clone());
+    request.payload_overlay_base_root = Some(request.state_root.clone());
+    let destination = request.execution_plan.files[0]
+        .destination
+        .as_path()
+        .to_path_buf();
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"old").unwrap();
+    let file = &mut request.execution_plan.files[0];
+    file.kind = FileOperationKind::Replace;
+    file.precondition = FilePrecondition::Exact {
+        size: 3,
+        sha256: digest(b"old"),
+    };
+
+    let (outcome, _) = run_local_install(request).await.unwrap();
+    assert!(matches!(outcome, InstallOutcome::Failed(message) if message.contains("ownership")));
+    assert!(!overlay.exists());
+}
+
+#[tokio::test]
+async fn recovery_rejects_mismatched_generated_overlay_before_mutation() {
+    use zup_transaction::{
+        FilesystemTransactionStore, TransactionId, TransactionRecord, TransactionStore,
+        compile_transaction,
+    };
+
+    let mut request = sample_request(SelectedScope::User);
+    request.execution_plan.files[0].source_relative =
+        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
+    let destination = request.execution_plan.files[0]
+        .destination
+        .as_path()
+        .to_path_buf();
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"untouched").unwrap();
+    let plan = compile_transaction(&request.execution_plan).unwrap();
+    let record = TransactionRecord::new(
+        TransactionId::new_v7(),
+        request.app_id.clone(),
+        request.scope,
+        request.app_version.clone(),
+        plan,
+    );
+    let store = FilesystemTransactionStore::new(&request.state_root);
+    store.create(&record).unwrap();
+    let identity = zup_windows::PayloadOverlayIdentity::from_transaction(
+        request.app_id.clone(),
+        request.app_version.clone(),
+        request.scope,
+        &record.plan,
+    )
+    .unwrap();
+    let overlay = identity.path_under(&request.state_root).unwrap();
+    let overlay_file = overlay.join("__zup_plugins__/generated.exe");
+    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+    std::fs::write(&overlay_file, b"HELLO").unwrap();
+    request.execution_plan = ExecutionPlan::default();
+    request.payload_overlay_root = Some(overlay.clone());
+    request.payload_overlay_base_root = Some(request.state_root.clone());
+    request.recovery_id = Some(record.transaction_id);
+
+    let error = run_local_install(request).await.unwrap_err();
+    assert!(matches!(error, SessionError::PlanInvalid(_)));
+    assert_eq!(std::fs::read(destination).unwrap(), b"untouched");
+    assert!(overlay.exists());
+    assert_eq!(
+        store.load(&record.transaction_id).unwrap().phase,
+        zup_transaction::TransactionPhase::Prepared
+    );
 }
 
 #[tokio::test]

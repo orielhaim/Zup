@@ -81,11 +81,73 @@ id_type!(
     ComponentId,
     "component id"
 );
-id_type!(
-    /// Stable logical external-action identifier.
-    ActionId,
-    "action id"
-);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PluginId(String);
+
+impl PluginId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
+        let value = value.as_ref();
+        let mut bytes = value.bytes();
+        let Some(first) = bytes.next() else {
+            return Err(ValueError::Empty { kind: "plugin id" });
+        };
+        if !first.is_ascii_alphanumeric()
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(ValueError::InvalidPluginId {
+                id: value.to_owned(),
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PluginId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for PluginId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for PluginId {
+    type Error = ValueError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for PluginId {
+    type Error = ValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for PluginId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 id_type!(
     /// Stable logical service identifier.
     ServiceId,

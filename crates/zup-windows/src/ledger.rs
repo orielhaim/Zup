@@ -1021,7 +1021,6 @@ mod tests {
             protocols: Vec::new(),
             file_types: Vec::new(),
             uninstall_entries: Vec::new(),
-            external_actions: Vec::new(),
             path_entries: vec![PathOperation {
                 key: ResourceKey::PathEntry {
                     value: entry.into(),
@@ -1283,7 +1282,6 @@ mod tests {
             protocols: vec![],
             file_types: vec![],
             uninstall_entries: vec![],
-            external_actions: vec![],
             shortcuts: vec![zup_exec::ShortcutOperation {
                 key: ResourceKey::Shortcut {
                     location: zup_core::ShortcutLocation::Desktop,

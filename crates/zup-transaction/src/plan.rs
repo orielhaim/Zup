@@ -18,11 +18,9 @@ use zup_exec::{
 };
 
 use crate::id::{
-    OperationId, action_kind_token, file_kind_token, file_type_kind_token, path_kind_token,
-    protocol_kind_token, service_kind_token, shortcut_kind_token,
+    OperationId, file_kind_token, file_type_kind_token, path_kind_token, protocol_kind_token,
+    service_kind_token, shortcut_kind_token,
 };
-use crate::rollback::{RollbackCapability, RollbackGuarantee};
-
 /// Errors produced while compiling an execution plan into a transaction plan.
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionPlanError {
@@ -49,10 +47,6 @@ pub enum TransactionPlanError {
     #[error("transaction graph contains a cycle")]
     #[diagnostic(code(zup_transaction::cycle))]
     Cycle,
-
-    #[error("forbidden operation ordering involving `{id}`")]
-    #[diagnostic(code(zup_transaction::forbidden_ordering))]
-    ForbiddenOrdering { id: String },
 }
 
 /// Phase bucket used for deterministic ordering.
@@ -65,7 +59,6 @@ pub enum Phase {
     CommitIntent,
     FileMutation,
     ManagedIntegration,
-    OpaqueAction,
     Verify,
     Commit,
 }
@@ -90,8 +83,6 @@ pub enum NodeKind {
         key: ResourceKey,
         resource: ManagedResource,
     },
-    /// Opaque external action. Side effects unknown to the planner.
-    OpaqueAction { key: ResourceKey },
 }
 
 /// Which managed resource family a node belongs to.
@@ -113,7 +104,6 @@ pub struct TransactionNode {
     pub id: OperationId,
     pub phase: Phase,
     pub kind: NodeKind,
-    pub rollback: RollbackCapability,
     /// Declaration order within the source `ExecutionPlan`.
     pub declaration_order: u32,
     /// Extra metadata needed later by executors (e.g. expected hash).
@@ -128,7 +118,6 @@ pub struct NodeMeta {
     pub expected_sha256: Option<Sha256Digest>,
     pub expected_size: Option<u64>,
     pub privilege: Option<Privilege>,
-    pub has_rollback_command: bool,
     pub managed: Option<zup_exec::ManagedOperation>,
     pub removal: Option<zup_exec::OwnedResource>,
     pub removal_scope: Option<zup_core::SelectedScope>,
@@ -161,7 +150,6 @@ pub struct TransactionPlan {
     pub retired_keys: Vec<ResourceKey>,
     pub nodes: Vec<TransactionNode>,
     pub dependencies: Vec<Dependency>,
-    pub rollback_guarantee: RollbackGuarantee,
     pub audit: TransactionAudit,
     /// Deterministic execution order of mutating nodes (OperationIds).
     pub execution_order: Vec<OperationId>,
@@ -245,7 +233,6 @@ pub fn compile_transaction(
                         kind: NodeKind::StageFile {
                             key: file.key.clone(),
                         },
-                        rollback: RollbackCapability::Automatic,
                         declaration_order: 0,
                         meta: NodeMeta {
                             source_relative: Some(file.source_relative.clone()),
@@ -253,7 +240,6 @@ pub fn compile_transaction(
                             expected_sha256: Some(file.expected_sha256),
                             expected_size: Some(file.expected_size),
                             privilege: Some(zup_core::Privilege::User),
-                            has_rollback_command: false,
                             managed: None,
                             removal: None,
                             removal_scope: None,
@@ -278,7 +264,6 @@ pub fn compile_transaction(
                                 _ => Delta::Replace,
                             },
                         },
-                        rollback: RollbackCapability::Automatic,
                         declaration_order: 0,
                         meta: NodeMeta {
                             source_relative: Some(file.source_relative.clone()),
@@ -286,7 +271,6 @@ pub fn compile_transaction(
                             expected_sha256: Some(file.expected_sha256),
                             expected_size: Some(file.expected_size),
                             privilege: Some(zup_core::Privilege::User),
-                            has_rollback_command: false,
                             managed: None,
                             removal: None,
                             removal_scope: None,
@@ -370,7 +354,6 @@ pub fn compile_transaction(
                     },
                     resource: ManagedResource::UninstallEntry,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: 0,
                 meta: NodeMeta {
                     managed: Some(zup_exec::ManagedOperation::UninstallEntry(entry.clone())),
@@ -409,7 +392,6 @@ pub fn compile_transaction(
                     key: removal.key.clone(),
                     resource,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: 0,
                 meta: NodeMeta {
                     removal: Some(removal.owned.clone()),
@@ -425,43 +407,6 @@ pub fn compile_transaction(
         } else {
             managed_removal_ids.push(id)
         }
-    }
-
-    // Opaque actions — late, after all reversible work.
-    let mut opaque_ids = Vec::new();
-    for action in &execution.external_actions {
-        let id = OperationId::resource(action_kind_token(Delta::RunOpaque), &action.key);
-        let rollback = if action.rollback.is_some() {
-            RollbackCapability::Compensating
-        } else {
-            RollbackCapability::None
-        };
-        push(
-            TransactionNode {
-                id: id.clone(),
-                phase: Phase::OpaqueAction,
-                kind: NodeKind::OpaqueAction {
-                    key: action.key.clone(),
-                },
-                rollback,
-                declaration_order: 0,
-                meta: NodeMeta {
-                    source_relative: None,
-                    file_precondition: None,
-                    expected_sha256: None,
-                    expected_size: None,
-                    privilege: Some(action.privilege),
-                    has_rollback_command: action.rollback.is_some(),
-                    managed: None,
-                    removal: None,
-                    removal_scope: None,
-                },
-            },
-            &mut order,
-            &mut nodes,
-        );
-        opaque_ids.push(id);
-        let _ = action;
     }
 
     push(
@@ -582,29 +527,12 @@ pub fn compile_transaction(
         }
     }
 
-    // Opaque actions after managed operations and file mutations.
-    for opaque in &opaque_ids {
-        for predecessor in file_mutation_ids
-            .iter()
-            .chain(managed_ids.iter())
-            .chain(managed_removal_ids.iter())
-            .chain(file_removal_ids.iter())
-            .chain(std::iter::once(&commit_intent))
-        {
-            deps.push(Dependency {
-                from: predecessor.clone(),
-                to: opaque.clone(),
-            });
-        }
-    }
-
     // Verify after all mutations; commit after verify.
     for tail in file_mutation_ids
         .iter()
         .chain(managed_ids.iter())
         .chain(managed_removal_ids.iter())
         .chain(file_removal_ids.iter())
-        .chain(opaque_ids.iter())
     {
         deps.push(Dependency {
             from: tail.clone(),
@@ -615,7 +543,6 @@ pub fn compile_transaction(
         && managed_ids.is_empty()
         && managed_removal_ids.is_empty()
         && file_removal_ids.is_empty()
-        && opaque_ids.is_empty()
     {
         deps.push(Dependency {
             from: commit_intent.clone(),
@@ -632,33 +559,12 @@ pub fn compile_transaction(
     let execution_order = topological_ids(&nodes, &deps, false)?;
     let rollback_order = topological_ids(&nodes, &deps, true)?;
 
-    // Irreversible operations must run after all reversible work that can precede
-    // them — encoded above via opaque → depends on file + managed.
-    for node in &nodes {
-        if node.rollback == RollbackCapability::None
-            && node.phase != Phase::OpaqueAction
-            && node.phase != Phase::Begin
-            && node.phase != Phase::Preflight
-            && node.phase != Phase::CommitIntent
-            && node.phase != Phase::Verify
-            && node.phase != Phase::Commit
-        {
-            return Err(TransactionPlanError::ForbiddenOrdering {
-                id: node.id.to_string(),
-            });
-        }
-    }
-
-    let rollback_guarantee =
-        RollbackGuarantee::from_capabilities(nodes.iter().map(|n| &n.rollback));
-
     Ok(TransactionPlan {
         selected_components: execution.selected_components.clone(),
         uninstall: execution.uninstall,
         retired_keys: execution.removals.iter().map(|op| op.key.clone()).collect(),
         nodes,
         dependencies: deps,
-        rollback_guarantee,
         audit,
         execution_order,
         rollback_order,
@@ -670,7 +576,6 @@ fn barrier(id: OperationId, phase: Phase) -> TransactionNode {
         id,
         phase,
         kind: NodeKind::Barrier,
-        rollback: RollbackCapability::Automatic,
         declaration_order: 0,
         meta: NodeMeta::default(),
     }
@@ -742,7 +647,6 @@ fn push_managed_shortcut(
                     },
                     resource: ManagedResource::Shortcut,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: *order,
                 meta: NodeMeta {
                     managed: Some(zup_exec::ManagedOperation::Shortcut(op.clone())),
@@ -790,7 +694,6 @@ fn push_managed_path(
                     },
                     resource: ManagedResource::PathEntry,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: *order,
                 meta: NodeMeta {
                     managed: Some(zup_exec::ManagedOperation::Path(op.clone())),
@@ -838,7 +741,6 @@ fn push_managed_service(
                     },
                     resource: ManagedResource::Service,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: *order,
                 meta: NodeMeta {
                     managed: Some(zup_exec::ManagedOperation::Service(op.clone())),
@@ -886,7 +788,6 @@ fn push_managed_protocol(
                     },
                     resource: ManagedResource::Protocol,
                 },
-                rollback: RollbackCapability::Automatic,
                 declaration_order: *order,
                 meta: NodeMeta {
                     managed: Some(zup_exec::ManagedOperation::Protocol(op.clone())),
@@ -945,7 +846,6 @@ fn push_managed_file_type(
                 },
                 resource: ManagedResource::FileType,
             },
-            rollback: RollbackCapability::Automatic,
             declaration_order: *order,
             meta: NodeMeta {
                 managed: Some(zup_exec::ManagedOperation::ProgId(op.clone())),
@@ -981,7 +881,6 @@ fn push_managed_file_type(
                 },
                 resource: ManagedResource::FileType,
             },
-            rollback: RollbackCapability::Automatic,
             declaration_order: *order,
             meta: NodeMeta {
                 managed: Some(zup_exec::ManagedOperation::Extension(op.clone())),

@@ -11,7 +11,6 @@ use crate::executor::{OperationExecutor, OperationReceipt, ReconcileResult};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::{NodeKind, TransactionNode, TransactionPlan};
 use crate::record::{NodeState, StoreError, TransactionPhase, TransactionRecord};
-use crate::rollback::RollbackCapability;
 use crate::store::TransactionStore;
 
 /// Final stable outcome of a transaction attempt.
@@ -291,13 +290,6 @@ fn rollback_after_failure<S: TransactionStore, E: OperationExecutor>(
 where
     E::Error: std::fmt::Display,
 {
-    let irreversible_applied = record.nodes.iter().any(|(id, state)| {
-        matches!(state, NodeState::Applied { .. })
-            && find_node(&record.plan, id)
-                .map(|n| n.rollback == RollbackCapability::None)
-                .unwrap_or(false)
-    });
-
     record.phase = TransactionPhase::RollingBack;
     save(record, store)?;
     info!("rollback started");
@@ -313,10 +305,6 @@ where
             Some(NodeState::Applied { receipt }) => receipt.clone(),
             _ => continue,
         };
-        if node.rollback == RollbackCapability::None {
-            continue;
-        }
-
         set_node_state(record, op_id, NodeState::RollingBack)?;
         save(record, store)?;
 
@@ -335,7 +323,7 @@ where
         }
     }
 
-    if rollback_failed || irreversible_applied {
+    if rollback_failed {
         record.phase = TransactionPhase::RecoveryRequired;
         save(record, store)?;
         return Ok(TransactionOutcome::RecoveryRequired);

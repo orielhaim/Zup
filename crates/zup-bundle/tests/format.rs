@@ -1,8 +1,41 @@
 use std::{fs, io::Read, path::Path};
 
 use tempfile::TempDir;
-use zup_bundle::{BundleWriter, EmbeddedBundle, PayloadSource, embed_bundle_file};
+use zup_bundle::{
+    AutoPayloadSource, BundleError, BundleWriter, EmbeddedBundle, PayloadError, PayloadSource,
+    embed_bundle_file, read_pe_target,
+};
 use zup_core::RelativePath;
+
+#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+fn pe_target_reads_the_current_test_executable() {
+    assert_eq!(
+        read_pe_target(&std::env::current_exe().unwrap()).unwrap(),
+        zup_plugin_contract::HOST_TARGET,
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn executable_without_bundle_resource_is_classified_as_missing() {
+    let error = match EmbeddedBundle::open(std::env::current_exe().unwrap()) {
+        Ok(_) => panic!("test executable unexpectedly contains a bundle"),
+        Err(error) => error,
+    };
+    assert!(error.is_missing_resource(), "{error}");
+}
+
+#[test]
+fn pe_target_rejects_non_pe_bytes() {
+    let root = TempDir::new().unwrap();
+    let runtime = root.path().join("runtime.exe");
+    fs::write(&runtime, b"not a PE").unwrap();
+    assert!(matches!(
+        read_pe_target(&runtime),
+        Err(BundleError::Invalid)
+    ));
+}
 
 fn plan(root: &Path) -> zup_build::BuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
@@ -40,7 +73,7 @@ fn embed(root: &Path, package: &[u8]) -> std::path::PathBuf {
 #[test]
 fn package_is_inside_an_authenticode_hashed_pe_resource_and_deduplicated() {
     let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path())).unwrap();
+    let bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
     let output = embed(root.path(), &bytes);
     let embedded = EmbeddedBundle::open(&output).unwrap();
     let (exe_size, exe_hash) = zup_core::hash_reader(fs::File::open(&output).unwrap()).unwrap();
@@ -83,11 +116,75 @@ fn package_is_inside_an_authenticode_hashed_pe_resource_and_deduplicated() {
 #[test]
 fn resource_bundle_corruption_is_rejected_before_payload_use() {
     let root = TempDir::new().unwrap();
-    let mut bytes = BundleWriter::encode(&plan(root.path())).unwrap();
+    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
     let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
     bytes[60 + metadata_len] ^= 0x40;
     let output = embed(root.path(), &bytes);
     assert!(EmbeddedBundle::open(output).is_err());
+}
+
+#[test]
+fn overlay_precedes_base_and_missing_overlay_falls_back() {
+    let root = TempDir::new().unwrap();
+    let base = root.path().join("base");
+    let overlay = root.path().join("overlay");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&overlay).unwrap();
+    fs::write(base.join("tool.bin"), b"base").unwrap();
+    fs::write(overlay.join("tool.bin"), b"overlay").unwrap();
+    let source = AutoPayloadSource::from_paths(&base, Some(overlay.clone())).unwrap();
+    let relative = RelativePath::new("tool.bin").unwrap();
+    let (size, digest) = zup_core::hash_reader(&b"overlay"[..]).unwrap();
+    let mut selected = Vec::new();
+    source
+        .open(&relative, &digest, size)
+        .unwrap()
+        .read_to_end(&mut selected)
+        .unwrap();
+    assert_eq!(selected, b"overlay");
+
+    fs::remove_file(overlay.join("tool.bin")).unwrap();
+    let (size, digest) = zup_core::hash_reader(&b"base"[..]).unwrap();
+    let mut fallback = Vec::new();
+    source
+        .open(&relative, &digest, size)
+        .unwrap()
+        .read_to_end(&mut fallback)
+        .unwrap();
+    assert_eq!(fallback, b"base");
+}
+
+#[test]
+fn overlay_digest_mismatch_never_falls_back_to_base() {
+    let root = TempDir::new().unwrap();
+    let base = root.path().join("base");
+    let overlay = root.path().join("overlay");
+    fs::create_dir_all(base.join("__zup_plugins__")).unwrap();
+    fs::create_dir_all(overlay.join("__zup_plugins__")).unwrap();
+    fs::write(base.join("__zup_plugins__/generated.bin"), b"good!").unwrap();
+    fs::write(overlay.join("__zup_plugins__/generated.bin"), b"wrong").unwrap();
+    let source = AutoPayloadSource::from_paths(base, Some(overlay)).unwrap();
+    let relative = RelativePath::new("__zup_plugins__/generated.bin").unwrap();
+    let (size, digest) = zup_core::hash_reader(&b"good!"[..]).unwrap();
+    assert!(matches!(
+        source.open(&relative, &digest, size),
+        Err(PayloadError::DigestMismatch { .. })
+    ));
+}
+
+#[test]
+fn reserved_payload_is_never_satisfied_by_the_base_source() {
+    let root = TempDir::new().unwrap();
+    let base = root.path().join("base");
+    fs::create_dir_all(base.join("__zup_plugins__")).unwrap();
+    fs::write(base.join("__zup_plugins__/generated.bin"), b"base").unwrap();
+    let source = AutoPayloadSource::from_path(base).unwrap();
+    let relative = RelativePath::new("__zup_plugins__/generated.bin").unwrap();
+    let (size, digest) = zup_core::hash_reader(&b"base"[..]).unwrap();
+    assert!(matches!(
+        source.open(&relative, &digest, size),
+        Err(PayloadError::NotFound { .. })
+    ));
 }
 
 fn pe_section_end(path: &Path) -> u64 {

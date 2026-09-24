@@ -2,13 +2,12 @@
 
 #![allow(dead_code)]
 
-use zup_core::{ActionId, ActionKind, Privilege};
 use zup_core::{RelativePath, ResourceKey, SelectedScope, ServiceId, Sha256Digest, hash_reader};
 use zup_exec::{
-    ExecutionPlan, ExecutionSummary, ExternalActionOperation, FileOperation, FileOperationKind,
-    FilePrecondition, ShortcutOperation, ShortcutOperationKind,
+    ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
+    ShortcutOperation, ShortcutOperationKind,
 };
-use zup_platform::{CommandSpec, TargetPath};
+use zup_platform::TargetPath;
 use zup_transaction::{TransactionPlan, compile_transaction};
 
 pub fn tpath(s: &str) -> TargetPath {
@@ -19,7 +18,7 @@ pub fn digest(b: &[u8]) -> Sha256Digest {
     hash_reader(b).unwrap().1
 }
 
-/// Two file creates + one shortcut create + one irreversible opaque action.
+/// Two file creates and one shortcut create.
 pub fn sample_execution() -> ExecutionPlan {
     ExecutionPlan {
         selected_components: vec![],
@@ -69,22 +68,9 @@ pub fn sample_execution() -> ExecutionPlan {
         protocols: vec![],
         file_types: vec![],
         uninstall_entries: vec![],
-        external_actions: vec![ExternalActionOperation {
-            key: ResourceKey::ExternalAction {
-                id: ActionId::new("setup").unwrap(),
-            },
-            id: ActionId::new("setup").unwrap(),
-            kind: ActionKind::Exec,
-            apply: CommandSpec::new(tpath(r"C:\PF\Acme\setup.exe"), vec!["reg".into()]),
-            rollback: None,
-            uninstall: None,
-            privilege: Privilege::Machine,
-            opaque: true,
-        }],
         summary: ExecutionSummary {
             files_create: 2,
             shortcuts_create: 1,
-            opaque_actions: 1,
             requires_elevation: true,
             ..Default::default()
         },
@@ -106,7 +92,6 @@ pub fn chain_execution() -> ExecutionPlan {
         expected_size: 1,
         conflict: None,
     });
-    plan.external_actions.clear();
     plan.shortcuts.clear();
     plan
 }

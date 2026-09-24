@@ -2,10 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zup_core::{ActionId, ComponentId, Install, InstallScope, Installer};
+use zup_core::{ComponentId, Install, InstallScope, Installer, PluginBinding};
 
 use crate::error::ManifestError;
 use crate::model::Manifest;
+use crate::plugin::is_valid_source;
 
 /// Compile a parsed manifest into platform-independent Installer IR.
 ///
@@ -31,18 +32,40 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
     validate_components(&manifest.components)?;
     validate_resources(&manifest)?;
 
+    let Manifest {
+        app,
+        install,
+        components,
+        files,
+        shortcuts,
+        path,
+        services,
+        protocols,
+        file_types,
+        plugins,
+        ..
+    } = manifest;
+    let plugins = plugins
+        .into_iter()
+        .map(|plugin| PluginBinding {
+            id: plugin.id,
+            component: plugin.component,
+            when: plugin.when,
+        })
+        .collect();
+
     Ok(Installer {
-        app: manifest.app,
+        app,
         updates: None,
-        install: manifest.install,
-        components: manifest.components,
-        files: manifest.files,
-        shortcuts: manifest.shortcuts,
-        path: manifest.path,
-        services: manifest.services,
-        protocols: manifest.protocols,
-        file_types: manifest.file_types,
-        actions: manifest.actions,
+        install,
+        components,
+        plugins,
+        files,
+        shortcuts,
+        path,
+        services,
+        protocols,
+        file_types,
     })
 }
 
@@ -195,22 +218,29 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
         .map(|component| component.id.clone())
         .collect();
 
-    let mut services = BTreeSet::new();
-    for service in &manifest.services {
-        if !services.insert(service.id.clone()) {
-            return Err(ManifestError::DuplicateService {
-                id: service.id.to_string(),
+    let mut plugins = BTreeSet::new();
+    for plugin in &manifest.plugins {
+        if !is_valid_source(&plugin.source) {
+            return Err(ManifestError::InvalidPluginSource {
+                path: plugin.source.clone(),
+                src: None,
+                span: None,
+            });
+        }
+        if !plugins.insert(plugin.id.as_str().to_ascii_lowercase()) {
+            return Err(ManifestError::DuplicatePlugin {
+                id: plugin.id.to_string(),
                 src: None,
                 span: None,
             });
         }
     }
 
-    let mut actions = BTreeSet::<ActionId>::new();
-    for action in &manifest.actions {
-        if !actions.insert(action.id.clone()) {
-            return Err(ManifestError::DuplicateAction {
-                id: action.id.to_string(),
+    let mut services = BTreeSet::new();
+    for service in &manifest.services {
+        if !services.insert(service.id.clone()) {
+            return Err(ManifestError::DuplicateService {
+                id: service.id.to_string(),
                 src: None,
                 span: None,
             });
@@ -252,29 +282,29 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
 
     for file in &manifest.files {
         check_ref(file.component.as_ref(), &known, "file mapping")?;
-        check_condition(file.when.as_ref(), &known)?;
+        check_condition(file.when.as_ref(), &known, "condition")?;
     }
     for shortcut in &manifest.shortcuts {
         check_ref(shortcut.component.as_ref(), &known, "shortcut")?;
-        check_condition(shortcut.when.as_ref(), &known)?;
+        check_condition(shortcut.when.as_ref(), &known, "condition")?;
     }
     for entry in &manifest.path {
         check_ref(entry.component.as_ref(), &known, "path entry")?;
-        check_condition(entry.when.as_ref(), &known)?;
+        check_condition(entry.when.as_ref(), &known, "condition")?;
     }
     for service in &manifest.services {
         check_ref(service.component.as_ref(), &known, "service")?;
-        check_condition(service.when.as_ref(), &known)?;
+        check_condition(service.when.as_ref(), &known, "condition")?;
     }
     for protocol in &manifest.protocols {
-        check_condition(protocol.when.as_ref(), &known)?;
+        check_condition(protocol.when.as_ref(), &known, "condition")?;
     }
     for file_type in &manifest.file_types {
-        check_condition(file_type.when.as_ref(), &known)?;
+        check_condition(file_type.when.as_ref(), &known, "condition")?;
     }
-    for action in &manifest.actions {
-        check_ref(action.component.as_ref(), &known, "action")?;
-        check_condition(action.when.as_ref(), &known)?;
+    for plugin in &manifest.plugins {
+        check_ref(plugin.component.as_ref(), &known, "plugin")?;
+        check_condition(plugin.when.as_ref(), &known, "plugin condition")?;
     }
 
     Ok(())
@@ -301,6 +331,7 @@ fn check_ref(
 fn check_condition(
     condition: Option<&zup_core::Condition>,
     known: &BTreeSet<ComponentId>,
+    context: &str,
 ) -> Result<(), ManifestError> {
     let Some(condition) = condition else {
         return Ok(());
@@ -309,7 +340,7 @@ fn check_condition(
         if !known.contains(&id) {
             return Err(ManifestError::UnknownComponent {
                 id: id.to_string(),
-                context: "condition".to_owned(),
+                context: context.to_owned(),
                 src: None,
                 span: None,
             });

@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Action, App, Component, FileMapping, FileType, Install, PathEntry, Protocol, Service, Shortcut,
+    App, Component, FileMapping, FileType, Install, PathEntry, PluginBinding, Protocol, Service,
+    Shortcut,
 };
 
 /// Engine-facing installer representation.
@@ -18,13 +19,13 @@ pub struct Installer {
     pub updates: Option<UpdateConfig>,
     pub install: Install,
     pub components: Vec<Component>,
+    pub plugins: Vec<PluginBinding>,
     pub files: Vec<FileMapping>,
     pub shortcuts: Vec<Shortcut>,
     pub path: Vec<PathEntry>,
     pub services: Vec<Service>,
     pub protocols: Vec<Protocol>,
     pub file_types: Vec<FileType>,
-    pub actions: Vec<Action>,
 }
 
 /// Runtime update trust configuration embedded by the build step.

@@ -68,16 +68,7 @@ id = "Acme.Document"
 description = "Acme Document"
 executable = "${install}/Acme.exe"
 
-[[actions]]
-id = "register-special-device"
-type = "exec"
-component = "service"
-privilege = "machine"
-
-[actions.apply]
-command = "${install}/setup-helper.exe"
-args = ["register"]
-
-[actions.rollback]
-command = "${install}/setup-helper.exe"
-args = ["unregister"]
+[[plugins]]
+id = "setup-helper"
+source = "plugins/setup-helper.wasm"
+component = "core"

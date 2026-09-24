@@ -102,8 +102,6 @@ pub enum OperationReceipt {
         previous: Option<UninstallEntryState>,
         installed: Option<UninstallEntryState>,
     },
-    /// Generic marker for unsupported or opaque nodes in tests.
-    Opaque,
 }
 
 /// Platform/runtime implementation that can actually perform an operation.

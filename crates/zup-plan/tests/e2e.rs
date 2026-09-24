@@ -20,8 +20,8 @@ fn acme_project() -> (TempDir, zup_build::BuildPlan) {
     write(dir.path().join("zup.toml"), b"");
     write(dir.path().join("dist/Acme.exe"), b"main-exe");
     write(dir.path().join("dist/acme-agent.exe"), b"agent-exe");
-    write(dir.path().join("dist/setup-helper.exe"), b"helper");
     write(dir.path().join("dist/bin/acme.exe"), b"cli-exe");
+    write(dir.path().join("plugins/setup-helper.wasm"), b"plugin");
 
     let source = include_str!("fixtures/acme.toml");
     let manifest = parse(source).expect("parse acme");
@@ -53,9 +53,6 @@ fn user_default_plan() {
 
     // Service component not selected → no service resource.
     assert!(result.services.is_empty());
-
-    // Helper action is gated on `service` → not included.
-    assert!(result.actions.is_empty());
 
     // User install directory with app.name resolved.
     assert_eq!(
@@ -107,18 +104,12 @@ fn machine_plan_with_service_enabled() {
     assert_eq!(result.services[0].id.as_str(), "acme-agent");
     assert_eq!(result.services[0].privilege, Privilege::Machine);
 
-    assert_eq!(result.actions.len(), 1);
-    assert_eq!(result.actions[0].id.as_str(), "register-special-device");
-    assert!(result.actions[0].opaque);
-    assert!(result.actions[0].rollback.is_some());
-
     assert_eq!(
         result.install_directory.to_string(),
         "${known.program_files}/Acme"
     );
 
     assert!(result.summary.requires_elevation);
-    assert_eq!(result.summary.opaque_action_count, 1);
 
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("${install}"));

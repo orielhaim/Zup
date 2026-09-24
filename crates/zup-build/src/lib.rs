@@ -18,11 +18,13 @@ mod error;
 mod materialize;
 mod pattern;
 mod plan;
+mod plugins;
 mod windows;
 
 pub use digest::{DigestParseError, Sha256Digest};
 pub use error::BuildError;
 pub use materialize::{materialize, materialize_destination};
 pub use pattern::FilePattern;
-pub use plan::{BuildPlan, ResolvedFile};
+pub use plan::{BuildPlan, ResolvedFile, ResolvedPlugin};
+pub use plugins::MAX_PLUGIN_SOURCE_BYTES;
 pub use windows::validate_windows_destination;

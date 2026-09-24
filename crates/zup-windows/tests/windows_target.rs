@@ -117,15 +117,6 @@ extension = ".acme"
 id = "Acme.Document"
 description = "Acme Document"
 executable = "${install}/Acme.exe"
-
-[[actions]]
-id = "setup"
-type = "exec"
-privilege = "machine"
-
-[actions.apply]
-command = "${install}/setup-helper.exe"
-args = ["register"]
 "#
 }
 
@@ -136,7 +127,6 @@ fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::Target
     write(&project.join("dist/Acme.exe"), b"main-correct");
     write(&project.join("dist/acme-agent.exe"), b"agent-new");
     write(&project.join("dist/bin/acme.exe"), b"cli-new");
-    write(&project.join("dist/setup-helper.exe"), b"helper");
 
     let source = acme_manifest();
     let manifest = parse(source).expect("parse");
@@ -223,7 +213,6 @@ fn inspect_target_with_fakes_and_plan_execution() {
     write(&pf.join("Acme.exe"), b"main-correct");
     write(&pf.join("acme-agent.exe"), b"agent-OLD");
     // bin/acme.exe intentionally absent → Create
-    write(&pf.join("setup-helper.exe"), b"helper");
 
     let services = FakeServiceReader::default();
     let shortcuts = FakeShortcutReader::default();
@@ -252,8 +241,6 @@ fn inspect_target_with_fakes_and_plan_execution() {
         plan.shortcuts[0].kind,
         zup_exec::ShortcutOperationKind::Create
     );
-    assert_eq!(plan.external_actions.len(), 1);
-    assert!(plan.external_actions[0].opaque);
 
     // Zero mutation: payload on disk unchanged.
     assert_eq!(fs::read(pf.join("acme-agent.exe")).unwrap(), b"agent-OLD");
@@ -282,5 +269,154 @@ fn live_known_folders_include_programs() {
         assert!(path.is_absolute());
         assert!(!path.as_os_str().is_empty());
         assert!(!path.to_string_lossy().contains("${"));
+    }
+}
+
+mod transaction_fingerprint {
+    use std::path::Path;
+
+    use tempfile::TempDir;
+    use zup_build::BuildPlan;
+    use zup_core::{
+        App, AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
+        NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
+    };
+    use zup_exec::LifecycleAction;
+    use zup_plan::{
+        CancellationQuery, NeverCancelled, PlanRequest, PluginArchitecture, PluginExecutor,
+        PluginFailure, PluginHostFacts, PluginOperatingSystem, PluginPlanningContext,
+        PluginResource, PluginResourceProposal, plan_with_plugins,
+    };
+    use zup_transaction::compile_transaction;
+    use zup_windows::{WindowsTargetContext, plan_target_lifecycle, resolve_target};
+
+    use super::FakeKnownFolders;
+
+    struct GuestExecutor {
+        resources: Vec<PluginResource>,
+    }
+
+    impl PluginExecutor for GuestExecutor {
+        fn plan(
+            &mut self,
+            _binding: &PluginBinding,
+            _context: &PluginPlanningContext,
+            _cancellation: &dyn CancellationQuery,
+        ) -> Result<PluginResourceProposal, PluginFailure> {
+            Ok(PluginResourceProposal::new(self.resources.clone()))
+        }
+    }
+
+    fn build_plan() -> BuildPlan {
+        BuildPlan {
+            installer: Installer {
+                app: App {
+                    id: AppId::new("com.example.fingerprint").unwrap(),
+                    name: NonEmptyString::new("Fingerprint").unwrap(),
+                    version: "1.0.0".parse().unwrap(),
+                    publisher: None,
+                    main: None,
+                    description: None,
+                },
+                updates: None,
+                install: Install {
+                    scope: InstallScope::User,
+                    directory: InstallDirectory {
+                        user: Some(Template::parse("${known.local_app_data}/Fingerprint").unwrap()),
+                        machine: None,
+                    },
+                },
+                components: vec![Component {
+                    id: ComponentId::new("core").unwrap(),
+                    name: NonEmptyString::new("Core").unwrap(),
+                    description: None,
+                    required: true,
+                    default: true,
+                    requires: Vec::new(),
+                }],
+                plugins: vec![PluginBinding {
+                    id: PluginId::new("guest").unwrap(),
+                    component: None,
+                    when: None,
+                }],
+                files: Vec::new(),
+                shortcuts: Vec::new(),
+                path: Vec::new(),
+                services: Vec::new(),
+                protocols: Vec::new(),
+                file_types: Vec::new(),
+            },
+            plugins: Vec::new(),
+            files: Vec::new(),
+            total_size: 0,
+        }
+    }
+
+    fn fingerprint(root: &Path, state: &Path, resources: Vec<PluginResource>) -> Sha256Digest {
+        let mut executor = GuestExecutor { resources };
+        let planned = plan_with_plugins(
+            &build_plan(),
+            &PlanRequest::new(SelectedScope::User),
+            PluginHostFacts::new(PluginOperatingSystem::Windows, PluginArchitecture::X86_64),
+            &mut executor,
+            &NeverCancelled,
+        )
+        .unwrap();
+        let target = resolve_target(
+            &planned.plan,
+            &WindowsTargetContext::with_resolver(
+                FakeKnownFolders {
+                    root: root.to_path_buf(),
+                },
+                SelectedScope::User,
+            ),
+        )
+        .unwrap();
+        let execution = plan_target_lifecycle(
+            LifecycleAction::Install,
+            &target.app.id,
+            SelectedScope::User,
+            Some(&target),
+            state,
+        )
+        .unwrap();
+        compile_transaction(&execution).unwrap().fingerprint()
+    }
+
+    #[test]
+    fn reversed_guest_resources_have_one_fingerprint_but_content_changes_it() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state");
+        let first = vec![
+            PluginResource::GeneratedFile {
+                destination: "${install}/a.txt".to_owned(),
+                contents: b"a".to_vec(),
+            },
+            PluginResource::GeneratedFile {
+                destination: "${install}/b.txt".to_owned(),
+                contents: b"b".to_vec(),
+            },
+        ];
+        let mut reversed = first.clone();
+        reversed.reverse();
+        let first_fingerprint = fingerprint(root.path(), &state, first);
+        let reversed_fingerprint = fingerprint(root.path(), &state, reversed);
+        assert_eq!(first_fingerprint, reversed_fingerprint);
+
+        let changed = fingerprint(
+            root.path(),
+            &state,
+            vec![
+                PluginResource::GeneratedFile {
+                    destination: "${install}/a.txt".to_owned(),
+                    contents: b"changed".to_vec(),
+                },
+                PluginResource::GeneratedFile {
+                    destination: "${install}/b.txt".to_owned(),
+                    contents: b"b".to_vec(),
+                },
+            ],
+        );
+        assert_ne!(first_fingerprint, changed);
     }
 }

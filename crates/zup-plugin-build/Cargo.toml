@@ -1,0 +1,22 @@
+[package]
+name = "zup-plugin-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ahead-of-time plugin compilation for zup"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+zup-build.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-plugin-contract = { workspace = true, features = ["compiler"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+zup-manifest.workspace = true
+wat = "1"
+wit-component = { version = "=0.258.0", features = ["dummy-module"] }
+wit-parser = "=0.258.0"

@@ -1,7 +1,9 @@
 //! Unit tests for domain identifiers and extensions.
 
 use rstest::rstest;
-use zup_core::{AppId, ComponentId, FileExtension, NonEmptyString, ProtocolScheme, ValueError};
+use zup_core::{
+    AppId, ComponentId, FileExtension, NonEmptyString, PluginId, ProtocolScheme, ValueError,
+};
 
 #[rstest]
 #[case::app(AppId::new("com.acme.acme"), "com.acme.acme")]
@@ -9,6 +11,27 @@ use zup_core::{AppId, ComponentId, FileExtension, NonEmptyString, ProtocolScheme
 fn valid_ids(#[case] result: Result<AppId, ValueError>, #[case] expected: &str) {
     let id = result.unwrap();
     assert_eq!(id.as_str(), expected);
+}
+
+#[rstest]
+#[case::letter("plugin")]
+#[case::digit("9plugin")]
+#[case::portable("plugin.name_1-x")]
+fn valid_plugin_ids(#[case] value: &str) {
+    assert_eq!(PluginId::new(value).unwrap().as_str(), value);
+}
+
+#[rstest]
+#[case::empty("")]
+#[case::leading_dot(".plugin")]
+#[case::leading_underscore("_plugin")]
+#[case::leading_hyphen("-plugin")]
+#[case::space("plugin name")]
+#[case::slash("plugin/name")]
+#[case::backslash("plugin\\name")]
+#[case::non_ascii("plugín")]
+fn invalid_plugin_ids(#[case] value: &str) {
+    assert!(PluginId::new(value).is_err(), "value: {value}");
 }
 
 #[test]

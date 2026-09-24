@@ -51,7 +51,6 @@ fn execute_commits_all_nodes() {
     assert_eq!(final_record.phase, TransactionPhase::Committed);
     assert!(exec.applied.iter().any(|id| id.contains("a.exe")));
     assert!(exec.applied.iter().any(|id| id.contains("b.dll")));
-    assert!(exec.applied.iter().any(|id| id.contains("setup")));
     assert!(exec.applied.iter().any(|id| id.contains("Acme")));
 }
 
@@ -91,35 +90,6 @@ fn rollback_failure_requires_recovery() {
     let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
-}
-
-#[test]
-fn irreversible_failure_requires_recovery() {
-    let (_dir, coord) = coord();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            sample_plan(),
-        )
-        .unwrap();
-    let total = record
-        .plan
-        .execution_order
-        .iter()
-        .filter(|id| !id.as_str().starts_with("ctrl:"))
-        .count();
-    let mut exec = FakeExecutor::new().fail_on_apply(total.saturating_sub(1));
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert!(
-        matches!(
-            outcome,
-            TransactionOutcome::RolledBack | TransactionOutcome::RecoveryRequired
-        ),
-        "outcome: {outcome:?} phase: {:?}",
-        final_record.phase
-    );
 }
 
 #[test]
@@ -294,39 +264,6 @@ fn crash_after_apply_before_applied_persisted() {
         final_record.nodes.get(&op_id),
         Some(NodeState::Applied { .. })
     ));
-}
-
-#[test]
-fn irreversible_opaque_runs_after_reversible() {
-    let plan = sample_plan();
-    let setup = plan
-        .nodes
-        .iter()
-        .find(|n| n.id.as_str().contains("setup"))
-        .unwrap();
-    assert_eq!(setup.rollback, zup_transaction::RollbackCapability::None);
-
-    let pos_setup = plan
-        .execution_order
-        .iter()
-        .position(|id| id == &setup.id)
-        .unwrap();
-    for node in &plan.nodes {
-        if matches!(node.kind, NodeKind::FileMutation { .. })
-            || matches!(node.kind, NodeKind::ManagedIntegration { .. })
-        {
-            let pos = plan
-                .execution_order
-                .iter()
-                .position(|id| id == &node.id)
-                .unwrap();
-            assert!(
-                pos < pos_setup,
-                "{} must precede irreversible setup",
-                node.id
-            );
-        }
-    }
 }
 
 #[test]

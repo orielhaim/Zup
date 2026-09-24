@@ -7,9 +7,11 @@ mod format;
 mod payload;
 
 pub use format::{
-    BundleError, BundlePayloadSource, BundleWriter, EmbeddedBundle, PortableBuildPlan,
-    build_self_contained_executable, embed_bundle_file,
+    BundleError, BundlePayloadSource, BundleWriter, CompiledPluginArtifact, EmbeddedBundle,
+    MAX_PLUGIN_AOT_TOTAL_BYTES, PayloadEntry, PluginArtifact, PortableBuildPlan,
+    build_self_contained_executable, embed_bundle_file, read_pe_target,
 };
 pub use payload::{
-    AutoPayloadSource, DirectoryPayloadSource, PayloadError, PayloadReader, PayloadSource,
+    AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,
+    PayloadSource,
 };

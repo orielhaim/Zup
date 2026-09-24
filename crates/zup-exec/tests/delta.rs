@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use zup_core::{
-    ActionId, ActionKind, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
-    ServiceId, ServiceStart, Sha256Digest, ShortcutLocation, hash_reader,
+    Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
+    Sha256Digest, ShortcutLocation, hash_reader,
 };
 use zup_exec::{
     Conflict, FileOperationKind, FileTypeOperationKind, MachineSnapshot, ObservedExtensionState,
@@ -102,18 +102,6 @@ fn sample_target() -> zup_platform::TargetPlan {
             command: cmd(r"C:\PF\Acme\Acme.exe", &[]),
             scope: SelectedScope::Machine,
             privilege: Privilege::Machine,
-        }],
-        actions: vec![zup_platform::TargetExternalAction {
-            key: ResourceKey::ExternalAction {
-                id: ActionId::new("setup").unwrap(),
-            },
-            id: ActionId::new("setup").unwrap(),
-            kind: ActionKind::Exec,
-            apply: cmd(r"C:\PF\Acme\setup-helper.exe", &["register"]),
-            rollback: Some(cmd(r"C:\PF\Acme\setup-helper.exe", &["unregister"])),
-            uninstall: None,
-            privilege: Privilege::Machine,
-            opaque: true,
         }],
         summary: zup_platform::TargetPlanSummary {
             file_count: 1,
@@ -275,8 +263,6 @@ fn e2e_fake_machine_mixed_deltas() {
     assert_eq!(plan.services[0].kind, ServiceOperationKind::NoOp);
     assert_eq!(plan.protocols[0].kind, ProtocolOperationKind::Create);
     assert_eq!(plan.file_types[0].kind, FileTypeOperationKind::NoOp);
-    assert_eq!(plan.external_actions.len(), 1);
-    assert!(plan.external_actions[0].opaque);
 
     assert_eq!(plan.summary.files_unchanged, 1);
     assert_eq!(plan.summary.path_entries_add, 1);
@@ -284,7 +270,6 @@ fn e2e_fake_machine_mixed_deltas() {
     assert_eq!(plan.summary.services_unchanged, 1);
     assert_eq!(plan.summary.protocols_create, 1);
     assert_eq!(plan.summary.file_types_unchanged, 1);
-    assert_eq!(plan.summary.opaque_actions, 1);
 }
 
 #[test]

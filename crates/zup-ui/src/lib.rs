@@ -1231,7 +1231,6 @@ mod windows_smoke {
                 protocols: vec![],
                 file_types: vec![],
                 uninstall_entries: vec![],
-                external_actions: vec![],
                 summary: ExecutionSummary {
                     files_create: 1,
                     ..Default::default()
@@ -1240,6 +1239,8 @@ mod windows_smoke {
             state_root: root.join("state"),
             work_root: root.join("work"),
             payload_root: payload,
+            payload_overlay_root: None,
+            payload_overlay_base_root: None,
             recovery_id: None,
         }
     }

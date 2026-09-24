@@ -3,7 +3,7 @@
 use std::fs;
 
 use rstest::rstest;
-use zup_core::{ActionId, ComponentId, InstallScope, Installer, ServiceId};
+use zup_core::{ComponentId, InstallScope, Installer, ServiceId};
 use zup_manifest::{ManifestError, compile, parse, parse_and_compile};
 
 fn fixture() -> String {
@@ -48,13 +48,14 @@ fn fixture_compiles_to_ir() {
     assert_eq!(installer.app.version.to_string(), "1.4.0");
     assert_eq!(installer.install.scope, InstallScope::Either);
     assert_eq!(installer.components.len(), 3);
+    assert_eq!(installer.plugins.len(), 1);
+    assert_eq!(installer.plugins[0].id.as_str(), "setup-helper");
     assert_eq!(installer.files.len(), 1);
     assert_eq!(installer.shortcuts.len(), 1);
     assert_eq!(installer.path.len(), 1);
     assert_eq!(installer.services.len(), 1);
     assert_eq!(installer.protocols.len(), 1);
     assert_eq!(installer.file_types.len(), 1);
-    assert_eq!(installer.actions.len(), 1);
 
     assert_eq!(
         installer.components[0].id,
@@ -67,12 +68,6 @@ fn fixture_compiles_to_ir() {
         installer.services[0].id,
         ServiceId::new("acme-agent").unwrap()
     );
-    assert_eq!(
-        installer.actions[0].id,
-        ActionId::new("register-special-device").unwrap()
-    );
-    assert!(installer.actions[0].rollback.is_some());
-    assert!(installer.actions[0].uninstall.is_none());
 }
 
 #[test]
@@ -80,6 +75,153 @@ fn compilation_is_deterministic() {
     let a = parse_and_compile(&fixture()).unwrap();
     let b = parse_and_compile(&fixture()).unwrap();
     assert_eq!(a, b);
+}
+
+#[test]
+fn plugin_compiles_without_build_time_source() {
+    let src = with(
+        r#"
+[[components]]
+id = "core"
+name = "Core"
+
+[[plugins]]
+id = "setup.helper"
+source = "plugins/setup-helper.wasm"
+component = "core"
+when = 'component("core")'
+"#,
+    );
+    let installer = parse_and_compile(&src).expect("valid plugin");
+    assert_eq!(installer.plugins.len(), 1);
+    let plugin = &installer.plugins[0];
+    assert_eq!(plugin.id.as_str(), "setup.helper");
+    assert_eq!(
+        plugin.component.as_ref().map(|id| id.as_str()),
+        Some("core")
+    );
+    assert_eq!(
+        plugin.when.as_ref().map(ToString::to_string),
+        Some("component(\"core\")".to_owned())
+    );
+    let json = serde_json::to_string(&installer).unwrap();
+    assert!(!json.contains("plugins/setup-helper.wasm"), "json: {json}");
+}
+
+#[test]
+fn duplicate_plugin() {
+    let src = with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/one.wasm"
+
+[[plugins]]
+id = "helper"
+source = "plugins/two.wasm"
+"#,
+    );
+    let err = compile(parse(&src).unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
+    ));
+}
+
+#[test]
+fn plugin_ids_are_case_insensitive_identities() {
+    let src = with(
+        r#"
+[[plugins]]
+id = "Helper"
+source = "plugins/one.wasm"
+
+[[plugins]]
+id = "helper"
+source = "plugins/two.wasm"
+"#,
+    );
+    let err = compile(parse(&src).unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
+    ));
+}
+
+#[test]
+fn invalid_plugin_source_is_rejected_by_compile() {
+    let mut manifest = parse(&with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    ))
+    .unwrap();
+    manifest.plugins[0].source = "../helper.wasm".to_owned();
+    let err = compile(manifest).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::InvalidPluginSource { ref path, .. } if path == "../helper.wasm"
+    ));
+}
+
+#[test]
+fn unknown_plugin_component_reference() {
+    let src = with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+component = "missing"
+"#,
+    );
+    let err = compile(parse(&src).unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::UnknownComponent { ref id, ref context, .. }
+            if id == "missing" && context.contains("plugin")
+    ));
+}
+
+#[test]
+fn unknown_plugin_condition_reference() {
+    let src = with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+when = 'component("missing")'
+"#,
+    );
+    let err = compile(parse(&src).unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        ManifestError::UnknownComponent { ref id, ref context, .. }
+            if id == "missing" && context.contains("plugin")
+    ));
+}
+
+#[test]
+fn plugin_declaration_order_is_preserved() {
+    let src = with(
+        r#"
+[[plugins]]
+id = "z-plugin"
+source = "plugins/z.wasm"
+
+[[plugins]]
+id = "a-plugin"
+source = "plugins/a.wasm"
+"#,
+    );
+    let installer = parse_and_compile(&src).unwrap();
+    let ids: Vec<_> = installer
+        .plugins
+        .iter()
+        .map(|plugin| plugin.id.as_str().to_owned())
+        .collect();
+    assert_eq!(ids, ["z-plugin", "a-plugin"]);
 }
 
 #[test]
@@ -171,32 +313,6 @@ start = "manual"
     assert!(matches!(
         err,
         ManifestError::DuplicateService { ref id, .. } if id == "svc"
-    ));
-}
-
-#[test]
-fn duplicate_action() {
-    let src = with(
-        r#"
-[[actions]]
-id = "run"
-type = "exec"
-
-[actions.apply]
-command = "a.exe"
-
-[[actions]]
-id = "run"
-type = "exec"
-
-[actions.apply]
-command = "b.exe"
-"#,
-    );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::DuplicateAction { ref id, .. } if id == "run"
     ));
 }
 
@@ -349,19 +465,6 @@ component = "tools"
 "#,
     "tools",
     "service"
-)]
-#[case::action(
-    r#"
-[[actions]]
-id = "a"
-type = "exec"
-component = "tools"
-
-[actions.apply]
-command = "x.exe"
-"#,
-    "tools",
-    "action"
 )]
 #[case::condition(
     r#"

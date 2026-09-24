@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    ActionId, ActionKind, App, ComponentId, FileExtension, FileTypeId, NonEmptyString, Privilege,
-    ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
-    Sha256Digest, ShortcutLocation,
+    App, ComponentId, FileExtension, FileTypeId, NonEmptyString, Privilege, ProtocolScheme,
+    RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest,
+    ShortcutLocation,
 };
 
 use crate::command::CommandSpec;
@@ -24,7 +24,6 @@ pub struct TargetPlan {
     pub services: Vec<TargetService>,
     pub protocols: Vec<TargetProtocol>,
     pub file_types: Vec<TargetFileType>,
-    pub actions: Vec<TargetExternalAction>,
 
     pub summary: TargetPlanSummary,
 }
@@ -95,19 +94,6 @@ pub struct TargetFileType {
     pub command: CommandSpec,
     pub scope: SelectedScope,
     pub privilege: Privilege,
-}
-
-/// One desired opaque external action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetExternalAction {
-    pub key: ResourceKey,
-    pub id: ActionId,
-    pub kind: ActionKind,
-    pub apply: CommandSpec,
-    pub rollback: Option<CommandSpec>,
-    pub uninstall: Option<CommandSpec>,
-    pub privilege: Privilege,
-    pub opaque: bool,
 }
 
 /// Derived summary of a target plan.

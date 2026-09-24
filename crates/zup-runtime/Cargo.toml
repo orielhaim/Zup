@@ -25,6 +25,7 @@ uuid.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
+zup-plan.workspace = true
 zup-platform.workspace = true
 zup-protocol.workspace = true
 zup-transaction.workspace = true
@@ -32,6 +33,5 @@ zup-windows.workspace = true
 
 [dev-dependencies]
 windows-registry.workspace = true
-rstest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -37,6 +37,9 @@ zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
 zup-windows = { path = "crates/zup-windows" }
 zup-update = { path = "crates/zup-update" }
+zup-plugin-contract = { path = "crates/zup-plugin-contract" }
+zup-plugin-build = { path = "crates/zup-plugin-build" }
+zup-plugin-runtime = { path = "crates/zup-plugin-runtime" }
 
 # Graph / transactions
 petgraph = "0.8"
@@ -46,6 +49,11 @@ fs-transaction = "0.3"
 walkdir = "2"
 globset = "0.4"
 sha2 = "0.11"
+wasmtime = { version = "=49.0.0", default-features = false, features = [
+  "component-model",
+  "runtime",
+  "std",
+] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

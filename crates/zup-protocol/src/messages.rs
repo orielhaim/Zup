@@ -6,13 +6,14 @@ use uuid::Uuid;
 use crate::SessionId;
 
 /// IPC protocol version.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Maximum length-delimited frame size (bytes). Rejects malicious length prefixes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum serialized transaction-plan payload size (bytes).
 pub const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PAYLOAD_OVERLAY_PATH_BYTES: usize = 32 * 1024;
 
 /// Worker capability token for the file-transaction node set.
 pub const FILE_TRANSACTIONS_V1: &str = "file-transactions-v1";
@@ -112,6 +113,10 @@ pub struct ExecuteTransaction {
     pub app_version: String,
     pub scope: String,
     pub payload_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_overlay_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_overlay_base_root: Option<String>,
     pub state_root: String,
     pub work_root: String,
     /// Resume this durable transaction instead of beginning another one.

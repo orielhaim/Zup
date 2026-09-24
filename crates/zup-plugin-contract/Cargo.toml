@@ -1,0 +1,21 @@
+[package]
+name = "zup-plugin-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stable WebAssembly component contract for zup plugins"
+
+[features]
+default = []
+compiler = ["wasmtime/cranelift", "wasmtime/all-arch"]
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+wat = "1"
+wit-component = { version = "=0.258.0", features = ["dummy-module"] }
+wit-parser = "=0.258.0"

@@ -5,10 +5,7 @@ use crate::observe::{
     ObservedShortcutState, PathEntryState,
 };
 use serde::{Deserialize, Serialize};
-use zup_core::{
-    ActionId, ActionKind, Privilege, ProtocolScheme, RelativePath, ResourceKey, ServiceStart,
-    Sha256Digest,
-};
+use zup_core::{ProtocolScheme, RelativePath, ResourceKey, ServiceStart, Sha256Digest};
 use zup_platform::{CommandSpec, SelectedScope, TargetPath};
 
 /// High-level comparison result for one desired resource.
@@ -22,8 +19,6 @@ pub enum Delta {
     RepairOwned,
     NoOp,
     Conflict,
-    /// Opaque external actions cannot be reasoned about.
-    RunOpaque,
 }
 
 /// File payload decision.
@@ -223,19 +218,6 @@ pub enum ManagedOperation {
     UninstallEntry(UninstallEntryOperation),
 }
 
-/// Opaque external action execution node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalActionOperation {
-    pub key: ResourceKey,
-    pub id: ActionId,
-    pub kind: ActionKind,
-    pub apply: CommandSpec,
-    pub rollback: Option<CommandSpec>,
-    pub uninstall: Option<CommandSpec>,
-    pub privilege: Privilege,
-    pub opaque: bool,
-}
-
 /// Derived execution summary with checked counts and byte totals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionSummary {
@@ -264,8 +246,6 @@ pub struct ExecutionSummary {
     pub file_types_unchanged: usize,
     pub file_types_conflict: usize,
 
-    pub opaque_actions: usize,
-
     pub write_bytes: u64,
     pub total_desired_bytes: u64,
     pub requires_elevation: bool,
@@ -286,7 +266,6 @@ pub struct ExecutionPlan {
     pub protocols: Vec<ProtocolOperation>,
     pub file_types: Vec<FileTypeOperation>,
     pub uninstall_entries: Vec<UninstallEntryOperation>,
-    pub external_actions: Vec<ExternalActionOperation>,
     pub summary: ExecutionSummary,
 }
 

@@ -834,11 +834,11 @@ pub fn apply_node<P: PayloadSource>(
                 }),
             }
         }
-        NodeKind::ManagedIntegration { .. }
-        | NodeKind::OwnedRemoval { .. }
-        | NodeKind::OpaqueAction { .. } => Err(WindowsFileExecutorError::Unsupported {
-            id: op.id.to_string(),
-        }),
+        NodeKind::ManagedIntegration { .. } | NodeKind::OwnedRemoval { .. } => {
+            Err(WindowsFileExecutorError::Unsupported {
+                id: op.id.to_string(),
+            })
+        }
     }
 }
 

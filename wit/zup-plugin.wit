@@ -1,0 +1,94 @@
+package zup:plugin@1.0.0;
+
+interface planner {
+  enum install-scope {
+    user,
+    machine,
+  }
+
+  record context {
+    plugin-id: string,
+    app-id: string,
+    app-name: string,
+    app-version: string,
+    install-directory: string,
+    install-scope: install-scope,
+    os: string,
+    architecture: string,
+    selected-components: list<string>,
+  }
+
+  enum shortcut-location {
+    start-menu,
+    desktop,
+  }
+
+  record generated-file {
+    destination: string,
+    contents: list<u8>,
+  }
+
+  record shortcut {
+    location: shortcut-location,
+    name: string,
+    target: string,
+    arguments: list<string>,
+    working-directory: option<string>,
+  }
+
+  record path-entry {
+    value: string,
+  }
+
+  enum service-start {
+    automatic,
+    manual,
+    disabled,
+  }
+
+  record service {
+    id: string,
+    name: string,
+    display-name: option<string>,
+    binary: string,
+    arguments: list<string>,
+    start: service-start,
+  }
+
+  record protocol {
+    scheme: string,
+    executable: string,
+    args: list<string>,
+  }
+
+  record file-type {
+    extension: string,
+    id: string,
+    description: option<string>,
+    executable: string,
+  }
+
+  variant resource-item {
+    generated-file(generated-file),
+    shortcut(shortcut),
+    path-entry(path-entry),
+    service(service),
+    protocol(protocol),
+    file-type(file-type),
+  }
+
+  record installation-plan {
+    resources: list<resource-item>,
+  }
+
+  record plugin-error {
+    code: string,
+    message: string,
+  }
+
+  plan: func(context: context) -> result<installation-plan, plugin-error>;
+}
+
+world plugin {
+  export planner;
+}

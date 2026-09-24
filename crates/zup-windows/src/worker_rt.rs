@@ -1,5 +1,5 @@
 //! Real worker runtime: connect, authenticate, handshake, one transaction, exit.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -16,12 +16,51 @@ use zup_transaction::{
 use crate::FilePrecondition;
 use crate::durable::InstallationLock;
 use crate::file_executor::{NullProgress, WindowsFileExecutor, apply_node};
+use crate::payload_overlay::{
+    PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
+    verify_payload_overlay,
+};
 use crate::pipe::{ClientReader, ClientWriter, PipeError, frame_client};
 use crate::transport::{UserSid, verify_server_pid};
 use crate::worker::{WorkerBootstrap, WorkerError, plan_hash_hex};
 
 /// Timeouts (no timeout on installation execution).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct WorkerOverlayCleanup {
+    base: Option<PathBuf>,
+    root: Option<PathBuf>,
+    retain: bool,
+}
+
+impl WorkerOverlayCleanup {
+    fn new(base: Option<PathBuf>, root: Option<PathBuf>, retain_on_error: bool) -> Self {
+        Self {
+            base,
+            root,
+            retain: retain_on_error,
+        }
+    }
+
+    fn retain(&mut self) {
+        self.retain = true;
+    }
+
+    fn cleanup(&mut self) {
+        self.retain = false;
+    }
+}
+
+impl Drop for WorkerOverlayCleanup {
+    fn drop(&mut self) {
+        if !self.retain
+            && let Some(root) = &self.root
+            && let Some(base) = &self.base
+        {
+            let _ = cleanup_payload_overlay(base, Some(root));
+        }
+    }
+}
 
 /// Run the complete worker lifecycle against the parent named pipe.
 ///
@@ -165,7 +204,7 @@ async fn run_worker_inner(
 
     let app_id = zup_core::AppId::new(&exec.app_id)
         .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
-    let app_version = exec
+    let app_version: semver::Version = exec
         .app_version
         .parse()
         .map_err(|e| WorkerError::Protocol(format!("bad app version: {e}")))?;
@@ -174,11 +213,59 @@ async fn run_worker_inner(
         "machine" => zup_core::SelectedScope::Machine,
         _ => return Err(WorkerError::Protocol("invalid install scope".into())),
     };
-    let payload_root = PathBuf::from(exec.payload_root);
-    let payload = AutoPayloadSource::from_path(payload_root.clone())
-        .map_err(|e| WorkerError::Transaction(format!("payload package: {e}")))?;
     let state_root = PathBuf::from(exec.state_root);
     let work_root = PathBuf::from(exec.work_root);
+    let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
+    let payload_overlay_base_root = decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
+    let mut overlay_cleanup = WorkerOverlayCleanup::new(
+        payload_overlay_base_root.clone(),
+        payload_overlay_root.clone(),
+        exec.recovery_id.is_some(),
+    );
+    let identity =
+        PayloadOverlayIdentity::from_transaction(app_id.clone(), app_version.clone(), scope, &plan)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    validate_worker_overlay(
+        &state_root,
+        scope,
+        &identity,
+        payload_overlay_root.as_deref(),
+        payload_overlay_base_root.as_deref(),
+        exec.recovery_id.is_some(),
+        &bootstrap.expected_parent_sid,
+    )?;
+    let existing_record = if let Some(id) = exec.recovery_id {
+        let record = zup_transaction::TransactionStore::load(
+            &FilesystemTransactionStore::new(&state_root),
+            &zup_transaction::TransactionId::from_uuid(id),
+        )
+        .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+        if record.app_id != app_id
+            || record.scope != scope
+            || record.app_version != app_version
+            || record.plan != plan
+        {
+            return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
+        }
+        if identity.has_files() {
+            verify_payload_overlay(
+                payload_overlay_base_root.as_deref().ok_or_else(|| {
+                    WorkerError::AuthFailed("missing recovery overlay base".into())
+                })?,
+                &identity,
+                payload_overlay_root
+                    .as_deref()
+                    .ok_or_else(|| WorkerError::AuthFailed("missing recovery overlay".into()))?,
+            )
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        }
+        Some(record)
+    } else {
+        None
+    };
+    let payload_root = PathBuf::from(exec.payload_root);
+    let payload = AutoPayloadSource::from_paths(payload_root.clone(), payload_overlay_root.clone())
+        .map_err(|e| WorkerError::Transaction(format!("payload package: {e}")))?;
 
     writer
         .send(&WireEnvelope {
@@ -213,19 +300,7 @@ async fn run_worker_inner(
 
     let store = FilesystemTransactionStore::new(&state_root);
     let coordinator = TransactionCoordinator::new(store);
-    let record = if let Some(id) = exec.recovery_id {
-        let record = zup_transaction::TransactionStore::load(
-            &FilesystemTransactionStore::new(&state_root),
-            &zup_transaction::TransactionId::from_uuid(id),
-        )
-        .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-        if record.app_id != app_id
-            || record.scope != scope
-            || record.app_version != app_version
-            || record.plan != plan
-        {
-            return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
-        }
+    let record = if let Some(record) = existing_record {
         record
     } else {
         coordinator
@@ -319,6 +394,7 @@ async fn run_worker_inner(
 
     let (transaction_id, outcome) = match result {
         Ok((r, TransactionOutcome::Committed)) => {
+            overlay_cleanup.cleanup();
             let ledgers = crate::ledger::InstallLedgerStore::new(&state_root);
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
@@ -334,9 +410,11 @@ async fn run_worker_inner(
             (r.transaction_id.as_uuid(), "committed".to_owned())
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
+            overlay_cleanup.cleanup();
             (r.transaction_id.as_uuid(), "rolled_back".to_owned())
         }
         Ok((r, TransactionOutcome::RecoveryRequired)) => {
+            overlay_cleanup.retain();
             (r.transaction_id.as_uuid(), "recovery_required".to_owned())
         }
         Err(e) => {
@@ -355,7 +433,6 @@ async fn run_worker_inner(
             return Err(WorkerError::Transaction(e.to_string()));
         }
     };
-
     drop(_lock);
     // 10. Durable terminal state → Completed → flush → close → exit.
     let _ = send_and_close(
@@ -370,6 +447,64 @@ async fn run_worker_inner(
     .await;
     let _ = reader_task.await;
     Ok(outcome)
+}
+
+fn decode_overlay_path(value: Option<&str>) -> Result<Option<PathBuf>, WorkerError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty()
+        || value.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+        || value.contains('\0')
+    {
+        return Err(WorkerError::Protocol("invalid payload overlay path".into()));
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(WorkerError::Protocol(
+            "payload overlay path must be absolute".into(),
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn validate_worker_overlay(
+    state_root: &Path,
+    scope: zup_core::SelectedScope,
+    identity: &PayloadOverlayIdentity,
+    actual: Option<&Path>,
+    overlay_base_root: Option<&Path>,
+    recovery: bool,
+    expected_parent_sid: &str,
+) -> Result<(), WorkerError> {
+    if identity.has_files() {
+        let base = overlay_base_root.ok_or_else(|| {
+            WorkerError::AuthFailed("generated plugin payload has no overlay base".into())
+        })?;
+        validate_payload_overlay_base(state_root, scope, base, expected_parent_sid)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let expected = identity.path_under(base).ok_or_else(|| {
+            WorkerError::AuthFailed("generated payload identity has no overlay path".into())
+        })?;
+        let actual = actual.ok_or_else(|| {
+            WorkerError::AuthFailed("generated plugin payload has no overlay".into())
+        })?;
+        if actual != expected {
+            return Err(WorkerError::AuthFailed(
+                "payload overlay identity mismatch".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if overlay_base_root.is_some() || actual.is_some() {
+        let detail = if recovery {
+            "recovery overlay has no generated plugin payload"
+        } else {
+            "overlay has no generated plugin payload"
+        };
+        return Err(WorkerError::AuthFailed(detail.into()));
+    }
+    Ok(())
 }
 
 /// Split reader into a background task that cancels on `Cancel` messages.
@@ -594,5 +729,132 @@ fn map_receipt(receipt: crate::file_executor::OperationReceipt) -> OperationRece
             new_sha256: r.new_sha256.to_hex(),
             new_size: r.new_size,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use zup_core::{AppId, RelativePath, SelectedScope, Sha256Digest};
+
+    fn machine_base_for_sid(sid: &str) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(sid.as_bytes());
+        let key = Sha256Digest::from_hasher(hasher).to_hex();
+        PathBuf::from(r"C:\Users\Parent\AppData\Local\Temp")
+            .join(format!("zup-payload-overlays-{}", &key[..32]))
+    }
+
+    fn identity_with_file() -> PayloadOverlayIdentity {
+        PayloadOverlayIdentity::new(
+            AppId::new("com.example.overlay-auth").unwrap(),
+            semver::Version::parse("1.0.0").unwrap(),
+            SelectedScope::Machine,
+            std::iter::empty(),
+            [crate::payload_overlay::PayloadOverlayFileIdentity {
+                source_relative: RelativePath::new("__zup_plugins__/generated.bin").unwrap(),
+                size: 1,
+                sha256: Sha256Digest::from_bytes([0; 32]),
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn uses_authenticated_parent_sid_for_machine_overlay_base() {
+        let parent_sid = "S-1-5-21-1111111111-2222222222-3333333333";
+        let state_root = PathBuf::from(r"C:\state");
+        let identity = identity_with_file();
+        let base = machine_base_for_sid(parent_sid);
+        let overlay = identity.path_under(&base).unwrap();
+
+        assert!(
+            validate_worker_overlay(
+                &state_root,
+                SelectedScope::Machine,
+                &identity,
+                Some(&overlay),
+                Some(&base),
+                false,
+                parent_sid,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_worker_overlay(
+                &state_root,
+                SelectedScope::Machine,
+                &identity,
+                Some(&overlay),
+                Some(&base),
+                false,
+                "S-1-5-21-9999999999-8888888888-7777777777",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_overlay_or_base_without_generated_files() {
+        let parent_sid = "S-1-5-21-1111111111-2222222222-3333333333";
+        let state_root = PathBuf::from(r"C:\state");
+        let identity = PayloadOverlayIdentity::new(
+            AppId::new("com.example.overlay-auth").unwrap(),
+            semver::Version::parse("1.0.0").unwrap(),
+            SelectedScope::Machine,
+            std::iter::empty(),
+            std::iter::empty(),
+        )
+        .unwrap();
+        let base = machine_base_for_sid(parent_sid);
+
+        assert!(
+            validate_worker_overlay(
+                &state_root,
+                SelectedScope::Machine,
+                &identity,
+                Some(&base),
+                Some(&base),
+                false,
+                parent_sid,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_overlay(
+                &state_root,
+                SelectedScope::Machine,
+                &identity,
+                None,
+                Some(&base),
+                false,
+                parent_sid,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn user_overlay_base_must_equal_state_root() {
+        let state_root = PathBuf::from(r"C:\state");
+        assert!(
+            validate_payload_overlay_base(
+                &state_root,
+                SelectedScope::User,
+                &state_root,
+                "S-1-5-21-1111111111-2222222222-3333333333",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_payload_overlay_base(
+                &state_root,
+                SelectedScope::User,
+                &state_root.join("other"),
+                "S-1-5-21-1111111111-2222222222-3333333333",
+            )
+            .is_err()
+        );
     }
 }

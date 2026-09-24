@@ -82,7 +82,8 @@ fn worker_hello_handshake_shape() {
 }
 
 #[test]
-fn plan_hash_binding_message() {
+fn plan_hash_binding_message_roundtrips_with_overlay() {
+    assert_eq!(PROTOCOL_VERSION, 5);
     let msg = ExecuteTransaction {
         plan_json: "{}".into(),
         plan_hash: "abc".into(),
@@ -90,9 +91,23 @@ fn plan_hash_binding_message() {
         app_version: "1.0.0".into(),
         scope: "machine".into(),
         payload_root: r"C:\payload".into(),
+        payload_overlay_root: Some(r"C:\state\.zup-payload-overlays\app\user\hash".into()),
+        payload_overlay_base_root: Some(r"C:\state".into()),
         state_root: r"C:\state".into(),
         work_root: r"C:\work".into(),
         recovery_id: None,
     };
-    assert_eq!(msg.plan_hash, "abc");
+    let envelope = WireEnvelope {
+        version: PROTOCOL_VERSION,
+        session_id: SessionId::new_v7(),
+        sequence: 1,
+        message: Message::ExecuteTransaction(msg.clone()),
+    };
+    let decoded = decode_payload(&encode_payload(&envelope).unwrap()).unwrap();
+    assert_eq!(decoded, envelope);
+    let Message::ExecuteTransaction(decoded) = decoded.message else {
+        panic!("wrong message");
+    };
+    assert_eq!(decoded, msg);
+    assert!(MAX_PAYLOAD_OVERLAY_PATH_BYTES >= msg.payload_overlay_root.unwrap().len());
 }

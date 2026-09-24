@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zup_core::ResourceKey;
 use zup_exec::{
-    Delta, FileOperationKind, FileTypeOperationKind, PathOperationKind, ProtocolOperationKind,
+    FileOperationKind, FileTypeOperationKind, PathOperationKind, ProtocolOperationKind,
     ServiceOperationKind, ShortcutOperationKind,
 };
 
@@ -98,7 +98,6 @@ fn format_key(key: &ResourceKey) -> String {
         ResourceKey::Protocol { scheme } => format!("protocol:{scheme}"),
         ResourceKey::FileType { id } => format!("filetype:{id}"),
         ResourceKey::FileTypeExtension { extension } => format!("fileext:{extension}"),
-        ResourceKey::ExternalAction { id } => format!("action:{id}"),
     }
 }
 
@@ -168,11 +167,6 @@ pub fn file_type_kind_token(kind: FileTypeOperationKind) -> &'static str {
         FileTypeOperationKind::Conflict => "conflict",
         FileTypeOperationKind::Drift => "drift",
     }
-}
-
-/// Stable token for opaque actions.
-pub fn action_kind_token(_delta: Delta) -> &'static str {
-    "run-opaque"
 }
 
 impl FromStr for TransactionId {

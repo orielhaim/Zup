@@ -1,6 +1,120 @@
-use std::{fs, process::Command};
+#![cfg(feature = "build")]
+
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output},
+};
 
 use tempfile::TempDir;
+use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
+use wit_parser::{ManglingAndAbi, Resolve};
+use zup_plugin_contract::HOST_TARGET;
+
+const PLUGIN_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+
+fn plugin_component() -> Vec<u8> {
+    let mut resolve = Resolve::default();
+    let package = resolve.push_str("zup-plugin.wit", PLUGIN_WIT).unwrap();
+    let world = resolve.select_world(&[package], Some("plugin")).unwrap();
+    let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
+    ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
+}
+
+fn write_pluginless_project(root: &Path) {
+    fs::create_dir_all(root.join("dist")).unwrap();
+    fs::write(root.join("dist/app.bin"), b"payload").unwrap();
+    fs::write(
+        root.join("zup.toml"),
+        r#"
+schema = 1
+[app]
+id = "com.example.runtime-target"
+name = "Runtime Target"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "user"
+[install.directory]
+user = "${known.local_app_data}/RuntimeTarget"
+[[files]]
+source = "**/*"
+destination = "${install}"
+"#,
+    )
+    .unwrap();
+}
+
+fn run_pluginless_build(project: &Path, runtime: &Path, target: &str) -> Output {
+    let output = project.join("Setup.exe");
+    Command::new(env!("CARGO_BIN_EXE_zup"))
+        .args(["build", "--manifest"])
+        .arg(project.join("zup.toml"))
+        .arg("--runtime")
+        .arg(runtime)
+        .arg("--target")
+        .arg(target)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap()
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+fn build_accepts_matching_x64_runtime_target_without_plugins() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let result = run_pluginless_build(
+        project.path(),
+        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
+        "x86_64-pc-windows-msvc",
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+fn build_rejects_arm64_target_for_x64_runtime_without_plugins() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let result = run_pluginless_build(
+        project.path(),
+        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
+        "aarch64-pc-windows-msvc",
+    );
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("does not match requested target"),
+        "{stderr}"
+    );
+    assert!(!project.path().join("Setup.exe").exists());
+}
+
+#[test]
+fn build_rejects_non_pe_runtime() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let runtime = project.path().join("runtime.exe");
+    fs::write(&runtime, b"not a PE").unwrap();
+    let result = run_pluginless_build(project.path(), &runtime, "x86_64-pc-windows-msvc");
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("runtime target"), "{stderr}");
+    assert!(!project.path().join("Setup.exe").exists());
+}
 
 #[test]
 fn build_embeds_a_verified_package_and_runs_outside_project_directory() {
@@ -51,6 +165,111 @@ destination = "${install}"
         "com.example.portable"
     );
     assert_eq!(package.plan().entries.len(), 1);
+}
+
+#[test]
+fn build_compiles_and_embeds_declared_plugins_for_the_explicit_target() {
+    let project = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join("dist")).unwrap();
+    fs::create_dir_all(project.path().join("plugins")).unwrap();
+    fs::write(project.path().join("dist/app.exe"), b"payload bytes").unwrap();
+    fs::write(
+        project.path().join("plugins/helper.wasm"),
+        plugin_component(),
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("zup.toml"),
+        r#"
+schema = 1
+[app]
+id = "com.example.plugin-cli"
+name = "Plugin CLI"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "user"
+[install.directory]
+user = "${known.local_app_data}/PluginCLI"
+[[files]]
+source = "**/*"
+destination = "${install}"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    )
+    .unwrap();
+    let output = project.path().join("Plugin-Setup.exe");
+    let result = Command::new(env!("CARGO_BIN_EXE_zup"))
+        .current_dir(elsewhere.path())
+        .args(["build", "--manifest"])
+        .arg(project.path().join("zup.toml"))
+        .arg("--runtime")
+        .arg(env!("CARGO_BIN_EXE_zup-setup"))
+        .arg("--target")
+        .arg(HOST_TARGET)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let package = zup_bundle::EmbeddedBundle::open(&output).unwrap();
+    let id = zup_core::PluginId::new("helper").unwrap();
+    let metadata = package.plugin_artifact(&id).unwrap();
+    assert_eq!(metadata.target, HOST_TARGET);
+    assert!(!package.plugin_aot(&id).unwrap().is_empty());
+    assert!(package.build_plan().unwrap().plugins.is_empty());
+    assert_eq!(package.plan().entries.len(), 1);
+}
+
+#[test]
+fn manifest_directory_mode_rejects_active_source_plugins_without_jit() {
+    let project = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join("dist")).unwrap();
+    fs::create_dir_all(project.path().join("plugins")).unwrap();
+    fs::write(project.path().join("dist/app.exe"), b"payload").unwrap();
+    fs::write(project.path().join("plugins/helper.wasm"), b"not component").unwrap();
+    fs::write(
+        project.path().join("zup.toml"),
+        r#"
+schema = 1
+[app]
+id = "com.example.source-plugin"
+name = "Source Plugin"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "user"
+[install.directory]
+user = "${known.local_app_data}/SourcePlugin"
+[[files]]
+source = "**/*"
+destination = "${install}"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zup"))
+        .current_dir(project.path())
+        .args(["install", "--manifest", "zup.toml", "--state-root"])
+        .arg(state.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source plugin JIT is disabled"), "{stderr}");
 }
 
 #[cfg(windows)]
@@ -404,4 +623,418 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
         registration.values["DisplayVersion"],
         zup_exec::UninstallEntryValue::String("2.0.0".into())
     );
+}
+
+#[cfg(all(feature = "build", windows))]
+#[test]
+fn plain_cli_without_bundle_uses_manifest_dispatch() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    fs::write(
+        project.path().join("zup.toml"),
+        r#"
+schema = 1
+[app]
+id = "com.example.plain-cli"
+name = "Plain CLI"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "user"
+[install.directory]
+user = "${known.local_app_data}/PlainCLI"
+[[plugins]]
+id = "Helper"
+source = "plugins/one.wasm"
+[[plugins]]
+id = "helper"
+source = "plugins/two.wasm"
+"#,
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_zup"))
+        .current_dir(project.path())
+        .args(["install", "--manifest", "zup.toml"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("duplicate plugin"), "{stderr}");
+    assert!(!stderr.contains("installer package"), "{stderr}");
+}
+
+#[cfg(all(feature = "build", windows))]
+#[test]
+fn corrupt_embedded_setup_does_not_fall_back_to_local_manifest() {
+    let project = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let setup = project.path().join("Setup.exe");
+    let manifest_path = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest_path).unwrap();
+    let parsed = zup_manifest::parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source).unwrap();
+    let build = zup_build::materialize(&manifest_path, &parsed, installer).unwrap();
+    let mut package = zup_bundle::BundleWriter::encode(&build, &[]).unwrap();
+    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
+    package[60 + metadata_len + 10] ^= 0x40;
+    let package_path = project.path().join("corrupt.zupbundle");
+    fs::write(&package_path, package).unwrap();
+    zup_bundle::embed_bundle_file(
+        Path::new(env!("CARGO_BIN_EXE_zup-setup")),
+        &setup,
+        &package_path,
+    )
+    .unwrap();
+    assert!(zup_bundle::EmbeddedBundle::open(&setup).is_err());
+
+    fs::write(
+        project.path().join("zup.toml"),
+        r#"
+schema = 1
+[app]
+id = "com.example.local-manifest"
+name = "Local Manifest"
+version = "1.0.0"
+[source]
+directory = "dist"
+[install]
+scope = "user"
+[install.directory]
+user = "${known.local_app_data}/LocalManifest"
+"#,
+    )
+    .unwrap();
+    let result = Command::new(&setup)
+        .current_dir(project.path())
+        .args(["install", "--manifest", "zup.toml", "--state-root"])
+        .arg(state.path())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!state.path().join("transactions").exists());
+}
+
+#[cfg(all(feature = "build", windows, target_arch = "x86_64"))]
+mod generated_file_lifecycle {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Output},
+        thread,
+        time::Duration,
+    };
+
+    use base64::Engine as _;
+    use semver::Version;
+    use tempfile::TempDir;
+    use zup_build::{BuildPlan, ResolvedPlugin};
+    use zup_bundle::{BundleWriter, CompiledPluginArtifact, PluginArtifact};
+    use zup_core::{
+        App, AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
+        NonEmptyString, PluginBinding, PluginId, RelativePath, ResourceKey, SelectedScope,
+        Sha256Digest, Template, hash_reader,
+    };
+    use zup_exec::OwnedResource;
+    use zup_plugin_contract::{
+        AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
+        wit_package_digest,
+    };
+    use zup_windows::{InstallLedgerStore, PAYLOAD_OVERLAY_DIRECTORY};
+
+    const PLUGIN_ID: &str = "configure";
+    const SOURCE_BYTES: &[u8] = b"configure component source is build-time only";
+    const CONFIGURE_AOT: &str =
+        include_str!("../../zup-plugin-runtime/tests/fixtures/configure-plugin.aot.b64");
+
+    fn decoded_fixture() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(CONFIGURE_AOT.trim())
+            .unwrap()
+    }
+
+    fn make_plan(
+        version: &str,
+        app_id: &AppId,
+        install_name: &str,
+        source_path: &Path,
+    ) -> BuildPlan {
+        let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).unwrap();
+        BuildPlan {
+            installer: Installer {
+                app: App {
+                    id: app_id.clone(),
+                    name: NonEmptyString::new("Configure Lifecycle").unwrap(),
+                    version: Version::parse(version).unwrap(),
+                    publisher: None,
+                    main: None,
+                    description: None,
+                },
+                updates: None,
+                install: Install {
+                    scope: InstallScope::User,
+                    directory: InstallDirectory {
+                        user: Some(
+                            Template::parse(&format!("${{known.local_app_data}}/{install_name}"))
+                                .unwrap(),
+                        ),
+                        machine: None,
+                    },
+                },
+                components: vec![Component {
+                    id: ComponentId::new("core").unwrap(),
+                    name: NonEmptyString::new("Core").unwrap(),
+                    description: None,
+                    required: true,
+                    default: true,
+                    requires: Vec::new(),
+                }],
+                plugins: vec![PluginBinding {
+                    id: PluginId::new(PLUGIN_ID).unwrap(),
+                    component: None,
+                    when: None,
+                }],
+                files: Vec::new(),
+                shortcuts: Vec::new(),
+                path: Vec::new(),
+                services: Vec::new(),
+                protocols: Vec::new(),
+                file_types: Vec::new(),
+            },
+            plugins: vec![ResolvedPlugin {
+                id: PluginId::new(PLUGIN_ID).unwrap(),
+                source: source_path.to_path_buf(),
+                source_relative: RelativePath::new("configure.component.wasm").unwrap(),
+                size: source_size,
+                sha256: source_sha256,
+            }],
+            files: Vec::new(),
+            total_size: 0,
+        }
+    }
+
+    fn artifact() -> CompiledPluginArtifact {
+        let bytes = decoded_fixture();
+        let engine = PluginEngine::new(HOST_TARGET).unwrap();
+        engine.verify_precompiled(&bytes).unwrap();
+        let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).unwrap();
+        let (aot_size, aot_sha256) = hash_reader(bytes.as_slice()).unwrap();
+        CompiledPluginArtifact::new(
+            PluginArtifact {
+                plugin_id: PluginId::new(PLUGIN_ID).unwrap(),
+                source_size,
+                source_sha256,
+                target: HOST_TARGET.to_owned(),
+                wasmtime_version: WASMTIME_VERSION.to_owned(),
+                aot_format_version: AOT_FORMAT_VERSION,
+                plugin_api_version: PLUGIN_API_VERSION.to_owned(),
+                wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
+                engine_fingerprint: Sha256Digest::from_bytes(*engine.fingerprint().as_bytes()),
+                aot_size,
+                aot_sha256,
+                blob: aot_sha256,
+            },
+            bytes,
+        )
+        .unwrap()
+    }
+
+    fn write_setup(
+        root: &Path,
+        name: &str,
+        plan: &BuildPlan,
+        artifact: &CompiledPluginArtifact,
+    ) -> PathBuf {
+        let package = BundleWriter::encode(plan, std::slice::from_ref(artifact)).unwrap();
+        assert_eq!(u32::from_le_bytes(package[8..12].try_into().unwrap()), 3);
+        let package_path = root.join(format!("{name}.zupbundle"));
+        fs::write(&package_path, package).unwrap();
+        let output = root.join(format!("{name}.exe"));
+        zup_bundle::embed_bundle_file(
+            Path::new(env!("CARGO_BIN_EXE_zup-setup")),
+            &output,
+            &package_path,
+        )
+        .unwrap();
+        let bundle = zup_bundle::EmbeddedBundle::open(&output).unwrap();
+        let plugin_id = PluginId::new(PLUGIN_ID).unwrap();
+        let metadata = bundle.plugin_artifact(&plugin_id).unwrap();
+        assert_eq!(metadata.target, HOST_TARGET);
+        assert_eq!(metadata.wasmtime_version, WASMTIME_VERSION);
+        assert_eq!(bundle.plan().plugins.len(), 1);
+        assert!(bundle.build_plan().unwrap().plugins.is_empty());
+        output
+    }
+
+    fn invoke(exe: &Path, cwd: &Path, state: &Path, command: &str, extra: &[&str]) -> Output {
+        Command::new(exe)
+            .current_dir(cwd)
+            .arg(command)
+            .args(["--scope", "user", "--state-root"])
+            .arg(state)
+            .args(extra)
+            .output()
+            .unwrap()
+    }
+
+    fn run(exe: &Path, cwd: &Path, state: &Path, command: &str, extra: &[&str]) -> Output {
+        let output = invoke(exe, cwd, state, command, extra);
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn wait_for_uninstall(state: &Path, app_id: &AppId, generated: &Path) {
+        for _ in 0..100 {
+            let ledger_gone = InstallLedgerStore::new(state)
+                .load(app_id, SelectedScope::User)
+                .ok()
+                .flatten()
+                .is_none();
+            if ledger_gone && !generated.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("uninstall did not finish");
+    }
+
+    #[test]
+    fn generated_file_survives_the_full_embedded_lifecycle_without_source_dependencies() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        let source_root = TempDir::new().unwrap();
+        let source_path = source_root.path().join("configure.component.wasm");
+        fs::write(&source_path, SOURCE_BYTES).unwrap();
+
+        let token = uuid::Uuid::now_v7().simple().to_string();
+        let app_id_text = format!("com.zup.plugin-lifecycle-{token}");
+        let install_name = format!("ZupPluginLifecycle-{token}");
+        let app_id = AppId::new(&app_id_text).unwrap();
+        let plan_v1 = make_plan("1.0.0", &app_id, &install_name, &source_path);
+        let plan_v2 = make_plan("1.1.0", &app_id, &install_name, &source_path);
+        let artifact = artifact();
+        let setup_v1 = write_setup(root.path(), "Setup-v1", &plan_v1, &artifact);
+        let setup_v2 = write_setup(root.path(), "Setup-v2", &plan_v2, &artifact);
+
+        fs::remove_file(&source_path).unwrap();
+        assert!(!source_path.exists());
+        assert!(
+            zup_bundle::EmbeddedBundle::open(&setup_v1)
+                .unwrap()
+                .build_plan()
+                .unwrap()
+                .plugins
+                .is_empty()
+        );
+        let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+        let install = local_app_data.join(&install_name);
+        let generated = install.join("plugin-config.txt");
+        let expected = format!(
+            "app id: {app_id_text}\ninstall directory: ${{known.local_app_data}}/{install_name}\nselected components: core\n"
+        );
+        let maintenance_v1 = state
+            .path()
+            .join("maintenance")
+            .join(&app_id_text)
+            .join("user/1.0.0/Setup.exe");
+        let maintenance_v2 = state
+            .path()
+            .join("maintenance")
+            .join(&app_id_text)
+            .join("user/1.1.0/Setup.exe");
+
+        run(&setup_v1, outside.path(), state.path(), "install", &[]);
+        assert_eq!(fs::read(&generated).unwrap(), expected.as_bytes());
+        assert!(maintenance_v1.is_file());
+        assert!(!state.path().join(PAYLOAD_OVERLAY_DIRECTORY).exists());
+
+        let ledger = InstallLedgerStore::new(state.path())
+            .load(&app_id, SelectedScope::User)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.version.to_string(), "1.0.0");
+        let generated_key = ResourceKey::File {
+            destination: generated.to_string_lossy().into_owned(),
+        };
+        let generated_owned = ledger.resources.get(&generated_key).unwrap();
+        let OwnedResource::File {
+            source_relative,
+            sha256,
+            size,
+            ..
+        } = generated_owned
+        else {
+            panic!("generated file is not owned as a file");
+        };
+        assert!(zup_windows::is_plugin_payload_path(source_relative));
+        assert_eq!(*sha256, hash_reader(expected.as_bytes()).unwrap().1);
+        assert_eq!(*size, expected.len() as u64);
+        assert_eq!(
+            ledger
+                .resources
+                .values()
+                .filter(|resource| {
+                    matches!(
+                        resource,
+                        OwnedResource::File { source_relative, .. }
+                            if zup_windows::is_plugin_payload_path(source_relative)
+                    )
+                })
+                .count(),
+            1
+        );
+
+        fs::remove_file(&setup_v1).unwrap();
+        run(&setup_v2, outside.path(), state.path(), "upgrade", &[]);
+        assert_eq!(fs::read(&generated).unwrap(), expected.as_bytes());
+        assert!(maintenance_v2.is_file());
+        assert!(!maintenance_v1.exists());
+        assert!(!state.path().join(PAYLOAD_OVERLAY_DIRECTORY).exists());
+        let upgraded = InstallLedgerStore::new(state.path())
+            .load(&app_id, SelectedScope::User)
+            .unwrap()
+            .unwrap();
+        assert_eq!(upgraded.version.to_string(), "1.1.0");
+        fs::remove_file(&setup_v2).unwrap();
+
+        fs::remove_file(&generated).unwrap();
+        run(&maintenance_v2, outside.path(), state.path(), "repair", &[]);
+        assert_eq!(fs::read(&generated).unwrap(), expected.as_bytes());
+        assert!(!state.path().join(PAYLOAD_OVERLAY_DIRECTORY).exists());
+
+        fs::write(&generated, b"corrupt").unwrap();
+        run(
+            &maintenance_v2,
+            outside.path(),
+            state.path(),
+            "repair",
+            &["--force-files"],
+        );
+        assert_eq!(fs::read(&generated).unwrap(), expected.as_bytes());
+        assert!(!state.path().join(PAYLOAD_OVERLAY_DIRECTORY).exists());
+
+        run(
+            &maintenance_v2,
+            outside.path(),
+            state.path(),
+            "uninstall",
+            &[],
+        );
+        wait_for_uninstall(state.path(), &app_id, &generated);
+        assert!(!generated.exists());
+        assert!(!maintenance_v2.exists());
+        assert!(!state.path().join("maintenance").join(&app_id_text).exists());
+        assert!(!state.path().join(PAYLOAD_OVERLAY_DIRECTORY).exists());
+        assert!(!state.path().join("transactions").exists());
+        assert!(!state.path().join("work").exists());
+        assert!(!state.path().join("installations").exists());
+        let lock_key = zup_windows::InstallationLock::lock_key(&app_id_text, "user");
+        assert!(!state.path().join(format!("{lock_key}.lock")).exists());
+    }
 }

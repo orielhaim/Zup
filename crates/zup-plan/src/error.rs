@@ -2,7 +2,9 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
-use zup_core::{ComponentId, Variable};
+use zup_core::{ComponentId, PluginId, Variable};
+
+use crate::plugins::PluginFailure;
 
 pub use zup_core::SelectedScope;
 
@@ -21,6 +23,57 @@ pub enum PlanError {
     #[error("install directory for scope `{scope}` is not configured")]
     #[diagnostic(code(zup_plan::scope_required))]
     ScopeRequired { scope: SelectedScope },
+
+    /// The ordinary planner cannot execute an active plugin.
+    #[error("active plugin `{plugin_id}` requires the plugin planning seam")]
+    #[diagnostic(code(zup_plan::plugin_planning_required))]
+    PluginPlanningRequired { plugin_id: PluginId },
+
+    /// An executor failed while planning a plugin.
+    #[error("plugin `{plugin_id}` failed: {failure}")]
+    #[diagnostic(code(zup_plan::plugin_execution_failed))]
+    PluginExecutionFailed {
+        plugin_id: PluginId,
+        #[source]
+        failure: PluginFailure,
+    },
+
+    /// Planning was cancelled before a plugin was invoked.
+    #[error("plugin `{plugin_id}` planning was cancelled")]
+    #[diagnostic(code(zup_plan::plugin_cancelled))]
+    PluginCancelled { plugin_id: PluginId },
+
+    /// A plugin returned a resource that cannot be represented by the core model.
+    #[error("plugin `{plugin_id}` returned invalid resource `{resource}`: {reason}")]
+    #[diagnostic(code(zup_plan::plugin_resource_rejected))]
+    PluginResourceRejected {
+        plugin_id: PluginId,
+        resource: String,
+        reason: String,
+    },
+
+    /// A plugin resource collided with another active or proposed resource.
+    #[error("plugin resource collision for `{resource}` at `{identity}`")]
+    #[diagnostic(code(zup_plan::plugin_resource_collision))]
+    PluginResourceCollision {
+        plugin_id: Option<PluginId>,
+        resource: String,
+        identity: String,
+        existing_plugin_id: Option<PluginId>,
+        existing_resource: String,
+    },
+
+    /// A plugin proposal exceeded a bounded resource limit.
+    #[error(
+        "plugin `{plugin_id}` resource limit exceeded for `{resource}`: {actual} exceeds {limit}"
+    )]
+    #[diagnostic(code(zup_plan::plugin_resource_limit))]
+    PluginResourceLimit {
+        plugin_id: PluginId,
+        resource: String,
+        actual: u64,
+        limit: u64,
+    },
 
     /// An enable/disable override names an unknown component.
     #[error("unknown component `{id}` in plan request")]
@@ -84,11 +137,6 @@ pub enum PlanError {
     #[error("active file extension collision for `{extension}`")]
     #[diagnostic(code(zup_plan::active_extension_collision))]
     ActiveExtensionCollision { extension: String },
-
-    /// Two active external actions share an id.
-    #[error("active external action collision for `{id}`")]
-    #[diagnostic(code(zup_plan::active_action_collision))]
-    ActiveActionCollision { id: String },
 
     /// Two active files share a destination identity.
     #[error("active file destination collision at `{destination}`")]

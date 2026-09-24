@@ -1,0 +1,23 @@
+[package]
+name = "zup-plugin-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime-only WebAssembly plugin execution for zup"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-plan.workspace = true
+zup-plugin-contract.workspace = true
+
+[dev-dependencies]
+base64 = "0.22"
+semver.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+zup-build.workspace = true

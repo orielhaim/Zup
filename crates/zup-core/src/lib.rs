@@ -21,18 +21,21 @@ mod value;
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_reader};
 pub use ids::{
-    ActionId, AppId, ComponentId, FileTypeId, NonEmptyString, ProtocolScheme, ServiceId,
+    AppId, ComponentId, FileTypeId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
 };
 pub use installer::{Installer, UpdateConfig};
 pub use model::{
-    Action, ActionKind, App, Command, Component, FileExtension, FileMapping, FileType, Install,
-    InstallDirectory, InstallScope, PathEntry, Privilege, Protocol, Service, ServiceStart,
-    Shortcut, ShortcutLocation, Source,
+    App, Component, FileExtension, FileMapping, FileType, Install, InstallDirectory, InstallScope,
+    PathEntry, PluginBinding, Privilege, Protocol, Service, ServiceStart, Shortcut,
+    ShortcutLocation, Source,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use resource_key::ResourceKey;
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
 pub use value::ValueError;
+
+pub const PLUGIN_PAYLOAD_ROOT: &str = "__zup_plugins__";
+pub const MAX_PLUGIN_ARTIFACTS: usize = 128;
 
 /// Concrete installation scope chosen for one plan.
 #[derive(

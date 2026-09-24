@@ -7,6 +7,7 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildError, FilePattern, Sha256Digest, materialize};
+use zup_core::MAX_PLUGIN_ARTIFACTS;
 use zup_manifest::parse_and_compile;
 
 fn write_file(path: &Path, contents: &[u8]) {
@@ -775,4 +776,160 @@ destination = "${install}"
     .unwrap();
     assert_eq!(plan.total_size, 5);
     assert_eq!(plan.files.len(), 2);
+}
+
+#[test]
+fn resolves_plugin_sources_in_declaration_order() {
+    let dir = project(&[
+        ("dist/app.bin", b"app"),
+        ("plugins/z.wasm", b"z"),
+        ("plugins/a.wasm", b"a"),
+    ]);
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "z-plugin"
+source = "plugins/z.wasm"
+
+[[plugins]]
+id = "a-plugin"
+source = "plugins/a.wasm"
+"#,
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    assert_eq!(
+        plan.plugins
+            .iter()
+            .map(|plugin| plugin.id.as_str())
+            .collect::<Vec<_>>(),
+        ["z-plugin", "a-plugin"]
+    );
+    assert_eq!(plan.plugins[0].source_relative.as_str(), "plugins/z.wasm");
+    assert_eq!(plan.plugins[0].size, 1);
+    assert_eq!(plan.plugins[1].source_relative.as_str(), "plugins/a.wasm");
+}
+
+#[test]
+fn rejects_plugin_source_traversal_after_manifest_parse() {
+    let dir = project(&[("dist/app.bin", b"app"), ("outside.wasm", b"bad")]);
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    );
+    let mut manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    manifest.plugins[0].source = "../outside.wasm".to_owned();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(
+        error,
+        BuildError::PluginSourceEscapesProject { .. } | BuildError::UnsafeRelativePath { .. }
+    ));
+}
+
+#[test]
+fn rejects_absolute_plugin_source_after_manifest_parse() {
+    let dir = project(&[("dist/app.bin", b"app")]);
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    );
+    let mut manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    manifest.plugins[0].source = dir
+        .path()
+        .join("helper.wasm")
+        .to_string_lossy()
+        .into_owned();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(
+        error,
+        BuildError::PluginSourceEscapesProject { .. }
+    ));
+}
+
+#[test]
+fn rejects_excess_plugin_declarations_before_source_access() {
+    let dir = TempDir::new().unwrap();
+    let plugins = (0..=MAX_PLUGIN_ARTIFACTS)
+        .map(|index| {
+            format!(
+                "[[plugins]]\nid = \"plugin-{index}\"\nsource = \"plugins/missing-{index}.wasm\"\n"
+            )
+        })
+        .collect::<String>();
+    let source = manifest_toml(&plugins);
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(
+        error,
+        BuildError::TooManyPluginDeclarations {
+            count,
+            limit: MAX_PLUGIN_ARTIFACTS,
+        } if count == MAX_PLUGIN_ARTIFACTS + 1
+    ));
+}
+
+#[test]
+fn rejects_oversized_plugin_source() {
+    let dir = project(&[("dist/app.bin", b"app")]);
+    let oversized = vec![0; zup_build::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
+    write_file(&dir.path().join("plugins/helper.wasm"), &oversized);
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(error, BuildError::PluginSourceTooLarge { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_special_plugin_source() {
+    let dir = project(&[("dist/app.bin", b"app")]);
+    let socket = dir.path().join("plugins/helper.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.sock"
+"#,
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(error, BuildError::PluginSourceNotRegular { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_plugin_source() {
+    let dir = project(&[("dist/app.bin", b"app"), ("plugins/real.wasm", b"real")]);
+    std::os::unix::fs::symlink("real.wasm", dir.path().join("plugins/link.wasm")).unwrap();
+    let source = manifest_toml(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/link.wasm"
+"#,
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = parse_and_compile(&source).unwrap();
+    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(error, BuildError::PluginSourceSymlink { .. }));
 }

@@ -54,6 +54,27 @@ async fn execute_with_test_worker(
     work_root: &Path,
     recovery_id: Option<uuid::Uuid>,
 ) -> String {
+    execute_with_test_worker_and_overlay(
+        execution,
+        version,
+        payload_root,
+        None,
+        state_root,
+        work_root,
+        recovery_id,
+    )
+    .await
+}
+
+async fn execute_with_test_worker_and_overlay(
+    execution: &ExecutionPlan,
+    version: &str,
+    payload_root: &Path,
+    payload_overlay_root: Option<&Path>,
+    state_root: &Path,
+    work_root: &Path,
+    recovery_id: Option<uuid::Uuid>,
+) -> String {
     let plan = if let Some(id) = recovery_id {
         use zup_transaction::TransactionStore;
         zup_transaction::FilesystemTransactionStore::new(state_root)
@@ -64,6 +85,10 @@ async fn execute_with_test_worker(
         compile_transaction(execution).expect("compile")
     };
     let plan_json = serde_json::to_string(&plan).unwrap();
+    let payload_overlay_base_root = payload_overlay_root.map(|_| {
+        zup_windows::payload_overlay_base_root(state_root, zup_core::SelectedScope::Machine)
+            .unwrap()
+    });
     let plan_hash = plan_hash_hex(&plan_json);
     let session_id = SessionId::new_v7();
     let pipe_name = zup_windows::pipe_name(&session_id.to_string());
@@ -128,6 +153,9 @@ async fn execute_with_test_worker(
                 app_version: version.into(),
                 scope: "machine".into(),
                 payload_root: payload_root.display().to_string(),
+                payload_overlay_root: payload_overlay_root.map(|path| path.display().to_string()),
+                payload_overlay_base_root: payload_overlay_base_root
+                    .map(|path| path.display().to_string()),
                 state_root: state_root.display().to_string(),
                 work_root: work_root.display().to_string(),
                 recovery_id,
@@ -186,7 +214,6 @@ async fn multi_process_named_pipe_handshake_and_execute() {
         protocols: vec![],
         file_types: vec![],
         uninstall_entries: vec![],
-        external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,
             ..Default::default()
@@ -206,6 +233,81 @@ async fn multi_process_named_pipe_handshake_and_execute() {
         "committed"
     );
     assert_eq!(std::fs::read(dest).unwrap(), b"hello-app");
+}
+
+#[tokio::test]
+async fn authenticated_machine_worker_stages_generated_overlay_as_ordinary_nodes() {
+    let root = TempDir::new().unwrap();
+    let payload_root = root.path().join("payload");
+    let state_root = root.path().join("state");
+    let work_root = root.path().join("work");
+    let target_root = root.path().join("target");
+    for path in [&payload_root, &state_root, &work_root, &target_root] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let app_id = AppId::new("com.acme.app").unwrap();
+    let version = "1.0.0".parse().unwrap();
+    let source = RelativePath::new("__zup_plugins__/generated.bin").unwrap();
+    let bytes = b"plugin-generated";
+    let destination = target_root.join("generated.bin");
+    let destination_text = destination.display().to_string();
+    let execution = ExecutionPlan {
+        selected_components: vec![zup_core::ComponentId::new("core").unwrap()],
+        files: vec![FileOperation {
+            key: ResourceKey::File {
+                destination: destination_text.clone(),
+            },
+            kind: FileOperationKind::Create,
+            destination: tpath(&destination_text),
+            source_relative: source.clone(),
+            precondition: FilePrecondition::Absent,
+            expected_sha256: digest(bytes),
+            expected_size: bytes.len() as u64,
+            conflict: None,
+        }],
+        summary: ExecutionSummary {
+            files_create: 1,
+            requires_elevation: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
+        app_id,
+        version,
+        zup_core::SelectedScope::Machine,
+        &execution,
+    )
+    .unwrap();
+    let overlay_base =
+        zup_windows::payload_overlay_base_root(&state_root, zup_core::SelectedScope::Machine)
+            .unwrap();
+    let overlay = identity.path_under(&overlay_base).unwrap();
+    let overlay_file = overlay.join(source.as_str());
+    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+    std::fs::write(&overlay_file, bytes).unwrap();
+    let transaction = compile_transaction(&execution).unwrap();
+    assert!(transaction.nodes.iter().all(|node| matches!(
+        node.kind,
+        zup_transaction::NodeKind::Barrier
+            | zup_transaction::NodeKind::StageFile { .. }
+            | zup_transaction::NodeKind::FileMutation { .. }
+    )));
+
+    assert_eq!(
+        execute_with_test_worker_and_overlay(
+            &execution,
+            "1.0.0",
+            &payload_root,
+            Some(&overlay),
+            &state_root,
+            &work_root,
+            None,
+        )
+        .await,
+        "committed"
+    );
+    assert_eq!(std::fs::read(destination).unwrap(), bytes);
 }
 
 #[tokio::test]
@@ -239,8 +341,13 @@ destination = "${install}"
     let installer = zup_manifest::parse_and_compile(manifest).unwrap();
     let build = zup_build::materialize(&project.join("zup.toml"), &parsed, installer).unwrap();
     let setup = root.path().join("Setup.exe");
-    zup_bundle::build_self_contained_executable(&std::env::current_exe().unwrap(), &setup, &build)
-        .unwrap();
+    zup_bundle::build_self_contained_executable(
+        &std::env::current_exe().unwrap(),
+        &setup,
+        &build,
+        &[],
+    )
+    .unwrap();
 
     let dest = root.path().join("target/App.exe");
     let dest_str = dest.display().to_string();
@@ -250,6 +357,22 @@ destination = "${install}"
     let maintenance_str = maintenance_path.display().to_string();
     let (maintenance_size, maintenance_hash) =
         hash_reader(std::fs::File::open(&setup).unwrap()).unwrap();
+    let bundle = zup_bundle::EmbeddedBundle::open(&setup).unwrap();
+    let payload_source = bundle.payload_source();
+    zup_bundle::PayloadSource::open(
+        &payload_source,
+        &RelativePath::new("App.exe").unwrap(),
+        &digest(b"hello-app"),
+        9,
+    )
+    .unwrap();
+    zup_bundle::PayloadSource::open(
+        &payload_source,
+        &RelativePath::new("__zup_maintenance__.exe").unwrap(),
+        &maintenance_hash,
+        maintenance_size,
+    )
+    .unwrap();
     let execution = ExecutionPlan {
         files: vec![
             FileOperation {
@@ -378,7 +501,6 @@ async fn worker_transaction_with_file_shortcut_and_service() {
         protocols: vec![],
         file_types: vec![],
         uninstall_entries: vec![],
-        external_actions: vec![],
         summary: ExecutionSummary {
             files_create: 1,
             shortcuts_create: 1,

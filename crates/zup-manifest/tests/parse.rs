@@ -56,6 +56,23 @@ fn without_section(src: &str, section: &str) -> String {
     out.join("\n")
 }
 
+fn toml_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\0' => out.push_str("\\u0000"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(character),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[test]
 fn complete_valid_manifest_defaults() {
     let src = r#"
@@ -93,13 +110,13 @@ name = "Core"
     assert!(component.default);
     assert!(component.requires.is_empty());
 
+    assert!(manifest.plugins.is_empty());
     assert!(manifest.files.is_empty());
     assert!(manifest.shortcuts.is_empty());
     assert!(manifest.path.is_empty());
     assert!(manifest.services.is_empty());
     assert!(manifest.protocols.is_empty());
     assert!(manifest.file_types.is_empty());
-    assert!(manifest.actions.is_empty());
 }
 
 #[test]
@@ -130,14 +147,101 @@ fn valid_minimal_manifest() {
             },
             updates: None,
             components: Vec::new(),
+            plugins: Vec::new(),
             files: Vec::new(),
             shortcuts: Vec::new(),
             path: Vec::new(),
             services: Vec::new(),
             protocols: Vec::new(),
             file_types: Vec::new(),
-            actions: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn plugin_defaults() {
+    let src = format!(
+        "{}\n[[plugins]]\nid = \"acme.plugin_1-x\"\nsource = \"plugins/acme.wasm\"\n",
+        minimal("user")
+    );
+    let manifest = parse(&src).expect("valid plugin");
+    assert_eq!(manifest.plugins.len(), 1);
+    let plugin = &manifest.plugins[0];
+    assert_eq!(plugin.id.as_str(), "acme.plugin_1-x");
+    assert_eq!(plugin.source, "plugins/acme.wasm");
+    assert_eq!(plugin.component, None);
+    assert_eq!(plugin.when, None);
+}
+
+#[test]
+fn plugin_component_and_condition_are_parsed() {
+    let src = format!(
+        "{}\n[[plugins]]\nid = \"acme.plugin\"\nsource = \"plugins/acme.wasm\"\ncomponent = \"core\"\nwhen = 'component(\"core\")'\n",
+        minimal("user")
+    );
+    let manifest = parse(&src).expect("valid plugin fields");
+    let plugin = &manifest.plugins[0];
+    assert_eq!(
+        plugin.component.as_ref().map(|id| id.as_str()),
+        Some("core")
+    );
+    assert_eq!(
+        plugin.when.as_ref().map(ToString::to_string),
+        Some("component(\"core\")".to_owned())
+    );
+}
+
+#[test]
+fn plugin_unknown_field_rejected() {
+    let src = format!(
+        "{}\n[[plugins]]\nid = \"acme.plugin\"\nsource = \"plugins/acme.wasm\"\nextra = true\n",
+        minimal("user")
+    );
+    let err = parse(&src).expect_err("unknown plugin field");
+    assert!(matches!(err, ManifestError::Invalid { .. }), "{err:?}");
+}
+
+#[rstest]
+#[case::empty("")]
+#[case::leading_dot("./plugin.wasm")]
+#[case::parent("../plugin.wasm")]
+#[case::embedded_parent("plugins/../plugin.wasm")]
+#[case::embedded_dot("plugins/./plugin.wasm")]
+#[case::empty_component("plugins//plugin.wasm")]
+#[case::trailing_slash("plugins/")]
+#[case::backslash("plugins\\plugin.wasm")]
+#[case::posix_root("/plugin.wasm")]
+#[case::windows_drive("C:/plugin.wasm")]
+#[case::windows_drive_relative("C:plugin.wasm")]
+#[case::unc_forward_slashes("//server/share/plugin.wasm")]
+#[case::unc_backslashes("\\\\server\\share\\plugin.wasm")]
+fn invalid_plugin_source(#[case] source: &str) {
+    let src = format!(
+        "{}\n[[plugins]]\nid = \"acme.plugin\"\nsource = {}\n",
+        minimal("user"),
+        toml_string(source)
+    );
+    let err = parse(&src).expect_err("invalid plugin source");
+    assert!(
+        matches!(err, ManifestError::InvalidPluginSource { ref path, .. } if path == source),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn invalid_plugin_source_rejects_nul() {
+    let src = format!(
+        r#"{}
+[[plugins]]
+id = "acme.plugin"
+source = "plugins/\u0000plugin.wasm"
+"#,
+        minimal("user")
+    );
+    let err = parse(&src).expect_err("NUL plugin source");
+    assert!(
+        matches!(err, ManifestError::InvalidPluginSource { .. }),
+        "{err:?}"
     );
 }
 

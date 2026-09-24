@@ -124,6 +124,42 @@ pub enum BuildError {
     #[diagnostic(code(zup_build::update_root_too_large))]
     UpdateRootTooLarge,
 
+    #[error("plugin source `{path}` does not exist")]
+    #[diagnostic(code(zup_build::plugin_source_missing))]
+    PluginSourceMissing { path: PathBuf },
+
+    #[error("plugin source `{path}` escapes the project root")]
+    #[diagnostic(code(zup_build::plugin_source_escapes_project))]
+    PluginSourceEscapesProject { path: PathBuf },
+
+    #[error("plugin source `{path}` is a symlink")]
+    #[diagnostic(code(zup_build::plugin_source_symlink))]
+    PluginSourceSymlink { path: PathBuf },
+
+    #[error("plugin source `{path}` is not a regular file")]
+    #[diagnostic(code(zup_build::plugin_source_not_regular))]
+    PluginSourceNotRegular { path: PathBuf },
+
+    #[error("plugin source `{path}` is {size} bytes; the limit is {limit} bytes")]
+    #[diagnostic(code(zup_build::plugin_source_too_large))]
+    PluginSourceTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
+
+    #[error("plugin source `{path}` changed while being hashed")]
+    #[diagnostic(code(zup_build::plugin_source_changed))]
+    PluginSourceChanged { path: PathBuf },
+
+    #[error("manifest declares {count} plugins; the limit is {limit}")]
+    #[diagnostic(code(zup_build::too_many_plugin_declarations))]
+    TooManyPluginDeclarations { count: usize, limit: usize },
+
+    #[error("plugin `{id}` has no matching resolved source")]
+    #[diagnostic(code(zup_build::plugin_source_mismatch))]
+    PluginSourceMismatch { id: String },
+
     /// An I/O error occurred while resolving the source root.
     #[error("I/O error at `{path}`")]
     #[diagnostic(code(zup_build::io))]

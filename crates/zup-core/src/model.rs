@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::condition::Condition;
 use crate::ids::{
-    ActionId, AppId, ComponentId, FileTypeId, NonEmptyString, ProtocolScheme, ServiceId,
+    AppId, ComponentId, FileTypeId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
 };
 use crate::template::Template;
 use crate::value::ValueError;
@@ -95,6 +95,16 @@ pub struct Component {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginBinding {
+    pub id: PluginId,
+    #[serde(default)]
+    pub component: Option<ComponentId>,
+    #[serde(default)]
+    pub when: Option<Condition>,
 }
 
 /// Declarative file mapping. Patterns are not expanded here.
@@ -255,49 +265,11 @@ impl<'de> Deserialize<'de> for FileExtension {
     }
 }
 
-/// External action kinds. Side effects are opaque to the planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    /// Run an external command. The planner cannot reason about its effects.
-    Exec,
-}
-
-/// Privilege an external action may require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Privilege {
     User,
     Machine,
-}
-
-/// An external command invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Command {
-    pub command: Template,
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-/// An opaque external action the engine executes as a black box.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Action {
-    pub id: ActionId,
-    #[serde(rename = "type")]
-    pub kind: ActionKind,
-    #[serde(default)]
-    pub component: Option<ComponentId>,
-    #[serde(default)]
-    pub privilege: Option<Privilege>,
-    pub apply: Command,
-    #[serde(default)]
-    pub rollback: Option<Command>,
-    #[serde(default)]
-    pub uninstall: Option<Command>,
-    #[serde(default)]
-    pub when: Option<Condition>,
 }
 
 /// Payload source for the installer (build-time, not install-time).

@@ -8,9 +8,10 @@ mod messages;
 
 pub use messages::{
     Capabilities, Completed, ExecuteTransaction, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1,
-    MANAGED_INTEGRATIONS_V1, MAX_FRAME_BYTES, MAX_PLAN_BYTES, Message, PROTOCOL_VERSION,
-    ParentHello, ProgressKind, ProgressReport, SHORTCUT_SERVICE_V1, SequenceTracker,
-    TransactionStateChanged, WireEnvelope, WorkerHello, decode_payload, encode_payload,
+    MANAGED_INTEGRATIONS_V1, MAX_FRAME_BYTES, MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES,
+    Message, PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport, SHORTCUT_SERVICE_V1,
+    SequenceTracker, TransactionStateChanged, WireEnvelope, WorkerHello, decode_payload,
+    encode_payload,
 };
 
 use serde::{Deserialize, Serialize};

@@ -5,7 +5,7 @@
 //! ```
 //!
 //! Pure and platform-API independent. `zup-windows` reports observed facts;
-//! this crate decides Create / Replace / NoOp / Conflict / RunOpaque.
+//! this crate decides Create / Replace / NoOp / Conflict.
 
 #![forbid(unsafe_code)]
 
@@ -27,10 +27,10 @@ pub use observe::{
     ServiceRuntimeState,
 };
 pub use operation::{
-    Conflict, Delta, ExecutionPlan, ExecutionSummary, ExternalActionOperation, FileOperation,
-    FileOperationKind, FilePrecondition, FileTypeOperation, FileTypeOperationKind,
-    ManagedOperation, PathOperation, PathOperationKind, ProtocolOperation, ProtocolOperationKind,
-    RemovalKind, RemovalOperation, ServiceOperation, ServiceOperationKind, ShortcutOperation,
-    ShortcutOperationKind, UninstallEntryOperation,
+    Conflict, Delta, ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind,
+    FilePrecondition, FileTypeOperation, FileTypeOperationKind, ManagedOperation, PathOperation,
+    PathOperationKind, ProtocolOperation, ProtocolOperationKind, RemovalKind, RemovalOperation,
+    ServiceOperation, ServiceOperationKind, ShortcutOperation, ShortcutOperationKind,
+    UninstallEntryOperation,
 };
 pub use plan::{ExecutionPlanError, normalize_path_entry, path_contains_entry, plan_execution};

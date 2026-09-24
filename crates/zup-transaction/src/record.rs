@@ -12,10 +12,9 @@ use zup_core::{AppId, SelectedScope, Sha256Digest};
 
 use crate::id::{OperationId, TransactionId};
 use crate::plan::TransactionPlan;
-use crate::rollback::RollbackGuarantee;
 
 /// Persistent journal schema version.
-pub const JOURNAL_SCHEMA: u32 = 3;
+pub const JOURNAL_SCHEMA: u32 = 4;
 
 /// Transaction-level phase state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +128,6 @@ pub struct TransactionRecord {
     pub phase: TransactionPhase,
     pub revision: u64,
     pub nodes: BTreeMap<OperationId, NodeState>,
-    pub rollback_guarantee: RollbackGuarantee,
 }
 
 impl TransactionRecord {
@@ -143,7 +141,6 @@ impl TransactionRecord {
     ) -> Self {
         let now = Timestamp::now();
         let plan_hash = plan.fingerprint();
-        let rollback_guarantee = plan.rollback_guarantee;
         let mut nodes = BTreeMap::new();
         for node in &plan.nodes {
             nodes.insert(node.id.clone(), NodeState::Pending);
@@ -161,7 +158,6 @@ impl TransactionRecord {
             phase: TransactionPhase::Prepared,
             revision: 0,
             nodes,
-            rollback_guarantee,
         }
     }
 

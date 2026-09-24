@@ -14,7 +14,6 @@ mod id;
 mod journal_fs;
 mod plan;
 mod record;
-mod rollback;
 mod store;
 
 pub use coordinator::{TransactionCoordinator, TransactionError, TransactionOutcome, recover};
@@ -30,7 +29,6 @@ pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,
     TransactionPhase, TransactionRecord,
 };
-pub use rollback::{RollbackCapability, RollbackGuarantee};
 pub use store::{FilesystemTransactionStore, TransactionStore};
 pub use uuid::Uuid;
 

@@ -6,8 +6,8 @@ use crate::target_path::TargetPath;
 
 /// A concrete executable path plus argument vector.
 ///
-/// Canonical engine representation for services, shortcuts, protocols,
-/// file-type open commands, and external actions — never a raw command line.
+/// Canonical engine representation for services, shortcuts, protocols, and
+/// file-type open commands — never a raw command line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub executable: TargetPath,
