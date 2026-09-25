@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeState {
     Preparing,
+    CheckingPrerequisites,
+    InstallingPrerequisites,
     WaitingForElevation,
+    RebootRequired,
     ConnectingWorker,
     Executing,
     RollingBack,
@@ -25,6 +28,25 @@ pub enum RuntimeEvent {
     },
     WaitingForElevation,
     WorkerConnected,
+    PrerequisiteCheck {
+        id: String,
+        name: String,
+        satisfied: bool,
+        version: Option<String>,
+    },
+    PrerequisiteDownload {
+        id: String,
+        completed: u64,
+        total: Option<u64>,
+    },
+    PrerequisiteInstall {
+        id: String,
+        name: String,
+    },
+    RebootRequired {
+        id: String,
+        exit_code: i32,
+    },
     PreflightStarted,
     BlockingProcessesFound {
         detail: String,

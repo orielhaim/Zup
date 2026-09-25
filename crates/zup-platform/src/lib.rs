@@ -18,8 +18,8 @@ pub use known_folders::{
 pub use resolve::{TemplateResolveError, resolve_template_path};
 pub use target_path::{TargetPath, TargetPathError};
 pub use target_plan::{
-    TargetFile, TargetFileType, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol,
-    TargetService, TargetShortcut,
+    TargetFile, TargetFileType, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetPrerequisite,
+    TargetProtocol, TargetService, TargetShortcut,
 };
 
 pub use zup_core::SelectedScope;

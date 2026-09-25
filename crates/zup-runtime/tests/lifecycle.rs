@@ -81,6 +81,7 @@ async fn interrupted_uninstall_recovers_through_runtime_and_publishes_ledger() {
         payload_overlay_root: None,
         payload_overlay_base_root: None,
         recovery_id: Some(record.transaction_id),
+        bootstrap: None,
     })
     .await
     .unwrap()
@@ -108,6 +109,7 @@ fn target(root: &TempDir, version: &str, files: &[(&str, &[u8])]) -> TargetPlan 
         scope: SelectedScope::User,
         install_directory: TargetPath::new(install.clone()).unwrap(),
         selected_components: vec![],
+        prerequisites: vec![],
         files: files
             .iter()
             .map(|(name, bytes)| {
@@ -135,6 +137,8 @@ fn target(root: &TempDir, version: &str, files: &[(&str, &[u8])]) -> TargetPlan 
             resource_count: 0,
             requires_elevation: false,
             selected_component_count: 0,
+            prerequisite_count: 0,
+            download_bytes: 0,
         },
     }
 }
@@ -166,6 +170,7 @@ async fn transition(
         payload_overlay_root: None,
         payload_overlay_base_root: None,
         recovery_id: None,
+        bootstrap: None,
     };
     run_local_install(request).await.unwrap().0
 }
@@ -393,6 +398,7 @@ async fn failed_upgrade_rolls_back_and_keeps_previous_ledger() {
         payload_overlay_root: None,
         payload_overlay_base_root: None,
         recovery_id: None,
+        bootstrap: None,
     })
     .await
     .unwrap()

@@ -3,6 +3,10 @@
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use zup_bootstrap::{
+    BootstrapOutcome, BootstrapState, BootstrapStateStore, BoundBootstrapPlan,
+    FilesystemBootstrapStateStore, Quarantine, execute_plan_with_persist,
+};
 use zup_bundle::AutoPayloadSource;
 use zup_core::{AppId, SelectedScope};
 use zup_exec::ExecutionPlan;
@@ -47,6 +51,9 @@ pub enum SessionError {
     #[error("transaction failure: {0}")]
     Transaction(String),
 
+    #[error("prerequisite failure: {0}")]
+    Prerequisite(String),
+
     #[error("installation busy")]
     InstallationBusy,
 
@@ -74,6 +81,14 @@ pub struct RuntimeRequest {
     pub payload_overlay_root: Option<PathBuf>,
     pub payload_overlay_base_root: Option<PathBuf>,
     pub recovery_id: Option<TransactionId>,
+    pub bootstrap: Option<BootstrapRequest>,
+}
+
+#[derive(Clone)]
+pub struct BootstrapRequest {
+    pub plan: BoundBootstrapPlan,
+    pub state_root: PathBuf,
+    pub quarantine_root: PathBuf,
 }
 
 struct OverlayCleanup {
@@ -134,6 +149,10 @@ pub enum OverlayPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
     Committed,
+    RebootRequired {
+        prerequisite_id: String,
+        exit_code: i32,
+    },
     RolledBack,
     Cancelled,
     RecoveryRequired,
@@ -287,6 +306,403 @@ pub async fn run_install(
     ))
 }
 
+async fn run_bootstrap_phase(
+    request: &BootstrapRequest,
+    cancel: &CancellationHandle,
+    events: &broadcast::Sender<RuntimeEvent>,
+    policy: ExecutionPolicy,
+) -> Result<BootstrapOutcome, SessionError> {
+    if cancel.is_cancelled() {
+        return Err(SessionError::Cancelled);
+    }
+    let _ = events.send(RuntimeEvent::StateChanged {
+        state: RuntimeState::CheckingPrerequisites,
+    });
+    let quarantine = Quarantine::new(&request.quarantine_root)
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    let bootstrap_lock_key = InstallationLock::lock_key(
+        request.plan.plan.key.app_id.as_str(),
+        &request.plan.plan.key.scope.to_string(),
+    );
+    let _bootstrap_lock =
+        InstallationLock::try_acquire(&request.quarantine_root, &bootstrap_lock_key)
+            .map_err(|_| SessionError::InstallationBusy)?
+            .ok_or(SessionError::InstallationBusy)?;
+    for artifact in request.plan.artifacts.values() {
+        quarantine
+            .verify(artifact)
+            .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    }
+    let elevated = zup_windows::is_process_elevated()
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let bootstrap_state_root = if request.plan.plan.key.scope == SelectedScope::Machine && !elevated
+    {
+        request.quarantine_root.join("state")
+    } else {
+        request.state_root.clone()
+    };
+    let store = FilesystemBootstrapStateStore::new(&bootstrap_state_root);
+    let mut state = match store.load(request.plan.id) {
+        Ok(state) => state,
+        Err(zup_bootstrap::BootstrapStoreError::Missing) => {
+            let mut state = BootstrapState::new(&request.plan.plan);
+            state.id = request.plan.id;
+            store
+                .create(&state)
+                .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+            state
+        }
+        Err(error) => return Err(SessionError::Prerequisite(error.to_string())),
+    };
+    state
+        .validate(&request.plan.plan)
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    let detector = zup_windows::WindowsPrerequisiteDetector;
+    if state.operations.iter().any(|operation| {
+        matches!(
+            operation.state,
+            zup_bootstrap::BootstrapOperationState::Running
+        )
+    }) {
+        let old_revision = state.revision;
+        let recovered = zup_bootstrap::recover(&request.plan.plan, &detector, &mut state)
+            .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+        state.revision = old_revision.saturating_add(1);
+        store
+            .compare_and_swap(old_revision, &state)
+            .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+        if matches!(recovered, BootstrapOutcome::RecoveryRequired) {
+            return Ok(BootstrapOutcome::RecoveryRequired);
+        }
+    }
+    zup_bootstrap::assess(&request.plan.plan, &detector, &mut state)
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    for operation in &request.plan.plan.operations {
+        if let Some(state) = state.operation_mut(&operation.id) {
+            let satisfied = matches!(
+                state,
+                zup_bootstrap::BootstrapOperationState::Satisfied { .. }
+            );
+            let version = match state {
+                zup_bootstrap::BootstrapOperationState::Satisfied { version, .. } => {
+                    version.as_ref().map(ToString::to_string)
+                }
+                _ => None,
+            };
+            let _ = events.send(RuntimeEvent::PrerequisiteCheck {
+                id: operation.id.to_string(),
+                name: operation.name.clone(),
+                satisfied,
+                version,
+            });
+        }
+    }
+    if state.remaining.is_empty() {
+        let revision = state.revision;
+        state.recompute();
+        state.revision = revision.saturating_add(1);
+        store
+            .compare_and_swap(revision, &state)
+            .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+        return Ok(BootstrapOutcome::Ready);
+    }
+    let assessed_revision = state.revision;
+    state.revision = assessed_revision.saturating_add(1);
+    state.recompute();
+    store
+        .compare_and_swap(assessed_revision, &state)
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    let needs_elevation = request
+        .plan
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| state.remaining.contains(&operation.id))
+        .any(|operation| operation.installer.privilege == zup_core::Privilege::Machine);
+    if needs_elevation {
+        if !policy.allows_elevation() {
+            return Err(SessionError::ElevationRequired);
+        }
+        for operation in &request.plan.plan.operations {
+            if state.remaining.contains(&operation.id) {
+                let _ = events.send(RuntimeEvent::PrerequisiteInstall {
+                    id: operation.id.to_string(),
+                    name: operation.name.clone(),
+                });
+            }
+        }
+        return run_elevated_bootstrap(request, events, cancel.clone()).await;
+    }
+    let _ = events.send(RuntimeEvent::StateChanged {
+        state: RuntimeState::InstallingPrerequisites,
+    });
+    for operation in &request.plan.plan.operations {
+        if state.remaining.contains(&operation.id) {
+            let _ = events.send(RuntimeEvent::PrerequisiteInstall {
+                id: operation.id.to_string(),
+                name: operation.name.clone(),
+            });
+        }
+    }
+    let plan = request.plan.clone();
+    let root = request.quarantine_root.clone();
+    let store_for_task = store.clone();
+    let store_inside_task = store_for_task.clone();
+    let (outcome, mut completed_state, persisted_revision) =
+        tokio::task::spawn_blocking(move || {
+            let detector = zup_windows::WindowsPrerequisiteDetector;
+            let provider = zup_windows::WindowsPrerequisiteProvider;
+            let quarantine = match Quarantine::new(root) {
+                Ok(quarantine) => quarantine,
+                Err(error) => {
+                    let revision = state.revision;
+                    return (
+                        Err(zup_bootstrap::BootstrapError::Provider(error.to_string())),
+                        state,
+                        revision,
+                    );
+                }
+            };
+            let mut revision = state.revision;
+            let mut persist =
+                |snapshot: &BootstrapState| -> Result<(), zup_bootstrap::BootstrapError> {
+                    let mut next = snapshot.clone();
+                    let expected = revision;
+                    next.revision =
+                        expected
+                            .checked_add(1)
+                            .ok_or(zup_bootstrap::BootstrapError::Limit(
+                                "bootstrap revision overflow",
+                            ))?;
+                    store_inside_task
+                        .compare_and_swap(expected, &next)
+                        .map_err(|error| {
+                            zup_bootstrap::BootstrapError::Provider(error.to_string())
+                        })?;
+                    revision = next.revision;
+                    Ok(())
+                };
+            let outcome = execute_plan_with_persist(
+                &plan.plan,
+                &detector,
+                &provider,
+                |operation| {
+                    let artifact = plan.artifacts.get(&operation.id).ok_or_else(|| {
+                        zup_bootstrap::BootstrapError::MissingArtifact(operation.id.to_string())
+                    })?;
+                    quarantine
+                        .resolve(&artifact.relative_path)
+                        .map_err(|error| zup_bootstrap::BootstrapError::Provider(error.to_string()))
+                },
+                &mut state,
+                &mut persist,
+            );
+            (outcome, state, revision)
+        })
+        .await
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    completed_state.revision = persisted_revision;
+    if let Err(error) = &outcome {
+        if completed_state.operations.iter().any(|operation| {
+            matches!(
+                operation.state,
+                zup_bootstrap::BootstrapOperationState::Running
+                    | zup_bootstrap::BootstrapOperationState::Failed { .. }
+            )
+        }) {
+            completed_state.phase = zup_bootstrap::BootstrapPhase::RecoveryRequired;
+        } else {
+            completed_state.recompute();
+        }
+        let old_revision = completed_state.revision;
+        completed_state.revision = old_revision.saturating_add(1);
+        let _ = store_for_task.compare_and_swap(old_revision, &completed_state);
+        return Err(SessionError::Prerequisite(error.to_string()));
+    }
+    completed_state.recompute();
+    let outcome = outcome.map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    Ok(outcome)
+}
+
+async fn run_elevated_bootstrap(
+    request: &BootstrapRequest,
+    events: &broadcast::Sender<RuntimeEvent>,
+    cancel: CancellationHandle,
+) -> Result<BootstrapOutcome, SessionError> {
+    let _ = events.send(RuntimeEvent::WaitingForElevation);
+    let session_id = zup_protocol::SessionId::new_v7();
+    let pipe = zup_windows::pipe_name(&session_id.to_string());
+    let mut server = zup_windows::PipeServer::create(&pipe)
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let bootstrap_json = serde_json::to_string(&request.plan)
+        .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
+    let plan_hash = zup_windows::plan_hash_hex(&bootstrap_json);
+    let bootstrap = zup_windows::WorkerBootstrap {
+        protocol_version: zup_protocol::PROTOCOL_VERSION,
+        session_id,
+        pipe_name: pipe.clone(),
+        expected_parent_pid: std::process::id(),
+        expected_parent_sid: zup_windows::UserSid::current()
+            .map_err(|error| SessionError::Protocol(error.to_string()))?
+            .display()
+            .to_owned(),
+        expected_plan_hash: plan_hash.clone(),
+    };
+    let params = format!(
+        "__worker {}",
+        zup_windows::quote_arg(&zup_windows::format_bootstrap(&bootstrap))
+    );
+    let executable = zup_windows::current_exe()
+        .map_err(|error| SessionError::WorkerLaunch(error.to_string()))?;
+    let worker =
+        zup_windows::launch_elevated_worker(&executable, &params).map_err(|error| match error {
+            zup_windows::TransportError::ElevationCancelled => SessionError::ElevationCancelled,
+            other => SessionError::WorkerLaunch(other.to_string()),
+        })?;
+    server
+        .connect_worker(worker.pid())
+        .await
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let (mut reader, mut writer) =
+        zup_windows::frame_server(server.into_inner().expect("connected server"));
+    let hello = tokio::time::timeout(zup_windows::HELLO_TIMEOUT, reader.recv())
+        .await
+        .map_err(|_| SessionError::Protocol("worker hello timeout".into()))?
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let zup_protocol::Message::WorkerHello(hello) = hello.message else {
+        return Err(SessionError::Protocol("expected WorkerHello".into()));
+    };
+    if hello.protocol_version != zup_protocol::PROTOCOL_VERSION
+        || hello.session_id != session_id
+        || hello.worker_pid != worker.pid()
+        || !hello.capabilities.has_prerequisite_bootstrap_v1()
+    {
+        return Err(SessionError::Protocol(
+            "bootstrap worker capability missing".into(),
+        ));
+    }
+    let _ = events.send(RuntimeEvent::WorkerConnected);
+    writer
+        .send(&zup_protocol::WireEnvelope {
+            version: zup_protocol::PROTOCOL_VERSION,
+            session_id,
+            sequence: 1,
+            message: zup_protocol::Message::ParentHello(zup_protocol::ParentHello {
+                protocol_version: zup_protocol::PROTOCOL_VERSION,
+                session_id,
+                transaction_id: request.plan.id.as_uuid(),
+                expected_plan_hash: plan_hash.clone(),
+            }),
+        })
+        .await
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    writer
+        .send(&zup_protocol::WireEnvelope {
+            version: zup_protocol::PROTOCOL_VERSION,
+            session_id,
+            sequence: 2,
+            message: zup_protocol::Message::ExecuteBootstrap(zup_protocol::ExecuteBootstrap {
+                bootstrap_json,
+                bootstrap_hash: plan_hash,
+                bootstrap_id: request.plan.id.as_uuid(),
+                app_id: request.plan.plan.key.app_id.to_string(),
+                app_version: request.plan.plan.key.app_version.to_string(),
+                scope: request.plan.plan.key.scope.to_string(),
+                state_root: request.state_root.display().to_string(),
+                quarantine_root: request.quarantine_root.display().to_string(),
+                recovery_id: None,
+            }),
+        })
+        .await
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let mut cancel_sent = false;
+    loop {
+        tokio::select! {
+            () = cancel.token.cancelled(), if !cancel_sent => {
+                writer
+                    .send(&zup_protocol::WireEnvelope {
+                        version: zup_protocol::PROTOCOL_VERSION,
+                        session_id,
+                        sequence: 3,
+                        message: zup_protocol::Message::Cancel,
+                    })
+                    .await
+                    .map_err(|error| SessionError::Protocol(error.to_string()))?;
+                cancel_sent = true;
+            }
+            message = reader.recv() => {
+                let message = message.map_err(|error| SessionError::Protocol(error.to_string()))?;
+                match message.message {
+                    zup_protocol::Message::Completed(completed) => {
+                        if completed.transaction_id != request.plan.id.as_uuid() {
+                            return Err(SessionError::Protocol("bootstrap completion identity mismatch".into()));
+                        }
+                        return Ok(match completed.outcome.as_str() {
+                            "committed" => BootstrapOutcome::Ready,
+                            "reboot_required" => {
+                                let exit_code = completed.exit_code.ok_or_else(|| {
+                                    SessionError::Protocol("bootstrap completion omitted reboot code".into())
+                                })?;
+                                let prerequisite_id = completed
+                                    .prerequisite_id
+                                    .as_deref()
+                                    .ok_or_else(|| {
+                                        SessionError::Protocol(
+                                            "bootstrap completion omitted prerequisite identity".into(),
+                                        )
+                                    })
+                                    .and_then(|value| {
+                                        zup_core::PrerequisiteId::new(value).map_err(|error| {
+                                            SessionError::Protocol(error.to_string())
+                                        })
+                                    })?;
+                                let operation = request
+                                    .plan
+                                    .plan
+                                    .operation(&prerequisite_id)
+                                    .ok_or_else(|| {
+                                        SessionError::Protocol(
+                                            "bootstrap completion referenced an unknown prerequisite".into(),
+                                        )
+                                    })?;
+                                if exit_code != 1641
+                                    && !operation.installer.reboot_exit_codes.contains(&exit_code)
+                                {
+                                    return Err(SessionError::Protocol(
+                                        "bootstrap completion returned an invalid reboot code".into(),
+                                    ));
+                                }
+                                BootstrapOutcome::RebootRequired {
+                                    exit_code,
+                                    prerequisite_id,
+                                }
+                            }
+                            "recovery_required" => BootstrapOutcome::RecoveryRequired,
+                            _ => {
+                                return Err(SessionError::Protocol(
+                                    "unknown bootstrap completion outcome".into(),
+                                ));
+                            }
+                        });
+                    }
+                    zup_protocol::Message::Failed(failed)
+                        if cancel_sent && failed.kind == "cancelled" =>
+                    {
+                        return Err(SessionError::Cancelled);
+                    }
+                    zup_protocol::Message::Failed(failed) => {
+                        return Err(SessionError::Prerequisite(failed.message));
+                    }
+                    zup_protocol::Message::Progress(progress) => {
+                        let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
+                    }
+                    _ => return Err(SessionError::Protocol("unexpected bootstrap worker message".into())),
+                }
+            }
+        }
+    }
+}
+
 /// Run an operation using control and event channels owned by a frontend.
 ///
 /// The frontend can subscribe before this future starts and request safe
@@ -313,6 +729,19 @@ pub async fn run_install_control_with_policy(
     policy: ExecutionPolicy,
     overlay_policy: OverlayPolicy,
 ) -> Result<InstallOutcome, SessionError> {
+    let bootstrap = request.bootstrap.clone();
+    run_install_control_with_bootstrap(request, bootstrap, cancel, events, policy, overlay_policy)
+        .await
+}
+
+pub async fn run_install_control_with_bootstrap(
+    request: RuntimeRequest,
+    bootstrap: Option<BootstrapRequest>,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+    policy: ExecutionPolicy,
+    overlay_policy: OverlayPolicy,
+) -> Result<InstallOutcome, SessionError> {
     let session_log = SessionLog::start(&request, "lifecycle");
     if let Some(log) = &session_log {
         let _ = events.send(RuntimeEvent::LogPath {
@@ -325,7 +754,8 @@ pub async fn run_install_control_with_policy(
     }
     let mut cleanup = OverlayCleanup::from_request(&request);
     let recovery = request.recovery_id.is_some();
-    let result = run_install_control_inner(request, cancel, events, policy).await;
+    let bootstrap_for_cleanup = bootstrap.clone();
+    let result = run_install_control_inner(request, bootstrap, cancel, events, policy).await;
     match &result {
         Ok(outcome) => {
             if let Some(log) = &session_log {
@@ -340,6 +770,12 @@ pub async fn run_install_control_with_policy(
                 log.event("failed", serde_json::json!({ "error": error.to_string() }));
             }
         }
+    }
+    if matches!(result, Ok(InstallOutcome::Committed))
+        && let Some(bootstrap) = bootstrap_for_cleanup
+    {
+        let _ = FilesystemBootstrapStateStore::new(&bootstrap.state_root).remove(bootstrap.plan.id);
+        let _ = std::fs::remove_dir_all(&bootstrap.quarantine_root);
     }
     match result {
         Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
@@ -358,11 +794,32 @@ pub async fn run_install_control_with_policy(
 
 async fn run_install_control_inner(
     request: RuntimeRequest,
+    bootstrap: Option<BootstrapRequest>,
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
     policy: ExecutionPolicy,
 ) -> Result<InstallOutcome, SessionError> {
     validate_runtime_request(&request)?;
+    if let Some(bootstrap) = bootstrap {
+        match run_bootstrap_phase(&bootstrap, &cancel, &events, policy).await? {
+            BootstrapOutcome::Ready => {}
+            BootstrapOutcome::RecoveryRequired => {
+                return Err(SessionError::RecoveryRequired);
+            }
+            BootstrapOutcome::RebootRequired {
+                exit_code,
+                prerequisite_id,
+            } => {
+                let id = prerequisite_id.to_string();
+                let outcome = InstallOutcome::RebootRequired {
+                    prerequisite_id: id,
+                    exit_code,
+                };
+                emit_outcome(&events, &outcome);
+                return Ok(outcome);
+            }
+        }
+    }
 
     let needs_elevation = request.scope == SelectedScope::Machine
         || request.execution_plan.summary.requires_elevation;
@@ -443,6 +900,37 @@ async fn run_install_control_inner(
     run_local_install_control(request, cancel, events).await
 }
 
+async fn run_local_install_with_bootstrap(
+    request: RuntimeRequest,
+    bootstrap: Option<BootstrapRequest>,
+    cancel: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+) -> Result<InstallOutcome, SessionError> {
+    let outcome = if let Some(bootstrap) = bootstrap.as_ref() {
+        match run_bootstrap_phase(bootstrap, &cancel, &events, ExecutionPolicy::Interactive).await?
+        {
+            BootstrapOutcome::Ready => run_local_install_control(request, cancel, events).await?,
+            BootstrapOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired,
+            BootstrapOutcome::RebootRequired {
+                exit_code,
+                prerequisite_id,
+            } => InstallOutcome::RebootRequired {
+                prerequisite_id: prerequisite_id.to_string(),
+                exit_code,
+            },
+        }
+    } else {
+        run_local_install_control(request, cancel, events).await?
+    };
+    if matches!(outcome, InstallOutcome::Committed)
+        && let Some(bootstrap) = bootstrap
+    {
+        let _ = FilesystemBootstrapStateStore::new(&bootstrap.state_root).remove(bootstrap.plan.id);
+        let _ = std::fs::remove_dir_all(&bootstrap.quarantine_root);
+    }
+    Ok(outcome)
+}
+
 /// Run a user-scope (or already-elevated) installation locally.
 pub async fn run_local_install(
     request: RuntimeRequest,
@@ -450,7 +938,10 @@ pub async fn run_local_install(
     let session_id = zup_protocol::SessionId::new_v7();
     let (events, _) = broadcast::channel(256);
     let cancel = CancellationHandle::new();
-    let outcome = run_local_install_control(request, cancel.clone(), events.clone()).await?;
+    let bootstrap = request.bootstrap.clone();
+    let outcome =
+        run_local_install_with_bootstrap(request, bootstrap, cancel.clone(), events.clone())
+            .await?;
     Ok((
         outcome,
         RuntimeSession {
@@ -663,12 +1154,10 @@ async fn run_elevated_worker(
         zup_windows::TransportError::ElevationCancelled => SessionError::ElevationCancelled,
         other => SessionError::WorkerLaunch(other.to_string()),
     })?;
-    tokio::time::timeout(zup_windows::WORKER_CONNECT_TIMEOUT, server.connect())
+    server
+        .connect_worker(worker.pid())
         .await
-        .map_err(|_| SessionError::WorkerExited(None))?
-        .map_err(|e| SessionError::Protocol(e.to_string()))?;
-    zup_windows::verify_client_pid(server.as_raw() as isize, worker.pid())
-        .map_err(|e| SessionError::Protocol(e.to_string()))?;
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
 
     let (mut reader, mut writer) =
         zup_windows::frame_server(server.into_inner().expect("connected server"));
@@ -797,6 +1286,18 @@ async fn run_elevated_worker(
 
 fn emit_outcome(events: &broadcast::Sender<RuntimeEvent>, outcome: &InstallOutcome) {
     match outcome {
+        InstallOutcome::RebootRequired {
+            prerequisite_id,
+            exit_code,
+        } => {
+            let _ = events.send(RuntimeEvent::RebootRequired {
+                id: prerequisite_id.clone(),
+                exit_code: *exit_code,
+            });
+            let _ = events.send(RuntimeEvent::Completed {
+                outcome: "reboot_required".into(),
+            });
+        }
         InstallOutcome::Committed => {
             let _ = events.send(RuntimeEvent::Completed {
                 outcome: "committed".into(),

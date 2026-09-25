@@ -1,26 +1,23 @@
 [package]
-name = "zup-update"
+name = "zup-bootstrap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "TUF based application update client for zup"
+description = "Typed prerequisite assessment, acquisition, execution, and recovery for zup"
 
 [dependencies]
-futures-util = "0.3"
-reqwest.workspace = true
 semver.workspace = true
-sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
-tough = { version = "0.24", features = ["http"] }
-url = "2"
 uuid.workspace = true
+url.workspace = true
 zup-core.workspace = true
 
 [dev-dependencies]
-aws-lc-rs = "1"
-jiff.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }

@@ -76,6 +76,37 @@ fn trusted_update_root_is_embedded_from_build_time_path() {
     assert_eq!(updates.trusted_root, br#"{"signed":{"_type":"root"}}"#);
 }
 
+#[test]
+fn embedded_prerequisite_is_materialized_with_exact_identity() {
+    let bytes = b"runtime payload";
+    let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
+    let dir = project(&[("dist/app.exe", b"app"), ("runtime.exe", bytes)]);
+    let source = format!(
+        r#"{}
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+detector = {{ kind = "visual_cpp_v14" }}
+package = {{ type = "embedded", path = "runtime.exe", sha256 = "{digest}", size = {} }}
+"#,
+        manifest_toml(
+            r#"
+[[files]]
+source = "**/*"
+destination = "${install}"
+"#,
+        ),
+        bytes.len()
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source).unwrap();
+    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    assert_eq!(plan.prerequisites.len(), 1);
+    assert_eq!(plan.prerequisites[0].sha256, digest);
+    assert_eq!(plan.prerequisites[0].size, bytes.len() as u64);
+    assert_eq!(plan.prerequisite_size, bytes.len() as u64);
+}
+
 // --- Source root ---
 
 #[test]

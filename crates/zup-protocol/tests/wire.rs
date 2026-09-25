@@ -83,7 +83,7 @@ fn worker_hello_handshake_shape() {
 
 #[test]
 fn plan_hash_binding_message_roundtrips_with_overlay() {
-    assert_eq!(PROTOCOL_VERSION, 5);
+    assert_eq!(PROTOCOL_VERSION, 6);
     let msg = ExecuteTransaction {
         plan_json: "{}".into(),
         plan_hash: "abc".into(),

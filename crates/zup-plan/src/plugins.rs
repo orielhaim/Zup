@@ -6,8 +6,8 @@ use thiserror::Error;
 use zup_build::validate_windows_destination;
 use zup_core::{
     App, ComponentId, FileExtension, FileTypeId, NonEmptyString, PluginBinding, PluginId,
-    Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
-    Sha256Digest, ShortcutLocation, Template,
+    PrerequisitePackage, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
+    ServiceId, ServiceStart, Sha256Digest, ShortcutLocation, Template,
 };
 
 use crate::error::PlanError;
@@ -1313,12 +1313,25 @@ pub(crate) fn summarize_plan(
             .checked_add(file.size)
             .ok_or(PlanError::SizeOverflow)?;
     }
+    let download_bytes = plan
+        .prerequisites
+        .iter()
+        .try_fold(0u64, |total, prerequisite| match &prerequisite.package {
+            PrerequisitePackage::Remote {
+                size: Some(size), ..
+            } => total.checked_add(*size).ok_or(PlanError::SizeOverflow),
+            PrerequisitePackage::Remote { .. } | PrerequisitePackage::Embedded { .. } => Ok(total),
+        })?;
     let resource_count = plan.shortcuts.len()
         + plan.path_entries.len()
         + plan.services.len()
         + plan.protocols.len()
         + plan.file_types.len();
     let requires_elevation = plan.scope == SelectedScope::Machine
+        || plan
+            .prerequisites
+            .iter()
+            .any(|resource| resource.installer.privilege == Privilege::Machine)
         || plan
             .files
             .iter()
@@ -1349,5 +1362,7 @@ pub(crate) fn summarize_plan(
         selected_component_count,
         resource_count,
         requires_elevation,
+        prerequisite_count: plan.prerequisites.len(),
+        download_bytes,
     })
 }

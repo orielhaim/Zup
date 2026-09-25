@@ -19,4 +19,7 @@ pub enum ValueError {
 
     #[error("invalid plugin id `{id}`")]
     InvalidPluginId { id: String },
+
+    #[error("invalid prerequisite id `{id}`")]
+    InvalidPrerequisiteId { id: String },
 }

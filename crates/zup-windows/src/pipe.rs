@@ -17,7 +17,7 @@ use tokio::net::windows::named_pipe::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::transport::{PipeSecurityDescriptor, UserSid};
+use crate::transport::{PipeSecurityDescriptor, TransportError, UserSid, verify_client_pid};
 use zup_protocol::{
     MAX_FRAME_BYTES, PROTOCOL_VERSION, WireEnvelope, decode_payload, encode_payload,
 };
@@ -110,6 +110,24 @@ impl PipeServer {
             .connect()
             .await
             .map_err(|e| PipeError::Io(e.to_string()))
+    }
+
+    pub async fn connect_worker(&mut self, expected_pid: u32) -> Result<(), PipeError> {
+        loop {
+            tokio::time::timeout(WORKER_CONNECT_TIMEOUT, self.inner.connect())
+                .await
+                .map_err(|_| PipeError::WorkerConnectTimeout)?
+                .map_err(|error| PipeError::Io(error.to_string()))?;
+            match verify_client_pid(self.as_raw() as isize, expected_pid) {
+                Ok(()) => return Ok(()),
+                Err(TransportError::WorkerPidMismatch { .. }) => {
+                    self.inner
+                        .disconnect()
+                        .map_err(|error| PipeError::Io(error.to_string()))?;
+                }
+                Err(error) => return Err(PipeError::Io(error.to_string())),
+            }
+        }
     }
 
     /// Raw handle for PID/session queries.

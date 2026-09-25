@@ -59,6 +59,7 @@ fn installer() -> Installer {
             description: None,
         },
         updates: None,
+        prerequisites: Vec::new(),
         install: Install {
             scope: InstallScope::User,
             directory: InstallDirectory {
@@ -85,9 +86,11 @@ fn installer() -> Installer {
 fn plan() -> BuildPlan {
     BuildPlan {
         installer: installer(),
+        prerequisites: Vec::new(),
         plugins: Vec::new(),
         files: Vec::new(),
         total_size: 0,
+        prerequisite_size: 0,
     }
 }
 

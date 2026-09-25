@@ -1,5 +1,6 @@
 //! Developer-facing CLI for zup.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -7,6 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use clap::CommandFactory;
 use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use std::io::IsTerminal;
+use zup_bootstrap::{
+    BootstrapId, BootstrapKey, BootstrapOperation, BootstrapPlan, BootstrapState,
+    BootstrapStateStore, BoundBootstrapPlan, Quarantine,
+};
 use zup_core::{
     AppId, ComponentId, Frontend, RelativePath, ResourceKey, SelectedScope, hash_reader,
 };
@@ -994,6 +999,136 @@ fn load_project(
     Ok((source, manifest, installer, build))
 }
 
+fn prepare_bootstrap(
+    build: &zup_plan::BuildPlan,
+    install: &zup_plan::InstallPlan,
+    state_root: &Path,
+    scope: SelectedScope,
+    bundle: Option<&zup_bundle::EmbeddedBundle>,
+) -> miette::Result<Option<zup_runtime::BootstrapRequest>> {
+    if install.prerequisites.is_empty() {
+        return Ok(None);
+    }
+    let operations = install
+        .prerequisites
+        .iter()
+        .map(|prerequisite| BootstrapOperation {
+            id: prerequisite.id.clone(),
+            name: prerequisite.name.to_string(),
+            target: prerequisite.target,
+            detector: prerequisite.detector.clone(),
+            package: prerequisite.package.clone(),
+            installer: prerequisite.installer.clone(),
+        })
+        .collect::<Vec<_>>();
+    let plan = BootstrapPlan::new(
+        BootstrapKey {
+            app_id: install.app.id.clone(),
+            app_version: install.app.version.clone(),
+            scope,
+        },
+        operations,
+    )
+    .map_err(|error| miette::miette!("prerequisite plan: {error}"))?;
+    let id = BootstrapId::for_plan(&plan);
+    let mut state = BootstrapState::new(&plan);
+    state.id = id;
+    let detector = zup_windows::WindowsPrerequisiteDetector;
+    zup_bootstrap::assess(&plan, &detector, &mut state)
+        .map_err(|error| miette::miette!("prerequisite detection: {error}"))?;
+    let quarantine_root = if scope == SelectedScope::Machine {
+        default_state_root(SelectedScope::User)?
+            .join("bootstrap-acquisition")
+            .join(id.as_uuid().to_string())
+    } else {
+        state_root
+            .join("bootstrap")
+            .join("quarantine")
+            .join(id.as_uuid().to_string())
+    };
+    let quarantine = Quarantine::new(&quarantine_root)
+        .map_err(|error| miette::miette!("prerequisite quarantine: {error}"))?;
+    if state.remaining.is_empty() {
+        let _ = zup_bootstrap::FilesystemBootstrapStateStore::new(state_root).remove(id);
+        let bound = BoundBootstrapPlan::with_id(id, plan, BTreeMap::new())
+            .map_err(|error| miette::miette!("bind prerequisite plan: {error}"))?;
+        return Ok(Some(zup_runtime::BootstrapRequest {
+            plan: bound,
+            state_root: state_root.to_path_buf(),
+            quarantine_root,
+        }));
+    }
+    let mut artifacts = BTreeMap::new();
+    for operation in &plan.operations {
+        if !state.remaining.contains(&operation.id) {
+            continue;
+        }
+        let reservation = quarantine
+            .reserve(
+                &operation.id,
+                operation.package.filename(),
+                operation.package.size(),
+            )
+            .map_err(|error| miette::miette!("prerequisite reservation: {error}"))?;
+        quarantine
+            .remove_partial(&reservation)
+            .map_err(|error| miette::miette!("clear prerequisite staging: {error}"))?;
+        let artifact = match &operation.package {
+            zup_core::PrerequisitePackage::Embedded { .. } => {
+                if let Some(bundle) = bundle {
+                    let bytes = bundle
+                        .prerequisite_bytes(&operation.id)
+                        .map_err(|error| miette::miette!("embedded prerequisite: {error}"))?;
+                    quarantine
+                        .stage_bytes(&reservation, &bytes, operation.package.digest())
+                        .map_err(|error| miette::miette!("stage prerequisite: {error}"))?
+                } else {
+                    let resolved = build
+                        .prerequisites
+                        .iter()
+                        .find(|item| item.id == operation.id)
+                        .ok_or_else(|| {
+                            miette::miette!("embedded prerequisite source is missing")
+                        })?;
+                    let file = std::fs::File::open(&resolved.source)
+                        .map_err(|error| miette::miette!("read prerequisite: {error}"))?;
+                    quarantine
+                        .stage_reader(&reservation, file, operation.package.digest())
+                        .map_err(|error| miette::miette!("stage prerequisite: {error}"))?
+                }
+            }
+            zup_core::PrerequisitePackage::Remote {
+                url, sha256, size, ..
+            } => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| miette::miette!("download runtime: {error}"))?;
+                runtime
+                    .block_on(zup_update::download_pinned(
+                        url,
+                        *sha256,
+                        *size,
+                        &reservation.partial_path,
+                        zup_core::MAX_PREREQUISITE_PACKAGE_BYTES,
+                    ))
+                    .map_err(|error| miette::miette!("download prerequisite: {error}"))?;
+                quarantine
+                    .publish(&reservation, *sha256)
+                    .map_err(|error| miette::miette!("verify prerequisite: {error}"))?
+            }
+        };
+        artifacts.insert(operation.id.clone(), artifact);
+    }
+    let bound = BoundBootstrapPlan::with_id(id, plan, artifacts)
+        .map_err(|error| miette::miette!("bind prerequisite plan: {error}"))?;
+    Ok(Some(zup_runtime::BootstrapRequest {
+        plan: bound,
+        state_root: state_root.to_path_buf(),
+        quarantine_root,
+    }))
+}
+
 #[cfg(feature = "build")]
 fn run_check(args: CheckCommand) -> miette::Result<()> {
     let (_, _, _, build) = load_project(&args.manifest)?;
@@ -1056,7 +1191,8 @@ fn run_plan(args: PlanCommand) -> miette::Result<()> {
         &state_root,
     )
     .map_err(|error| miette::miette!("execution plan: {error}"))?;
-    let mut preview = zup_presentation::PlanPreview::from_execution_plan(&execution, scope);
+    let mut preview = zup_presentation::PlanPreview::from_execution_plan(&execution, scope)
+        .with_prerequisites(&install);
     preview.application = installer.app.name.to_string();
     preview.version = installer.app.version.to_string();
     preview.install_directory = target.install_directory.to_string();
@@ -1123,6 +1259,11 @@ fn run_completions(args: CompletionsCommand) -> miette::Result<()> {
     Ok(())
 }
 
+struct EmbeddedPreparationMode<'a> {
+    cancellation: &'a dyn zup_plan::CancellationQuery,
+    acquire_prerequisites: bool,
+}
+
 struct EmbeddedTransitionOptions {
     state: Option<PathBuf>,
     enable: Vec<String>,
@@ -1178,7 +1319,10 @@ fn prepare_embedded_transition(
         enable,
         disable,
         install_directory,
-        &zup_plan::NeverCancelled,
+        EmbeddedPreparationMode {
+            cancellation: &zup_plan::NeverCancelled,
+            acquire_prerequisites: true,
+        },
     )
 }
 
@@ -1189,7 +1333,7 @@ fn prepare_embedded_transition_with_cancellation(
     enable: Vec<String>,
     disable: Vec<String>,
     install_directory: Option<PathBuf>,
-    cancellation: &dyn zup_plan::CancellationQuery,
+    mode: EmbeddedPreparationMode<'_>,
 ) -> miette::Result<RuntimeRequest> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
     let bundle = zup_bundle::EmbeddedBundle::open(&executable)
@@ -1214,7 +1358,9 @@ fn prepare_embedded_transition_with_cancellation(
             disable,
             install_directory,
         },
-        cancellation,
+        Some(&bundle.clone()),
+        mode.acquire_prerequisites,
+        mode.cancellation,
         || {
             zup_plugin_runtime::WasmtimePluginExecutor::load(
                 bundle,
@@ -1239,6 +1385,8 @@ struct EmbeddedPreparation<'a> {
 
 fn prepare_embedded_request<E>(
     preparation: EmbeddedPreparation<'_>,
+    embedded_bundle: Option<&zup_bundle::EmbeddedBundle>,
+    acquire_prerequisites: bool,
     cancellation: &dyn zup_plan::CancellationQuery,
     load_executor: impl FnOnce() -> Result<E, miette::Report>,
 ) -> miette::Result<RuntimeRequest>
@@ -1307,6 +1455,7 @@ where
             payload_overlay_root: None,
             payload_overlay_base_root: None,
             recovery_id: None,
+            bootstrap: None,
         });
     }
 
@@ -1394,6 +1543,11 @@ where
     .map_err(|e| miette::miette!("lifecycle plan: {e}"))?;
     let (payload_overlay_base_root, payload_overlay_root) =
         materialize_plugin_overlay(&state_root, scope, install, &planned.generated_files)?;
+    let bootstrap = if acquire_prerequisites {
+        prepare_bootstrap(build, install, &state_root, scope, embedded_bundle)?
+    } else {
+        None
+    };
     let work_root = state_root.join("work");
     Ok(RuntimeRequest {
         app_id,
@@ -1406,6 +1560,7 @@ where
         payload_overlay_root,
         payload_overlay_base_root,
         recovery_id: None,
+        bootstrap,
     })
 }
 
@@ -1975,6 +2130,7 @@ fn run_manifest_source_transition(
         .unwrap_or_else(|| Path::new("."))
         .join(&manifest.source.directory);
     let work_root = args.work_root.unwrap_or_else(|| state_root.join("work"));
+    let bootstrap = prepare_bootstrap(&build, &install, &state_root, scope, None)?;
     let request = RuntimeRequest {
         app_id,
         app_version: target.app.version.clone(),
@@ -1986,6 +2142,7 @@ fn run_manifest_source_transition(
         payload_overlay_root: None,
         payload_overlay_base_root: None,
         recovery_id: None,
+        bootstrap,
     };
     if args.output == OutputArg::Human {
         execute_with_policy(request, policy)
@@ -2516,6 +2673,7 @@ fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
         state_root: state_root.clone(),
         work_root,
         recovery_id: None,
+        bootstrap: None,
     };
     let result = if output == OutputArg::Human {
         execute_with_policy(request, policy)
@@ -2680,6 +2838,7 @@ fn run_recover(args: RecoverCommand) -> miette::Result<()> {
         payload_overlay_root,
         payload_overlay_base_root,
         recovery_id: Some(id),
+        bootstrap: None,
     };
     if args.output == OutputArg::Human {
         execute(request)
@@ -2816,6 +2975,7 @@ fn is_terminal_runtime_event(event: &zup_runtime::RuntimeEvent) -> bool {
 
 fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
     match outcome {
+        InstallOutcome::RebootRequired { .. } => ProcessOutcome::RebootRequired,
         InstallOutcome::Committed => ProcessOutcome::Success,
         InstallOutcome::Cancelled => ProcessOutcome::Cancelled,
         InstallOutcome::RecoveryRequired => ProcessOutcome::RecoveryRequired,
@@ -2827,6 +2987,9 @@ fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
 fn runtime_state_name(state: zup_runtime::RuntimeState) -> &'static str {
     match state {
         zup_runtime::RuntimeState::Preparing => "preparing",
+        zup_runtime::RuntimeState::CheckingPrerequisites => "checking_prerequisites",
+        zup_runtime::RuntimeState::InstallingPrerequisites => "installing_prerequisites",
+        zup_runtime::RuntimeState::RebootRequired => "reboot_required",
         zup_runtime::RuntimeState::WaitingForElevation => "waiting_for_elevation",
         zup_runtime::RuntimeState::ConnectingWorker => "connecting_worker",
         zup_runtime::RuntimeState::Executing => "executing",
@@ -2885,6 +3048,38 @@ fn automation_events(event: &zup_runtime::RuntimeEvent) -> Vec<AutomationEvent> 
         } => vec![AutomationEvent::progress(
             &zup_presentation::ProgressPresentation::new(*completed, *total, action),
         )],
+        zup_runtime::RuntimeEvent::PrerequisiteCheck {
+            id,
+            name,
+            satisfied,
+            version,
+        } => vec![AutomationEvent::PrerequisiteCheck {
+            id: id.clone(),
+            name: name.clone(),
+            satisfied: *satisfied,
+            version: version.clone(),
+        }],
+        zup_runtime::RuntimeEvent::PrerequisiteDownload {
+            id,
+            completed,
+            total,
+        } => vec![AutomationEvent::PrerequisiteDownload {
+            id: id.clone(),
+            completed: *completed,
+            total: *total,
+        }],
+        zup_runtime::RuntimeEvent::PrerequisiteInstall { id, name } => {
+            vec![AutomationEvent::PrerequisiteInstall {
+                id: id.clone(),
+                name: name.clone(),
+            }]
+        }
+        zup_runtime::RuntimeEvent::RebootRequired { id, exit_code } => {
+            vec![AutomationEvent::RebootRequired {
+                id: id.clone(),
+                exit_code: *exit_code,
+            }]
+        }
         zup_runtime::RuntimeEvent::RollingBack => vec![AutomationEvent::Phase {
             state: "rolling_back".into(),
         }],
@@ -3688,10 +3883,14 @@ fn request_ui_preview(
         enable,
         disabled,
         install_directory,
-        &zup_plan::NeverCancelled,
+        EmbeddedPreparationMode {
+            cancellation: &zup_plan::NeverCancelled,
+            acquire_prerequisites: false,
+        },
     )?;
     let mut preview =
-        zup_presentation::PlanPreview::from_execution_plan(&request.execution_plan, scope);
+        zup_presentation::PlanPreview::from_execution_plan(&request.execution_plan, scope)
+            .with_declared_prerequisites(&installer.prerequisites);
     preview.application = installer.app.name.to_string();
     preview.version = installer.app.version.to_string();
     preview.install_directory = request
@@ -3819,7 +4018,10 @@ fn start_ui_transition(
             enable,
             disabled,
             install_directory,
-            &cancel,
+            EmbeddedPreparationMode {
+                cancellation: &cancel,
+                acquire_prerequisites: true,
+            },
         );
         let request = match request {
             Ok(request) => request,
@@ -3904,9 +4106,10 @@ fn start_ui_transition(
                         overlay_root.as_deref(),
                     );
                 }
+                let recovery_required = error.to_string().contains("recovery required");
                 let _ = events.send(zup_ui::UiEvent::Error {
                     message: error.to_string(),
-                    recovery_required: false,
+                    recovery_required,
                 });
             }
         }
@@ -4130,6 +4333,8 @@ source = "plugins/helper.wasm"
                 disable: Vec::new(),
                 install_directory: None,
             },
+            None,
+            true,
             &zup_plan::NeverCancelled,
             || {
                 loads.set(loads.get() + 1);
@@ -4158,6 +4363,8 @@ source = "plugins/helper.wasm"
                 disable: Vec::new(),
                 install_directory: None,
             },
+            None,
+            true,
             &cancel,
             || Ok(FakeExecutor),
         );

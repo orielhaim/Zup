@@ -860,6 +860,7 @@ mod tests {
             scope: SelectedScope::User,
             install_directory: Template::parse("${known.local_app_data}/Overlay").unwrap(),
             selected_components: vec![ComponentId::new("core").unwrap()],
+            prerequisites: Vec::new(),
             files: vec![PlannedFile {
                 key: ResourceKey::File {
                     destination: generated.destination.to_string(),
@@ -881,6 +882,8 @@ mod tests {
                 selected_component_count: 1,
                 resource_count: 0,
                 requires_elevation: false,
+                prerequisite_count: 0,
+                download_bytes: 0,
             },
         }
     }

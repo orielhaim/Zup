@@ -6090,6 +6090,7 @@ version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
@@ -6488,6 +6489,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -6498,6 +6500,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -10786,6 +10789,7 @@ dependencies = [
  "windows-registry 0.100.0",
  "wit-component 0.259.0",
  "wit-parser 0.259.0",
+ "zup-bootstrap",
  "zup-build",
  "zup-bundle",
  "zup-core",
@@ -10802,6 +10806,22 @@ dependencies = [
  "zup-ui",
  "zup-update",
  "zup-windows",
+]
+
+[[package]]
+name = "zup-bootstrap"
+version = "0.0.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
+ "windows 0.62.2",
+ "zup-core",
 ]
 
 [[package]]
@@ -10846,6 +10866,7 @@ dependencies = [
  "schemars",
  "semver",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.21",
 ]
@@ -10877,6 +10898,7 @@ dependencies = [
  "serde_spanned 1.1.1",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "url",
  "zup-core",
 ]
 
@@ -10990,6 +11012,7 @@ dependencies = [
  "tracing-appender",
  "uuid",
  "windows-registry 0.100.0",
+ "zup-bootstrap",
  "zup-bundle",
  "zup-core",
  "zup-exec",
@@ -11044,9 +11067,11 @@ dependencies = [
  "aws-lc-rs",
  "futures-util",
  "jiff",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -11078,6 +11103,7 @@ dependencies = [
  "windows-registry 0.100.0",
  "windows-result 0.100.0",
  "windows-service",
+ "zup-bootstrap",
  "zup-build",
  "zup-bundle",
  "zup-core",

@@ -1,8 +1,12 @@
 //! Compile the authoring model into normalized Installer IR.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use zup_core::{ComponentId, Install, InstallScope, Installer, PluginBinding, UiBranding};
+use zup_core::{
+    ComponentId, Install, InstallScope, Installer, PluginBinding, Prerequisite,
+    PrerequisiteDetector, PrerequisiteInstallerKind, PrerequisitePackage, UiBranding,
+};
 
 use crate::error::ManifestError;
 use crate::model::Manifest;
@@ -31,6 +35,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
         });
     }
     validate_components(&manifest.components)?;
+    validate_prerequisites(&manifest)?;
     validate_resources(&manifest)?;
 
     let Manifest {
@@ -38,6 +43,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
         frontend,
         ui,
         install,
+        prerequisites,
         components,
         files,
         shortcuts,
@@ -63,6 +69,7 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
         ui,
         updates: None,
         install,
+        prerequisites,
         components,
         plugins,
         files,
@@ -237,6 +244,185 @@ fn check_cycles(index: &BTreeMap<ComponentId, &zup_core::Component>) -> Result<(
     Ok(())
 }
 
+fn validate_prerequisites(manifest: &Manifest) -> Result<(), ManifestError> {
+    let mut seen = BTreeSet::new();
+    for prerequisite in &manifest.prerequisites {
+        if !seen.insert(prerequisite.id.as_str().to_ascii_lowercase()) {
+            return Err(ManifestError::DuplicatePrerequisite {
+                id: prerequisite.id.to_string(),
+                src: None,
+                span: None,
+            });
+        }
+        validate_prerequisite(prerequisite)?;
+    }
+    Ok(())
+}
+
+fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestError> {
+    let invalid = |reason: &str| ManifestError::InvalidPrerequisite {
+        id: prerequisite.id.to_string(),
+        reason: reason.to_owned(),
+        src: None,
+        span: None,
+    };
+    if prerequisite.installer.arguments.len() > zup_core::MAX_PREREQUISITE_ARGUMENTS
+        || prerequisite.installer.arguments.iter().any(|argument| {
+            argument.len() > zup_core::MAX_PREREQUISITE_ARGUMENT_BYTES
+                || argument.contains('\0')
+                || argument.contains("${")
+        })
+    {
+        return Err(invalid(
+            "installer arguments are unbounded, contain NUL, or contain templates",
+        ));
+    }
+    let success: BTreeSet<_> = prerequisite
+        .installer
+        .success_exit_codes
+        .iter()
+        .copied()
+        .collect();
+    let reboot: BTreeSet<_> = prerequisite
+        .installer
+        .reboot_exit_codes
+        .iter()
+        .copied()
+        .collect();
+    if success.is_empty() || reboot.is_empty() || success.intersection(&reboot).next().is_some() {
+        return Err(invalid(
+            "success and reboot exit-code sets must be non-empty and disjoint",
+        ));
+    }
+    match &prerequisite.package {
+        PrerequisitePackage::Embedded { path, size, .. } => {
+            if *size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES {
+                return Err(invalid(
+                    "embedded prerequisite exceeds the package size limit",
+                ));
+            }
+            validate_filename(path.file_name()).map_err(|reason| invalid(&reason))?;
+        }
+        PrerequisitePackage::Remote {
+            url,
+            size,
+            filename,
+            ..
+        } => {
+            let parsed =
+                url::Url::parse(url).map_err(|_| invalid("remote prerequisite URL is invalid"))?;
+            if parsed.scheme() != "https"
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(invalid(
+                    "remote prerequisite URL must be HTTPS without credentials or fragments",
+                ));
+            }
+            if size.is_some_and(|size| size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES) {
+                return Err(invalid(
+                    "remote prerequisite exceeds the package size limit",
+                ));
+            }
+            validate_filename(filename).map_err(|reason| invalid(&reason))?;
+        }
+    }
+    if prerequisite.installer.kind == PrerequisiteInstallerKind::Msi
+        && !matches!(
+            prerequisite.detector,
+            PrerequisiteDetector::MsiProduct { .. }
+        )
+    {
+        return Err(invalid("MSI installers require an msi_product detector"));
+    }
+    match &prerequisite.detector {
+        PrerequisiteDetector::RegistryValue { key, value, .. } => {
+            if key.is_empty() || key.contains('\0') || value.is_empty() || value.contains('\0') {
+                return Err(invalid(
+                    "registry detector key and value must be non-empty and NUL-free",
+                ));
+            }
+        }
+        PrerequisiteDetector::FileVersion { path, .. } => {
+            if path
+                .parts()
+                .iter()
+                .any(|part| matches!(part, zup_core::TemplatePart::Variable(_)))
+            {
+                return Err(invalid(
+                    "prerequisite file-version paths must be literal absolute paths",
+                ));
+            }
+            if path
+                .as_literal()
+                .is_none_or(|value| !Path::new(value).is_absolute())
+            {
+                return Err(invalid("prerequisite file-version path must be absolute"));
+            }
+        }
+        PrerequisiteDetector::MsiProduct { product_code, .. } => {
+            if product_code.is_empty()
+                || product_code.len() > 256
+                || product_code.contains('\0')
+                || product_code.contains(['/', '\\'])
+            {
+                return Err(invalid("MSI product code is invalid"));
+            }
+        }
+        PrerequisiteDetector::VisualCppV14 { .. }
+        | PrerequisiteDetector::DotNetRuntime { .. }
+        | PrerequisiteDetector::WebView2Evergreen { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_filename(filename: &str) -> Result<(), String> {
+    let valid = !filename.is_empty()
+        && filename.len() <= 255
+        && !filename.contains(['/', '\\', ':', '\0'])
+        && filename != "."
+        && filename != ".."
+        && !filename.ends_with(['.', ' '])
+        && !filename.chars().any(char::is_control)
+        && !matches!(
+            filename
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_uppercase()
+                .as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+    if valid {
+        Ok(())
+    } else {
+        Err("remote prerequisite filename is not a safe Windows basename".into())
+    }
+}
+
 fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
     let known: BTreeSet<ComponentId> = manifest
         .components
@@ -306,6 +492,10 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
         }
     }
 
+    for prerequisite in &manifest.prerequisites {
+        check_ref(prerequisite.component.as_ref(), &known, "prerequisite")?;
+        check_condition(prerequisite.when.as_ref(), &known, "prerequisite condition")?;
+    }
     for file in &manifest.files {
         check_ref(file.component.as_ref(), &known, "file mapping")?;
         check_condition(file.when.as_ref(), &known, "condition")?;

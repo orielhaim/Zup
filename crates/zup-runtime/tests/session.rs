@@ -1,5 +1,6 @@
 //! Runtime session tests (local user-scope path).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
@@ -73,6 +74,7 @@ fn sample_request(scope: SelectedScope) -> RuntimeRequest {
         payload_overlay_root: None,
         payload_overlay_base_root: None,
         recovery_id: None,
+        bootstrap: None,
     }
 }
 
@@ -359,6 +361,39 @@ async fn invalid_plan_rejected_before_run() {
         Some(zup_exec::Conflict::TargetNonFile { path: "x".into() });
     let err = run_local_install(request).await.unwrap_err();
     assert!(matches!(err, SessionError::PlanInvalid(_)));
+}
+
+#[tokio::test]
+async fn invalid_plan_rejected_before_bootstrap_mutation() {
+    let mut request = sample_request(SelectedScope::User);
+    request.execution_plan.files[0].conflict =
+        Some(zup_exec::Conflict::TargetNonFile { path: "x".into() });
+    let plan = zup_bootstrap::BootstrapPlan::new(
+        zup_bootstrap::BootstrapKey {
+            app_id: request.app_id.clone(),
+            app_version: request.app_version.clone(),
+            scope: request.scope,
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let bootstrap = zup_bootstrap::BoundBootstrapPlan::new(plan, BTreeMap::new()).unwrap();
+    let bootstrap_state_root = request.state_root.join("bootstrap-state");
+    let quarantine_root = request.state_root.join("quarantine");
+    request.bootstrap = Some(zup_runtime::BootstrapRequest {
+        plan: bootstrap,
+        state_root: bootstrap_state_root.clone(),
+        quarantine_root: quarantine_root.clone(),
+    });
+
+    let (events, _) = tokio::sync::broadcast::channel(8);
+    let err = run_install_control(request, CancellationHandle::new(), events)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, SessionError::PlanInvalid(_)));
+    assert!(!bootstrap_state_root.exists());
+    assert!(!quarantine_root.exists());
 }
 
 #[test]

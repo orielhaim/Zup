@@ -16,8 +16,8 @@ use crate::plugins::{
 use crate::request::PlanRequest;
 use crate::resolve::{resolve_install_directory, resolve_template};
 use crate::resources::{
-    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
-    PlannedShortcut,
+    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedPrerequisite, PlannedProtocol,
+    PlannedService, PlannedShortcut,
 };
 use crate::select::select_components;
 
@@ -146,6 +146,19 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
 
     let install_directory = resolve_install_directory(&raw_directory, &installer.app)?;
     let scope_privilege = scope.privilege();
+
+    let prerequisites = installer
+        .prerequisites
+        .iter()
+        .filter(|prerequisite| {
+            is_active(
+                prerequisite.component.as_ref(),
+                prerequisite.when.as_ref(),
+                &selected_set,
+            )
+        })
+        .map(PlannedPrerequisite::from_prerequisite)
+        .collect::<Vec<_>>();
 
     let mut files = Vec::new();
     for file in &build.files {
@@ -286,6 +299,7 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
         scope,
         install_directory,
         selected_components: selected,
+        prerequisites,
         files,
         shortcuts,
         path_entries,
@@ -298,6 +312,8 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
             selected_component_count: 0,
             resource_count: 0,
             requires_elevation: false,
+            prerequisite_count: 0,
+            download_bytes: 0,
         },
     };
     plan.summary = summarize_plan(&plan, plan.selected_components.len())?;

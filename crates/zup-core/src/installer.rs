@@ -6,6 +6,7 @@ use crate::model::{
     App, Component, FileMapping, FileType, Frontend, Install, PathEntry, PluginBinding, Protocol,
     Service, Shortcut, UiBranding,
 };
+use crate::prerequisite::Prerequisite;
 
 /// Engine-facing installer representation.
 ///
@@ -22,6 +23,8 @@ pub struct Installer {
     pub ui: Option<UiBranding>,
     pub updates: Option<UpdateConfig>,
     pub install: Install,
+    #[serde(default)]
+    pub prerequisites: Vec<Prerequisite>,
     pub components: Vec<Component>,
     pub plugins: Vec<PluginBinding>,
     pub files: Vec<FileMapping>,

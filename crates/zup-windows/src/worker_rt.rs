@@ -1,9 +1,14 @@
 //! Real worker runtime: connect, authenticate, handshake, one transaction, exit.
 use std::path::{Path, PathBuf};
+
 use std::time::Duration;
+use zup_bootstrap::{
+    BootstrapId, BootstrapState, BootstrapStateStore, BoundBootstrapPlan,
+    FilesystemBootstrapStateStore, Quarantine, execute_plan_with_persist, recover,
+};
 
 use tokio_util::sync::CancellationToken;
-use zup_bundle::AutoPayloadSource;
+use zup_bundle::{AutoPayloadSource, EmbeddedBundle};
 use zup_protocol::{
     Capabilities, FILE_TRANSACTIONS_V1, Message, PROTOCOL_VERSION, ProgressKind, ProgressReport,
     SequenceTracker, SessionId, WireEnvelope, WorkerHello,
@@ -163,9 +168,19 @@ async fn run_worker_inner(
         .accept(exec_env.sequence)
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
     let exec = match exec_env.message {
+        Message::ExecuteBootstrap(exec) => {
+            return run_bootstrap_worker(
+                bootstrap, exec, reader, writer, incoming, outgoing, cancel,
+            )
+            .await;
+        }
         Message::ExecuteTransaction(exec) => exec,
         Message::Cancel => return Err(WorkerError::Protocol("cancelled".into())),
-        _ => return Err(WorkerError::Protocol("expected ExecuteTransaction".into())),
+        _ => {
+            return Err(WorkerError::Protocol(
+                "expected ExecuteTransaction or ExecuteBootstrap".into(),
+            ));
+        }
     };
 
     // 8. Plan binding + capability check (still before lock/journal).
@@ -213,6 +228,13 @@ async fn run_worker_inner(
         "machine" => zup_core::SelectedScope::Machine,
         _ => return Err(WorkerError::Protocol("invalid install scope".into())),
     };
+    if require_elevation {
+        let executable = crate::worker::current_exe()
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let bundle = EmbeddedBundle::open(&executable)
+            .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
+        validate_transaction_bundle_identity(&app_id, &app_version, scope, &bundle)?;
+    }
     let state_root = PathBuf::from(exec.state_root);
     let work_root = PathBuf::from(exec.work_root);
     let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
@@ -442,11 +464,347 @@ async fn run_worker_inner(
         Message::Completed(zup_protocol::Completed {
             transaction_id,
             outcome: outcome.clone(),
+            prerequisite_id: None,
+            exit_code: None,
         }),
     )
     .await;
     let _ = reader_task.await;
     Ok(outcome)
+}
+
+async fn run_bootstrap_worker(
+    bootstrap: WorkerBootstrap,
+    exec: zup_protocol::ExecuteBootstrap,
+    reader: ClientReader,
+    mut writer: ClientWriter,
+    incoming: SequenceTracker,
+    mut outgoing: u64,
+    cancel: CancellationToken,
+) -> Result<String, WorkerError> {
+    if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
+        return Err(WorkerError::Protocol("bootstrap plan too large".into()));
+    }
+    let hash = plan_hash_hex(&exec.bootstrap_json);
+    if hash != bootstrap.expected_plan_hash || hash != exec.bootstrap_hash {
+        return Err(WorkerError::PlanHashMismatch);
+    }
+    let bound: BoundBootstrapPlan = serde_json::from_str(&exec.bootstrap_json)
+        .map_err(|error| WorkerError::Protocol(format!("bad bootstrap plan: {error}")))?;
+    let declared_plan_hash = bound.plan_hash;
+    let validated = BoundBootstrapPlan::with_id(bound.id, bound.plan, bound.artifacts)
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    if bound.id.as_uuid() != exec.bootstrap_id
+        || validated.plan_hash != declared_plan_hash
+        || validated.plan.key.app_id.as_str() != exec.app_id
+        || validated.plan.key.app_version.to_string() != exec.app_version
+        || validated.plan.key.scope.to_string() != exec.scope
+    {
+        return Err(WorkerError::AuthFailed(
+            "bootstrap identity mismatch".into(),
+        ));
+    }
+    let bound = validated;
+    let executable =
+        crate::worker::current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let bundle = EmbeddedBundle::open(&executable)
+        .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
+    validate_bootstrap_bundle(&bound.plan, &bundle)?;
+    if exec.recovery_id.is_some() {
+        return Err(WorkerError::AuthFailed(
+            "bootstrap recovery ids are not supported".into(),
+        ));
+    }
+    let state_root = PathBuf::from(&exec.state_root);
+    let quarantine_root = PathBuf::from(&exec.quarantine_root);
+    if exec.state_root.is_empty()
+        || exec.quarantine_root.is_empty()
+        || exec.state_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+        || exec.quarantine_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+        || exec.state_root.contains('\0')
+        || exec.quarantine_root.contains('\0')
+        || !state_root.is_absolute()
+        || !quarantine_root.is_absolute()
+    {
+        return Err(WorkerError::AuthFailed(
+            "bootstrap roots must be absolute".into(),
+        ));
+    }
+    let quarantine = Quarantine::new(&quarantine_root)
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    for artifact in bound.artifacts.values() {
+        quarantine
+            .verify(artifact)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    }
+    let store = FilesystemBootstrapStateStore::new(&state_root);
+    let bootstrap_id = BootstrapId::from_uuid(exec.bootstrap_id);
+    let mut state = match store.load(bootstrap_id) {
+        Ok(state) => state,
+        Err(zup_bootstrap::BootstrapStoreError::Missing) => {
+            let mut state = BootstrapState::new(&bound.plan);
+            state.id = bootstrap_id;
+            store
+                .create(&state)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            state
+        }
+        Err(error) => return Err(WorkerError::Transaction(error.to_string())),
+    };
+    state
+        .validate(&bound.plan)
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let lock_key =
+        InstallationLock::lock_key(&format!("bootstrap-{}", exec.bootstrap_id), &exec.scope);
+    let _lock = InstallationLock::try_acquire(&state_root, &lock_key)
+        .map_err(|error| WorkerError::Transaction(error.to_string()))?
+        .ok_or_else(|| WorkerError::Transaction("bootstrap is busy".into()))?;
+    writer
+        .send(&WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: bootstrap.session_id,
+            sequence: outgoing,
+            message: Message::Progress(ProgressReport {
+                kind: ProgressKind::OperationStarted,
+                detail: "Checking prerequisites…".into(),
+                completed: None,
+                total: None,
+            }),
+        })
+        .await
+        .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+    outgoing = outgoing.saturating_add(1);
+    let reader_task = split_reader(reader, cancel.clone(), incoming);
+    let detector = crate::WindowsPrerequisiteDetector;
+    let provider = crate::WindowsPrerequisiteProvider;
+    if state.operations.iter().any(|operation| {
+        matches!(
+            operation.state,
+            zup_bootstrap::BootstrapOperationState::Running
+        )
+    }) {
+        let old_revision = state.revision;
+        let recovered = recover(&bound.plan, &detector, &mut state)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+        state.revision = old_revision.saturating_add(1);
+        store
+            .compare_and_swap(old_revision, &state)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+        if matches!(recovered, zup_bootstrap::BootstrapOutcome::RecoveryRequired) {
+            let _ = send_and_close(
+                writer,
+                bootstrap.session_id,
+                outgoing,
+                Message::Completed(zup_protocol::Completed {
+                    transaction_id: exec.bootstrap_id,
+                    outcome: "recovery_required".into(),
+                    prerequisite_id: None,
+                    exit_code: None,
+                }),
+            )
+            .await;
+            return Ok("recovery_required".into());
+        }
+    }
+    let assessed_revision = state.revision;
+    zup_bootstrap::assess(&bound.plan, &detector, &mut state)
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    state.revision = assessed_revision.saturating_add(1);
+    store
+        .compare_and_swap(assessed_revision, &state)
+        .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+    let mut revision = state.revision;
+    let mut persist = |snapshot: &BootstrapState| -> Result<(), zup_bootstrap::BootstrapError> {
+        let mut next = snapshot.clone();
+        let expected = revision;
+        next.revision = expected
+            .checked_add(1)
+            .ok_or(zup_bootstrap::BootstrapError::Limit(
+                "bootstrap revision overflow",
+            ))?;
+        store
+            .compare_and_swap(expected, &next)
+            .map_err(|error| zup_bootstrap::BootstrapError::Provider(error.to_string()))?;
+        revision = next.revision;
+        Ok(())
+    };
+    let result = execute_plan_with_persist(
+        &bound.plan,
+        &detector,
+        &provider,
+        |operation| {
+            let artifact = bound.artifacts.get(&operation.id).ok_or_else(|| {
+                zup_bootstrap::BootstrapError::MissingArtifact(operation.id.to_string())
+            })?;
+            quarantine
+                .resolve(&artifact.relative_path)
+                .map_err(|error| zup_bootstrap::BootstrapError::Provider(error.to_string()))
+        },
+        &mut state,
+        &mut persist,
+    );
+    state.revision = revision;
+    if cancel.is_cancelled() {
+        let _ = writer
+            .send(&WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: bootstrap.session_id,
+                sequence: outgoing,
+                message: Message::Failed(zup_protocol::Failed {
+                    kind: "cancelled".into(),
+                    message: "bootstrap cancelled".into(),
+                }),
+            })
+            .await;
+        return Err(WorkerError::Transaction("bootstrap cancelled".into()));
+    }
+    if let Err(error) = &result {
+        if state.operations.iter().any(|operation| {
+            matches!(
+                operation.state,
+                zup_bootstrap::BootstrapOperationState::Running
+                    | zup_bootstrap::BootstrapOperationState::Failed { .. }
+            )
+        }) {
+            state.phase = zup_bootstrap::BootstrapPhase::RecoveryRequired;
+        } else {
+            state.recompute();
+        }
+        let old_revision = state.revision;
+        state.revision = old_revision.saturating_add(1);
+        let _ = store.compare_and_swap(old_revision, &state);
+        let _ = writer
+            .send(&WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: bootstrap.session_id,
+                sequence: outgoing,
+                message: Message::Failed(zup_protocol::Failed {
+                    kind: "prerequisite".into(),
+                    message: error.to_string(),
+                }),
+            })
+            .await;
+        return Err(WorkerError::Transaction(error.to_string()));
+    }
+    let (outcome, prerequisite_id, exit_code) = match result {
+        Ok(zup_bootstrap::BootstrapOutcome::Ready) => ("committed", None, None),
+        Ok(zup_bootstrap::BootstrapOutcome::RebootRequired { exit_code, .. }) => {
+            let prerequisite_id = state
+                .operations
+                .iter()
+                .find_map(|operation| {
+                    if matches!(
+                        operation.state,
+                        zup_bootstrap::BootstrapOperationState::RebootRequired { .. }
+                    ) {
+                        Some(operation.id.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    bound
+                        .plan
+                        .operations
+                        .first()
+                        .map(|operation| operation.id.to_string())
+                });
+            ("reboot_required", prerequisite_id, Some(exit_code))
+        }
+        Ok(zup_bootstrap::BootstrapOutcome::RecoveryRequired) => ("recovery_required", None, None),
+        Err(error) => return Err(WorkerError::Transaction(error.to_string())),
+    };
+    let _ = send_and_close(
+        writer,
+        bootstrap.session_id,
+        outgoing,
+        Message::Completed(zup_protocol::Completed {
+            transaction_id: exec.bootstrap_id,
+            outcome: outcome.to_owned(),
+            prerequisite_id,
+            exit_code,
+        }),
+    )
+    .await;
+    let _ = cancel;
+    let _ = reader_task.await;
+    Ok(outcome.to_owned())
+}
+
+fn validate_transaction_bundle_identity(
+    app_id: &zup_core::AppId,
+    app_version: &semver::Version,
+    scope: zup_core::SelectedScope,
+    bundle: &EmbeddedBundle,
+) -> Result<(), WorkerError> {
+    validate_transaction_installer(&bundle.plan().installer, app_id, app_version, scope)
+}
+
+fn validate_transaction_installer(
+    installer: &zup_core::Installer,
+    app_id: &zup_core::AppId,
+    app_version: &semver::Version,
+    scope: zup_core::SelectedScope,
+) -> Result<(), WorkerError> {
+    if &installer.app.id != app_id
+        || &installer.app.version != app_version
+        || !match scope {
+            zup_core::SelectedScope::User => installer.install.scope.allows_user(),
+            zup_core::SelectedScope::Machine => installer.install.scope.allows_machine(),
+        }
+    {
+        return Err(WorkerError::AuthFailed(
+            "transaction identity is not declared by the worker bundle".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bootstrap_bundle(
+    plan: &zup_bootstrap::BootstrapPlan,
+    bundle: &EmbeddedBundle,
+) -> Result<(), WorkerError> {
+    let installer = &bundle.plan().installer;
+    if plan.key.app_id != installer.app.id
+        || plan.key.app_version != installer.app.version
+        || !matches!(
+            (plan.key.scope, installer.install.scope),
+            (zup_core::SelectedScope::User, zup_core::InstallScope::User)
+                | (
+                    zup_core::SelectedScope::User,
+                    zup_core::InstallScope::Either
+                )
+                | (
+                    zup_core::SelectedScope::Machine,
+                    zup_core::InstallScope::Machine
+                )
+                | (
+                    zup_core::SelectedScope::Machine,
+                    zup_core::InstallScope::Either
+                )
+        )
+    {
+        return Err(WorkerError::AuthFailed(
+            "bootstrap plan is not declared by the worker bundle".into(),
+        ));
+    }
+    for operation in &plan.operations {
+        let declared = installer
+            .prerequisites
+            .iter()
+            .find(|prerequisite| prerequisite.id == operation.id);
+        let Some(declared) = declared else {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap operation is not declared by the worker bundle".into(),
+            ));
+        };
+        if &zup_bootstrap::BootstrapOperation::from_prerequisite(declared) != operation {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap operation differs from the worker bundle".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn decode_overlay_path(value: Option<&str>) -> Result<Option<PathBuf>, WorkerError> {
@@ -522,6 +880,7 @@ fn split_reader(
                 cancel.cancel();
             }
         }
+        cancel.cancel();
     })
 }
 
@@ -856,5 +1215,58 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn transaction_identity_must_match_bundle_installer() {
+        let installer = zup_manifest::parse_and_compile(
+            r#"
+            schema = 1
+            [app]
+            id = "com.example.app"
+            name = "Example"
+            version = "1.0.0"
+            [source]
+            directory = "dist"
+            [install]
+            scope = "user"
+            [install.directory]
+            user = "${known.local_app_data}/Example"
+            "#,
+        )
+        .unwrap();
+        let app_id = installer.app.id.clone();
+        let app_version = installer.app.version.clone();
+        assert!(
+            validate_transaction_installer(&installer, &app_id, &app_version, SelectedScope::User,)
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_transaction_installer(
+                &installer,
+                &zup_core::AppId::new("com.example.other").unwrap(),
+                &app_version,
+                SelectedScope::User,
+            ),
+            Err(WorkerError::AuthFailed(_))
+        ));
+        assert!(matches!(
+            validate_transaction_installer(
+                &installer,
+                &app_id,
+                &semver::Version::new(2, 0, 0),
+                SelectedScope::User,
+            ),
+            Err(WorkerError::AuthFailed(_))
+        ));
+        assert!(matches!(
+            validate_transaction_installer(
+                &installer,
+                &app_id,
+                &app_version,
+                SelectedScope::Machine,
+            ),
+            Err(WorkerError::AuthFailed(_))
+        ));
     }
 }

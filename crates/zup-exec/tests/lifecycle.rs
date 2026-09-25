@@ -38,6 +38,7 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
         scope: SelectedScope::User,
         install_directory: TargetPath::new(PathBuf::from(r"C:\ZupLifecycle")).unwrap(),
         selected_components: vec![ComponentId::new("core").unwrap()],
+        prerequisites: vec![],
         files,
         shortcuts: vec![],
         path_entries: vec![],
@@ -50,6 +51,8 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
             resource_count: 0,
             requires_elevation: false,
             selected_component_count: 1,
+            prerequisite_count: 0,
+            download_bytes: 0,
         },
     }
 }

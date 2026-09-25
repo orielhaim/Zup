@@ -1048,6 +1048,7 @@ mod generated_file_lifecycle {
                     description: None,
                 },
                 updates: None,
+                prerequisites: Vec::new(),
                 install: Install {
                     scope: InstallScope::User,
                     directory: InstallDirectory {
@@ -1079,6 +1080,7 @@ mod generated_file_lifecycle {
                 protocols: Vec::new(),
                 file_types: Vec::new(),
             },
+            prerequisites: Vec::new(),
             plugins: vec![ResolvedPlugin {
                 id: PluginId::new(PLUGIN_ID).unwrap(),
                 source: source_path.to_path_buf(),
@@ -1088,6 +1090,7 @@ mod generated_file_lifecycle {
             }],
             files: Vec::new(),
             total_size: 0,
+            prerequisite_size: 0,
         }
     }
 

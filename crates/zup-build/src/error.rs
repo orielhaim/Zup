@@ -160,6 +160,14 @@ pub enum BuildError {
     #[diagnostic(code(zup_build::plugin_source_mismatch))]
     PluginSourceMismatch { id: String },
 
+    #[error("embedded prerequisite `{id}` is missing or unsafe")]
+    #[diagnostic(code(zup_build::prerequisite_source))]
+    PrerequisiteSource { id: String, path: PathBuf },
+
+    #[error("embedded prerequisite `{id}` does not match its declared size or digest")]
+    #[diagnostic(code(zup_build::prerequisite_identity))]
+    PrerequisiteIdentity { id: String, path: PathBuf },
+
     /// An I/O error occurred while resolving the source root.
     #[error("I/O error at `{path}`")]
     #[diagnostic(code(zup_build::io))]

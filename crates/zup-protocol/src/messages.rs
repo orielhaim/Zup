@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::SessionId;
 
 /// IPC protocol version.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Maximum length-delimited frame size (bytes). Rejects malicious length prefixes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -20,6 +20,7 @@ pub const FILE_TRANSACTIONS_V1: &str = "file-transactions-v1";
 pub const MANAGED_INTEGRATIONS_V1: &str = "path-protocol-file-type-v1";
 pub const SHORTCUT_SERVICE_V1: &str = "shortcut-service-v1";
 pub const LIFECYCLE_V1: &str = "owned-lifecycle-v1";
+pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 
 /// Versioned envelope wrapping every message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,7 @@ pub enum Message {
     WorkerHello(WorkerHello),
     ParentHello(ParentHello),
     ExecuteTransaction(ExecuteTransaction),
+    ExecuteBootstrap(ExecuteBootstrap),
     Cancel,
     Progress(ProgressReport),
     TransactionStateChanged(TransactionStateChanged),
@@ -73,6 +75,8 @@ pub struct Capabilities {
     pub managed_integrations_v1: bool,
     pub shortcut_service_v1: bool,
     pub lifecycle_v1: bool,
+    #[serde(default)]
+    pub prerequisite_bootstrap_v1: bool,
 }
 
 impl Capabilities {
@@ -82,6 +86,7 @@ impl Capabilities {
             managed_integrations_v1: true,
             shortcut_service_v1: true,
             lifecycle_v1: true,
+            prerequisite_bootstrap_v1: true,
         }
     }
 
@@ -99,6 +104,10 @@ impl Capabilities {
 
     pub fn has_lifecycle_v1(&self) -> bool {
         self.lifecycle_v1
+    }
+
+    pub fn has_prerequisite_bootstrap_v1(&self) -> bool {
+        self.prerequisite_bootstrap_v1
     }
 }
 
@@ -120,6 +129,20 @@ pub struct ExecuteTransaction {
     pub state_root: String,
     pub work_root: String,
     /// Resume this durable transaction instead of beginning another one.
+    pub recovery_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteBootstrap {
+    pub bootstrap_json: String,
+    pub bootstrap_hash: String,
+    pub bootstrap_id: uuid::Uuid,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub state_root: String,
+    pub quarantine_root: String,
+    #[serde(default)]
     pub recovery_id: Option<uuid::Uuid>,
 }
 
@@ -159,6 +182,10 @@ pub struct TransactionStateChanged {
 pub struct Completed {
     pub transaction_id: Uuid,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerequisite_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// Terminal failure with a typed reason tag.

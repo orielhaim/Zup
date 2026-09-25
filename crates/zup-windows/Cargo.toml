@@ -29,6 +29,7 @@ windows-registry.workspace = true
 windows-result.workspace = true
 lnks.workspace = true
 windows-service.workspace = true
+zup-bootstrap.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
@@ -41,7 +42,10 @@ zup-transaction.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_RestartManager",
+  "Win32_System_SystemInformation",
 ] }
 
 [build-dependencies]

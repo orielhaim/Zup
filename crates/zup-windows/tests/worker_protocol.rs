@@ -1,8 +1,9 @@
 //! Worker bootstrap, handshake, and security-negative tests.
 
+use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
 use zup_protocol::{
-    Capabilities, ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker,
-    SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
+    Capabilities, ExecuteBootstrap, ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello,
+    SequenceTracker, SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
 };
 use zup_windows::{
     WorkerBootstrap, WorkerError, WorkerSession, format_bootstrap, parse_bootstrap, pipe_name,
@@ -30,6 +31,56 @@ fn bootstrap_roundtrip() {
     assert_eq!(parsed.pipe_name, b.pipe_name);
     assert_eq!(parsed.expected_parent_pid, b.expected_parent_pid);
     assert_eq!(parsed.expected_plan_hash, b.expected_plan_hash);
+}
+
+#[test]
+fn bootstrap_roundtrip_accepts_only_the_typed_bootstrap_message() {
+    let plan = BootstrapPlan::new(
+        BootstrapKey {
+            app_id: zup_core::AppId::new("com.example.app").unwrap(),
+            app_version: semver::Version::new(1, 0, 0),
+            scope: zup_core::SelectedScope::User,
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let bound = BoundBootstrapPlan::new(plan, Default::default()).unwrap();
+    let bootstrap_json = serde_json::to_string(&bound).unwrap();
+    let hash = plan_hash_hex(&bootstrap_json);
+    let mut worker_bootstrap = bootstrap();
+    worker_bootstrap.expected_plan_hash = hash.clone();
+    let mut session = WorkerSession::new(worker_bootstrap.clone());
+    session
+        .handle_message(WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: worker_bootstrap.session_id,
+            sequence: 1,
+            message: Message::ParentHello(ParentHello {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: worker_bootstrap.session_id,
+                transaction_id: bound.id.as_uuid(),
+                expected_plan_hash: hash.clone(),
+            }),
+        })
+        .unwrap();
+    session
+        .handle_message(WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: worker_bootstrap.session_id,
+            sequence: 2,
+            message: Message::ExecuteBootstrap(ExecuteBootstrap {
+                bootstrap_json,
+                bootstrap_hash: hash,
+                bootstrap_id: BootstrapId::for_plan(&bound.plan).as_uuid(),
+                app_id: "com.example.app".into(),
+                app_version: "1.0.0".into(),
+                scope: "user".into(),
+                state_root: r"C:\state".into(),
+                quarantine_root: r"C:\quarantine".into(),
+                recovery_id: None,
+            }),
+        })
+        .unwrap();
 }
 
 #[test]

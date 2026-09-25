@@ -2,12 +2,12 @@
 
 use thiserror::Error;
 use tracing::{info, info_span};
-use zup_core::{ResourceKey, SelectedScope, ShortcutLocation};
+use zup_core::{PrerequisitePackage, ResourceKey, SelectedScope, ShortcutLocation};
 use zup_plan::InstallPlan;
 use zup_platform::{
     CommandSpec, KnownFolder, KnownFolderResolver, TargetFile, TargetFileType, TargetPath,
-    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService, TargetShortcut,
-    TemplateResolveError, resolve_template_path,
+    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetPrerequisite, TargetProtocol,
+    TargetService, TargetShortcut, TemplateResolveError, resolve_template_path,
 };
 
 use crate::cmdline;
@@ -67,6 +67,19 @@ pub fn resolve_target<R: KnownFolderResolver>(
     };
 
     let install_directory = path(&plan.install_directory)?;
+
+    let prerequisites = plan
+        .prerequisites
+        .iter()
+        .map(|prerequisite| TargetPrerequisite {
+            id: prerequisite.id.clone(),
+            name: prerequisite.name.clone(),
+            target: prerequisite.target,
+            detector: prerequisite.detector.clone(),
+            package: prerequisite.package.clone(),
+            installer: prerequisite.installer.clone(),
+        })
+        .collect();
 
     let mut files = Vec::with_capacity(plan.files.len());
     let mut install_bytes = 0u64;
@@ -188,6 +201,15 @@ pub fn resolve_target<R: KnownFolderResolver>(
         resource_count,
         requires_elevation: plan.summary.requires_elevation,
         selected_component_count: plan.selected_components.len(),
+        prerequisite_count: plan.prerequisites.len(),
+        download_bytes: plan
+            .prerequisites
+            .iter()
+            .filter_map(|item| match &item.package {
+                PrerequisitePackage::Remote { size, .. } => *size,
+                PrerequisitePackage::Embedded { .. } => None,
+            })
+            .sum(),
     };
 
     info!(
@@ -204,6 +226,7 @@ pub fn resolve_target<R: KnownFolderResolver>(
         scope: plan.scope,
         install_directory,
         selected_components: plan.selected_components.clone(),
+        prerequisites,
         files,
         shortcuts,
         path_entries,

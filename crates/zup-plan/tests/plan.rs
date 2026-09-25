@@ -69,6 +69,66 @@ fn selected_names(plan: &InstallPlan) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn active_prerequisites_follow_components_and_contribute_download_summary() {
+    let source = with(
+        r#"
+[[components]]
+id = "core"
+name = "Core"
+required = true
+
+[[prerequisites]]
+id = "vc-runtime"
+name = "Visual C++ Runtime"
+component = "core"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "remote", url = "https://cdn.example.test/vc.exe", filename = "vc.exe", sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 1024 }
+
+[[prerequisites]]
+id = "optional-runtime"
+name = "Optional Runtime"
+component = "extras"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "remote", url = "https://cdn.example.test/optional.exe", filename = "optional.exe", sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", size = 2048 }
+
+[[components]]
+id = "extras"
+name = "Extras"
+default = false
+"#,
+    );
+    let build = build_plan_from(&source, &[("dist/app.txt", b"app")]);
+    let result = plan(&build, &PlanRequest::new(SelectedScope::User)).unwrap();
+    assert_eq!(result.prerequisites.len(), 1);
+    assert_eq!(result.prerequisites[0].id.as_str(), "vc-runtime");
+    assert_eq!(result.summary.prerequisite_count, 1);
+    assert_eq!(result.summary.download_bytes, 1024);
+    assert!(result.summary.requires_elevation);
+}
+
+#[test]
+fn prerequisites_are_filtered_by_condition() {
+    let source = with(
+        r#"
+[[components]]
+id = "core"
+name = "Core"
+required = true
+
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+when = '!component("core")'
+detector = { kind = "visual_cpp_v14" }
+package = { type = "remote", url = "https://cdn.example.test/runtime.exe", filename = "runtime.exe", sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", size = 1 }
+"#,
+    );
+    let build = build_plan_from(&source, &[("dist/app.txt", b"app")]);
+    let result = plan(&build, &PlanRequest::new(SelectedScope::User)).unwrap();
+    assert!(result.prerequisites.is_empty());
+}
+
 // --- Scope ---
 
 #[rstest]

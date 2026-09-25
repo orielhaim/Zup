@@ -34,6 +34,13 @@
     "install": {
       "$ref": "#/$defs/Install"
     },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Prerequisite"
+      },
+      "default": []
+    },
     "updates": {
       "anyOf": [
         {
@@ -327,6 +334,376 @@
       },
       "additionalProperties": false
     },
+    "Prerequisite": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target": {
+          "$ref": "#/$defs/PrerequisiteArchitecture",
+          "default": "current"
+        },
+        "detector": {
+          "$ref": "#/$defs/PrerequisiteDetector"
+        },
+        "package": {
+          "$ref": "#/$defs/PrerequisitePackage"
+        },
+        "installer": {
+          "$ref": "#/$defs/PrerequisiteInstaller",
+          "default": {
+            "kind": "exe",
+            "arguments": [],
+            "success_exit_codes": [
+              0
+            ],
+            "reboot_exit_codes": [
+              1641,
+              3010
+            ],
+            "privilege": "machine"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "detector",
+        "package"
+      ]
+    },
+    "ComponentId": {
+      "description": "Stable logical component identifier.",
+      "type": "string"
+    },
+    "Condition": {
+      "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
+      "type": "string",
+      "examples": [
+        "component(\"docs\")",
+        "!component(\"debug\")"
+      ]
+    },
+    "PrerequisiteArchitecture": {
+      "type": "string",
+      "enum": [
+        "x86",
+        "x64",
+        "arm64",
+        "current",
+        "any"
+      ]
+    },
+    "PrerequisiteDetector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "visual_cpp_v14"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "desktop": {
+              "type": "boolean",
+              "default": false
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "dotnet_runtime"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "webview2_evergreen"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "product_code": {
+              "type": "string"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "msi_product"
+            }
+          },
+          "required": [
+            "kind",
+            "product_code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "hive": {
+              "$ref": "#/$defs/RegistryHive",
+              "default": "current_user"
+            },
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "expected": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "registry_value"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/Template"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "file_version"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
+      ]
+    },
+    "RegistryHive": {
+      "type": "string",
+      "enum": [
+        "current_user",
+        "local_machine",
+        "classes_root"
+      ]
+    },
+    "PrerequisitePackage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "embedded"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "sha256",
+            "size"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "default": null
+            },
+            "filename": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "remote"
+            }
+          },
+          "required": [
+            "type",
+            "url",
+            "sha256",
+            "filename"
+          ]
+        }
+      ]
+    },
+    "PrerequisiteInstaller": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PrerequisiteInstallerKind",
+          "default": "exe"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "success_exit_codes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "default": [
+            0
+          ]
+        },
+        "reboot_exit_codes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "default": [
+            1641,
+            3010
+          ]
+        },
+        "privilege": {
+          "$ref": "#/$defs/Privilege",
+          "default": "machine"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PrerequisiteInstallerKind": {
+      "type": "string",
+      "enum": [
+        "exe",
+        "msi"
+      ]
+    },
+    "Privilege": {
+      "type": "string",
+      "enum": [
+        "user",
+        "machine"
+      ]
+    },
     "Updates": {
       "description": "Build-time update repository settings.",
       "type": "object",
@@ -387,10 +764,6 @@
         "name"
       ]
     },
-    "ComponentId": {
-      "description": "Stable logical component identifier.",
-      "type": "string"
-    },
     "Plugin": {
       "type": "object",
       "properties": {
@@ -427,14 +800,6 @@
       "required": [
         "id",
         "source"
-      ]
-    },
-    "Condition": {
-      "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
-      "type": "string",
-      "examples": [
-        "component(\"docs\")",
-        "!component(\"debug\")"
       ]
     },
     "FileMapping": {

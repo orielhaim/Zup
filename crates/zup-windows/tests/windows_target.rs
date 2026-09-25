@@ -321,6 +321,7 @@ mod transaction_fingerprint {
                     description: None,
                 },
                 updates: None,
+                prerequisites: Vec::new(),
                 install: Install {
                     scope: InstallScope::User,
                     directory: InstallDirectory {
@@ -349,9 +350,11 @@ mod transaction_fingerprint {
                 protocols: Vec::new(),
                 file_types: Vec::new(),
             },
+            prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             total_size: 0,
+            prerequisite_size: 0,
         }
     }
 

@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::materialize;
+use zup_build::{ResolvedPrerequisite, materialize};
 use zup_bundle::{
     BundleError, BundleWriter, CompiledPluginArtifact, EmbeddedBundle, PluginArtifact,
 };
@@ -111,13 +111,13 @@ fn embed(root: &Path, package: &[u8]) -> std::path::PathBuf {
 }
 
 #[test]
-fn schema_three_deduplicates_plugin_blobs_without_payload_entries() {
+fn schema_four_deduplicates_plugin_blobs_without_payload_entries() {
     let (root, plan) = project();
     let one = artifact(&plan, "z-plugin", b"same aot");
     let two = artifact(&plan, "a-plugin", b"same aot");
     let artifacts = vec![one.clone(), two.clone()];
     let package = BundleWriter::encode(&plan, &[two, one]).unwrap();
-    assert_eq!(u32::from_le_bytes(package[8..12].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(package[8..12].try_into().unwrap()), 4);
     let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
     let metadata: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
     assert_eq!(metadata["plan"]["entries"].as_array().unwrap().len(), 1);
@@ -294,4 +294,49 @@ fn rejects_aggregate_aot_overflow_while_parsing_metadata() {
         zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path)
             .unwrap_err();
     assert!(matches!(error, BundleError::PluginAotTooLarge { .. }));
+}
+
+#[test]
+fn embedded_prerequisite_bytes_roundtrip_in_bundle() {
+    let (root, mut plan) = project();
+    plan.plugins.clear();
+    plan.installer.plugins.clear();
+    let bytes = b"runtime payload";
+    let source = root.path().join("runtime.exe");
+    fs::write(&source, bytes).unwrap();
+    let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
+    let id = zup_core::PrerequisiteId::new("runtime").unwrap();
+    plan.installer.prerequisites.push(zup_core::Prerequisite {
+        id: id.clone(),
+        name: zup_core::NonEmptyString::new("Runtime").unwrap(),
+        description: None,
+        component: None,
+        when: None,
+        target: zup_core::PrerequisiteArchitecture::Current,
+        detector: zup_core::PrerequisiteDetector::VisualCppV14 { version: None },
+        package: zup_core::PrerequisitePackage::Embedded {
+            path: zup_core::RelativePath::new("runtime.exe").unwrap(),
+            sha256: digest,
+            size: bytes.len() as u64,
+        },
+        installer: Default::default(),
+    });
+    plan.prerequisites.push(ResolvedPrerequisite {
+        id,
+        source,
+        source_relative: zup_core::RelativePath::new("runtime.exe").unwrap(),
+        size: bytes.len() as u64,
+        sha256: digest,
+    });
+    plan.prerequisite_size = bytes.len() as u64;
+    let package = BundleWriter::encode(&plan, &[]).unwrap();
+    let package_path = root.path().join("prerequisite.zupbundle");
+    fs::write(&package_path, &package).unwrap();
+    let output = root.path().join("PrerequisiteSetup.exe");
+    zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path)
+        .unwrap();
+    let bundle = EmbeddedBundle::open(&output).unwrap();
+    let prerequisite_id = zup_core::PrerequisiteId::new("runtime").unwrap();
+    assert_eq!(bundle.prerequisite_bytes(&prerequisite_id).unwrap(), bytes);
+    assert_eq!(bundle.build_plan().unwrap().prerequisites[0].sha256, digest);
 }

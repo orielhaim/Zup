@@ -14,6 +14,7 @@ mod ids;
 mod installer;
 mod model;
 mod path;
+mod prerequisite;
 mod resource_key;
 mod template;
 mod value;
@@ -30,6 +31,12 @@ pub use model::{
     ShortcutLocation, Source, UiBranding, UiTheme,
 };
 pub use path::{RelativePath, RelativePathError};
+pub use prerequisite::{
+    MAX_PREREQUISITE_ARGUMENT_BYTES, MAX_PREREQUISITE_ARGUMENTS, MAX_PREREQUISITE_ID_BYTES,
+    MAX_PREREQUISITE_PACKAGE_BYTES, Prerequisite, PrerequisiteArchitecture, PrerequisiteDetector,
+    PrerequisiteId, PrerequisiteInstaller, PrerequisiteInstallerKind, PrerequisitePackage,
+    RegistryHive,
+};
 pub use resource_key::ResourceKey;
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
 pub use value::ValueError;

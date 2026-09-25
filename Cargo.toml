@@ -26,6 +26,7 @@ semver = { version = "1", features = ["serde"] }
 
 # Workspace crates
 zup-core = { path = "crates/zup-core" }
+zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
 zup-plan = { path = "crates/zup-plan" }
@@ -69,12 +70,16 @@ toml_edit = "0.25"
 # Manifest authoring
 schemars = "1.2"
 toml = "1.1"
+url = "2"
 serde_spanned = "1.1"
 serde_ignored = "0.1"
 
 # Test
 rstest = "0.27"
 tempfile = "3"
+
+# Verified remote artifacts
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
 
 # Focused Windows crates (prefer these over the `windows` umbrella crate)
 windows-link = "0.100"

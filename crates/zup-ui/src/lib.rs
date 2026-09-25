@@ -20,7 +20,8 @@ use gpui_kit::{
 };
 use zup_core::{ComponentId, SelectedScope, UiBranding, UiTheme};
 use zup_presentation::{
-    DiagnosticPresentation, InstallationHealth, OperationPhase, PlanPreview, UpdatePresentation,
+    DiagnosticPresentation, InstallationHealth, OperationPhase, PlanPreview, RequirementStatus,
+    UpdatePresentation,
 };
 use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 
@@ -338,6 +339,19 @@ impl UiModel {
                 }
             }
             UiEvent::OperationFinished(outcome) => match outcome {
+                InstallOutcome::RebootRequired {
+                    prerequisite_id,
+                    exit_code,
+                } => {
+                    self.diagnostic = Some(DiagnosticPresentation::from_message(
+                        &format!("restart required by {prerequisite_id} ({exit_code})"),
+                        false,
+                    ));
+                    self.error = Some(format!(
+                        "Restart required by {prerequisite_id} before continuing ({exit_code})"
+                    ));
+                    self.state = ViewState::Error;
+                }
                 InstallOutcome::Committed => {
                     self.state = ViewState::Success;
                     self.close_requested = false;
@@ -388,6 +402,38 @@ impl UiModel {
         match event {
             RuntimeEvent::WaitingForElevation => self.action("Waiting for approval…"),
             RuntimeEvent::WorkerConnected => self.action("Starting…"),
+            RuntimeEvent::PrerequisiteCheck {
+                name, satisfied, ..
+            } => {
+                let label = if satisfied {
+                    format!("✓ {name}")
+                } else {
+                    format!("↓ {name}")
+                };
+                self.action(&label);
+            }
+            RuntimeEvent::PrerequisiteDownload {
+                completed, total, ..
+            } => {
+                self.progress = Some(ProgressModel {
+                    completed,
+                    total: total.unwrap_or(0),
+                    phase: OperationPhase::Download,
+                    action: "Downloading required component…".into(),
+                });
+                self.state = ViewState::Running;
+            }
+            RuntimeEvent::PrerequisiteInstall { name, .. } => {
+                self.action(&format!("Installing {name}…"));
+            }
+            RuntimeEvent::RebootRequired { .. } => {
+                self.diagnostic = Some(DiagnosticPresentation::from_message(
+                    "restart required before continuing",
+                    false,
+                ));
+                self.error = Some("Restart Windows, then run setup again.".into());
+                self.state = ViewState::Error;
+            }
             RuntimeEvent::PreflightStarted => self.action("Checking for open applications…"),
             RuntimeEvent::BlockingProcessesFound { detail, .. } => {
                 self.blockers = detail.lines().map(str::to_owned).collect();
@@ -415,8 +461,15 @@ impl UiModel {
                 };
             }
             RuntimeEvent::RollingBack => self.action("Restoring the previous state…"),
-            RuntimeEvent::Completed { .. } => {
-                self.state = ViewState::Success;
+            RuntimeEvent::Completed { outcome } => {
+                self.state = match outcome.as_str() {
+                    "reboot_required" => {
+                        self.error = Some("Restart Windows, then run setup again.".into());
+                        ViewState::Error
+                    }
+                    "recovery_required" => ViewState::RecoveryRequired,
+                    _ => ViewState::Success,
+                };
                 self.close_requested = false;
             }
             RuntimeEvent::LogPath { path } => {
@@ -438,6 +491,14 @@ impl UiModel {
             RuntimeEvent::StateChanged { state } => match state {
                 RuntimeState::Preparing => self.action("Preparing…"),
                 RuntimeState::WaitingForElevation => self.action("Waiting for approval…"),
+                RuntimeState::CheckingPrerequisites => self.action("Checking requirements…"),
+                RuntimeState::InstallingPrerequisites => {
+                    self.action("Installing required components…")
+                }
+                RuntimeState::RebootRequired => {
+                    self.error = Some("Restart Windows, then run setup again.".into());
+                    self.state = ViewState::Error;
+                }
                 RuntimeState::ConnectingWorker => self.action("Starting…"),
                 RuntimeState::Executing => self.action("Installing files…"),
                 RuntimeState::RollingBack => self.action("Restoring the previous state…"),
@@ -1184,6 +1245,41 @@ fn change_preview(preview: &PlanPreview, theme: &Theme) -> impl IntoElement {
         .p_4()
         .rounded(theme.radius_lg)
         .bg(theme.colors.muted);
+    if !preview.requirements.is_empty() {
+        content = content.child(
+            div()
+                .v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Requirements"),
+                )
+                .children(preview.requirements.iter().map(|requirement| {
+                    let marker = match requirement.status {
+                        RequirementStatus::Satisfied => "✓",
+                        RequirementStatus::Missing => "+",
+                        RequirementStatus::Unknown => "?",
+                    };
+                    div()
+                        .h_flex()
+                        .justify_between()
+                        .gap_3()
+                        .text_size(px(13.0))
+                        .child(format!("{marker}  {}", requirement.name))
+                        .child(if requirement.shared {
+                            "Shared system dependency".to_owned()
+                        } else {
+                            String::new()
+                        })
+                }))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .child("Shared requirements are not removed with this application."),
+                ),
+        );
+    }
     for group in &preview.groups {
         content = content.child(
             div()
@@ -1709,8 +1805,10 @@ mod tests {
             install_directory: r"C:\Apps\Acme".into(),
             selected_components: vec![],
             estimated_bytes: 42,
+            download_bytes: 0,
             requires_elevation: false,
             groups: vec![],
+            requirements: vec![],
         };
         model.apply(UiEvent::PlanReady(preview));
         let Surface::Installer { install, .. } = &model.surface else {
@@ -1833,6 +1931,20 @@ mod tests {
     }
 
     #[test]
+    fn reboot_and_recovery_terminal_events_are_not_reported_as_success() {
+        let mut model = installer();
+        model.apply(UiEvent::Runtime(RuntimeEvent::Completed {
+            outcome: "reboot_required".into(),
+        }));
+        assert_eq!(model.state, ViewState::Error);
+        let mut model = installer();
+        model.apply(UiEvent::Runtime(RuntimeEvent::Completed {
+            outcome: "recovery_required".into(),
+        }));
+        assert_eq!(model.state, ViewState::RecoveryRequired);
+    }
+
+    #[test]
     fn update_repair_and_uninstall_state_are_renderable() {
         let mut model = installer();
         model.apply(UiEvent::UpdateAvailable {
@@ -1932,6 +2044,7 @@ mod windows_smoke {
             payload_overlay_root: None,
             payload_overlay_base_root: None,
             recovery_id: None,
+            bootstrap: None,
         }
     }
 

@@ -1,5 +1,6 @@
 use schemars::{JsonSchema, schema_for};
 use serde_json::json;
+use zup_core::Prerequisite;
 use zup_core::{
     App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
     Shortcut, Source,
@@ -19,6 +20,8 @@ struct SchemaManifest {
     ui: Option<zup_core::UiBranding>,
     source: Source,
     install: Install,
+    #[serde(default)]
+    prerequisites: Vec<Prerequisite>,
     #[serde(default)]
     updates: Option<Updates>,
     #[serde(default)]

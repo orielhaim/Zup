@@ -140,6 +140,7 @@ fn valid_minimal_manifest() {
             source: Source {
                 directory: PathBuf::from("dist"),
             },
+            prerequisites: Vec::new(),
             install: Install {
                 scope: InstallScope::User,
                 directory: InstallDirectory {

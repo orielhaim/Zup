@@ -41,6 +41,7 @@ fn sample_target() -> zup_platform::TargetPlan {
         scope: SelectedScope::Machine,
         install_directory: tpath(r"C:\PF\Acme"),
         selected_components: vec![],
+        prerequisites: vec![],
         files: vec![zup_platform::TargetFile {
             key: ResourceKey::File {
                 destination: r"C:\PF\Acme\Acme.exe".into(),
@@ -109,6 +110,8 @@ fn sample_target() -> zup_platform::TargetPlan {
             resource_count: 5,
             requires_elevation: true,
             selected_component_count: 2,
+            prerequisite_count: 0,
+            download_bytes: 0,
         },
     }
 }

@@ -25,6 +25,6 @@ pub use digest::{DigestParseError, Sha256Digest};
 pub use error::BuildError;
 pub use materialize::{materialize, materialize_destination};
 pub use pattern::FilePattern;
-pub use plan::{BuildPlan, ResolvedFile, ResolvedPlugin};
+pub use plan::{BuildPlan, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite};
 pub use plugins::MAX_PLUGIN_SOURCE_BYTES;
 pub use windows::validate_windows_destination;

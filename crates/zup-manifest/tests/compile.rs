@@ -639,6 +639,132 @@ destination = "${install}"
 }
 
 #[test]
+fn prerequisite_declarations_are_typed_and_component_scoped() {
+    let src = with(
+        r#"
+[[components]]
+id = "core"
+name = "Core"
+
+[[prerequisites]]
+id = "vc-x64"
+name = "Visual C++ v14 Runtime"
+component = "core"
+target = "x64"
+detector = { kind = "visual_cpp_v14", version = ">=14.0.0" }
+package = { type = "embedded", path = "prerequisites/vc.exe", sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 42 }
+installer = { kind = "exe", args = ["/install", "/quiet", "/norestart"] }
+"#,
+    );
+    let installer = parse_and_compile(&src).expect("valid prerequisite");
+    assert_eq!(installer.prerequisites.len(), 1);
+    assert_eq!(installer.prerequisites[0].id.as_str(), "vc-x64");
+    assert_eq!(
+        installer.prerequisites[0].target,
+        zup_core::PrerequisiteArchitecture::X64
+    );
+    assert_eq!(
+        installer.prerequisites[0].detector.kind_name(),
+        "visual_cpp_v14"
+    );
+}
+
+#[test]
+fn remote_prerequisite_requires_https_and_digest() {
+    let src = with(
+        r#"
+[[prerequisites]]
+id = "webview2"
+name = "WebView2 Evergreen Runtime"
+detector = { kind = "webview2_evergreen", version = ">=120.0" }
+package = { type = "remote", url = "https://cdn.example.test/webview2.exe", filename = "webview2.exe", sha256 = "1111111111111111111111111111111111111111111111111111111111111111", size = 100 }
+"#,
+    );
+    assert!(parse_and_compile(&src).is_ok());
+    let insecure = src.replace("https://", "http://");
+    assert!(matches!(
+        parse_and_compile(&insecure),
+        Err(ManifestError::InvalidPrerequisite { .. })
+    ));
+    let unpinned = src.replace(
+        "sha256 = \"1111111111111111111111111111111111111111111111111111111111111111\", ",
+        "",
+    );
+    assert!(parse_and_compile(&unpinned).is_err());
+}
+
+#[test]
+fn prerequisite_rejects_duplicate_and_unknown_component_references() {
+    let duplicate = with(
+        r#"
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
+
+[[prerequisites]]
+id = "runtime"
+name = "Runtime again"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333333333333333333333333333333333333333333333333333", size = 1 }
+"#,
+    );
+    assert!(matches!(
+        parse_and_compile(&duplicate),
+        Err(ManifestError::DuplicatePrerequisite { .. })
+    ));
+    let case_duplicate = with(
+        r#"
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
+
+[[prerequisites]]
+id = "Runtime"
+name = "Runtime again"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333333333333333333333333333333333333333333333333333", size = 1 }
+"#,
+    );
+    assert!(matches!(
+        parse_and_compile(&case_duplicate),
+        Err(ManifestError::DuplicatePrerequisite { .. })
+    ));
+    let unknown = with(
+        r#"
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+component = "missing"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
+"#,
+    );
+    assert!(parse_and_compile(&unknown).is_err());
+}
+
+#[test]
+fn msi_installer_requires_msi_product_detector() {
+    let src = with(
+        r#"
+[[prerequisites]]
+id = "desktop"
+name = "Desktop runtime"
+detector = { kind = "visual_cpp_v14" }
+package = { type = "embedded", path = "desktop.msi", sha256 = "4444444444444444444444444444444444444444444444444444444444444444", size = 1 }
+installer = { kind = "msi" }
+"#,
+    );
+    assert!(matches!(
+        parse_and_compile(&src),
+        Err(ManifestError::InvalidPrerequisite { .. })
+    ));
+}
+
+#[test]
 fn missing_field_directories_for_user_only_scope_ok_with_user_template() {
     let src = r#"
 schema = 1

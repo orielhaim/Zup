@@ -2,9 +2,40 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    FileExtension, FileTypeId, NonEmptyString, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, ServiceId, ServiceStart, Sha256Digest, ShortcutLocation, Template,
+    FileExtension, FileTypeId, NonEmptyString, Prerequisite, PrerequisiteArchitecture,
+    PrerequisiteDetector, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage, Privilege,
+    ProtocolScheme, RelativePath, ResourceKey, ServiceId, ServiceStart, Sha256Digest,
+    ShortcutLocation, Template,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedPrerequisite {
+    pub id: PrerequisiteId,
+    pub name: NonEmptyString,
+    pub description: Option<String>,
+    pub target: PrerequisiteArchitecture,
+    pub detector: PrerequisiteDetector,
+    pub package: PrerequisitePackage,
+    pub installer: PrerequisiteInstaller,
+    pub component: Option<zup_core::ComponentId>,
+    pub condition: Option<zup_core::Condition>,
+}
+
+impl PlannedPrerequisite {
+    pub fn from_prerequisite(prerequisite: &Prerequisite) -> Self {
+        Self {
+            id: prerequisite.id.clone(),
+            name: prerequisite.name.clone(),
+            description: prerequisite.description.clone(),
+            target: prerequisite.target,
+            detector: prerequisite.detector.clone(),
+            package: prerequisite.package.clone(),
+            installer: prerequisite.installer.clone(),
+            component: prerequisite.component.clone(),
+            condition: prerequisite.when.clone(),
+        }
+    }
+}
 
 /// One active payload file in the desired installation.
 ///

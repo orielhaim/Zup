@@ -197,6 +197,27 @@ pub enum ManifestError {
         #[label("duplicate file type extension")]
         span: Option<SourceSpan>,
     },
+
+    #[error("duplicate prerequisite id `{id}`")]
+    #[diagnostic(code(zup_manifest::duplicate_prerequisite))]
+    DuplicatePrerequisite {
+        id: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("duplicate prerequisite id")]
+        span: Option<SourceSpan>,
+    },
+
+    #[error("invalid prerequisite `{id}`: {reason}")]
+    #[diagnostic(code(zup_manifest::invalid_prerequisite))]
+    InvalidPrerequisite {
+        id: String,
+        reason: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("invalid prerequisite")]
+        span: Option<SourceSpan>,
+    },
 }
 
 impl ManifestError {
@@ -362,6 +383,26 @@ impl ManifestError {
                 span: span.or(inferred),
                 src: existing.or(src),
             },
+            Self::DuplicatePrerequisite {
+                id,
+                span,
+                src: existing,
+            } => Self::DuplicatePrerequisite {
+                id,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::InvalidPrerequisite {
+                id,
+                reason,
+                span,
+                src: existing,
+            } => Self::InvalidPrerequisite {
+                id,
+                reason,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
         }
     }
 }
@@ -382,7 +423,9 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
         | ManifestError::ComponentSelfDependency { id, .. }
         | ManifestError::RequiredComponentDisabled { id, .. }
         | ManifestError::DuplicateService { id, .. }
-        | ManifestError::DuplicatePlugin { id, .. } => source
+        | ManifestError::DuplicatePlugin { id, .. }
+        | ManifestError::DuplicatePrerequisite { id, .. }
+        | ManifestError::InvalidPrerequisite { id, .. } => source
             .find(id.as_str())
             .map(|start| source_span(start..start + id.len())),
         ManifestError::InvalidPluginSource { path, .. } => source

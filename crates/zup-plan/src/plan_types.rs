@@ -5,8 +5,8 @@ use zup_core::{App, ComponentId, Template};
 
 use crate::error::SelectedScope;
 use crate::resources::{
-    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
-    PlannedShortcut,
+    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedPrerequisite, PlannedProtocol,
+    PlannedService, PlannedShortcut,
 };
 
 /// Derived summary of a planned installation.
@@ -17,6 +17,8 @@ pub struct PlanSummary {
     pub selected_component_count: usize,
     pub resource_count: usize,
     pub requires_elevation: bool,
+    pub prerequisite_count: usize,
+    pub download_bytes: u64,
 }
 
 /// Desired-state installation for one scope and component selection.
@@ -30,6 +32,7 @@ pub struct InstallPlan {
     pub install_directory: Template,
     pub selected_components: Vec<ComponentId>,
 
+    pub prerequisites: Vec<PlannedPrerequisite>,
     pub files: Vec<PlannedFile>,
     pub shortcuts: Vec<PlannedShortcut>,
     pub path_entries: Vec<PlannedPathEntry>,

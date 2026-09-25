@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_spanned::Spanned;
+use zup_core::Prerequisite;
 use zup_core::{
     App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
     Shortcut, Source, UiBranding,
@@ -51,6 +52,7 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
         ui: raw.ui,
         source: raw.source,
         install: raw.install,
+        prerequisites: raw.prerequisites,
         updates: raw.updates,
         components: raw.components,
         plugins: raw.plugins,
@@ -74,6 +76,8 @@ struct RawManifest {
     ui: Option<UiBranding>,
     source: Source,
     install: Install,
+    #[serde(default)]
+    prerequisites: Vec<Prerequisite>,
     updates: Option<crate::model::Updates>,
     #[serde(default)]
     components: Vec<Component>,

@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use zup_core::{ComponentId, Condition, Installer, PluginId, RelativePath, Template};
+use zup_core::{
+    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, Template,
+};
 
 use crate::digest::Sha256Digest;
 
@@ -30,6 +32,15 @@ pub struct ResolvedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPrerequisite {
+    pub id: PrerequisiteId,
+    pub source: PathBuf,
+    pub source_relative: RelativePath,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPlugin {
     pub id: PluginId,
     pub source: PathBuf,
@@ -43,11 +54,15 @@ pub struct ResolvedPlugin {
 pub struct BuildPlan {
     /// Normalized installer IR the plan was produced from.
     pub installer: Installer,
+    #[serde(default)]
+    pub prerequisites: Vec<ResolvedPrerequisite>,
     pub plugins: Vec<ResolvedPlugin>,
     /// Resolved payload files, sorted by destination then source_relative.
     pub files: Vec<ResolvedFile>,
     /// Sum of file sizes.
     pub total_size: u64,
+    #[serde(default)]
+    pub prerequisite_size: u64,
 }
 
 impl BuildPlan {

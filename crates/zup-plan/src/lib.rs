@@ -32,8 +32,8 @@ pub use plugins::{
 pub use request::{ComponentOverrides, PlanRequest};
 pub use resolve::{resolve_install_directory, resolve_template};
 pub use resources::{
-    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
-    PlannedShortcut,
+    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedPrerequisite, PlannedProtocol,
+    PlannedService, PlannedShortcut,
 };
 pub use select::select_components;
 pub use zup_build::BuildPlan;

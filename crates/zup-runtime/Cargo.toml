@@ -24,6 +24,7 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
 uuid.workspace = true
+zup-bootstrap.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true

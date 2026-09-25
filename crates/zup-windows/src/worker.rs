@@ -3,7 +3,7 @@
 //! Bootstrap carries only: protocol version, session id, pipe name,
 //! expected parent pid, expected plan hash. The plan itself travels over IPC.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -160,6 +160,7 @@ impl WorkerSession {
             )),
             Message::ParentHello(hello) => self.on_parent_hello(envelope.sequence, hello),
             Message::ExecuteTransaction(exec) => self.on_execute(envelope.sequence, exec),
+            Message::ExecuteBootstrap(exec) => self.on_bootstrap(envelope.sequence, exec),
             Message::Cancel => Ok(None),
             Message::Ping => Ok(Some(WireEnvelope {
                 version: PROTOCOL_VERSION,
@@ -210,6 +211,72 @@ impl WorkerSession {
         self.authenticated = true;
         let _ = sequence;
         Ok(None)
+    }
+
+    fn on_bootstrap(
+        &mut self,
+        _sequence: u64,
+        exec: zup_protocol::ExecuteBootstrap,
+    ) -> Result<Option<WireEnvelope>, WorkerError> {
+        if !self.authenticated {
+            return Err(WorkerError::AuthFailed("not authenticated".into()));
+        }
+        if self.plan_hash_checked {
+            return Err(WorkerError::Protocol("second operation rejected".into()));
+        }
+        if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
+            return Err(WorkerError::Protocol("bootstrap plan too large".into()));
+        }
+        let hash = plan_hash_hex(&exec.bootstrap_json);
+        if hash != self.bootstrap.expected_plan_hash || hash != exec.bootstrap_hash {
+            return Err(WorkerError::PlanHashMismatch);
+        }
+        let plan: zup_bootstrap::BoundBootstrapPlan = serde_json::from_str(&exec.bootstrap_json)
+            .map_err(|error| WorkerError::Protocol(format!("bad bootstrap plan: {error}")))?;
+        let declared_plan_hash = plan.plan_hash;
+        let validated =
+            zup_bootstrap::BoundBootstrapPlan::with_id(plan.id, plan.plan, plan.artifacts)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        if validated.plan_hash != declared_plan_hash
+            || validated.id.as_uuid() != exec.bootstrap_id
+            || validated.plan.key.app_id.as_str() != exec.app_id
+            || validated.plan.key.app_version.to_string() != exec.app_version
+            || validated.plan.key.scope.to_string() != exec.scope
+        {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap identity mismatch".into(),
+            ));
+        }
+        if exec.recovery_id.is_some() {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap recovery ids are not supported".into(),
+            ));
+        }
+        if exec.state_root.is_empty()
+            || exec.quarantine_root.is_empty()
+            || exec.state_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+            || exec.quarantine_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+            || exec.state_root.contains('\0')
+            || exec.quarantine_root.contains('\0')
+            || !Path::new(&exec.state_root).is_absolute()
+            || !Path::new(&exec.quarantine_root).is_absolute()
+        {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap roots must be absolute".into(),
+            ));
+        }
+        self.plan_hash_checked = true;
+        Ok(Some(WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: self.bootstrap.session_id,
+            sequence: 0,
+            message: Message::Progress(zup_protocol::ProgressReport {
+                kind: zup_protocol::ProgressKind::OperationStarted,
+                detail: "bootstrap plan accepted".into(),
+                completed: None,
+                total: None,
+            }),
+        }))
     }
 
     fn on_execute(

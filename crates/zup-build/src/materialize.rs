@@ -7,13 +7,13 @@ use std::path::{Component, Path, PathBuf};
 
 use tracing::{debug, info, info_span};
 use walkdir::WalkDir;
-use zup_core::{FileMapping, Installer, RelativePath, Template, hash_reader};
+use zup_core::{FileMapping, Installer, PrerequisitePackage, RelativePath, Template, hash_reader};
 use zup_manifest::Manifest;
 
 use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
-use crate::plan::{BuildPlan, ResolvedFile};
+use crate::plan::{BuildPlan, ResolvedFile, ResolvedPrerequisite};
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
 use crate::windows::validate_windows_destination;
 
@@ -54,6 +54,7 @@ pub fn materialize(
     }
     let source_root = resolve_source_root(&project_root, &manifest.source.directory)?;
     let plugins = resolve_plugins(&project_root, &manifest.plugins, &installer)?;
+    let (prerequisites, prerequisite_size) = resolve_prerequisites(&project_root, &installer)?;
 
     let span = info_span!(
         "materialize",
@@ -97,10 +98,78 @@ pub fn materialize(
 
     Ok(BuildPlan {
         installer,
+        prerequisites,
         plugins,
         files: resolved,
         total_size,
+        prerequisite_size,
     })
+}
+
+fn resolve_prerequisites(
+    project_root: &Path,
+    installer: &Installer,
+) -> Result<(Vec<ResolvedPrerequisite>, u64), BuildError> {
+    let mut resolved = Vec::new();
+    let mut total = 0u64;
+    for prerequisite in &installer.prerequisites {
+        match &prerequisite.package {
+            PrerequisitePackage::Remote { size, .. } => {
+                if let Some(size) = size {
+                    total = total.checked_add(*size).ok_or(BuildError::SizeOverflow)?;
+                }
+            }
+            PrerequisitePackage::Embedded { path, sha256, size } => {
+                let source = project_root.join(path.as_str());
+                let normalized = lexical_normalize(&source);
+                if !is_within(&lexical_normalize(project_root), &normalized) {
+                    return Err(BuildError::PrerequisiteSource {
+                        id: prerequisite.id.to_string(),
+                        path: path.as_str().into(),
+                    });
+                }
+                reject_prerequisite_reparse(&normalized, &prerequisite.id)?;
+                let metadata = fs::symlink_metadata(&normalized).map_err(|source| {
+                    if source.kind() == std::io::ErrorKind::NotFound {
+                        BuildError::PrerequisiteSource {
+                            id: prerequisite.id.to_string(),
+                            path: normalized.clone(),
+                        }
+                    } else {
+                        BuildError::Io {
+                            path: normalized.clone(),
+                            source,
+                        }
+                    }
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(BuildError::PrerequisiteSource {
+                        id: prerequisite.id.to_string(),
+                        path: normalized,
+                    });
+                }
+                let (actual_size, actual_digest) = hash_file(&normalized)?;
+                if actual_size != *size || actual_digest != *sha256 {
+                    return Err(BuildError::PrerequisiteIdentity {
+                        id: prerequisite.id.to_string(),
+                        path: normalized,
+                    });
+                }
+                total = total
+                    .checked_add(actual_size)
+                    .ok_or(BuildError::SizeOverflow)?;
+                resolved.push(ResolvedPrerequisite {
+                    id: prerequisite.id.clone(),
+                    source: normalized,
+                    source_relative: path.clone(),
+                    size: actual_size,
+                    sha256: actual_digest,
+                });
+            }
+        }
+    }
+    resolved.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok((resolved, total))
 }
 
 fn project_root(manifest_path: &Path) -> PathBuf {
@@ -148,6 +217,44 @@ fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<PathBuf,
 
     debug!(path = %normalized.display(), "resolved source root");
     Ok(normalized)
+}
+
+fn reject_prerequisite_reparse(
+    path: &Path,
+    id: &zup_core::PrerequisiteId,
+) -> Result<(), BuildError> {
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            let reparse = if metadata.file_type().is_symlink() {
+                true
+            } else {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    metadata.file_attributes() & 0x400 != 0
+                }
+                #[cfg(not(windows))]
+                {
+                    false
+                }
+            };
+            if reparse {
+                return Err(BuildError::PrerequisiteSource {
+                    id: id.to_string(),
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    Ok(())
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {

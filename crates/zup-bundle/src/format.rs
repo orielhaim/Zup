@@ -11,10 +11,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES};
+use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES, ResolvedPrerequisite};
 use zup_core::{
-    ComponentId, Condition, Frontend, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, RelativePath,
-    Sha256Digest, Template, hash_reader,
+    ComponentId, Condition, Frontend, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
+    RelativePath, Sha256Digest, Template, hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -22,7 +22,7 @@ use zup_plugin_contract::{
 };
 
 const MAGIC: &[u8; 8] = b"ZUPBNDL\0";
-const SCHEMA: u32 = 3;
+const SCHEMA: u32 = 4;
 const HEADER_LEN: u64 = 60;
 const MAX_METADATA: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
@@ -200,6 +200,8 @@ impl CompiledPluginArtifact {
 pub struct PortableBuildPlan {
     pub installer: Installer,
     pub entries: Vec<PayloadEntry>,
+    #[serde(default)]
+    pub prerequisite_artifacts: Vec<PrerequisiteArtifact>,
     pub plugins: Vec<PluginArtifact>,
     pub total_size: u64,
 }
@@ -214,6 +216,16 @@ pub struct PayloadEntry {
     pub blob: Sha256Digest,
     pub component: Option<ComponentId>,
     pub condition: Option<Condition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrerequisiteArtifact {
+    pub prerequisite_id: PrerequisiteId,
+    pub path: RelativePath,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+    pub blob: Sha256Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +337,41 @@ fn canonical_artifacts(
     Ok(canonical)
 }
 
+fn canonical_prerequisites(plan: &BuildPlan) -> Result<Vec<PrerequisiteArtifact>, BundleError> {
+    let mut resolved: Vec<&ResolvedPrerequisite> = plan.prerequisites.iter().collect();
+    resolved.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(resolved.len());
+    for prerequisite in resolved {
+        if !seen.insert(prerequisite.id.clone()) {
+            return Err(BundleError::Invalid);
+        }
+        let Some(declaration) = plan
+            .installer
+            .prerequisites
+            .iter()
+            .find(|item| item.id == prerequisite.id)
+        else {
+            return Err(BundleError::Invalid);
+        };
+        let zup_core::PrerequisitePackage::Embedded { sha256, size, .. } = &declaration.package
+        else {
+            return Err(BundleError::Invalid);
+        };
+        if *sha256 != prerequisite.sha256 || *size != prerequisite.size {
+            return Err(BundleError::Invalid);
+        }
+        out.push(PrerequisiteArtifact {
+            prerequisite_id: prerequisite.id.clone(),
+            path: prerequisite.source_relative.clone(),
+            size: prerequisite.size,
+            sha256: prerequisite.sha256,
+            blob: prerequisite.sha256,
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Debug)]
 pub struct BundleWriter;
 
@@ -359,6 +406,26 @@ impl BundleWriter {
                 component: file.component.clone(),
                 condition: file.condition.clone(),
             });
+        }
+        let prerequisite_artifacts = canonical_prerequisites(plan)?;
+        for prerequisite in &plan.prerequisites {
+            let bytes = std::fs::read(&prerequisite.source)?;
+            if bytes.len() as u64 != prerequisite.size
+                || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != prerequisite.sha256
+            {
+                return Err(BundleError::Payload(
+                    prerequisite.source.display().to_string(),
+                ));
+            }
+            if let Some(existing) = contents.get(&prerequisite.sha256) {
+                if existing.as_slice() != bytes.as_slice() {
+                    return Err(BundleError::Payload(
+                        prerequisite.source.display().to_string(),
+                    ));
+                }
+            } else {
+                contents.insert(prerequisite.sha256, bytes);
+            }
         }
         for artifact in &artifacts {
             let digest = artifact.metadata.blob;
@@ -404,6 +471,7 @@ impl BundleWriter {
         let plan = PortableBuildPlan {
             installer,
             entries,
+            prerequisite_artifacts,
             plugins: artifacts
                 .into_iter()
                 .map(|artifact| artifact.metadata)
@@ -500,6 +568,50 @@ impl BundleWriter {
                 condition: file.condition.clone(),
             });
         }
+        let prerequisite_artifacts = canonical_prerequisites(plan)?;
+        for prerequisite in &plan.prerequisites {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                objects.entry(prerequisite.sha256)
+            {
+                let spool_path = spool_dir.path().join(prerequisite.sha256.to_hex());
+                let output_file = File::create(&spool_path)?;
+                let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
+                let mut input = File::open(&prerequisite.source)?;
+                let mut hasher = Sha256::new();
+                let mut size = 0u64;
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let read = input.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    size = size.checked_add(read as u64).ok_or(BundleError::Invalid)?;
+                    hasher.update(&buffer[..read]);
+                    encoder.write_all(&buffer[..read])?;
+                }
+                let output_file = encoder.finish()?;
+                if size != prerequisite.size
+                    || Sha256Digest::from_hasher(hasher) != prerequisite.sha256
+                {
+                    return Err(BundleError::Payload(
+                        prerequisite.source.display().to_string(),
+                    ));
+                }
+                let compressed_size = output_file.metadata()?.len();
+                entry.insert(Spool {
+                    path: spool_path,
+                    size,
+                    compressed_size,
+                });
+            } else {
+                let (size, digest) = hash_reader(File::open(&prerequisite.source)?)?;
+                if size != prerequisite.size || digest != prerequisite.sha256 {
+                    return Err(BundleError::Payload(
+                        prerequisite.source.display().to_string(),
+                    ));
+                }
+            }
+        }
         for artifact in &artifacts {
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 objects.entry(artifact.metadata.blob)
@@ -551,6 +663,7 @@ impl BundleWriter {
             plan: PortableBuildPlan {
                 installer,
                 entries,
+                prerequisite_artifacts,
                 plugins: artifacts
                     .into_iter()
                     .map(|artifact| artifact.metadata)
@@ -585,6 +698,7 @@ impl BundleWriter {
 }
 
 /// Validated content index from the executable's RCDATA resources.
+#[derive(Clone)]
 pub struct EmbeddedBundle {
     path: PathBuf,
     metadata: Metadata,
@@ -632,11 +746,32 @@ impl EmbeddedBundle {
                 })
             })
             .collect::<Result<Vec<_>, BundleError>>()?;
+        let prerequisites = self
+            .metadata
+            .plan
+            .prerequisite_artifacts
+            .iter()
+            .map(|artifact| zup_build::ResolvedPrerequisite {
+                id: artifact.prerequisite_id.clone(),
+                source: PathBuf::new(),
+                source_relative: artifact.path.clone(),
+                size: artifact.size,
+                sha256: artifact.sha256,
+            })
+            .collect();
         Ok(BuildPlan {
             installer: self.metadata.plan.installer.clone(),
+            prerequisites,
             plugins: Vec::new(),
             files,
             total_size: self.metadata.plan.total_size,
+            prerequisite_size: self
+                .metadata
+                .plan
+                .prerequisite_artifacts
+                .iter()
+                .map(|artifact| artifact.size)
+                .sum(),
         })
     }
     pub fn plugin_artifacts(&self) -> &[PluginArtifact] {
@@ -687,6 +822,36 @@ impl EmbeddedBundle {
         }
         Ok(bytes)
     }
+
+    pub fn prerequisite_artifact(&self, id: &PrerequisiteId) -> Option<&PrerequisiteArtifact> {
+        self.metadata
+            .plan
+            .prerequisite_artifacts
+            .iter()
+            .find(|artifact| &artifact.prerequisite_id == id)
+    }
+
+    pub fn prerequisite_bytes(&self, id: &PrerequisiteId) -> Result<Vec<u8>, BundleError> {
+        let artifact = self.prerequisite_artifact(id).ok_or(BundleError::Invalid)?;
+        let blob = self
+            .metadata
+            .blobs
+            .iter()
+            .find(|blob| blob.digest == artifact.blob)
+            .ok_or(BundleError::Invalid)?;
+        let decoder = open_blob(&self.path, blob)?;
+        let mut bytes = Vec::new();
+        decoder
+            .take(artifact.size.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != artifact.size
+            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.sha256
+        {
+            return Err(BundleError::Payload(artifact.sha256.to_string()));
+        }
+        Ok(bytes)
+    }
+
     pub fn payload_source(&self) -> BundlePayloadSource {
         BundlePayloadSource {
             path: self.path.clone(),
@@ -702,7 +867,17 @@ impl EmbeddedBundle {
                 .plugins
                 .iter()
                 .find(|artifact| artifact.blob == blob.digest)
-                .map_or(blob.size, |artifact| artifact.aot_size);
+                .map_or_else(
+                    || {
+                        self.metadata
+                            .plan
+                            .prerequisite_artifacts
+                            .iter()
+                            .find(|artifact| artifact.blob == blob.digest)
+                            .map_or(blob.size, |artifact| artifact.size)
+                    },
+                    |artifact| artifact.aot_size,
+                );
             verify_blob(&self.path, blob, limit)?;
         }
         Ok(())
@@ -813,7 +988,9 @@ fn parse_metadata(
         return Err(BundleError::Invalid);
     }
     let metadata: Metadata = serde_json::from_slice(&bytes)?;
-    if metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS {
+    if metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS
+        || metadata.plan.prerequisite_artifacts.len() > 256
+    {
         return Err(BundleError::TooManyPluginArtifacts {
             count: metadata.plan.plugins.len(),
             limit: MAX_PLUGIN_ARTIFACTS,
@@ -893,6 +1070,49 @@ fn parse_metadata(
         return Err(BundleError::Invalid);
     }
 
+    let expected_prerequisites: BTreeMap<_, _> = metadata
+        .plan
+        .installer
+        .prerequisites
+        .iter()
+        .filter_map(|prerequisite| {
+            matches!(
+                prerequisite.package,
+                zup_core::PrerequisitePackage::Embedded { .. }
+            )
+            .then_some((prerequisite.id.clone(), prerequisite))
+        })
+        .collect();
+    if expected_prerequisites.len() != metadata.plan.prerequisite_artifacts.len()
+        || metadata
+            .plan
+            .prerequisite_artifacts
+            .windows(2)
+            .any(|window| window[0].prerequisite_id >= window[1].prerequisite_id)
+    {
+        return Err(BundleError::Invalid);
+    }
+    for artifact in &metadata.plan.prerequisite_artifacts {
+        let Some(prerequisite) = expected_prerequisites.get(&artifact.prerequisite_id) else {
+            return Err(BundleError::Invalid);
+        };
+        let zup_core::PrerequisitePackage::Embedded {
+            sha256,
+            size,
+            path: expected_path,
+        } = &prerequisite.package
+        else {
+            return Err(BundleError::Invalid);
+        };
+        if artifact.sha256 != *sha256
+            || artifact.size != *size
+            || artifact.path != *expected_path
+            || artifact.blob != artifact.sha256
+        {
+            return Err(BundleError::Invalid);
+        }
+    }
+
     let data_len = package_len
         .checked_sub(HEADER_LEN + meta_len)
         .ok_or(BundleError::Invalid)?;
@@ -926,6 +1146,13 @@ fn parse_metadata(
             return Err(BundleError::Invalid);
         }
         referenced.insert(entry.blob);
+    }
+    for artifact in &metadata.plan.prerequisite_artifacts {
+        if artifact.blob != artifact.sha256 || by_digest.get(&artifact.blob) != Some(&artifact.size)
+        {
+            return Err(BundleError::Invalid);
+        }
+        referenced.insert(artifact.blob);
     }
     for artifact in &metadata.plan.plugins {
         if artifact.blob != artifact.aot_sha256
@@ -1369,6 +1596,7 @@ mod tests {
                     description: None,
                 },
                 updates: None,
+                prerequisites: Vec::new(),
                 install: Install {
                     scope: InstallScope::User,
                     directory: InstallDirectory {
@@ -1394,9 +1622,11 @@ mod tests {
                 protocols: Vec::new(),
                 file_types: Vec::new(),
             },
+            prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             total_size: 0,
+            prerequisite_size: 0,
         }
     }
 

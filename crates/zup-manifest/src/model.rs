@@ -4,6 +4,7 @@
 //! structure lives here; the compiled output is `zup_core::Installer`.
 
 use schemars::JsonSchema;
+use zup_core::Prerequisite;
 use zup_core::{
     App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
     Shortcut, Source, UiBranding,
@@ -23,6 +24,7 @@ pub struct Manifest {
     pub ui: Option<UiBranding>,
     pub source: Source,
     pub install: Install,
+    pub prerequisites: Vec<Prerequisite>,
     pub updates: Option<Updates>,
     pub components: Vec<Component>,
     pub plugins: Vec<Plugin>,

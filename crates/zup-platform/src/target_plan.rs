@@ -2,9 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    App, ComponentId, FileExtension, FileTypeId, NonEmptyString, Privilege, ProtocolScheme,
-    RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest,
-    ShortcutLocation,
+    App, ComponentId, FileExtension, FileTypeId, NonEmptyString, PrerequisiteArchitecture,
+    PrerequisiteDetector, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage, Privilege,
+    ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
+    Sha256Digest, ShortcutLocation,
 };
 
 use crate::command::CommandSpec;
@@ -18,6 +19,8 @@ pub struct TargetPlan {
     pub install_directory: TargetPath,
     pub selected_components: Vec<ComponentId>,
 
+    #[serde(default)]
+    pub prerequisites: Vec<TargetPrerequisite>,
     pub files: Vec<TargetFile>,
     pub shortcuts: Vec<TargetShortcut>,
     pub path_entries: Vec<TargetPathEntry>,
@@ -26,6 +29,16 @@ pub struct TargetPlan {
     pub file_types: Vec<TargetFileType>,
 
     pub summary: TargetPlanSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetPrerequisite {
+    pub id: PrerequisiteId,
+    pub name: NonEmptyString,
+    pub target: PrerequisiteArchitecture,
+    pub detector: PrerequisiteDetector,
+    pub package: PrerequisitePackage,
+    pub installer: PrerequisiteInstaller,
 }
 
 /// One desired payload file on the target machine.
@@ -104,4 +117,6 @@ pub struct TargetPlanSummary {
     pub resource_count: usize,
     pub requires_elevation: bool,
     pub selected_component_count: usize,
+    pub prerequisite_count: usize,
+    pub download_bytes: u64,
 }

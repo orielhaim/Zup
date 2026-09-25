@@ -22,6 +22,7 @@ pub enum ResourceCategory {
     FileAssociations,
     AppsFeatures,
     Maintenance,
+    Prerequisites,
     Other,
 }
 
@@ -36,6 +37,7 @@ impl ResourceCategory {
             Self::FileAssociations => "File associations",
             Self::AppsFeatures => "Apps & Features",
             Self::Maintenance => "Maintenance",
+            Self::Prerequisites => "Requirements",
             Self::Other => "Other",
         }
     }
@@ -93,6 +95,23 @@ impl ChangeGroup {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementStatus {
+    Satisfied,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequirementPresentation {
+    pub id: String,
+    pub name: String,
+    pub status: RequirementStatus,
+    pub estimated_bytes: u64,
+    pub shared: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPreview {
     pub application: String,
@@ -101,8 +120,12 @@ pub struct PlanPreview {
     pub install_directory: String,
     pub selected_components: Vec<ComponentId>,
     pub estimated_bytes: u64,
+    #[serde(default)]
+    pub download_bytes: u64,
     pub requires_elevation: bool,
     pub groups: Vec<ChangeGroup>,
+    #[serde(default)]
+    pub requirements: Vec<RequirementPresentation>,
 }
 
 impl PlanPreview {
@@ -227,6 +250,7 @@ impl PlanPreview {
             install_directory: plan.install_directory.to_string(),
             selected_components: plan.selected_components.clone(),
             estimated_bytes: plan.summary.install_bytes,
+            download_bytes: plan.summary.download_bytes,
             requires_elevation: plan.summary.requires_elevation,
             groups: groups
                 .into_iter()
@@ -234,6 +258,17 @@ impl PlanPreview {
                     category,
                     title: category.title().into(),
                     changes,
+                })
+                .collect(),
+            requirements: plan
+                .prerequisites
+                .iter()
+                .map(|prerequisite| RequirementPresentation {
+                    id: prerequisite.id.to_string(),
+                    name: prerequisite.name.to_string(),
+                    status: RequirementStatus::Unknown,
+                    estimated_bytes: prerequisite.package.size().unwrap_or(0),
+                    shared: true,
                 })
                 .collect(),
         }
@@ -453,6 +488,7 @@ impl PlanPreview {
             install_directory: String::new(),
             selected_components: plan.selected_components.clone(),
             estimated_bytes: plan.summary.write_bytes,
+            download_bytes: 0,
             requires_elevation: plan.summary.requires_elevation,
             groups: groups
                 .into_iter()
@@ -462,7 +498,37 @@ impl PlanPreview {
                     changes,
                 })
                 .collect(),
+            requirements: Vec::new(),
         }
+    }
+
+    pub fn with_declared_prerequisites(mut self, prerequisites: &[zup_core::Prerequisite]) -> Self {
+        self.requirements = prerequisites
+            .iter()
+            .map(|prerequisite| RequirementPresentation {
+                id: prerequisite.id.to_string(),
+                name: prerequisite.name.to_string(),
+                status: RequirementStatus::Unknown,
+                estimated_bytes: prerequisite.package.size().unwrap_or(0),
+                shared: true,
+            })
+            .collect();
+        self
+    }
+
+    pub fn with_prerequisites(mut self, plan: &InstallPlan) -> Self {
+        self.requirements = plan
+            .prerequisites
+            .iter()
+            .map(|prerequisite| RequirementPresentation {
+                id: prerequisite.id.to_string(),
+                name: prerequisite.name.to_string(),
+                status: RequirementStatus::Unknown,
+                estimated_bytes: prerequisite.package.size().unwrap_or(0),
+                shared: true,
+            })
+            .collect();
+        self
     }
 
     pub fn human(&self) -> String {
@@ -472,9 +538,32 @@ impl PlanPreview {
         if !self.install_directory.is_empty() {
             let _ = writeln!(output, "Location: {}", self.install_directory);
         }
-        let _ = writeln!(output, "Disk: {}", format_bytes(self.estimated_bytes));
+        let _ = writeln!(output, "Install: {}", format_bytes(self.estimated_bytes));
+        if self.download_bytes > 0 {
+            let _ = writeln!(output, "Download: {}", format_bytes(self.download_bytes));
+        }
         if self.requires_elevation {
             let _ = writeln!(output, "Elevation: requested");
+        }
+        if !self.requirements.is_empty() {
+            let _ = writeln!(output, "\nRequirements");
+            for requirement in &self.requirements {
+                let status = match requirement.status {
+                    RequirementStatus::Satisfied => "✓",
+                    RequirementStatus::Missing => "+",
+                    RequirementStatus::Unknown => "?",
+                };
+                let _ = writeln!(
+                    output,
+                    "  {status} {} ({})",
+                    requirement.name,
+                    format_bytes(requirement.estimated_bytes)
+                );
+            }
+            let _ = writeln!(
+                output,
+                "  Shared system dependencies are not removed when this application is uninstalled."
+            );
         }
         for group in &self.groups {
             let _ = writeln!(output, "\n{}", group.title);
@@ -693,6 +782,7 @@ pub enum ProcessOutcome {
     ElevationRequired,
     VerificationFailure,
     RecoveryRequired,
+    RebootRequired,
     Failure,
 }
 
@@ -706,6 +796,7 @@ impl ProcessOutcome {
             Self::ElevationRequired => 5,
             Self::VerificationFailure => 6,
             Self::RecoveryRequired => 7,
+            Self::RebootRequired => 3010,
             Self::Failure => 1,
         }
     }
@@ -722,6 +813,11 @@ impl ProcessOutcome {
             || normalized.contains("administrator")
         {
             Self::ElevationRequired
+        } else if normalized.contains("reboot")
+            || normalized.contains("restart required")
+            || normalized.contains("3010")
+        {
+            Self::RebootRequired
         } else if normalized.contains("recovery") || normalized.contains("journal") {
             Self::RecoveryRequired
         } else if normalized.contains("drift")
@@ -734,6 +830,10 @@ impl ProcessOutcome {
             || normalized.contains("signature")
             || normalized.contains("trust")
             || normalized.contains("tuf")
+            || normalized.contains("digest")
+            || normalized.contains("hash")
+            || normalized.contains("integrity")
+            || normalized.contains("quarantine")
         {
             Self::VerificationFailure
         } else if normalized.contains("configuration")
@@ -766,6 +866,25 @@ pub enum AutomationEvent {
         completed: u64,
         total: u64,
         label: String,
+    },
+    PrerequisiteCheck {
+        id: String,
+        name: String,
+        satisfied: bool,
+        version: Option<String>,
+    },
+    PrerequisiteDownload {
+        id: String,
+        completed: u64,
+        total: Option<u64>,
+    },
+    PrerequisiteInstall {
+        id: String,
+        name: String,
+    },
+    RebootRequired {
+        id: String,
+        exit_code: i32,
     },
     Blocked {
         message: String,
@@ -948,6 +1067,10 @@ mod tests {
         assert_eq!(ProcessOutcome::RecoveryRequired.code(), 7);
         assert_eq!(
             ProcessOutcome::from_message("verification failed"),
+            ProcessOutcome::VerificationFailure
+        );
+        assert_eq!(
+            ProcessOutcome::from_message("pinned artifact digest mismatch"),
             ProcessOutcome::VerificationFailure
         );
     }
