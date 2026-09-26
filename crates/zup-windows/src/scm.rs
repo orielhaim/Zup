@@ -2,12 +2,12 @@
 
 use windows_service::service::{ServiceAccess, ServiceStartType, ServiceType};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-use zup_core::ServiceStart;
+use zup_core::{ServiceStart, TargetTriple};
 use zup_exec::ObservedServiceState;
 
 use crate::cmdline;
 
-pub fn query_service(name: &str) -> Result<ObservedServiceState, String> {
+pub fn query_service(name: &str, target: &TargetTriple) -> Result<ObservedServiceState, String> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| error.to_string())?;
     let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
@@ -26,7 +26,7 @@ pub fn query_service(name: &str) -> Result<ObservedServiceState, String> {
         .into_os_string()
         .into_string()
         .map_err(|_| "service command line contains invalid UTF-16".to_owned())?;
-    let command = cmdline::command_spec_from_command_line(&command_line)?;
+    let command = cmdline::command_spec_from_command_line(&command_line, target)?;
     let display_name = config
         .display_name
         .into_string()

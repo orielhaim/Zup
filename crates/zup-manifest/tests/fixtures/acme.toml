@@ -7,15 +7,18 @@ version = "1.4.0"
 publisher = "Acme Inc."
 main = "Acme.exe"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
 
 [install]
 scope = "either"
 
 [install.directory]
-user = "${known.local_app_data}/Programs/Acme"
-machine = "${known.program_files}/Acme"
+user = "${location.user_data}/Programs/Acme"
+machine = "${location.programs}/Acme"
 
 [[components]]
 id = "core"
@@ -27,6 +30,7 @@ id = "cli"
 name = "Command-line tools"
 default = true
 requires = ["core"]
+targets = ["windows-x64"]
 
 [[components]]
 id = "service"
@@ -38,9 +42,10 @@ requires = ["core"]
 source = "**/*"
 destination = "${install}"
 component = "core"
+targets = ["windows-x64"]
 
-[[shortcuts]]
-location = "start-menu"
+[[launchers]]
+location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 component = "core"
@@ -62,7 +67,7 @@ scheme = "acme"
 executable = "${install}/Acme.exe"
 args = ["--url", "%1"]
 
-[[file_types]]
+[[file_associations]]
 extension = ".acme"
 id = "Acme.Document"
 description = "Acme Document"

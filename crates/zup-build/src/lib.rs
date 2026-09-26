@@ -19,12 +19,15 @@ mod materialize;
 mod pattern;
 mod plan;
 mod plugins;
-mod windows;
+mod source_policy;
 
 pub use digest::{DigestParseError, Sha256Digest};
 pub use error::BuildError;
-pub use materialize::{materialize, materialize_destination};
+pub use materialize::{
+    MAX_UPDATE_ROOT_BYTES, ResolvedUpdateRoot, materialize, materialize_destination,
+    materialize_with_policy, project_root, resolve_source_root, resolve_update_root,
+};
 pub use pattern::FilePattern;
-pub use plan::{BuildPlan, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite};
+pub use plan::{BuildPlan, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite, TargetBuildPlan};
 pub use plugins::MAX_PLUGIN_SOURCE_BYTES;
-pub use windows::validate_windows_destination;
+pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};

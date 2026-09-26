@@ -1,8 +1,7 @@
 //! Windows file mutation executor (Create / Replace / Stage / Verify).
 //!
-//! Files only. No registry, PATH, shortcuts, services, protocols, or file
-//! types. All payload access goes through `PayloadSource`.
-
+//! Files only. No registry, PATH, launchers, services, protocols, or file
+//! associations. All payload access goes through `PayloadSource`.
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -12,10 +11,12 @@ use sha2::Digest as _;
 use thiserror::Error;
 use zup_bundle::{PayloadError, PayloadSource};
 use zup_core::{ResourceKey, Sha256Digest, hash_reader};
-use zup_exec::FilePrecondition;
-use zup_transaction::{NodeKind, OperationId, ReconcileResult, TransactionNode};
+use zup_transaction::{
+    FileDelta, FilePrecondition, NodeKind, OperationId, ReconcileResult, TransactionNode,
+};
 
 use crate::durable::{DurableError, move_durable};
+use crate::lowering::{host_path, target_path_from_host};
 
 /// Receipt recorded after staging a payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -206,15 +207,15 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 sha256,
                 size,
             } => {
-                if file_identity(destination.as_path())?.is_some()
-                    || file_identity(backup_path.as_path())? != Some((*size, *sha256))
+                if file_identity(&host_path(destination))?.is_some()
+                    || file_identity(&host_path(backup_path))? != Some((*size, *sha256))
                 {
                     return Err(WindowsFileExecutorError::RollbackDrift {
                         path: destination.to_string(),
                         reason: "removed file or backup changed".into(),
                     });
                 }
-                move_durable(backup_path.as_path(), destination.as_path())?;
+                move_durable(&host_path(backup_path), &host_path(destination))?;
                 Ok(())
             }
             _ => Err(WindowsFileExecutorError::Unsupported {
@@ -271,7 +272,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 }
             }
             NodeKind::FileMutation {
-                delta: zup_exec::Delta::Create | zup_exec::Delta::RestoreOwned,
+                delta: FileDelta::Create | FileDelta::RestoreOwned,
                 ..
             } => match file_identity(destination)? {
                 None => Ok(ReconcileResult::NotApplied),
@@ -286,7 +287,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 _ => Ok(ReconcileResult::Ambiguous),
             },
             NodeKind::FileMutation {
-                delta: zup_exec::Delta::Replace | zup_exec::Delta::RepairOwned,
+                delta: FileDelta::Replace | FileDelta::RepairOwned,
                 ..
             } => {
                 let FilePrecondition::Exact { size, sha256 } = node
@@ -387,40 +388,35 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         &self,
         node: &TransactionNode,
     ) -> Result<zup_transaction::OperationReceipt, WindowsFileExecutorError> {
-        let Some(zup_exec::OwnedResource::File {
-            destination,
-            sha256,
-            size,
-            ..
-        }) = &node.meta.removal
-        else {
+        let Some(removal) = &node.meta.removal else {
             return Err(WindowsFileExecutorError::Unsupported {
                 id: node.id.to_string(),
             });
         };
-        if file_identity(destination.as_path())? != Some((*size, *sha256)) {
+        let destination_path = host_path(&removal.destination);
+        if file_identity(&destination_path)? != Some((removal.size, removal.sha256)) {
             return Err(WindowsFileExecutorError::PlanDrift {
-                path: destination.to_string(),
+                path: removal.destination.to_string(),
                 reason: "owned file changed before removal".into(),
             });
         }
-        let backup = self.removal_backup(destination.as_path());
+        let backup = self.removal_backup(&destination_path);
         if fs::symlink_metadata(&backup).is_ok() {
             return Err(WindowsFileExecutorError::PlanDrift {
                 path: backup.display().to_string(),
                 reason: "removal backup path is occupied".into(),
             });
         }
-        move_durable(destination.as_path(), &backup)?;
+        move_durable(&destination_path, &backup)?;
         Ok(zup_transaction::OperationReceipt::RemoveFile {
-            destination: destination.clone(),
-            backup_path: zup_platform::TargetPath::new(backup).map_err(|_| {
-                WindowsFileExecutorError::Unsupported {
+            destination: removal.destination.clone(),
+            backup_path: target_path_from_host(&backup, removal.destination.target()).map_err(
+                |_| WindowsFileExecutorError::Unsupported {
                     id: node.id.to_string(),
-                }
-            })?,
-            sha256: *sha256,
-            size: *size,
+                },
+            )?,
+            sha256: removal.sha256,
+            size: removal.size,
         })
     }
 
@@ -428,35 +424,26 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         &self,
         node: &TransactionNode,
     ) -> Result<ReconcileResult, WindowsFileExecutorError> {
-        let Some(zup_exec::OwnedResource::File {
-            destination,
-            sha256,
-            size,
-            ..
-        }) = &node.meta.removal
-        else {
+        let Some(removal) = &node.meta.removal else {
             return Err(WindowsFileExecutorError::Unsupported {
                 id: node.id.to_string(),
             });
         };
-        let backup = self.removal_backup(destination.as_path());
-        let expected = Some((*size, *sha256));
-        match (
-            file_identity(destination.as_path())?,
-            file_identity(&backup)?,
-        ) {
+        let destination_path = host_path(&removal.destination);
+        let backup = self.removal_backup(&destination_path);
+        let expected = Some((removal.size, removal.sha256));
+        match (file_identity(&destination_path)?, file_identity(&backup)?) {
             (Some(current), None) if Some(current) == expected => Ok(ReconcileResult::NotApplied),
             (None, Some(saved)) if Some(saved) == expected => {
                 Ok(ReconcileResult::AppliedWithReceipt(
                     zup_transaction::OperationReceipt::RemoveFile {
-                        destination: destination.clone(),
-                        backup_path: zup_platform::TargetPath::new(backup).map_err(|_| {
-                            WindowsFileExecutorError::Unsupported {
-                                id: node.id.to_string(),
-                            }
+                        destination: removal.destination.clone(),
+                        backup_path: target_path_from_host(&backup, removal.destination.target())
+                            .map_err(|_| WindowsFileExecutorError::Unsupported {
+                            id: node.id.to_string(),
                         })?,
-                        sha256: *sha256,
-                        size: *size,
+                        sha256: removal.sha256,
+                        size: removal.size,
                     },
                 ))
             }
@@ -823,10 +810,10 @@ pub fn apply_node<P: PayloadSource>(
                 .cloned()
                 .unwrap_or(FilePrecondition::Absent);
             match delta {
-                zup_exec::Delta::Create | zup_exec::Delta::RestoreOwned => {
+                FileDelta::Create | FileDelta::RestoreOwned => {
                     exec.create_file(op, dest, sha256, size, key)
                 }
-                zup_exec::Delta::Replace | zup_exec::Delta::RepairOwned => {
+                FileDelta::Replace | FileDelta::RepairOwned => {
                     exec.replace_file(op, dest, sha256, size, &precondition, key)
                 }
                 _ => Err(WindowsFileExecutorError::Unsupported {
@@ -834,11 +821,156 @@ pub fn apply_node<P: PayloadSource>(
                 }),
             }
         }
-        NodeKind::ManagedIntegration { .. } | NodeKind::OwnedRemoval { .. } => {
-            Err(WindowsFileExecutorError::Unsupported {
-                id: op.id.to_string(),
-            })
+        NodeKind::FileRemoval { .. }
+        | NodeKind::BackendOperation { .. }
+        | NodeKind::BackendRemoval { .. } => Err(WindowsFileExecutorError::Unsupported {
+            id: op.id.to_string(),
+        }),
+    }
+}
+
+/// Lower a Windows file receipt to the transaction journal's receipt shape.
+pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::OperationReceipt {
+    use zup_transaction::OperationReceipt as Journal;
+    match receipt {
+        OperationReceipt::Control => Journal::Control,
+        OperationReceipt::StageFile(receipt) => Journal::StageFile {
+            staged_path: receipt.staged_path,
+            size: receipt.size,
+            sha256: receipt.sha256.to_hex(),
+        },
+        OperationReceipt::CreateFile(receipt) => Journal::CreateFile {
+            destination: receipt.destination,
+            installed_sha256: receipt.installed_sha256.to_hex(),
+            installed_size: receipt.installed_size,
+            created_directories: receipt.created_directories,
+        },
+        OperationReceipt::ReplaceFile(receipt) => Journal::ReplaceFile {
+            destination: receipt.destination,
+            previous_sha256: receipt.previous_sha256.to_hex(),
+            previous_size: receipt.previous_size,
+            backup_path: receipt.backup_path,
+            new_sha256: receipt.new_sha256.to_hex(),
+            new_size: receipt.new_size,
+        },
+    }
+}
+
+/// Verify an applied file operation against the receipt that recorded it.
+///
+/// The receipt is the only durable record of what the apply installed, so the
+/// installed bytes, the retained backup, and the vacated path are all read
+/// back from it. A receipt kind that names no file state is not a file
+/// verification, and says so rather than passing.
+pub fn verify_installed_file(
+    receipt: &zup_transaction::OperationReceipt,
+) -> Result<(), WindowsFileExecutorError> {
+    use zup_transaction::OperationReceipt as Receipt;
+    match receipt {
+        Receipt::StageFile {
+            staged_path,
+            size,
+            sha256,
+        } => {
+            let expected = (*size, digest_of(sha256, staged_path)?);
+            expect_identity(
+                Path::new(staged_path),
+                Some(expected),
+                staged_path,
+                "staged payload",
+            )
         }
+        Receipt::CreateFile {
+            destination,
+            installed_sha256,
+            installed_size,
+            ..
+        } => {
+            let expected = (*installed_size, digest_of(installed_sha256, destination)?);
+            expect_identity(
+                Path::new(destination),
+                Some(expected),
+                destination,
+                "installed file",
+            )
+        }
+        Receipt::ReplaceFile {
+            destination,
+            backup_path,
+            new_sha256,
+            new_size,
+            previous_sha256,
+            previous_size,
+        } => {
+            let installed = (*new_size, digest_of(new_sha256, destination)?);
+            expect_identity(
+                Path::new(destination),
+                Some(installed),
+                destination,
+                "installed file",
+            )?;
+            let previous = (*previous_size, digest_of(previous_sha256, backup_path)?);
+            expect_identity(
+                Path::new(backup_path),
+                Some(previous),
+                backup_path,
+                "replaced file backup",
+            )
+        }
+        Receipt::RemoveFile {
+            destination,
+            backup_path,
+            sha256,
+            size,
+        } => {
+            let destination = host_path(destination);
+            let backup_path = host_path(backup_path);
+            let removed = (*size, *sha256);
+            expect_identity(
+                &destination,
+                None,
+                &destination.display().to_string(),
+                "removed file",
+            )?;
+            expect_identity(
+                &backup_path,
+                Some(removed),
+                &backup_path.display().to_string(),
+                "removal backup",
+            )
+        }
+        Receipt::Control | Receipt::Backend { .. } => Err(WindowsFileExecutorError::Unsupported {
+            id: "receipt".into(),
+        }),
+    }
+}
+
+fn digest_of(value: &str, path: &str) -> Result<Sha256Digest, WindowsFileExecutorError> {
+    value
+        .parse::<Sha256Digest>()
+        .map_err(|_| WindowsFileExecutorError::Verification {
+            path: path.to_owned(),
+            reason: "invalid journal digest".into(),
+        })
+}
+
+fn expect_identity(
+    path: &Path,
+    expected: Option<(u64, Sha256Digest)>,
+    display: &str,
+    what: &str,
+) -> Result<(), WindowsFileExecutorError> {
+    match (file_identity(path)?, expected) {
+        (found, Some((size, digest))) if found == Some((size, digest)) => Ok(()),
+        (Some(_), _) => Err(WindowsFileExecutorError::Verification {
+            path: display.to_owned(),
+            reason: format!("{what} no longer matches its receipt"),
+        }),
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(WindowsFileExecutorError::Verification {
+            path: display.to_owned(),
+            reason: format!("{what} is missing"),
+        }),
     }
 }
 

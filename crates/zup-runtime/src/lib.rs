@@ -12,11 +12,12 @@ mod session;
 pub use diagnostics::SessionLog;
 pub use events::{RuntimeEvent, RuntimeState};
 pub use session::{
-    BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, OverlayPolicy,
-    RecoveryStatus, RuntimeRequest, RuntimeSession, SessionError, discover_recovery, run_install,
-    run_install_control, run_install_control_with_bootstrap, run_install_control_with_policy,
-    run_local_install,
+    BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RecoveryStatus,
+    RuntimeBackend, RuntimeControl, RuntimeFuture, RuntimePayloadSource, RuntimeRequest,
+    RuntimeSession, SessionError, TokenProbe, discover_recovery, run_install, run_install_control,
+    run_install_control_with_policy, run_local_install,
 };
 
 pub use uuid::Uuid;
+pub use zup_bundle::PayloadSource;
 pub use zup_protocol::SessionId;

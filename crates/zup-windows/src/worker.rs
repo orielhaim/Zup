@@ -1,15 +1,17 @@
 //! Hidden elevated/worker mode entry (`zup __worker <bootstrap>`).
 //!
 //! Bootstrap carries only: protocol version, session id, pipe name,
-//! expected parent pid, expected plan hash. The plan itself travels over IPC.
+//! expected parent identity, canonical target, and expected plan hash. The plan
+//! itself travels over IPC.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use zup_core::TargetTriple;
 
 use zup_protocol::{
-    Capabilities, FILE_TRANSACTIONS_V1, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker,
-    SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
+    Capabilities, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker, SessionId, WireEnvelope,
+    WorkerHello, decode_payload, encode_payload,
 };
 
 /// Worker bootstrap arguments (command line, no plan/secrets).
@@ -20,6 +22,7 @@ pub struct WorkerBootstrap {
     pub pipe_name: String,
     pub expected_parent_pid: u32,
     pub expected_parent_sid: String,
+    pub target: TargetTriple,
     pub expected_plan_hash: String,
 }
 
@@ -35,6 +38,9 @@ pub enum WorkerError {
     #[error("plan hash mismatch")]
     PlanHashMismatch,
 
+    #[error("target mismatch")]
+    TargetMismatch,
+
     #[error("capability missing: {0}")]
     MissingCapability(String),
 
@@ -48,13 +54,22 @@ pub enum WorkerError {
     ParentDisconnect,
 }
 
+pub fn worker_capabilities() -> Capabilities {
+    Capabilities {
+        file_transactions_v1: true,
+        backend_operations_v1: true,
+        lifecycle_v1: true,
+        prerequisite_bootstrap_v1: true,
+    }
+}
+
 /// Parse `zup __worker <bootstrap-json>` arguments.
 pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
-    // Strict bootstrap: version|session|pipe|parent_pid|plan_hash
+    // Strict bootstrap: version|session|pipe|parent_pid|parent_sid|target|plan_hash
     let parts: Vec<&str> = arg.split('|').collect();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return Err(WorkerError::InvalidBootstrap(format!(
-            "expected 5 fields, got {}",
+            "expected 6 fields, got {}",
             parts.len()
         )));
     }
@@ -83,7 +98,9 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
     if !expected_parent_sid.starts_with("S-1-") {
         return Err(WorkerError::InvalidBootstrap("parent sid".into()));
     }
-    let expected_plan_hash = parts[5].to_owned();
+    let target = TargetTriple::parse(parts[5])
+        .map_err(|error| WorkerError::InvalidBootstrap(error.to_string()))?;
+    let expected_plan_hash = parts[6].to_owned();
     if expected_plan_hash.len() != 64 || !expected_plan_hash.chars().all(|c| c.is_ascii_hexdigit())
     {
         return Err(WorkerError::InvalidBootstrap("plan hash".into()));
@@ -95,6 +112,7 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
         pipe_name,
         expected_parent_pid,
         expected_parent_sid,
+        target,
         expected_plan_hash: expected_plan_hash.to_lowercase(),
     })
 }
@@ -102,12 +120,13 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
 /// Serialize bootstrap for the worker command line (quoting handled by caller).
 pub fn format_bootstrap(bootstrap: &WorkerBootstrap) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         bootstrap.protocol_version,
         bootstrap.session_id,
         bootstrap.pipe_name,
         bootstrap.expected_parent_pid,
         bootstrap.expected_parent_sid,
+        bootstrap.target,
         bootstrap.expected_plan_hash
     )
 }
@@ -185,8 +204,9 @@ impl WorkerSession {
             message: Message::WorkerHello(WorkerHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: self.bootstrap.session_id,
+                target: self.bootstrap.target.clone(),
                 worker_pid: std::process::id(),
-                capabilities: Capabilities::supported(),
+                capabilities: worker_capabilities(),
             }),
         }
     }
@@ -204,6 +224,9 @@ impl WorkerSession {
         }
         if hello.session_id != self.bootstrap.session_id {
             return Err(WorkerError::AuthFailed("session id".into()));
+        }
+        if hello.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
         }
         if hello.expected_plan_hash != self.bootstrap.expected_plan_hash {
             return Err(WorkerError::PlanHashMismatch);
@@ -224,6 +247,9 @@ impl WorkerSession {
         if self.plan_hash_checked {
             return Err(WorkerError::Protocol("second operation rejected".into()));
         }
+        if exec.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
+        }
         if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
             return Err(WorkerError::Protocol("bootstrap plan too large".into()));
         }
@@ -237,6 +263,11 @@ impl WorkerSession {
         let validated =
             zup_bootstrap::BoundBootstrapPlan::with_id(plan.id, plan.plan, plan.artifacts)
                 .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        if validated.plan.key.target != self.bootstrap.target
+            || exec.target != validated.plan.key.target
+        {
+            return Err(WorkerError::TargetMismatch);
+        }
         if validated.plan_hash != declared_plan_hash
             || validated.id.as_uuid() != exec.bootstrap_id
             || validated.plan.key.app_id.as_str() != exec.app_id
@@ -290,6 +321,9 @@ impl WorkerSession {
         if self.plan_hash_checked {
             return Err(WorkerError::Protocol("second transaction rejected".into()));
         }
+        if exec.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
+        }
         if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
             return Err(WorkerError::Protocol("plan too large".into()));
         }
@@ -299,21 +333,13 @@ impl WorkerSession {
         }
         self.plan_hash_checked = true;
 
-        // Validate plan is file-transaction only (capability restriction).
         let plan: zup_transaction::TransactionPlan = serde_json::from_str(&exec.plan_json)
             .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
-        for node in &plan.nodes {
-            match node.kind {
-                zup_transaction::NodeKind::Barrier
-                | zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::FileMutation { .. } => {}
-                _ => {
-                    return Err(WorkerError::MissingCapability(
-                        FILE_TRANSACTIONS_V1.to_owned(),
-                    ));
-                }
-            }
+        if exec.target != plan.target {
+            return Err(WorkerError::TargetMismatch);
         }
+        plan.validate()
+            .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
 
         // Actual execution is driven by the caller (coordinator + executor).
         Ok(Some(WireEnvelope {

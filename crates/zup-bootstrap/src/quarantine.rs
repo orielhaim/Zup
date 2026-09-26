@@ -1,11 +1,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_core::{PrerequisiteId, RelativePath, Sha256Digest};
 
+use crate::filesystem::{BootstrapFileSystem, PortableBootstrapFileSystem};
 use crate::model::QuarantinedArtifact;
 
 #[derive(Debug, Error)]
@@ -78,6 +80,7 @@ pub fn validate_filename(filename: &str) -> Result<(), QuarantineError> {
 
 pub struct Quarantine {
     root: PathBuf,
+    file_system: Arc<dyn BootstrapFileSystem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,14 +92,25 @@ pub struct ArtifactReservation {
 }
 
 impl Quarantine {
+    /// Quarantine on the portable `std::fs` filesystem.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, QuarantineError> {
+        Self::with_file_system(root, Arc::new(PortableBootstrapFileSystem))
+    }
+
+    /// Quarantine that publishes and clears links through `file_system`, for
+    /// hosts that must guarantee more than `std::fs` can.
+    pub fn with_file_system(
+        root: impl Into<PathBuf>,
+        file_system: Arc<dyn BootstrapFileSystem>,
+    ) -> Result<Self, QuarantineError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(|source| QuarantineError::Io {
             path: root.clone(),
             source,
         })?;
-        reject_reparse_points(&root)?;
-        Ok(Self { root })
+        let quarantine = Self { root, file_system };
+        quarantine.reject_links(quarantine.root.as_path())?;
+        Ok(quarantine)
     }
 
     pub fn root(&self) -> &Path {
@@ -122,8 +136,8 @@ impl Quarantine {
             path: parent.to_path_buf(),
             source,
         })?;
-        reject_reparse_points(&self.root)?;
-        reject_reparse_points(parent)?;
+        self.reject_links(&self.root)?;
+        self.reject_links(parent)?;
         Ok(ArtifactReservation {
             relative_path,
             partial_path,
@@ -147,7 +161,7 @@ impl Quarantine {
         mut reader: R,
         expected_digest: Sha256Digest,
     ) -> Result<QuarantinedArtifact, QuarantineError> {
-        reject_reparse_points(&reservation.partial_path)?;
+        self.reject_links(&reservation.partial_path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -218,7 +232,7 @@ impl Quarantine {
         reservation: &ArtifactReservation,
         expected_digest: Sha256Digest,
     ) -> Result<QuarantinedArtifact, QuarantineError> {
-        reject_reparse_points(&reservation.partial_path)?;
+        self.reject_links(&reservation.partial_path)?;
         let (size, digest) = hash_file(&reservation.partial_path)?;
         if let Some(expected_size) = reservation.expected_size
             && size != expected_size
@@ -237,12 +251,12 @@ impl Quarantine {
             let _ = fs::remove_file(&reservation.partial_path);
             return Err(QuarantineError::TooLarge);
         }
-        publish_replace(&reservation.partial_path, &reservation.final_path).map_err(|source| {
-            QuarantineError::Io {
+        self.file_system
+            .publish_replace(&reservation.partial_path, &reservation.final_path)
+            .map_err(|source| QuarantineError::Io {
                 path: reservation.final_path.clone(),
                 source,
-            }
-        })?;
+            })?;
         Ok(QuarantinedArtifact {
             relative_path: reservation.relative_path.clone(),
             size,
@@ -252,11 +266,14 @@ impl Quarantine {
 
     pub fn verify(&self, artifact: &QuarantinedArtifact) -> Result<(), QuarantineError> {
         let path = self.resolve(&artifact.relative_path)?;
+        if self.is_link(&path)? {
+            return Err(QuarantineError::OutsideRoot);
+        }
         let metadata = fs::symlink_metadata(&path).map_err(|source| QuarantineError::Io {
             path: path.clone(),
             source,
         })?;
-        if is_reparse_point(&metadata) || !metadata.is_file() {
+        if !metadata.is_file() {
             return Err(QuarantineError::OutsideRoot);
         }
         let (size, digest) = hash_file(&path)?;
@@ -271,7 +288,7 @@ impl Quarantine {
         if !path.starts_with(&self.root) || path == self.root {
             return Err(QuarantineError::OutsideRoot);
         }
-        reject_reparse_points(&path)?;
+        self.reject_links(&path)?;
         Ok(path)
     }
 
@@ -294,56 +311,31 @@ impl Quarantine {
             Err(source) => Err(QuarantineError::Io { path, source }),
         }
     }
-}
 
-fn publish_replace(from: &Path, to: &Path) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Storage::FileSystem::{
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-        };
-        let from = from
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let to = to
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        unsafe {
-            MoveFileExW(
-                windows::core::PCWSTR(from.as_ptr()),
-                windows::core::PCWSTR(to.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
+    /// Refuse to proceed when any component of `path`, or `path` itself, is a
+    /// link: staging or reading through one would move data outside the root.
+    fn reject_links(&self, path: &Path) -> Result<(), QuarantineError> {
+        for component in link_checked_prefixes(path)? {
+            if self.is_link(&component)? {
+                return Err(QuarantineError::OutsideRoot);
+            }
         }
-        .map_err(|error| std::io::Error::other(error.to_string()))
+        Ok(())
     }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to)
+
+    fn is_link(&self, path: &Path) -> Result<bool, QuarantineError> {
+        self.file_system
+            .is_link(path)
+            .map_err(|source| QuarantineError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
     }
 }
 
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn reject_reparse_points(path: &Path) -> Result<(), QuarantineError> {
+/// `path` preceded by each of its ancestors, from the filesystem root down, so
+/// a link anywhere along the way is inspected before the leaf is touched.
+fn link_checked_prefixes(path: &Path) -> Result<Vec<PathBuf>, QuarantineError> {
     let mut current = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -364,22 +356,7 @@ fn reject_reparse_points(path: &Path) -> Result<(), QuarantineError> {
     }
     components.reverse();
     components.push(path.to_path_buf());
-    for component in components {
-        match fs::symlink_metadata(&component) {
-            Ok(metadata) if is_reparse_point(&metadata) => {
-                return Err(QuarantineError::OutsideRoot);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(QuarantineError::Io {
-                    path: component,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
+    Ok(components)
 }
 
 fn hash_file(path: &Path) -> Result<(u64, Sha256Digest), QuarantineError> {

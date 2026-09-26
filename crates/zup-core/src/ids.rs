@@ -157,9 +157,14 @@ id_type!(
     "service id"
 );
 id_type!(
-    /// Stable logical file-type identifier (for example a ProgID-like name).
-    FileTypeId,
-    "file type id"
+    /// Stable logical file-association identifier.
+    FileAssociationId,
+    "file association id"
+);
+id_type!(
+    /// Stable identity for an opaque platform backend resource.
+    BackendResourceId,
+    "backend resource id"
 );
 
 /// URI scheme such as `acme` in `acme://`.

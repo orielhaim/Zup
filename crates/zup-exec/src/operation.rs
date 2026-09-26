@@ -1,11 +1,11 @@
 //! Execution operations, conflicts, and summary.
 
 use crate::observe::{
-    ObservedExtensionState, ObservedProgIdState, ObservedProtocolState, ObservedServiceState,
-    ObservedShortcutState, PathEntryState,
+    ObservedExtensionState, ObservedFileAssociationState, ObservedLauncherState,
+    ObservedProtocolState, ObservedServiceState,
 };
 use serde::{Deserialize, Serialize};
-use zup_core::{ProtocolScheme, RelativePath, ResourceKey, ServiceStart, Sha256Digest};
+use zup_core::{Privilege, ProtocolScheme, RelativePath, ResourceKey, ServiceStart, Sha256Digest};
 use zup_platform::{CommandSpec, SelectedScope, TargetPath};
 
 /// High-level comparison result for one desired resource.
@@ -42,10 +42,10 @@ pub enum FilePrecondition {
     Exact { size: u64, sha256: Sha256Digest },
 }
 
-/// Shortcut decision (no Replace until ownership is proven).
+/// Launcher decision (no Replace until ownership is proven).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShortcutOperationKind {
+pub enum LauncherOperationKind {
     Create,
     UpdateOwned,
     RestoreOwned,
@@ -54,7 +54,7 @@ pub enum ShortcutOperationKind {
     Drift,
 }
 
-/// PATH entry decision.
+/// Search-path entry decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathOperationKind {
@@ -90,10 +90,10 @@ pub enum ProtocolOperationKind {
     Drift,
 }
 
-/// File-type ProgID/extension decision.
+/// File-association decision (association and extension considered together).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FileTypeOperationKind {
+pub enum FileAssociationOperationKind {
     Create,
     UpdateOwned,
     RestoreOwned,
@@ -106,14 +106,36 @@ pub enum FileTypeOperationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Conflict {
-    TargetNonFile { path: String },
-    File { path: String },
-    ShortcutAlreadyOwnedByDifferentTarget { link_path: String, reason: String },
-    ServiceAlreadyExistsWithDifferentConfiguration { service: String, reason: String },
-    ProtocolAlreadyRegistered { scheme: String, reason: String },
-    FileTypeProgIdConflict { id: String, reason: String },
-    FileExtensionConflict { extension: String, reason: String },
-    PathEntryConflict { value: String, reason: String },
+    TargetNonFile {
+        path: String,
+    },
+    File {
+        path: String,
+    },
+    LauncherAlreadyOwnedByDifferentTarget {
+        launcher_path: String,
+        reason: String,
+    },
+    ServiceAlreadyExistsWithDifferentConfiguration {
+        service: String,
+        reason: String,
+    },
+    ProtocolAlreadyRegistered {
+        scheme: String,
+        reason: String,
+    },
+    FileAssociationConflict {
+        id: String,
+        reason: String,
+    },
+    FileExtensionConflict {
+        extension: String,
+        reason: String,
+    },
+    PathEntryConflict {
+        value: String,
+        reason: String,
+    },
 }
 
 /// One file Create/Replace/NoOp/Conflict decision.
@@ -126,30 +148,35 @@ pub struct FileOperation {
     pub precondition: FilePrecondition,
     pub expected_sha256: Sha256Digest,
     pub expected_size: u64,
+    pub privilege: Privilege,
     pub conflict: Option<Conflict>,
 }
 
-/// One shortcut decision.
+/// One launcher decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShortcutOperation {
+pub struct LauncherOperation {
     pub key: ResourceKey,
-    pub kind: ShortcutOperationKind,
-    pub link_path: TargetPath,
+    pub kind: LauncherOperationKind,
+    pub launcher_path: TargetPath,
     pub target: TargetPath,
     pub arguments: Vec<String>,
     pub working_directory: Option<TargetPath>,
-    pub previous: ObservedShortcutState,
+    pub privilege: Privilege,
+    pub previous: ObservedLauncherState,
     pub conflict: Option<Conflict>,
 }
 
-/// One PATH entry decision.
+/// One search-path entry decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathOperation {
     pub key: ResourceKey,
     pub kind: PathOperationKind,
     pub value: TargetPath,
+    /// Persistent search path that owns the entry, decided by the plan.
     pub scope: SelectedScope,
-    pub previous: PathEntryState,
+    pub privilege: Privilege,
+    /// Whether the owning search path already held the entry at planning time.
+    pub present: bool,
     pub previously_owned: bool,
     pub conflict: Option<Conflict>,
 }
@@ -164,6 +191,7 @@ pub struct ServiceOperation {
     pub display_name: String,
     pub command: CommandSpec,
     pub start: ServiceStart,
+    pub privilege: Privilege,
     pub previous: ObservedServiceState,
     pub conflict: Option<Conflict>,
 }
@@ -177,45 +205,37 @@ pub struct ProtocolOperation {
     pub command: CommandSpec,
     pub previous: ObservedProtocolState,
     pub scope: SelectedScope,
+    pub privilege: Privilege,
     pub conflict: Option<Conflict>,
 }
 
-/// One file-type decision (ProgID + extension considered together).
+/// One file-association decision (association and extension considered together).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileTypeOperation {
+pub struct FileAssociationOperation {
     pub key: ResourceKey,
-    pub kind: FileTypeOperationKind,
-    pub prog_id_kind: FileTypeOperationKind,
-    pub extension_kind: FileTypeOperationKind,
+    pub kind: FileAssociationOperationKind,
+    pub association_kind: FileAssociationOperationKind,
+    pub extension_kind: FileAssociationOperationKind,
     pub extension: String,
     pub id: String,
     pub description: Option<String>,
     pub command: CommandSpec,
-    pub previous_id: ObservedProgIdState,
+    pub previous_association: ObservedFileAssociationState,
     pub previous_extension: ObservedExtensionState,
     pub scope: SelectedScope,
+    pub privilege: Privilege,
     pub conflict: Option<Conflict>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UninstallEntryOperation {
-    pub key: ResourceKey,
-    pub scope: SelectedScope,
-    pub key_path: String,
-    pub previous: Option<crate::UninstallEntryState>,
-    pub installed: crate::UninstallEntryState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedOperation {
-    Shortcut(ShortcutOperation),
+    Launcher(LauncherOperation),
     Path(PathOperation),
     Service(ServiceOperation),
     Protocol(ProtocolOperation),
-    ProgId(FileTypeOperation),
-    Extension(FileTypeOperation),
-    UninstallEntry(UninstallEntryOperation),
+    FileAssociation(FileAssociationOperation),
+    Extension(FileAssociationOperation),
 }
 
 /// Derived execution summary with checked counts and byte totals.
@@ -226,9 +246,9 @@ pub struct ExecutionSummary {
     pub files_unchanged: usize,
     pub files_conflict: usize,
 
-    pub shortcuts_create: usize,
-    pub shortcuts_unchanged: usize,
-    pub shortcuts_conflict: usize,
+    pub launchers_create: usize,
+    pub launchers_unchanged: usize,
+    pub launchers_conflict: usize,
 
     pub path_entries_add: usize,
     pub path_entries_present: usize,
@@ -242,13 +262,14 @@ pub struct ExecutionSummary {
     pub protocols_unchanged: usize,
     pub protocols_conflict: usize,
 
-    pub file_types_create: usize,
-    pub file_types_unchanged: usize,
-    pub file_types_conflict: usize,
+    pub file_associations_create: usize,
+    pub file_associations_unchanged: usize,
+    pub file_associations_conflict: usize,
 
     pub write_bytes: u64,
     pub total_desired_bytes: u64,
-    pub requires_elevation: bool,
+    /// True when at least one planned operation needs system authorization.
+    pub requires_authorization: bool,
 }
 
 /// Full v1 file-and-resource delta between desired and observed state.
@@ -262,12 +283,11 @@ pub struct ExecutionPlan {
     pub uninstall: bool,
     pub removals: Vec<RemovalOperation>,
     pub files: Vec<FileOperation>,
-    pub shortcuts: Vec<ShortcutOperation>,
+    pub launchers: Vec<LauncherOperation>,
     pub path_entries: Vec<PathOperation>,
     pub services: Vec<ServiceOperation>,
     pub protocols: Vec<ProtocolOperation>,
-    pub file_types: Vec<FileTypeOperation>,
-    pub uninstall_entries: Vec<UninstallEntryOperation>,
+    pub file_associations: Vec<FileAssociationOperation>,
     pub summary: ExecutionSummary,
 }
 
@@ -283,5 +303,6 @@ pub struct RemovalOperation {
     pub key: ResourceKey,
     pub kind: RemovalKind,
     pub scope: SelectedScope,
+    pub privilege: Privilege,
     pub owned: crate::OwnedResource,
 }

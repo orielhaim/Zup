@@ -10,14 +10,14 @@ use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 #[cfg(any(feature = "console", feature = "headless"))]
-use zup_bundle::EmbeddedBundle;
-#[cfg(feature = "headless")]
-use zup_bundle::read_pe_frontend;
-#[cfg(feature = "console")]
-use zup_bundle::{PeSubsystem, read_pe_subsystem};
-#[cfg(any(feature = "console", feature = "headless"))]
 use zup_core::Frontend;
 use zup_plugin_contract::HOST_TARGET;
+#[cfg(any(feature = "console", feature = "headless"))]
+use zup_windows::EmbeddedBundle;
+#[cfg(feature = "headless")]
+use zup_windows::read_pe_frontend;
+#[cfg(feature = "console")]
+use zup_windows::{PeSubsystem, read_pe_subsystem};
 
 const PLUGIN_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
 
@@ -82,12 +82,15 @@ schema = 1
 id = "com.example.runtime-target"
 name = "Runtime Target"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/RuntimeTarget"
+user = "${location.user_data}/RuntimeTarget"
 [[files]]
 source = "**/*"
 destination = "${install}"
@@ -358,13 +361,20 @@ fn console_redirected_install_does_not_prompt() {
 fn build_rejects_arm64_target_for_x64_runtime_without_plugins() {
     let project = TempDir::new().unwrap();
     write_pluginless_project(project.path());
+    let manifest_path = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest_path).unwrap();
+    fs::write(
+        &manifest_path,
+        source.replace(
+            "[install]",
+            "[build.targets.arm64]\ntarget = \"aarch64-pc-windows-msvc\"\nsource = { directory = \"dist\" }\n\n[install]",
+        ),
+    )
+    .unwrap();
     let result = run_pluginless_build(project.path(), &setup_runtime(), "aarch64-pc-windows-msvc");
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains("does not match requested target"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("does not match target"), "{stderr}");
     assert!(!project.path().join("Setup.exe").exists());
 }
 
@@ -378,6 +388,52 @@ fn build_rejects_non_pe_runtime() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("runtime target"), "{stderr}");
+    assert!(!project.path().join("Setup.exe").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn build_rejects_invalid_windows_destinations_before_writing_an_artifact() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let manifest = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        source.replace(
+            "destination = \"${install}\"",
+            "destination = \"${install}/CON\"",
+        ),
+    )
+    .unwrap();
+    let output = project.path().join("Setup.exe");
+    let result = run_pluginless_build(project.path(), &setup_runtime(), "x86_64-pc-windows-msvc");
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("Windows lowering"), "{stderr}");
+    assert!(stderr.contains("reserved device name"), "{stderr}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn build_rejects_non_windows_targets_at_the_backend_seam() {
+    let project = TempDir::new().unwrap();
+    write_pluginless_project(project.path());
+    let manifest = project.path().join("zup.toml");
+    let source = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        source.replace("x86_64-pc-windows-msvc", "aarch64-unknown-linux-gnu"),
+    )
+    .unwrap();
+    let result = run_pluginless_build(
+        project.path(),
+        &setup_runtime(),
+        "aarch64-unknown-linux-gnu",
+    );
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("unsupported backend"), "{stderr}");
     assert!(!project.path().join("Setup.exe").exists());
 }
 
@@ -395,12 +451,15 @@ schema = 1
 id = "com.example.portable"
 name = "Portable App"
 version = "1.2.3"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/PortableApp"
+user = "${location.user_data}/PortableApp"
 [[files]]
 source = "**/*"
 destination = "${install}"
@@ -426,7 +485,7 @@ destination = "${install}"
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let package = zup_bundle::EmbeddedBundle::open(output).unwrap();
+    let package = zup_windows::EmbeddedBundle::open(output).unwrap();
     assert_eq!(
         package.plan().installer.app.id.as_str(),
         "com.example.portable"
@@ -454,12 +513,15 @@ schema = 1
 id = "com.example.plugin-cli"
 name = "Plugin CLI"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/PluginCLI"
+user = "${location.user_data}/PluginCLI"
 [[files]]
 source = "**/*"
 destination = "${install}"
@@ -489,12 +551,15 @@ source = "plugins/helper.wasm"
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let package = zup_bundle::EmbeddedBundle::open(&output).unwrap();
+    let package = zup_windows::EmbeddedBundle::open(&output).unwrap();
     let id = zup_core::PluginId::new("helper").unwrap();
     let metadata = package.plugin_artifact(&id).unwrap();
-    assert_eq!(metadata.target, HOST_TARGET);
+    assert_eq!(
+        metadata.target,
+        zup_core::TargetTriple::parse(HOST_TARGET).unwrap()
+    );
     assert!(!package.plugin_aot(&id).unwrap().is_empty());
-    assert!(package.build_plan().unwrap().plugins.is_empty());
+    assert!(package.build_plan().unwrap().targets[0].plugins.is_empty());
     assert_eq!(package.plan().entries.len(), 1);
 }
 
@@ -514,12 +579,15 @@ schema = 1
 id = "com.example.source-plugin"
 name = "Source Plugin"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/SourcePlugin"
+user = "${location.user_data}/SourcePlugin"
 [[files]]
 source = "**/*"
 destination = "${install}"
@@ -561,12 +629,15 @@ schema = 1
 id = "{app_id}"
 name = "Zup E2E"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = {{ directory = "dist" }}
 [install]
 scope = "user"
 [install.directory]
-user = "${{known.local_app_data}}/Programs/{install_name}"
+user = "${{location.user_data}}/Programs/{install_name}"
 [[components]]
 id = "core"
 name = "Core"
@@ -638,19 +709,19 @@ component = "docs"
     let values = &registration.values;
     assert_eq!(
         values["DisplayName"],
-        zup_exec::UninstallEntryValue::String("Zup E2E".into())
+        zup_windows::AppsFeaturesValue::String("Zup E2E".into())
     );
     assert_eq!(
         values["DisplayVersion"],
-        zup_exec::UninstallEntryValue::String("1.0.0".into())
+        zup_windows::AppsFeaturesValue::String("1.0.0".into())
     );
     assert!(
-        matches!(values["EstimatedSize"], zup_exec::UninstallEntryValue::Dword(size) if size > 0)
+        matches!(values["EstimatedSize"], zup_windows::AppsFeaturesValue::Dword(size) if size > 0)
     );
-    let zup_exec::UninstallEntryValue::String(uninstall) = &values["UninstallString"] else {
+    let zup_windows::AppsFeaturesValue::String(uninstall) = &values["UninstallString"] else {
         panic!("UninstallString is not REG_SZ")
     };
-    let zup_exec::UninstallEntryValue::String(modify) = &values["ModifyPath"] else {
+    let zup_windows::AppsFeaturesValue::String(modify) = &values["ModifyPath"] else {
         panic!("ModifyPath is not REG_SZ")
     };
     assert!(uninstall.contains(&maintenance.to_string_lossy().to_string()));
@@ -705,7 +776,7 @@ fn uninstall_preserves_a_drifted_apps_and_features_entry() {
     fs::write(
         project.path().join("zup.toml"),
         format!(
-            "schema = 1\n[app]\nid = \"{app_id}\"\nname = \"ARP Drift\"\nversion = \"1.0.0\"\n[source]\ndirectory = \"dist\"\n[install]\nscope = \"user\"\n[install.directory]\nuser = \"${{known.local_app_data}}/Programs/{install_name}\"\n[[files]]\nsource = \"**/*\"\ndestination = \"${{install}}\"\n"
+            "schema = 1\n[app]\nid = \"{app_id}\"\nname = \"ARP Drift\"\nversion = \"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget = \"x86_64-pc-windows-msvc\"\nsource = {{ directory = \"dist\" }}\n[install]\nscope = \"user\"\n[install.directory]\nuser = \"${{location.user_data}}/Programs/{install_name}\"\n[[files]]\nsource = \"**/*\"\ndestination = \"${{install}}\"\n"
         ),
     )
     .unwrap();
@@ -762,7 +833,7 @@ fn uninstall_preserves_a_drifted_apps_and_features_entry() {
             .unwrap();
     assert_eq!(
         remaining.values["DisplayName"],
-        zup_exec::UninstallEntryValue::String("Changed outside zup".into())
+        zup_windows::AppsFeaturesValue::String("Changed outside zup".into())
     );
     assert!(!maintenance.exists());
     assert!(
@@ -802,7 +873,7 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
         fs::write(
             root.join("zup.toml"),
             format!(
-                "schema = 1\n[app]\nid = \"{app_id}\"\nname = \"Upgrade E2E\"\nversion = \"{version}\"\n[source]\ndirectory = \"dist\"\n[install]\nscope = \"user\"\n[install.directory]\nuser = \"${{known.local_app_data}}/Programs/{install_name}\"\n[[files]]\nsource = \"app.exe\"\ndestination = \"${{install}}\"\n{extra}"
+                "schema = 1\n[app]\nid = \"{app_id}\"\nname = \"Upgrade E2E\"\nversion = \"{version}\"\n[build]\n\n[build.targets.default]\ntarget = \"x86_64-pc-windows-msvc\"\nsource = {{ directory = \"dist\" }}\n[install]\nscope = \"user\"\n[install.directory]\nuser = \"${{location.user_data}}/Programs/{install_name}\"\n[[files]]\nsource = \"app.exe\"\ndestination = \"${{install}}\"\n{extra}"
             ),
         )
         .unwrap();
@@ -872,7 +943,7 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
             .unwrap();
     assert_eq!(
         registration.values["DisplayVersion"],
-        zup_exec::UninstallEntryValue::String("1.0.0".into())
+        zup_windows::AppsFeaturesValue::String("1.0.0".into())
     );
     fs::remove_dir(install.join("block.dat")).unwrap();
     assert!(run(&maintenance_v1, "repair").status.success());
@@ -898,7 +969,7 @@ fn failed_embedded_upgrade_keeps_previous_committed_maintenance_copy() {
             .unwrap();
     assert_eq!(
         registration.values["DisplayVersion"],
-        zup_exec::UninstallEntryValue::String("2.0.0".into())
+        zup_windows::AppsFeaturesValue::String("2.0.0".into())
     );
 }
 
@@ -915,12 +986,15 @@ schema = 1
 id = "com.example.plain-cli"
 name = "Plain CLI"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/PlainCLI"
+user = "${location.user_data}/PlainCLI"
 [[plugins]]
 id = "Helper"
 source = "plugins/one.wasm"
@@ -951,15 +1025,21 @@ fn corrupt_embedded_setup_does_not_fall_back_to_local_manifest() {
     let manifest_path = project.path().join("zup.toml");
     let source = fs::read_to_string(&manifest_path).unwrap();
     let parsed = zup_manifest::parse(&source).unwrap();
-    let installer = zup_manifest::parse_and_compile(&source).unwrap();
-    let build = zup_build::materialize(&manifest_path, &parsed, installer).unwrap();
-    let mut package = zup_bundle::BundleWriter::encode(&build, &[]).unwrap();
+    let overrides = zup_core::TargetOverrides::default();
+    let config = zup_manifest::select_targets(&parsed, &["default"], &overrides)
+        .unwrap()
+        .remove(0);
+    let installer = zup_manifest::compile(&parsed, &config, &overrides).unwrap();
+    let mut build =
+        zup_build::materialize(&manifest_path, &parsed, vec![(config, installer)]).unwrap();
+    let target = build.targets.pop().unwrap();
+    let mut package = zup_bundle::BundleWriter::encode(&target, &[]).unwrap();
     let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
     package[60 + metadata_len + 10] ^= 0x40;
     let package_path = project.path().join("corrupt.zupbundle");
     fs::write(&package_path, package).unwrap();
-    zup_bundle::embed_bundle_file(&setup_runtime(), &setup, &package_path).unwrap();
-    assert!(zup_bundle::EmbeddedBundle::open(&setup).is_err());
+    zup_windows::embed_bundle_file(&setup_runtime(), &setup, &package_path).unwrap();
+    assert!(zup_windows::EmbeddedBundle::open(&setup).is_err());
 
     fs::write(
         project.path().join("zup.toml"),
@@ -969,12 +1049,15 @@ schema = 1
 id = "com.example.local-manifest"
 name = "Local Manifest"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/LocalManifest"
+user = "${location.user_data}/LocalManifest"
 "#,
     )
     .unwrap();
@@ -991,6 +1074,8 @@ user = "${known.local_app_data}/LocalManifest"
 #[cfg(all(feature = "build", windows, target_arch = "x86_64"))]
 mod generated_file_lifecycle {
     use super::setup_runtime;
+    use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+    use wit_parser::Resolve;
 
     use std::{
         fs,
@@ -1000,15 +1085,14 @@ mod generated_file_lifecycle {
         time::Duration,
     };
 
-    use base64::Engine as _;
     use semver::Version;
     use tempfile::TempDir;
-    use zup_build::{BuildPlan, ResolvedPlugin};
+    use zup_build::{ResolvedPlugin, TargetBuildPlan};
     use zup_bundle::{BundleWriter, CompiledPluginArtifact, PluginArtifact};
     use zup_core::{
         App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
         Installer, NonEmptyString, PluginBinding, PluginId, RelativePath, ResourceKey,
-        SelectedScope, Sha256Digest, Template, hash_reader,
+        SelectedScope, Sha256Digest, TargetTriple, Template, hash_reader,
     };
     use zup_exec::OwnedResource;
     use zup_plugin_contract::{
@@ -1019,12 +1103,58 @@ mod generated_file_lifecycle {
 
     const PLUGIN_ID: &str = "configure";
     const SOURCE_BYTES: &[u8] = b"configure component source is build-time only";
-    const CONFIGURE_AOT: &str =
-        include_str!("../../zup-plugin-runtime/tests/fixtures/configure-plugin.aot.b64");
 
-    fn decoded_fixture() -> Vec<u8> {
-        base64::engine::general_purpose::STANDARD
-            .decode(CONFIGURE_AOT.trim())
+    fn decoded_fixture(app_id: &str, install_name: &str) -> Vec<u8> {
+        let contents_len = format!(
+            "app id: {app_id}\ninstall directory: ${{location.user_data}}/{install_name}\nselected components: core\n"
+        )
+        .len();
+        let wat = format!(
+            r#"(module
+            (type (func (param i32) (result i32)))
+            (type (func (param i32)))
+            (type (func (param i32 i32 i32 i32) (result i32)))
+            (type (func))
+            (memory (export "cm32p2_memory") 1)
+            (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
+                (i32.store (i32.const 1024) (i32.const 0))
+                (i32.store (i32.const 1028) (i32.const 2048))
+                (i32.store (i32.const 1032) (i32.const 1))
+                (i32.store (i32.const 2048) (i32.const 0))
+                (i32.store (i32.const 2052) (i32.const 5000))
+                (i32.store (i32.const 2056) (i32.const 28))
+                (i32.store (i32.const 2060) (i32.const 6000))
+                (i32.store (i32.const 2064) (i32.const {contents_len}))
+                (i32.const 1024)
+            )
+            (func (export "cm32p2|zup:plugin/planner@1|plan_post") (param i32))
+            (func (export "cm32p2_realloc") (param i32 i32 i32 i32) (result i32)
+                local.get 0
+            )
+            (func (export "cm32p2_initialize"))
+            (data (i32.const 5000) "${{install}}/plugin-config.txt")
+            (data (i32.const 6000) "app id: {app_id}\0ainstall directory: ${{location.user_data}}/{install_name}\0aselected components: core\0a")
+        )"#,
+        );
+        let mut resolve = Resolve::default();
+        let package = resolve
+            .push_str(
+                "zup-plugin.wit",
+                include_str!("../../../wit/zup-plugin.wit"),
+            )
+            .unwrap();
+        let world = resolve.select_world(&[package], Some("plugin")).unwrap();
+        let mut module = wat::parse_str(wat).unwrap();
+        embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
+        let component = ComponentEncoder::default()
+            .module(&module)
+            .unwrap()
+            .validate(true)
+            .encode()
+            .unwrap();
+        PluginEngine::new(HOST_TARGET)
+            .unwrap()
+            .precompile_component(&component)
             .unwrap()
     }
 
@@ -1033,11 +1163,12 @@ mod generated_file_lifecycle {
         app_id: &AppId,
         install_name: &str,
         source_path: &Path,
-    ) -> BuildPlan {
+    ) -> TargetBuildPlan {
         let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).unwrap();
-        BuildPlan {
+        TargetBuildPlan {
             installer: Installer {
                 ui: None,
+                target: TargetTriple::parse(HOST_TARGET).unwrap(),
                 frontend: Frontend::Gui,
                 app: App {
                     id: app_id.clone(),
@@ -1053,7 +1184,7 @@ mod generated_file_lifecycle {
                     scope: InstallScope::User,
                     directory: InstallDirectory {
                         user: Some(
-                            Template::parse(&format!("${{known.local_app_data}}/{install_name}"))
+                            Template::parse(&format!("${{location.user_data}}/{install_name}"))
                                 .unwrap(),
                         ),
                         machine: None,
@@ -1074,11 +1205,11 @@ mod generated_file_lifecycle {
                     when: None,
                 }],
                 files: Vec::new(),
-                shortcuts: Vec::new(),
+                launchers: Vec::new(),
                 path: Vec::new(),
                 services: Vec::new(),
                 protocols: Vec::new(),
-                file_types: Vec::new(),
+                file_associations: Vec::new(),
             },
             prerequisites: Vec::new(),
             plugins: vec![ResolvedPlugin {
@@ -1094,8 +1225,8 @@ mod generated_file_lifecycle {
         }
     }
 
-    fn artifact() -> CompiledPluginArtifact {
-        let bytes = decoded_fixture();
+    fn artifact(app_id: &str, install_name: &str) -> CompiledPluginArtifact {
+        let bytes = decoded_fixture(app_id, install_name);
         let engine = PluginEngine::new(HOST_TARGET).unwrap();
         engine.verify_precompiled(&bytes).unwrap();
         let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).unwrap();
@@ -1105,7 +1236,7 @@ mod generated_file_lifecycle {
                 plugin_id: PluginId::new(PLUGIN_ID).unwrap(),
                 source_size,
                 source_sha256,
-                target: HOST_TARGET.to_owned(),
+                target: TargetTriple::parse(HOST_TARGET).unwrap(),
                 wasmtime_version: WASMTIME_VERSION.to_owned(),
                 aot_format_version: AOT_FORMAT_VERSION,
                 plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -1123,22 +1254,28 @@ mod generated_file_lifecycle {
     fn write_setup(
         root: &Path,
         name: &str,
-        plan: &BuildPlan,
+        plan: &TargetBuildPlan,
         artifact: &CompiledPluginArtifact,
     ) -> PathBuf {
         let package = BundleWriter::encode(plan, std::slice::from_ref(artifact)).unwrap();
-        assert_eq!(u32::from_le_bytes(package[8..12].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_le_bytes(package[8..12].try_into().unwrap()),
+            zup_bundle::PACKAGE_SCHEMA
+        );
         let package_path = root.join(format!("{name}.zupbundle"));
         fs::write(&package_path, package).unwrap();
         let output = root.join(format!("{name}.exe"));
-        zup_bundle::embed_bundle_file(&setup_runtime(), &output, &package_path).unwrap();
-        let bundle = zup_bundle::EmbeddedBundle::open(&output).unwrap();
+        zup_windows::embed_bundle_file(&setup_runtime(), &output, &package_path).unwrap();
+        let bundle = zup_windows::EmbeddedBundle::open(&output).unwrap();
         let plugin_id = PluginId::new(PLUGIN_ID).unwrap();
         let metadata = bundle.plugin_artifact(&plugin_id).unwrap();
-        assert_eq!(metadata.target, HOST_TARGET);
+        assert_eq!(
+            metadata.target,
+            zup_core::TargetTriple::parse(HOST_TARGET).unwrap()
+        );
         assert_eq!(metadata.wasmtime_version, WASMTIME_VERSION);
         assert_eq!(bundle.plan().plugins.len(), 1);
-        assert!(bundle.build_plan().unwrap().plugins.is_empty());
+        assert!(bundle.build_plan().unwrap().targets[0].plugins.is_empty());
         output
     }
 
@@ -1170,7 +1307,8 @@ mod generated_file_lifecycle {
                 .ok()
                 .flatten()
                 .is_none();
-            if ledger_gone && !generated.exists() {
+            let maintenance_gone = !state.join("maintenance").join(app_id.as_str()).exists();
+            if ledger_gone && !generated.exists() && maintenance_gone {
                 return;
             }
             thread::sleep(Duration::from_millis(100));
@@ -1193,17 +1331,18 @@ mod generated_file_lifecycle {
         let app_id = AppId::new(&app_id_text).unwrap();
         let plan_v1 = make_plan("1.0.0", &app_id, &install_name, &source_path);
         let plan_v2 = make_plan("1.1.0", &app_id, &install_name, &source_path);
-        let artifact = artifact();
+        let artifact = artifact(&app_id_text, &install_name);
         let setup_v1 = write_setup(root.path(), "Setup-v1", &plan_v1, &artifact);
         let setup_v2 = write_setup(root.path(), "Setup-v2", &plan_v2, &artifact);
 
         fs::remove_file(&source_path).unwrap();
         assert!(!source_path.exists());
         assert!(
-            zup_bundle::EmbeddedBundle::open(&setup_v1)
+            zup_windows::EmbeddedBundle::open(&setup_v1)
                 .unwrap()
                 .build_plan()
                 .unwrap()
+                .targets[0]
                 .plugins
                 .is_empty()
         );
@@ -1211,7 +1350,7 @@ mod generated_file_lifecycle {
         let install = local_app_data.join(&install_name);
         let generated = install.join("plugin-config.txt");
         let expected = format!(
-            "app id: {app_id_text}\ninstall directory: ${{known.local_app_data}}/{install_name}\nselected components: core\n"
+            "app id: {app_id_text}\ninstall directory: ${{location.user_data}}/{install_name}\nselected components: core\n"
         );
         let maintenance_v1 = state
             .path()

@@ -1,63 +1,130 @@
 //! Project source-root resolution and file materialization.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use tracing::{debug, info, info_span};
 use walkdir::WalkDir;
-use zup_core::{FileMapping, Installer, PrerequisitePackage, RelativePath, Template, hash_reader};
+use zup_core::{
+    FileMapping, Installer, PrerequisitePackage, RelativePath, ResolvedTargetConfig, Template,
+    hash_reader,
+};
 use zup_manifest::Manifest;
 
 use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
-use crate::plan::{BuildPlan, ResolvedFile, ResolvedPrerequisite};
+use crate::plan::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
-use crate::windows::validate_windows_destination;
+use crate::source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
 
-/// Materialize installer sources into a deterministic build plan.
+/// Materialize selected target sources with [`PortableSourceFilePolicy`].
 ///
-/// `manifest_path` must point at the project's `zup.toml`. Source discovery is
-/// rooted at that file's directory and never depends on the process CWD.
-pub fn materialize(
+/// A build that must refuse host-specific indirections — a Windows build, where
+/// a reparse point can redirect a prerequisite read without presenting as a
+/// symlink — calls [`materialize_with_policy`] with a policy that can see them.
+pub fn materialize<S>(
     manifest_path: &Path,
     manifest: &Manifest,
-    installer: Installer,
-) -> Result<BuildPlan, BuildError> {
+    selected: S,
+) -> Result<BuildPlan, BuildError>
+where
+    S: AsRef<[(ResolvedTargetConfig, Installer)]>,
+{
+    materialize_with_policy(manifest_path, manifest, selected, &PortableSourceFilePolicy)
+}
+
+/// Materialize selected target sources into one deterministic aggregate plan.
+///
+/// `manifest_path` must point at the project's `zup.toml`. Each selected pair
+/// is validated before any source is accessed, then materialized from its own
+/// target source root. Every prerequisite source is inspected through `policy`.
+pub fn materialize_with_policy<S>(
+    manifest_path: &Path,
+    manifest: &Manifest,
+    selected: S,
+    policy: &dyn SourceFilePolicy,
+) -> Result<BuildPlan, BuildError>
+where
+    S: AsRef<[(ResolvedTargetConfig, Installer)]>,
+{
+    let selected = selected.as_ref();
+    validate_selection(selected)?;
+
     let project_root = project_root(manifest_path);
-    validate_plugin_declaration_count(manifest.plugins.len(), installer.plugins.len())?;
-    let mut installer = installer;
-    if let Some(updates) = &manifest.updates {
-        let root_path = project_root.join(&updates.root);
-        let root_file = File::open(&root_path).map_err(|source| BuildError::Io {
-            path: root_path.clone(),
-            source,
-        })?;
-        let mut trusted_root = Vec::new();
-        root_file
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut trusted_root)
-            .map_err(|source| BuildError::Io {
-                path: root_path.clone(),
-                source,
+    let mut selected = selected.to_vec();
+    selected.sort_by(|left, right| left.0.profile.cmp(&right.0.profile));
+
+    let mut targets = Vec::with_capacity(selected.len());
+    for (config, installer) in selected {
+        let profile = config.profile.to_string();
+        let target = materialize_target(&project_root, manifest, config, installer, policy)
+            .map_err(|source| BuildError::Target {
+                profile,
+                source: Box::new(source),
             })?;
-        if trusted_root.len() > 1024 * 1024 {
-            return Err(BuildError::UpdateRootTooLarge);
-        }
-        installer.updates = Some(zup_core::UpdateConfig {
-            repository: updates.repository.clone(),
-            channel: updates.channel.clone(),
-            trusted_root,
-        });
+        targets.push(target);
     }
-    let source_root = resolve_source_root(&project_root, &manifest.source.directory)?;
-    let plugins = resolve_plugins(&project_root, &manifest.plugins, &installer)?;
-    let (prerequisites, prerequisite_size) = resolve_prerequisites(&project_root, &installer)?;
+
+    Ok(BuildPlan { targets })
+}
+
+fn validate_selection(selected: &[(ResolvedTargetConfig, Installer)]) -> Result<(), BuildError> {
+    if selected.is_empty() {
+        return Err(BuildError::EmptyTargetSelection);
+    }
+
+    let mut profiles = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    for (config, installer) in selected {
+        if !profiles.insert(config.profile.clone()) {
+            return Err(BuildError::DuplicateTargetProfile {
+                profile: config.profile.to_string(),
+            });
+        }
+        if !targets.insert(config.target.clone()) {
+            return Err(BuildError::DuplicateTarget {
+                target: config.target.to_string(),
+            });
+        }
+        if config.target != installer.target {
+            return Err(BuildError::TargetMismatch {
+                profile: config.profile.to_string(),
+                config: config.target.to_string(),
+                installer: installer.target.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_target(
+    project_root: &Path,
+    manifest: &Manifest,
+    config: ResolvedTargetConfig,
+    mut installer: Installer,
+    policy: &dyn SourceFilePolicy,
+) -> Result<TargetBuildPlan, BuildError> {
+    let plugins = manifest
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.applies_to(&config.profile))
+        .map(|plugin| plugin.value.clone())
+        .collect::<Vec<_>>();
+    validate_plugin_declaration_count(plugins.len(), installer.plugins.len())?;
+    embed_update_root(project_root, manifest, &mut installer)?;
+
+    let source_root = resolve_source_root(project_root, &config.source.directory)?;
+    let plugins = resolve_plugins(project_root, &plugins, &installer)?;
+    let (prerequisites, prerequisite_size) =
+        resolve_prerequisites(project_root, &installer, policy)?;
 
     let span = info_span!(
         "materialize",
+        profile = %config.profile,
         project_root = %project_root.display(),
         source_root = %source_root.display()
     );
@@ -88,15 +155,15 @@ pub fn materialize(
     }
 
     resolved.sort_by(|a, b| {
-        BuildPlan::sort_key(a)
-            .cmp(&BuildPlan::sort_key(b))
+        TargetBuildPlan::sort_key(a)
+            .cmp(&TargetBuildPlan::sort_key(b))
             .then_with(|| a.source.cmp(&b.source))
     });
 
     let file_count = resolved.len();
     info!(file_count, total_size, "materialization complete");
 
-    Ok(BuildPlan {
+    Ok(TargetBuildPlan {
         installer,
         prerequisites,
         plugins,
@@ -106,9 +173,81 @@ pub fn materialize(
     })
 }
 
+fn embed_update_root(
+    project_root: &Path,
+    manifest: &Manifest,
+    installer: &mut Installer,
+) -> Result<(), BuildError> {
+    installer.updates = None;
+    let Some(updates) = &manifest.updates else {
+        return Ok(());
+    };
+    let Some(resolved) = resolve_update_root(project_root, manifest)? else {
+        return Ok(());
+    };
+    installer.updates = Some(zup_core::UpdateConfig {
+        repository: updates.repository.clone(),
+        channel: updates.channel.clone(),
+        trusted_root: resolved.bytes,
+    });
+    Ok(())
+}
+
+/// The trusted TUF root a build embeds, with the identity it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUpdateRoot {
+    /// Where the root was read from, resolved against the project root.
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub sha256: Sha256Digest,
+}
+
+/// The build-time limit for an embedded trusted update root.
+pub const MAX_UPDATE_ROOT_BYTES: usize = 1024 * 1024;
+
+/// Read `[updates].root` from the project, or `None` when updates are unconfigured.
+///
+/// Shared with readiness checks so `zup build` and preflight reports agree on
+/// what counts as a usable trusted root.
+pub fn resolve_update_root(
+    project_root: &Path,
+    manifest: &Manifest,
+) -> Result<Option<ResolvedUpdateRoot>, BuildError> {
+    let Some(updates) = &manifest.updates else {
+        return Ok(None);
+    };
+
+    let root_path = project_root.join(&updates.root);
+    let root_file = File::open(&root_path).map_err(|source| BuildError::Io {
+        path: root_path.clone(),
+        source,
+    })?;
+    let mut trusted_root = Vec::new();
+    root_file
+        .take(MAX_UPDATE_ROOT_BYTES as u64 + 1)
+        .read_to_end(&mut trusted_root)
+        .map_err(|source| BuildError::Io {
+            path: root_path.clone(),
+            source,
+        })?;
+    if trusted_root.len() > MAX_UPDATE_ROOT_BYTES {
+        return Err(BuildError::UpdateRootTooLarge);
+    }
+    let (_, sha256) = hash_reader(trusted_root.as_slice()).map_err(|source| BuildError::Io {
+        path: root_path.clone(),
+        source,
+    })?;
+    Ok(Some(ResolvedUpdateRoot {
+        path: root_path,
+        bytes: trusted_root,
+        sha256,
+    }))
+}
+
 fn resolve_prerequisites(
     project_root: &Path,
     installer: &Installer,
+    policy: &dyn SourceFilePolicy,
 ) -> Result<(Vec<ResolvedPrerequisite>, u64), BuildError> {
     let mut resolved = Vec::new();
     let mut total = 0u64;
@@ -128,7 +267,7 @@ fn resolve_prerequisites(
                         path: path.as_str().into(),
                     });
                 }
-                reject_prerequisite_reparse(&normalized, &prerequisite.id)?;
+                reject_linked_source(policy, &normalized, &prerequisite.id)?;
                 let metadata = fs::symlink_metadata(&normalized).map_err(|source| {
                     if source.kind() == std::io::ErrorKind::NotFound {
                         BuildError::PrerequisiteSource {
@@ -142,7 +281,7 @@ fn resolve_prerequisites(
                         }
                     }
                 })?;
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                if !metadata.is_file() {
                     return Err(BuildError::PrerequisiteSource {
                         id: prerequisite.id.to_string(),
                         path: normalized,
@@ -172,7 +311,8 @@ fn resolve_prerequisites(
     Ok((resolved, total))
 }
 
-fn project_root(manifest_path: &Path) -> PathBuf {
+/// The project directory that owns a manifest path.
+pub fn project_root(manifest_path: &Path) -> PathBuf {
     manifest_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -180,7 +320,8 @@ fn project_root(manifest_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<PathBuf, BuildError> {
+/// Resolve a target's declared source directory inside the project.
+pub fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<PathBuf, BuildError> {
     if directory.is_absolute() {
         return Err(BuildError::SourceEscapesProject {
             path: directory.to_path_buf(),
@@ -219,32 +360,26 @@ fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<PathBuf,
     Ok(normalized)
 }
 
-fn reject_prerequisite_reparse(
+/// Refuse a prerequisite source, or any directory above it, that `policy`
+/// reports as a link.
+///
+/// An ancestor that cannot be inspected is an `Io` error rather than a pass: a
+/// link behind an unreadable directory is still a link.
+fn reject_linked_source(
+    policy: &dyn SourceFilePolicy,
     path: &Path,
     id: &zup_core::PrerequisiteId,
 ) -> Result<(), BuildError> {
     let mut current = path.to_path_buf();
     loop {
-        if let Ok(metadata) = fs::symlink_metadata(&current) {
-            let reparse = if metadata.file_type().is_symlink() {
-                true
-            } else {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & 0x400 != 0
-                }
-                #[cfg(not(windows))]
-                {
-                    false
-                }
-            };
-            if reparse {
-                return Err(BuildError::PrerequisiteSource {
-                    id: id.to_string(),
-                    path: path.to_path_buf(),
-                });
-            }
+        if policy.is_link(&current).map_err(|source| BuildError::Io {
+            path: current.clone(),
+            source,
+        })? {
+            return Err(BuildError::PrerequisiteSource {
+                id: id.to_string(),
+                path: path.to_path_buf(),
+            });
         }
         let Some(parent) = current.parent() else {
             break;
@@ -315,7 +450,6 @@ fn expand_mapping(
                 reason: err.to_string(),
             })?;
         let destination = mapping.destination.join_relative(&suffix_path);
-        validate_windows_destination(&destination)?;
 
         let (size, sha256) = hash_file(&absolute)?;
         out.push(ResolvedFile {
@@ -449,7 +583,6 @@ fn hash_file(path: &Path) -> Result<(u64, Sha256Digest), BuildError> {
 
 fn detect_collisions(files: &[ResolvedFile]) -> Result<(), BuildError> {
     let mut exact: BTreeMap<String, usize> = BTreeMap::new();
-    let mut folded: BTreeMap<String, usize> = BTreeMap::new();
 
     for (index, file) in files.iter().enumerate() {
         let destination = file.destination.to_string();
@@ -463,17 +596,7 @@ fn detect_collisions(files: &[ResolvedFile]) -> Result<(), BuildError> {
             });
         }
 
-        let canonical = destination.to_lowercase();
-        if let Some(&prev) = folded.get(&canonical) {
-            return Err(BuildError::WindowsDestinationCollision {
-                first: files[prev].destination.to_string(),
-                second: destination,
-                canonical,
-            });
-        }
-
         exact.insert(destination, index);
-        folded.insert(canonical, index);
     }
 
     Ok(())

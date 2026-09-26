@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zup_core::TargetTriple;
 
 use crate::SessionId;
 
 /// IPC protocol version.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Maximum length-delimited frame size (bytes). Rejects malicious length prefixes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -17,8 +18,7 @@ pub const MAX_PAYLOAD_OVERLAY_PATH_BYTES: usize = 32 * 1024;
 
 /// Worker capability token for the file-transaction node set.
 pub const FILE_TRANSACTIONS_V1: &str = "file-transactions-v1";
-pub const MANAGED_INTEGRATIONS_V1: &str = "path-protocol-file-type-v1";
-pub const SHORTCUT_SERVICE_V1: &str = "shortcut-service-v1";
+pub const BACKEND_OPERATIONS_V1: &str = "backend-operations-v1";
 pub const LIFECYCLE_V1: &str = "owned-lifecycle-v1";
 pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 
@@ -54,6 +54,7 @@ pub enum Message {
 pub struct WorkerHello {
     pub protocol_version: u32,
     pub session_id: SessionId,
+    pub target: TargetTriple,
     pub worker_pid: u32,
     pub capabilities: Capabilities,
 }
@@ -63,6 +64,7 @@ pub struct WorkerHello {
 pub struct ParentHello {
     pub protocol_version: u32,
     pub session_id: SessionId,
+    pub target: TargetTriple,
     pub transaction_id: Uuid,
     /// Fingerprint the worker must independently re-validate.
     pub expected_plan_hash: String,
@@ -72,48 +74,16 @@ pub struct ParentHello {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Capabilities {
     pub file_transactions_v1: bool,
-    pub managed_integrations_v1: bool,
-    pub shortcut_service_v1: bool,
+    pub backend_operations_v1: bool,
     pub lifecycle_v1: bool,
     #[serde(default)]
     pub prerequisite_bootstrap_v1: bool,
 }
 
-impl Capabilities {
-    pub fn supported() -> Self {
-        Self {
-            file_transactions_v1: true,
-            managed_integrations_v1: true,
-            shortcut_service_v1: true,
-            lifecycle_v1: true,
-            prerequisite_bootstrap_v1: true,
-        }
-    }
-
-    pub fn has_file_transactions_v1(&self) -> bool {
-        self.file_transactions_v1
-    }
-
-    pub fn has_managed_integrations_v1(&self) -> bool {
-        self.managed_integrations_v1
-    }
-
-    pub fn has_shortcut_service_v1(&self) -> bool {
-        self.shortcut_service_v1
-    }
-
-    pub fn has_lifecycle_v1(&self) -> bool {
-        self.lifecycle_v1
-    }
-
-    pub fn has_prerequisite_bootstrap_v1(&self) -> bool {
-        self.prerequisite_bootstrap_v1
-    }
-}
-
 /// Execute exactly one transaction plan (already compiled).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteTransaction {
+    pub target: TargetTriple,
     /// Canonical JSON of `zup_transaction::TransactionPlan`.
     pub plan_json: String,
     /// SHA-256 hex of `plan_json` — must match launch-time `expected_plan_hash`.
@@ -134,6 +104,7 @@ pub struct ExecuteTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteBootstrap {
+    pub target: TargetTriple,
     pub bootstrap_json: String,
     pub bootstrap_hash: String,
     pub bootstrap_id: uuid::Uuid,
@@ -161,7 +132,7 @@ pub struct ProgressReport {
 #[serde(rename_all = "snake_case")]
 pub enum ProgressKind {
     PreflightStarted,
-    BlockingProcessesFound,
+    ResourceBlocked,
     StagingStarted,
     StagingProgress,
     OperationStarted,

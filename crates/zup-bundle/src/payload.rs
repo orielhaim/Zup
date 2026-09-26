@@ -1,6 +1,6 @@
 //! Portable payload content access.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
@@ -50,21 +50,21 @@ pub trait PayloadSource {
     ) -> Result<PayloadReader, PayloadError>;
 }
 
-/// Selects an embedded package for executable paths and a directory for
-/// developer workflows. Executable packages are fully verified on creation.
+/// Selects a standalone package for file paths and a directory for developer
+/// workflows. Package files are fully verified when the source is opened.
 pub enum AutoPayloadSource {
     Directory(DirectoryPayloadSource),
-    Bundle(super::BundlePayloadSource),
+    Package(super::PackagePayloadSource),
     Overlay(OverlayPayloadSource),
 }
 
 impl AutoPayloadSource {
-    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, super::BundleError> {
+    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, super::PackageError> {
         let path = path.into();
         let metadata = std::fs::metadata(&path)?;
         if metadata.is_file() {
-            let bundle = super::EmbeddedBundle::open(&path)?;
-            Ok(Self::Bundle(bundle.payload_source()))
+            let package = super::Package::open(&path)?;
+            Ok(Self::Package(package.payload_source()))
         } else {
             Ok(Self::Directory(DirectoryPayloadSource::new(path)))
         }
@@ -73,7 +73,7 @@ impl AutoPayloadSource {
     pub fn from_paths(
         payload_root: impl Into<PathBuf>,
         payload_overlay_root: Option<PathBuf>,
-    ) -> Result<Self, super::BundleError> {
+    ) -> Result<Self, super::PackageError> {
         let base = Self::from_path(payload_root)?;
         Ok(Self::Overlay(OverlayPayloadSource::new(
             base,
@@ -99,7 +99,7 @@ impl PayloadSource for AutoPayloadSource {
                 }
                 source.open(path, expected_sha256, expected_size)
             }
-            Self::Bundle(source) => {
+            Self::Package(source) => {
                 if is_plugin_payload_path(path) {
                     return Err(PayloadError::NotFound {
                         path: path.to_string(),
@@ -154,42 +154,12 @@ impl PayloadSource for OverlayPayloadSource {
 fn is_plugin_payload_path(path: &RelativePath) -> bool {
     path.components()
         .next()
-        .is_some_and(|component| component.eq_ignore_ascii_case(PLUGIN_PAYLOAD_ROOT))
+        .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)
 }
 
 /// Development/build payload provider rooted at a source tree.
 pub struct DirectoryPayloadSource {
     root: PathBuf,
-}
-
-fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_type().is_symlink()
-            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        metadata.file_type().is_symlink()
-    }
-}
-
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-#[cfg(windows)]
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-fn open_payload_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-    }
-    options.open(path)
 }
 
 impl DirectoryPayloadSource {
@@ -236,7 +206,7 @@ impl DirectoryPayloadSource {
                 }
             }
         })?;
-        if is_reparse_point(&metadata) || !metadata.is_dir() {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(PayloadError::NotRegular {
                 path: path.to_string(),
             });
@@ -258,7 +228,7 @@ impl DirectoryPayloadSource {
                     }
                 }
             })?;
-            if is_reparse_point(&metadata) || !metadata.is_dir() {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(PayloadError::NotRegular {
                     path: path.to_string(),
                 });
@@ -278,27 +248,24 @@ impl DirectoryPayloadSource {
     ) -> Result<PayloadReader, PayloadError> {
         let full = self.resolve(path)?;
         self.verify_parent_chain(path)?;
-        #[cfg(unix)]
-        {
-            let metadata = std::fs::symlink_metadata(&full).map_err(|source| {
-                if source.kind() == std::io::ErrorKind::NotFound {
-                    PayloadError::NotFound {
-                        path: path.to_string(),
-                    }
-                } else {
-                    PayloadError::Read {
-                        path: path.to_string(),
-                        source,
-                    }
-                }
-            })?;
-            if metadata.file_type().is_symlink() {
-                return Err(PayloadError::NotRegular {
+        let metadata = std::fs::symlink_metadata(&full).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                PayloadError::NotFound {
                     path: path.to_string(),
-                });
+                }
+            } else {
+                PayloadError::Read {
+                    path: path.to_string(),
+                    source,
+                }
             }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(PayloadError::NotRegular {
+                path: path.to_string(),
+            });
         }
-        let mut file = open_payload_file(&full).map_err(|source| {
+        let mut file = File::open(&full).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 PayloadError::NotFound {
                     path: path.to_string(),
@@ -314,7 +281,7 @@ impl DirectoryPayloadSource {
             path: path.to_string(),
             source,
         })?;
-        if is_reparse_point(&metadata) || !metadata.is_file() {
+        if !metadata.is_file() {
             return Err(PayloadError::NotRegular {
                 path: path.to_string(),
             });
@@ -363,6 +330,71 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn reserved_payload_root_uses_exact_portable_identity() {
+        assert!(is_plugin_payload_path(
+            &RelativePath::new("__zup_plugins__/generated.bin").unwrap()
+        ));
+        assert!(!is_plugin_payload_path(
+            &RelativePath::new("__ZUP_PLUGINS__/generated.bin").unwrap()
+        ));
+    }
+
+    #[test]
+    fn directory_source_confinement_and_verification_are_portable() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("payload.bin");
+        let bytes = b"verified payload";
+        std::fs::write(&path, bytes).unwrap();
+        let source = DirectoryPayloadSource::new(root.path());
+        let relative = RelativePath::new("payload.bin").unwrap();
+        let (size, digest) = hash_reader(&bytes[..]).unwrap();
+        let mut reader = source.open(&relative, &digest, size).unwrap();
+        let mut selected = Vec::new();
+        reader.read_to_end(&mut selected).unwrap();
+        assert_eq!(selected, bytes);
+        assert!(matches!(
+            source.open(&relative, &digest, size + 1),
+            Err(PayloadError::SizeMismatch { .. })
+        ));
+        let other = Sha256Digest::from_bytes([0; 32]);
+        assert!(matches!(
+            source.open(&relative, &other, size),
+            Err(PayloadError::DigestMismatch { .. })
+        ));
+        let escape = RelativePath::new("C:/outside.bin").unwrap();
+        assert!(matches!(
+            source.resolve(&escape),
+            Err(PayloadError::EscapesRoot { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_source_rejects_symlinked_files_and_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_path = outside.path().join("payload.bin");
+        std::fs::write(&outside_path, b"outside").unwrap();
+        let source = DirectoryPayloadSource::new(root.path());
+        let relative = RelativePath::new("payload.bin").unwrap();
+        let (size, digest) = hash_reader(&b"outside"[..]).unwrap();
+        symlink(&outside_path, root.path().join("payload.bin")).unwrap();
+        assert!(matches!(
+            source.open(&relative, &digest, size),
+            Err(PayloadError::NotRegular { .. })
+        ));
+        std::fs::remove_file(root.path().join("payload.bin")).unwrap();
+        symlink(outside.path(), root.path().join("nested")).unwrap();
+        let nested = RelativePath::new("nested/payload.bin").unwrap();
+        assert!(matches!(
+            source.open(&nested, &digest, size),
+            Err(PayloadError::NotRegular { .. })
+        ));
+    }
 
     #[test]
     fn returns_the_verified_handle_after_the_path_is_replaced() {

@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize, de::Error as _};
 use zup_core::{ComponentId, ResourceKey, SelectedScope};
 use zup_exec::{
-    ExecutionPlan, FileOperationKind, FileTypeOperationKind, PathOperationKind,
-    ProtocolOperationKind, ServiceOperationKind, ShortcutOperationKind,
+    ExecutionPlan, FileAssociationOperationKind, FileOperationKind, LauncherOperationKind,
+    PathOperationKind, ProtocolOperationKind, ServiceOperationKind,
 };
 use zup_plan::InstallPlan;
 
@@ -15,7 +15,7 @@ use zup_plan::InstallPlan;
 #[serde(rename_all = "snake_case")]
 pub enum ResourceCategory {
     Files,
-    Shortcuts,
+    Launchers,
     Path,
     Services,
     Protocols,
@@ -30,8 +30,8 @@ impl ResourceCategory {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Files => "Files",
-            Self::Shortcuts => "Shortcuts",
-            Self::Path => "PATH",
+            Self::Launchers => "Launchers",
+            Self::Path => "Search path",
             Self::Services => "Services",
             Self::Protocols => "Protocols",
             Self::FileAssociations => "File associations",
@@ -74,7 +74,8 @@ pub struct PlannedChange {
     pub label: String,
     pub location: Option<String>,
     pub scope: Option<SelectedScope>,
-    pub requires_elevation: bool,
+    /// True when this single change needs host-wide authority.
+    pub requires_authorization: bool,
     pub estimated_bytes: u64,
     pub component: Option<ComponentId>,
     pub technical_key: Option<String>,
@@ -122,7 +123,8 @@ pub struct PlanPreview {
     pub estimated_bytes: u64,
     #[serde(default)]
     pub download_bytes: u64,
-    pub requires_elevation: bool,
+    /// True when any change in this preview needs host-wide authority.
+    pub requires_authorization: bool,
     pub groups: Vec<ChangeGroup>,
     #[serde(default)]
     pub requirements: Vec<RequirementPresentation>,
@@ -143,26 +145,26 @@ impl PlanPreview {
                 label: file.source_relative.to_string(),
                 location: Some(file.destination.to_string()),
                 scope: Some(plan.scope),
-                requires_elevation: plan.summary.requires_elevation,
+                requires_authorization: file.privilege == zup_core::Privilege::System,
                 estimated_bytes: file.size,
                 component: None,
                 technical_key: Some(format!("{:?}", file.key)),
             });
         }
-        for shortcut in &plan.shortcuts {
+        for launcher in &plan.launchers {
             groups
-                .entry(ResourceCategory::Shortcuts)
+                .entry(ResourceCategory::Launchers)
                 .or_default()
                 .push(PlannedChange {
-                    category: ResourceCategory::Shortcuts,
+                    category: ResourceCategory::Launchers,
                     kind: ChangeKind::Create,
-                    label: shortcut.name.to_string(),
-                    location: Some(shortcut.target.to_string()),
+                    label: launcher.name.to_string(),
+                    location: Some(launcher.target.to_string()),
                     scope: Some(plan.scope),
-                    requires_elevation: false,
+                    requires_authorization: launcher.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
-                    technical_key: Some(format!("{:?}", shortcut.key)),
+                    technical_key: Some(format!("{:?}", launcher.key)),
                 });
         }
         for entry in &plan.path_entries {
@@ -172,10 +174,10 @@ impl PlanPreview {
                 .push(PlannedChange {
                     category: ResourceCategory::Path,
                     kind: ChangeKind::Create,
-                    label: "Add PATH entry".into(),
+                    label: "Add search-path entry".into(),
                     location: Some(entry.value.to_string()),
-                    scope: Some(plan.scope),
-                    requires_elevation: entry.privilege == zup_core::Privilege::Machine,
+                    scope: Some(entry.scope),
+                    requires_authorization: entry.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", entry.key)),
@@ -191,7 +193,7 @@ impl PlanPreview {
                     label: service.name.to_string(),
                     location: Some(service.binary.to_string()),
                     scope: Some(SelectedScope::Machine),
-                    requires_elevation: true,
+                    requires_authorization: service.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", service.key)),
@@ -206,27 +208,28 @@ impl PlanPreview {
                     kind: ChangeKind::Create,
                     label: format!("{}://", protocol.scheme),
                     location: Some(protocol.executable.to_string()),
-                    scope: Some(plan.scope),
-                    requires_elevation: protocol.privilege == zup_core::Privilege::Machine,
+                    scope: Some(protocol.scope),
+                    requires_authorization: protocol.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", protocol.key)),
                 });
         }
-        for file_type in &plan.file_types {
+        for file_association in &plan.file_associations {
             groups
                 .entry(ResourceCategory::FileAssociations)
                 .or_default()
                 .push(PlannedChange {
                     category: ResourceCategory::FileAssociations,
                     kind: ChangeKind::Create,
-                    label: format!("{} files", file_type.extension),
-                    location: Some(file_type.executable.to_string()),
-                    scope: Some(plan.scope),
-                    requires_elevation: file_type.privilege == zup_core::Privilege::Machine,
+                    label: format!("{} files", file_association.extension),
+                    location: Some(file_association.executable.to_string()),
+                    scope: Some(file_association.scope),
+                    requires_authorization: file_association.privilege
+                        == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
-                    technical_key: Some(format!("{:?}", file_type.key)),
+                    technical_key: Some(format!("{:?}", file_association.key)),
                 });
         }
         groups
@@ -238,7 +241,7 @@ impl PlanPreview {
                 label: "Register in Apps & Features".into(),
                 location: None,
                 scope: Some(plan.scope),
-                requires_elevation: plan.scope == SelectedScope::Machine,
+                requires_authorization: plan.summary.requires_authorization,
                 estimated_bytes: 0,
                 component: None,
                 technical_key: Some("uninstall_entry".into()),
@@ -251,7 +254,7 @@ impl PlanPreview {
             selected_components: plan.selected_components.clone(),
             estimated_bytes: plan.summary.install_bytes,
             download_bytes: plan.summary.download_bytes,
-            requires_elevation: plan.summary.requires_elevation,
+            requires_authorization: plan.summary.requires_authorization,
             groups: groups
                 .into_iter()
                 .map(|(category, changes)| ChangeGroup {
@@ -297,35 +300,35 @@ impl PlanPreview {
                 label: file.source_relative.to_string(),
                 location: Some(file.destination.to_string()),
                 scope: Some(scope),
-                requires_elevation: false,
+                requires_authorization: file.privilege == zup_core::Privilege::System,
                 estimated_bytes: file.expected_size,
                 component: None,
                 technical_key: Some(format!("{:?}", file.key)),
             });
         }
-        for shortcut in &plan.shortcuts {
-            let kind = match shortcut.kind {
-                ShortcutOperationKind::Create => ChangeKind::Create,
-                ShortcutOperationKind::UpdateOwned | ShortcutOperationKind::RestoreOwned => {
+        for launcher in &plan.launchers {
+            let kind = match launcher.kind {
+                LauncherOperationKind::Create => ChangeKind::Create,
+                LauncherOperationKind::UpdateOwned | LauncherOperationKind::RestoreOwned => {
                     ChangeKind::Update
                 }
-                ShortcutOperationKind::NoOp => ChangeKind::NoOp,
-                ShortcutOperationKind::Drift => ChangeKind::Drift,
-                ShortcutOperationKind::Conflict => ChangeKind::Conflict,
+                LauncherOperationKind::NoOp => ChangeKind::NoOp,
+                LauncherOperationKind::Drift => ChangeKind::Drift,
+                LauncherOperationKind::Conflict => ChangeKind::Conflict,
             };
             groups
-                .entry(ResourceCategory::Shortcuts)
+                .entry(ResourceCategory::Launchers)
                 .or_default()
                 .push(PlannedChange {
-                    category: ResourceCategory::Shortcuts,
+                    category: ResourceCategory::Launchers,
                     kind,
-                    label: shortcut.target.to_string(),
-                    location: Some(shortcut.link_path.to_string()),
+                    label: launcher.target.to_string(),
+                    location: Some(launcher.launcher_path.to_string()),
                     scope: Some(scope),
-                    requires_elevation: false,
+                    requires_authorization: launcher.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
-                    technical_key: Some(format!("{:?}", shortcut.key)),
+                    technical_key: Some(format!("{:?}", launcher.key)),
                 });
         }
         for entry in &plan.path_entries {
@@ -344,10 +347,10 @@ impl PlanPreview {
                 .push(PlannedChange {
                     category: ResourceCategory::Path,
                     kind,
-                    label: "PATH entry".into(),
+                    label: "Search-path entry".into(),
                     location: Some(entry.value.to_string()),
                     scope: Some(entry.scope),
-                    requires_elevation: entry.scope == SelectedScope::Machine,
+                    requires_authorization: entry.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", entry.key)),
@@ -376,7 +379,7 @@ impl PlanPreview {
                     },
                     location: None,
                     scope: Some(SelectedScope::Machine),
-                    requires_elevation: true,
+                    requires_authorization: service.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", service.key)),
@@ -401,21 +404,20 @@ impl PlanPreview {
                     label: format!("{}://", protocol.scheme),
                     location: None,
                     scope: Some(protocol.scope),
-                    requires_elevation: protocol.scope == SelectedScope::Machine,
+                    requires_authorization: protocol.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some(format!("{:?}", protocol.key)),
                 });
         }
-        for file_type in &plan.file_types {
-            let kind = match file_type.kind {
-                FileTypeOperationKind::Create => ChangeKind::Create,
-                FileTypeOperationKind::UpdateOwned | FileTypeOperationKind::RestoreOwned => {
-                    ChangeKind::Update
-                }
-                FileTypeOperationKind::NoOp => ChangeKind::NoOp,
-                FileTypeOperationKind::Drift => ChangeKind::Drift,
-                FileTypeOperationKind::Conflict => ChangeKind::Conflict,
+        for file_association in &plan.file_associations {
+            let kind = match file_association.kind {
+                FileAssociationOperationKind::Create => ChangeKind::Create,
+                FileAssociationOperationKind::UpdateOwned
+                | FileAssociationOperationKind::RestoreOwned => ChangeKind::Update,
+                FileAssociationOperationKind::NoOp => ChangeKind::NoOp,
+                FileAssociationOperationKind::Drift => ChangeKind::Drift,
+                FileAssociationOperationKind::Conflict => ChangeKind::Conflict,
             };
             groups
                 .entry(ResourceCategory::FileAssociations)
@@ -423,27 +425,29 @@ impl PlanPreview {
                 .push(PlannedChange {
                     category: ResourceCategory::FileAssociations,
                     kind,
-                    label: format!("{} files", file_type.extension),
+                    label: format!("{} files", file_association.extension),
                     location: None,
-                    scope: Some(file_type.scope),
-                    requires_elevation: file_type.scope == SelectedScope::Machine,
+                    scope: Some(file_association.scope),
+                    requires_authorization: file_association.privilege
+                        == zup_core::Privilege::System,
                     estimated_bytes: 0,
                     component: None,
-                    technical_key: Some(format!("{:?}", file_type.key)),
+                    technical_key: Some(format!("{:?}", file_association.key)),
                 });
         }
         for removal in &plan.removals {
             let category = match &removal.key {
                 ResourceKey::File { .. } => ResourceCategory::Files,
                 ResourceKey::Maintenance { .. } => ResourceCategory::Maintenance,
-                ResourceKey::Shortcut { .. } => ResourceCategory::Shortcuts,
+                ResourceKey::Launcher { .. } => ResourceCategory::Launchers,
                 ResourceKey::PathEntry { .. } => ResourceCategory::Path,
                 ResourceKey::Service { .. } => ResourceCategory::Services,
                 ResourceKey::Protocol { .. } => ResourceCategory::Protocols,
-                ResourceKey::FileType { .. } | ResourceKey::FileTypeExtension { .. } => {
+                ResourceKey::FileAssociation { .. }
+                | ResourceKey::FileAssociationExtension { .. } => {
                     ResourceCategory::FileAssociations
                 }
-                ResourceKey::UninstallEntry { .. } => ResourceCategory::AppsFeatures,
+                ResourceKey::Backend { .. } => ResourceCategory::AppsFeatures,
             };
             groups.entry(category).or_default().push(PlannedChange {
                 category,
@@ -455,31 +459,11 @@ impl PlanPreview {
                 label: "Remove managed resource".into(),
                 location: None,
                 scope: Some(removal.scope),
-                requires_elevation: removal.scope == SelectedScope::Machine,
+                requires_authorization: removal.privilege == zup_core::Privilege::System,
                 estimated_bytes: 0,
                 component: None,
                 technical_key: Some(format!("{:?}", removal.key)),
             });
-        }
-        if !plan.uninstall_entries.is_empty() {
-            groups
-                .entry(ResourceCategory::AppsFeatures)
-                .or_default()
-                .push(PlannedChange {
-                    category: ResourceCategory::AppsFeatures,
-                    kind: if plan.uninstall {
-                        ChangeKind::Remove
-                    } else {
-                        ChangeKind::Update
-                    },
-                    label: "Apps & Features registration".into(),
-                    location: None,
-                    scope: Some(scope),
-                    requires_elevation: scope == SelectedScope::Machine,
-                    estimated_bytes: 0,
-                    component: None,
-                    technical_key: Some("uninstall_entry".into()),
-                });
         }
         Self {
             application: String::new(),
@@ -489,7 +473,126 @@ impl PlanPreview {
             selected_components: plan.selected_components.clone(),
             estimated_bytes: plan.summary.write_bytes,
             download_bytes: 0,
-            requires_elevation: plan.summary.requires_elevation,
+            requires_authorization: plan.summary.requires_authorization,
+            groups: groups
+                .into_iter()
+                .map(|(category, changes)| ChangeGroup {
+                    category,
+                    title: category.title().into(),
+                    changes,
+                })
+                .collect(),
+            requirements: Vec::new(),
+        }
+    }
+
+    pub fn from_transaction_plan(
+        plan: &zup_transaction::TransactionPlan,
+        scope: SelectedScope,
+    ) -> Self {
+        let mut groups = BTreeMap::<ResourceCategory, Vec<PlannedChange>>::new();
+        let mut estimated_bytes = 0u64;
+        for node in &plan.nodes {
+            match &node.kind {
+                zup_transaction::NodeKind::FileMutation { key, delta } => {
+                    let category = if matches!(key, ResourceKey::Maintenance { .. }) {
+                        ResourceCategory::Maintenance
+                    } else {
+                        ResourceCategory::Files
+                    };
+                    let kind = match delta {
+                        zup_transaction::FileDelta::Create => ChangeKind::Create,
+                        zup_transaction::FileDelta::Replace
+                        | zup_transaction::FileDelta::RestoreOwned
+                        | zup_transaction::FileDelta::RepairOwned => ChangeKind::Update,
+                        zup_transaction::FileDelta::NoOp => ChangeKind::NoOp,
+                        zup_transaction::FileDelta::Drift => ChangeKind::Drift,
+                        zup_transaction::FileDelta::Conflict => ChangeKind::Conflict,
+                    };
+                    let size = node.meta.expected_size.unwrap_or(0);
+                    estimated_bytes = estimated_bytes.saturating_add(size);
+                    groups.entry(category).or_default().push(PlannedChange {
+                        category,
+                        kind,
+                        label: node
+                            .meta
+                            .source_relative
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| format!("{key:?}")),
+                        location: node
+                            .meta
+                            .source_relative
+                            .as_ref()
+                            .map(|_| format!("{key:?}")),
+                        scope: Some(scope),
+                        requires_authorization: node.meta.privilege
+                            == Some(zup_core::Privilege::System),
+                        estimated_bytes: size,
+                        component: None,
+                        technical_key: Some(format!("{key:?}")),
+                    });
+                }
+                zup_transaction::NodeKind::FileRemoval { key } => {
+                    let category = match key {
+                        ResourceKey::Maintenance { .. } => ResourceCategory::Maintenance,
+                        _ => ResourceCategory::Files,
+                    };
+                    groups.entry(category).or_default().push(PlannedChange {
+                        category,
+                        kind: ChangeKind::Remove,
+                        label: "Remove file".into(),
+                        location: Some(format!("{key:?}")),
+                        scope: Some(scope),
+                        requires_authorization: node.meta.privilege
+                            == Some(zup_core::Privilege::System),
+                        estimated_bytes: 0,
+                        component: None,
+                        technical_key: Some(format!("{key:?}")),
+                    });
+                }
+                zup_transaction::NodeKind::BackendOperation { key, .. }
+                | zup_transaction::NodeKind::BackendRemoval { key } => {
+                    groups
+                        .entry(ResourceCategory::AppsFeatures)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::AppsFeatures,
+                            kind: if matches!(
+                                node.kind,
+                                zup_transaction::NodeKind::BackendRemoval { .. }
+                            ) {
+                                ChangeKind::Remove
+                            } else {
+                                ChangeKind::Update
+                            },
+                            label: "Backend operation".into(),
+                            location: None,
+                            scope: Some(scope),
+                            requires_authorization: node.meta.privilege
+                                == Some(zup_core::Privilege::System),
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(format!("{key:?}")),
+                        });
+                }
+                zup_transaction::NodeKind::StageFile { .. }
+                | zup_transaction::NodeKind::Barrier => {}
+            }
+        }
+        Self {
+            application: String::new(),
+            version: String::new(),
+            scope,
+            install_directory: plan
+                .install_directory
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            selected_components: plan.selected_components.clone(),
+            estimated_bytes,
+            download_bytes: 0,
+            requires_authorization: plan.requires_authorization(),
             groups: groups
                 .into_iter()
                 .map(|(category, changes)| ChangeGroup {
@@ -542,8 +645,8 @@ impl PlanPreview {
         if self.download_bytes > 0 {
             let _ = writeln!(output, "Download: {}", format_bytes(self.download_bytes));
         }
-        if self.requires_elevation {
-            let _ = writeln!(output, "Elevation: requested");
+        if self.requires_authorization {
+            let _ = writeln!(output, "Authorization: system access required");
         }
         if !self.requirements.is_empty() {
             let _ = writeln!(output, "\nRequirements");
@@ -634,10 +737,10 @@ impl OperationPhase {
         } else if action.contains("verif") || action.contains("signature") {
             Self::Verify
         } else if action.contains("service")
-            || action.contains("shortcut")
+            || action.contains("launcher")
             || action.contains("path")
             || action.contains("protocol")
-            || action.contains("registry")
+            || action.contains("system")
             || action.contains("settings")
         {
             Self::System
@@ -727,13 +830,15 @@ impl DiagnosticPresentation {
             }
         } else if normalized.contains("permission")
             || normalized.contains("access")
+            || normalized.contains("authorization")
+            || normalized.contains("privilege")
             || normalized.contains("elevation")
         {
             Self {
                 kind: DiagnosticKind::Permission,
                 title: "Windows needs permission".into(),
                 meaning: "This operation includes a protected system change.".into(),
-                recovery: "Approve the elevation prompt, then choose Retry.".into(),
+                recovery: "Approve the Windows administrator prompt, then choose Retry.".into(),
                 technical_details: Some(message.into()),
             }
         } else {
@@ -779,7 +884,7 @@ pub enum ProcessOutcome {
     InvalidInvocation,
     Configuration,
     OwnershipConflict,
-    ElevationRequired,
+    AuthorizationRequired,
     VerificationFailure,
     RecoveryRequired,
     RebootRequired,
@@ -793,7 +898,7 @@ impl ProcessOutcome {
             Self::Cancelled => 2,
             Self::InvalidInvocation | Self::Configuration => 3,
             Self::OwnershipConflict => 4,
-            Self::ElevationRequired => 5,
+            Self::AuthorizationRequired => 5,
             Self::VerificationFailure => 6,
             Self::RecoveryRequired => 7,
             Self::RebootRequired => 3010,
@@ -808,11 +913,12 @@ impl ProcessOutcome {
             || normalized.contains("cancel was requested")
         {
             Self::Cancelled
-        } else if normalized.contains("elevation")
+        } else if normalized.contains("authorization")
+            || normalized.contains("elevation")
             || normalized.contains("privilege")
             || normalized.contains("administrator")
         {
-            Self::ElevationRequired
+            Self::AuthorizationRequired
         } else if normalized.contains("reboot")
             || normalized.contains("restart required")
             || normalized.contains("3010")
@@ -1062,7 +1168,7 @@ mod tests {
         assert_eq!(ProcessOutcome::Success.code(), 0);
         assert_eq!(ProcessOutcome::Cancelled.code(), 2);
         assert_eq!(ProcessOutcome::OwnershipConflict.code(), 4);
-        assert_eq!(ProcessOutcome::ElevationRequired.code(), 5);
+        assert_eq!(ProcessOutcome::AuthorizationRequired.code(), 5);
         assert_eq!(ProcessOutcome::VerificationFailure.code(), 6);
         assert_eq!(ProcessOutcome::RecoveryRequired.code(), 7);
         assert_eq!(

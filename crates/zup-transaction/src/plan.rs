@@ -1,9 +1,4 @@
-//! Transaction plan model and pure compilation from `ExecutionPlan`.
-//!
-//! The serialized model is ours. `petgraph` is used only internally for
-//! validation, topological ordering, and reverse rollback ordering.
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use miette::Diagnostic;
 use petgraph::algo::is_cyclic_directed;
@@ -11,26 +6,26 @@ use petgraph::graph::DiGraph;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_core::{Privilege, RelativePath, ResourceKey, Sha256Digest};
-use zup_exec::{
-    Delta, ExecutionPlan, FileTypeOperationKind, PathOperationKind, ProtocolOperationKind,
-    ServiceOperationKind, ShortcutOperationKind,
+use zup_core::{ComponentId, Privilege, RelativePath, ResourceKey, Sha256Digest, TargetTriple};
+use zup_platform::TargetPath;
+
+use crate::id::OperationId;
+use crate::input::{
+    BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
+    FileRemovalKind, FileWork, TransactionInput, TransactionInputError,
 };
 
-use crate::id::{
-    OperationId, file_kind_token, file_type_kind_token, path_kind_token, protocol_kind_token,
-    service_kind_token, shortcut_kind_token,
-};
-/// Errors produced while compiling an execution plan into a transaction plan.
+pub const TRANSACTION_PLAN_SCHEMA: u32 = 1;
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionPlanError {
-    #[error("execution plan contains unresolved conflict: {reason}")]
+    #[error("transaction input is invalid: {0}")]
+    #[diagnostic(code(zup_transaction::invalid_input))]
+    InvalidInput(#[from] TransactionInputError),
+
+    #[error("unresolved transaction conflict: {reason}")]
     #[diagnostic(code(zup_transaction::plan_conflict))]
     UnresolvedConflict { reason: String },
-
-    #[error("unsupported operation kind for `{key}`")]
-    #[diagnostic(code(zup_transaction::unsupported_operation))]
-    UnsupportedOperation { key: String },
 
     #[error("duplicate operation id `{id}`")]
     #[diagnostic(code(zup_transaction::duplicate_operation_id))]
@@ -47,9 +42,16 @@ pub enum TransactionPlanError {
     #[error("transaction graph contains a cycle")]
     #[diagnostic(code(zup_transaction::cycle))]
     Cycle,
+
+    #[error("invalid transaction node `{id}`: {reason}")]
+    #[diagnostic(code(zup_transaction::invalid_node))]
+    InvalidNode { id: String, reason: String },
+
+    #[error("invalid transaction execution or rollback order")]
+    #[diagnostic(code(zup_transaction::invalid_order))]
+    InvalidOrder,
 }
 
-/// Phase bucket used for deterministic ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -58,175 +60,345 @@ pub enum Phase {
     Preflight,
     CommitIntent,
     FileMutation,
-    ManagedIntegration,
+    Backend,
     Verify,
     Commit,
 }
 
-/// Kind of transaction node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum NodeKind {
-    /// Control barrier (begin, preflight, commit-intent, verify, commit).
     Barrier,
-    /// Stage a payload file before commit intent.
-    StageFile { key: ResourceKey },
-    /// Mutate a file (create/replace).
-    FileMutation { key: ResourceKey, delta: Delta },
-    /// Managed system integration (shortcut, path, service, protocol, file type).
-    ManagedIntegration {
+    StageFile {
         key: ResourceKey,
-        delta: Delta,
-        resource: ManagedResource,
     },
-    OwnedRemoval {
+    FileMutation {
         key: ResourceKey,
-        resource: ManagedResource,
+        delta: FileDelta,
+    },
+    FileRemoval {
+        key: ResourceKey,
+    },
+    BackendOperation {
+        key: ResourceKey,
+        intent: BackendOperationIntent,
+    },
+    BackendRemoval {
+        key: ResourceKey,
     },
 }
 
-/// Which managed resource family a node belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedResource {
-    File,
-    Shortcut,
-    PathEntry,
-    Service,
-    Protocol,
-    FileType,
-    UninstallEntry,
+impl NodeKind {
+    /// True for a control node that orders the plan without mutating.
+    pub fn is_barrier(&self) -> bool {
+        matches!(self, Self::Barrier)
+    }
+
+    /// True when the node changes installed state that must be observed
+    /// against its receipt before commit.
+    ///
+    /// Staged payloads are excluded: the file mutation that publishes them
+    /// verifies the same bytes at their destination, and the staged copy is
+    /// gone by then.
+    pub fn requires_verification(&self) -> bool {
+        matches!(
+            self,
+            Self::FileMutation { .. }
+                | Self::FileRemoval { .. }
+                | Self::BackendOperation { .. }
+                | Self::BackendRemoval { .. }
+        )
+    }
 }
 
-/// One executable (or barrier) transaction node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionNode {
     pub id: OperationId,
     pub phase: Phase,
     pub kind: NodeKind,
-    /// Declaration order within the source `ExecutionPlan`.
     pub declaration_order: u32,
-    /// Extra metadata needed later by executors (e.g. expected hash).
     pub meta: NodeMeta,
 }
 
-/// Executor-facing payload summary (no secrets).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NodeMeta {
     pub source_relative: Option<RelativePath>,
-    pub file_precondition: Option<zup_exec::FilePrecondition>,
+    pub file_precondition: Option<FilePrecondition>,
     pub expected_sha256: Option<Sha256Digest>,
     pub expected_size: Option<u64>,
     pub privilege: Option<Privilege>,
-    pub managed: Option<zup_exec::ManagedOperation>,
-    pub removal: Option<zup_exec::OwnedResource>,
-    pub removal_scope: Option<zup_core::SelectedScope>,
+    pub backend: Option<BackendOperation>,
+    pub removal: Option<FileRemoval>,
 }
 
-/// Directed dependency edge (`from` must complete before `to` starts).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dependency {
     pub from: OperationId,
     pub to: OperationId,
 }
 
-/// Audit-only counts of operations that need no mutation node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TransactionAudit {
     pub files_unchanged: usize,
-    pub shortcuts_unchanged: usize,
-    pub path_entries_present: usize,
-    pub services_unchanged: usize,
-    pub protocols_unchanged: usize,
-    pub file_types_unchanged: usize,
+    pub backend_unchanged: usize,
+    pub drifted_removals: usize,
     pub noop_total: usize,
 }
 
-/// Pure, deterministic transaction plan (no runtime identity).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionPlan {
-    pub selected_components: Vec<zup_core::ComponentId>,
-    #[serde(default)]
-    pub install_directory: Option<zup_platform::TargetPath>,
+    pub schema: u32,
+    pub target: TargetTriple,
+    pub selected_components: Vec<ComponentId>,
+    pub install_directory: Option<TargetPath>,
     pub uninstall: bool,
     pub retired_keys: Vec<ResourceKey>,
     pub nodes: Vec<TransactionNode>,
     pub dependencies: Vec<Dependency>,
     pub audit: TransactionAudit,
-    /// Deterministic execution order of mutating nodes (OperationIds).
     pub execution_order: Vec<OperationId>,
-    /// Deterministic reverse order used for rollback.
     pub rollback_order: Vec<OperationId>,
 }
 
 impl TransactionPlan {
-    /// Canonical deterministic fingerprint of the logical plan.
     pub fn fingerprint(&self) -> Sha256Digest {
-        let json = serde_json::to_vec(self).expect("plan serializes");
+        let json = serde_json::to_vec(self).expect("transaction plan serializes");
         let mut hasher = Sha256::new();
         hasher.update(&json);
         Sha256Digest::from_hasher(hasher)
     }
 
-    /// Debug DOT rendering of the logical graph (no Graphviz dependency).
-    pub fn to_dot(&self) -> String {
-        let mut out = String::from("digraph transaction {\n");
+    /// True when at least one node needs system authority.
+    ///
+    /// Authorization is read from each node, never from a scope, so a
+    /// per-user transaction that owns a host-wide service still reports true.
+    pub fn requires_authorization(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|node| node.meta.privilege == Some(Privilege::System))
+    }
+
+    pub fn total_work(&self) -> u64 {
+        self.nodes
+            .iter()
+            .map(|node| {
+                if matches!(
+                    node.kind,
+                    NodeKind::StageFile { .. } | NodeKind::FileMutation { .. }
+                ) {
+                    node.meta.expected_size.unwrap_or(1).max(1)
+                } else {
+                    1
+                }
+            })
+            .sum::<u64>()
+            .max(1)
+    }
+
+    pub fn validate(&self) -> Result<(), TransactionPlanError> {
+        if self.schema != TRANSACTION_PLAN_SCHEMA {
+            return Err(TransactionPlanError::InvalidNode {
+                id: "schema".into(),
+                reason: format!("unsupported transaction plan schema {}", self.schema),
+            });
+        }
+        if self
+            .install_directory
+            .as_ref()
+            .is_some_and(|directory| directory.target() != &self.target)
+        {
+            return Err(TransactionPlanError::InvalidNode {
+                id: "install_directory".into(),
+                reason: "target does not match the transaction".into(),
+            });
+        }
+        let mut ids = BTreeSet::new();
+        let mut retired = BTreeSet::new();
+        for key in &self.retired_keys {
+            if !retired.insert(key) {
+                return Err(TransactionPlanError::InvalidNode {
+                    id: format!("{key:?}"),
+                    reason: "retired key is duplicated".into(),
+                });
+            }
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if !ids.insert(node.id.clone()) {
+                return Err(TransactionPlanError::DuplicateOperationId {
+                    id: node.id.to_string(),
+                });
+            }
+            if node.declaration_order != (index as u32).saturating_add(1) {
+                return Err(TransactionPlanError::InvalidNode {
+                    id: node.id.to_string(),
+                    reason: "declaration order is not contiguous".into(),
+                });
+            }
+            let invalid = |reason: &str| TransactionPlanError::InvalidNode {
+                id: node.id.to_string(),
+                reason: reason.into(),
+            };
+            match &node.kind {
+                NodeKind::Barrier => {}
+                NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => {
+                    if node.meta.source_relative.is_none()
+                        || node.meta.file_precondition.is_none()
+                        || node.meta.expected_sha256.is_none()
+                        || node.meta.expected_size.is_none()
+                        || node.meta.privilege.is_none()
+                    {
+                        return Err(invalid("file metadata is incomplete"));
+                    }
+                }
+                NodeKind::FileRemoval { key } => {
+                    let Some(removal) = &node.meta.removal else {
+                        return Err(invalid("file removal metadata is missing"));
+                    };
+                    if removal.key != *key
+                        || !retired.contains(&key)
+                        || removal.destination.target() != &self.target
+                        || removal
+                            .created_directories
+                            .iter()
+                            .any(|directory| directory.target() != &self.target)
+                        || node.meta.privilege != Some(removal.privilege)
+                        || node.meta.backend.is_some()
+                    {
+                        return Err(invalid("file removal metadata is inconsistent"));
+                    }
+                }
+                NodeKind::BackendOperation { key, intent } => {
+                    let Some(operation) = &node.meta.backend else {
+                        return Err(invalid("backend operation metadata is missing"));
+                    };
+                    operation.validate()?;
+                    if operation.key != *key
+                        || operation.intent != *intent
+                        || *intent != BackendOperationIntent::Apply
+                        || node.meta.removal.is_some()
+                    {
+                        return Err(invalid("backend operation metadata is inconsistent"));
+                    }
+                }
+                NodeKind::BackendRemoval { key } => {
+                    let Some(operation) = &node.meta.backend else {
+                        return Err(invalid("backend removal metadata is missing"));
+                    };
+                    operation.validate()?;
+                    if operation.key != *key
+                        || operation.intent != BackendOperationIntent::Remove
+                        || !retired.contains(&key)
+                        || node.meta.removal.is_some()
+                    {
+                        return Err(invalid("backend removal metadata is inconsistent"));
+                    }
+                }
+            }
+        }
+        let mut graph = DiGraph::new();
+        let mut index = BTreeMap::new();
         for node in &self.nodes {
-            out.push_str(&format!(
+            index.insert(node.id.clone(), graph.add_node(()));
+        }
+        for edge in &self.dependencies {
+            if edge.from == edge.to {
+                return Err(TransactionPlanError::SelfDependency {
+                    id: edge.from.to_string(),
+                });
+            }
+            if !ids.contains(&edge.from) || !ids.contains(&edge.to) {
+                return Err(TransactionPlanError::UnknownDependency {
+                    id: edge.from.to_string(),
+                });
+            }
+            graph.add_edge(index[&edge.from], index[&edge.to], ());
+        }
+        if is_cyclic_directed(&graph) {
+            return Err(TransactionPlanError::Cycle);
+        }
+        Self::validate_order(&self.execution_order, &ids, &self.dependencies, false)?;
+        Self::validate_order(&self.rollback_order, &ids, &self.dependencies, true)?;
+        Ok(())
+    }
+
+    fn validate_order(
+        order: &[OperationId],
+        ids: &BTreeSet<OperationId>,
+        dependencies: &[Dependency],
+        reverse: bool,
+    ) -> Result<(), TransactionPlanError> {
+        if order.len() != ids.len() {
+            return Err(TransactionPlanError::InvalidOrder);
+        }
+        let mut seen = BTreeSet::new();
+        let mut positions = BTreeMap::new();
+        for (position, id) in order.iter().enumerate() {
+            if !ids.contains(id) || !seen.insert(id.clone()) {
+                return Err(TransactionPlanError::InvalidOrder);
+            }
+            positions.insert(id.clone(), position);
+        }
+        for dependency in dependencies {
+            let from = positions[&dependency.from];
+            let to = positions[&dependency.to];
+            if (!reverse && from >= to) || (reverse && from <= to) {
+                return Err(TransactionPlanError::InvalidOrder);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_dot(&self) -> String {
+        let mut output = String::from("digraph transaction {\n");
+        for node in &self.nodes {
+            output.push_str(&format!(
                 "  \"{}\" [label=\"{}\\n{:?}\"];\n",
                 node.id, node.id, node.phase
             ));
         }
-        for dep in &self.dependencies {
-            out.push_str(&format!("  \"{}\" -> \"{}\";\n", dep.from, dep.to));
+        for edge in &self.dependencies {
+            output.push_str(&format!("  \"{}\" -> \"{}\";\n", edge.from, edge.to));
         }
-        out.push_str("}\n");
-        out
+        output.push_str("}\n");
+        output
     }
 }
 
-/// Compile an `ExecutionPlan` into a `TransactionPlan`. Pure.
 pub fn compile_transaction(
-    execution: &ExecutionPlan,
+    input: &TransactionInput,
 ) -> Result<TransactionPlan, TransactionPlanError> {
-    reject_conflicts(execution)?;
+    input.validate()?;
+    reject_conflicts(input)?;
 
     let mut nodes = Vec::new();
     let mut audit = TransactionAudit::default();
     let mut order = 0u32;
-
     let push = |node: TransactionNode, order: &mut u32, nodes: &mut Vec<TransactionNode>| {
-        *order += 1;
+        *order = order.saturating_add(1);
         let mut node = node;
         node.declaration_order = *order;
         nodes.push(node);
     };
 
-    // Barriers
-    push(
-        barrier(OperationId::new(OperationId::BEGIN), Phase::Begin),
-        &mut order,
-        &mut nodes,
-    );
-
-    // Stage mutating files
+    push(barrier(OperationId::BEGIN), &mut order, &mut nodes);
     let mut stage_ids = Vec::new();
-    let mut file_mutation_ids = Vec::new();
-    for file in &execution.files {
-        match file.kind {
-            zup_exec::FileOperationKind::NoOp => {
+    let mut file_ids = Vec::new();
+    let mut file_ids_by_key = BTreeMap::new();
+    for file in &input.files {
+        match file.delta {
+            FileDelta::NoOp => {
                 audit.files_unchanged += 1;
                 audit.noop_total += 1;
             }
-            zup_exec::FileOperationKind::Conflict | zup_exec::FileOperationKind::Drift => {
+            FileDelta::Conflict | FileDelta::Drift => {
                 return Err(TransactionPlanError::UnresolvedConflict {
-                    reason: format!("file conflict on {:?}", file.key),
+                    reason: format!("file {:?}", file.key),
                 });
             }
-            kind @ (zup_exec::FileOperationKind::Create
-            | zup_exec::FileOperationKind::Replace
-            | zup_exec::FileOperationKind::RestoreOwned
-            | zup_exec::FileOperationKind::RepairOwned) => {
+            FileDelta::Create
+            | FileDelta::Replace
+            | FileDelta::RestoreOwned
+            | FileDelta::RepairOwned => {
                 let stage_id = OperationId::stage_file(&file.key);
                 push(
                     TransactionNode {
@@ -236,669 +408,269 @@ pub fn compile_transaction(
                             key: file.key.clone(),
                         },
                         declaration_order: 0,
-                        meta: NodeMeta {
-                            source_relative: Some(file.source_relative.clone()),
-                            file_precondition: Some(file.precondition),
-                            expected_sha256: Some(file.expected_sha256),
-                            expected_size: Some(file.expected_size),
-                            privilege: Some(zup_core::Privilege::User),
-                            managed: None,
-                            removal: None,
-                            removal_scope: None,
-                        },
+                        meta: file_meta(file),
                     },
                     &mut order,
                     &mut nodes,
                 );
                 stage_ids.push(stage_id);
-
-                let mut_id = OperationId::resource(file_kind_token(kind), &file.key);
+                let mutation_id = OperationId::resource(file_delta_token(file.delta), &file.key);
                 push(
                     TransactionNode {
-                        id: mut_id.clone(),
+                        id: mutation_id.clone(),
                         phase: Phase::FileMutation,
                         kind: NodeKind::FileMutation {
                             key: file.key.clone(),
-                            delta: match kind {
-                                zup_exec::FileOperationKind::Create => Delta::Create,
-                                zup_exec::FileOperationKind::RestoreOwned => Delta::RestoreOwned,
-                                zup_exec::FileOperationKind::RepairOwned => Delta::RepairOwned,
-                                _ => Delta::Replace,
-                            },
+                            delta: file.delta,
                         },
                         declaration_order: 0,
-                        meta: NodeMeta {
-                            source_relative: Some(file.source_relative.clone()),
-                            file_precondition: Some(file.precondition),
-                            expected_sha256: Some(file.expected_sha256),
-                            expected_size: Some(file.expected_size),
-                            privilege: Some(zup_core::Privilege::User),
-                            managed: None,
-                            removal: None,
-                            removal_scope: None,
-                        },
+                        meta: file_meta(file),
                     },
                     &mut order,
                     &mut nodes,
                 );
-                file_mutation_ids.push(mut_id);
+                file_ids_by_key.insert(file.key.clone(), mutation_id.clone());
+                file_ids.push(mutation_id);
             }
         }
     }
 
-    push(
-        barrier(OperationId::new(OperationId::PREFLIGHT), Phase::Preflight),
-        &mut order,
-        &mut nodes,
-    );
-    push(
-        barrier(
-            OperationId::new(OperationId::COMMIT_INTENT),
-            Phase::CommitIntent,
-        ),
-        &mut order,
-        &mut nodes,
-    );
+    push(barrier(OperationId::PREFLIGHT), &mut order, &mut nodes);
+    push(barrier(OperationId::COMMIT_INTENT), &mut order, &mut nodes);
 
-    // Managed integrations
-    let mut managed_ids = Vec::new();
-    for shortcut in &execution.shortcuts {
-        push_managed_shortcut(
-            shortcut,
-            &mut order,
-            &mut nodes,
-            &mut audit,
-            &mut managed_ids,
-        )?;
-    }
-    for path in &execution.path_entries {
-        push_managed_path(path, &mut order, &mut nodes, &mut audit, &mut managed_ids)?;
-    }
-    for service in &execution.services {
-        push_managed_service(
-            service,
-            &mut order,
-            &mut nodes,
-            &mut audit,
-            &mut managed_ids,
-        )?;
-    }
-    for protocol in &execution.protocols {
-        push_managed_protocol(
-            protocol,
-            &mut order,
-            &mut nodes,
-            &mut audit,
-            &mut managed_ids,
-        )?;
-    }
-    for file_type in &execution.file_types {
-        push_managed_file_type(
-            file_type,
-            &mut order,
-            &mut nodes,
-            &mut audit,
-            &mut managed_ids,
-        )?;
-    }
-    for entry in &execution.uninstall_entries {
-        let id = OperationId::resource("write_uninstall_entry", &entry.key);
+    let mut backend_ids = BTreeMap::new();
+    let mut backend_node_ids = Vec::new();
+    for operation in &input.backend_operations {
+        let id = OperationId::resource(
+            match operation.intent {
+                BackendOperationIntent::Apply => "backend_apply",
+                BackendOperationIntent::Remove => "backend_remove",
+            },
+            &operation.key,
+        );
+        backend_ids.insert(operation.key.clone(), id.clone());
+        let kind = match operation.intent {
+            BackendOperationIntent::Apply => NodeKind::BackendOperation {
+                key: operation.key.clone(),
+                intent: operation.intent,
+            },
+            BackendOperationIntent::Remove => NodeKind::BackendRemoval {
+                key: operation.key.clone(),
+            },
+        };
         push(
             TransactionNode {
                 id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::ManagedIntegration {
-                    key: entry.key.clone(),
-                    delta: if entry.previous.is_some() {
-                        Delta::Replace
-                    } else {
-                        Delta::Create
-                    },
-                    resource: ManagedResource::UninstallEntry,
-                },
+                phase: Phase::Backend,
+                kind,
                 declaration_order: 0,
                 meta: NodeMeta {
-                    managed: Some(zup_exec::ManagedOperation::UninstallEntry(entry.clone())),
+                    privilege: Some(operation.privilege),
+                    backend: Some(operation.clone()),
                     ..Default::default()
                 },
             },
             &mut order,
             &mut nodes,
         );
-        managed_ids.push(id);
+        backend_node_ids.push(id);
     }
 
-    let mut managed_removal_ids = Vec::new();
     let mut file_removal_ids = Vec::new();
-    for removal in &execution.removals {
-        if removal.kind == zup_exec::RemovalKind::Drift {
+    for removal in &input.removals {
+        if removal.kind == FileRemovalKind::Drift {
+            audit.drifted_removals += 1;
             continue;
         }
-        let resource = match &removal.owned {
-            zup_exec::OwnedResource::File { .. } => ManagedResource::File,
-            zup_exec::OwnedResource::Shortcut { .. } => ManagedResource::Shortcut,
-            zup_exec::OwnedResource::PathEntry { .. } => ManagedResource::PathEntry,
-            zup_exec::OwnedResource::Service { .. } => ManagedResource::Service,
-            zup_exec::OwnedResource::Protocol { .. } => ManagedResource::Protocol,
-            zup_exec::OwnedResource::ProgId { .. } | zup_exec::OwnedResource::Extension { .. } => {
-                ManagedResource::FileType
-            }
-            zup_exec::OwnedResource::UninstallEntry { .. } => ManagedResource::UninstallEntry,
-        };
-        let id = OperationId::resource("remove_owned", &removal.key);
+        let id = OperationId::resource("remove_file", &removal.key);
         push(
             TransactionNode {
                 id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::OwnedRemoval {
+                phase: Phase::Backend,
+                kind: NodeKind::FileRemoval {
                     key: removal.key.clone(),
-                    resource,
                 },
                 declaration_order: 0,
                 meta: NodeMeta {
-                    removal: Some(removal.owned.clone()),
-                    removal_scope: Some(removal.scope),
+                    privilege: Some(removal.privilege),
+                    removal: Some(removal.clone()),
                     ..Default::default()
                 },
             },
             &mut order,
             &mut nodes,
         );
-        if resource == ManagedResource::File {
-            file_removal_ids.push(id)
-        } else {
-            managed_removal_ids.push(id)
-        }
+        file_removal_ids.push(id);
     }
 
-    push(
-        barrier(OperationId::new(OperationId::VERIFY), Phase::Verify),
-        &mut order,
-        &mut nodes,
-    );
-    push(
-        barrier(OperationId::new(OperationId::COMMIT), Phase::Commit),
-        &mut order,
-        &mut nodes,
-    );
+    push(barrier(OperationId::VERIFY), &mut order, &mut nodes);
+    push(barrier(OperationId::COMMIT), &mut order, &mut nodes);
 
-    // Edges
-    let mut deps = Vec::new();
+    let mut edges = Vec::new();
     let begin = OperationId::new(OperationId::BEGIN);
     let preflight = OperationId::new(OperationId::PREFLIGHT);
     let commit_intent = OperationId::new(OperationId::COMMIT_INTENT);
     let verify = OperationId::new(OperationId::VERIFY);
     let commit = OperationId::new(OperationId::COMMIT);
-
     for stage in &stage_ids {
-        deps.push(Dependency {
+        edges.push(Dependency {
             from: begin.clone(),
             to: stage.clone(),
         });
-        deps.push(Dependency {
+        edges.push(Dependency {
             from: stage.clone(),
             to: preflight.clone(),
         });
     }
     if stage_ids.is_empty() {
-        deps.push(Dependency {
-            from: begin.clone(),
+        edges.push(Dependency {
+            from: begin,
             to: preflight.clone(),
         });
     }
-
-    deps.push(Dependency {
-        from: preflight.clone(),
+    edges.push(Dependency {
+        from: preflight,
         to: commit_intent.clone(),
     });
-
-    for file in &file_mutation_ids {
-        deps.push(Dependency {
+    for file in &file_ids {
+        edges.push(Dependency {
             from: commit_intent.clone(),
             to: file.clone(),
         });
     }
-
-    for managed in &managed_ids {
-        // Managed integrations depend on commit intent and on all file mutations
-        // (do not register an executable before its files exist).
-        deps.push(Dependency {
+    for backend in &backend_node_ids {
+        edges.push(Dependency {
             from: commit_intent.clone(),
-            to: managed.clone(),
+            to: backend.clone(),
         });
-        for file in &file_mutation_ids {
-            deps.push(Dependency {
+        for file in &file_ids {
+            edges.push(Dependency {
                 from: file.clone(),
-                to: managed.clone(),
+                to: backend.clone(),
             });
         }
     }
-    for managed in &managed_removal_ids {
-        deps.push(Dependency {
-            from: commit_intent.clone(),
-            to: managed.clone(),
-        });
-        for file in &file_mutation_ids {
-            deps.push(Dependency {
-                from: file.clone(),
-                to: managed.clone(),
+    for (index, operation) in input.backend_operations.iter().enumerate() {
+        let to = &backend_node_ids[index];
+        for dependency in &operation.dependencies {
+            let from = backend_ids
+                .get(dependency)
+                .or_else(|| file_ids_by_key.get(dependency));
+            let from = from.ok_or_else(|| TransactionPlanError::UnknownDependency {
+                id: format!("{:?}", dependency),
+            })?;
+            edges.push(Dependency {
+                from: from.clone(),
+                to: to.clone(),
             });
         }
     }
     for file in &file_removal_ids {
-        for predecessor in file_mutation_ids
+        for predecessor in file_ids
             .iter()
-            .chain(managed_ids.iter())
-            .chain(managed_removal_ids.iter())
+            .chain(backend_node_ids.iter())
             .chain(std::iter::once(&commit_intent))
         {
-            deps.push(Dependency {
+            edges.push(Dependency {
                 from: predecessor.clone(),
                 to: file.clone(),
             });
         }
     }
-    for extension in nodes.iter().filter(|node| {
-        matches!(
-            node.meta.removal,
-            Some(zup_exec::OwnedResource::Extension { .. })
-        )
-    }) {
-        let Some(zup_exec::OwnedResource::Extension {
-            installed: zup_exec::ExtensionState::Mapped { prog_id },
-            ..
-        }) = &extension.meta.removal
-        else {
-            continue;
-        };
-        if let Some(prog_id_node) = nodes.iter().find(|node| matches!((&node.kind, &node.meta.removal),
-            (NodeKind::OwnedRemoval { key: ResourceKey::FileType { id }, .. }, Some(zup_exec::OwnedResource::ProgId { .. })) if id.as_str() == prog_id))
-        {
-            deps.push(Dependency { from: extension.id.clone(), to: prog_id_node.id.clone() });
-        }
-    }
-
-    for file_type in &execution.file_types {
-        let prog_id = nodes.iter().find(|node| matches!(&node.meta.managed, Some(zup_exec::ManagedOperation::ProgId(op)) if op.key == file_type.key));
-        let extension = nodes.iter().find(|node| matches!(&node.meta.managed, Some(zup_exec::ManagedOperation::Extension(op)) if op.key == file_type.key));
-        if let (Some(prog_id), Some(extension)) = (prog_id, extension) {
-            deps.push(Dependency {
-                from: prog_id.id.clone(),
-                to: extension.id.clone(),
-            });
-        }
-    }
-
-    // Verify after all mutations; commit after verify.
-    for tail in file_mutation_ids
+    let tails = file_ids
         .iter()
-        .chain(managed_ids.iter())
-        .chain(managed_removal_ids.iter())
-        .chain(file_removal_ids.iter())
-    {
-        deps.push(Dependency {
+        .chain(backend_node_ids.iter())
+        .chain(file_removal_ids.iter());
+    for tail in tails {
+        edges.push(Dependency {
             from: tail.clone(),
             to: verify.clone(),
         });
     }
-    if file_mutation_ids.is_empty()
-        && managed_ids.is_empty()
-        && managed_removal_ids.is_empty()
-        && file_removal_ids.is_empty()
-    {
-        deps.push(Dependency {
-            from: commit_intent.clone(),
+    if file_ids.is_empty() && backend_node_ids.is_empty() && file_removal_ids.is_empty() {
+        edges.push(Dependency {
+            from: commit_intent,
             to: verify.clone(),
         });
     }
-    deps.push(Dependency {
-        from: verify.clone(),
-        to: commit.clone(),
+    edges.push(Dependency {
+        from: verify,
+        to: commit,
     });
 
-    validate_graph(&nodes, &deps)?;
-
-    let execution_order = topological_ids(&nodes, &deps, false)?;
-    let rollback_order = topological_ids(&nodes, &deps, true)?;
-
-    Ok(TransactionPlan {
-        selected_components: execution.selected_components.clone(),
-        install_directory: execution.install_directory.clone(),
-        uninstall: execution.uninstall,
-        retired_keys: execution.removals.iter().map(|op| op.key.clone()).collect(),
+    validate_graph(&nodes, &edges)?;
+    let execution_order = topological_ids(&nodes, &edges, false)?;
+    let rollback_order = topological_ids(&nodes, &edges, true)?;
+    let plan = TransactionPlan {
+        schema: TRANSACTION_PLAN_SCHEMA,
+        target: input.target.clone(),
+        selected_components: input.selected_components.clone(),
+        install_directory: input.install_directory.clone(),
+        uninstall: input.uninstall,
+        retired_keys: input.retired_keys.clone(),
         nodes,
-        dependencies: deps,
+        dependencies: edges,
         audit,
         execution_order,
         rollback_order,
-    })
+    };
+    plan.validate()?;
+    Ok(plan)
 }
 
-fn barrier(id: OperationId, phase: Phase) -> TransactionNode {
+fn barrier(id: &'static str) -> TransactionNode {
     TransactionNode {
-        id,
-        phase,
+        id: OperationId::new(id),
+        phase: match id {
+            OperationId::BEGIN => Phase::Begin,
+            OperationId::PREFLIGHT => Phase::Preflight,
+            OperationId::COMMIT_INTENT => Phase::CommitIntent,
+            OperationId::VERIFY => Phase::Verify,
+            _ => Phase::Commit,
+        },
         kind: NodeKind::Barrier,
         declaration_order: 0,
         meta: NodeMeta::default(),
     }
 }
 
-fn reject_conflicts(execution: &ExecutionPlan) -> Result<(), TransactionPlanError> {
-    fn check(has_conflict: bool, what: &str) -> Result<(), TransactionPlanError> {
-        if has_conflict {
-            Err(TransactionPlanError::UnresolvedConflict {
-                reason: what.to_owned(),
-            })
-        } else {
-            Ok(())
-        }
+fn file_meta(file: &FileWork) -> NodeMeta {
+    NodeMeta {
+        source_relative: Some(file.source_relative.clone()),
+        file_precondition: Some(file.precondition),
+        expected_sha256: Some(file.expected_sha256),
+        expected_size: Some(file.expected_size),
+        privilege: Some(file.privilege),
+        ..Default::default()
     }
-
-    for f in &execution.files {
-        check(f.conflict.is_some(), "file")?;
-    }
-    for s in &execution.shortcuts {
-        check(s.conflict.is_some(), "shortcut")?;
-    }
-    for p in &execution.path_entries {
-        check(p.conflict.is_some(), "path entry")?;
-    }
-    for s in &execution.services {
-        check(s.conflict.is_some(), "service")?;
-    }
-    for p in &execution.protocols {
-        check(p.conflict.is_some(), "protocol")?;
-    }
-    for f in &execution.file_types {
-        check(f.conflict.is_some(), "file type")?;
-    }
-    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_managed_shortcut(
-    op: &zup_exec::ShortcutOperation,
-    order: &mut u32,
-    nodes: &mut Vec<TransactionNode>,
-    audit: &mut TransactionAudit,
-    managed_ids: &mut Vec<OperationId>,
-) -> Result<(), TransactionPlanError> {
-    match op.kind {
-        ShortcutOperationKind::NoOp => {
-            audit.shortcuts_unchanged += 1;
-            audit.noop_total += 1;
-        }
-        ShortcutOperationKind::Conflict | ShortcutOperationKind::Drift => {
+fn reject_conflicts(input: &TransactionInput) -> Result<(), TransactionPlanError> {
+    for file in &input.files {
+        if matches!(file.delta, FileDelta::Conflict | FileDelta::Drift) {
             return Err(TransactionPlanError::UnresolvedConflict {
-                reason: "shortcut".into(),
+                reason: format!("file {:?}", file.key),
             });
-        }
-        kind @ (ShortcutOperationKind::Create
-        | ShortcutOperationKind::UpdateOwned
-        | ShortcutOperationKind::RestoreOwned) => {
-            let id = OperationId::resource(shortcut_kind_token(kind), &op.key);
-            nodes.push(TransactionNode {
-                id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::ManagedIntegration {
-                    key: op.key.clone(),
-                    delta: match kind {
-                        ShortcutOperationKind::Create => Delta::Create,
-                        ShortcutOperationKind::RestoreOwned => Delta::RestoreOwned,
-                        _ => Delta::Replace,
-                    },
-                    resource: ManagedResource::Shortcut,
-                },
-                declaration_order: *order,
-                meta: NodeMeta {
-                    managed: Some(zup_exec::ManagedOperation::Shortcut(op.clone())),
-                    ..Default::default()
-                },
-            });
-            *order += 1;
-            managed_ids.push(id);
         }
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_managed_path(
-    op: &zup_exec::PathOperation,
-    order: &mut u32,
-    nodes: &mut Vec<TransactionNode>,
-    audit: &mut TransactionAudit,
-    managed_ids: &mut Vec<OperationId>,
-) -> Result<(), TransactionPlanError> {
-    match op.kind {
-        PathOperationKind::Present => {
-            audit.path_entries_present += 1;
-            audit.noop_total += 1;
-        }
-        PathOperationKind::Conflict | PathOperationKind::Drift => {
-            return Err(TransactionPlanError::UnresolvedConflict {
-                reason: "path".into(),
-            });
-        }
-        kind @ (PathOperationKind::Add
-        | PathOperationKind::UpdateOwned
-        | PathOperationKind::RestoreOwned) => {
-            let id = OperationId::resource(path_kind_token(kind), &op.key);
-            nodes.push(TransactionNode {
-                id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::ManagedIntegration {
-                    key: op.key.clone(),
-                    delta: match kind {
-                        PathOperationKind::Add => Delta::Create,
-                        PathOperationKind::RestoreOwned => Delta::RestoreOwned,
-                        _ => Delta::Replace,
-                    },
-                    resource: ManagedResource::PathEntry,
-                },
-                declaration_order: *order,
-                meta: NodeMeta {
-                    managed: Some(zup_exec::ManagedOperation::Path(op.clone())),
-                    ..Default::default()
-                },
-            });
-            *order += 1;
-            managed_ids.push(id);
-        }
+fn file_delta_token(delta: FileDelta) -> &'static str {
+    match delta {
+        FileDelta::Create => "file_create",
+        FileDelta::Replace => "file_replace",
+        FileDelta::RestoreOwned => "file_restore_owned",
+        FileDelta::RepairOwned => "file_repair_owned",
+        FileDelta::NoOp => "file_noop",
+        FileDelta::Conflict => "file_conflict",
+        FileDelta::Drift => "file_drift",
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_managed_service(
-    op: &zup_exec::ServiceOperation,
-    order: &mut u32,
-    nodes: &mut Vec<TransactionNode>,
-    audit: &mut TransactionAudit,
-    managed_ids: &mut Vec<OperationId>,
-) -> Result<(), TransactionPlanError> {
-    match op.kind {
-        ServiceOperationKind::NoOp => {
-            audit.services_unchanged += 1;
-            audit.noop_total += 1;
-        }
-        ServiceOperationKind::Conflict | ServiceOperationKind::Drift => {
-            return Err(TransactionPlanError::UnresolvedConflict {
-                reason: "service".into(),
-            });
-        }
-        kind @ (ServiceOperationKind::Create
-        | ServiceOperationKind::UpdateOwned
-        | ServiceOperationKind::RestoreOwned) => {
-            let id = OperationId::resource(service_kind_token(kind), &op.key);
-            nodes.push(TransactionNode {
-                id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::ManagedIntegration {
-                    key: op.key.clone(),
-                    delta: match kind {
-                        ServiceOperationKind::Create => Delta::Create,
-                        ServiceOperationKind::RestoreOwned => Delta::RestoreOwned,
-                        _ => Delta::Replace,
-                    },
-                    resource: ManagedResource::Service,
-                },
-                declaration_order: *order,
-                meta: NodeMeta {
-                    managed: Some(zup_exec::ManagedOperation::Service(op.clone())),
-                    ..Default::default()
-                },
-            });
-            *order += 1;
-            managed_ids.push(id);
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_managed_protocol(
-    op: &zup_exec::ProtocolOperation,
-    order: &mut u32,
-    nodes: &mut Vec<TransactionNode>,
-    audit: &mut TransactionAudit,
-    managed_ids: &mut Vec<OperationId>,
-) -> Result<(), TransactionPlanError> {
-    match op.kind {
-        ProtocolOperationKind::NoOp => {
-            audit.protocols_unchanged += 1;
-            audit.noop_total += 1;
-        }
-        ProtocolOperationKind::Conflict | ProtocolOperationKind::Drift => {
-            return Err(TransactionPlanError::UnresolvedConflict {
-                reason: "protocol".into(),
-            });
-        }
-        kind @ (ProtocolOperationKind::Create
-        | ProtocolOperationKind::UpdateOwned
-        | ProtocolOperationKind::RestoreOwned) => {
-            let id = OperationId::resource(protocol_kind_token(kind), &op.key);
-            nodes.push(TransactionNode {
-                id: id.clone(),
-                phase: Phase::ManagedIntegration,
-                kind: NodeKind::ManagedIntegration {
-                    key: op.key.clone(),
-                    delta: match kind {
-                        ProtocolOperationKind::Create => Delta::Create,
-                        ProtocolOperationKind::RestoreOwned => Delta::RestoreOwned,
-                        _ => Delta::Replace,
-                    },
-                    resource: ManagedResource::Protocol,
-                },
-                declaration_order: *order,
-                meta: NodeMeta {
-                    managed: Some(zup_exec::ManagedOperation::Protocol(op.clone())),
-                    ..Default::default()
-                },
-            });
-            *order += 1;
-            managed_ids.push(id);
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_managed_file_type(
-    op: &zup_exec::FileTypeOperation,
-    order: &mut u32,
-    nodes: &mut Vec<TransactionNode>,
-    audit: &mut TransactionAudit,
-    managed_ids: &mut Vec<OperationId>,
-) -> Result<(), TransactionPlanError> {
-    for kind in [op.prog_id_kind, op.extension_kind] {
-        if matches!(
-            kind,
-            FileTypeOperationKind::Conflict | FileTypeOperationKind::Drift
-        ) {
-            return Err(TransactionPlanError::UnresolvedConflict {
-                reason: "file type".into(),
-            });
-        }
-    }
-    if op.prog_id_kind == FileTypeOperationKind::NoOp
-        && op.extension_kind == FileTypeOperationKind::NoOp
-    {
-        audit.file_types_unchanged += 1;
-        audit.noop_total += 1;
-        return Ok(());
-    }
-    if matches!(
-        op.prog_id_kind,
-        FileTypeOperationKind::Create
-            | FileTypeOperationKind::UpdateOwned
-            | FileTypeOperationKind::RestoreOwned
-    ) {
-        let kind = op.prog_id_kind;
-        let prog_id = OperationId::resource(file_type_kind_token(kind), &op.key);
-        nodes.push(TransactionNode {
-            id: prog_id.clone(),
-            phase: Phase::ManagedIntegration,
-            kind: NodeKind::ManagedIntegration {
-                key: op.key.clone(),
-                delta: match kind {
-                    FileTypeOperationKind::Create => Delta::Create,
-                    FileTypeOperationKind::RestoreOwned => Delta::RestoreOwned,
-                    _ => Delta::Replace,
-                },
-                resource: ManagedResource::FileType,
-            },
-            declaration_order: *order,
-            meta: NodeMeta {
-                managed: Some(zup_exec::ManagedOperation::ProgId(op.clone())),
-                ..Default::default()
-            },
-        });
-        *order += 1;
-        managed_ids.push(prog_id);
-    }
-    if matches!(
-        op.extension_kind,
-        FileTypeOperationKind::Create
-            | FileTypeOperationKind::UpdateOwned
-            | FileTypeOperationKind::RestoreOwned
-    ) {
-        let kind = op.extension_kind;
-        let extension = zup_core::FileExtension::new(&op.extension).map_err(|_| {
-            TransactionPlanError::UnsupportedOperation {
-                key: op.extension.clone(),
-            }
-        })?;
-        let key = ResourceKey::FileTypeExtension { extension };
-        let extension_id = OperationId::resource(file_type_kind_token(kind), &key);
-        nodes.push(TransactionNode {
-            id: extension_id.clone(),
-            phase: Phase::ManagedIntegration,
-            kind: NodeKind::ManagedIntegration {
-                key,
-                delta: match kind {
-                    FileTypeOperationKind::Create => Delta::Create,
-                    FileTypeOperationKind::RestoreOwned => Delta::RestoreOwned,
-                    _ => Delta::Replace,
-                },
-                resource: ManagedResource::FileType,
-            },
-            declaration_order: *order,
-            meta: NodeMeta {
-                managed: Some(zup_exec::ManagedOperation::Extension(op.clone())),
-                ..Default::default()
-            },
-        });
-        *order += 1;
-        managed_ids.push(extension_id);
-    }
-    Ok(())
 }
 
 fn validate_graph(
     nodes: &[TransactionNode],
-    deps: &[Dependency],
+    dependencies: &[Dependency],
 ) -> Result<(), TransactionPlanError> {
     let mut ids = BTreeMap::new();
     for node in nodes {
@@ -908,31 +680,25 @@ fn validate_graph(
             });
         }
     }
-    for dep in deps {
-        if dep.from == dep.to {
+    for dependency in dependencies {
+        if dependency.from == dependency.to {
             return Err(TransactionPlanError::SelfDependency {
-                id: dep.from.to_string(),
+                id: dependency.from.to_string(),
             });
         }
-        if !ids.contains_key(&dep.from) {
+        if !ids.contains_key(&dependency.from) || !ids.contains_key(&dependency.to) {
             return Err(TransactionPlanError::UnknownDependency {
-                id: dep.from.to_string(),
-            });
-        }
-        if !ids.contains_key(&dep.to) {
-            return Err(TransactionPlanError::UnknownDependency {
-                id: dep.to.to_string(),
+                id: dependency.from.to_string(),
             });
         }
     }
-
-    let mut graph: DiGraph<(), ()> = DiGraph::new();
-    let mut index = BTreeMap::new();
+    let mut graph = DiGraph::new();
+    let mut indices = BTreeMap::new();
     for node in nodes {
-        index.insert(node.id.clone(), graph.add_node(()));
+        indices.insert(node.id.clone(), graph.add_node(()));
     }
-    for dep in deps {
-        graph.add_edge(index[&dep.from], index[&dep.to], ());
+    for dependency in dependencies {
+        graph.add_edge(indices[&dependency.from], indices[&dependency.to], ());
     }
     if is_cyclic_directed(&graph) {
         return Err(TransactionPlanError::Cycle);
@@ -942,19 +708,19 @@ fn validate_graph(
 
 fn topological_ids(
     nodes: &[TransactionNode],
-    deps: &[Dependency],
+    dependencies: &[Dependency],
     reverse: bool,
 ) -> Result<Vec<OperationId>, TransactionPlanError> {
-    let meta: BTreeMap<OperationId, &TransactionNode> =
-        nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let metadata: BTreeMap<OperationId, &TransactionNode> =
+        nodes.iter().map(|node| (node.id.clone(), node)).collect();
     let mut incoming: BTreeMap<OperationId, usize> =
         nodes.iter().map(|node| (node.id.clone(), 0)).collect();
     let mut outgoing: BTreeMap<OperationId, Vec<OperationId>> = BTreeMap::new();
-    for dep in deps {
+    for dependency in dependencies {
         let (from, to) = if reverse {
-            (&dep.to, &dep.from)
+            (&dependency.to, &dependency.from)
         } else {
-            (&dep.from, &dep.to)
+            (&dependency.from, &dependency.to)
         };
         *incoming.get_mut(to).ok_or(TransactionPlanError::Cycle)? += 1;
         outgoing.entry(from.clone()).or_default().push(to.clone());
@@ -964,21 +730,21 @@ fn topological_ids(
         .filter(|(_, count)| **count == 0)
         .map(|(id, _)| id.clone())
         .collect();
-    let mut ids = Vec::with_capacity(nodes.len());
+    let mut result = Vec::with_capacity(nodes.len());
     while !ready.is_empty() {
         ready.sort_by(|a, b| {
-            let (a_node, b_node) = (meta[a], meta[b]);
+            let left = metadata[a];
+            let right = metadata[b];
             if reverse {
-                b_node
+                right
                     .phase
-                    .cmp(&a_node.phase)
-                    .then(b_node.declaration_order.cmp(&a_node.declaration_order))
+                    .cmp(&left.phase)
+                    .then(right.declaration_order.cmp(&left.declaration_order))
                     .then(b.cmp(a))
             } else {
-                a_node
-                    .phase
-                    .cmp(&b_node.phase)
-                    .then(a_node.declaration_order.cmp(&b_node.declaration_order))
+                left.phase
+                    .cmp(&right.phase)
+                    .then(left.declaration_order.cmp(&right.declaration_order))
                     .then(a.cmp(b))
             }
         });
@@ -992,10 +758,10 @@ fn topological_ids(
                 }
             }
         }
-        ids.push(next);
+        result.push(next);
     }
-    if ids.len() == nodes.len() {
-        Ok(ids)
+    if result.len() == nodes.len() {
+        Ok(result)
     } else {
         Err(TransactionPlanError::Cycle)
     }

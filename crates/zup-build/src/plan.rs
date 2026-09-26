@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, Template,
+    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, TargetTriple,
+    Template,
 };
 
 use crate::digest::Sha256Digest;
@@ -49,28 +50,45 @@ pub struct ResolvedPlugin {
     pub sha256: Sha256Digest,
 }
 
-/// Deterministic materialization result for one project.
+/// Materialized sources for one target profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BuildPlan {
-    /// Normalized installer IR the plan was produced from.
+pub struct TargetBuildPlan {
+    /// Target-bound normalized installer IR.
     pub installer: Installer,
-    #[serde(default)]
+    /// Resolved embedded prerequisites for this target.
     pub prerequisites: Vec<ResolvedPrerequisite>,
+    /// Resolved plugin sources for this target.
     pub plugins: Vec<ResolvedPlugin>,
-    /// Resolved payload files, sorted by destination then source_relative.
+    /// Resolved payload files, sorted by destination then source relative path.
     pub files: Vec<ResolvedFile>,
-    /// Sum of file sizes.
+    /// Sum of payload file sizes.
     pub total_size: u64,
-    #[serde(default)]
+    /// Sum of embedded prerequisite sizes.
     pub prerequisite_size: u64,
 }
 
-impl BuildPlan {
+/// Deterministic materialization result for all selected target profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildPlan {
+    /// Target plans ordered by profile id.
+    pub targets: Vec<TargetBuildPlan>,
+}
+
+impl TargetBuildPlan {
     /// Stable sort key for a resolved file.
     pub fn sort_key(file: &ResolvedFile) -> (String, String) {
         (
             file.destination.to_string(),
             file.source_relative.as_str().to_owned(),
         )
+    }
+}
+
+impl BuildPlan {
+    /// Find one target plan by its canonical target triple.
+    pub fn target_by_triple(&self, target: &TargetTriple) -> Option<&TargetBuildPlan> {
+        self.targets
+            .iter()
+            .find(|plan| &plan.installer.target == target)
     }
 }

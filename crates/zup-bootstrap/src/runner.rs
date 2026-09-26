@@ -4,13 +4,13 @@ use zup_core::PrerequisiteId;
 
 use crate::model::{
     BootstrapError, BootstrapOperation, BootstrapOperationState, BootstrapOutcome, BootstrapPhase,
-    BootstrapPlan, BootstrapState, DetectionResult, PrerequisiteDetector, PrerequisiteProvider,
-    ProviderRequest, builtin_for_detector,
+    BootstrapPlan, BootstrapState, DetectionResult, PrerequisiteProvider, PrerequisiteSatisfier,
+    ProviderRequest,
 };
 
 pub fn recover(
     plan: &BootstrapPlan,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     state: &mut BootstrapState,
 ) -> Result<BootstrapOutcome, BootstrapError> {
     state.validate(plan)?;
@@ -21,9 +21,9 @@ pub fn recover(
         let operation = plan
             .operation(&record.id)
             .ok_or_else(|| BootstrapError::UnknownOperation(record.id.to_string()))?;
-        match detector
-            .detect(operation)
-            .map_err(|error| BootstrapError::Detector(error.to_string()))?
+        match satisfier
+            .satisfy(operation)
+            .map_err(|error| BootstrapError::Requirement(error.to_string()))?
         {
             DetectionResult::Satisfied { version, evidence } => {
                 record.state = BootstrapOperationState::Satisfied { version, evidence };
@@ -31,7 +31,8 @@ pub fn recover(
             DetectionResult::Missing | DetectionResult::Incompatible { .. } => {
                 record.state = BootstrapOperationState::Failed {
                     code: "ambiguous_external_process".into(),
-                    message: "the prerequisite process ended without a satisfied detector".into(),
+                    message: "the prerequisite process ended without a satisfied requirement"
+                        .into(),
                 };
             }
         }
@@ -51,7 +52,7 @@ pub fn recover(
 
 pub fn assess(
     plan: &BootstrapPlan,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     state: &mut BootstrapState,
 ) -> Result<Vec<PrerequisiteId>, BootstrapError> {
     state.validate(plan)?;
@@ -65,9 +66,9 @@ pub fn assess(
         ));
     }
     for operation in &plan.operations {
-        let result = detector
-            .detect(operation)
-            .map_err(|error| BootstrapError::Detector(error.to_string()))?;
+        let result = satisfier
+            .satisfy(operation)
+            .map_err(|error| BootstrapError::Requirement(error.to_string()))?;
         match result {
             DetectionResult::Satisfied { version, evidence } => {
                 state.mark(
@@ -98,7 +99,7 @@ pub fn assess(
 pub fn execute_operation(
     plan: &BootstrapPlan,
     operation: &BootstrapOperation,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     provider: &impl PrerequisiteProvider,
     executable: PathBuf,
     state: &mut BootstrapState,
@@ -106,7 +107,7 @@ pub fn execute_operation(
     execute_operation_with_persist(
         plan,
         operation,
-        detector,
+        satisfier,
         provider,
         executable,
         state,
@@ -117,7 +118,7 @@ pub fn execute_operation(
 fn execute_operation_with_persist(
     plan: &BootstrapPlan,
     operation: &BootstrapOperation,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     provider: &impl PrerequisiteProvider,
     executable: PathBuf,
     state: &mut BootstrapState,
@@ -131,9 +132,9 @@ fn execute_operation_with_persist(
             "{code}: {message}"
         )));
     }
-    let initial = detector
-        .detect(operation)
-        .map_err(|error| BootstrapError::Detector(error.to_string()))?;
+    let initial = satisfier
+        .satisfy(operation)
+        .map_err(|error| BootstrapError::Requirement(error.to_string()))?;
     if let DetectionResult::Satisfied { version, evidence } = initial {
         state.mark(
             &operation.id,
@@ -155,12 +156,11 @@ fn execute_operation_with_persist(
     persist(state)?;
     let outcome = match provider.execute(&ProviderRequest {
         prerequisite_id: operation.id.clone(),
+        requirement: operation.requirement.clone(),
         executable,
         arguments: operation.installer.arguments.clone(),
         expected_digest: operation.package.digest(),
         expected_size: operation.package.size(),
-        installer_kind: operation.installer.kind,
-        builtin: builtin_for_detector(&operation.detector),
         success_exit_codes: operation.installer.success_exit_codes.clone(),
         reboot_exit_codes: operation.installer.reboot_exit_codes.clone(),
     }) {
@@ -192,20 +192,20 @@ fn execute_operation_with_persist(
             prerequisite_id: operation.id.clone(),
         });
     }
-    let after = detector
-        .detect(operation)
-        .map_err(|error| BootstrapError::Detector(error.to_string()))?;
+    let after = satisfier
+        .satisfy(operation)
+        .map_err(|error| BootstrapError::Requirement(error.to_string()))?;
     let DetectionResult::Satisfied { version, evidence } = after else {
         state.mark(
             &operation.id,
             BootstrapOperationState::Failed {
-                code: "detector_unsatisfied".into(),
+                code: "requirement_unsatisfied".into(),
                 message: "provider returned success but the requirement is still absent".into(),
             },
         )?;
         state.recompute();
         persist(state)?;
-        return Err(BootstrapError::DetectorStillUnsatisfied);
+        return Err(BootstrapError::RequirementStillUnsatisfied);
     };
     state.mark(
         &operation.id,
@@ -218,25 +218,30 @@ fn execute_operation_with_persist(
 
 pub fn execute_plan(
     plan: &BootstrapPlan,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     provider: &impl PrerequisiteProvider,
     executable_for: impl FnMut(&BootstrapOperation) -> Result<PathBuf, BootstrapError>,
     state: &mut BootstrapState,
 ) -> Result<BootstrapOutcome, BootstrapError> {
-    execute_plan_with_persist(plan, detector, provider, executable_for, state, &mut |_| {
-        Ok(())
-    })
+    execute_plan_with_persist(
+        plan,
+        satisfier,
+        provider,
+        executable_for,
+        state,
+        &mut |_| Ok(()),
+    )
 }
 
 pub fn execute_plan_with_persist(
     plan: &BootstrapPlan,
-    detector: &impl PrerequisiteDetector,
+    satisfier: &impl PrerequisiteSatisfier,
     provider: &impl PrerequisiteProvider,
     mut executable_for: impl FnMut(&BootstrapOperation) -> Result<PathBuf, BootstrapError>,
     state: &mut BootstrapState,
     persist: &mut impl FnMut(&BootstrapState) -> Result<(), BootstrapError>,
 ) -> Result<BootstrapOutcome, BootstrapError> {
-    assess(plan, detector, state)?;
+    assess(plan, satisfier, state)?;
     for operation in &plan.operations {
         if matches!(
             state.operation_mut(&operation.id),
@@ -246,7 +251,7 @@ pub fn execute_plan_with_persist(
         }
         let executable = executable_for(operation)?;
         let outcome = execute_operation_with_persist(
-            plan, operation, detector, provider, executable, state, persist,
+            plan, operation, satisfier, provider, executable, state, persist,
         )?;
         if let BootstrapOutcome::RebootRequired { .. } = outcome {
             return Ok(outcome);

@@ -2,7 +2,7 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
-use zup_core::{ComponentId, PluginId, Variable};
+use zup_core::{ComponentId, PluginId, TargetTriple, Variable};
 
 use crate::plugins::PluginFailure;
 
@@ -11,6 +11,11 @@ pub use zup_core::SelectedScope;
 /// Errors produced while computing a desired [`crate::InstallPlan`].
 #[derive(Debug, Error, Diagnostic)]
 pub enum PlanError {
+    /// The requested target is not present in the aggregate build plan.
+    #[error("build plan has no target `{target}`")]
+    #[diagnostic(code(zup_plan::unknown_build_target))]
+    UnknownBuildTarget { target: zup_core::TargetTriple },
+
     /// Requested scope is not allowed by the manifest install scope.
     #[error("scope `{requested}` is not allowed (manifest scope is `{allowed}`)")]
     #[diagnostic(code(zup_plan::scope_not_allowed))]
@@ -35,6 +40,14 @@ pub enum PlanError {
     #[error("active plugin `{plugin_id}` requires the plugin planning seam")]
     #[diagnostic(code(zup_plan::plugin_planning_required))]
     PluginPlanningRequired { plugin_id: PluginId },
+
+    /// The plugin executor target does not match the selected installation plan.
+    #[error("plugin executor target `{found}` does not match plan target `{expected}`")]
+    #[diagnostic(code(zup_plan::plugin_target_mismatch))]
+    PluginTargetMismatch {
+        expected: TargetTriple,
+        found: TargetTriple,
+    },
 
     /// An executor failed while planning a plugin.
     #[error("plugin `{plugin_id}` failed: {failure}")]
@@ -115,13 +128,13 @@ pub enum PlanError {
     #[diagnostic(code(zup_plan::template_resolution))]
     TemplateResolutionError { variable: Variable },
 
-    /// Two active shortcuts share location and name.
-    #[error("active shortcut collision at `{location}` / `{name}`")]
-    #[diagnostic(code(zup_plan::active_shortcut_collision))]
-    ActiveShortcutCollision { location: String, name: String },
+    /// Two active launchers share location and name.
+    #[error("active launcher collision at `{location}` / `{name}`")]
+    #[diagnostic(code(zup_plan::active_launcher_collision))]
+    ActiveLauncherCollision { location: String, name: String },
 
-    /// Two active PATH entries resolve to the same value.
-    #[error("active PATH entry collision at `{value}`")]
+    /// Two active search-path entries resolve to the same value.
+    #[error("active search-path entry collision at `{value}`")]
     #[diagnostic(code(zup_plan::active_path_collision))]
     ActivePathCollision { value: String },
 
@@ -135,12 +148,12 @@ pub enum PlanError {
     #[diagnostic(code(zup_plan::active_protocol_collision))]
     ActiveProtocolCollision { scheme: String },
 
-    /// Two active file types share an id.
-    #[error("active file type collision for id `{id}`")]
-    #[diagnostic(code(zup_plan::active_file_type_collision))]
-    ActiveFileTypeCollision { id: String },
+    /// Two active file associations share an id.
+    #[error("active file association collision for id `{id}`")]
+    #[diagnostic(code(zup_plan::active_file_association_collision))]
+    ActiveFileAssociationCollision { id: String },
 
-    /// Two active file types own the same extension.
+    /// Two active file associations own the same extension.
     #[error("active file extension collision for `{extension}`")]
     #[diagnostic(code(zup_plan::active_extension_collision))]
     ActiveExtensionCollision { extension: String },

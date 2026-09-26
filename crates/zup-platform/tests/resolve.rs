@@ -1,177 +1,420 @@
-//! Target path and template resolution unit tests (cross-platform).
-
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use rstest::rstest;
-use zup_core::{SelectedScope, Template, Variable};
+use zup_core::{InstallLocation, SelectedScope, TargetTriple, Template, Variable, VariableValue};
 use zup_platform::{
-    KnownFolder, KnownFolderError, KnownFolderResolver, TargetPath, TargetPathError,
+    InstallLocationError, InstallLocationResolver, TargetPath, TargetPathError,
     TemplateResolveError, resolve_template_path,
 };
 
-/// Deterministic fake known-folder resolver for tests.
 #[derive(Debug, Default, Clone)]
-struct FakeKnownFolders {
-    paths: BTreeMap<KnownFolder, PathBuf>,
+struct FakeLocations {
+    paths: BTreeMap<InstallLocation, String>,
 }
 
-impl KnownFolderResolver for FakeKnownFolders {
-    fn resolve(
+impl FakeLocations {
+    fn resolved(
         &self,
-        folder: KnownFolder,
-        _scope: SelectedScope,
-    ) -> Result<PathBuf, KnownFolderError> {
-        self.paths
-            .get(&folder)
-            .cloned()
-            .ok_or_else(|| KnownFolderError::ResolutionFailed {
-                folder,
-                scope: SelectedScope::User,
-                source: "not configured".into(),
-            })
+        location: InstallLocation,
+        scope: SelectedScope,
+        target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        let path =
+            self.paths
+                .get(&location)
+                .cloned()
+                .ok_or(InstallLocationError::ResolutionFailed {
+                    location,
+                    scope,
+                    source: "not configured".into(),
+                })?;
+        TargetPath::new(target, &path).map_err(|source| InstallLocationError::ResolutionFailed {
+            location,
+            scope,
+            source: source.into(),
+        })
     }
 }
 
-fn fake_resolver() -> FakeKnownFolders {
+impl InstallLocationResolver for FakeLocations {
+    fn resolve(
+        &self,
+        location: InstallLocation,
+        scope: SelectedScope,
+        target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        self.resolved(location, scope, target)
+    }
+}
+
+/// Answers with paths that belong to one target per location regardless of the
+/// target it was asked for, so target drift surfaces as a resolver fault.
+#[derive(Debug, Clone)]
+struct DriftingTargetLocations;
+
+impl InstallLocationResolver for DriftingTargetLocations {
+    fn resolve(
+        &self,
+        location: InstallLocation,
+        scope: SelectedScope,
+        _target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        let (owning, path) = match location {
+            InstallLocation::Programs => (windows_target(), r"C:\PF"),
+            _ => (unix_target(), "/opt/pf"),
+        };
+        TargetPath::new(&owning, path).map_err(|source| InstallLocationError::ResolutionFailed {
+            location,
+            scope,
+            source: source.into(),
+        })
+    }
+}
+
+fn windows_target() -> TargetTriple {
+    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+}
+
+fn unix_target() -> TargetTriple {
+    TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()
+}
+
+fn fake_locations() -> FakeLocations {
     let mut paths = BTreeMap::new();
-    paths.insert(KnownFolder::ProgramFiles, PathBuf::from(r"C:\PF"));
+    paths.insert(InstallLocation::Programs, r"C:\PF".to_owned());
     paths.insert(
-        KnownFolder::LocalAppData,
-        PathBuf::from(r"C:\Users\Test\AppData\Local"),
+        InstallLocation::UserData,
+        r"C:\Users\Test\AppData\Local".to_owned(),
     );
-    paths.insert(KnownFolder::ProgramData, PathBuf::from(r"C:\PD"));
-    paths.insert(KnownFolder::StartMenu, PathBuf::from(r"C:\SM"));
-    paths.insert(KnownFolder::Desktop, PathBuf::from(r"C:\DESK"));
-    FakeKnownFolders { paths }
+    paths.insert(InstallLocation::SharedData, r"C:\ProgramData".to_owned());
+    paths.insert(
+        InstallLocation::Menu,
+        r"C:\Users\Test\Start Menu".to_owned(),
+    );
+    paths.insert(
+        InstallLocation::Desktop,
+        r"C:\Users\Test\Desktop".to_owned(),
+    );
+    FakeLocations { paths }
 }
 
 #[rstest]
-#[case::simple(r"C:\Windows\System32\cmd.exe")]
-fn accepts_absolute(#[case] path: &str) {
-    assert!(TargetPath::new(PathBuf::from(path)).is_ok());
+#[case::windows(r"C:\Windows\System32\cmd.exe", r"C:\Windows\System32\cmd.exe")]
+#[case::windows_forward_slash(r"C:/Windows/System32/cmd.exe", r"C:\Windows\System32\cmd.exe")]
+#[case::windows_unc(r"\\server\share\Acme", r"\\server\share\Acme")]
+fn accepts_windows_absolute(#[case] raw: &str, #[case] expected: &str) {
+    let path = TargetPath::new(windows_target(), raw).unwrap();
+    assert_eq!(path.as_str(), expected);
+    assert_eq!(path.target(), &windows_target());
+}
+
+#[test]
+fn accepts_unix_absolute_without_host_inference() {
+    let path = TargetPath::new(unix_target(), "/opt/acme/bin").unwrap();
+    assert_eq!(path.as_str(), "/opt/acme/bin");
+    assert_eq!(path.target(), &unix_target());
+}
+
+#[test]
+fn unc_paths_keep_their_root_and_parent() {
+    let path = TargetPath::new(windows_target(), r"\\server\share\Acme\tool.exe").unwrap();
+    assert_eq!(path.as_str(), r"\\server\share\Acme\tool.exe");
+    assert_eq!(path.parent().unwrap().as_str(), r"\\server\share\Acme");
+    assert_eq!(
+        path.parent().unwrap().parent().unwrap().as_str(),
+        r"\\server\share"
+    );
+    assert_eq!(path.file_name(), Some("tool.exe"));
+}
+
+#[test]
+fn parent_of_a_unicode_segment_walks_back_to_the_root() {
+    let path = TargetPath::new(windows_target(), r"C:\Ünïcodé\toolé").unwrap();
+    assert_eq!(path.as_str(), r"C:\Ünïcodé\toolé");
+    assert_eq!(path.parent().unwrap().as_str(), r"C:\Ünïcodé");
+    assert_eq!(path.parent().unwrap().parent().unwrap().as_str(), r"C:\");
+    assert!(path.parent().unwrap().parent().unwrap().parent().is_none());
+    assert_eq!(path.file_name(), Some("toolé"));
+}
+
+#[test]
+fn parent_of_a_unicode_leaf_splits_on_separators_not_bytes() {
+    // The final segment ends on a multi-byte character, so the byte before the
+    // end of the path is not a character boundary.
+    let path = TargetPath::new(unix_target(), "/opt/café/naïvé").unwrap();
+    assert_eq!(path.as_str(), "/opt/café/naïvé");
+    assert_eq!(path.parent().unwrap().as_str(), "/opt/café");
+    assert_eq!(path.parent().unwrap().parent().unwrap().as_str(), "/opt");
+    let root = path.parent().unwrap().parent().unwrap().parent().unwrap();
+    assert_eq!(root.as_str(), "/");
+    assert!(root.parent().is_none());
+    assert_eq!(path.file_name(), Some("naïvé"));
+}
+
+#[test]
+fn parent_of_a_unicode_unc_path_keeps_the_share() {
+    let path = TargetPath::new(windows_target(), r"\\sérveur\partagé\toolé").unwrap();
+    assert_eq!(path.parent().unwrap().as_str(), r"\\sérveur\partagé");
+    assert!(path.parent().unwrap().parent().is_none());
+    assert_eq!(path.file_name(), Some("toolé"));
 }
 
 #[rstest]
-#[case::relative("foo/bar")]
-#[case::traversal_dot_dot(r"C:\PF\..\Windows")]
-#[case::unresolved(r"C:\PF\${install}")]
-#[case::empty("")]
-fn rejects_invalid(#[case] path: &str) {
-    let err = TargetPath::new(PathBuf::from(path)).unwrap_err();
+#[case::windows_drive_root(r"C:\", "windows")]
+#[case::windows_unc_root(r"\\server\share", "windows")]
+#[case::windows_unicode_unc_root(r"\\sérveur\partagé", "windows")]
+#[case::unix_root("/", "unix")]
+fn roots_have_no_parent_or_file_name(#[case] path: &str, #[case] target_kind: &str) {
+    let target = match target_kind {
+        "unix" => unix_target(),
+        _ => windows_target(),
+    };
+    let root = TargetPath::new(target, path).unwrap();
+    assert!(root.parent().is_none(), "path: {path:?}");
+    assert_eq!(root.file_name(), None, "path: {path:?}");
+}
+
+#[rstest]
+#[case::empty("", "windows")]
+#[case::relative("foo/bar", "windows")]
+#[case::traversal(r"C:\PF\..\Windows", "windows")]
+#[case::dot(r"C:\PF\.\Windows", "windows")]
+#[case::nul("C:\\PF\\Windows\0", "windows")]
+#[case::unresolved(r"C:\PF\${install}", "windows")]
+#[case::windows_on_unix(r"C:\Windows", "unix")]
+#[case::windows_device(r"\\?\C:\Windows", "windows")]
+#[case::windows_dot_device(r"\\.\PIPE\device", "windows")]
+#[case::unix_on_windows(r"/opt/acme", "windows")]
+fn rejects_invalid(#[case] path: &str, #[case] target_kind: &str) {
+    let target = match target_kind {
+        "unix" => unix_target(),
+        _ => windows_target(),
+    };
+    let error = TargetPath::new(target, path).unwrap_err();
     assert!(
         matches!(
-            err,
+            error,
             TargetPathError::NotAbsolute { .. }
                 | TargetPathError::Traversal { .. }
                 | TargetPathError::UnresolvedVariable { .. }
+                | TargetPathError::Nul { .. }
                 | TargetPathError::Empty
         ),
-        "path: {path}, err: {err:?}"
+        "path: {path:?}, error: {error:?}"
     );
 }
 
 #[test]
-fn middle_dot_is_normalized_by_pathbuf() {
-    // `Path::components` drops interior `.` segments; the resulting absolute
-    // path is still valid and contains no traversal.
-    let path = TargetPath::new(PathBuf::from(r"C:\PF\.\x")).unwrap();
-    assert!(!path.as_path().components().any(|c| matches!(
-        c,
-        std::path::Component::CurDir | std::path::Component::ParentDir
-    )));
+fn unix_backslashes_remain_lexical_characters() {
+    let base = TargetPath::new(unix_target(), "/opt/acme").unwrap();
+    let path = TargetPath::new(unix_target(), "/opt/acme\\tool").unwrap();
+    assert_eq!(path.as_str(), "/opt/acme\\tool");
+    assert!(!path.starts_with(&base));
+    assert_eq!(base.join("C:tool").unwrap().as_str(), "/opt/acme/C:tool");
 }
 
 #[test]
-fn install_directory_resolved() {
-    let template = Template::parse("${known.program_files}/Acme").unwrap();
-    let path = resolve_template_path(&template, &fake_resolver(), SelectedScope::Machine).unwrap();
-    assert_eq!(path.to_string(), r"C:\PF\Acme");
+fn preserves_case_and_normalizes_only_separators() {
+    let path = TargetPath::new(windows_target(), r"c:/Users/Alice/AppData/Local").unwrap();
+    assert_eq!(path.as_str(), r"c:\Users\Alice\AppData\Local");
 }
 
 #[test]
-fn absolute_literal_template_keeps_windows_root() {
+fn target_path_serializes_with_its_target() {
+    let path = TargetPath::new(windows_target(), r"C:\PF\Acme").unwrap();
+    let json = serde_json::to_string(&path).unwrap();
+    let restored: TargetPath = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, path);
+    assert_eq!(restored.target(), path.target());
+    assert_eq!(restored.as_str(), path.as_str());
+}
+
+#[test]
+fn joins_with_target_separator_and_preserves_case() {
+    let base = TargetPath::new(windows_target(), r"C:\PF").unwrap();
+    let path = base.join("MixedCase").unwrap();
+    assert_eq!(path.as_str(), r"C:\PF\MixedCase");
+    assert_eq!(path.target(), base.target());
+    assert!(path.starts_with(&TargetPath::new(windows_target(), r"c:\pf").unwrap()));
+}
+
+#[test]
+fn resolves_semantic_location_into_target_path() {
+    let template = Template::parse("${location.programs}/Acme").unwrap();
+    let path = resolve_template_path(
+        &template,
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::Machine,
+    )
+    .unwrap();
+    assert_eq!(path.as_str(), r"C:\PF\Acme");
+}
+
+#[test]
+fn resolves_absolute_literal_for_target() {
     let template = Template::parse(r"C:\Zup Tests\App").unwrap();
-    let path = resolve_template_path(&template, &fake_resolver(), SelectedScope::User).unwrap();
-    assert_eq!(path.to_string(), "C:/Zup Tests/App");
+    let path = resolve_template_path(
+        &template,
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::User,
+    )
+    .unwrap();
+    assert_eq!(path.as_str(), r"C:\Zup Tests\App");
 }
 
 #[test]
-fn nested_destination_resolved() {
-    let template =
-        Template::parse("${known.local_app_data}/Programs/${app.name}/bin/tool.exe").unwrap();
-    // app.name should have been substituted already in InstallPlan; after
-    // resolve_template it becomes a literal. Here we only resolve known.*.
-    // So substitute first like the planner does.
-    let install = Template::parse("${known.program_files}/Acme").unwrap();
-    let planned = template.substitute(|var| match var {
-        Variable::AppName => Some(zup_core::VariableValue::Literal("Acme".into())),
-        Variable::Install => Some(zup_core::VariableValue::Template(install.clone())),
-        _ => None,
-    });
-    // Direct known-folder template
-    let path = resolve_template_path(&planned, &fake_resolver(), SelectedScope::User).unwrap();
+fn resolves_nested_location_and_literal_parts() {
+    let template = Template::parse("${location.user_data}/Programs/Acme/bin/tool.exe").unwrap();
+    let path = resolve_template_path(
+        &template,
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::User,
+    )
+    .unwrap();
     assert_eq!(
-        path.to_string(),
+        path.as_str(),
         r"C:\Users\Test\AppData\Local\Programs\Acme\bin\tool.exe"
     );
 }
 
 #[test]
-fn user_vs_machine_shell_folders() {
-    let mut user = fake_resolver();
-    user.paths.insert(
-        KnownFolder::StartMenu,
-        PathBuf::from(r"C:\Users\Test\Start Menu"),
+fn scope_aware_locations_are_forwarded_to_resolver() {
+    let mut locations = fake_locations();
+    locations.paths.insert(
+        InstallLocation::Menu,
+        r"C:\Users\Public\Start Menu".to_owned(),
     );
-    user.paths.insert(
-        KnownFolder::Desktop,
-        PathBuf::from(r"C:\Users\Test\Desktop"),
-    );
-
-    let mut machine = fake_resolver();
-    machine.paths.insert(
-        KnownFolder::StartMenu,
-        PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu"),
-    );
-    machine.paths.insert(
-        KnownFolder::Desktop,
-        PathBuf::from(r"C:\Users\Public\Desktop"),
-    );
-
-    let template = Template::parse("${known.start_menu}/Acme").unwrap();
-    let user_path = resolve_template_path(&template, &user, SelectedScope::User).unwrap();
-    let machine_path = resolve_template_path(&template, &machine, SelectedScope::Machine).unwrap();
-    assert_eq!(user_path.to_string(), r"C:\Users\Test\Start Menu\Acme");
-    assert_eq!(
-        machine_path.to_string(),
-        r"C:\ProgramData\Microsoft\Windows\Start Menu\Acme"
-    );
+    let template = Template::parse("${location.menu}/Acme").unwrap();
+    let path = resolve_template_path(
+        &template,
+        &windows_target(),
+        &locations,
+        SelectedScope::Machine,
+    )
+    .unwrap();
+    assert_eq!(path.as_str(), r"C:\Users\Public\Start Menu\Acme");
 }
 
 #[test]
-fn rejects_relative_result() {
-    let mut fake = FakeKnownFolders::default();
-    fake.paths
-        .insert(KnownFolder::ProgramFiles, PathBuf::from("relative/pf"));
-    let template = Template::parse("${known.program_files}/Acme").unwrap();
-    let err = resolve_template_path(&template, &fake, SelectedScope::User).unwrap_err();
-    assert!(matches!(
-        err,
-        TemplateResolveError::InvalidPath(TargetPathError::NotAbsolute { .. })
-    ));
-}
-
-#[test]
-fn rejects_unresolved_non_known_variable() {
-    // After static substitution, `${app.name}` should not remain. If it does,
-    // resolution must fail.
+fn rejects_unresolved_non_location_variable() {
     let template = Template::parse("${app.name}/bin").unwrap();
-    let err = resolve_template_path(&template, &fake_resolver(), SelectedScope::User).unwrap_err();
+    let error = resolve_template_path(
+        &template,
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::User,
+    )
+    .unwrap_err();
     assert!(matches!(
-        err,
+        error,
         TemplateResolveError::UnresolvedVariable {
             variable: Variable::AppName
         }
     ));
+}
+
+#[test]
+fn resolver_answers_for_the_requested_target() {
+    let mut locations = fake_locations();
+    locations
+        .paths
+        .insert(InstallLocation::Programs, "/opt/pf".to_owned());
+    let template = Template::parse("${location.programs}/Acme").unwrap();
+
+    let path = resolve_template_path(
+        &template,
+        &unix_target(),
+        &locations,
+        SelectedScope::Machine,
+    )
+    .unwrap();
+
+    assert_eq!(path.as_str(), "/opt/pf/Acme");
+    assert_eq!(path.target(), &unix_target());
+}
+
+#[test]
+fn location_that_is_not_absolute_for_the_target_fails_resolution() {
+    let mut locations = fake_locations();
+    locations
+        .paths
+        .insert(InstallLocation::Programs, "relative/pf".to_owned());
+    let template = Template::parse("${location.programs}/Acme").unwrap();
+
+    let error = resolve_template_path(
+        &template,
+        &windows_target(),
+        &locations,
+        SelectedScope::Machine,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            TemplateResolveError::InstallLocation(InstallLocationError::ResolutionFailed {
+                location: InstallLocation::Programs,
+                scope: SelectedScope::Machine,
+                ..
+            })
+        ),
+        "error: {error:?}"
+    );
+}
+
+#[test]
+fn resolver_answering_for_two_targets_in_one_template_is_rejected() {
+    let template = Template::parse("${location.programs}/${location.menu}").unwrap();
+
+    let error = resolve_template_path(
+        &template,
+        &windows_target(),
+        &DriftingTargetLocations,
+        SelectedScope::Machine,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            TemplateResolveError::ResolverTargetMismatch { ref path, ref target }
+                if path == "/opt/pf" && target == "x86_64-unknown-linux-gnu"
+        ),
+        "error: {error:?}"
+    );
+}
+
+#[test]
+fn blames_substituted_text_for_an_unresolved_sequence_in_a_literal() {
+    // The app name resolves to text that still carries a template sequence, so
+    // the sequence is in substituted text rather than in the manifest.
+    let template = Template::parse("${location.programs}/${app.name}")
+        .unwrap()
+        .substitute(|variable| match variable {
+            Variable::AppName => Some(VariableValue::Literal("${app.name}".to_owned())),
+            _ => None,
+        });
+
+    let error = resolve_template_path(
+        &template,
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::Machine,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            TemplateResolveError::UnresolvedLiteral { ref text } if text == "/${app.name}"
+        ),
+        "error: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "substituted text contains an unresolved `${` sequence: `/${app.name}`"
+    );
 }

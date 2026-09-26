@@ -23,6 +23,7 @@ jiff = { version = "0.2", default-features = false, features = [
 ] }
 uuid = { version = "1", features = ["v7", "serde"] }
 semver = { version = "1", features = ["serde"] }
+target-lexicon = { version = "0.13", features = ["std"] }
 
 # Workspace crates
 zup-core = { path = "crates/zup-core" }

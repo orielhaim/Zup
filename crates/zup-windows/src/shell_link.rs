@@ -2,28 +2,37 @@
 
 use std::path::Path;
 
-use zup_exec::ObservedShortcutState;
+use zup_core::TargetTriple;
+use zup_exec::ObservedLauncherState;
 use zup_platform::TargetPath;
 
 use crate::cmdline::{quote_arg, split_command_line};
+use crate::lowering::{host_path, target_path_from_host};
 
-pub fn load_shortcut(path: &Path) -> Result<ObservedShortcutState, String> {
+pub fn load_shortcut(
+    path: &Path,
+    target_triple: &TargetTriple,
+) -> Result<ObservedLauncherState, String> {
     let link = match lnks::Shortcut::load(path) {
         Ok(link) => link,
         Err(lnks::Error::Io(error)) => return Err(error.to_string()),
-        Err(_) => return Ok(ObservedShortcutState::InvalidShortcut),
+        Err(_) => return Ok(ObservedLauncherState::InvalidLauncher),
     };
-    let Some(target) = link.target_path.and_then(|path| TargetPath::new(path).ok()) else {
-        return Ok(ObservedShortcutState::InvalidShortcut);
+    let Some(target) = link
+        .target_path
+        .as_deref()
+        .and_then(|path| target_path_from_host(path, target_triple).ok())
+    else {
+        return Ok(ObservedLauncherState::InvalidLauncher);
     };
     let working_directory = match link.working_dir {
-        Some(path) => match TargetPath::new(path) {
+        Some(path) => match target_path_from_host(&path, target_triple) {
             Ok(path) => Some(path),
-            Err(_) => return Ok(ObservedShortcutState::InvalidShortcut),
+            Err(_) => return Ok(ObservedLauncherState::InvalidLauncher),
         },
         None => None,
     };
-    Ok(ObservedShortcutState::Shortcut {
+    Ok(ObservedLauncherState::Launcher {
         target,
         arguments: link
             .arguments
@@ -42,9 +51,9 @@ pub fn save_shortcut(
     let mut link = if current_path.exists() {
         lnks::Shortcut::load(current_path).map_err(|error| error.to_string())?
     } else {
-        lnks::Shortcut::new(target.as_path())
+        lnks::Shortcut::new(host_path(target))
     };
-    link.target_path = Some(target.as_path().to_path_buf());
+    link.target_path = Some(host_path(target));
     link.arguments = if arguments.is_empty() {
         None
     } else {
@@ -56,6 +65,6 @@ pub fn save_shortcut(
                 .join(" "),
         )
     };
-    link.working_dir = working_directory.map(|path| path.as_path().to_path_buf());
+    link.working_dir = working_directory.map(host_path);
     link.save(output_path).map_err(|error| error.to_string())
 }

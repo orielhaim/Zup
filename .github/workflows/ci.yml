@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-full
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-machete
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo nextest run --workspace --all-features
+
+      - name: Doc tests
+        run: cargo test --workspace --all-features --doc
+
+      - name: Unused dependencies
+        run: cargo machete
+
+      - name: Whitespace
+        run: git diff --check
+
+      - name: Portable boundary
+        run: cargo xtask verify-portable-boundaries
+
+      - name: Published schema
+        run: |
+          cargo run -p zup --all-features --bin zup -- schema --output schema/zup.schema.json
+          git diff --exit-code -- schema/zup.schema.json
+
+      - name: Frontend feature graphs
+        shell: pwsh
+        run: ./scripts/verify-frontend-features.ps1
+
+  ubuntu-portable:
+    name: ubuntu (portable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-portable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146,cargo-machete
+
+      - name: Package matrices
+        run: |
+          cargo xtask emit-portable-matrix
+          core="$(cargo xtask emit-portable-matrix --matrix portable-core --format cargo-args)"
+          tests="$(cargo xtask emit-portable-matrix --matrix portable-tests --format cargo-args)"
+          printf 'PORTABLE=%s %s\n' "$core" "$tests" >> "$GITHUB_ENV"
+
+      - name: Portable boundary
+        run: cargo xtask verify-portable-boundaries
+
+      - name: Check
+        run: cargo check --all-features $PORTABLE
+
+      - name: Tests
+        run: cargo nextest run --all-features $PORTABLE
+
+      - name: Doc tests
+        run: cargo test --doc --all-features $PORTABLE
+
+      - name: Clippy
+        run: cargo clippy --all-features --all-targets $PORTABLE -- -D warnings
+
+      - name: Unused dependencies
+        run: cargo machete
+
+      - name: Whitespace
+        run: git diff --check

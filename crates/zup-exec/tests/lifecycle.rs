@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use zup_core::{
     App, AppId, ComponentId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope,
-    hash_reader,
+    TargetTriple, hash_reader,
 };
 use zup_exec::{
-    FileOperationKind, InstallLedger, LifecycleAction, LifecycleError, MachineSnapshot,
-    ObservedFile, ObservedFileState, OwnedResource, RemovalKind, plan_lifecycle,
+    FileOperationKind, HostSnapshot, InstallLedger, LifecycleAction, LifecycleError, ObservedFile,
+    ObservedFileState, OwnedResource, RemovalKind, plan_lifecycle,
 };
 use zup_platform::{TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
 
 fn file(name: &str, contents: &[u8]) -> TargetFile {
-    let destination = TargetPath::new(PathBuf::from(format!(r"C:\ZupLifecycle\{name}"))).unwrap();
+    let destination = TargetPath::new(
+        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        format!(r"C:\ZupLifecycle\{name}"),
+    )
+    .unwrap();
     TargetFile {
         key: ResourceKey::File {
             destination: destination.to_string(),
@@ -35,21 +38,26 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
             main: None,
             description: None,
         },
+        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
         scope: SelectedScope::User,
-        install_directory: TargetPath::new(PathBuf::from(r"C:\ZupLifecycle")).unwrap(),
+        install_directory: TargetPath::new(
+            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            r"C:\ZupLifecycle",
+        )
+        .unwrap(),
         selected_components: vec![ComponentId::new("core").unwrap()],
         prerequisites: vec![],
         files,
-        shortcuts: vec![],
+        launchers: vec![],
         path_entries: vec![],
         services: vec![],
         protocols: vec![],
-        file_types: vec![],
+        file_associations: vec![],
         summary: TargetPlanSummary {
             file_count: 0,
             install_bytes: 0,
             resource_count: 0,
-            requires_elevation: false,
+            requires_authorization: false,
             selected_component_count: 1,
             prerequisite_count: 0,
             download_bytes: 0,
@@ -60,6 +68,7 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
 fn ledger(files: &[TargetFile]) -> InstallLedger {
     let mut ledger = InstallLedger::new(
         AppId::new("com.zup.lifecycle").unwrap(),
+        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
         SelectedScope::User,
     );
     ledger.version = "1.0.0".parse().unwrap();
@@ -73,14 +82,15 @@ fn ledger(files: &[TargetFile]) -> InstallLedger {
                 sha256: file.sha256,
                 size: file.size,
                 created_directories: vec![],
+                privilege: file.privilege,
             },
         );
     }
     ledger
 }
 
-fn snapshot(target: &TargetPlan, states: &[ObservedFileState]) -> MachineSnapshot {
-    MachineSnapshot {
+fn snapshot(target: &TargetPlan, states: &[ObservedFileState]) -> HostSnapshot {
+    HostSnapshot {
         files: target
             .files
             .iter()
@@ -132,7 +142,7 @@ fn upgrade_adds_updates_and_retires_owned_files() {
         plan_lifecycle(
             LifecycleAction::Upgrade,
             Some(&make_target("0.9.0", vec![])),
-            Some(&MachineSnapshot::default()),
+            Some(&HostSnapshot::default()),
             Some(&ledger),
             &matches
         ),

@@ -1,7 +1,8 @@
 //! Windows command-line quoting, parsing, and semantic comparison.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use zup_core::TargetTriple;
 use zup_platform::{CommandSpec, TargetPath};
 
 /// Format `executable + arguments` as a Windows process command line.
@@ -112,33 +113,20 @@ pub fn split_command_line(command_line: &str) -> Vec<String> {
 
 /// Semantic command equality: path-insensitive executable + exact arguments.
 pub fn commands_match(a: &CommandSpec, b: &CommandSpec) -> bool {
-    paths_match(&a.executable, &b.executable) && a.arguments == b.arguments
+    a.executable.equivalent(&b.executable) && a.arguments == b.arguments
 }
 
-/// Compare target paths ignoring case, slash direction, and trailing separators.
-pub fn paths_match(a: &TargetPath, b: &TargetPath) -> bool {
-    normalize_path(&a.to_string()) == normalize_path(&b.to_string())
-}
-
-fn normalize_path(s: &str) -> String {
-    s.replace('\\', "/")
-        .to_lowercase()
-        .trim_end_matches('/')
-        .to_owned()
-}
-
-/// Build a `CommandSpec` from a raw service/registry command line.
-pub fn command_spec_from_command_line(command_line: &str) -> Result<CommandSpec, String> {
+/// Build a `CommandSpec` from a raw command line the host already stores.
+pub fn command_spec_from_command_line(
+    command_line: &str,
+    target: &TargetTriple,
+) -> Result<CommandSpec, String> {
     let (exe, arguments) = parse_command_line(command_line);
     let exe = exe.ok_or_else(|| "empty command line".to_owned())?;
-    let path = PathBuf::from(&exe);
-    if path.as_os_str().is_empty() {
+    if exe.is_empty() {
         return Err("empty executable".to_owned());
     }
-    if !path.is_absolute() {
-        return Err(format!("relative executable `{exe}`"));
-    }
-    let executable = TargetPath::new(path).map_err(|e| e.to_string())?;
+    let executable = TargetPath::new(target.clone(), exe).map_err(|error| error.to_string())?;
     Ok(CommandSpec {
         executable,
         arguments,
@@ -151,20 +139,6 @@ pub fn command_spec(executable: &TargetPath, arguments: &[String]) -> CommandSpe
         executable: executable.clone(),
         arguments: arguments.to_vec(),
     }
-}
-
-/// PATH entry comparison (quotes, slashes, case, trailing sep).
-pub fn path_entry_matches(raw_entry: &str, desired: &TargetPath) -> bool {
-    let raw = raw_entry.trim();
-    if raw.contains('%') {
-        return false;
-    }
-    let unquoted = raw
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(raw)
-        .trim();
-    normalize_path(unquoted) == normalize_path(&desired.to_string())
 }
 
 #[cfg(test)]
@@ -208,11 +182,21 @@ mod tests {
     }
 
     #[test]
-    fn path_entry_case_and_slash_equivalent() {
-        let desired = TargetPath::new(PathBuf::from(r"C:\Apps\bin")).unwrap();
-        assert!(path_entry_matches(r"c:/apps/bin", &desired));
-        assert!(path_entry_matches(r"C:\Apps\bin\", &desired));
-        assert!(path_entry_matches(r#""C:\Apps\bin""#, &desired));
-        assert!(!path_entry_matches(r"%SOMETHING%\bin", &desired));
+    fn command_identity_uses_target_path_identity() {
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let a = CommandSpec {
+            executable: TargetPath::new(&target, r"C:\Apps\Acme.exe").unwrap(),
+            arguments: vec!["--run".to_owned()],
+        };
+        let b = CommandSpec {
+            executable: TargetPath::new(&target, r"c:/apps/acme.exe").unwrap(),
+            arguments: vec!["--run".to_owned()],
+        };
+        let c = CommandSpec {
+            executable: b.executable.clone(),
+            arguments: vec!["--other".to_owned()],
+        };
+        assert!(commands_match(&a, &b));
+        assert!(!commands_match(&a, &c));
     }
 }

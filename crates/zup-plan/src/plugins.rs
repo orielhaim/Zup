@@ -3,19 +3,18 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_build::validate_windows_destination;
 use zup_core::{
-    App, ComponentId, FileExtension, FileTypeId, NonEmptyString, PluginBinding, PluginId,
-    PrerequisitePackage, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
-    ServiceId, ServiceStart, Sha256Digest, ShortcutLocation, Template,
+    App, ComponentId, FileAssociationId, FileExtension, LauncherLocation, NonEmptyString,
+    PluginBinding, PluginId, PrerequisitePackage, Privilege, ProtocolScheme, RelativePath,
+    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, TargetTriple, Template,
 };
 
 use crate::error::PlanError;
 use crate::plan_types::{InstallPlan, PlanSummary};
 use crate::resolve::resolve_template;
 use crate::resources::{
-    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedProtocol, PlannedService,
-    PlannedShortcut,
+    PlannedFile, PlannedFileAssociation, PlannedLauncher, PlannedPathEntry, PlannedProtocol,
+    PlannedService,
 };
 
 pub const MAX_PLUGIN_RESOURCES: usize = 4096;
@@ -27,67 +26,13 @@ pub const MAX_PLUGIN_ARGUMENTS: usize = 256;
 pub const MAX_PLUGIN_ARGUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_PLUGIN_ERROR_BYTES: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginOperatingSystem {
-    Windows,
-    Linux,
-    Macos,
-}
-
-impl PluginOperatingSystem {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Windows => "windows",
-            Self::Linux => "linux",
-            Self::Macos => "macos",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginArchitecture {
-    X86_64,
-    Aarch64,
-}
-
-impl PluginArchitecture {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::Aarch64 => "aarch64",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginHostFacts {
-    os: PluginOperatingSystem,
-    architecture: PluginArchitecture,
-}
-
-impl PluginHostFacts {
-    pub const fn new(os: PluginOperatingSystem, architecture: PluginArchitecture) -> Self {
-        Self { os, architecture }
-    }
-
-    pub const fn os(&self) -> PluginOperatingSystem {
-        self.os
-    }
-
-    pub const fn architecture(&self) -> PluginArchitecture {
-        self.architecture
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginPlanningContext {
     pub app: App,
     pub install_directory: Template,
     pub scope: SelectedScope,
     pub selected_components: Vec<ComponentId>,
-    pub host: PluginHostFacts,
+    pub target: TargetTriple,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,8 +42,8 @@ pub enum PluginResource {
         destination: String,
         contents: Vec<u8>,
     },
-    Shortcut {
-        location: ShortcutLocation,
+    Launcher {
+        location: LauncherLocation,
         name: String,
         target: String,
         arguments: Vec<String>,
@@ -120,7 +65,7 @@ pub enum PluginResource {
         executable: String,
         args: Vec<String>,
     },
-    FileType {
+    FileAssociation {
         extension: String,
         id: String,
         description: Option<String>,
@@ -158,6 +103,11 @@ pub enum PluginFailure {
     OutputLimit { message: String },
     #[error("plugin returned invalid output: {message}")]
     InvalidOutput { message: String },
+    #[error("plugin target `{found}` does not match expected target `{expected}`")]
+    TargetMismatch {
+        expected: TargetTriple,
+        found: TargetTriple,
+    },
     #[error("plugin invocation failed internally: {message}")]
     Internal { message: String },
 }
@@ -198,6 +148,10 @@ impl PluginFailure {
         Self::InvalidOutput {
             message: sanitize_error(message.into()),
         }
+    }
+
+    pub fn target_mismatch(expected: TargetTriple, found: TargetTriple) -> Self {
+        Self::TargetMismatch { expected, found }
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -259,6 +213,8 @@ impl CancellationQuery for NeverCancelled {
 }
 
 pub trait PluginExecutor {
+    fn target(&self) -> &TargetTriple;
+
     fn plan(
         &mut self,
         binding: &PluginBinding,
@@ -291,12 +247,12 @@ struct CollisionOrigin {
 pub(crate) struct CollisionIndex {
     files: BTreeMap<String, CollisionOrigin>,
     file_sources: BTreeMap<String, CollisionOrigin>,
-    shortcuts: BTreeMap<String, CollisionOrigin>,
+    launchers: BTreeMap<String, CollisionOrigin>,
     paths: BTreeMap<String, CollisionOrigin>,
     services: BTreeMap<String, CollisionOrigin>,
     protocols: BTreeMap<String, CollisionOrigin>,
-    file_type_ids: BTreeMap<String, CollisionOrigin>,
-    file_type_extensions: BTreeMap<String, CollisionOrigin>,
+    file_association_ids: BTreeMap<String, CollisionOrigin>,
+    file_association_extensions: BTreeMap<String, CollisionOrigin>,
 }
 
 impl CollisionIndex {
@@ -304,12 +260,12 @@ impl CollisionIndex {
         let mut index = Self {
             files: BTreeMap::new(),
             file_sources: BTreeMap::new(),
-            shortcuts: BTreeMap::new(),
+            launchers: BTreeMap::new(),
             paths: BTreeMap::new(),
             services: BTreeMap::new(),
             protocols: BTreeMap::new(),
-            file_type_ids: BTreeMap::new(),
-            file_type_extensions: BTreeMap::new(),
+            file_association_ids: BTreeMap::new(),
+            file_association_extensions: BTreeMap::new(),
         };
 
         for file in &plan.files {
@@ -318,16 +274,16 @@ impl CollisionIndex {
                 file.source_relative.as_str(),
             )?;
         }
-        for shortcut in &plan.shortcuts {
-            index.insert_shortcut(
-                &shortcut.location.to_string(),
-                shortcut.name.as_ref(),
+        for launcher in &plan.launchers {
+            index.insert_launcher(
+                &launcher.location.to_string(),
+                launcher.name.as_ref(),
                 None,
-                "manifest shortcut",
+                "manifest launcher",
             )?;
         }
         for path in &plan.path_entries {
-            index.insert_path(&path.value.to_string(), None, "manifest PATH entry")?;
+            index.insert_path(&path.value.to_string(), None, "manifest search-path entry")?;
         }
         for service in &plan.services {
             index.insert_service(service.id.as_ref(), None, "manifest service")?;
@@ -335,19 +291,19 @@ impl CollisionIndex {
         for protocol in &plan.protocols {
             index.insert_protocol(protocol.scheme.as_ref(), None, "manifest protocol")?;
         }
-        for file_type in &plan.file_types {
-            index.insert_file_type(
-                file_type.id.as_ref(),
-                &file_type.extension.to_string(),
+        for file_association in &plan.file_associations {
+            index.insert_file_association(
+                file_association.id.as_ref(),
+                &file_association.extension.to_string(),
                 None,
-                "manifest file type",
+                "manifest file association",
             )?;
         }
         Ok(index)
     }
 
     fn insert_manifest_file(&mut self, destination: &str, source: &str) -> Result<(), PlanError> {
-        let identity = normalize_identity(destination);
+        let identity = logical_identity(destination);
         if let Some(existing) = self.files.get(&identity) {
             return Err(collision_error(None, "manifest file", &identity, existing));
         }
@@ -359,7 +315,7 @@ impl CollisionIndex {
             },
         );
         self.file_sources
-            .entry(normalize_identity(source))
+            .entry(logical_identity(source))
             .or_insert_with(|| CollisionOrigin {
                 plugin_id: None,
                 resource: "manifest file".to_owned(),
@@ -374,7 +330,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = normalize_identity(destination);
+        let identity = logical_identity(destination);
         if let Some(existing) = self.files.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -386,7 +342,7 @@ impl CollisionIndex {
             },
         );
         if let Some(source) = source {
-            let source_identity = normalize_identity(source);
+            let source_identity = logical_identity(source);
             if let Some(existing) = self.file_sources.get(&source_identity) {
                 return Err(collision_error(
                     plugin_id,
@@ -406,18 +362,18 @@ impl CollisionIndex {
         Ok(())
     }
 
-    fn insert_shortcut(
+    fn insert_launcher(
         &mut self,
         location: &str,
         name: &str,
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = format!("{}:{}", location, normalize_identity(name));
-        if let Some(existing) = self.shortcuts.get(&identity) {
+        let identity = format!("launcher:{}:{}", location, logical_identity(name));
+        if let Some(existing) = self.launchers.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
-        self.shortcuts.insert(
+        self.launchers.insert(
             identity,
             CollisionOrigin {
                 plugin_id: plugin_id.cloned(),
@@ -433,7 +389,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = normalize_identity(value);
+        let identity = logical_identity(value);
         if let Some(existing) = self.paths.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -453,7 +409,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = normalize_identity(id);
+        let identity = logical_identity(id);
         if let Some(existing) = self.services.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -473,7 +429,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = normalize_identity(scheme);
+        let identity = logical_identity(scheme);
         if let Some(existing) = self.protocols.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -487,39 +443,40 @@ impl CollisionIndex {
         Ok(())
     }
 
-    fn insert_file_type(
+    fn insert_file_association(
         &mut self,
         id: &str,
         extension: &str,
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let id_identity = normalize_identity(id);
-        if let Some(existing) = self.file_type_ids.get(&id_identity) {
+        let id_identity = format!("file-association:{}", logical_identity(id));
+        if let Some(existing) = self.file_association_ids.get(&id_identity) {
             return Err(collision_error(
                 plugin_id,
-                "file type id",
+                "file association id",
                 &id_identity,
                 existing,
             ));
         }
-        let extension_identity = normalize_identity(extension);
-        if let Some(existing) = self.file_type_extensions.get(&extension_identity) {
+        let extension_identity =
+            format!("file-association-extension:{}", logical_identity(extension));
+        if let Some(existing) = self.file_association_extensions.get(&extension_identity) {
             return Err(collision_error(
                 plugin_id,
-                "file type extension",
+                "file association extension",
                 &extension_identity,
                 existing,
             ));
         }
-        self.file_type_ids.insert(
+        self.file_association_ids.insert(
             id_identity,
             CollisionOrigin {
                 plugin_id: plugin_id.cloned(),
                 resource: resource.to_owned(),
             },
         );
-        self.file_type_extensions.insert(
+        self.file_association_extensions.insert(
             extension_identity,
             CollisionOrigin {
                 plugin_id: plugin_id.cloned(),
@@ -535,8 +492,8 @@ struct GeneratedFileInput {
     contents: Vec<u8>,
 }
 
-struct ShortcutInput {
-    location: ShortcutLocation,
+struct LauncherInput {
+    location: LauncherLocation,
     name: String,
     target: String,
     arguments: Vec<String>,
@@ -558,7 +515,7 @@ struct ProtocolInput {
     args: Vec<String>,
 }
 
-struct FileTypeInput {
+struct FileAssociationInput {
     extension: String,
     id: String,
     description: Option<String>,
@@ -594,7 +551,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
             PluginResource::GeneratedFile { destination, .. } => {
                 add_text_size(&mut total, destination)?;
             }
-            PluginResource::Shortcut {
+            PluginResource::Launcher {
                 location,
                 name,
                 target,
@@ -642,7 +599,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                     add_text_size(&mut total, argument)?;
                 }
             }
-            PluginResource::FileType {
+            PluginResource::FileAssociation {
                 extension,
                 id,
                 description,
@@ -740,16 +697,16 @@ pub(crate) fn merge_plugin_proposal(
                     },
                 )?;
             }
-            PluginResource::Shortcut {
+            PluginResource::Launcher {
                 location,
                 name,
                 target,
                 arguments,
                 working_directory,
             } => {
-                merge.merge_shortcut(
+                merge.merge_launcher(
                     &resource_name,
-                    ShortcutInput {
+                    LauncherInput {
                         location,
                         name,
                         target,
@@ -795,15 +752,15 @@ pub(crate) fn merge_plugin_proposal(
                     },
                 )?;
             }
-            PluginResource::FileType {
+            PluginResource::FileAssociation {
                 extension,
                 id,
                 description,
                 executable,
             } => {
-                merge.merge_file_type(
+                merge.merge_file_association(
                     &resource_name,
-                    FileTypeInput {
+                    FileAssociationInput {
                         extension,
                         id,
                         description,
@@ -865,7 +822,7 @@ impl MergeContext<'_> {
         let destination =
             resolve_template(&destination, &self.plan.app, &self.plan.install_directory)?;
         check_resolved_template(plugin_id, resource_name, &destination, "destination")?;
-        let destination_identity = normalize_identity(&destination.to_string());
+        let destination_identity = logical_identity(&destination.to_string());
         let destination_hash = digest_hex(destination_identity.as_bytes());
         let source_name = format!("{destination_hash}.bin");
         let source_relative =
@@ -883,7 +840,7 @@ impl MergeContext<'_> {
         )?;
 
         let sha256 = digest(&contents);
-        let privilege = self.plan.scope.privilege();
+        let privilege = self.plan.scope.authorization();
         let planned_destination = destination.clone();
         self.plan.files.push(PlannedFile {
             key: ResourceKey::File {
@@ -905,12 +862,12 @@ impl MergeContext<'_> {
         Ok(())
     }
 
-    fn merge_shortcut(
+    fn merge_launcher(
         &mut self,
         resource_name: &str,
-        input: ShortcutInput,
+        input: LauncherInput,
     ) -> Result<(), PlanError> {
-        let ShortcutInput {
+        let LauncherInput {
             location,
             name,
             target,
@@ -931,14 +888,14 @@ impl MergeContext<'_> {
                 Ok(value)
             })
             .transpose()?;
-        self.collisions.insert_shortcut(
+        self.collisions.insert_launcher(
             &location.to_string(),
             name.as_str(),
             Some(plugin_id),
             resource_name,
         )?;
-        self.plan.shortcuts.push(PlannedShortcut {
-            key: ResourceKey::Shortcut {
+        self.plan.launchers.push(PlannedLauncher {
+            key: ResourceKey::Launcher {
                 location,
                 name: name.to_string(),
             },
@@ -947,7 +904,7 @@ impl MergeContext<'_> {
             target,
             arguments,
             working_directory,
-            privilege: self.plan.scope.privilege(),
+            privilege: self.plan.scope.authorization(),
         });
         Ok(())
     }
@@ -959,12 +916,14 @@ impl MergeContext<'_> {
         check_resolved_template(plugin_id, resource_name, &value, "value")?;
         self.collisions
             .insert_path(&value.to_string(), Some(plugin_id), resource_name)?;
+        let scope = self.plan.scope;
         self.plan.path_entries.push(PlannedPathEntry {
             key: ResourceKey::PathEntry {
                 value: value.to_string(),
             },
             value,
-            privilege: self.plan.scope.privilege(),
+            scope,
+            privilege: scope.authorization(),
         });
         Ok(())
     }
@@ -998,7 +957,7 @@ impl MergeContext<'_> {
             binary,
             arguments,
             start,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         });
         Ok(())
     }
@@ -1029,17 +988,18 @@ impl MergeContext<'_> {
             scheme,
             executable,
             args,
-            privilege: self.plan.scope.privilege(),
+            scope: self.plan.scope,
+            privilege: self.plan.scope.authorization(),
         });
         Ok(())
     }
 
-    fn merge_file_type(
+    fn merge_file_association(
         &mut self,
         resource_name: &str,
-        input: FileTypeInput,
+        input: FileAssociationInput,
     ) -> Result<(), PlanError> {
-        let FileTypeInput {
+        let FileAssociationInput {
             extension,
             id,
             description,
@@ -1047,7 +1007,7 @@ impl MergeContext<'_> {
         } = input;
         let plugin_id = &self.binding.id;
         let extension = parse_extension(plugin_id, resource_name, &extension)?;
-        let id: FileTypeId = parse_id(plugin_id, resource_name, &id, "file type id")?;
+        let id: FileAssociationId = parse_id(plugin_id, resource_name, &id, "file association id")?;
         let description = description
             .map(|value| check_optional_string(plugin_id, resource_name, &value, "description"))
             .transpose()?;
@@ -1055,19 +1015,20 @@ impl MergeContext<'_> {
         let executable =
             resolve_template(&executable, &self.plan.app, &self.plan.install_directory)?;
         check_resolved_template(plugin_id, resource_name, &executable, "executable")?;
-        self.collisions.insert_file_type(
+        self.collisions.insert_file_association(
             id.as_str(),
             extension.as_str(),
             Some(plugin_id),
             resource_name,
         )?;
-        self.plan.file_types.push(PlannedFileType {
-            key: ResourceKey::FileType { id: id.clone() },
+        self.plan.file_associations.push(PlannedFileAssociation {
+            key: ResourceKey::FileAssociation { id: id.clone() },
             extension,
             id,
             description,
             executable,
-            privilege: self.plan.scope.privilege(),
+            scope: self.plan.scope,
+            privilege: self.plan.scope.authorization(),
         });
         Ok(())
     }
@@ -1124,8 +1085,6 @@ fn parse_template(
     check_string(plugin_id, value, resource_name, field, true)?;
     let template =
         Template::parse(value).map_err(|error| rejected(plugin_id, resource_name, field, error))?;
-    validate_windows_destination(&template)
-        .map_err(|error| rejected(plugin_id, resource_name, field, error))?;
     if template.is_empty() {
         return Err(rejected(
             plugin_id,
@@ -1144,9 +1103,7 @@ fn check_resolved_template(
     field: &str,
 ) -> Result<(), PlanError> {
     let text = value.to_string();
-    check_string(plugin_id, &text, resource_name, field, true)?;
-    validate_windows_destination(value)
-        .map_err(|error| rejected(plugin_id, resource_name, field, error))
+    check_string(plugin_id, &text, resource_name, field, true)
 }
 
 fn check_arguments(
@@ -1258,12 +1215,8 @@ fn collision_error(
     }
 }
 
-fn normalize_identity(value: &str) -> String {
-    value
-        .replace('\\', "/")
-        .to_ascii_lowercase()
-        .trim_end_matches('/')
-        .to_owned()
+fn logical_identity(value: &str) -> String {
+    value.to_owned()
 }
 
 fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
@@ -1282,7 +1235,7 @@ pub(crate) fn sort_resources(plan: &mut InstallPlan, generated_files: &mut [Gene
             .cmp(&right.key)
             .then_with(|| left.source_relative.cmp(&right.source_relative))
     });
-    plan.shortcuts
+    plan.launchers
         .sort_by(|left, right| left.key.cmp(&right.key));
     plan.path_entries
         .sort_by(|left, right| left.key.cmp(&right.key));
@@ -1290,7 +1243,7 @@ pub(crate) fn sort_resources(plan: &mut InstallPlan, generated_files: &mut [Gene
         .sort_by(|left, right| left.key.cmp(&right.key));
     plan.protocols
         .sort_by(|left, right| left.key.cmp(&right.key));
-    plan.file_types.sort_by(|left, right| {
+    plan.file_associations.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
             .then_with(|| left.extension.cmp(&right.extension))
@@ -1322,46 +1275,46 @@ pub(crate) fn summarize_plan(
             } => total.checked_add(*size).ok_or(PlanError::SizeOverflow),
             PrerequisitePackage::Remote { .. } | PrerequisitePackage::Embedded { .. } => Ok(total),
         })?;
-    let resource_count = plan.shortcuts.len()
+    let resource_count = plan.launchers.len()
         + plan.path_entries.len()
         + plan.services.len()
         + plan.protocols.len()
-        + plan.file_types.len();
-    let requires_elevation = plan.scope == SelectedScope::Machine
-        || plan
-            .prerequisites
-            .iter()
-            .any(|resource| resource.installer.privilege == Privilege::Machine)
+        + plan.file_associations.len();
+    // Authorization is a property of each resource, never of the scope.
+    let requires_authorization = plan
+        .prerequisites
+        .iter()
+        .any(|resource| resource.installer.privilege == Privilege::System)
         || plan
             .files
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine)
+            .any(|resource| resource.privilege == Privilege::System)
         || plan
-            .shortcuts
+            .launchers
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine)
+            .any(|resource| resource.privilege == Privilege::System)
         || plan
             .path_entries
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine)
+            .any(|resource| resource.privilege == Privilege::System)
         || plan
             .services
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine)
+            .any(|resource| resource.privilege == Privilege::System)
         || plan
             .protocols
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine)
+            .any(|resource| resource.privilege == Privilege::System)
         || plan
-            .file_types
+            .file_associations
             .iter()
-            .any(|resource| resource.privilege == Privilege::Machine);
+            .any(|resource| resource.privilege == Privilege::System);
     Ok(PlanSummary {
         file_count: plan.files.len(),
         install_bytes,
         selected_component_count,
         resource_count,
-        requires_elevation,
+        requires_authorization,
         prerequisite_count: plan.prerequisites.len(),
         download_bytes,
     })

@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    App, ComponentId, FileExtension, FileTypeId, NonEmptyString, PrerequisiteArchitecture,
-    PrerequisiteDetector, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage, Privilege,
-    ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
-    Sha256Digest, ShortcutLocation,
+    App, ComponentId, FileAssociationId, FileExtension, LauncherLocation, NonEmptyString,
+    PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
+    PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
+    ServiceId, ServiceStart, Sha256Digest, TargetTriple,
 };
 
 use crate::command::CommandSpec;
@@ -15,6 +15,7 @@ use crate::target_path::TargetPath;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPlan {
     pub app: App,
+    pub target: TargetTriple,
     pub scope: SelectedScope,
     pub install_directory: TargetPath,
     pub selected_components: Vec<ComponentId>,
@@ -22,11 +23,11 @@ pub struct TargetPlan {
     #[serde(default)]
     pub prerequisites: Vec<TargetPrerequisite>,
     pub files: Vec<TargetFile>,
-    pub shortcuts: Vec<TargetShortcut>,
+    pub launchers: Vec<TargetLauncher>,
     pub path_entries: Vec<TargetPathEntry>,
     pub services: Vec<TargetService>,
     pub protocols: Vec<TargetProtocol>,
-    pub file_types: Vec<TargetFileType>,
+    pub file_associations: Vec<TargetFileAssociation>,
 
     pub summary: TargetPlanSummary,
 }
@@ -36,7 +37,7 @@ pub struct TargetPrerequisite {
     pub id: PrerequisiteId,
     pub name: NonEmptyString,
     pub target: PrerequisiteArchitecture,
-    pub detector: PrerequisiteDetector,
+    pub requirement: PrerequisiteRequirement,
     pub package: PrerequisitePackage,
     pub installer: PrerequisiteInstaller,
 }
@@ -52,21 +53,25 @@ pub struct TargetFile {
     pub privilege: Privilege,
 }
 
-/// One desired application shortcut with a concrete `.lnk` path.
+/// One desired application launcher with a concrete launcher path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetShortcut {
+pub struct TargetLauncher {
     pub key: ResourceKey,
-    pub location: ShortcutLocation,
+    pub location: LauncherLocation,
     pub name: NonEmptyString,
-    /// Concrete `.lnk` path on the target machine.
-    pub link_path: TargetPath,
+    /// Concrete launcher path on the target machine.
+    pub launcher_path: TargetPath,
     pub target: TargetPath,
     pub arguments: Vec<String>,
     pub working_directory: Option<TargetPath>,
     pub privilege: Privilege,
 }
 
-/// One desired PATH entry.
+/// One desired search-path entry.
+///
+/// `scope` names the persistent search path that owns the entry (the per-user
+/// or host-wide one). It is an independent decision from `privilege`: a
+/// host-wide install may still add a per-user entry, and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPathEntry {
     pub key: ResourceKey,
@@ -97,12 +102,12 @@ pub struct TargetProtocol {
     pub privilege: Privilege,
 }
 
-/// One desired file-type registration (ProgID + extension mapping).
+/// One desired file-association registration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetFileType {
+pub struct TargetFileAssociation {
     pub key: ResourceKey,
     pub extension: FileExtension,
-    pub id: FileTypeId,
+    pub id: FileAssociationId,
     pub description: Option<String>,
     pub command: CommandSpec,
     pub scope: SelectedScope,
@@ -115,7 +120,8 @@ pub struct TargetPlanSummary {
     pub file_count: usize,
     pub install_bytes: u64,
     pub resource_count: usize,
-    pub requires_elevation: bool,
+    /// True when at least one planned resource needs system authorization.
+    pub requires_authorization: bool,
     pub selected_component_count: usize,
     pub prerequisite_count: usize,
     pub download_bytes: u64,

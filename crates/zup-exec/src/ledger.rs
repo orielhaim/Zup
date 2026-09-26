@@ -3,17 +3,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zup_core::{
-    AppId, ComponentId, RelativePath, ResourceKey, SelectedScope, ServiceStart, Sha256Digest,
+    AppId, BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, SelectedScope,
+    ServiceStart, Sha256Digest, TargetTriple,
 };
 use zup_platform::{CommandSpec, TargetPath};
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
     pub schema: u32,
     pub app_id: AppId,
     pub scope: SelectedScope,
+    pub target: TargetTriple,
     pub version: semver::Version,
     pub selected_components: Vec<ComponentId>,
     #[serde(default)]
@@ -50,11 +52,12 @@ mod resource_map {
 }
 
 impl InstallLedger {
-    pub fn new(app_id: AppId, scope: SelectedScope) -> Self {
+    pub fn new(app_id: AppId, target: TargetTriple, scope: SelectedScope) -> Self {
         Self {
             schema: INSTALL_LEDGER_SCHEMA,
             app_id,
             scope,
+            target,
             version: semver::Version::new(0, 0, 0),
             selected_components: Vec::new(),
             install_directory: None,
@@ -64,6 +67,11 @@ impl InstallLedger {
     }
 }
 
+/// One resource this installation owns, plus the authority that created it.
+///
+/// `privilege` is recorded at install time and is the only correct source for
+/// the authorization of a later removal: it survives scope changes, and it does
+/// not have to be re-derived from a plan that no longer exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OwnedResource {
@@ -73,56 +81,69 @@ pub enum OwnedResource {
         sha256: Sha256Digest,
         size: u64,
         created_directories: Vec<TargetPath>,
+        privilege: Privilege,
     },
-    Shortcut {
-        link_path: TargetPath,
-        previous: ShortcutState,
-        installed: ShortcutState,
+    Launcher {
+        launcher_path: TargetPath,
+        privilege: Privilege,
+        previous: LauncherState,
+        installed: LauncherState,
     },
     PathEntry {
         value: TargetPath,
+        /// Host spelling of the search path that owns the entry, as stored.
         value_type: String,
+        privilege: Privilege,
     },
     Protocol {
+        privilege: Privilege,
         previous: ProtocolState,
         installed: ProtocolState,
     },
-    ProgId {
-        previous: ProgIdState,
-        installed: ProgIdState,
+    FileAssociation {
+        privilege: Privilege,
+        previous: FileAssociationState,
+        installed: FileAssociationState,
     },
     Extension {
+        privilege: Privilege,
         previous: ExtensionState,
         installed: ExtensionState,
     },
     Service {
         name: String,
+        privilege: Privilege,
         previous: ServiceState,
         installed: ServiceState,
     },
-    UninstallEntry {
-        scope: SelectedScope,
-        state: UninstallEntryState,
+    Backend {
+        id: BackendResourceId,
+        privilege: Privilege,
+        payload: Vec<u8>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UninstallEntryState {
-    pub values: BTreeMap<String, UninstallEntryValue>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum UninstallEntryValue {
-    String(String),
-    Dword(u32),
+impl OwnedResource {
+    /// Authority this installation used when it created the resource.
+    pub const fn privilege(&self) -> Privilege {
+        match self {
+            Self::File { privilege, .. }
+            | Self::Launcher { privilege, .. }
+            | Self::PathEntry { privilege, .. }
+            | Self::Protocol { privilege, .. }
+            | Self::FileAssociation { privilege, .. }
+            | Self::Extension { privilege, .. }
+            | Self::Service { privilege, .. }
+            | Self::Backend { privilege, .. } => *privilege,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShortcutState {
+pub enum LauncherState {
     Absent,
-    Link {
+    Launcher {
         target: TargetPath,
         arguments: Vec<String>,
         working_directory: Option<TargetPath>,
@@ -149,7 +170,7 @@ pub enum ProtocolState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProgIdState {
+pub enum FileAssociationState {
     Absent,
     Registration {
         description: Option<String>,
@@ -161,5 +182,5 @@ pub enum ProgIdState {
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionState {
     Absent,
-    Mapped { prog_id: String },
+    Mapped { association_id: String },
 }

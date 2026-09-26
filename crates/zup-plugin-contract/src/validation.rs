@@ -385,12 +385,12 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(string_size(&file.destination))
                 .saturating_add(list_size(file.contents.len()))
                 .saturating_add(file.contents.len()),
-            ResourceItem::Shortcut(shortcut) => size
+            ResourceItem::Launcher(launcher) => size
                 .saturating_add(1)
-                .saturating_add(string_size(&shortcut.name))
-                .saturating_add(string_size(&shortcut.target))
-                .saturating_add(string_list_size(&shortcut.arguments))
-                .saturating_add(option_string_size(&shortcut.working_directory)),
+                .saturating_add(string_size(&launcher.name))
+                .saturating_add(string_size(&launcher.target))
+                .saturating_add(string_list_size(&launcher.arguments))
+                .saturating_add(option_string_size(&launcher.working_directory)),
             ResourceItem::PathEntry(entry) => size.saturating_add(string_size(&entry.value)),
             ResourceItem::Service(service) => size
                 .saturating_add(string_size(&service.id))
@@ -403,11 +403,11 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(string_size(&protocol.scheme))
                 .saturating_add(string_size(&protocol.executable))
                 .saturating_add(string_list_size(&protocol.args)),
-            ResourceItem::FileType(file_type) => size
-                .saturating_add(string_size(&file_type.extension))
-                .saturating_add(string_size(&file_type.id))
-                .saturating_add(option_string_size(&file_type.description))
-                .saturating_add(string_size(&file_type.executable)),
+            ResourceItem::FileAssociation(file_association) => size
+                .saturating_add(string_size(&file_association.extension))
+                .saturating_add(string_size(&file_association.id))
+                .saturating_add(option_string_size(&file_association.description))
+                .saturating_add(string_size(&file_association.executable)),
         };
     }
     size

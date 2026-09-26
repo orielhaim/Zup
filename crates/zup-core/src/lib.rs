@@ -12,32 +12,41 @@ mod condition;
 mod digest;
 mod ids;
 mod installer;
+mod location;
 mod model;
 mod path;
 mod prerequisite;
 mod resource_key;
+mod target;
 mod template;
 mod value;
 
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_reader};
 pub use ids::{
-    AppId, ComponentId, FileTypeId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
+    AppId, BackendResourceId, ComponentId, FileAssociationId, NonEmptyString, PluginId,
+    ProtocolScheme, ServiceId,
 };
 pub use installer::{Installer, UpdateConfig};
+pub use location::{INSTALL_LOCATIONS, InstallLocation};
 pub use model::{
-    App, Component, FileExtension, FileMapping, FileType, Frontend, Install, InstallDirectory,
-    InstallScope, PathEntry, PluginBinding, Privilege, Protocol, Service, ServiceStart, Shortcut,
-    ShortcutLocation, Source, UiBranding, UiTheme,
+    App, Component, FileAssociation, FileExtension, FileMapping, Frontend, Install,
+    InstallDirectory, InstallScope, Launcher, LauncherLocation, PathEntry, PluginBinding,
+    Privilege, Protocol, Service, ServiceStart, Source, UiBranding, UiTheme,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use prerequisite::{
+    FileVersion, InstalledPackage, InstalledPackageId, MAX_INSTALLED_PACKAGE_ID_BYTES,
     MAX_PREREQUISITE_ARGUMENT_BYTES, MAX_PREREQUISITE_ARGUMENTS, MAX_PREREQUISITE_ID_BYTES,
-    MAX_PREREQUISITE_PACKAGE_BYTES, Prerequisite, PrerequisiteArchitecture, PrerequisiteDetector,
-    PrerequisiteId, PrerequisiteInstaller, PrerequisiteInstallerKind, PrerequisitePackage,
-    RegistryHive,
+    MAX_PREREQUISITE_PACKAGE_BYTES, MAX_RUNTIME_REQUIREMENT_ID_BYTES, Prerequisite,
+    PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
+    PrerequisiteRequirement, Runtime, RuntimeRequirementId,
 };
 pub use resource_key::ResourceKey;
+pub use target::{
+    ResolvedTargetConfig, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
+    TargetParseError, TargetProfile, TargetProfileId, TargetTriple,
+};
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
 pub use value::ValueError;
 
@@ -55,11 +64,17 @@ pub enum SelectedScope {
 }
 
 impl SelectedScope {
-    /// Privilege implied by the installation scope.
-    pub const fn privilege(self) -> Privilege {
+    /// Default authorization for resources that a scope places on the host.
+    ///
+    /// A scope says *where* an application lives, not *how* the host authorizes
+    /// work. Planning uses this as the default for resources that declare no
+    /// narrower requirement; every resource may still carry its own
+    /// [`Privilege`], and nothing outside authoring derives authorization from
+    /// a scope.
+    pub const fn authorization(self) -> Privilege {
         match self {
             Self::User => Privilege::User,
-            Self::Machine => Privilege::Machine,
+            Self::Machine => Privilege::System,
         }
     }
 }

@@ -1,49 +1,35 @@
-//! Operation executor interface (synchronous) with typed receipts.
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-
-use crate::plan::TransactionNode;
-use zup_core::{SelectedScope, Sha256Digest};
-use zup_exec::{
-    ExtensionState, ProgIdState, ProtocolState, ServiceState, ShortcutState, UninstallEntryState,
-};
+use zup_core::{ResourceKey, Sha256Digest};
 use zup_platform::TargetPath;
 
-/// Result of reconciling a node whose durable state is `Running`.
+use crate::plan::TransactionNode;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReconcileResult {
-    /// Side effect did not land. Retry is safe.
     #[default]
     NotApplied,
-    /// Side effect landed. Record `Applied` and continue.
     Applied,
     AppliedWithReceipt(OperationReceipt),
-    /// Outcome unknown. Do not guess.
     Ambiguous,
 }
 
-/// Typed durable receipt for one applied operation.
-///
-/// Journaled as part of `Applied`. Unknown future variants must fail closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationReceipt {
-    /// Control barrier (begin, preflight, commit-intent, verify, commit).
     Control,
-    /// Payload staged to the transaction work area.
     StageFile {
         staged_path: String,
         size: u64,
         sha256: String,
     },
-    /// File created at the destination.
     CreateFile {
         destination: String,
         installed_sha256: String,
         installed_size: u64,
         created_directories: Vec<String>,
     },
-    /// File replaced; previous content preserved under `backup_path`.
     ReplaceFile {
         destination: String,
         previous_sha256: String,
@@ -58,67 +44,77 @@ pub enum OperationReceipt {
         sha256: Sha256Digest,
         size: u64,
     },
-    PathEntry {
-        scope: SelectedScope,
-        entry: String,
-        value_type: String,
-    },
-    RemovePathEntry {
-        scope: SelectedScope,
-        entry: String,
-        value_type: String,
-    },
-    Shortcut {
-        link_path: TargetPath,
-        previous: Box<ShortcutState>,
-        installed: Box<ShortcutState>,
-    },
-    Service {
-        name: String,
-        previous: Box<ServiceState>,
-        installed: Box<ServiceState>,
-    },
-    Protocol {
-        scope: SelectedScope,
-        scheme: String,
-        previous: ProtocolState,
-        installed: ProtocolState,
-    },
-    ProgId {
-        scope: SelectedScope,
-        id: String,
-        previous: ProgIdState,
-        installed: ProgIdState,
-    },
-    Extension {
-        scope: SelectedScope,
-        extension: String,
-        previous: ExtensionState,
-        installed: ExtensionState,
-    },
-    UninstallEntry {
-        scope: SelectedScope,
-        key_path: String,
-        previous: Option<UninstallEntryState>,
-        installed: Option<UninstallEntryState>,
+    Backend {
+        key: ResourceKey,
+        payload: Vec<u8>,
     },
 }
 
-/// Platform/runtime implementation that can actually perform an operation.
+impl OperationReceipt {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Backend { key, payload } => {
+                if !matches!(key, ResourceKey::Backend { .. }) {
+                    return Err("backend receipt key is not a backend resource".into());
+                }
+                if payload.len() > crate::MAX_BACKEND_PAYLOAD_BYTES {
+                    return Err("backend receipt payload exceeds the transaction limit".into());
+                }
+            }
+            Self::StageFile { sha256, .. } => {
+                Sha256Digest::from_str(sha256)
+                    .map_err(|_| "invalid staged file digest".to_string())?;
+            }
+            Self::CreateFile {
+                installed_sha256, ..
+            } => {
+                Sha256Digest::from_str(installed_sha256)
+                    .map_err(|_| "invalid installed file digest".to_string())?;
+            }
+            Self::ReplaceFile {
+                previous_sha256,
+                new_sha256,
+                ..
+            } => {
+                Sha256Digest::from_str(previous_sha256)
+                    .and_then(|_| Sha256Digest::from_str(new_sha256))
+                    .map_err(|_| "invalid replaced file digest".to_string())?;
+            }
+            Self::RemoveFile { .. } | Self::Control => {}
+        }
+        Ok(())
+    }
+}
+
 pub trait OperationExecutor {
     type Error;
 
-    /// Perform the operation's side effect and return a durable receipt.
+    /// Preflight one node before the transaction mutates anything.
+    ///
+    /// Called for the `Begin` and `Preflight` barriers, so it must observe
+    /// only: a prepare that changes state defeats the barrier it guards.
+    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error>;
+
     fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error>;
 
-    /// Undo a previously applied operation using its durable receipt.
+    /// Confirm that an applied node's installed state matches its receipt.
+    ///
+    /// Called once per applied mutation, file removal, and backend operation
+    /// before the commit barrier. The receipt is the only durable record of
+    /// what the apply was supposed to install, so it is the comparison basis.
+    /// Must observe only.
+    fn verify(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), Self::Error>;
+
     fn rollback(
         &mut self,
         operation: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error>;
 
-    /// Determine the real-world outcome of a node left `Running` after a crash.
     fn reconcile(
         &mut self,
         operation: &TransactionNode,
@@ -126,12 +122,10 @@ pub trait OperationExecutor {
     ) -> Result<ReconcileResult, Self::Error>;
 }
 
-/// Runtime-neutral cancellation probe.
 pub trait CancellationProbe {
     fn is_cancelled(&self) -> bool;
 }
 
-/// Never cancelled (default).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NeverCancel;
 

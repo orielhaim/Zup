@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracing::{info, info_span};
-use zup_build::BuildPlan;
+use zup_build::{BuildPlan, TargetBuildPlan};
 use zup_core::{
     ComponentId, Condition, InstallScope, PluginBinding, PluginId, Privilege, ResourceKey,
 };
@@ -10,14 +10,13 @@ use crate::error::{PlanError, SelectedScope};
 use crate::plan_types::InstallPlan;
 use crate::plugins::{
     CancellationQuery, CollisionIndex, MAX_PLUGIN_STRING_BYTES, PlannedInstallation,
-    PluginExecutor, PluginHostFacts, PluginPlanningContext, merge_plugin_proposal, sort_resources,
-    summarize_plan,
+    PluginExecutor, PluginPlanningContext, merge_plugin_proposal, sort_resources, summarize_plan,
 };
 use crate::request::PlanRequest;
 use crate::resolve::{resolve_install_directory, resolve_template};
 use crate::resources::{
-    PlannedFile, PlannedFileType, PlannedPathEntry, PlannedPrerequisite, PlannedProtocol,
-    PlannedService, PlannedShortcut,
+    PlannedFile, PlannedFileAssociation, PlannedLauncher, PlannedPathEntry, PlannedPrerequisite,
+    PlannedProtocol, PlannedService,
 };
 use crate::select::select_components;
 
@@ -27,7 +26,8 @@ struct PreparedPlan {
 }
 
 pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, PlanError> {
-    let prepared = prepare_plan(build, request)?;
+    let target = requested_target(build, request)?;
+    let prepared = prepare_plan(target, request)?;
     if let Some(binding) = prepared.active_plugins.first() {
         return Err(PlanError::PluginPlanningRequired {
             plugin_id: binding.id.clone(),
@@ -36,17 +36,41 @@ pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, Pla
     Ok(prepared.plan)
 }
 
+pub fn plan_without_plugins(
+    build: &BuildPlan,
+    request: &PlanRequest,
+) -> Result<InstallPlan, PlanError> {
+    Ok(prepare_plan(requested_target(build, request)?, request)?.plan)
+}
+
+fn requested_target<'a>(
+    build: &'a BuildPlan,
+    request: &PlanRequest,
+) -> Result<&'a TargetBuildPlan, PlanError> {
+    build
+        .target_by_triple(&request.target)
+        .ok_or_else(|| PlanError::UnknownBuildTarget {
+            target: request.target.clone(),
+        })
+}
+
 pub fn plan_with_plugins<E>(
     build: &BuildPlan,
     request: &PlanRequest,
-    host: PluginHostFacts,
     executor: &mut E,
     cancellation: &dyn CancellationQuery,
 ) -> Result<PlannedInstallation, PlanError>
 where
     E: PluginExecutor + ?Sized,
 {
-    let mut prepared = prepare_plan(build, request)?;
+    let target = requested_target(build, request)?;
+    let mut prepared = prepare_plan(target, request)?;
+    if executor.target() != &prepared.plan.target {
+        return Err(PlanError::PluginTargetMismatch {
+            expected: prepared.plan.target.clone(),
+            found: executor.target().clone(),
+        });
+    }
     if prepared.active_plugins.is_empty() {
         return Ok(PlannedInstallation {
             plan: prepared.plan,
@@ -59,7 +83,7 @@ where
         install_directory: prepared.plan.install_directory.clone(),
         scope: prepared.plan.scope,
         selected_components: prepared.plan.selected_components.clone(),
-        host,
+        target: prepared.plan.target.clone(),
     };
     let mut collisions = CollisionIndex::from_plan(&prepared.plan)?;
     let mut generated_files = Vec::new();
@@ -98,7 +122,7 @@ where
     })
 }
 
-fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan, PlanError> {
+fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<PreparedPlan, PlanError> {
     let installer = &build.installer;
     let scope = request.scope;
 
@@ -145,7 +169,9 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
     };
 
     let install_directory = resolve_install_directory(&raw_directory, &installer.app)?;
-    let scope_privilege = scope.privilege();
+    // Authoring default only: resources inherit their scope's authorization
+    // unless something later gives them a narrower requirement.
+    let default_privilege = scope.authorization();
 
     let prerequisites = installer
         .prerequisites
@@ -178,35 +204,35 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
             destination,
             size: file.size,
             sha256: file.sha256,
-            privilege: scope_privilege,
+            privilege: default_privilege,
         });
     }
 
-    let mut shortcuts = Vec::new();
-    for shortcut in &installer.shortcuts {
+    let mut launchers = Vec::new();
+    for launcher in &installer.launchers {
         if !is_active(
-            shortcut.component.as_ref(),
-            shortcut.when.as_ref(),
+            launcher.component.as_ref(),
+            launcher.when.as_ref(),
             &selected_set,
         ) {
             continue;
         }
-        let name = shortcut.name.clone();
-        shortcuts.push(PlannedShortcut {
-            key: ResourceKey::Shortcut {
-                location: shortcut.location,
+        let name = launcher.name.clone();
+        launchers.push(PlannedLauncher {
+            key: ResourceKey::Launcher {
+                location: launcher.location,
                 name: name.to_string(),
             },
-            location: shortcut.location,
+            location: launcher.location,
             name,
-            target: resolve_template(&shortcut.target, &installer.app, &install_directory)?,
-            arguments: shortcut.arguments.clone(),
-            working_directory: shortcut
+            target: resolve_template(&launcher.target, &installer.app, &install_directory)?,
+            arguments: launcher.arguments.clone(),
+            working_directory: launcher
                 .working_directory
                 .as_ref()
                 .map(|dir| resolve_template(dir, &installer.app, &install_directory))
                 .transpose()?,
-            privilege: scope_privilege,
+            privilege: default_privilege,
         });
     }
 
@@ -221,7 +247,8 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
                 value: value.to_string(),
             },
             value,
-            privilege: scope_privilege,
+            scope,
+            privilege: default_privilege,
         });
     }
 
@@ -244,7 +271,7 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
             binary: resolve_template(&service.binary, &installer.app, &install_directory)?,
             arguments: service.arguments.clone(),
             start: service.start,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         });
     }
 
@@ -260,58 +287,61 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
             scheme: protocol.scheme.clone(),
             executable: resolve_template(&protocol.executable, &installer.app, &install_directory)?,
             args: protocol.args.clone(),
-            privilege: scope_privilege,
+            scope,
+            privilege: default_privilege,
         });
     }
 
-    let mut file_types = Vec::new();
-    for file_type in &installer.file_types {
-        if !is_active(None, file_type.when.as_ref(), &selected_set) {
+    let mut file_associations = Vec::new();
+    for file_association in &installer.file_associations {
+        if !is_active(None, file_association.when.as_ref(), &selected_set) {
             continue;
         }
-        file_types.push(PlannedFileType {
-            key: ResourceKey::FileType {
-                id: file_type.id.clone(),
+        file_associations.push(PlannedFileAssociation {
+            key: ResourceKey::FileAssociation {
+                id: file_association.id.clone(),
             },
-            extension: file_type.extension.clone(),
-            id: file_type.id.clone(),
-            description: file_type.description.clone(),
+            extension: file_association.extension.clone(),
+            id: file_association.id.clone(),
+            description: file_association.description.clone(),
             executable: resolve_template(
-                &file_type.executable,
+                &file_association.executable,
                 &installer.app,
                 &install_directory,
             )?,
-            privilege: scope_privilege,
+            scope,
+            privilege: default_privilege,
         });
     }
 
     validate_active_collisions(
         &files,
-        &shortcuts,
+        &launchers,
         &path_entries,
         &services,
         &protocols,
-        &file_types,
+        &file_associations,
     )?;
 
     let mut plan = InstallPlan {
         app: installer.app.clone(),
+        target: installer.target.clone(),
         scope,
         install_directory,
         selected_components: selected,
         prerequisites,
         files,
-        shortcuts,
+        launchers,
         path_entries,
         services,
         protocols,
-        file_types,
+        file_associations,
         summary: crate::plan_types::PlanSummary {
             file_count: 0,
             install_bytes: 0,
             selected_component_count: 0,
             resource_count: 0,
-            requires_elevation: false,
+            requires_authorization: false,
             prerequisite_count: 0,
             download_bytes: 0,
         },
@@ -338,7 +368,7 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
         ) {
             continue;
         }
-        let identity = plugin.id.as_str().to_ascii_lowercase();
+        let identity = plugin.id.as_str().to_owned();
         if let Some(existing) = plugin_ids.get(&identity) {
             return Err(PlanError::PluginResourceCollision {
                 plugin_id: Some(plugin.id.clone()),
@@ -354,13 +384,13 @@ fn prepare_plan(build: &BuildPlan, request: &PlanRequest) -> Result<PreparedPlan
 
     info!(
         active_files = plan.files.len(),
-        active_resources = plan.shortcuts.len()
+        active_resources = plan.launchers.len()
             + plan.path_entries.len()
             + plan.services.len()
             + plan.protocols.len()
-            + plan.file_types.len(),
+            + plan.file_associations.len(),
         install_bytes = plan.summary.install_bytes,
-        requires_elevation = plan.summary.requires_elevation,
+        requires_authorization = plan.summary.requires_authorization,
         "plan complete"
     );
 
@@ -402,11 +432,11 @@ fn is_active(
 
 fn validate_active_collisions(
     files: &[PlannedFile],
-    shortcuts: &[PlannedShortcut],
+    launchers: &[PlannedLauncher],
     path_entries: &[PlannedPathEntry],
     services: &[PlannedService],
     protocols: &[PlannedProtocol],
-    file_types: &[PlannedFileType],
+    file_associations: &[PlannedFileAssociation],
 ) -> Result<(), PlanError> {
     let mut file_keys = BTreeSet::new();
     for file in files {
@@ -417,12 +447,12 @@ fn validate_active_collisions(
         }
     }
 
-    let mut shortcut_keys = BTreeSet::new();
-    for shortcut in shortcuts {
-        if !shortcut_keys.insert(shortcut.key.clone()) {
-            return Err(PlanError::ActiveShortcutCollision {
-                location: shortcut.location.to_string(),
-                name: shortcut.name.to_string(),
+    let mut launcher_keys = BTreeSet::new();
+    for launcher in launchers {
+        if !launcher_keys.insert(launcher.key.clone()) {
+            return Err(PlanError::ActiveLauncherCollision {
+                location: launcher.location.to_string(),
+                name: launcher.name.to_string(),
             });
         }
     }
@@ -454,17 +484,17 @@ fn validate_active_collisions(
         }
     }
 
-    let mut file_type_ids = BTreeSet::new();
-    let mut file_type_exts = BTreeSet::new();
-    for file_type in file_types {
-        if !file_type_ids.insert(file_type.key.clone()) {
-            return Err(PlanError::ActiveFileTypeCollision {
-                id: file_type.id.to_string(),
+    let mut file_association_ids = BTreeSet::new();
+    let mut file_association_exts = BTreeSet::new();
+    for file_association in file_associations {
+        if !file_association_ids.insert(file_association.key.clone()) {
+            return Err(PlanError::ActiveFileAssociationCollision {
+                id: file_association.id.to_string(),
             });
         }
-        if !file_type_exts.insert(file_type.extension.clone()) {
+        if !file_association_exts.insert(file_association.extension.clone()) {
             return Err(PlanError::ActiveExtensionCollision {
-                extension: file_type.extension.to_string(),
+                extension: file_association.extension.to_string(),
             });
         }
     }

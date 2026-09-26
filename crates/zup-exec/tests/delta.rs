@@ -1,19 +1,17 @@
 //! Full v1 delta planning tests with a fake machine.
 
-use std::path::PathBuf;
-
 use zup_core::{
-    Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope, ServiceId, ServiceStart,
-    Sha256Digest, ShortcutLocation, hash_reader,
+    LauncherLocation, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
+    ServiceId, ServiceStart, Sha256Digest, TargetTriple, hash_reader,
 };
 use zup_exec::{
-    Conflict, FileOperationKind, FileTypeOperationKind, MachineSnapshot, ObservedExtensionState,
-    ObservedFile, ObservedFileState, ObservedFileType, ObservedPathEntry, ObservedProgIdState,
+    Conflict, FileAssociationOperationKind, FileOperationKind, HostSnapshot, LauncherOperationKind,
+    ObservedExtensionState, ObservedFile, ObservedFileAssociation, ObservedFileAssociationState,
+    ObservedFileState, ObservedLauncher, ObservedLauncherState, ObservedPathEntry,
     ObservedProtocol, ObservedProtocolState, ObservedService, ObservedServiceState,
-    ObservedShortcut, ObservedShortcutState, PathEntryState, PathOperationKind,
-    ProtocolOperationKind, ServiceOperationKind, ShortcutOperationKind, plan_execution,
+    PathOperationKind, ProtocolOperationKind, SearchPath, ServiceOperationKind, plan_execution,
 };
-use zup_exec::{InstallLedger, OwnedResource, ProtocolState, ServiceState, ShortcutState};
+use zup_exec::{InstallLedger, LauncherState, OwnedResource, ProtocolState, ServiceState};
 use zup_platform::{CommandSpec, TargetPath};
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
@@ -21,7 +19,7 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
 }
 
 fn tpath(s: &str) -> TargetPath {
-    TargetPath::new(PathBuf::from(s)).unwrap()
+    TargetPath::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(), s).unwrap()
 }
 
 fn cmd(path: &str, args: &[&str]) -> CommandSpec {
@@ -38,6 +36,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             main: None,
             description: None,
         },
+        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
         scope: SelectedScope::Machine,
         install_directory: tpath(r"C:\PF\Acme"),
         selected_components: vec![],
@@ -50,20 +49,22 @@ fn sample_target() -> zup_platform::TargetPlan {
             destination: tpath(r"C:\PF\Acme\Acme.exe"),
             size: 4,
             sha256: digest(b"data"),
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
-        shortcuts: vec![zup_platform::TargetShortcut {
-            key: ResourceKey::Shortcut {
-                location: ShortcutLocation::StartMenu,
+        launchers: vec![zup_platform::TargetLauncher {
+            key: ResourceKey::Launcher {
+                location: LauncherLocation::Menu,
                 name: "Acme".into(),
             },
-            location: ShortcutLocation::StartMenu,
+            location: LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Acme").unwrap(),
-            link_path: tpath(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Acme.lnk"),
+            launcher_path: tpath(
+                r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Acme.launcher",
+            ),
             target: tpath(r"C:\PF\Acme\Acme.exe"),
             arguments: vec![],
             working_directory: Some(tpath(r"C:\PF\Acme")),
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
         path_entries: vec![zup_platform::TargetPathEntry {
             key: ResourceKey::PathEntry {
@@ -71,7 +72,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             },
             value: tpath(r"C:\PF\Acme\bin"),
             scope: SelectedScope::Machine,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
         services: vec![zup_platform::TargetService {
             key: ResourceKey::Service {
@@ -82,7 +83,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             display_name: Some(zup_core::NonEmptyString::new("Acme Agent").unwrap()),
             command: cmd(r"C:\PF\Acme\acme-agent.exe", &[]),
             start: ServiceStart::Automatic,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
         protocols: vec![zup_platform::TargetProtocol {
             key: ResourceKey::Protocol {
@@ -91,24 +92,24 @@ fn sample_target() -> zup_platform::TargetPlan {
             scheme: ProtocolScheme::new("acme").unwrap(),
             command: cmd(r"C:\PF\Acme\Acme.exe", &["--url", "%1"]),
             scope: SelectedScope::Machine,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
-        file_types: vec![zup_platform::TargetFileType {
-            key: ResourceKey::FileType {
-                id: zup_core::FileTypeId::new("Acme.Document").unwrap(),
+        file_associations: vec![zup_platform::TargetFileAssociation {
+            key: ResourceKey::FileAssociation {
+                id: zup_core::FileAssociationId::new("Acme.Document").unwrap(),
             },
             extension: zup_core::FileExtension::new(".acme").unwrap(),
-            id: zup_core::FileTypeId::new("Acme.Document").unwrap(),
+            id: zup_core::FileAssociationId::new("Acme.Document").unwrap(),
             description: Some("Acme Document".into()),
             command: cmd(r"C:\PF\Acme\Acme.exe", &[]),
             scope: SelectedScope::Machine,
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }],
         summary: zup_platform::TargetPlanSummary {
             file_count: 1,
             install_bytes: 4,
             resource_count: 5,
-            requires_elevation: true,
+            requires_authorization: true,
             selected_component_count: 2,
             prerequisite_count: 0,
             download_bytes: 0,
@@ -125,27 +126,27 @@ fn exact_service() -> ObservedServiceState {
     }
 }
 
-fn exact_file_type() -> ObservedFileType {
-    ObservedFileType {
-        key: ResourceKey::FileType {
-            id: zup_core::FileTypeId::new("Acme.Document").unwrap(),
+fn exact_file_association() -> ObservedFileAssociation {
+    ObservedFileAssociation {
+        key: ResourceKey::FileAssociation {
+            id: zup_core::FileAssociationId::new("Acme.Document").unwrap(),
         },
         extension: ".acme".into(),
         id: "Acme.Document".into(),
         scope: SelectedScope::Machine,
-        id_state: ObservedProgIdState::Registration {
+        association_state: ObservedFileAssociationState::Registration {
             description: Some("Acme Document".into()),
             command: cmd(r"C:\PF\Acme\Acme.exe", &[]),
         },
         extension_state: ObservedExtensionState::Mapped {
-            prog_id: "Acme.Document".into(),
+            association_id: "Acme.Document".into(),
         },
     }
 }
 
-fn snapshot_happy() -> MachineSnapshot {
+fn snapshot_happy() -> HostSnapshot {
     let target = sample_target();
-    MachineSnapshot {
+    HostSnapshot {
         files: vec![ObservedFile {
             key: target.files[0].key.clone(),
             path: target.files[0].destination.clone(),
@@ -154,16 +155,16 @@ fn snapshot_happy() -> MachineSnapshot {
                 sha256: digest(b"data"),
             },
         }],
-        shortcuts: vec![ObservedShortcut {
-            key: target.shortcuts[0].key.clone(),
-            link_path: target.shortcuts[0].link_path.clone(),
-            state: ObservedShortcutState::Absent,
+        launchers: vec![ObservedLauncher {
+            key: target.launchers[0].key.clone(),
+            launcher_path: target.launchers[0].launcher_path.clone(),
+            state: ObservedLauncherState::Absent,
         }],
         path_entries: vec![ObservedPathEntry {
             key: target.path_entries[0].key.clone(),
             desired: target.path_entries[0].value.clone(),
             scope: SelectedScope::Machine,
-            state: PathEntryState::Absent,
+            search_path: SearchPath::default(),
         }],
         services: vec![ObservedService {
             key: target.services[0].key.clone(),
@@ -176,28 +177,28 @@ fn snapshot_happy() -> MachineSnapshot {
             scope: SelectedScope::Machine,
             state: ObservedProtocolState::Absent,
         }],
-        file_types: vec![exact_file_type()],
+        file_associations: vec![exact_file_association()],
     }
 }
 
 #[test]
-fn shortcut_and_service_ownership_decisions() {
+fn launcher_and_service_ownership_decisions() {
     let mut target = sample_target();
     let mut snapshot = snapshot_happy();
-    let original_shortcut = ShortcutState::Link {
-        target: target.shortcuts[0].target.clone(),
+    let original_launcher = LauncherState::Launcher {
+        target: target.launchers[0].target.clone(),
         arguments: vec!["--old".into()],
-        working_directory: target.shortcuts[0].working_directory.clone(),
+        working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
     };
-    snapshot.shortcuts[0].state = ObservedShortcutState::Shortcut {
-        target: target.shortcuts[0].target.clone(),
+    snapshot.launchers[0].state = ObservedLauncherState::Launcher {
+        target: target.launchers[0].target.clone(),
         arguments: vec!["--old".into()],
-        working_directory: target.shortcuts[0].working_directory.clone(),
+        working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
         display_name: "Old Agent".into(),
@@ -206,42 +207,48 @@ fn shortcut_and_service_ownership_decisions() {
         runtime_state: None,
     };
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(foreign.shortcuts[0].kind, ShortcutOperationKind::Conflict);
+    assert_eq!(foreign.launchers[0].kind, LauncherOperationKind::Conflict);
     assert_eq!(foreign.services[0].kind, ServiceOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(target.app.id.clone(), SelectedScope::Machine);
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target.clone(),
+        SelectedScope::Machine,
+    );
     ledger.resources.insert(
-        target.shortcuts[0].key.clone(),
-        OwnedResource::Shortcut {
-            link_path: target.shortcuts[0].link_path.clone(),
-            previous: ShortcutState::Absent,
-            installed: original_shortcut,
+        target.launchers[0].key.clone(),
+        OwnedResource::Launcher {
+            launcher_path: target.launchers[0].launcher_path.clone(),
+            privilege: Privilege::System,
+            previous: LauncherState::Absent,
+            installed: original_launcher,
         },
     );
     ledger.resources.insert(
         target.services[0].key.clone(),
         OwnedResource::Service {
             name: target.services[0].name.to_string(),
+            privilege: Privilege::System,
             previous: ServiceState::Absent,
             installed: original_service,
         },
     );
     let owned = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(owned.shortcuts[0].kind, ShortcutOperationKind::UpdateOwned);
+    assert_eq!(owned.launchers[0].kind, LauncherOperationKind::UpdateOwned);
     assert_eq!(owned.services[0].kind, ServiceOperationKind::UpdateOwned);
-    snapshot.shortcuts[0].state = ObservedShortcutState::Absent;
+    snapshot.launchers[0].state = ObservedLauncherState::Absent;
     snapshot.services[0].state = ObservedServiceState::Absent;
     let drift = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(drift.shortcuts[0].kind, ShortcutOperationKind::Drift);
+    assert_eq!(drift.launchers[0].kind, LauncherOperationKind::Drift);
     assert_eq!(drift.services[0].kind, ServiceOperationKind::Drift);
 
-    target.shortcuts[0].arguments = vec!["--old".into()];
+    target.launchers[0].arguments = vec!["--old".into()];
     target.services[0].display_name = Some(zup_core::NonEmptyString::new("Old Agent").unwrap());
     target.services[0].start = ServiceStart::Manual;
-    snapshot.shortcuts[0].state = ObservedShortcutState::Shortcut {
-        target: target.shortcuts[0].target.clone(),
+    snapshot.launchers[0].state = ObservedLauncherState::Launcher {
+        target: target.launchers[0].target.clone(),
         arguments: vec!["--old".into()],
-        working_directory: target.shortcuts[0].working_directory.clone(),
+        working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
         display_name: "Old Agent".into(),
@@ -250,7 +257,7 @@ fn shortcut_and_service_ownership_decisions() {
         runtime_state: None,
     };
     let exact = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(exact.shortcuts[0].kind, ShortcutOperationKind::NoOp);
+    assert_eq!(exact.launchers[0].kind, LauncherOperationKind::NoOp);
     assert_eq!(exact.services[0].kind, ServiceOperationKind::NoOp);
 }
 
@@ -262,17 +269,20 @@ fn e2e_fake_machine_mixed_deltas() {
 
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
-    assert_eq!(plan.shortcuts[0].kind, ShortcutOperationKind::Create);
+    assert_eq!(plan.launchers[0].kind, LauncherOperationKind::Create);
     assert_eq!(plan.services[0].kind, ServiceOperationKind::NoOp);
     assert_eq!(plan.protocols[0].kind, ProtocolOperationKind::Create);
-    assert_eq!(plan.file_types[0].kind, FileTypeOperationKind::NoOp);
+    assert_eq!(
+        plan.file_associations[0].kind,
+        FileAssociationOperationKind::NoOp
+    );
 
     assert_eq!(plan.summary.files_unchanged, 1);
     assert_eq!(plan.summary.path_entries_add, 1);
-    assert_eq!(plan.summary.shortcuts_create, 1);
+    assert_eq!(plan.summary.launchers_create, 1);
     assert_eq!(plan.summary.services_unchanged, 1);
     assert_eq!(plan.summary.protocols_create, 1);
-    assert_eq!(plan.summary.file_types_unchanged, 1);
+    assert_eq!(plan.summary.file_associations_unchanged, 1);
 }
 
 #[test]
@@ -290,7 +300,7 @@ fn e2e_foreign_resources_conflict() {
         start: ServiceStart::Manual,
         runtime_state: None,
     };
-    snapshot.shortcuts[0].state = ObservedShortcutState::Shortcut {
+    snapshot.launchers[0].state = ObservedLauncherState::Launcher {
         target: tpath(r"C:\Other\app.exe"),
         arguments: vec![],
         working_directory: None,
@@ -307,10 +317,10 @@ fn e2e_foreign_resources_conflict() {
         plan.services[0].conflict,
         Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration { .. })
     ));
-    assert_eq!(plan.shortcuts[0].kind, ShortcutOperationKind::Conflict);
+    assert_eq!(plan.launchers[0].kind, LauncherOperationKind::Conflict);
     assert!(matches!(
-        plan.shortcuts[0].conflict,
-        Some(Conflict::ShortcutAlreadyOwnedByDifferentTarget { .. })
+        plan.launchers[0].conflict,
+        Some(Conflict::LauncherAlreadyOwnedByDifferentTarget { .. })
     ));
 }
 
@@ -326,7 +336,11 @@ fn files_replace_non_file_conflict() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.files[0].kind, FileOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(target.app.id.clone(), SelectedScope::Machine);
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target.clone(),
+        SelectedScope::Machine,
+    );
     ledger.resources.insert(
         target.files[0].key.clone(),
         OwnedResource::File {
@@ -335,6 +349,7 @@ fn files_replace_non_file_conflict() {
             sha256: digest(b"old!"),
             size: 4,
             created_directories: vec![],
+            privilege: Privilege::System,
         },
     );
     let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
@@ -357,41 +372,53 @@ fn files_replace_non_file_conflict() {
 }
 
 #[test]
-fn file_type_parts_are_planned_independently() {
+fn file_association_parts_are_planned_independently() {
     let target = sample_target();
     let mut snapshot = snapshot_happy();
 
-    // ProgID exact, extension missing.
-    snapshot.file_types[0].extension_state = ObservedExtensionState::Absent;
+    // Association exact, extension missing.
+    snapshot.file_associations[0].extension_state = ObservedExtensionState::Absent;
     let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.file_types[0].kind, FileTypeOperationKind::Create);
-    assert_eq!(plan.file_types[0].prog_id_kind, FileTypeOperationKind::NoOp);
     assert_eq!(
-        plan.file_types[0].extension_kind,
-        FileTypeOperationKind::Create
+        plan.file_associations[0].kind,
+        FileAssociationOperationKind::Create
+    );
+    assert_eq!(
+        plan.file_associations[0].association_kind,
+        FileAssociationOperationKind::NoOp
+    );
+    assert_eq!(
+        plan.file_associations[0].extension_kind,
+        FileAssociationOperationKind::Create
     );
 
-    // Extension exact, ProgID missing.
-    snapshot.file_types[0].id_state = ObservedProgIdState::Absent;
-    snapshot.file_types[0].extension_state = ObservedExtensionState::Mapped {
-        prog_id: "Acme.Document".into(),
+    // Extension exact, association missing.
+    snapshot.file_associations[0].association_state = ObservedFileAssociationState::Absent;
+    snapshot.file_associations[0].extension_state = ObservedExtensionState::Mapped {
+        association_id: "Acme.Document".into(),
     };
     let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.file_types[0].kind, FileTypeOperationKind::Create);
     assert_eq!(
-        plan.file_types[0].prog_id_kind,
-        FileTypeOperationKind::Create
+        plan.file_associations[0].kind,
+        FileAssociationOperationKind::Create
     );
     assert_eq!(
-        plan.file_types[0].extension_kind,
-        FileTypeOperationKind::NoOp
+        plan.file_associations[0].association_kind,
+        FileAssociationOperationKind::Create
+    );
+    assert_eq!(
+        plan.file_associations[0].extension_kind,
+        FileAssociationOperationKind::NoOp
     );
 
     // Both absent → Create
-    snapshot.file_types[0].id_state = ObservedProgIdState::Absent;
-    snapshot.file_types[0].extension_state = ObservedExtensionState::Absent;
+    snapshot.file_associations[0].association_state = ObservedFileAssociationState::Absent;
+    snapshot.file_associations[0].extension_state = ObservedExtensionState::Absent;
     let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.file_types[0].kind, FileTypeOperationKind::Create);
+    assert_eq!(
+        plan.file_associations[0].kind,
+        FileAssociationOperationKind::Create
+    );
 }
 
 #[test]
@@ -407,10 +434,11 @@ fn protocol_upgrade_requires_previous_owned_state() {
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(foreign.protocols[0].kind, ProtocolOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.scope);
+    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
     ledger.resources.insert(
         target.protocols[0].key.clone(),
         OwnedResource::Protocol {
+            privilege: Privilege::System,
             previous: ProtocolState::Absent,
             installed: ProtocolState::Registration { command: old },
         },
@@ -433,16 +461,33 @@ fn protocol_upgrade_requires_previous_owned_state() {
 fn removed_owned_path_is_drift() {
     let target = sample_target();
     let snapshot = snapshot_happy();
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.scope);
+    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
     ledger.resources.insert(
         target.path_entries[0].key.clone(),
         OwnedResource::PathEntry {
             value: target.path_entries[0].value.clone(),
             value_type: "expand_sz".into(),
+            privilege: Privilege::System,
         },
     );
     let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Drift);
+}
+
+#[test]
+fn ledger_target_mismatch_is_rejected() {
+    let target = sample_target();
+    let snapshot = snapshot_happy();
+    let ledger = InstallLedger::new(
+        target.app.id.clone(),
+        TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+        target.scope,
+    );
+    let error = plan_execution(&target, &snapshot, Some(&ledger)).unwrap_err();
+    assert!(matches!(
+        error,
+        zup_exec::ExecutionPlanError::LedgerMismatch
+    ));
 }
 
 #[test]
@@ -461,7 +506,7 @@ fn determinism() {
 #[test]
 fn missing_observation_rejected() {
     let target = sample_target();
-    let snapshot = MachineSnapshot {
+    let snapshot = HostSnapshot {
         files: snapshot_happy().files,
         ..Default::default()
     };
@@ -470,4 +515,154 @@ fn missing_observation_rejected() {
         err,
         zup_exec::ExecutionPlanError::MissingSnapshotObservation { .. }
     ));
+}
+
+#[test]
+fn search_path_membership_is_a_set_decision() {
+    let target = sample_target();
+    let mut snapshot = snapshot_happy();
+    // An unrelated value does not stop the desired entry from being a member.
+    snapshot.path_entries[0].search_path = SearchPath::new(vec![
+        tpath(r"C:\Windows"),
+        tpath(r"C:\PF\Acme\bin"),
+        tpath(r"D:\tools"),
+    ]);
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
+    assert!(plan.path_entries[0].present);
+    assert!(!plan.path_entries[0].previously_owned);
+    assert_eq!(plan.summary.path_entries_present, 1);
+    assert_eq!(plan.summary.path_entries_add, 0);
+
+    // An empty search path is the same decision as one that lacks the entry.
+    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"C:\Windows")]);
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
+    assert!(!plan.path_entries[0].present);
+    assert_eq!(plan.summary.path_entries_add, 1);
+}
+
+#[test]
+fn search_path_membership_uses_target_path_identity() {
+    let target = sample_target();
+    let mut snapshot = snapshot_happy();
+    // Separators and case are the adapter's normalization, not a string compare.
+    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"c:/pf/acme/bin/")]);
+    assert!(
+        snapshot.path_entries[0]
+            .search_path
+            .contains(&target.path_entries[0].value)
+    );
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
+
+    // A different directory under the same prefix is not a member.
+    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"C:\PF\Acme")]);
+    assert!(
+        !snapshot.path_entries[0]
+            .search_path
+            .contains(&target.path_entries[0].value)
+    );
+}
+
+#[test]
+fn search_path_ownership_decisions_are_deterministic() {
+    let target = sample_target();
+    let mut snapshot = snapshot_happy();
+    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
+    ledger.resources.insert(
+        target.path_entries[0].key.clone(),
+        OwnedResource::PathEntry {
+            value: target.path_entries[0].value.clone(),
+            value_type: "expand_sz".into(),
+            privilege: Privilege::System,
+        },
+    );
+    // A reworded but equivalent entry is still owned and still present.
+    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"c:/pf/acme/bin")]);
+    let first = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
+    let second = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
+    assert_eq!(first.path_entries[0].kind, PathOperationKind::Present);
+    assert_eq!(first, second);
+
+    // Removing it is drift, not an add, because the ledger owns it.
+    snapshot.path_entries[0].search_path = SearchPath::default();
+    let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Drift);
+    assert!(plan.path_entries[0].previously_owned);
+    assert!(plan.path_entries[0].conflict.is_some());
+    assert_eq!(plan.summary.path_entries_conflict, 1);
+}
+
+#[test]
+fn operation_privilege_is_carried_verbatim_from_the_target_plan() {
+    let mut target = sample_target();
+    // A per-user scope that still owns a host-wide service, and a host-wide
+    // scope that owns a per-user launcher. Both must survive planning as-is.
+    target.scope = SelectedScope::User;
+    target.files[0].privilege = Privilege::User;
+    target.launchers[0].privilege = Privilege::User;
+    target.path_entries[0].scope = SelectedScope::User;
+    target.path_entries[0].privilege = Privilege::User;
+    target.protocols[0].scope = SelectedScope::User;
+    target.protocols[0].privilege = Privilege::User;
+    target.file_associations[0].scope = SelectedScope::User;
+    target.file_associations[0].privilege = Privilege::User;
+    target.services[0].privilege = Privilege::System;
+    target.summary.requires_authorization = true;
+
+    let mut snapshot = snapshot_happy();
+    snapshot.path_entries[0].scope = SelectedScope::User;
+    snapshot.protocols[0].scope = SelectedScope::User;
+    snapshot.file_associations[0].scope = SelectedScope::User;
+
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.files[0].privilege, Privilege::User);
+    assert_eq!(plan.launchers[0].privilege, Privilege::User);
+    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
+    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
+    assert_eq!(plan.protocols[0].privilege, Privilege::User);
+    assert_eq!(plan.file_associations[0].privilege, Privilege::User);
+    // The service is the only host-wide operation, and it is still System.
+    assert_eq!(plan.services[0].privilege, Privilege::System);
+    assert!(plan.summary.requires_authorization);
+}
+
+#[test]
+fn serialized_field_names_name_authorization_not_elevation() {
+    let plan = plan_execution(&sample_target(), &snapshot_happy(), None).unwrap();
+    let json = serde_json::to_string(&plan).unwrap();
+    assert!(
+        !json.contains("elevation"),
+        "execution plan leaked elevation: {json}"
+    );
+    assert!(json.contains("requires_authorization"));
+
+    let summary = serde_json::to_value(zup_platform::TargetPlanSummary {
+        file_count: 0,
+        install_bytes: 0,
+        resource_count: 0,
+        requires_authorization: true,
+        selected_component_count: 0,
+        prerequisite_count: 0,
+        download_bytes: 0,
+    })
+    .unwrap();
+    assert_eq!(summary["requires_authorization"], serde_json::json!(true));
+    assert!(summary.get("requires_elevation").is_none());
+}
+
+#[test]
+fn privilege_serializes_as_authorization_words_only() {
+    assert_eq!(serde_json::to_string(&Privilege::User).unwrap(), "\"user\"");
+    assert_eq!(
+        serde_json::to_string(&Privilege::System).unwrap(),
+        "\"system\""
+    );
+    // No alias: the old word is not accepted on the way back in.
+    assert!(serde_json::from_str::<Privilege>("\"machine\"").is_err());
+    assert_eq!(
+        serde_json::from_str::<Privilege>("\"system\"").unwrap(),
+        Privilege::System
+    );
 }

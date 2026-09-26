@@ -6,42 +6,82 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use zup_build::materialize;
-use zup_core::SelectedScope;
-use zup_exec::{FileOperationKind, MachineSnapshot, ObservedFileState, plan_execution};
-use zup_manifest::{parse, parse_and_compile};
-use zup_plan::{PlanRequest, plan};
-use zup_platform::{KnownFolder, KnownFolderError, KnownFolderResolver};
+use zup_core::{INSTALL_LOCATIONS, InstallLocation, SelectedScope, TargetTriple};
+use zup_exec::{FileOperationKind, HostSnapshot, ObservedFileState, plan_execution};
+use zup_manifest::{TargetOverrides, compile, parse, select_targets};
+use zup_plan::{InstallPlan, PlanRequest, plan};
+use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 use zup_windows::{
-    FakeServiceReader, FakeShortcutReader, WindowsKnownFolderResolver, WindowsRegistryReader,
-    WindowsTargetContext, inspect_files, inspect_target_with, resolve_target,
+    FakeServiceReader, FakeShortcutReader, TargetPathValidationError, TargetResolveError,
+    WindowsInstallLocationResolver, WindowsRegistryReader, WindowsTargetContext, inspect_files,
+    inspect_target_with, resolve_target, validate_windows_target_path,
+    windows_target_path_identity,
 };
 
 #[derive(Debug, Clone)]
-struct FakeKnownFolders {
+struct FakeInstallLocations {
     root: PathBuf,
 }
 
-impl KnownFolderResolver for FakeKnownFolders {
+impl InstallLocationResolver for FakeInstallLocations {
     fn resolve(
         &self,
-        folder: KnownFolder,
+        location: InstallLocation,
         scope: SelectedScope,
-    ) -> Result<PathBuf, KnownFolderError> {
-        let name = match folder {
-            KnownFolder::ProgramFiles => "PF",
-            KnownFolder::LocalAppData => "LocalAppData",
-            KnownFolder::ProgramData => "PD",
-            KnownFolder::StartMenu => "StartMenu",
-            KnownFolder::Desktop => match scope {
+        target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        let name = match location {
+            InstallLocation::Programs => "PF",
+            InstallLocation::UserData => "LocalAppData",
+            InstallLocation::SharedData => "PD",
+            InstallLocation::Menu => match scope {
+                SelectedScope::User => "UserStartMenu",
+                SelectedScope::Machine => "CommonStartMenu",
+            },
+            InstallLocation::Desktop => match scope {
                 SelectedScope::User => "UserDesktop",
                 SelectedScope::Machine => "PublicDesktop",
             },
-            KnownFolder::Programs => match scope {
-                SelectedScope::User => "UserPrograms",
-                SelectedScope::Machine => "CommonPrograms",
+        };
+        let path = self.root.join(name);
+        TargetPath::new(target, path.to_string_lossy().as_ref()).map_err(|source| {
+            InstallLocationError::ResolutionFailed {
+                location,
+                scope,
+                source: source.into(),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixedInstallLocations;
+
+impl InstallLocationResolver for FixedInstallLocations {
+    fn resolve(
+        &self,
+        location: InstallLocation,
+        scope: SelectedScope,
+        target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        let path = match location {
+            InstallLocation::Programs => r"C:\Program Files",
+            InstallLocation::UserData => r"C:\Users\Test\AppData\Local",
+            InstallLocation::SharedData => r"C:\ProgramData",
+            InstallLocation::Menu => match scope {
+                SelectedScope::User => r"C:\Users\Test\Start Menu",
+                SelectedScope::Machine => r"C:\ProgramData\Start Menu",
+            },
+            InstallLocation::Desktop => match scope {
+                SelectedScope::User => r"C:\Users\Test\Desktop",
+                SelectedScope::Machine => r"C:\Users\Public\Desktop",
             },
         };
-        Ok(self.root.join(name))
+        TargetPath::new(target, path).map_err(|source| InstallLocationError::ResolutionFailed {
+            location,
+            scope,
+            source: source.into(),
+        })
     }
 }
 
@@ -59,15 +99,18 @@ id = "com.acme.acme"
 name = "Acme"
 version = "1.4.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 
 [install]
 scope = "either"
 
 [install.directory]
-user = "${known.local_app_data}/Programs/${app.name}"
-machine = "${known.program_files}/${app.name}"
+user = "${location.user_data}/Programs/${app.name}"
+machine = "${location.programs}/${app.name}"
 
 [[components]]
 id = "core"
@@ -89,8 +132,8 @@ source = "bin/**/*"
 destination = "${install}/bin"
 component = "core"
 
-[[shortcuts]]
-location = "start-menu"
+[[launchers]]
+location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 component = "core"
@@ -112,12 +155,50 @@ scheme = "acme"
 executable = "${install}/Acme.exe"
 args = ["--url", "%1"]
 
-[[file_types]]
+[[file_associations]]
 extension = ".acme"
 id = "Acme.Document"
 description = "Acme Document"
 executable = "${install}/Acme.exe"
 "#
+}
+
+fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("project");
+    write(&project.join("zup.toml"), b"");
+    for (relative, contents) in files {
+        write(&project.join(relative), contents);
+    }
+    let manifest = parse(source).expect("parse");
+    let overrides = TargetOverrides::default();
+    let config = select_targets(&manifest, &["default"], &overrides)
+        .expect("target")
+        .into_iter()
+        .next()
+        .expect("selected target");
+    let installer = compile(&manifest, &config, &overrides).expect("compile");
+    let build = materialize(
+        &project.join("zup.toml"),
+        &manifest,
+        vec![(config.clone(), installer)],
+    )
+    .expect("materialize");
+    let install = plan(
+        &build,
+        &PlanRequest::new(config.target.clone(), SelectedScope::User),
+    )
+    .expect("semantic plan");
+    (dir, install)
+}
+
+fn resolve_fixed(
+    install: &InstallPlan,
+) -> Result<zup_platform::TargetPlan, zup_windows::TargetResolveError> {
+    resolve_target(
+        install,
+        &WindowsTargetContext::with_resolver(FixedInstallLocations, SelectedScope::User),
+    )
 }
 
 fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::TargetPlan) {
@@ -130,12 +211,24 @@ fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::Target
 
     let source = acme_manifest();
     let manifest = parse(source).expect("parse");
-    let installer = parse_and_compile(source).expect("compile");
-    let build = materialize(&project.join("zup.toml"), &manifest, installer).expect("materialize");
-    let install = plan(&build, &PlanRequest::new(scope)).expect("install plan");
+    let overrides = TargetOverrides::default();
+    let config = select_targets(&manifest, &["default"], &overrides)
+        .expect("target")
+        .into_iter()
+        .next()
+        .expect("selected target");
+    let installer = compile(&manifest, &config, &overrides).expect("compile");
+    let build = materialize(
+        &project.join("zup.toml"),
+        &manifest,
+        vec![(config.clone(), installer)],
+    )
+    .expect("materialize");
+    let install =
+        plan(&build, &PlanRequest::new(config.target.clone(), scope)).expect("install plan");
 
     let context = WindowsTargetContext::with_resolver(
-        FakeKnownFolders {
+        FakeInstallLocations {
             root: root.to_path_buf(),
         },
         scope,
@@ -149,6 +242,234 @@ fn temp_root() -> TempDir {
 }
 
 #[test]
+fn resolved_template_components_are_validated_after_semantic_planning() {
+    let files = [
+        ("dist/Acme.exe", b"main-correct".as_slice()),
+        ("dist/acme-agent.exe", b"agent-new".as_slice()),
+        ("dist/bin/acme.exe", b"cli-new".as_slice()),
+    ];
+    let cases = [
+        (
+            "install directory",
+            acme_manifest().replace("name = \"Acme\"", "name = \"CON.\""),
+        ),
+        (
+            "file destination",
+            acme_manifest().replacen(
+                "destination = \"${install}\"",
+                "destination = \"${install}/file.\"",
+                1,
+            ),
+        ),
+        (
+            "launcher target",
+            acme_manifest().replace(
+                "target = \"${install}/Acme.exe\"",
+                "target = \"${install}/CON\"",
+            ),
+        ),
+        (
+            "launcher working directory",
+            acme_manifest().replace(
+                "target = \"${install}/Acme.exe\"",
+                "target = \"${install}/Acme.exe\"\nworking_directory = \"${install}/bad.\"",
+            ),
+        ),
+        (
+            "PATH entry",
+            acme_manifest().replace("value = \"${install}/bin\"", "value = \"${install}/CON\""),
+        ),
+        (
+            "service binary",
+            acme_manifest().replace(
+                "binary = \"${install}/acme-agent.exe\"",
+                "binary = \"${install}/CON\"",
+            ),
+        ),
+        (
+            "protocol executable",
+            acme_manifest().replace(
+                "executable = \"${install}/Acme.exe\"",
+                "executable = \"${install}/CON\"",
+            ),
+        ),
+        (
+            "file association executable",
+            acme_manifest()
+                .rsplit_once("executable = \"${install}/Acme.exe\"")
+                .map_or_else(
+                    || acme_manifest().to_owned(),
+                    |(prefix, _)| format!("{prefix}executable = \"${{install}}/CON\""),
+                ),
+        ),
+    ];
+
+    for (kind, source) in cases {
+        let (_dir, install) = semantic_plan(&source, &files);
+        let error = resolve_fixed(&install).expect_err(kind);
+        assert!(
+            matches!(
+                error,
+                TargetResolveError::InvalidTargetPath { kind: ref actual, .. }
+                    if actual == kind
+            ),
+            "{kind}: {error}"
+        );
+    }
+}
+
+#[test]
+fn windows_path_validation_preserves_legacy_filename_rules() {
+    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    for raw in [
+        r"C:\CON",
+        r"C:\nul.txt",
+        r"C:\com1.dat",
+        r"C:\file.",
+        r"C:\file ",
+        r"C:\a:b",
+        r"C:\a?b",
+        "C:\\file\u{0001}.txt",
+    ] {
+        let path = TargetPath::new(&target, raw).unwrap();
+        assert!(
+            matches!(
+                validate_windows_target_path(&path),
+                Err(TargetPathValidationError::InvalidComponent { .. })
+            ),
+            "{raw:?}"
+        );
+    }
+    let valid = TargetPath::new(&target, r"C:\Program Files\Acme\app.exe").unwrap();
+    assert!(validate_windows_target_path(&valid).is_ok());
+    assert_eq!(
+        windows_target_path_identity(&valid),
+        windows_target_path_identity(
+            &TargetPath::new(&target, r"c:/program files/acme/APP.exe").unwrap(),
+        )
+    );
+}
+
+#[test]
+fn case_only_file_destinations_collide_after_target_lowering() {
+    let source = format!(
+        "{}\n[[files]]\nsource = \"x/Foo.dll\"\ndestination = \"${{install}}/Payload.dll\"\n\n[[files]]\nsource = \"y/foo.dll\"\ndestination = \"${{install}}/payload.dll\"\n",
+        acme_manifest()
+    );
+    let (_dir, install) = semantic_plan(
+        &source,
+        &[
+            ("dist/Acme.exe", b"main-correct".as_slice()),
+            ("dist/acme-agent.exe", b"agent-new".as_slice()),
+            ("dist/bin/acme.exe", b"cli-new".as_slice()),
+            ("dist/x/Foo.dll", b"one".as_slice()),
+            ("dist/y/foo.dll", b"two".as_slice()),
+        ],
+    );
+    let error = resolve_fixed(&install).expect_err("case-only collision");
+    assert!(
+        matches!(
+            error,
+            TargetResolveError::TargetCollision {
+                ref kind,
+                ref identity,
+                ..
+            } if kind == "file destination"
+                && identity == "c:\\users\\test\\appdata\\local\\programs\\acme\\payload.dll\\foo.dll"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn target_resource_identities_collide_case_insensitively() {
+    let base = acme_manifest();
+    let prefix = base.split("[[components]]").next().unwrap();
+    let cases = [
+        (
+            "PATH entry",
+            r#"
+[[path]]
+value = "${install}/Bin"
+
+[[path]]
+value = "${install}/bin"
+"#,
+        ),
+        (
+            "service id",
+            r#"
+[[services]]
+id = "Agent"
+name = "Agent"
+binary = "${install}/Agent.exe"
+start = "manual"
+
+[[services]]
+id = "agent"
+name = "agent"
+binary = "${install}/Agent.exe"
+start = "manual"
+"#,
+        ),
+        (
+            "protocol scheme",
+            r#"
+[[protocols]]
+scheme = "Acme"
+executable = "${install}/Acme.exe"
+
+[[protocols]]
+scheme = "acme"
+executable = "${install}/Acme.exe"
+"#,
+        ),
+        (
+            "file association id",
+            r#"
+[[file_associations]]
+extension = ".one"
+id = "Acme.One"
+executable = "${install}/Acme.exe"
+
+[[file_associations]]
+extension = ".two"
+id = "acme.one"
+executable = "${install}/Acme.exe"
+"#,
+        ),
+        (
+            "launcher link path",
+            r#"
+[[launchers]]
+location = "desktop"
+name = "Launch"
+target = "${install}/Acme.exe"
+
+[[launchers]]
+location = "desktop"
+name = "launch"
+target = "${install}/Acme.exe"
+"#,
+        ),
+    ];
+
+    for (kind, body) in cases {
+        let source = format!("{prefix}\n{body}");
+        let (_dir, install) = semantic_plan(&source, &[("dist/app.txt", b"app".as_slice())]);
+        let error = resolve_fixed(&install).expect_err(kind);
+        assert!(
+            matches!(
+                error,
+                TargetResolveError::TargetCollision { kind: ref actual, .. }
+                    if actual == kind
+            ),
+            "{kind}: {error}"
+        );
+    }
+}
+
+#[test]
 fn resolve_target_leaves_no_templates_and_sets_lnk() {
     let root = temp_root();
     let (_dir, target) = pipeline(root.path(), SelectedScope::User);
@@ -156,18 +477,18 @@ fn resolve_target_leaves_no_templates_and_sets_lnk() {
     let json = serde_json::to_string(&target).unwrap();
     assert!(!json.contains("${"), "unresolved vars: {json}");
 
-    assert_eq!(target.shortcuts.len(), 1);
-    let link = target.shortcuts[0].link_path.to_string();
+    assert_eq!(target.launchers.len(), 1);
+    let link = target.launchers[0].launcher_path.to_string();
     assert!(link.ends_with(".lnk"), "link: {link}");
-    assert!(link.contains("UserPrograms"), "{link}");
+    assert!(link.contains("UserStartMenu\\Programs"), "{link}");
 }
 
 #[test]
 fn machine_shortcut_uses_common_programs() {
     let root = temp_root();
     let (_dir, target) = pipeline(root.path(), SelectedScope::Machine);
-    let link = target.shortcuts[0].link_path.to_string();
-    assert!(link.contains("CommonPrograms"), "{link}");
+    let link = target.launchers[0].launcher_path.to_string();
+    assert!(link.contains("CommonStartMenu\\Programs"), "{link}");
     assert_eq!(target.path_entries[0].scope, SelectedScope::Machine);
     assert_eq!(target.protocols[0].scope, SelectedScope::Machine);
 }
@@ -185,13 +506,7 @@ fn inspect_files_absent_present_directory() {
     assert_eq!(files.len(), 3);
     let mut by_name = BTreeMap::new();
     for f in &files {
-        let name = f
-            .path
-            .as_path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let name = f.path.file_name().unwrap().to_owned();
         by_name.insert(name, f.state.clone());
     }
     assert!(matches!(
@@ -224,13 +539,7 @@ fn inspect_target_with_fakes_and_plan_execution() {
     // An existing different file has no proven owner.
     let mut file_kinds = BTreeMap::new();
     for op in &plan.files {
-        let name = op
-            .destination
-            .as_path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let name = op.destination.file_name().unwrap().to_owned();
         file_kinds.insert(name, op.kind);
     }
     assert_eq!(file_kinds["Acme.exe"], FileOperationKind::NoOp);
@@ -238,8 +547,8 @@ fn inspect_target_with_fakes_and_plan_execution() {
     assert_eq!(file_kinds["acme.exe"], FileOperationKind::Create);
 
     assert_eq!(
-        plan.shortcuts[0].kind,
-        zup_exec::ShortcutOperationKind::Create
+        plan.launchers[0].kind,
+        zup_exec::LauncherOperationKind::Create
     );
 
     // Zero mutation: payload on disk unchanged.
@@ -257,18 +566,21 @@ fn machine_snapshot_is_deterministic() {
     let a = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
     let b = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
     assert_eq!(a, b);
-    let _ = MachineSnapshot::default();
+    let _ = HostSnapshot::default();
 }
 
 #[test]
 #[cfg(windows)]
-fn live_known_folders_include_programs() {
-    let resolver = WindowsKnownFolderResolver;
-    for scope in [SelectedScope::User, SelectedScope::Machine] {
-        let path = resolver.resolve(KnownFolder::Programs, scope).unwrap();
-        assert!(path.is_absolute());
-        assert!(!path.as_os_str().is_empty());
-        assert!(!path.to_string_lossy().contains("${"));
+fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
+    let resolver = WindowsInstallLocationResolver;
+    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    for location in INSTALL_LOCATIONS {
+        for scope in [SelectedScope::User, SelectedScope::Machine] {
+            let path = resolver.resolve(location, scope, &target).unwrap();
+            assert_eq!(path.target(), &target, "location: {location}");
+            assert!(!path.as_str().is_empty());
+            assert!(!path.as_str().contains("${"));
+        }
     }
 }
 
@@ -276,27 +588,31 @@ mod transaction_fingerprint {
     use std::path::Path;
 
     use tempfile::TempDir;
-    use zup_build::BuildPlan;
+    use zup_build::{BuildPlan, TargetBuildPlan};
     use zup_core::{
         App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
-        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Template,
+        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest,
+        TargetTriple, Template,
     };
     use zup_exec::LifecycleAction;
     use zup_plan::{
-        CancellationQuery, NeverCancelled, PlanRequest, PluginArchitecture, PluginExecutor,
-        PluginFailure, PluginHostFacts, PluginOperatingSystem, PluginPlanningContext,
-        PluginResource, PluginResourceProposal, plan_with_plugins,
+        CancellationQuery, NeverCancelled, PlanRequest, PluginExecutor, PluginFailure,
+        PluginPlanningContext, PluginResource, PluginResourceProposal, plan_with_plugins,
     };
-    use zup_transaction::compile_transaction;
     use zup_windows::{WindowsTargetContext, plan_target_lifecycle, resolve_target};
 
-    use super::FakeKnownFolders;
+    use super::FakeInstallLocations;
 
     struct GuestExecutor {
+        target: TargetTriple,
         resources: Vec<PluginResource>,
     }
 
     impl PluginExecutor for GuestExecutor {
+        fn target(&self) -> &TargetTriple {
+            &self.target
+        }
+
         fn plan(
             &mut self,
             _binding: &PluginBinding,
@@ -309,61 +625,71 @@ mod transaction_fingerprint {
 
     fn build_plan() -> BuildPlan {
         BuildPlan {
-            installer: Installer {
-                ui: None,
-                frontend: Frontend::Gui,
-                app: App {
-                    id: AppId::new("com.example.fingerprint").unwrap(),
-                    name: NonEmptyString::new("Fingerprint").unwrap(),
-                    version: "1.0.0".parse().unwrap(),
-                    publisher: None,
-                    main: None,
-                    description: None,
-                },
-                updates: None,
-                prerequisites: Vec::new(),
-                install: Install {
-                    scope: InstallScope::User,
-                    directory: InstallDirectory {
-                        user: Some(Template::parse("${known.local_app_data}/Fingerprint").unwrap()),
-                        machine: None,
+            targets: vec![TargetBuildPlan {
+                installer: Installer {
+                    ui: None,
+                    target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                    frontend: Frontend::Gui,
+                    app: App {
+                        id: AppId::new("com.example.fingerprint").unwrap(),
+                        name: NonEmptyString::new("Fingerprint").unwrap(),
+                        version: "1.0.0".parse().unwrap(),
+                        publisher: None,
+                        main: None,
+                        description: None,
                     },
-                    allow_directory_override: false,
+                    updates: None,
+                    prerequisites: Vec::new(),
+                    install: Install {
+                        scope: InstallScope::User,
+                        directory: InstallDirectory {
+                            user: Some(
+                                Template::parse("${location.user_data}/Fingerprint").unwrap(),
+                            ),
+                            machine: None,
+                        },
+                        allow_directory_override: false,
+                    },
+                    components: vec![Component {
+                        id: ComponentId::new("core").unwrap(),
+                        name: NonEmptyString::new("Core").unwrap(),
+                        description: None,
+                        required: true,
+                        default: true,
+                        requires: Vec::new(),
+                    }],
+                    plugins: vec![PluginBinding {
+                        id: PluginId::new("guest").unwrap(),
+                        component: None,
+                        when: None,
+                    }],
+                    files: Vec::new(),
+                    launchers: Vec::new(),
+                    path: Vec::new(),
+                    services: Vec::new(),
+                    protocols: Vec::new(),
+                    file_associations: Vec::new(),
                 },
-                components: vec![Component {
-                    id: ComponentId::new("core").unwrap(),
-                    name: NonEmptyString::new("Core").unwrap(),
-                    description: None,
-                    required: true,
-                    default: true,
-                    requires: Vec::new(),
-                }],
-                plugins: vec![PluginBinding {
-                    id: PluginId::new("guest").unwrap(),
-                    component: None,
-                    when: None,
-                }],
+                prerequisites: Vec::new(),
+                plugins: Vec::new(),
                 files: Vec::new(),
-                shortcuts: Vec::new(),
-                path: Vec::new(),
-                services: Vec::new(),
-                protocols: Vec::new(),
-                file_types: Vec::new(),
-            },
-            prerequisites: Vec::new(),
-            plugins: Vec::new(),
-            files: Vec::new(),
-            total_size: 0,
-            prerequisite_size: 0,
+                total_size: 0,
+                prerequisite_size: 0,
+            }],
         }
     }
 
     fn fingerprint(root: &Path, state: &Path, resources: Vec<PluginResource>) -> Sha256Digest {
-        let mut executor = GuestExecutor { resources };
+        let mut executor = GuestExecutor {
+            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            resources,
+        };
         let planned = plan_with_plugins(
             &build_plan(),
-            &PlanRequest::new(SelectedScope::User),
-            PluginHostFacts::new(PluginOperatingSystem::Windows, PluginArchitecture::X86_64),
+            &PlanRequest::new(
+                TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                SelectedScope::User,
+            ),
             &mut executor,
             &NeverCancelled,
         )
@@ -371,7 +697,7 @@ mod transaction_fingerprint {
         let target = resolve_target(
             &planned.plan,
             &WindowsTargetContext::with_resolver(
-                FakeKnownFolders {
+                FakeInstallLocations {
                     root: root.to_path_buf(),
                 },
                 SelectedScope::User,
@@ -386,7 +712,7 @@ mod transaction_fingerprint {
             state,
         )
         .unwrap();
-        compile_transaction(&execution).unwrap().fingerprint()
+        execution.fingerprint()
     }
 
     #[test]

@@ -1,12 +1,16 @@
 //! Restart Manager blocker discovery (read-only).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
 };
 use windows::core::PCWSTR;
+use zup_core::TargetTriple;
 use zup_exec::FileOperation;
+use zup_platform::TargetPath;
+
+use crate::lowering::host_path;
 
 /// A process/service blocking a target resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,19 +70,29 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
         let mut reboot: u32 = 0;
         let rc = RmGetList(session, &mut needed, &mut count, None, &mut reboot);
         if rc.0 == 234 {
-            let mut processes = vec![RM_PROCESS_INFO::default(); needed as usize];
-            let rc = RmGetList(
-                session,
-                &mut needed,
-                &mut count,
-                Some(processes.as_mut_ptr()),
-                &mut reboot,
-            );
-            if rc.0 != 0 {
-                return Err(format!("RmGetList failed ({})", rc.0));
+            let mut capacity = (needed as usize).max(1);
+            for _ in 0..3 {
+                let mut processes = vec![RM_PROCESS_INFO::default(); capacity];
+                let mut needed = 0;
+                let mut count = 0;
+                let mut reboot = 0;
+                let rc = RmGetList(
+                    session,
+                    &mut needed,
+                    &mut count,
+                    Some(processes.as_mut_ptr()),
+                    &mut reboot,
+                );
+                if rc.0 == 0 {
+                    processes.truncate(count.min(processes.len() as u32) as usize);
+                    return Ok(blocked_or_ready(processes, reboot));
+                }
+                if rc.0 != 234 {
+                    return Err(format!("RmGetList failed ({})", rc.0));
+                }
+                capacity = capacity.saturating_mul(2).max(needed as usize).max(1);
             }
-            processes.truncate(count.min(processes.len() as u32) as usize);
-            return Ok(blocked_or_ready(processes, reboot));
+            return Err("RmGetList remained more-data after three attempts".into());
         }
         if rc.0 != 0 {
             return Err(format!("RmGetList failed ({})", rc.0));
@@ -88,8 +102,66 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
     }
 }
 
-struct RestartManagerSession(u32);
+/// Files a transaction plan will mutate, as host paths.
+///
+/// The preflight before a transaction starts and the barrier preflight
+/// immediately before commit intent read this one set, so the two can never
+/// disagree about what is at risk.
+pub fn plan_mutating_paths(
+    plan: &zup_transaction::TransactionPlan,
+    target: &TargetTriple,
+) -> Vec<PathBuf> {
+    plan.nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            zup_transaction::NodeKind::FileMutation {
+                key,
+                delta:
+                    zup_transaction::FileDelta::Create
+                    | zup_transaction::FileDelta::Replace
+                    | zup_transaction::FileDelta::RestoreOwned
+                    | zup_transaction::FileDelta::RepairOwned,
+            } => {
+                let destination = match key {
+                    zup_core::ResourceKey::File { destination }
+                    | zup_core::ResourceKey::Maintenance { destination, .. } => destination,
+                    _ => return None,
+                };
+                let path = TargetPath::new(target.clone(), destination).ok()?;
+                Some(host_path(&path))
+            }
+            zup_transaction::NodeKind::FileRemoval { .. } => node
+                .meta
+                .removal
+                .as_ref()
+                .map(|removal| host_path(&removal.destination)),
+            _ => None,
+        })
+        .collect()
+}
 
+/// Why a preflight is blocked, one line per blocker.
+pub fn blocked_reason(blocked: &FilePreflight) -> Option<String> {
+    let FilePreflight::Blocked {
+        processes,
+        reboot_reason,
+    } = blocked
+    else {
+        return None;
+    };
+    let mut detail = processes
+        .iter()
+        .map(|process| format!("{} (PID {})", process.name, process.pid))
+        .collect::<Vec<_>>();
+    if detail.is_empty() {
+        detail.push(format!(
+            "resource preflight requested a restart: {reboot_reason}"
+        ));
+    }
+    Some(detail.join("\n"))
+}
+
+struct RestartManagerSession(u32);
 impl Drop for RestartManagerSession {
     fn drop(&mut self) {
         unsafe {
@@ -141,6 +213,6 @@ pub fn mutating_paths(files: &[FileOperation]) -> Vec<std::path::PathBuf> {
                 zup_exec::FileOperationKind::Create | zup_exec::FileOperationKind::Replace
             )
         })
-        .map(|f| f.destination.as_path().to_path_buf())
+        .map(|f| host_path(&f.destination))
         .collect()
 }

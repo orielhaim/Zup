@@ -4,19 +4,144 @@ A programmable application installer for the modern desktop.
 
 Zup is in very early development. The public API is not available yet.
 
+Windows is the only implemented platform backend. A manifest that declares a
+non-Windows target is refused at an explicit boundary before the source tree is
+walked; a Windows target on a non-Windows build host is refused the same way.
+Nothing is written in either case. The portable stack still builds and tests
+natively on Linux, which is what keeps the Windows code an adapter.
+
+## Quickstart
+
+Create a manifest and a source directory:
+
+```powershell
+cargo run -p zup --features build --bin zup -- init --name Acme --app-id com.acme.desktop --non-interactive
+```
+
+`zup init` writes `zup.toml`:
+
+```toml
+#:schema https://zup.dev/schema/zup.toml.json
+
+schema = 1
+frontend = "gui"
+
+[app]
+id = "com.acme.desktop"
+name = "Acme"
+version = "0.1.0"
+main = "app.exe"
+
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
+
+[install]
+scope = "user"
+allow_directory_override = true
+
+[install.directory]
+user = "${location.user_data}/acme"
+```
+
+Every manifest declares `schema = 1` and at least one entry under
+`[build.targets.<profile>]`. A profile is a friendly name; its `target` is a
+canonical triple from `target-lexicon`, such as `x86_64-pc-windows-msvc` or
+`aarch64-pc-windows-msvc`. A resource may narrow itself to named profiles with
+`targets = ["<profile>"]`.
+
+Build a runtime template, then check and build:
+
+```powershell
+cargo build -p zup --no-default-features --features build,gui --bin zup-setup-gui --release
+cargo run -p zup --features build --bin zup -- check
+cargo run -p zup --features build --bin zup -- doctor --runtime target\release\zup-setup-gui.exe
+cargo run -p zup --features build --bin zup -- build --runtime target\release\zup-setup-gui.exe
+```
+
+`zup check` validates the manifest and its build inputs. `zup doctor` answers
+whether `zup build` would succeed right now, without writing anything.
+`zup build` needs one runtime template per selected target and names its output
+`<App>-Setup.exe`, or `<App>-Setup-<profile>.exe` when more than one profile is
+selected. The template has to be built with the `build` feature today; see
+[installer frontends](docs/frontends.md).
+
+## Authoring commands
+
+| Command | Purpose |
+| --- | --- |
+| `zup init` | Write a small, editable `zup.toml` and its source directory |
+| `zup check` | Validate a manifest and its build inputs |
+| `zup doctor` | Report build readiness for the selected targets |
+| `zup plan` | Print the real installation plan without touching the machine |
+| `zup build` | Produce a self-contained installer executable |
+| `zup schema` | Print or write the authoritative JSON Schema |
+| `zup fmt` | Format `zup.toml` while preserving comments |
+| `zup completions <shell>` | Write shell completions to stdout |
+
+`--target` is repeatable on `zup check`, `zup doctor`, `zup plan`, and
+`zup build`, and accepts a profile name or a canonical triple. On `zup check`,
+`zup doctor`, and `zup build`, `--source` and `--install-directory` are
+repeatable and positional against the selected targets, in selection order. An
+empty `--target` selects every profile. `zup plan` takes one target and a
+single `--install-directory`.
+
+See [architecture](docs/architecture.md) for the CLI surface in full.
+
+## Lifecycle commands
+
+`install`, `upgrade`, `modify`, `repair`, `uninstall`, `update`, and `recover`
+run against an installed application rather than a project. They accept
+`--output human|json|jsonl` and exit with a small stable outcome code; see
+[installer frontends](docs/frontends.md).
+
+## Architecture
+
+See [architecture](docs/architecture.md) for the portable core, target lowering,
+the platform backend boundary, the target matrix, the per-crate boundary, the
+persisted format versions, and the leak gate.
+
+Zup is a prototype: every internal format is version 1, and an incompatible
+change is expected without a version bump.
+
 ## Installer frontends
 
-See [GUI, console, and headless installer frontends](docs/frontends.md) for build-time selection, automation output, exit codes, elevation, and Server Core guidance.
+See [GUI, console, and headless installer frontends](docs/frontends.md) for
+build-time selection, automation output, exit codes, elevation, and Server Core
+guidance.
 
 ## Plugins
 
-See [plugin authoring and runtime architecture](docs/plugins.md) and the [Rust configure example](examples/plugins/configure).
+See [plugin authoring and runtime architecture](docs/plugins.md) and the
+[Rust configure example](examples/plugins/configure).
 
-## Windows installer artifacts
+## Packages and Windows installer artifacts
 
-`zup build` writes the package into the PE resource section: RCDATA resource 1
-contains the bundle index, and each unique compressed payload blob has its own
-RCDATA resource. The index is limited to 256 MiB, each resource to 4,294,967,295
-bytes, and a package to 65,534 unique blobs. Sign the completed `Setup.exe`
-with your normal Authenticode tool after `zup build`; the signature then covers
-the package resources.
+`zup-bundle` writes and reads a portable schema-1 package. The file contains a
+60-byte header, a SHA-256-protected JSON index for one target, and Zstandard
+compressed content-addressed blobs. `Package::open` verifies the index and all
+blobs before exposing payload, plugin, or prerequisite data. The same package can
+be read on any host without an executable.
+
+On Windows, `zup-windows` adapts that package to a PE: the package index is
+stored in resource 1 and each compressed blob is stored in the following
+resources. The adapter assigns those resource identifiers at embed time; they
+are not part of the portable package schema. Sign the completed executable
+after `zup build` so the signature covers the embedded package.
+
+## Repository tasks
+
+The package matrices are single-sourced in `zup-xtask`:
+
+```text
+cargo xtask emit-portable-matrix
+cargo xtask verify-portable-boundaries
+```
+
+`verify-portable-boundaries` fails when a portable crate depends on a
+Windows-only crate, declares a Windows-only platform table, names a Windows API,
+branches on `cfg(windows)` in production code, reintroduces a
+Windows-specific identifier, or spells a Windows concept inside a string
+literal.

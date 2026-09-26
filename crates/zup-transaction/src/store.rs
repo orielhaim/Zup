@@ -8,10 +8,25 @@ use std::path::{Path, PathBuf};
 
 use fs_transaction::exec::block_on;
 use fs_transaction::{ChangeSet, Error as FsTxError};
+use jiff::Timestamp;
 
 use crate::id::TransactionId;
 use crate::journal_fs::JournalFs;
 use crate::record::{CorruptReason, StoreError, TransactionRecord};
+
+/// How many times [`TransactionStore::update`] re-reads and re-applies after
+/// losing a compare-and-swap.
+///
+/// Losing one is ordinary contention, not corruption: every actor that journals
+/// progress for a transaction reads the record, decides, and writes it back, so
+/// two of those windows overlap whenever a coordinator and a recovery pass are
+/// live at once. The loser simply started from a revision that is no longer
+/// current, and re-reading converges as long as both writers keep making
+/// progress. A transaction journals O(plan size) writes with a handful of
+/// actors, so a handful of attempts is ample; exhausting the budget means a
+/// writer is rewriting the record faster than the other can be scheduled, which
+/// is a real stall rather than something to retry forever.
+const MAX_UPDATE_ATTEMPTS: u32 = 8;
 
 /// Optimistic-concurrency durable store for transaction records.
 pub trait TransactionStore {
@@ -22,6 +37,43 @@ pub trait TransactionStore {
         expected_revision: u64,
         updated: &TransactionRecord,
     ) -> Result<(), StoreError>;
+
+    /// Read-modify-write one record as a single durable step, and return what
+    /// was committed.
+    ///
+    /// `change` is applied to the freshest committed state and the result is
+    /// swapped in under the revision it was read at, retrying against re-read
+    /// state when another actor won the race (see [`MAX_UPDATE_ATTEMPTS`]).
+    /// A lost swap is therefore never a failure, and a caller never has to
+    /// reason about a revision it read before someone else wrote.
+    ///
+    /// `change` must be a function of the state it is handed. It is re-run
+    /// against a newer revision on every retry, so a closure that also captures
+    /// state read earlier would reintroduce the lost update this path exists to
+    /// prevent. It must leave `revision` and `updated_at` alone: the store owns
+    /// both.
+    fn update(
+        &self,
+        id: &TransactionId,
+        change: &mut dyn FnMut(&mut TransactionRecord) -> Result<(), StoreError>,
+    ) -> Result<TransactionRecord, StoreError> {
+        for _ in 0..MAX_UPDATE_ATTEMPTS {
+            let mut next = self.load(id)?;
+            let expected = next.revision;
+            change(&mut next)?;
+            next.revision = expected.saturating_add(1);
+            next.updated_at = Timestamp::now();
+            match self.compare_and_swap(expected, &next) {
+                Ok(()) => return Ok(next),
+                Err(StoreError::RevisionConflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StoreError::UpdateExhausted {
+            id: id.to_string(),
+            attempts: MAX_UPDATE_ATTEMPTS,
+        })
+    }
 }
 
 const JOURNAL_FILE: &str = "transaction.json";

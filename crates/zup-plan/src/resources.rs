@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    FileExtension, FileTypeId, NonEmptyString, Prerequisite, PrerequisiteArchitecture,
-    PrerequisiteDetector, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage, Privilege,
-    ProtocolScheme, RelativePath, ResourceKey, ServiceId, ServiceStart, Sha256Digest,
-    ShortcutLocation, Template,
+    FileAssociationId, FileExtension, LauncherLocation, NonEmptyString, Prerequisite,
+    PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
+    PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
+    ServiceId, ServiceStart, Sha256Digest, Template,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,7 +14,7 @@ pub struct PlannedPrerequisite {
     pub name: NonEmptyString,
     pub description: Option<String>,
     pub target: PrerequisiteArchitecture,
-    pub detector: PrerequisiteDetector,
+    pub requirement: PrerequisiteRequirement,
     pub package: PrerequisitePackage,
     pub installer: PrerequisiteInstaller,
     pub component: Option<zup_core::ComponentId>,
@@ -28,7 +28,7 @@ impl PlannedPrerequisite {
             name: prerequisite.name.clone(),
             description: prerequisite.description.clone(),
             target: prerequisite.target,
-            detector: prerequisite.detector.clone(),
+            requirement: prerequisite.requirement.clone(),
             package: prerequisite.package.clone(),
             installer: prerequisite.installer.clone(),
             component: prerequisite.component.clone(),
@@ -50,11 +50,11 @@ pub struct PlannedFile {
     pub privilege: Privilege,
 }
 
-/// One active application shortcut.
+/// One active application launcher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedShortcut {
+pub struct PlannedLauncher {
     pub key: ResourceKey,
-    pub location: ShortcutLocation,
+    pub location: LauncherLocation,
     pub name: NonEmptyString,
     pub target: Template,
     pub arguments: Vec<String>,
@@ -62,11 +62,15 @@ pub struct PlannedShortcut {
     pub privilege: Privilege,
 }
 
-/// One active PATH entry.
+/// One active search-path entry.
+///
+/// scope names the persistent search path that will own the entry, decided
+/// at authoring time. It is not derived from privilege.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedPathEntry {
     pub key: ResourceKey,
     pub value: Template,
+    pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
@@ -80,7 +84,7 @@ pub struct PlannedService {
     pub binary: Template,
     pub arguments: Vec<String>,
     pub start: ServiceStart,
-    /// Services always require machine privilege.
+    /// Services are host-wide by nature, so they always need system authority.
     pub privilege: Privilege,
 }
 
@@ -91,16 +95,22 @@ pub struct PlannedProtocol {
     pub scheme: ProtocolScheme,
     pub executable: Template,
     pub args: Vec<String>,
+    /// Host store that holds the registration. Chosen at authoring time, never
+    /// derived from privilege.
+    pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
-/// One active file-type registration intent.
+/// One active file-association registration intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedFileType {
+pub struct PlannedFileAssociation {
     pub key: ResourceKey,
     pub extension: FileExtension,
-    pub id: FileTypeId,
+    pub id: FileAssociationId,
     pub description: Option<String>,
     pub executable: Template,
+    /// Host store that holds the registration. Chosen at authoring time, never
+    /// derived from privilege.
+    pub scope: SelectedScope,
     pub privilege: Privilege,
 }

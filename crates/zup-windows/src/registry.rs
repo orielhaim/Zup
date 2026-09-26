@@ -99,26 +99,3 @@ impl RegistryReader for WindowsRegistryReader {
         }
     }
 }
-
-/// Split a PATH value into raw entries using Windows `;` semantics.
-pub fn split_path_value(value: &str) -> Vec<&str> {
-    value
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Read the persistent PATH string for `scope`, if present.
-pub fn read_path_value<R: RegistryReader>(
-    reader: &R,
-    scope: SelectedScope,
-) -> Result<Option<String>, RegistryError> {
-    let Some(key) = reader.open_environment_key(scope)? else {
-        return Ok(None);
-    };
-    match R::read_value(&key, "Path") {
-        RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) => Ok(Some(s)),
-        RegistryValue::Missing | RegistryValue::Other { .. } => Ok(None),
-    }
-}

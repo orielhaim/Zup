@@ -7,8 +7,8 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildError, FilePattern, Sha256Digest, materialize};
-use zup_core::MAX_PLUGIN_ARTIFACTS;
-use zup_manifest::parse_and_compile;
+use zup_core::{MAX_PLUGIN_ARTIFACTS, TargetTriple};
+use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 
 fn write_file(path: &Path, contents: &[u8]) {
     if let Some(parent) = path.parent() {
@@ -35,26 +35,54 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = {{ directory = "dist" }}
 
 [install]
 scope = "user"
 
 [install.directory]
-user = "${{known.local_app_data}}/Acme"
+user = "${{location.user_data}}/Acme"
 
 {files_block}
 "#
     )
 }
 
-fn materialize_project(dir: &Path, files_block: &str) -> Result<zup_build::BuildPlan, BuildError> {
+fn materialize_one(
+    manifest_path: &Path,
+    manifest: &zup_manifest::Manifest,
+    installer: zup_core::Installer,
+) -> Result<zup_build::TargetBuildPlan, BuildError> {
+    let config = select_targets(manifest, &["default"], &TargetOverrides::default())
+        .expect("target")
+        .into_iter()
+        .next()
+        .expect("selected target");
+    let mut plan = materialize(manifest_path, manifest, vec![(config, installer)])
+        .map_err(unwrap_target_error)?;
+    assert_eq!(plan.targets.len(), 1);
+    Ok(plan.targets.pop().expect("target plan"))
+}
+
+fn unwrap_target_error(error: BuildError) -> BuildError {
+    match error {
+        BuildError::Target { source, .. } => *source,
+        other => other,
+    }
+}
+
+fn materialize_project(
+    dir: &Path,
+    files_block: &str,
+) -> Result<zup_build::TargetBuildPlan, BuildError> {
     let source = manifest_toml(files_block);
-    let manifest = zup_manifest::parse(&source).expect("parse");
-    let installer = zup_manifest::parse_and_compile(&source).expect("compile");
-    let manifest_path = dir.join("zup.toml");
-    materialize(&manifest_path, &manifest, installer)
+    let manifest = parse(&source).expect("parse");
+    let installer = parse_and_compile(&source, "default").expect("compile");
+    materialize_one(&dir.join("zup.toml"), &manifest, installer)
 }
 
 #[test]
@@ -68,8 +96,8 @@ fn trusted_update_root_is_embedded_from_build_time_path() {
         manifest_toml("")
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = zup_manifest::parse_and_compile(&source).unwrap();
-    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
     let updates = plan.installer.updates.unwrap();
     assert_eq!(updates.repository, "https://updates.example.com/acme");
     assert_eq!(updates.channel, "stable");
@@ -86,7 +114,7 @@ fn embedded_prerequisite_is_materialized_with_exact_identity() {
 [[prerequisites]]
 id = "runtime"
 name = "Runtime"
-detector = {{ kind = "visual_cpp_v14" }}
+requirement = {{ kind = "runtime", id = "windows.vc.v14" }}
 package = {{ type = "embedded", path = "runtime.exe", sha256 = "{digest}", size = {} }}
 "#,
         manifest_toml(
@@ -99,8 +127,8 @@ destination = "${install}"
         bytes.len()
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = zup_manifest::parse_and_compile(&source).unwrap();
-    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
     assert_eq!(plan.prerequisites.len(), 1);
     assert_eq!(plan.prerequisites[0].sha256, digest);
     assert_eq!(plan.prerequisites[0].size, bytes.len() as u64);
@@ -126,8 +154,8 @@ destination = "${install}"
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let plan = materialize(&nested.join("zup.toml"), &manifest, installer).unwrap();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&nested.join("zup.toml"), &manifest, installer).unwrap();
     assert_eq!(plan.files.len(), 1);
     assert_eq!(plan.files[0].source_relative.as_str(), "acme.exe");
 }
@@ -156,8 +184,8 @@ fn source_lexical_escape_rejected() {
     let dir = project(&[("dist/a.txt", b"a")]);
     let source = manifest_toml("").replace(r#"directory = "dist""#, r#"directory = "../outside""#);
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let err = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let err = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(
         matches!(err, BuildError::SourceEscapesProject { .. }),
         "{err:?}"
@@ -432,7 +460,7 @@ destination = "${install}"
     )
     .unwrap();
 
-    let portable = |plan: &zup_build::BuildPlan| {
+    let portable = |plan: &zup_build::TargetBuildPlan| {
         plan.files
             .iter()
             .map(|f| {
@@ -586,9 +614,9 @@ destination = "${install}"
 }
 
 #[test]
-fn case_only_windows_collision() {
+fn case_only_destinations_are_left_for_target_lowering() {
     let dir = project(&[("dist/x/Foo.dll", b"a"), ("dist/y/foo.dll", b"b")]);
-    let err = materialize_project(
+    let plan = materialize_project(
         dir.path(),
         r#"
 [[files]]
@@ -600,11 +628,8 @@ source = "y/foo.dll"
 destination = "${install}/foo.dll"
 "#,
     )
-    .unwrap_err();
-    assert!(
-        matches!(err, BuildError::WindowsDestinationCollision { .. }),
-        "{err:?}"
-    );
+    .unwrap();
+    assert_eq!(plan.files.len(), 2);
 }
 
 #[test]
@@ -684,33 +709,24 @@ fn literal_dot_dot_pattern_rejected() {
 }
 
 #[test]
-fn invalid_windows_names_rejected() {
-    let dir = project(&[("dist/CON", b"x")]);
-    let err = materialize_project(
+fn invalid_windows_names_are_left_for_target_lowering() {
+    let dir = project(&[("dist/file.txt", b"x")]);
+    let plan = materialize_project(
         dir.path(),
         r#"
 [[files]]
-source = "CON"
+source = "file.txt"
 destination = "${install}/CON"
 "#,
     )
-    .unwrap_err();
-    // Either the source filename maps to CON (invalid) or destination CON is invalid.
-    assert!(
-        matches!(
-            err,
-            BuildError::InvalidWindowsDestinationName { .. }
-                | BuildError::UnsafeRelativePath { .. }
-                | BuildError::PathNotRepresentable { .. }
-        ),
-        "{err:?}"
-    );
+    .unwrap();
+    assert_eq!(plan.files.len(), 1);
 }
 
 #[test]
-fn trailing_dot_destination_rejected() {
+fn trailing_dot_destinations_are_left_for_target_lowering() {
     let dir = project(&[("dist/file.txt", b"x")]);
-    let err = materialize_project(
+    let plan = materialize_project(
         dir.path(),
         r#"
 [[files]]
@@ -718,17 +734,11 @@ source = "file.txt"
 destination = "${install}/bad."
 "#,
     )
-    .unwrap_err();
-    // Destination is fully specified including filename via static-root parent mapping:
-    // source `file.txt` → suffix `file.txt` → `${install}/bad./file.txt` — `bad.` is invalid.
-    // OR if destination is the full path... let's also try exact.
-    match err {
-        BuildError::InvalidWindowsDestinationName { .. } => {}
-        other => {
-            // If suffix appended, `bad.` is still a literal segment.
-            panic!("expected invalid Windows name, got {other:?}");
-        }
-    }
+    .unwrap();
+    assert_eq!(
+        plan.files[0].destination.to_string(),
+        "${install}/bad./file.txt"
+    );
 }
 
 // --- Metadata preservation ---
@@ -750,8 +760,8 @@ when = 'component("cli")'
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
 
     let file = &plan.files[0];
     assert_eq!(file.component.as_ref().unwrap().as_str(), "cli");
@@ -828,8 +838,8 @@ source = "plugins/a.wasm"
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let plan = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
     assert_eq!(
         plan.plugins
             .iter()
@@ -853,9 +863,9 @@ source = "plugins/helper.wasm"
 "#,
     );
     let mut manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    manifest.plugins[0].source = "../outside.wasm".to_owned();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    manifest.plugins[0].value.source = "../outside.wasm".to_owned();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(
         error,
         BuildError::PluginSourceEscapesProject { .. } | BuildError::UnsafeRelativePath { .. }
@@ -873,13 +883,13 @@ source = "plugins/helper.wasm"
 "#,
     );
     let mut manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    manifest.plugins[0].source = dir
+    let installer = parse_and_compile(&source, "default").unwrap();
+    manifest.plugins[0].value.source = dir
         .path()
         .join("helper.wasm")
         .to_string_lossy()
         .into_owned();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(
         error,
         BuildError::PluginSourceEscapesProject { .. }
@@ -898,8 +908,8 @@ fn rejects_excess_plugin_declarations_before_source_access() {
         .collect::<String>();
     let source = manifest_toml(&plugins);
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(
         error,
         BuildError::TooManyPluginDeclarations {
@@ -922,8 +932,8 @@ source = "plugins/helper.wasm"
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(error, BuildError::PluginSourceTooLarge { .. }));
 }
 
@@ -942,8 +952,8 @@ source = "plugins/helper.sock"
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(error, BuildError::PluginSourceNotRegular { .. }));
 }
 
@@ -960,7 +970,235 @@ source = "plugins/link.wasm"
 "#,
     );
     let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source).unwrap();
-    let error = materialize(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(error, BuildError::PluginSourceSymlink { .. }));
+}
+
+const TARGET_MATRIX: &str = r#"
+schema = 1
+
+[app]
+id = "com.example.matrix"
+name = "Matrix"
+version = "1.0.0"
+
+[build]
+
+[build.targets.linux-arm64]
+target = "aarch64-unknown-linux-gnu"
+source = { directory = "dist/linux-arm64" }
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Matrix"
+
+[[files]]
+source = "**/*"
+destination = "${install}"
+targets = ["linux-arm64", "windows-x64"]
+"#;
+
+fn selected_targets(
+    source: &str,
+) -> (
+    zup_manifest::Manifest,
+    Vec<(zup_core::ResolvedTargetConfig, zup_core::Installer)>,
+) {
+    let manifest = parse(source).expect("parse");
+    let selected = select_targets(&manifest, &[], &TargetOverrides::default())
+        .expect("targets")
+        .into_iter()
+        .map(|config| {
+            let installer =
+                compile(&manifest, &config, &TargetOverrides::default()).expect("compile");
+            (config, installer)
+        })
+        .collect::<Vec<_>>();
+    (manifest, selected)
+}
+
+fn materialize_targets(
+    manifest_path: &Path,
+    source: &str,
+) -> Result<zup_build::BuildPlan, BuildError> {
+    let (manifest, mut selected) = selected_targets(source);
+    selected.reverse();
+    materialize(manifest_path, &manifest, selected)
+}
+
+#[test]
+fn target_filtered_plugin_materializes_only_for_its_profile() {
+    let source = TARGET_MATRIX.replace(
+        r#"targets = ["linux-arm64", "windows-x64"]"#,
+        r#"targets = ["linux-arm64", "windows-x64"]
+
+[[plugins]]
+id = "linux-helper"
+source = "plugins/linux-helper.wasm"
+targets = ["linux-arm64"]"#,
+    );
+    let dir = project(&[
+        ("dist/linux-arm64/app", b"linux"),
+        ("dist/windows-x64/app", b"windows"),
+        ("plugins/linux-helper.wasm", b"plugin"),
+    ]);
+
+    let plan = materialize_targets(&dir.path().join("zup.toml"), &source).unwrap();
+
+    assert_eq!(plan.targets[0].plugins.len(), 1);
+    assert_eq!(plan.targets[0].plugins[0].id.as_str(), "linux-helper");
+    assert!(plan.targets[1].plugins.is_empty());
+}
+
+#[test]
+fn target_matrix_materializes_independent_payloads_in_profile_order() {
+    let dir = project(&[
+        ("dist/linux-arm64/app", b"linux"),
+        ("dist/windows-x64/app", b"windows"),
+    ]);
+    let plan = materialize_targets(&dir.path().join("zup.toml"), TARGET_MATRIX).unwrap();
+
+    assert_eq!(plan.targets.len(), 2);
+    assert_eq!(
+        plan.targets
+            .iter()
+            .map(|target| target.installer.target.as_str())
+            .collect::<Vec<_>>(),
+        ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+    );
+    let linux = &plan.targets[0];
+    let windows = &plan.targets[1];
+    assert_eq!(linux.files[0].size, 5);
+    assert_eq!(windows.files[0].size, 7);
+    assert_ne!(linux.files[0].sha256, windows.files[0].sha256);
+    assert_eq!(linux.total_size, 5);
+    assert_eq!(windows.total_size, 7);
+    assert_eq!(
+        plan.target_by_triple(&TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()),
+        Some(windows)
+    );
+}
+
+#[test]
+fn missing_source_is_attributed_to_its_target_profile() {
+    let dir = project(&[("dist/windows-x64/app", b"windows")]);
+    let error = materialize_targets(&dir.path().join("zup.toml"), TARGET_MATRIX).unwrap_err();
+
+    assert!(error.to_string().contains("linux-arm64"), "{error}");
+    assert!(matches!(error, BuildError::Target { .. }));
+}
+
+#[test]
+fn destination_collisions_are_isolated_per_target() {
+    let source = TARGET_MATRIX.replace(
+        r#"source = "**/*"
+destination = "${install}""#,
+        r#"source = "a/**/*"
+destination = "${install}/shared"
+allow_empty = true
+
+[[files]]
+source = "b/**/*"
+destination = "${install}/shared"
+allow_empty = true"#,
+    );
+    let dir = project(&[
+        ("dist/linux-arm64/a/foo", b"linux"),
+        ("dist/windows-x64/b/foo", b"windows"),
+    ]);
+    let plan = materialize_targets(&dir.path().join("zup.toml"), &source).unwrap();
+
+    assert_eq!(plan.targets[0].files.len(), 1);
+    assert_eq!(plan.targets[1].files.len(), 1);
+    assert_eq!(
+        plan.targets[0].files[0].destination.to_string(),
+        "${install}/shared/foo"
+    );
+    assert_eq!(
+        plan.targets[1].files[0].destination.to_string(),
+        "${install}/shared/foo"
+    );
+}
+
+#[test]
+fn target_matrix_materializes_shared_update_and_plugin_metadata() {
+    let source = format!(
+        r#"{}
+[updates]
+repository = "https://updates.example.test"
+channel = "stable"
+root = "keys/root.json"
+
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+"#,
+        TARGET_MATRIX
+    );
+    let dir = project(&[
+        ("dist/linux-arm64/app", b"linux"),
+        ("dist/windows-x64/app", b"windows"),
+        ("keys/root.json", b"root"),
+        ("plugins/helper.wasm", b"plugin"),
+    ]);
+    let plan = materialize_targets(&dir.path().join("zup.toml"), &source).unwrap();
+
+    assert_eq!(
+        plan.targets[0]
+            .installer
+            .updates
+            .as_ref()
+            .unwrap()
+            .trusted_root,
+        b"root"
+    );
+    assert_eq!(
+        plan.targets[1]
+            .installer
+            .updates
+            .as_ref()
+            .unwrap()
+            .trusted_root,
+        b"root"
+    );
+    assert_eq!(plan.targets[0].plugins.len(), 1);
+    assert_eq!(plan.targets[1].plugins.len(), 1);
+    assert_eq!(plan.targets[0].plugins[0].size, 6);
+    assert_eq!(plan.targets[1].plugins[0].size, 6);
+    assert_eq!(
+        plan.targets[0].plugins[0].sha256,
+        plan.targets[1].plugins[0].sha256
+    );
+}
+
+#[test]
+fn selection_errors_are_rejected_before_filesystem_access() {
+    let path = Path::new("missing-project/zup.toml");
+
+    let (manifest, _) = selected_targets(TARGET_MATRIX);
+    let error = materialize(path, &manifest, Vec::new()).unwrap_err();
+    assert!(matches!(error, BuildError::EmptyTargetSelection));
+
+    let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
+    selected[1].0.profile = selected[0].0.profile.clone();
+    let error = materialize(path, &manifest, selected).unwrap_err();
+    assert!(matches!(error, BuildError::DuplicateTargetProfile { .. }));
+
+    let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
+    selected[1].0.target = selected[0].0.target.clone();
+    selected[1].1.target = selected[1].0.target.clone();
+    let error = materialize(path, &manifest, selected).unwrap_err();
+    assert!(matches!(error, BuildError::DuplicateTarget { .. }));
+
+    let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
+    selected[0].1.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
+    let error = materialize(path, &manifest, selected).unwrap_err();
+    assert!(matches!(error, BuildError::TargetMismatch { .. }));
 }

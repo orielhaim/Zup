@@ -1,54 +1,70 @@
-use std::{fs, path::Path};
+use std::fs;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{ResolvedPrerequisite, materialize};
+use zup_build::{ResolvedPrerequisite, TargetBuildPlan, materialize};
 use zup_bundle::{
-    BundleError, BundleWriter, CompiledPluginArtifact, EmbeddedBundle, PluginArtifact,
+    BundleWriter, CompiledPluginArtifact, PACKAGE_SCHEMA, Package, PackageError, PluginArtifact,
 };
-use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, TargetTriple};
+use zup_manifest::TargetOverrides;
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     engine_fingerprint, wit_package_digest,
 };
 
-fn project() -> (TempDir, zup_build::BuildPlan) {
+fn project() -> (TempDir, TargetBuildPlan) {
     let root = TempDir::new().unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
     fs::create_dir_all(root.path().join("plugins")).unwrap();
     fs::write(root.path().join("dist/app.bin"), b"payload").unwrap();
     fs::write(root.path().join("plugins/one.wasm"), b"one").unwrap();
     fs::write(root.path().join("plugins/two.wasm"), b"two").unwrap();
-    let source = r#"
+    let source = format!(
+        r#"
 schema = 1
 [app]
 id = "com.example.bundle-plugins"
 name = "Bundle Plugins"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+[build.targets.default]
+target = "{target}"
+source = {{ directory = "dist" }}
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/BundlePlugins"
+user = "${{location.user_data}}/BundlePlugins"
 [[files]]
 source = "**/*"
-destination = "${install}"
+destination = "${{install}}"
 [[plugins]]
 id = "z-plugin"
 source = "plugins/one.wasm"
 [[plugins]]
 id = "a-plugin"
 source = "plugins/two.wasm"
-"#;
-    let manifest = zup_manifest::parse(source).unwrap();
-    let installer = zup_manifest::parse_and_compile(source).unwrap();
-    let plan = materialize(&root.path().join("zup.toml"), &manifest, installer).unwrap();
-    (root, plan)
+"#,
+        target = HOST_TARGET
+    );
+    let manifest = zup_manifest::parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let config = zup_manifest::select_targets(&manifest, &["default"], &TargetOverrides::default())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut plan = materialize(
+        &root.path().join("zup.toml"),
+        &manifest,
+        vec![(config, installer)],
+    )
+    .unwrap();
+    (root, plan.targets.pop().unwrap())
 }
 
-fn artifact(plan: &zup_build::BuildPlan, id: &str, aot: &[u8]) -> CompiledPluginArtifact {
+fn artifact(plan: &TargetBuildPlan, id: &str, aot: &[u8]) -> CompiledPluginArtifact {
     let resolved = plan
         .plugins
         .iter()
@@ -60,13 +76,13 @@ fn artifact(plan: &zup_build::BuildPlan, id: &str, aot: &[u8]) -> CompiledPlugin
             plugin_id: resolved.id.clone(),
             source_size: resolved.size,
             source_sha256: resolved.sha256,
-            target: HOST_TARGET.to_owned(),
+            target: plan.installer.target.clone(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
-                *engine_fingerprint(HOST_TARGET).as_bytes(),
+                *engine_fingerprint(plan.installer.target.as_str()).as_bytes(),
             ),
             aot_size: aot.len() as u64,
             aot_sha256: digest,
@@ -84,7 +100,7 @@ fn synthetic_artifact(id: &str, bytes: &[u8]) -> CompiledPluginArtifact {
             plugin_id: PluginId::new(id).unwrap(),
             source_size: bytes.len() as u64,
             source_sha256: digest,
-            target: HOST_TARGET.to_owned(),
+            target: TargetTriple::parse(HOST_TARGET).unwrap(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -101,42 +117,44 @@ fn synthetic_artifact(id: &str, bytes: &[u8]) -> CompiledPluginArtifact {
     .unwrap()
 }
 
-fn embed(root: &Path, package: &[u8]) -> std::path::PathBuf {
-    let package_path = root.join("bundle.zupbundle");
-    fs::write(&package_path, package).unwrap();
-    let output = root.join("Setup.exe");
-    zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path)
-        .unwrap();
-    output
+fn rewrite_metadata(package: &mut Vec<u8>, mutate: impl FnOnce(&mut Value)) {
+    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
+    let mut value: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
+    mutate(&mut value);
+    let metadata = serde_json::to_vec(&value).unwrap();
+    package.splice(60..60 + metadata_len, metadata.clone());
+    package[20..28].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
+    package[28..60].copy_from_slice(&Sha256::digest(&metadata));
 }
 
 #[test]
-fn schema_four_deduplicates_plugin_blobs_without_payload_entries() {
+fn schema_one_deduplicates_plugin_blobs_and_round_trips() {
     let (root, plan) = project();
     let one = artifact(&plan, "z-plugin", b"same aot");
     let two = artifact(&plan, "a-plugin", b"same aot");
     let artifacts = vec![one.clone(), two.clone()];
-    let package = BundleWriter::encode(&plan, &[two, one]).unwrap();
-    assert_eq!(u32::from_le_bytes(package[8..12].try_into().unwrap()), 4);
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    let metadata: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
-    assert_eq!(metadata["plan"]["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(metadata["plan"]["plugins"].as_array().unwrap().len(), 2);
-    assert_eq!(metadata["blobs"].as_array().unwrap().len(), 2);
-    assert_eq!(BundleWriter::encode(&plan, &artifacts).unwrap(), package);
-    let written = root.path().join("written.zupbundle");
+    let package_bytes = BundleWriter::encode(&plan, &[two, one]).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(package_bytes[8..12].try_into().unwrap()),
+        PACKAGE_SCHEMA
+    );
+    let package = Package::parse(&package_bytes).unwrap();
+    assert_eq!(package.plan().entries.len(), 1);
+    assert_eq!(package.plan().plugins.len(), 2);
+    assert_eq!(package.index_info().blob_count(), 2);
+    assert_eq!(
+        BundleWriter::encode(&plan, &artifacts).unwrap(),
+        package_bytes
+    );
+    let written = root.path().join("written.zup");
     assert_eq!(
         BundleWriter::write_file(&plan, &artifacts, &written).unwrap(),
-        package.len() as u64
+        package_bytes.len() as u64
     );
-    assert_eq!(fs::read(&written).unwrap(), package);
-    let output = embed(root.path(), &package);
-    let bundle = EmbeddedBundle::open(&output).unwrap();
-    assert_eq!(bundle.plugin_artifacts().len(), 2);
+    assert_eq!(fs::read(&written).unwrap(), package_bytes);
     let id = PluginId::new("a-plugin").unwrap();
-    assert_eq!(bundle.plugin_aot(&id).unwrap(), b"same aot");
-    assert!(bundle.build_plan().unwrap().plugins.is_empty());
-    assert_eq!(bundle.plan().installer.plugins.len(), 2);
+    assert_eq!(package.plugin_aot(&id).unwrap(), b"same aot");
+    assert_eq!(package.build_plan().unwrap().targets.len(), 1);
 }
 
 #[test]
@@ -152,81 +170,90 @@ fn artifact_bytes_cannot_disagree_with_metadata() {
 }
 
 #[test]
-fn malformed_plugin_metadata_is_rejected_on_open() {
-    let (root, plan) = project();
+fn malformed_plugin_metadata_is_rejected_on_package_open() {
+    let (_root, plan) = project();
     let compiled = artifact(&plan, "z-plugin", b"aot");
     let second = artifact(&plan, "a-plugin", b"other aot");
     let mut package = BundleWriter::encode(&plan, &[compiled, second]).unwrap();
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    let mut value: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
-    value["plan"]["plugins"][0]["aot_size"] = Value::from(99);
-    let metadata = serde_json::to_vec(&value).unwrap();
-    package.splice(60..60 + metadata_len, metadata.clone());
-    package[20..28].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
-    let hash = Sha256::digest(&metadata);
-    package[28..60].copy_from_slice(&hash);
-    let package_path = root.path().join("malformed.zupbundle");
-    fs::write(&package_path, &package).unwrap();
-    let output = root.path().join("Malformed.exe");
-    assert!(
-        zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path,)
-            .is_err()
-    );
+    rewrite_metadata(&mut package, |value| {
+        value["plan"]["plugins"][0]["aot_size"] = Value::from(99);
+    });
+    assert!(Package::parse(package).is_err());
 }
 
 #[test]
 fn plugin_descriptor_order_is_strict() {
-    let (root, plan) = project();
+    let (_root, plan) = project();
     let first = artifact(&plan, "z-plugin", b"aot");
     let second = artifact(&plan, "a-plugin", b"other");
     let mut package = BundleWriter::encode(&plan, &[first, second]).unwrap();
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    let mut value: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
-    value["plan"]["plugins"].as_array_mut().unwrap().swap(0, 1);
-    let metadata = serde_json::to_vec(&value).unwrap();
-    package.splice(60..60 + metadata_len, metadata.clone());
-    package[20..28].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
-    package[28..60].copy_from_slice(&Sha256::digest(&metadata));
-    let package_path = root.path().join("unordered.zupbundle");
-    fs::write(&package_path, &package).unwrap();
-    let output = root.path().join("Unordered.exe");
-    assert!(
-        zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path,)
-            .is_err()
-    );
+    rewrite_metadata(&mut package, |value| {
+        value["plan"]["plugins"].as_array_mut().unwrap().swap(0, 1);
+    });
+    assert!(Package::parse(package).is_err());
 }
 
 #[test]
-fn tampered_plugin_blob_is_rejected_on_open() {
-    let (root, plan) = project();
+fn tampered_plugin_blob_is_rejected_before_access() {
+    let (_root, plan) = project();
     let compiled = artifact(&plan, "z-plugin", b"aot");
     let second = artifact(&plan, "a-plugin", b"other aot");
     let mut package = BundleWriter::encode(&plan, &[compiled, second]).unwrap();
     let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
     package[60 + metadata_len] ^= 1;
-    let output = embed(root.path(), &package);
-    assert!(EmbeddedBundle::open(output).is_err());
+    assert!(Package::parse(package).is_err());
+}
+
+fn other_target() -> TargetTriple {
+    let host = TargetTriple::parse(HOST_TARGET).unwrap();
+    if host.as_str() == "aarch64-unknown-linux-gnu" {
+        TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()
+    } else {
+        TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap()
+    }
 }
 
 #[test]
-fn cross_target_metadata_is_accepted() {
+fn plugin_target_must_match_target_plan() {
     let (_root, plan) = project();
-    let compiled = artifact(&plan, "z-plugin", b"aot");
-    let mut metadata = compiled.metadata().clone();
-    metadata.target = "aarch64-pc-windows-msvc".to_owned();
-    metadata.engine_fingerprint = Sha256Digest::from_bytes(
-        *zup_plugin_contract::engine_fingerprint(&metadata.target).as_bytes(),
-    );
-    assert!(CompiledPluginArtifact::new(metadata, b"aot".to_vec()).is_ok());
+    let other = other_target();
+    let mut first = artifact(&plan, "z-plugin", b"aot");
+    let mut second = artifact(&plan, "a-plugin", b"other aot");
+    for artifact in [&mut first, &mut second] {
+        let mut metadata = artifact.metadata().clone();
+        metadata.target = other.clone();
+        metadata.engine_fingerprint = Sha256Digest::from_bytes(
+            *zup_plugin_contract::engine_fingerprint(other.as_str()).as_bytes(),
+        );
+        let bytes = artifact.bytes().to_vec();
+        *artifact = CompiledPluginArtifact::new(metadata, bytes).unwrap();
+    }
+    let error = BundleWriter::encode(&plan, &[first, second]).unwrap_err();
+    assert!(matches!(
+        error,
+        PackageError::TargetMismatch { expected, found }
+            if expected == plan.installer.target && found == other
+    ));
 }
 
 #[test]
-fn plugin_target_is_checked_by_contract() {
+fn persisted_plugin_target_must_match_installer_target() {
     let (_root, plan) = project();
-    let compiled = artifact(&plan, "z-plugin", b"aot");
-    let mut metadata = compiled.metadata().clone();
-    metadata.target = "not a target".to_owned();
-    assert!(CompiledPluginArtifact::new(metadata, b"aot".to_vec()).is_err());
+    let first = artifact(&plan, "z-plugin", b"aot");
+    let second = artifact(&plan, "a-plugin", b"other aot");
+    let mut package = BundleWriter::encode(&plan, &[first, second]).unwrap();
+    rewrite_metadata(&mut package, |value| {
+        value["plan"]["plugins"][0]["target"] = Value::from(other_target().to_string());
+    });
+    assert!(matches!(
+        Package::parse(package),
+        Err(PackageError::TargetMismatch { .. })
+    ));
+}
+
+#[test]
+fn typed_plugin_target_is_validated_by_contract() {
+    assert!(TargetTriple::parse("not a target").is_err());
     let _ = PluginEngine::new(HOST_TARGET).unwrap();
 }
 
@@ -251,17 +278,16 @@ fn rejects_more_than_the_documented_plugin_descriptor_limit() {
     let error = BundleWriter::encode(&plan, &artifacts).unwrap_err();
     assert!(matches!(
         error,
-        BundleError::TooManyPluginArtifacts {
+        PackageError::TooManyPluginArtifacts {
             count,
             limit: MAX_PLUGIN_ARTIFACTS,
         } if count == MAX_PLUGIN_ARTIFACTS + 1
     ));
 }
 
-#[cfg(windows)]
 #[test]
 fn rejects_aggregate_aot_overflow_while_parsing_metadata() {
-    let (root, mut plan) = project();
+    let (_root, mut plan) = project();
     plan.plugins.clear();
     plan.installer.plugins = (0..5)
         .map(|index| PluginBinding {
@@ -277,32 +303,24 @@ fn rejects_aggregate_aot_overflow_while_parsing_metadata() {
         .map(|binding| synthetic_artifact(binding.id.as_str(), binding.id.as_str().as_bytes()))
         .collect::<Vec<_>>();
     let mut package = BundleWriter::encode(&plan, &artifacts).unwrap();
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    let mut value: Value = serde_json::from_slice(&package[60..60 + metadata_len]).unwrap();
-    for artifact in value["plan"]["plugins"].as_array_mut().unwrap() {
-        artifact["aot_size"] = Value::from(zup_plugin_contract::MAX_AOT_BYTES as u64);
-    }
-    let metadata = serde_json::to_vec(&value).unwrap();
-    package.splice(60..60 + metadata_len, metadata.clone());
-    package[20..28].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
-    package[28..60].copy_from_slice(&Sha256::digest(&metadata));
-    let package_path = root.path().join("aggregate-overflow.zupbundle");
-    fs::write(&package_path, &package).unwrap();
-    let output = root.path().join("AggregateOverflow.exe");
-
-    let error =
-        zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path)
-            .unwrap_err();
-    assert!(matches!(error, BundleError::PluginAotTooLarge { .. }));
+    rewrite_metadata(&mut package, |value| {
+        for artifact in value["plan"]["plugins"].as_array_mut().unwrap() {
+            artifact["aot_size"] = Value::from(zup_plugin_contract::MAX_AOT_BYTES as u64);
+        }
+    });
+    assert!(matches!(
+        Package::parse(package),
+        Err(PackageError::PluginAotTooLarge { .. })
+    ));
 }
 
 #[test]
-fn embedded_prerequisite_bytes_roundtrip_in_bundle() {
+fn embedded_prerequisite_bytes_round_trip_in_package() {
     let (root, mut plan) = project();
     plan.plugins.clear();
     plan.installer.plugins.clear();
     let bytes = b"runtime payload";
-    let source = root.path().join("runtime.exe");
+    let source = root.path().join("runtime.bin");
     fs::write(&source, bytes).unwrap();
     let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
     let id = zup_core::PrerequisiteId::new("runtime").unwrap();
@@ -313,9 +331,12 @@ fn embedded_prerequisite_bytes_roundtrip_in_bundle() {
         component: None,
         when: None,
         target: zup_core::PrerequisiteArchitecture::Current,
-        detector: zup_core::PrerequisiteDetector::VisualCppV14 { version: None },
+        requirement: zup_core::PrerequisiteRequirement::Runtime(zup_core::Runtime {
+            id: zup_core::RuntimeRequirementId::new("windows.vc.v14").unwrap(),
+            version: None,
+        }),
         package: zup_core::PrerequisitePackage::Embedded {
-            path: zup_core::RelativePath::new("runtime.exe").unwrap(),
+            path: zup_core::RelativePath::new("runtime.bin").unwrap(),
             sha256: digest,
             size: bytes.len() as u64,
         },
@@ -324,19 +345,24 @@ fn embedded_prerequisite_bytes_roundtrip_in_bundle() {
     plan.prerequisites.push(ResolvedPrerequisite {
         id,
         source,
-        source_relative: zup_core::RelativePath::new("runtime.exe").unwrap(),
+        source_relative: zup_core::RelativePath::new("runtime.bin").unwrap(),
         size: bytes.len() as u64,
         sha256: digest,
     });
     plan.prerequisite_size = bytes.len() as u64;
-    let package = BundleWriter::encode(&plan, &[]).unwrap();
-    let package_path = root.path().join("prerequisite.zupbundle");
-    fs::write(&package_path, &package).unwrap();
-    let output = root.path().join("PrerequisiteSetup.exe");
-    zup_bundle::embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package_path)
-        .unwrap();
-    let bundle = EmbeddedBundle::open(&output).unwrap();
+    let encoded = BundleWriter::encode(&plan, &[]).unwrap();
+    let package = Package::parse(&encoded).unwrap();
+    let package_path = root.path().join("prerequisite.zup");
+    assert_eq!(
+        BundleWriter::write_file(&plan, &[], &package_path).unwrap(),
+        encoded.len() as u64
+    );
+    let opened = Package::open(&package_path).unwrap();
     let prerequisite_id = zup_core::PrerequisiteId::new("runtime").unwrap();
-    assert_eq!(bundle.prerequisite_bytes(&prerequisite_id).unwrap(), bytes);
-    assert_eq!(bundle.build_plan().unwrap().prerequisites[0].sha256, digest);
+    assert_eq!(package.prerequisite_bytes(&prerequisite_id).unwrap(), bytes);
+    assert_eq!(opened.prerequisite_bytes(&prerequisite_id).unwrap(), bytes);
+    assert_eq!(
+        package.build_plan().unwrap().targets[0].prerequisites[0].sha256,
+        digest
+    );
 }

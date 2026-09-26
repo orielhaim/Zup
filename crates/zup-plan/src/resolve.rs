@@ -6,7 +6,7 @@ use crate::error::PlanError;
 
 /// Resolve `${app.*}` and `${install}` into a concrete template.
 ///
-/// `${known.*}` variables remain for platform resolution.
+/// `${location.*}` variables remain for platform resolution.
 pub fn resolve_template(
     template: &Template,
     app: &App,
@@ -17,11 +17,7 @@ pub fn resolve_template(
         Variable::AppName => Some(VariableValue::Literal(app.name.to_string())),
         Variable::AppVersion => Some(VariableValue::Literal(app.version.to_string())),
         Variable::Install => Some(VariableValue::Template(install_directory.clone())),
-        Variable::KnownProgramFiles
-        | Variable::KnownLocalAppData
-        | Variable::KnownProgramData
-        | Variable::KnownStartMenu
-        | Variable::KnownDesktop => None,
+        Variable::Location(_) => None,
     });
 
     debug_assert!(!resolved.contains_variable(Variable::Install));
@@ -33,7 +29,7 @@ pub fn resolve_template(
 
 /// Resolve the scope-specific install directory (app variables only).
 ///
-/// The result may still contain `${known.*}`. It must not contain `${install}`.
+/// The result may still contain `${location.*}`. It must not contain `${install}`.
 pub fn resolve_install_directory(directory: &Template, app: &App) -> Result<Template, PlanError> {
     let resolved = directory.substitute(|variable| match variable {
         Variable::AppId => Some(VariableValue::Literal(app.id.to_string())),
@@ -43,11 +39,7 @@ pub fn resolve_install_directory(directory: &Template, app: &App) -> Result<Temp
             // Statically rejected at compile; defensive only.
             Some(VariableValue::Literal(String::new()))
         }
-        Variable::KnownProgramFiles
-        | Variable::KnownLocalAppData
-        | Variable::KnownProgramData
-        | Variable::KnownStartMenu
-        | Variable::KnownDesktop => None,
+        Variable::Location(_) => None,
     });
 
     if directory.contains_variable(Variable::Install) {

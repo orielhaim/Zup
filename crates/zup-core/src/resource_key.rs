@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{FileTypeId, ProtocolScheme, ServiceId};
-use crate::model::{FileExtension, ShortcutLocation};
+use crate::ids::{BackendResourceId, FileAssociationId, ProtocolScheme, ServiceId};
+use crate::model::{FileExtension, LauncherLocation};
 
 /// Stable logical identity for one planned resource.
 ///
@@ -17,14 +17,14 @@ pub enum ResourceKey {
         version: String,
         destination: String,
     },
-    UninstallEntry {
-        app_id: String,
+    Backend {
+        id: BackendResourceId,
     },
     File {
         destination: String,
     },
-    Shortcut {
-        location: ShortcutLocation,
+    Launcher {
+        location: LauncherLocation,
         name: String,
     },
     PathEntry {
@@ -36,10 +36,10 @@ pub enum ResourceKey {
     Protocol {
         scheme: ProtocolScheme,
     },
-    FileType {
-        id: FileTypeId,
+    FileAssociation {
+        id: FileAssociationId,
     },
-    FileTypeExtension {
+    FileAssociationExtension {
         extension: FileExtension,
     },
 }

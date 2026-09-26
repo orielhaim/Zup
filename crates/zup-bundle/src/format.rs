@@ -1,91 +1,71 @@
-//! Versioned, content-addressed bundle objects stored in an Authenticode-hashed
-//! PE RCDATA resource.
+//! Portable, content-addressed package format.
+//!
+//! A package is a schema-1 header followed by a SHA-256-protected JSON plan and
+//! Zstandard-compressed blobs. Blob offsets are relative to the data region and
+//! blobs are ordered by digest. The package contains one target plan and does
+//! not depend on an executable or an operating-system container format.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES, ResolvedPrerequisite};
+use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES, ResolvedPrerequisite, TargetBuildPlan};
 use zup_core::{
-    ComponentId, Condition, Frontend, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
-    RelativePath, Sha256Digest, Template, hash_reader,
+    ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
+    RelativePath, Sha256Digest, TargetTriple, Template, hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
     wit_package_digest,
 };
 
-const MAGIC: &[u8; 8] = b"ZUPBNDL\0";
-const SCHEMA: u32 = 4;
+/// Current portable package schema.
+pub const PACKAGE_SCHEMA: u32 = 1;
 const HEADER_LEN: u64 = 60;
 const MAX_METADATA: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
-/// Maximum aggregate uncompressed plugin AOT bytes in one bundle.
+const MAX_BLOBS: usize = 1_000_000;
+const MAX_PREREQUISITES: usize = 256;
+/// Maximum aggregate uncompressed plugin AOT bytes in one package.
 pub const MAX_PLUGIN_AOT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PLUGIN_ID_BYTES: usize = 128;
 const MAX_TARGET_BYTES: usize = 256;
-const MAX_RESOURCE_SIZE: u64 = u32::MAX as u64;
-const RESOURCE_TYPE_RCDATA: usize = 10;
-const RESOURCE_ID_BUNDLE: usize = 1;
-const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
-const WINDOWS_ARM64_TARGET: &str = "aarch64-pc-windows-msvc";
-const PE_SUBSYSTEM_OFFSET: u64 = 68;
-const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = PE_SUBSYSTEM_OFFSET + 2;
-const IMAGE_SUBSYSTEM_CUI: u16 = 3;
-const IMAGE_SUBSYSTEM_GUI: u16 = 2;
 
+/// Failures produced by the portable package format and payload reader.
 #[derive(Debug, Error)]
-pub enum BundleError {
-    #[error("bundle I/O: {0}")]
+pub enum PackageError {
+    #[error("package I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("bundle metadata: {0}")]
+    #[error("package metadata: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("bundle is truncated, corrupt, unsupported, or has unsafe offsets")]
+    #[error("package is truncated, corrupt, unsupported, or has unsafe offsets")]
     Invalid,
-    #[error("runtime frontend is {found:?}; expected {expected:?}")]
-    FrontendMismatch { expected: Frontend, found: Frontend },
-    #[error("executable has no embedded bundle resource")]
-    MissingResource,
-    #[error(
-        "installer package is {size} bytes; the Windows RCDATA resource limit is {limit} bytes"
-    )]
-    ResourceTooLarge { size: u64, limit: u64 },
-    #[error("bundle index is {size} bytes; the metadata limit is {limit} bytes")]
+    #[error("package index is {size} bytes; the metadata limit is {limit} bytes")]
     MetadataTooLarge { size: u64, limit: u64 },
-    #[error(
-        "installer has {count} unique payload blobs; numeric RCDATA identifiers allow at most {limit}"
-    )]
+    #[error("package has {count} unique blobs; the limit is {limit}")]
     TooManyBlobs { count: usize, limit: usize },
-    #[error("bundle has {count} plugin artifacts; the limit is {limit}")]
+    #[error("package has {count} plugin artifacts; the limit is {limit}")]
     TooManyPluginArtifacts { count: usize, limit: usize },
     #[error("aggregate plugin AOT payload is {size} bytes; the limit is {limit} bytes")]
     PluginAotTooLarge { size: u64, limit: u64 },
-    #[error("cannot allocate {size} bytes while processing the installer resource")]
-    ResourceAllocation { size: u64 },
-    #[error("PE resource API failed: {0}")]
-    ResourceApi(u32),
-    #[error("PE resource APIs are available only on Windows")]
-    ResourcesUnavailable,
-    #[error(
-        "runtime already has an Authenticode certificate table; embed resources before signing"
-    )]
-    RuntimeAlreadySigned,
-    #[error("payload verification failed for {0}")]
+    #[error("cannot allocate {size} bytes while processing the package")]
+    Allocation { size: u64 },
+    #[error("package payload verification failed for {0}")]
     Payload(String),
+    #[error("target mismatch: expected `{expected}`, found `{found}`")]
+    TargetMismatch {
+        expected: TargetTriple,
+        found: TargetTriple,
+    },
     #[error("plugin artifact is invalid: {0}")]
     PluginArtifact(String),
-}
-
-impl BundleError {
-    pub fn is_missing_resource(&self) -> bool {
-        matches!(self, Self::MissingResource)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +74,7 @@ pub struct PluginArtifact {
     pub plugin_id: PluginId,
     pub source_size: u64,
     pub source_sha256: Sha256Digest,
-    pub target: String,
+    pub target: TargetTriple,
     pub wasmtime_version: String,
     pub aot_format_version: u32,
     pub plugin_api_version: String,
@@ -106,29 +86,29 @@ pub struct PluginArtifact {
 }
 
 impl PluginArtifact {
-    pub fn validate(&self) -> Result<(), BundleError> {
+    pub fn validate(&self) -> Result<(), PackageError> {
         if self.plugin_id.as_str().len() > MAX_PLUGIN_ID_BYTES {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "plugin id exceeds the field limit".to_owned(),
             ));
         }
-        if self.target.len() > MAX_TARGET_BYTES
-            || self.target.is_empty()
-            || self.target.contains('\0')
-            || self.wasmtime_version.len() > 32
-            || self.plugin_api_version.len() > 32
-        {
-            return Err(BundleError::PluginArtifact(
+        if self.target.as_str().len() > MAX_TARGET_BYTES {
+            return Err(PackageError::PluginArtifact(
                 "target exceeds the field limit".to_owned(),
             ));
         }
+        if self.wasmtime_version.len() > 32 || self.plugin_api_version.len() > 32 {
+            return Err(PackageError::PluginArtifact(
+                "contract version exceeds the field limit".to_owned(),
+            ));
+        }
         if self.source_size == 0 || self.source_size > MAX_PLUGIN_SOURCE_BYTES {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "source size exceeds the component limit".to_owned(),
             ));
         }
         if self.aot_size == 0 || self.aot_size > u64::try_from(MAX_AOT_BYTES).unwrap_or(u64::MAX) {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "AOT size is outside the component limit".to_owned(),
             ));
         }
@@ -136,26 +116,26 @@ impl PluginArtifact {
             || self.aot_format_version != AOT_FORMAT_VERSION
             || self.plugin_api_version != PLUGIN_API_VERSION
         {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "component contract version is not supported".to_owned(),
             ));
         }
         if self.wit_digest != Sha256Digest::from_bytes(wit_package_digest()) {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "WIT digest does not match the contract".to_owned(),
             ));
         }
-        zup_plugin_contract::PluginEngine::new(&self.target)
-            .map_err(|error| BundleError::PluginArtifact(error.to_string()))?;
+        zup_plugin_contract::PluginEngine::new(self.target.as_str())
+            .map_err(|error| PackageError::PluginArtifact(error.to_string()))?;
         if self.engine_fingerprint
-            != Sha256Digest::from_bytes(*engine_fingerprint(&self.target).as_bytes())
+            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.as_str()).as_bytes())
         {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "engine fingerprint does not match the target".to_owned(),
             ));
         }
         if self.aot_sha256 != self.blob {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "AOT and blob digests differ".to_owned(),
             ));
         }
@@ -170,16 +150,16 @@ pub struct CompiledPluginArtifact {
 }
 
 impl CompiledPluginArtifact {
-    pub fn new(metadata: PluginArtifact, bytes: Vec<u8>) -> Result<Self, BundleError> {
+    pub fn new(metadata: PluginArtifact, bytes: Vec<u8>) -> Result<Self, PackageError> {
         metadata.validate()?;
         if bytes.len() as u64 != metadata.aot_size {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "AOT byte length does not match metadata".to_owned(),
             ));
         }
         let digest = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
         if digest != metadata.aot_sha256 {
-            return Err(BundleError::PluginArtifact(
+            return Err(PackageError::PluginArtifact(
                 "AOT digest does not match metadata".to_owned(),
             ));
         }
@@ -232,7 +212,6 @@ pub struct PrerequisiteArtifact {
 #[serde(deny_unknown_fields)]
 struct BlobIndex {
     digest: Sha256Digest,
-    resource_id: u16,
     offset: u64,
     compressed_size: u64,
     size: u64,
@@ -247,19 +226,696 @@ struct Metadata {
     blobs: Vec<BlobIndex>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageIndex {
+    index_size: u64,
+    blobs: Vec<IndexedBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexedBlob {
+    compressed_size: u64,
+    size: u64,
+}
+
+impl PackageIndex {
+    pub fn index_size(&self) -> u64 {
+        self.index_size
+    }
+
+    pub fn blob_count(&self) -> usize {
+        self.blobs.len()
+    }
+
+    pub fn compressed_size(&self, index: usize) -> Option<u64> {
+        self.blobs.get(index).map(|blob| blob.compressed_size)
+    }
+
+    pub fn size(&self, index: usize) -> Option<u64> {
+        self.blobs.get(index).map(|blob| blob.size)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PackageStorage {
+    File(PathBuf),
+    Memory(Arc<Vec<u8>>),
+}
+
+impl PackageStorage {
+    fn read_range(&self, offset: u64, size: u64) -> Result<Vec<u8>, PackageError> {
+        let end = offset.checked_add(size).ok_or(PackageError::Invalid)?;
+        let size_usize = usize::try_from(size).map_err(|_| PackageError::Invalid)?;
+        match self {
+            Self::File(path) => {
+                let mut file = File::open(path)?;
+                if end > file.metadata()?.len() {
+                    return Err(PackageError::Invalid);
+                }
+                file.seek(SeekFrom::Start(offset))?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(size_usize)
+                    .map_err(|_| PackageError::Allocation { size })?;
+                bytes.resize(size_usize, 0);
+                file.read_exact(&mut bytes)?;
+                Ok(bytes)
+            }
+            Self::Memory(bytes) => {
+                let start = usize::try_from(offset).map_err(|_| PackageError::Invalid)?;
+                let end = usize::try_from(end).map_err(|_| PackageError::Invalid)?;
+                bytes
+                    .get(start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(PackageError::Invalid)
+            }
+        }
+    }
+}
+
+/// A verified standalone package.
+#[derive(Debug, Clone)]
+pub struct Package {
+    storage: PackageStorage,
+    metadata: Metadata,
+    index_size: u64,
+}
+
+impl Package {
+    /// Open and verify a package file.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, PackageError> {
+        let path = path.as_ref().to_path_buf();
+        let len = File::open(&path)?.metadata()?.len();
+        let mut file = File::open(&path)?;
+        let (metadata, index_size) = parse_metadata(&mut file, Some(len))?;
+        let package = Self {
+            storage: PackageStorage::File(path),
+            metadata,
+            index_size,
+        };
+        package.verify()?;
+        Ok(package)
+    }
+
+    /// Open package structure without decompressing or hashing blob data.
+    pub fn open_unverified(path: impl AsRef<Path>) -> Result<Self, PackageError> {
+        let path = path.as_ref().to_path_buf();
+        let len = File::open(&path)?.metadata()?.len();
+        let mut file = File::open(&path)?;
+        let (metadata, index_size) = parse_metadata(&mut file, Some(len))?;
+        Ok(Self {
+            storage: PackageStorage::File(path),
+            metadata,
+            index_size,
+        })
+    }
+
+    /// Parse and verify package bytes.
+    pub fn parse(bytes: impl AsRef<[u8]>) -> Result<Self, PackageError> {
+        Self::from_bytes(bytes.as_ref().to_vec())
+    }
+
+    /// Parse and verify owned package bytes.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, PackageError> {
+        let len = bytes.len() as u64;
+        let mut cursor = Cursor::new(bytes.as_slice());
+        let (metadata, index_size) = parse_metadata(&mut cursor, Some(len))?;
+        let package = Self {
+            storage: PackageStorage::Memory(Arc::new(bytes)),
+            metadata,
+            index_size,
+        };
+        package.verify()?;
+        Ok(package)
+    }
+
+    /// Parse the index portion used by a package adapter.
+    pub fn parse_index(bytes: &[u8]) -> Result<PackageIndex, PackageError> {
+        if (bytes.len() as u64) < HEADER_LEN {
+            return Err(PackageError::Invalid);
+        }
+        let mut cursor = Cursor::new(bytes);
+        let (metadata, index_size) = parse_metadata(&mut cursor, None)?;
+        if index_size != bytes.len() as u64 {
+            return Err(PackageError::Invalid);
+        }
+        Ok(PackageIndex {
+            index_size,
+            blobs: metadata
+                .blobs
+                .iter()
+                .map(|blob| IndexedBlob {
+                    compressed_size: blob.compressed_size,
+                    size: blob.size,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn plan(&self) -> &PortableBuildPlan {
+        &self.metadata.plan
+    }
+
+    pub fn build_plan(&self) -> Result<BuildPlan, PackageError> {
+        let files = self
+            .metadata
+            .plan
+            .entries
+            .iter()
+            .map(|entry| {
+                Ok(zup_build::ResolvedFile {
+                    source: PathBuf::new(),
+                    source_relative: entry.path.clone(),
+                    destination: entry.destination.clone(),
+                    size: entry.size,
+                    sha256: entry.sha256,
+                    component: entry.component.clone(),
+                    condition: entry.condition.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, PackageError>>()?;
+        let prerequisites = self
+            .metadata
+            .plan
+            .prerequisite_artifacts
+            .iter()
+            .map(|artifact| zup_build::ResolvedPrerequisite {
+                id: artifact.prerequisite_id.clone(),
+                source: PathBuf::new(),
+                source_relative: artifact.path.clone(),
+                size: artifact.size,
+                sha256: artifact.sha256,
+            })
+            .collect();
+        Ok(BuildPlan {
+            targets: vec![TargetBuildPlan {
+                installer: self.metadata.plan.installer.clone(),
+                prerequisites,
+                plugins: Vec::new(),
+                files,
+                total_size: self.metadata.plan.total_size,
+                prerequisite_size: self
+                    .metadata
+                    .plan
+                    .prerequisite_artifacts
+                    .iter()
+                    .map(|artifact| artifact.size)
+                    .sum(),
+            }],
+        })
+    }
+
+    pub fn plugin_artifacts(&self) -> &[PluginArtifact] {
+        &self.metadata.plan.plugins
+    }
+
+    pub fn plugin_artifact(&self, id: &PluginId) -> Option<&PluginArtifact> {
+        self.metadata
+            .plan
+            .plugins
+            .iter()
+            .find(|artifact| &artifact.plugin_id == id)
+    }
+
+    pub fn plugin_aot(&self, id: &PluginId) -> Result<Vec<u8>, PackageError> {
+        if !self
+            .metadata
+            .plan
+            .installer
+            .plugins
+            .iter()
+            .any(|plugin| &plugin.id == id)
+        {
+            return Err(PackageError::Invalid);
+        }
+        let artifact = self.plugin_artifact(id).ok_or(PackageError::Invalid)?;
+        let blob = self
+            .metadata
+            .blobs
+            .iter()
+            .find(|blob| blob.digest == artifact.blob)
+            .ok_or(PackageError::Invalid)?;
+        let mut decoder = self.open_blob(blob)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(
+                usize::try_from(artifact.aot_size).map_err(|_| PackageError::Invalid)?,
+            )
+            .map_err(|_| PackageError::Allocation {
+                size: artifact.aot_size,
+            })?;
+        decoder
+            .by_ref()
+            .take(artifact.aot_size.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != artifact.aot_size
+            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.aot_sha256
+        {
+            return Err(PackageError::Payload(artifact.blob.to_string()));
+        }
+        Ok(bytes)
+    }
+
+    pub fn prerequisite_artifact(&self, id: &PrerequisiteId) -> Option<&PrerequisiteArtifact> {
+        self.metadata
+            .plan
+            .prerequisite_artifacts
+            .iter()
+            .find(|artifact| &artifact.prerequisite_id == id)
+    }
+
+    pub fn prerequisite_bytes(&self, id: &PrerequisiteId) -> Result<Vec<u8>, PackageError> {
+        let artifact = self
+            .prerequisite_artifact(id)
+            .ok_or(PackageError::Invalid)?;
+        let blob = self
+            .metadata
+            .blobs
+            .iter()
+            .find(|blob| blob.digest == artifact.blob)
+            .ok_or(PackageError::Invalid)?;
+        let decoder = self.open_blob(blob)?;
+        let mut bytes = Vec::new();
+        decoder
+            .take(artifact.size.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != artifact.size
+            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.sha256
+        {
+            return Err(PackageError::Payload(artifact.sha256.to_string()));
+        }
+        Ok(bytes)
+    }
+
+    pub fn payload_source(&self) -> PackagePayloadSource {
+        PackagePayloadSource {
+            storage: self.storage.clone(),
+            index_size: self.index_size,
+            blobs: self.metadata.blobs.clone(),
+            entries: self.metadata.plan.entries.clone(),
+        }
+    }
+
+    pub fn verify(&self) -> Result<(), PackageError> {
+        for blob in &self.metadata.blobs {
+            let limit = self
+                .metadata
+                .plan
+                .plugins
+                .iter()
+                .find(|artifact| artifact.blob == blob.digest)
+                .map_or_else(
+                    || {
+                        self.metadata
+                            .plan
+                            .prerequisite_artifacts
+                            .iter()
+                            .find(|artifact| artifact.blob == blob.digest)
+                            .map_or(blob.size, |artifact| artifact.size)
+                    },
+                    |artifact| artifact.aot_size,
+                );
+            self.verify_blob(blob, limit)?;
+        }
+        Ok(())
+    }
+
+    pub fn index_bytes(&self) -> Result<Vec<u8>, PackageError> {
+        self.storage.read_range(0, self.index_size)
+    }
+
+    pub fn index_info(&self) -> PackageIndex {
+        PackageIndex {
+            index_size: self.index_size,
+            blobs: self
+                .metadata
+                .blobs
+                .iter()
+                .map(|blob| IndexedBlob {
+                    compressed_size: blob.compressed_size,
+                    size: blob.size,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn blob_count(&self) -> usize {
+        self.metadata.blobs.len()
+    }
+
+    pub fn compressed_blob(&self, index: usize) -> Result<Vec<u8>, PackageError> {
+        let blob = self
+            .metadata
+            .blobs
+            .get(index)
+            .ok_or(PackageError::Invalid)?;
+        self.storage.read_range(
+            self.index_size
+                .checked_add(blob.offset)
+                .ok_or(PackageError::Invalid)?,
+            blob.compressed_size,
+        )
+    }
+
+    fn verify_blob(&self, blob: &BlobIndex, limit: u64) -> Result<(), PackageError> {
+        let decoder = self.open_blob(blob)?;
+        let (size, digest) = hash_reader(decoder.take(limit.saturating_add(1)))?;
+        if size != blob.size || digest != blob.digest || size > limit {
+            return Err(PackageError::Payload(blob.digest.to_string()));
+        }
+        Ok(())
+    }
+
+    fn open_blob(
+        &self,
+        blob: &BlobIndex,
+    ) -> Result<zstd::stream::read::Decoder<'static, BufReader<Cursor<Vec<u8>>>>, PackageError>
+    {
+        let bytes = self.storage.read_range(
+            self.index_size
+                .checked_add(blob.offset)
+                .ok_or(PackageError::Invalid)?,
+            blob.compressed_size,
+        )?;
+        Ok(zstd::stream::read::Decoder::new(Cursor::new(bytes))?)
+    }
+}
+
+impl crate::PayloadSource for Package {
+    fn open(
+        &self,
+        path: &RelativePath,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<crate::PayloadReader, crate::PayloadError> {
+        self.payload_source()
+            .open(path, expected_sha256, expected_size)
+    }
+}
+
+#[derive(Clone)]
+pub struct PackagePayloadSource {
+    storage: PackageStorage,
+    index_size: u64,
+    blobs: Vec<BlobIndex>,
+    entries: Vec<PayloadEntry>,
+}
+
+impl crate::PayloadSource for PackagePayloadSource {
+    fn open(
+        &self,
+        path: &RelativePath,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<crate::PayloadReader, crate::PayloadError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| {
+                &entry.path == path
+                    && &entry.sha256 == expected_sha256
+                    && entry.size == expected_size
+            })
+            .ok_or_else(|| crate::PayloadError::NotFound {
+                path: path.to_string(),
+            })?;
+        let blob = self
+            .blobs
+            .iter()
+            .find(|blob| blob.digest == entry.blob)
+            .ok_or_else(|| crate::PayloadError::NotFound {
+                path: path.to_string(),
+            })?;
+        let compressed = self
+            .storage
+            .read_range(
+                self.index_size
+                    .checked_add(blob.offset)
+                    .ok_or_else(|| std::io::Error::other(PackageError::Invalid))
+                    .map_err(|source| crate::PayloadError::Read {
+                        path: path.to_string(),
+                        source,
+                    })?,
+                blob.compressed_size,
+            )
+            .map_err(|error| crate::PayloadError::Read {
+                path: path.to_string(),
+                source: std::io::Error::other(error.to_string()),
+            })?;
+        let decoder =
+            zstd::stream::read::Decoder::new(Cursor::new(compressed)).map_err(|source| {
+                crate::PayloadError::Read {
+                    path: path.to_string(),
+                    source,
+                }
+            })?;
+        Ok(Box::new(decoder))
+    }
+}
+
+fn parse_metadata(
+    file: &mut (impl Read + Seek),
+    package_len: Option<u64>,
+) -> Result<(Metadata, u64), PackageError> {
+    if package_len.is_some_and(|length| length < HEADER_LEN) {
+        return Err(PackageError::Invalid);
+    }
+    let mut header = [0u8; HEADER_LEN as usize];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    if &header[..8] != b"ZUPBNDL\0"
+        || u32::from_le_bytes(header[8..12].try_into().unwrap()) != PACKAGE_SCHEMA
+    {
+        return Err(PackageError::Invalid);
+    }
+    let features = u64::from_le_bytes(header[12..20].try_into().unwrap());
+    let meta_len = u64::from_le_bytes(header[20..28].try_into().unwrap());
+    let index_size = HEADER_LEN
+        .checked_add(meta_len)
+        .ok_or(PackageError::Invalid)?;
+    if features != 0 || meta_len > MAX_METADATA {
+        return Err(if meta_len > MAX_METADATA {
+            PackageError::MetadataTooLarge {
+                size: meta_len,
+                limit: MAX_METADATA,
+            }
+        } else {
+            PackageError::Invalid
+        });
+    }
+    if package_len.is_some_and(|length| index_size > length) {
+        return Err(PackageError::Invalid);
+    }
+    let meta_size = usize::try_from(meta_len).map_err(|_| PackageError::Invalid)?;
+    let mut bytes = vec![0; meta_size];
+    file.read_exact(&mut bytes)?;
+    if Sha256::digest(&bytes).as_slice() != &header[28..60] {
+        return Err(PackageError::Invalid);
+    }
+    let metadata: Metadata = serde_json::from_slice(&bytes)?;
+    if metadata.schema != PACKAGE_SCHEMA
+        || metadata.required_features != 0
+        || metadata.plan.entries.len() > MAX_ENTRIES
+        || metadata.plan.prerequisite_artifacts.len() > MAX_PREREQUISITES
+        || metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS
+        || metadata.blobs.len() > MAX_BLOBS
+    {
+        return Err(if metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS {
+            PackageError::TooManyPluginArtifacts {
+                count: metadata.plan.plugins.len(),
+                limit: MAX_PLUGIN_ARTIFACTS,
+            }
+        } else {
+            PackageError::Invalid
+        });
+    }
+    validate_plugin_aot_total(metadata.plan.plugins.iter())?;
+
+    let computed_total = metadata.plan.entries.iter().try_fold(0u64, |sum, entry| {
+        sum.checked_add(entry.size).ok_or(PackageError::Invalid)
+    })?;
+    if computed_total != metadata.plan.total_size {
+        return Err(PackageError::Invalid);
+    }
+
+    let mut entry_keys = BTreeSet::new();
+    for entry in &metadata.plan.entries {
+        let key = (entry.destination.to_string(), entry.path.clone());
+        if !entry_keys.insert(key) {
+            return Err(PackageError::Invalid);
+        }
+    }
+    if metadata.plan.entries.windows(2).any(|window| {
+        let left = (window[0].destination.to_string(), window[0].path.clone());
+        let right = (window[1].destination.to_string(), window[1].path.clone());
+        left >= right
+    }) {
+        return Err(PackageError::Invalid);
+    }
+
+    let mut expected_plugins = BTreeMap::<String, PluginId>::new();
+    for plugin in &metadata.plan.installer.plugins {
+        if expected_plugins
+            .insert(plugin.id.as_str().to_ascii_lowercase(), plugin.id.clone())
+            .is_some()
+        {
+            return Err(PackageError::Invalid);
+        }
+    }
+    if expected_plugins.len() != metadata.plan.plugins.len() {
+        return Err(PackageError::Invalid);
+    }
+    let mut artifact_plugins = BTreeMap::<String, &PluginArtifact>::new();
+    for artifact in &metadata.plan.plugins {
+        validate_plugin_target(&metadata.plan.installer.target, artifact)?;
+        artifact.validate()?;
+        let key = artifact.plugin_id.as_str().to_ascii_lowercase();
+        let Some(expected_id) = expected_plugins.get(&key) else {
+            return Err(PackageError::Invalid);
+        };
+        if artifact.plugin_id != *expected_id || artifact_plugins.insert(key, artifact).is_some() {
+            return Err(PackageError::Invalid);
+        }
+    }
+    if metadata
+        .plan
+        .plugins
+        .windows(2)
+        .any(|window| window[0].plugin_id >= window[1].plugin_id)
+    {
+        return Err(PackageError::Invalid);
+    }
+
+    let expected_prerequisites: BTreeMap<_, _> = metadata
+        .plan
+        .installer
+        .prerequisites
+        .iter()
+        .filter_map(|prerequisite| {
+            matches!(
+                prerequisite.package,
+                zup_core::PrerequisitePackage::Embedded { .. }
+            )
+            .then_some((prerequisite.id.clone(), prerequisite))
+        })
+        .collect();
+    if expected_prerequisites.len() != metadata.plan.prerequisite_artifacts.len()
+        || metadata
+            .plan
+            .prerequisite_artifacts
+            .windows(2)
+            .any(|window| window[0].prerequisite_id >= window[1].prerequisite_id)
+    {
+        return Err(PackageError::Invalid);
+    }
+    for artifact in &metadata.plan.prerequisite_artifacts {
+        let Some(prerequisite) = expected_prerequisites.get(&artifact.prerequisite_id) else {
+            return Err(PackageError::Invalid);
+        };
+        let zup_core::PrerequisitePackage::Embedded {
+            sha256,
+            size,
+            path: expected_path,
+        } = &prerequisite.package
+        else {
+            return Err(PackageError::Invalid);
+        };
+        if artifact.sha256 != *sha256
+            || artifact.size != *size
+            || artifact.path != *expected_path
+            || artifact.blob != artifact.sha256
+        {
+            return Err(PackageError::Invalid);
+        }
+    }
+
+    let mut previous = 0u64;
+    let mut by_digest = BTreeMap::new();
+    for (index, blob) in metadata.blobs.iter().enumerate() {
+        let end = blob
+            .offset
+            .checked_add(blob.compressed_size)
+            .ok_or(PackageError::Invalid)?;
+        if blob.offset != previous
+            || blob.compressed_size == 0
+            || by_digest.insert(blob.digest, blob.size).is_some()
+            || (index > 0 && metadata.blobs[index - 1].digest >= blob.digest)
+        {
+            return Err(PackageError::Invalid);
+        }
+        if let Some(length) = package_len {
+            let data_len = length
+                .checked_sub(index_size)
+                .ok_or(PackageError::Invalid)?;
+            if end > data_len {
+                return Err(PackageError::Invalid);
+            }
+        }
+        previous = end;
+    }
+    if let Some(length) = package_len {
+        let data_len = length
+            .checked_sub(index_size)
+            .ok_or(PackageError::Invalid)?;
+        if previous != data_len {
+            return Err(PackageError::Invalid);
+        }
+    }
+
+    let mut referenced = BTreeSet::new();
+    for entry in &metadata.plan.entries {
+        if entry.blob != entry.sha256 || by_digest.get(&entry.blob) != Some(&entry.size) {
+            return Err(PackageError::Invalid);
+        }
+        referenced.insert(entry.blob);
+    }
+    for artifact in &metadata.plan.prerequisite_artifacts {
+        if artifact.blob != artifact.sha256 || by_digest.get(&artifact.blob) != Some(&artifact.size)
+        {
+            return Err(PackageError::Invalid);
+        }
+        referenced.insert(artifact.blob);
+    }
+    for artifact in &metadata.plan.plugins {
+        if artifact.blob != artifact.aot_sha256
+            || by_digest.get(&artifact.blob) != Some(&artifact.aot_size)
+        {
+            return Err(PackageError::Invalid);
+        }
+        referenced.insert(artifact.blob);
+    }
+    if referenced.len() != metadata.blobs.len() {
+        return Err(PackageError::Invalid);
+    }
+    Ok((metadata, index_size))
+}
+
+fn validate_plugin_target(
+    expected: &TargetTriple,
+    artifact: &PluginArtifact,
+) -> Result<(), PackageError> {
+    if artifact.target != *expected {
+        return Err(PackageError::TargetMismatch {
+            expected: expected.clone(),
+            found: artifact.target.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_plugin_aot_total<'a>(
     mut artifacts: impl Iterator<Item = &'a PluginArtifact>,
-) -> Result<u64, BundleError> {
+) -> Result<u64, PackageError> {
     let total = artifacts.try_fold(0u64, |total, artifact| {
         total
             .checked_add(artifact.aot_size)
-            .ok_or(BundleError::PluginAotTooLarge {
+            .ok_or(PackageError::PluginAotTooLarge {
                 size: u64::MAX,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             })
     })?;
     if total > MAX_PLUGIN_AOT_TOTAL_BYTES {
-        return Err(BundleError::PluginAotTooLarge {
+        return Err(PackageError::PluginAotTooLarge {
             size: total,
             limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
         });
@@ -268,18 +924,18 @@ fn validate_plugin_aot_total<'a>(
 }
 
 fn canonical_artifacts(
-    plan: &BuildPlan,
+    plan: &TargetBuildPlan,
     artifacts: &[CompiledPluginArtifact],
-) -> Result<Vec<CompiledPluginArtifact>, BundleError> {
+) -> Result<Vec<CompiledPluginArtifact>, PackageError> {
     let count = artifacts.len().max(plan.installer.plugins.len());
     if count > MAX_PLUGIN_ARTIFACTS {
-        return Err(BundleError::TooManyPluginArtifacts {
+        return Err(PackageError::TooManyPluginArtifacts {
             count,
             limit: MAX_PLUGIN_ARTIFACTS,
         });
     }
     if artifacts.len() != plan.installer.plugins.len() {
-        return Err(BundleError::Invalid);
+        return Err(PackageError::Invalid);
     }
     validate_plugin_aot_total(artifacts.iter().map(|artifact| &artifact.metadata))?;
     let mut expected = BTreeMap::<String, PluginId>::new();
@@ -288,63 +944,58 @@ fn canonical_artifacts(
             .insert(plugin.id.as_str().to_ascii_lowercase(), plugin.id.clone())
             .is_some()
         {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         }
     }
     let mut canonical = artifacts.to_vec();
     canonical.sort_by(|a, b| a.metadata.plugin_id.cmp(&b.metadata.plugin_id));
     let mut actual = BTreeSet::<String>::new();
     for artifact in &canonical {
+        validate_plugin_target(&plan.installer.target, &artifact.metadata)?;
         artifact.metadata.validate()?;
         let key = artifact.metadata.plugin_id.as_str().to_ascii_lowercase();
         let Some(expected_id) = expected.get(&key) else {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         };
         if artifact.metadata.plugin_id != *expected_id || !actual.insert(key) {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         }
     }
     validate_plugin_aot_total(canonical.iter().map(|artifact| &artifact.metadata))?;
-    if let Some(first) = canonical.first()
-        && canonical.iter().any(|artifact| {
-            artifact.metadata.target != first.metadata.target
-                || artifact.metadata.engine_fingerprint != first.metadata.engine_fingerprint
-        })
-    {
-        return Err(BundleError::Invalid);
-    }
     if !plan.plugins.is_empty() {
         if plan.plugins.len() != plan.installer.plugins.len() {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         }
         for (resolved, binding) in plan.plugins.iter().zip(&plan.installer.plugins) {
             if resolved.id != binding.id {
-                return Err(BundleError::Invalid);
+                return Err(PackageError::Invalid);
             }
             let Some(artifact) = canonical
                 .iter()
                 .find(|artifact| artifact.metadata.plugin_id == resolved.id)
             else {
-                return Err(BundleError::Invalid);
+                return Err(PackageError::Invalid);
             };
             if artifact.metadata.source_size != resolved.size
                 || artifact.metadata.source_sha256 != resolved.sha256
             {
-                return Err(BundleError::Invalid);
+                return Err(PackageError::Invalid);
             }
         }
     }
     Ok(canonical)
 }
 
-fn canonical_prerequisites(plan: &BuildPlan) -> Result<Vec<PrerequisiteArtifact>, BundleError> {
+fn canonical_prerequisites(
+    plan: &TargetBuildPlan,
+) -> Result<Vec<PrerequisiteArtifact>, PackageError> {
     let mut resolved: Vec<&ResolvedPrerequisite> = plan.prerequisites.iter().collect();
     resolved.sort_by(|left, right| left.id.cmp(&right.id));
     let mut seen = BTreeSet::new();
     let mut out = Vec::with_capacity(resolved.len());
     for prerequisite in resolved {
         if !seen.insert(prerequisite.id.clone()) {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         }
         let Some(declaration) = plan
             .installer
@@ -352,14 +1003,14 @@ fn canonical_prerequisites(plan: &BuildPlan) -> Result<Vec<PrerequisiteArtifact>
             .iter()
             .find(|item| item.id == prerequisite.id)
         else {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         };
         let zup_core::PrerequisitePackage::Embedded { sha256, size, .. } = &declaration.package
         else {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         };
         if *sha256 != prerequisite.sha256 || *size != prerequisite.size {
-            return Err(BundleError::Invalid);
+            return Err(PackageError::Invalid);
         }
         out.push(PrerequisiteArtifact {
             prerequisite_id: prerequisite.id.clone(),
@@ -376,12 +1027,12 @@ fn canonical_prerequisites(plan: &BuildPlan) -> Result<Vec<PrerequisiteArtifact>
 pub struct BundleWriter;
 
 impl BundleWriter {
-    /// Produce deterministic package bytes. Blobs are Zstandard-compressed once
-    /// per unique SHA-256 identity; all offsets are relative to the data region.
+    /// Produce deterministic package bytes. Each unique digest is compressed
+    /// once and all blob offsets are relative to the data region.
     pub fn encode(
-        plan: &BuildPlan,
+        plan: &TargetBuildPlan,
         artifacts: &[CompiledPluginArtifact],
-    ) -> Result<Vec<u8>, BundleError> {
+    ) -> Result<Vec<u8>, PackageError> {
         let artifacts = canonical_artifacts(plan, artifacts)?;
         let mut installer = plan.installer.clone();
         for mapping in &mut installer.files {
@@ -394,7 +1045,7 @@ impl BundleWriter {
             if bytes.len() as u64 != file.size
                 || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != file.sha256
             {
-                return Err(BundleError::Payload(file.source.display().to_string()));
+                return Err(PackageError::Payload(file.source.display().to_string()));
             }
             contents.entry(file.sha256).or_insert(bytes);
             entries.push(PayloadEntry {
@@ -413,13 +1064,13 @@ impl BundleWriter {
             if bytes.len() as u64 != prerequisite.size
                 || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != prerequisite.sha256
             {
-                return Err(BundleError::Payload(
+                return Err(PackageError::Payload(
                     prerequisite.source.display().to_string(),
                 ));
             }
             if let Some(existing) = contents.get(&prerequisite.sha256) {
                 if existing.as_slice() != bytes.as_slice() {
-                    return Err(BundleError::Payload(
+                    return Err(PackageError::Payload(
                         prerequisite.source.display().to_string(),
                     ));
                 }
@@ -431,7 +1082,7 @@ impl BundleWriter {
             let digest = artifact.metadata.blob;
             if let Some(existing) = contents.get(&digest) {
                 if existing.as_slice() != artifact.bytes.as_slice() {
-                    return Err(BundleError::PluginArtifact(
+                    return Err(PackageError::PluginArtifact(
                         "digest collision in plugin artifacts".to_owned(),
                     ));
                 }
@@ -445,30 +1096,29 @@ impl BundleWriter {
                 .cmp(&b.destination.to_string())
                 .then(a.path.cmp(&b.path))
         });
-        let total_size = entries.iter().try_fold(0u64, |sum, e| {
-            sum.checked_add(e.size).ok_or(BundleError::Invalid)
+        let total_size = entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.size).ok_or(PackageError::Invalid)
         })?;
-        let mut compressed = Vec::new();
-        let mut blobs = Vec::new();
-        if contents.len() > u16::MAX as usize - 1 {
-            return Err(BundleError::TooManyBlobs {
+        if contents.len() > MAX_BLOBS {
+            return Err(PackageError::TooManyBlobs {
                 count: contents.len(),
-                limit: u16::MAX as usize - 1,
+                limit: MAX_BLOBS,
             });
         }
-        for (index, (digest, bytes)) in contents.into_iter().enumerate() {
+        let mut compressed = Vec::new();
+        let mut blobs = Vec::with_capacity(contents.len());
+        for (digest, bytes) in contents {
             let encoded = zstd::stream::encode_all(Cursor::new(&bytes), 9)?;
             let offset = compressed.len() as u64;
             blobs.push(BlobIndex {
                 digest,
-                resource_id: u16::try_from(index + 2).map_err(|_| BundleError::Invalid)?,
                 offset,
                 compressed_size: encoded.len() as u64,
                 size: bytes.len() as u64,
             });
             compressed.extend_from_slice(&encoded);
         }
-        let plan = PortableBuildPlan {
+        let portable_plan = PortableBuildPlan {
             installer,
             entries,
             prerequisite_artifacts,
@@ -478,39 +1128,37 @@ impl BundleWriter {
                 .collect(),
             total_size,
         };
-        // Blob offsets are independent of metadata length.
         let metadata = Metadata {
-            schema: SCHEMA,
+            schema: PACKAGE_SCHEMA,
             required_features: 0,
-            plan,
+            plan: portable_plan,
             blobs,
         };
         let meta = serde_json::to_vec(&metadata)?;
         if meta.len() as u64 > MAX_METADATA {
-            return Err(BundleError::MetadataTooLarge {
+            return Err(PackageError::MetadataTooLarge {
                 size: meta.len() as u64,
                 limit: MAX_METADATA,
             });
         }
-        let meta_hash = Sha256::digest(&meta);
         let mut out = Vec::with_capacity(HEADER_LEN as usize + meta.len() + compressed.len());
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&SCHEMA.to_le_bytes());
-        out.extend_from_slice(&0u64.to_le_bytes()); // required features
+        out.extend_from_slice(b"ZUPBNDL\0");
+        out.extend_from_slice(&PACKAGE_SCHEMA.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
         out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
-        out.extend_from_slice(&meta_hash);
+        out.extend_from_slice(&Sha256::digest(&meta));
         out.extend_from_slice(&meta);
         out.extend_from_slice(&compressed);
         Ok(out)
     }
 
-    /// Stream unique payload files through Zstandard into a spool directory,
-    /// then write the index followed by compressed objects to `output`.
+    /// Stream unique source files through Zstandard into a spool directory,
+    /// then write the package index and compressed objects to `output`.
     pub fn write_file(
-        plan: &BuildPlan,
+        plan: &TargetBuildPlan,
         artifacts: &[CompiledPluginArtifact],
         output: &Path,
-    ) -> Result<u64, BundleError> {
+    ) -> Result<u64, PackageError> {
         let artifacts = canonical_artifacts(plan, artifacts)?;
         struct Spool {
             path: PathBuf,
@@ -538,13 +1186,13 @@ impl BundleWriter {
                     if read == 0 {
                         break;
                     }
-                    size = size.checked_add(read as u64).ok_or(BundleError::Invalid)?;
+                    size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
                     hasher.update(&buffer[..read]);
                     encoder.write_all(&buffer[..read])?;
                 }
                 let output_file = encoder.finish()?;
                 if size != file.size || Sha256Digest::from_hasher(hasher) != file.sha256 {
-                    return Err(BundleError::Payload(file.source.display().to_string()));
+                    return Err(PackageError::Payload(file.source.display().to_string()));
                 }
                 let compressed_size = output_file.metadata()?.len();
                 entry.insert(Spool {
@@ -555,7 +1203,7 @@ impl BundleWriter {
             } else {
                 let (size, digest) = hash_reader(File::open(&file.source)?)?;
                 if size != file.size || digest != file.sha256 {
-                    return Err(BundleError::Payload(file.source.display().to_string()));
+                    return Err(PackageError::Payload(file.source.display().to_string()));
                 }
             }
             entries.push(PayloadEntry {
@@ -585,7 +1233,7 @@ impl BundleWriter {
                     if read == 0 {
                         break;
                     }
-                    size = size.checked_add(read as u64).ok_or(BundleError::Invalid)?;
+                    size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
                     hasher.update(&buffer[..read]);
                     encoder.write_all(&buffer[..read])?;
                 }
@@ -593,7 +1241,7 @@ impl BundleWriter {
                 if size != prerequisite.size
                     || Sha256Digest::from_hasher(hasher) != prerequisite.sha256
                 {
-                    return Err(BundleError::Payload(
+                    return Err(PackageError::Payload(
                         prerequisite.source.display().to_string(),
                     ));
                 }
@@ -606,7 +1254,7 @@ impl BundleWriter {
             } else {
                 let (size, digest) = hash_reader(File::open(&prerequisite.source)?)?;
                 if size != prerequisite.size || digest != prerequisite.sha256 {
-                    return Err(BundleError::Payload(
+                    return Err(PackageError::Payload(
                         prerequisite.source.display().to_string(),
                     ));
                 }
@@ -634,31 +1282,30 @@ impl BundleWriter {
                 .cmp(&b.destination.to_string())
                 .then(a.path.cmp(&b.path))
         });
-        let total_size = entries.iter().try_fold(0u64, |sum, e| {
-            sum.checked_add(e.size).ok_or(BundleError::Invalid)
+        let total_size = entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.size).ok_or(PackageError::Invalid)
         })?;
-        let mut offset = 0u64;
-        let mut blobs = Vec::with_capacity(objects.len());
-        if objects.len() > u16::MAX as usize - 1 {
-            return Err(BundleError::TooManyBlobs {
+        if objects.len() > MAX_BLOBS {
+            return Err(PackageError::TooManyBlobs {
                 count: objects.len(),
-                limit: u16::MAX as usize - 1,
+                limit: MAX_BLOBS,
             });
         }
-        for (index, (digest, spool)) in objects.iter().enumerate() {
+        let mut offset = 0u64;
+        let mut blobs = Vec::with_capacity(objects.len());
+        for (digest, spool) in objects.iter() {
             blobs.push(BlobIndex {
                 digest: *digest,
-                resource_id: u16::try_from(index + 2).map_err(|_| BundleError::Invalid)?,
                 offset,
                 compressed_size: spool.compressed_size,
                 size: spool.size,
             });
             offset = offset
                 .checked_add(spool.compressed_size)
-                .ok_or(BundleError::Invalid)?;
+                .ok_or(PackageError::Invalid)?;
         }
         let metadata = Metadata {
-            schema: SCHEMA,
+            schema: PACKAGE_SCHEMA,
             required_features: 0,
             plan: PortableBuildPlan {
                 installer,
@@ -674,7 +1321,7 @@ impl BundleWriter {
         };
         let meta = serde_json::to_vec(&metadata)?;
         if meta.len() as u64 > MAX_METADATA {
-            return Err(BundleError::MetadataTooLarge {
+            return Err(PackageError::MetadataTooLarge {
                 size: meta.len() as u64,
                 limit: MAX_METADATA,
             });
@@ -683,8 +1330,8 @@ impl BundleWriter {
             .write(true)
             .create_new(true)
             .open(output)?;
-        out.write_all(MAGIC)?;
-        out.write_all(&SCHEMA.to_le_bytes())?;
+        out.write_all(b"ZUPBNDL\0")?;
+        out.write_all(&PACKAGE_SCHEMA.to_le_bytes())?;
         out.write_all(&0u64.to_le_bytes())?;
         out.write_all(&(meta.len() as u64).to_le_bytes())?;
         out.write_all(&Sha256::digest(&meta))?;
@@ -697,882 +1344,6 @@ impl BundleWriter {
     }
 }
 
-/// Validated content index from the executable's RCDATA resources.
-#[derive(Clone)]
-pub struct EmbeddedBundle {
-    path: PathBuf,
-    metadata: Metadata,
-}
-
-impl EmbeddedBundle {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, BundleError> {
-        let path = path.as_ref().to_path_buf();
-        let temporary = tempfile::tempdir()?;
-        let package_path = temporary.path().join("bundle.index");
-        extract_bundle_resource(&path, &package_path)?;
-        let mut file = File::open(&package_path)?;
-        let len = file.metadata()?.len();
-        let metadata = parse_metadata(&mut file, 0, len, true)?;
-        let bundle = Self { path, metadata };
-        bundle.verify_all()?;
-        Ok(bundle)
-    }
-
-    pub fn frontend(&self) -> Frontend {
-        self.metadata.plan.installer.frontend
-    }
-    pub fn plan(&self) -> &PortableBuildPlan {
-        &self.metadata.plan
-    }
-    pub fn build_plan(&self) -> Result<BuildPlan, BundleError> {
-        let files = self
-            .metadata
-            .plan
-            .entries
-            .iter()
-            .map(|entry| {
-                Ok(zup_build::ResolvedFile {
-                    source: PathBuf::new(),
-                    source_relative: entry.path.clone(),
-                    destination: entry.destination.clone(),
-                    size: entry.size,
-                    sha256: entry
-                        .sha256
-                        .to_string()
-                        .parse()
-                        .map_err(|_| BundleError::Invalid)?,
-                    component: entry.component.clone(),
-                    condition: entry.condition.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, BundleError>>()?;
-        let prerequisites = self
-            .metadata
-            .plan
-            .prerequisite_artifacts
-            .iter()
-            .map(|artifact| zup_build::ResolvedPrerequisite {
-                id: artifact.prerequisite_id.clone(),
-                source: PathBuf::new(),
-                source_relative: artifact.path.clone(),
-                size: artifact.size,
-                sha256: artifact.sha256,
-            })
-            .collect();
-        Ok(BuildPlan {
-            installer: self.metadata.plan.installer.clone(),
-            prerequisites,
-            plugins: Vec::new(),
-            files,
-            total_size: self.metadata.plan.total_size,
-            prerequisite_size: self
-                .metadata
-                .plan
-                .prerequisite_artifacts
-                .iter()
-                .map(|artifact| artifact.size)
-                .sum(),
-        })
-    }
-    pub fn plugin_artifacts(&self) -> &[PluginArtifact] {
-        &self.metadata.plan.plugins
-    }
-    pub fn plugin_artifact(&self, id: &PluginId) -> Option<&PluginArtifact> {
-        self.metadata
-            .plan
-            .plugins
-            .iter()
-            .find(|artifact| &artifact.plugin_id == id)
-    }
-    pub fn plugin_aot(&self, id: &PluginId) -> Result<Vec<u8>, BundleError> {
-        if !self
-            .metadata
-            .plan
-            .installer
-            .plugins
-            .iter()
-            .any(|plugin| &plugin.id == id)
-        {
-            return Err(BundleError::Invalid);
-        }
-        let artifact = self.plugin_artifact(id).ok_or(BundleError::Invalid)?;
-        let blob = self
-            .metadata
-            .blobs
-            .iter()
-            .find(|blob| blob.digest == artifact.blob)
-            .ok_or(BundleError::Invalid)?;
-        let mut decoder = open_blob(&self.path, blob)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(
-                usize::try_from(artifact.aot_size).map_err(|_| BundleError::Invalid)?,
-            )
-            .map_err(|_| BundleError::ResourceAllocation {
-                size: artifact.aot_size,
-            })?;
-        decoder
-            .by_ref()
-            .take(artifact.aot_size.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != artifact.aot_size
-            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.aot_sha256
-        {
-            return Err(BundleError::Payload(artifact.blob.to_string()));
-        }
-        Ok(bytes)
-    }
-
-    pub fn prerequisite_artifact(&self, id: &PrerequisiteId) -> Option<&PrerequisiteArtifact> {
-        self.metadata
-            .plan
-            .prerequisite_artifacts
-            .iter()
-            .find(|artifact| &artifact.prerequisite_id == id)
-    }
-
-    pub fn prerequisite_bytes(&self, id: &PrerequisiteId) -> Result<Vec<u8>, BundleError> {
-        let artifact = self.prerequisite_artifact(id).ok_or(BundleError::Invalid)?;
-        let blob = self
-            .metadata
-            .blobs
-            .iter()
-            .find(|blob| blob.digest == artifact.blob)
-            .ok_or(BundleError::Invalid)?;
-        let decoder = open_blob(&self.path, blob)?;
-        let mut bytes = Vec::new();
-        decoder
-            .take(artifact.size.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != artifact.size
-            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.sha256
-        {
-            return Err(BundleError::Payload(artifact.sha256.to_string()));
-        }
-        Ok(bytes)
-    }
-
-    pub fn payload_source(&self) -> BundlePayloadSource {
-        BundlePayloadSource {
-            path: self.path.clone(),
-            blobs: self.metadata.blobs.clone(),
-            entries: self.metadata.plan.entries.clone(),
-        }
-    }
-    fn verify_all(&self) -> Result<(), BundleError> {
-        for blob in &self.metadata.blobs {
-            let limit = self
-                .metadata
-                .plan
-                .plugins
-                .iter()
-                .find(|artifact| artifact.blob == blob.digest)
-                .map_or_else(
-                    || {
-                        self.metadata
-                            .plan
-                            .prerequisite_artifacts
-                            .iter()
-                            .find(|artifact| artifact.blob == blob.digest)
-                            .map_or(blob.size, |artifact| artifact.size)
-                    },
-                    |artifact| artifact.aot_size,
-                );
-            verify_blob(&self.path, blob, limit)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct BundlePayloadSource {
-    path: PathBuf,
-    blobs: Vec<BlobIndex>,
-    entries: Vec<PayloadEntry>,
-}
-
-impl crate::PayloadSource for BundlePayloadSource {
-    fn open(
-        &self,
-        path: &RelativePath,
-        expected_sha256: &Sha256Digest,
-        expected_size: u64,
-    ) -> Result<crate::PayloadReader, crate::PayloadError> {
-        if path.as_str() == "__zup_maintenance__.exe" {
-            let file = File::open(&self.path).map_err(|source| crate::PayloadError::Read {
-                path: path.to_string(),
-                source,
-            })?;
-            let (size, digest) = hash_reader(file).map_err(|source| crate::PayloadError::Read {
-                path: path.to_string(),
-                source,
-            })?;
-            if size != expected_size {
-                return Err(crate::PayloadError::SizeMismatch {
-                    path: path.to_string(),
-                    expected: expected_size,
-                    found: size,
-                });
-            }
-            if digest != *expected_sha256 {
-                return Err(crate::PayloadError::DigestMismatch {
-                    path: path.to_string(),
-                });
-            }
-            let file = File::open(&self.path).map_err(|source| crate::PayloadError::Read {
-                path: path.to_string(),
-                source,
-            })?;
-            return Ok(Box::new(file));
-        }
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| &e.path == path && &e.sha256 == expected_sha256 && e.size == expected_size)
-            .ok_or_else(|| crate::PayloadError::NotFound {
-                path: path.to_string(),
-            })?;
-        let blob = self
-            .blobs
-            .iter()
-            .find(|b| b.digest == entry.blob)
-            .ok_or_else(|| crate::PayloadError::NotFound {
-                path: path.to_string(),
-            })?;
-        let decoder = open_blob(&self.path, blob).map_err(|source| crate::PayloadError::Read {
-            path: path.to_string(),
-            source: std::io::Error::other(source.to_string()),
-        })?;
-        Ok(Box::new(decoder))
-    }
-}
-
-fn parse_metadata(
-    file: &mut File,
-    start: u64,
-    package_len: u64,
-    resource_index: bool,
-) -> Result<Metadata, BundleError> {
-    if package_len < HEADER_LEN {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(start))?;
-    let mut header = [0u8; HEADER_LEN as usize];
-    file.read_exact(&mut header)?;
-    if &header[..8] != MAGIC || u32::from_le_bytes(header[8..12].try_into().unwrap()) != SCHEMA {
-        return Err(BundleError::Invalid);
-    }
-    let features = u64::from_le_bytes(header[12..20].try_into().unwrap());
-    let meta_len = u64::from_le_bytes(header[20..28].try_into().unwrap());
-    if features != 0
-        || HEADER_LEN.checked_add(meta_len).is_none_or(|n| {
-            if resource_index {
-                n != package_len
-            } else {
-                n > package_len
-            }
-        })
-    {
-        return Err(BundleError::Invalid);
-    }
-    if meta_len > MAX_METADATA {
-        return Err(BundleError::MetadataTooLarge {
-            size: meta_len,
-            limit: MAX_METADATA,
-        });
-    }
-    let meta_size = usize::try_from(meta_len).map_err(|_| BundleError::Invalid)?;
-    let mut bytes = vec![0; meta_size];
-    file.read_exact(&mut bytes)?;
-    if Sha256::digest(&bytes).as_slice() != &header[28..60] {
-        return Err(BundleError::Invalid);
-    }
-    let metadata: Metadata = serde_json::from_slice(&bytes)?;
-    if metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS
-        || metadata.plan.prerequisite_artifacts.len() > 256
-    {
-        return Err(BundleError::TooManyPluginArtifacts {
-            count: metadata.plan.plugins.len(),
-            limit: MAX_PLUGIN_ARTIFACTS,
-        });
-    }
-    if metadata.schema != SCHEMA
-        || metadata.required_features != 0
-        || metadata.plan.entries.len() > MAX_ENTRIES
-        || metadata.blobs.len() > u16::MAX as usize - 1
-    {
-        return Err(BundleError::Invalid);
-    }
-    validate_plugin_aot_total(metadata.plan.plugins.iter())?;
-
-    let computed_total = metadata.plan.entries.iter().try_fold(0u64, |sum, entry| {
-        sum.checked_add(entry.size).ok_or(BundleError::Invalid)
-    })?;
-    if computed_total != metadata.plan.total_size {
-        return Err(BundleError::Invalid);
-    }
-
-    let mut entry_keys = BTreeSet::new();
-    for entry in &metadata.plan.entries {
-        if entry.size > MAX_RESOURCE_SIZE {
-            return Err(BundleError::Invalid);
-        }
-        let key = (entry.destination.to_string(), entry.path.clone());
-        if !entry_keys.insert(key) {
-            return Err(BundleError::Invalid);
-        }
-    }
-    if metadata.plan.entries.windows(2).any(|window| {
-        let left = (window[0].destination.to_string(), window[0].path.clone());
-        let right = (window[1].destination.to_string(), window[1].path.clone());
-        left >= right
-    }) {
-        return Err(BundleError::Invalid);
-    }
-
-    let mut expected_plugins = BTreeMap::<String, PluginId>::new();
-    for plugin in &metadata.plan.installer.plugins {
-        if expected_plugins
-            .insert(plugin.id.as_str().to_ascii_lowercase(), plugin.id.clone())
-            .is_some()
-        {
-            return Err(BundleError::Invalid);
-        }
-    }
-    if expected_plugins.len() != metadata.plan.plugins.len() {
-        return Err(BundleError::Invalid);
-    }
-    let mut artifact_plugins = BTreeMap::<String, &PluginArtifact>::new();
-    for artifact in &metadata.plan.plugins {
-        artifact.validate()?;
-        let key = artifact.plugin_id.as_str().to_ascii_lowercase();
-        let Some(expected_id) = expected_plugins.get(&key) else {
-            return Err(BundleError::Invalid);
-        };
-        if artifact.plugin_id != *expected_id || artifact_plugins.insert(key, artifact).is_some() {
-            return Err(BundleError::Invalid);
-        }
-    }
-    if metadata
-        .plan
-        .plugins
-        .windows(2)
-        .any(|window| window[0].plugin_id >= window[1].plugin_id)
-    {
-        return Err(BundleError::Invalid);
-    }
-    if let Some(first) = metadata.plan.plugins.first()
-        && metadata.plan.plugins.iter().any(|artifact| {
-            artifact.target != first.target
-                || artifact.engine_fingerprint != first.engine_fingerprint
-        })
-    {
-        return Err(BundleError::Invalid);
-    }
-
-    let expected_prerequisites: BTreeMap<_, _> = metadata
-        .plan
-        .installer
-        .prerequisites
-        .iter()
-        .filter_map(|prerequisite| {
-            matches!(
-                prerequisite.package,
-                zup_core::PrerequisitePackage::Embedded { .. }
-            )
-            .then_some((prerequisite.id.clone(), prerequisite))
-        })
-        .collect();
-    if expected_prerequisites.len() != metadata.plan.prerequisite_artifacts.len()
-        || metadata
-            .plan
-            .prerequisite_artifacts
-            .windows(2)
-            .any(|window| window[0].prerequisite_id >= window[1].prerequisite_id)
-    {
-        return Err(BundleError::Invalid);
-    }
-    for artifact in &metadata.plan.prerequisite_artifacts {
-        let Some(prerequisite) = expected_prerequisites.get(&artifact.prerequisite_id) else {
-            return Err(BundleError::Invalid);
-        };
-        let zup_core::PrerequisitePackage::Embedded {
-            sha256,
-            size,
-            path: expected_path,
-        } = &prerequisite.package
-        else {
-            return Err(BundleError::Invalid);
-        };
-        if artifact.sha256 != *sha256
-            || artifact.size != *size
-            || artifact.path != *expected_path
-            || artifact.blob != artifact.sha256
-        {
-            return Err(BundleError::Invalid);
-        }
-    }
-
-    let data_len = package_len
-        .checked_sub(HEADER_LEN + meta_len)
-        .ok_or(BundleError::Invalid)?;
-    let mut previous = 0u64;
-    let mut by_digest = BTreeMap::new();
-    for (index, blob) in metadata.blobs.iter().enumerate() {
-        let end = blob
-            .offset
-            .checked_add(blob.compressed_size)
-            .ok_or(BundleError::Invalid)?;
-        if blob.offset != previous
-            || (!resource_index && end > data_len)
-            || blob.resource_id != u16::try_from(index + 2).map_err(|_| BundleError::Invalid)?
-            || blob.compressed_size == 0
-            || blob.compressed_size > MAX_RESOURCE_SIZE
-            || blob.size > MAX_RESOURCE_SIZE
-            || by_digest.insert(blob.digest, blob.size).is_some()
-            || (index > 0 && metadata.blobs[index - 1].digest >= blob.digest)
-        {
-            return Err(BundleError::Invalid);
-        }
-        previous = end;
-    }
-    if !resource_index && previous != data_len {
-        return Err(BundleError::Invalid);
-    }
-
-    let mut referenced = BTreeSet::new();
-    for entry in &metadata.plan.entries {
-        if entry.blob != entry.sha256 || by_digest.get(&entry.blob) != Some(&entry.size) {
-            return Err(BundleError::Invalid);
-        }
-        referenced.insert(entry.blob);
-    }
-    for artifact in &metadata.plan.prerequisite_artifacts {
-        if artifact.blob != artifact.sha256 || by_digest.get(&artifact.blob) != Some(&artifact.size)
-        {
-            return Err(BundleError::Invalid);
-        }
-        referenced.insert(artifact.blob);
-    }
-    for artifact in &metadata.plan.plugins {
-        if artifact.blob != artifact.aot_sha256
-            || by_digest.get(&artifact.blob) != Some(&artifact.aot_size)
-        {
-            return Err(BundleError::Invalid);
-        }
-        referenced.insert(artifact.blob);
-    }
-    if referenced.len() != metadata.blobs.len() {
-        return Err(BundleError::Invalid);
-    }
-    Ok(metadata)
-}
-
-fn verify_blob(executable: &Path, blob: &BlobIndex, limit: u64) -> Result<(), BundleError> {
-    let decoder = open_blob(executable, blob)?;
-    let (size, digest) = hash_reader(decoder.take(limit.saturating_add(1)))?;
-    if size != blob.size || digest != blob.digest || size > limit {
-        return Err(BundleError::Payload(blob.digest.to_string()));
-    }
-    Ok(())
-}
-
-fn open_blob(
-    executable: &Path,
-    blob: &BlobIndex,
-) -> Result<
-    zstd::stream::read::Decoder<'static, std::io::BufReader<std::io::Cursor<Vec<u8>>>>,
-    BundleError,
-> {
-    let bytes = read_blob_resource(executable, blob.resource_id as usize)?;
-    if bytes.len() as u64 != blob.compressed_size {
-        return Err(BundleError::Invalid);
-    }
-    Ok(zstd::stream::read::Decoder::new(std::io::Cursor::new(
-        bytes,
-    ))?)
-}
-/// Build the final installer artifact. Authenticode signing must happen after
-/// this returns so the signature covers the package resource.
-pub fn build_self_contained_executable(
-    executable: &Path,
-    output: &Path,
-    plan: &BuildPlan,
-    artifacts: &[CompiledPluginArtifact],
-) -> Result<(u64, u64), BundleError> {
-    validate_pe_frontend(executable, plan.installer.frontend)?;
-    validate_unsigned_pe(executable)?;
-    let temporary = tempfile::tempdir()?;
-    let package = temporary.path().join("installer.zupbundle");
-    let package_size = BundleWriter::write_file(plan, artifacts, &package)?;
-    embed_bundle_file(executable, output, &package)?;
-    Ok((std::fs::metadata(output)?.len(), package_size))
-}
-
-/// Embed a prebuilt bundle file as RCDATA resource 1. This is also used by
-/// installer integration tests to exercise the exact native resource path.
-pub fn embed_bundle_file(
-    executable: &Path,
-    output: &Path,
-    package: &Path,
-) -> Result<(), BundleError> {
-    validate_unsigned_pe(executable)?;
-    embed_bundle_resource(executable, output, package)
-}
-
-pub fn read_pe_target(path: &Path) -> Result<&'static str, BundleError> {
-    let machine = read_pe_header(path)?.machine;
-    match machine {
-        0x8664 => Ok(WINDOWS_X64_TARGET),
-        0xaa64 => Ok(WINDOWS_ARM64_TARGET),
-        _ => Err(BundleError::Invalid),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeSubsystem {
-    Console,
-    Gui,
-}
-
-pub fn read_pe_subsystem(path: &Path) -> Result<PeSubsystem, BundleError> {
-    match read_pe_header(path)?.subsystem {
-        IMAGE_SUBSYSTEM_CUI => Ok(PeSubsystem::Console),
-        IMAGE_SUBSYSTEM_GUI => Ok(PeSubsystem::Gui),
-        _ => Err(BundleError::Invalid),
-    }
-}
-
-pub fn read_pe_frontend(path: &Path) -> Result<Frontend, BundleError> {
-    match read_pe_subsystem(path)? {
-        PeSubsystem::Console => Ok(Frontend::Console),
-        PeSubsystem::Gui => Ok(Frontend::Gui),
-    }
-}
-
-pub fn validate_pe_frontend(path: &Path, expected: Frontend) -> Result<(), BundleError> {
-    let found = read_pe_frontend(path)?;
-    let matches = match expected {
-        Frontend::Gui => found == Frontend::Gui,
-        Frontend::Console | Frontend::Headless => found == Frontend::Console,
-    };
-    if !matches {
-        return Err(BundleError::FrontendMismatch { expected, found });
-    }
-    Ok(())
-}
-
-struct PeHeader {
-    machine: u16,
-    subsystem: u16,
-    security_offset: u64,
-}
-
-fn read_pe_header(path: &Path) -> Result<PeHeader, BundleError> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    if len < 0x40 {
-        return Err(BundleError::Invalid);
-    }
-    let mut dos = [0u8; 0x40];
-    file.read_exact(&mut dos)?;
-    if &dos[..2] != b"MZ" {
-        return Err(BundleError::Invalid);
-    }
-    let pe = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
-    if pe < 0x40 || pe.checked_add(24).is_none_or(|end| end > len) {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(pe))?;
-    let mut signature = [0u8; 4];
-    file.read_exact(&mut signature)?;
-    if &signature != b"PE\0\0" {
-        return Err(BundleError::Invalid);
-    }
-    let mut coff = [0u8; 20];
-    file.read_exact(&mut coff)?;
-    let machine = u16::from_le_bytes(coff[..2].try_into().unwrap());
-    let section_count = u16::from_le_bytes(coff[2..4].try_into().unwrap());
-    let optional_offset = pe + 24;
-    let optional_len = u16::from_le_bytes(coff[16..18].try_into().unwrap()) as u64;
-    let optional_end = optional_offset
-        .checked_add(optional_len)
-        .ok_or(BundleError::Invalid)?;
-    if optional_len < PE_MIN_OPTIONAL_HEADER_SIZE || optional_end > len || section_count == 0 {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(optional_offset))?;
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic)?;
-    let data_directory_offset = match u16::from_le_bytes(magic) {
-        0x10b => 96,
-        0x20b => 112,
-        _ => return Err(BundleError::Invalid),
-    };
-    let security_offset = optional_offset
-        .checked_add(data_directory_offset)
-        .and_then(|offset| offset.checked_add(8 * 4))
-        .ok_or(BundleError::Invalid)?;
-    if security_offset
-        .checked_add(8)
-        .is_none_or(|end| end > optional_end)
-    {
-        return Err(BundleError::Invalid);
-    }
-    let subsystem_offset = optional_offset
-        .checked_add(PE_SUBSYSTEM_OFFSET)
-        .ok_or(BundleError::Invalid)?;
-    file.seek(SeekFrom::Start(subsystem_offset))?;
-    let mut subsystem = [0u8; 2];
-    file.read_exact(&mut subsystem)?;
-    let section_end = optional_end
-        .checked_add(
-            u64::from(section_count)
-                .checked_mul(40)
-                .ok_or(BundleError::Invalid)?,
-        )
-        .ok_or(BundleError::Invalid)?;
-    if section_end > len {
-        return Err(BundleError::Invalid);
-    }
-    Ok(PeHeader {
-        machine,
-        subsystem: u16::from_le_bytes(subsystem),
-        security_offset,
-    })
-}
-
-fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
-    let header = read_pe_header(path)?;
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(header.security_offset))?;
-    let mut certificate = [0u8; 8];
-    file.read_exact(&mut certificate)?;
-    if certificate != [0; 8] {
-        return Err(BundleError::RuntimeAlreadySigned);
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn embed_bundle_resource(
-    executable: &Path,
-    output: &Path,
-    package: &Path,
-) -> Result<(), BundleError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_link::link;
-    type Handle = *mut core::ffi::c_void;
-    type Bool = i32;
-    type Dword = u32;
-    link!("kernel32.dll" "system" fn BeginUpdateResourceW(filename: *const u16, delete_existing: Bool) -> Handle);
-    link!("kernel32.dll" "system" fn UpdateResourceW(update: Handle, resource_type: *const u16, name: *const u16, language: u16, data: *const core::ffi::c_void, size: Dword) -> Bool);
-    link!("kernel32.dll" "system" fn EndUpdateResourceW(update: Handle, discard: Bool) -> Bool);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-    if output.exists() || output == executable {
-        return Err(BundleError::Invalid);
-    }
-    let mut package_file = File::open(package)?;
-    let package_size = package_file.metadata()?.len();
-    let mut header = [0u8; HEADER_LEN as usize];
-    package_file.read_exact(&mut header)?;
-    let metadata_size = u64::from_le_bytes(header[20..28].try_into().unwrap());
-    let index_size = HEADER_LEN
-        .checked_add(metadata_size)
-        .ok_or(BundleError::Invalid)?;
-    if metadata_size > MAX_METADATA {
-        return Err(BundleError::MetadataTooLarge {
-            size: metadata_size,
-            limit: MAX_METADATA,
-        });
-    }
-    if index_size > MAX_RESOURCE_SIZE {
-        return Err(BundleError::ResourceTooLarge {
-            size: index_size,
-            limit: MAX_RESOURCE_SIZE,
-        });
-    }
-    let metadata = parse_metadata(&mut package_file, 0, package_size, false)?;
-    if metadata.blobs.len() > u16::MAX as usize - 1 {
-        return Err(BundleError::TooManyBlobs {
-            count: metadata.blobs.len(),
-            limit: u16::MAX as usize - 1,
-        });
-    }
-    for blob in &metadata.blobs {
-        if blob.compressed_size > MAX_RESOURCE_SIZE {
-            return Err(BundleError::ResourceTooLarge {
-                size: blob.compressed_size,
-                limit: MAX_RESOURCE_SIZE,
-            });
-        }
-    }
-    let index = read_package_range(&mut package_file, 0, index_size)?;
-    std::fs::copy(executable, output)?;
-    let wide: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
-    let update = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
-    if update.is_null() {
-        let _ = std::fs::remove_file(output);
-        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
-    }
-    let apply = |id: usize, data: &[u8]| -> Result<(), u32> {
-        let size = u32::try_from(data.len()).map_err(|_| 87u32)?;
-        let ok = unsafe {
-            UpdateResourceW(
-                update,
-                RESOURCE_TYPE_RCDATA as *const u16,
-                id as *const u16,
-                0,
-                data.as_ptr().cast(),
-                size,
-            )
-        };
-        if ok == 0 {
-            Err(unsafe { GetLastError() })
-        } else {
-            Ok(())
-        }
-    };
-    let result = (|| {
-        apply(RESOURCE_ID_BUNDLE, &index).map_err(BundleError::ResourceApi)?;
-        let data_start = index_size;
-        for blob in &metadata.blobs {
-            let start = data_start
-                .checked_add(blob.offset)
-                .ok_or(BundleError::Invalid)?;
-            let bytes = read_package_range(&mut package_file, start, blob.compressed_size)?;
-            apply(blob.resource_id as usize, &bytes).map_err(BundleError::ResourceApi)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        unsafe {
-            EndUpdateResourceW(update, 1);
-        }
-        let _ = std::fs::remove_file(output);
-        return Err(error);
-    }
-    if unsafe { EndUpdateResourceW(update, 0) } == 0 {
-        let error = unsafe { GetLastError() };
-        let _ = std::fs::remove_file(output);
-        return Err(BundleError::ResourceApi(error));
-    }
-    Ok(())
-}
-
-fn read_package_range(file: &mut File, offset: u64, size: u64) -> Result<Vec<u8>, BundleError> {
-    let requested_size = size;
-    let size = usize::try_from(requested_size).map_err(|_| BundleError::ResourceAllocation {
-        size: requested_size,
-    })?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(size)
-        .map_err(|_| BundleError::ResourceAllocation {
-            size: requested_size,
-        })?;
-    bytes.resize(size, 0);
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-#[cfg(not(windows))]
-fn embed_bundle_resource(_: &Path, _: &Path, package: &Path) -> Result<(), BundleError> {
-    let size = std::fs::metadata(package)?.len();
-    if size > MAX_RESOURCE_SIZE {
-        return Err(BundleError::ResourceTooLarge {
-            size,
-            limit: MAX_RESOURCE_SIZE,
-        });
-    }
-    Err(BundleError::ResourcesUnavailable)
-}
-
-#[cfg(windows)]
-fn read_blob_resource(executable: &Path, resource_id: usize) -> Result<Vec<u8>, BundleError> {
-    read_resource(executable, resource_id).map_err(|error| match error {
-        BundleError::MissingResource => BundleError::Invalid,
-        other => other,
-    })
-}
-
-#[cfg(windows)]
-fn read_resource(executable: &Path, resource_id: usize) -> Result<Vec<u8>, BundleError> {
-    use std::{os::windows::ffi::OsStrExt, ptr};
-    use windows_link::link;
-    type Handle = *mut core::ffi::c_void;
-    type Dword = u32;
-    link!("kernel32.dll" "system" fn LoadLibraryExW(filename: *const u16, file: Handle, flags: Dword) -> Handle);
-    link!("kernel32.dll" "system" fn FindResourceW(module: Handle, name: *const u16, resource_type: *const u16) -> Handle);
-    link!("kernel32.dll" "system" fn LoadResource(module: Handle, resource: Handle) -> Handle);
-    link!("kernel32.dll" "system" fn SizeofResource(module: Handle, resource: Handle) -> Dword);
-    link!("kernel32.dll" "system" fn LockResource(resource: Handle) -> *const core::ffi::c_void);
-    link!("kernel32.dll" "system" fn FreeLibrary(module: Handle) -> i32);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-    let wide: Vec<u16> = executable
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let module = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), 0x0000_0002) };
-    if module.is_null() {
-        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
-    }
-    let resource = unsafe {
-        FindResourceW(
-            module,
-            resource_id as *const u16,
-            RESOURCE_TYPE_RCDATA as *const u16,
-        )
-    };
-    let result = if resource.is_null() {
-        Err(BundleError::MissingResource)
-    } else {
-        let size = unsafe { SizeofResource(module, resource) } as usize;
-        if size == 0 {
-            Err(BundleError::Invalid)
-        } else {
-            let loaded = unsafe { LoadResource(module, resource) };
-            let data = if loaded.is_null() {
-                ptr::null()
-            } else {
-                unsafe { LockResource(loaded) }
-            };
-            if data.is_null() {
-                Err(BundleError::ResourceApi(unsafe { GetLastError() }))
-            } else {
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(size)
-                    .map_err(|_| BundleError::ResourceAllocation { size: size as u64 })?;
-                bytes.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(data.cast::<u8>(), size)
-                });
-                Ok(bytes)
-            }
-        }
-    };
-    unsafe {
-        FreeLibrary(module);
-    }
-    result
-}
-
-#[cfg(windows)]
-fn extract_bundle_resource(executable: &Path, output: &Path) -> Result<(), BundleError> {
-    std::fs::write(output, read_resource(executable, RESOURCE_ID_BUNDLE)?)?;
-    Ok(())
-}
-#[cfg(not(windows))]
-fn extract_bundle_resource(_: &Path, _: &Path) -> Result<(), BundleError> {
-    Err(BundleError::MissingResource)
-}
-
-#[cfg(not(windows))]
-fn read_resource(_: &Path, _: usize) -> Result<Vec<u8>, BundleError> {
-    Err(BundleError::ResourcesUnavailable)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1580,13 +1351,14 @@ mod tests {
         App, AppId, Install, InstallDirectory, InstallScope, NonEmptyString, PluginBinding,
         PluginId, Template,
     };
-    use zup_plugin_contract::HOST_TARGET;
+    use zup_plugin_contract::{
+        AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
+        wit_package_digest,
+    };
 
-    fn plan_with_plugins(count: usize) -> BuildPlan {
-        BuildPlan {
+    fn plan_with_plugins(count: usize) -> TargetBuildPlan {
+        TargetBuildPlan {
             installer: Installer {
-                ui: None,
-                frontend: zup_core::Frontend::Gui,
                 app: App {
                     id: AppId::new("com.example.bundle-limits").unwrap(),
                     name: NonEmptyString::new("Bundle Limits").unwrap(),
@@ -1595,14 +1367,15 @@ mod tests {
                     main: None,
                     description: None,
                 },
+                target: TargetTriple::parse(HOST_TARGET).unwrap(),
+                frontend: Default::default(),
+                ui: None,
                 updates: None,
                 prerequisites: Vec::new(),
                 install: Install {
                     scope: InstallScope::User,
                     directory: InstallDirectory {
-                        user: Some(
-                            Template::parse("${known.local_app_data}/BundleLimits").unwrap(),
-                        ),
+                        user: Some(Template::parse("${location.user_data}/BundleLimits").unwrap()),
                         machine: None,
                     },
                     allow_directory_override: false,
@@ -1616,11 +1389,11 @@ mod tests {
                     })
                     .collect(),
                 files: Vec::new(),
-                shortcuts: Vec::new(),
+                launchers: Vec::new(),
                 path: Vec::new(),
                 services: Vec::new(),
                 protocols: Vec::new(),
-                file_types: Vec::new(),
+                file_associations: Vec::new(),
             },
             prerequisites: Vec::new(),
             plugins: Vec::new(),
@@ -1637,7 +1410,7 @@ mod tests {
                 plugin_id: PluginId::new(id).unwrap(),
                 source_size: 1,
                 source_sha256: digest,
-                target: HOST_TARGET.to_owned(),
+                target: TargetTriple::parse(HOST_TARGET).unwrap(),
                 wasmtime_version: WASMTIME_VERSION.to_owned(),
                 aot_format_version: AOT_FORMAT_VERSION,
                 plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -1665,7 +1438,7 @@ mod tests {
 
         assert!(matches!(
             canonical_artifacts(&plan, &artifacts),
-            Err(BundleError::PluginAotTooLarge {
+            Err(PackageError::PluginAotTooLarge {
                 size,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             }) if size == 5 * MAX_AOT_BYTES as u64
@@ -1687,7 +1460,7 @@ mod tests {
         let error = BundleWriter::write_file(&plan, &artifacts, &output).unwrap_err();
         assert!(matches!(
             error,
-            BundleError::PluginAotTooLarge {
+            PackageError::PluginAotTooLarge {
                 size,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             } if size == 5 * MAX_AOT_BYTES as u64

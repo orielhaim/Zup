@@ -7,12 +7,14 @@ use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 use zup_core::InstallScope;
 
+use crate::target::ResourceKind;
+
 type Src = Arc<NamedSource<String>>;
 
 /// Errors produced while parsing, validating, or compiling a `zup.toml` manifest.
 #[derive(Debug, Error, Diagnostic)]
 pub enum ManifestError {
-    /// The document is not a well-formed schema-1 manifest.
+    /// The document is not a well-formed supported manifest.
     #[error("{message}")]
     #[diagnostic(code(zup_manifest::invalid))]
     Invalid {
@@ -35,6 +37,82 @@ pub enum ManifestError {
         #[source_code]
         src: Option<Src>,
         #[label("unsupported schema version")]
+        span: Option<SourceSpan>,
+    },
+
+    /// The build matrix contains no target profiles.
+    #[error("the build target matrix must contain at least one profile")]
+    #[diagnostic(
+        code(zup_manifest::empty_target_matrix),
+        help("declare a profile under [build.targets.<profile>]")
+    )]
+    EmptyTargetMatrix {
+        #[source_code]
+        src: Option<Src>,
+        #[label("target matrix is empty")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A targeted resource names a profile that is not declared.
+    #[error("{resource} references unknown target profile `{profile}`")]
+    #[diagnostic(
+        code(zup_manifest::unknown_target_profile_reference),
+        help("use an exact profile id declared under [build.targets]")
+    )]
+    UnknownTargetProfileReference {
+        resource: ResourceKind,
+        profile: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("unknown target profile `{profile}`")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A target selector matches neither a profile name nor a configured target.
+    #[error("unknown target selector `{selector}`")]
+    #[diagnostic(
+        code(zup_manifest::unknown_target_selector),
+        help("available target profiles: {available}")
+    )]
+    UnknownTargetSelector {
+        selector: String,
+        available: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("unknown target selector")]
+        span: Option<SourceSpan>,
+    },
+
+    /// Two target profiles resolve to the same canonical target triple.
+    #[error(
+        "target profile `{profile}` duplicates canonical target `{target}` from profile `{conflicts_with}`"
+    )]
+    #[diagnostic(
+        code(zup_manifest::duplicate_target),
+        help("assign a distinct canonical target to each target profile")
+    )]
+    DuplicateTarget {
+        profile: String,
+        conflicts_with: String,
+        target: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("duplicate canonical target")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A resolved target config no longer matches its declared profile.
+    #[error("invalid resolved target configuration for profile `{profile}`: {reason}")]
+    #[diagnostic(
+        code(zup_manifest::invalid_resolved_target_config),
+        help("resolve the target again with select_targets")
+    )]
+    InvalidResolvedTargetConfig {
+        profile: String,
+        reason: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("resolved target does not match its declaration")]
         span: Option<SourceSpan>,
     },
 
@@ -176,25 +254,25 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two unconditional declarations share a file type id.
-    #[error("duplicate file type id `{id}`")]
-    #[diagnostic(code(zup_manifest::duplicate_file_type))]
-    DuplicateFileType {
+    /// Two unconditional declarations share a file association id.
+    #[error("duplicate file association id `{id}`")]
+    #[diagnostic(code(zup_manifest::duplicate_file_association))]
+    DuplicateFileAssociation {
         id: String,
         #[source_code]
         src: Option<Src>,
-        #[label("duplicate file type id")]
+        #[label("duplicate file association id")]
         span: Option<SourceSpan>,
     },
 
     /// Two unconditional declarations own the same file extension.
-    #[error("duplicate file type extension `{extension}`")]
+    #[error("duplicate file association extension `{extension}`")]
     #[diagnostic(code(zup_manifest::duplicate_extension))]
     DuplicateExtension {
         extension: String,
         #[source_code]
         src: Option<Src>,
-        #[label("duplicate file type extension")]
+        #[label("duplicate file association extension")]
         span: Option<SourceSpan>,
     },
 
@@ -261,6 +339,59 @@ impl ManifestError {
             } => Self::UnsupportedSchema {
                 supported,
                 found,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::EmptyTargetMatrix {
+                span,
+                src: existing,
+            } => Self::EmptyTargetMatrix {
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::UnknownTargetProfileReference {
+                resource,
+                profile,
+                span,
+                src: existing,
+            } => Self::UnknownTargetProfileReference {
+                resource,
+                profile,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::UnknownTargetSelector {
+                selector,
+                available,
+                span,
+                src: existing,
+            } => Self::UnknownTargetSelector {
+                selector,
+                available,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::DuplicateTarget {
+                profile,
+                conflicts_with,
+                target,
+                span,
+                src: existing,
+            } => Self::DuplicateTarget {
+                profile,
+                conflicts_with,
+                target,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::InvalidResolvedTargetConfig {
+                profile,
+                reason,
+                span,
+                src: existing,
+            } => Self::InvalidResolvedTargetConfig {
+                profile,
+                reason,
                 span: span.or(inferred),
                 src: existing.or(src),
             },
@@ -365,11 +496,11 @@ impl ManifestError {
                 span: span.or(inferred),
                 src: existing.or(src),
             },
-            Self::DuplicateFileType {
+            Self::DuplicateFileAssociation {
                 id,
                 span,
                 src: existing,
-            } => Self::DuplicateFileType {
+            } => Self::DuplicateFileAssociation {
                 id,
                 span: span.or(inferred),
                 src: existing.or(src),
@@ -417,6 +548,17 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
             }
         }
         ManifestError::UnsupportedSchema { .. } => value_span(source, "schema"),
+        ManifestError::EmptyTargetMatrix { .. } => {
+            table_span(source, "build.targets").or_else(|| table_span(source, "build"))
+        }
+        ManifestError::UnknownTargetProfileReference { profile, .. } => source
+            .find(profile.as_str())
+            .map(|start| source_span(start..start + profile.len())),
+        ManifestError::UnknownTargetSelector { .. } => None,
+        ManifestError::DuplicateTarget { profile, .. }
+        | ManifestError::InvalidResolvedTargetConfig { profile, .. } => source
+            .find(profile.as_str())
+            .map(|start| source_span(start..start + profile.len())),
         ManifestError::InvalidUiAccent { .. } => value_span(source, "accent"),
         ManifestError::DuplicateComponent { id, .. }
         | ManifestError::UnknownComponent { id, .. }
@@ -442,13 +584,19 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
         ManifestError::DuplicateProtocol { scheme, .. } => source
             .find(scheme)
             .map(|start| source_span(start..start + scheme.len())),
-        ManifestError::DuplicateFileType { id, .. } => source
+        ManifestError::DuplicateFileAssociation { id, .. } => source
             .find(id)
             .map(|start| source_span(start..start + id.len())),
         ManifestError::DuplicateExtension { extension, .. } => source
             .find(extension)
             .map(|start| source_span(start..start + extension.len())),
     }
+}
+
+fn table_span(source: &str, table: &str) -> Option<SourceSpan> {
+    let header = format!("[{table}]");
+    let start = source.find(&header)?;
+    Some(source_span(start..start + header.len()))
 }
 
 fn value_span(source: &str, key: &str) -> Option<SourceSpan> {

@@ -1,12 +1,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use zup_core::{AppId, SelectedScope, Sha256Digest};
+use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
 
+use crate::filesystem::{BootstrapFileSystem, PortableBootstrapFileSystem};
 use crate::model::{BootstrapId, BootstrapState, MAX_BOOTSTRAP_STATE_BYTES};
 
 #[derive(Debug, Error)]
@@ -48,6 +50,7 @@ pub trait BootstrapStateStore {
         &self,
         app_id: &AppId,
         scope: SelectedScope,
+        target: &TargetTriple,
     ) -> Result<Vec<BootstrapState>, BootstrapStoreError>;
     fn remove(&self, id: BootstrapId) -> Result<(), BootstrapStoreError>;
 }
@@ -55,15 +58,42 @@ pub trait BootstrapStateStore {
 #[derive(Clone)]
 pub struct FilesystemBootstrapStateStore {
     root: PathBuf,
+    file_system: Arc<dyn BootstrapFileSystem>,
 }
 
 impl FilesystemBootstrapStateStore {
+    /// Store backed by the portable `std::fs` filesystem.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_file_system(root, Arc::new(PortableBootstrapFileSystem))
+    }
+
+    /// Store that publishes state and clears links through `file_system`, for
+    /// hosts that must guarantee more than `std::fs` can.
+    pub fn with_file_system(
+        root: impl Into<PathBuf>,
+        file_system: Arc<dyn BootstrapFileSystem>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            file_system,
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Refuse to read or publish state through a link: a link at the root or at
+    /// the state file would move bootstrap state outside its own root.
+    fn reject_links(&self, path: &Path) -> Result<(), BootstrapStoreError> {
+        match self.file_system.is_link(path) {
+            Ok(true) => Err(BootstrapStoreError::Invalid),
+            Ok(false) => Ok(()),
+            Err(source) => Err(BootstrapStoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
     }
 
     fn state_path(&self, id: BootstrapId) -> PathBuf {
@@ -74,8 +104,8 @@ impl FilesystemBootstrapStateStore {
     }
 
     fn write_state(&self, path: &Path, state: &BootstrapState) -> Result<(), BootstrapStoreError> {
-        reject_reparse_points(&self.root)?;
-        reject_reparse_points(path)?;
+        self.reject_links(&self.root)?;
+        self.reject_links(path)?;
         if state.operations.len() > crate::model::MAX_BOOTSTRAP_OPERATIONS {
             return Err(BootstrapStoreError::Invalid);
         }
@@ -97,7 +127,7 @@ impl FilesystemBootstrapStateStore {
             path: parent.to_path_buf(),
             source,
         })?;
-        reject_reparse_points(&self.root)?;
+        self.reject_links(&self.root)?;
         let temporary = parent.join(format!(".state-{}.partial", Uuid::now_v7()));
         let mut file = OpenOptions::new()
             .write(true)
@@ -120,18 +150,20 @@ impl FilesystemBootstrapStateStore {
                 source,
             });
         }
-        publish_replace(&temporary, path).map_err(|source| {
-            let _ = fs::remove_file(&temporary);
-            BootstrapStoreError::Io {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
+        self.file_system
+            .publish_replace(&temporary, path)
+            .map_err(|source| {
+                let _ = fs::remove_file(&temporary);
+                BootstrapStoreError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
         Ok(())
     }
 
     fn read_state(&self, path: &Path) -> Result<BootstrapState, BootstrapStoreError> {
-        reject_reparse_points(path)?;
+        self.reject_links(path)?;
         let metadata = fs::metadata(path).map_err(|source| BootstrapStoreError::Io {
             path: path.to_path_buf(),
             source,
@@ -166,69 +198,10 @@ impl FilesystemBootstrapStateStore {
     }
 }
 
-fn publish_replace(from: &Path, to: &Path) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Storage::FileSystem::{
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-        };
-        let from = from
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let to = to
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        unsafe {
-            MoveFileExW(
-                windows::core::PCWSTR(from.as_ptr()),
-                windows::core::PCWSTR(to.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
-        .map_err(|error| std::io::Error::other(error.to_string()))
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(from, to)
-    }
-}
-
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn reject_reparse_points(path: &Path) -> Result<(), BootstrapStoreError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if is_reparse_point(&metadata) => Err(BootstrapStoreError::Invalid),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(BootstrapStoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
 impl BootstrapStateStore for FilesystemBootstrapStateStore {
     fn create(&self, state: &BootstrapState) -> Result<(), BootstrapStoreError> {
         let path = self.state_path(state.id);
-        reject_reparse_points(&path)?;
+        self.reject_links(&path)?;
         if path.exists() {
             return Err(BootstrapStoreError::AlreadyExists);
         }
@@ -260,6 +233,7 @@ impl BootstrapStateStore for FilesystemBootstrapStateStore {
         &self,
         app_id: &AppId,
         scope: SelectedScope,
+        target: &TargetTriple,
     ) -> Result<Vec<BootstrapState>, BootstrapStoreError> {
         let root = self.root.join("bootstrap");
         let entries = match fs::read_dir(&root) {
@@ -286,6 +260,7 @@ impl BootstrapStateStore for FilesystemBootstrapStateStore {
             if let Ok(state) = self.read_state(&self.state_path(id))
                 && state.key.app_id == *app_id
                 && state.key.scope == scope
+                && &state.key.target == target
             {
                 states.push(state);
             }

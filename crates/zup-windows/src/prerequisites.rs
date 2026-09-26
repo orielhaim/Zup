@@ -1,87 +1,257 @@
+//! Windows prerequisite detection and package execution.
+//!
+//! Portable requirements carry opaque ids. This module owns the stable ids it
+//! can answer, the registry and package queries behind them, and the command
+//! line used to install a verified artifact.
+
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use semver::{Version, VersionReq};
-use windows_registry::{Key, LOCAL_MACHINE, Type};
+use windows_registry::{Key, Type};
 use zup_bootstrap::{
-    BootstrapError, BootstrapOperation, BuiltinProvider, DetectionResult, PrerequisiteDetector,
-    PrerequisiteProvider, ProviderOutcome, ProviderRequest,
+    BootstrapError, BootstrapOperation, DetectionResult, PrerequisiteProvider,
+    PrerequisiteSatisfier, ProviderOutcome, ProviderRequest,
 };
 use zup_core::{
-    PrerequisiteArchitecture, PrerequisiteDetector as PrerequisiteDetectorSpec, RegistryHive,
-    hash_reader,
+    FileVersion, InstalledPackage, PrerequisiteArchitecture, PrerequisiteRequirement, Runtime,
 };
+
+/// Stable runtime requirement ids understood by the Windows adapter.
+pub mod runtime_requirements {
+    /// Visual C++ 2015-2022 redistributable runtime (`14.x`).
+    pub const VISUAL_CPP_V14: &str = "windows.vc.v14";
+    /// .NET Desktop Runtime.
+    pub const DOTNET_DESKTOP: &str = "windows.dotnet.desktop";
+    /// .NET Runtime.
+    pub const DOTNET_RUNTIME: &str = "windows.dotnet.runtime";
+    /// Microsoft Edge WebView2 Evergreen Runtime.
+    pub const WEBVIEW2_EVERGREEN: &str = "windows.webview2.evergreen";
+}
+
+/// Stable installed-package ids understood by the Windows adapter.
+pub mod package_requirements {
+    /// Microsoft Edge WebView2 Evergreen Bootstrapper product code.
+    pub const WEBVIEW2_BOOTSTRAPPER: &str = "{F3017226-FE2A-4295-8A7C-971BF3207148}";
+}
+
+/// WebView2 Evergreen Runtime client registry key.
+const WEBVIEW2_CLIENT_KEY: &str =
+    "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
+/// WebView2 Evergreen Runtime client registry key as seen by 32-bit processes.
+const WEBVIEW2_CLIENT_KEY_WOW64: &str =
+    "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
+/// The Visual C++ redistributable runtime reports its version per architecture.
+const VISUAL_CPP_V14_KEY: &str = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes";
+/// The .NET installer records installed shared frameworks per architecture.
+const DOTNET_INSTALLED_VERSIONS_KEY: &str = "SOFTWARE\\dotnet\\Setup\\InstalledVersions";
+
+/// Compound-file (CFB) header: the on-disk format of every Windows Installer package.
+const COMPOUND_FILE_MAGIC: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+
+/// How a verified prerequisite artifact is launched on Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactFormat {
+    /// Windows Installer package, installed through `msiexec`.
+    WindowsInstaller,
+    /// Ordinary executable, launched directly.
+    Executable,
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsPrerequisiteDetector;
 
-impl PrerequisiteDetector for WindowsPrerequisiteDetector {
-    fn detect(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
-        match &operation.detector {
-            PrerequisiteDetectorSpec::VisualCppV14 { version } => detect_registry_version(
-                RegistryHive::LocalMachine,
-                &format!(
-                    "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\{}",
-                    architecture_name(operation.target)
-                ),
-                "Version",
-                version.as_ref(),
-                operation.target,
-            ),
-            PrerequisiteDetectorSpec::DotNetRuntime { desktop, version } => {
-                let runtime = if *desktop {
-                    "WindowsDesktop"
-                } else {
-                    "NetCore"
-                };
-                detect_dotnet(operation.target, *desktop, version.as_ref(), runtime)
+impl PrerequisiteSatisfier for WindowsPrerequisiteDetector {
+    fn satisfy(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
+        match &operation.requirement {
+            PrerequisiteRequirement::Runtime(runtime) => satisfy_runtime(operation, runtime),
+            PrerequisiteRequirement::InstalledPackage(package) => {
+                satisfy_installed_package(package)
             }
-            PrerequisiteDetectorSpec::WebView2Evergreen { version } => {
-                let path = match operation.target {
-                    PrerequisiteArchitecture::X86 => {
-                        "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}"
-                    }
-                    PrerequisiteArchitecture::X64 | PrerequisiteArchitecture::Arm64 => {
-                        "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}"
-                    }
-                    PrerequisiteArchitecture::Current | PrerequisiteArchitecture::Any => {
-                        "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}"
-                    }
-                };
-                detect_registry_version(
-                    RegistryHive::LocalMachine,
-                    path,
-                    "pv",
-                    version.as_ref(),
-                    operation.target,
-                )
-            }
-            PrerequisiteDetectorSpec::MsiProduct {
-                product_code,
-                version,
-            } => detect_msi(product_code, version.as_ref()),
-            PrerequisiteDetectorSpec::RegistryValue {
-                hive,
-                key,
-                value,
-                version,
-                expected,
-            } => detect_registry_value(
-                *hive,
-                key,
-                value,
-                version.as_ref(),
-                expected.as_deref(),
-                operation.target,
-            ),
-            PrerequisiteDetectorSpec::FileVersion { path, version } => {
-                let path = path.as_literal().ok_or_else(|| {
-                    BootstrapError::Detector("unresolved file-version path".into())
-                })?;
-                detect_file_version(Path::new(path), version.as_ref())
-            }
+            PrerequisiteRequirement::FileVersion(file) => satisfy_file_version(file),
         }
     }
+}
+
+fn satisfy_runtime(
+    operation: &BootstrapOperation,
+    runtime: &Runtime,
+) -> Result<DetectionResult, BootstrapError> {
+    let id = runtime.id.as_str();
+    let requirement = runtime.version.as_ref();
+    let evidence = || format!("runtime {id}");
+    if id == runtime_requirements::VISUAL_CPP_V14 {
+        return detect_version(
+            &format!(
+                "{VISUAL_CPP_V14_KEY}\\{}",
+                architecture_name(operation.target)
+            ),
+            "Version",
+            requirement,
+            operation.target,
+            evidence(),
+        );
+    }
+    if id == runtime_requirements::WEBVIEW2_EVERGREEN {
+        let path = match operation.target {
+            PrerequisiteArchitecture::X64 | PrerequisiteArchitecture::Arm64 => WEBVIEW2_CLIENT_KEY,
+            _ => WEBVIEW2_CLIENT_KEY_WOW64,
+        };
+        return detect_version(path, "pv", requirement, operation.target, evidence());
+    }
+    if id == runtime_requirements::DOTNET_DESKTOP {
+        return detect_dotnet(operation.target, "WindowsDesktop", requirement, evidence());
+    }
+    if id == runtime_requirements::DOTNET_RUNTIME {
+        return detect_dotnet(operation.target, "NetCore", requirement, evidence());
+    }
+    Err(BootstrapError::Requirement(format!(
+        "no Windows runtime is registered for requirement id `{id}`"
+    )))
+}
+
+fn detect_dotnet(
+    architecture: PrerequisiteArchitecture,
+    runtime: &str,
+    requirement: Option<&VersionReq>,
+    evidence: String,
+) -> Result<DetectionResult, BootstrapError> {
+    detect_version(
+        &format!(
+            "{DOTNET_INSTALLED_VERSIONS_KEY}\\{}\\sharedfx\\Microsoft\\{runtime}",
+            architecture_name(architecture)
+        ),
+        "Version",
+        requirement,
+        architecture,
+        evidence,
+    )
+}
+
+fn detect_version(
+    path: &str,
+    value_name: &str,
+    requirement: Option<&VersionReq>,
+    architecture: PrerequisiteArchitecture,
+    evidence: String,
+) -> Result<DetectionResult, BootstrapError> {
+    let Some(key) = open_machine_key(path, architecture)? else {
+        return Ok(DetectionResult::Missing);
+    };
+    let Some(value) = read_version_value(&key, value_name)? else {
+        return Ok(DetectionResult::Missing);
+    };
+    let Some(version) = parse_runtime_version(&value) else {
+        return Ok(DetectionResult::Missing);
+    };
+    if requirement.is_some_and(|requirement| !requirement.matches(&version)) {
+        return Ok(DetectionResult::Incompatible {
+            found: version,
+            required: requirement.expect("checked above").clone(),
+        });
+    }
+    Ok(DetectionResult::Satisfied {
+        version: Some(version),
+        evidence,
+    })
+}
+
+fn satisfy_installed_package(
+    package: &InstalledPackage,
+) -> Result<DetectionResult, BootstrapError> {
+    let product_code = package.id.as_str();
+    let requirement = package.version.as_ref();
+    let state = unsafe {
+        windows::Win32::System::ApplicationInstallationAndServicing::MsiQueryProductStateW(
+            windows::core::PCWSTR(wide(product_code).as_ptr()),
+        )
+    };
+    if state != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_LOCAL
+        && state
+            != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_DEFAULT
+    {
+        return Ok(DetectionResult::Missing);
+    }
+    if requirement.is_none() {
+        return Ok(DetectionResult::Satisfied {
+            version: None,
+            evidence: format!("package {product_code}"),
+        });
+    }
+    let text = product_version_string(product_code)?;
+    let Some(version) = parse_runtime_version(&text) else {
+        return Ok(DetectionResult::Missing);
+    };
+    if !requirement.expect("checked above").matches(&version) {
+        return Ok(DetectionResult::Incompatible {
+            found: version,
+            required: requirement.expect("checked above").clone(),
+        });
+    }
+    Ok(DetectionResult::Satisfied {
+        version: Some(version),
+        evidence: format!("package {product_code}"),
+    })
+}
+
+fn product_version_string(product_code: &str) -> Result<String, BootstrapError> {
+    let product = wide(product_code);
+    let attribute = wide("VersionString");
+    let mut length = 0u32;
+    let code = unsafe {
+        windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
+            windows::core::PCWSTR(product.as_ptr()),
+            windows::core::PCWSTR(attribute.as_ptr()),
+            None,
+            Some(&mut length),
+        )
+    };
+    if code != 0 || length == 0 {
+        return Err(BootstrapError::Requirement(format!(
+            "package {product_code} did not report a version"
+        )));
+    }
+    let mut buffer = vec![0u16; length as usize];
+    let code = unsafe {
+        windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
+            windows::core::PCWSTR(product.as_ptr()),
+            windows::core::PCWSTR(attribute.as_ptr()),
+            Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+            Some(&mut length),
+        )
+    };
+    if code != 0 {
+        return Err(BootstrapError::Requirement(format!(
+            "package {product_code} version query failed"
+        )));
+    }
+    Ok(String::from_utf16_lossy(
+        &buffer[..length.saturating_sub(1) as usize],
+    ))
+}
+
+fn satisfy_file_version(file: &FileVersion) -> Result<DetectionResult, BootstrapError> {
+    let Some(path) = file.path.as_literal() else {
+        return Err(BootstrapError::Requirement(
+            "unresolved file-version path".into(),
+        ));
+    };
+    let Some(version) = read_file_version(Path::new(path))? else {
+        return Ok(DetectionResult::Missing);
+    };
+    if let Some(requirement) = file.version.as_ref()
+        && !requirement.matches(&version)
+    {
+        return Ok(DetectionResult::Incompatible {
+            found: version,
+            required: requirement.clone(),
+        });
+    }
+    Ok(DetectionResult::Satisfied {
+        version: Some(version),
+        evidence: path.to_owned(),
+    })
 }
 
 #[derive(Debug, Default, Clone)]
@@ -89,61 +259,15 @@ pub struct WindowsPrerequisiteProvider;
 
 impl PrerequisiteProvider for WindowsPrerequisiteProvider {
     fn execute(&self, request: &ProviderRequest) -> Result<ProviderOutcome, BootstrapError> {
-        let _artifact = verify_artifact(
+        let format = verify_artifact(
             &request.executable,
             request.expected_digest,
             request.expected_size,
         )
         .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
-        let (program, arguments) = match request.installer_kind {
-            zup_core::PrerequisiteInstallerKind::Msi => {
-                let msiexec = system_directory()
-                    .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?
-                    .join("msiexec.exe");
-                if !msiexec.is_absolute() {
-                    return Err(BootstrapError::ProviderPreflight(
-                        "msiexec path is not absolute".into(),
-                    ));
-                }
-                let mut arguments = vec![
-                    "/i".to_owned(),
-                    request.executable.display().to_string(),
-                    "/qn".to_owned(),
-                ];
-                arguments.extend(request.arguments.iter().cloned());
-                arguments.push("/norestart".to_owned());
-                (msiexec, arguments)
-            }
-            zup_core::PrerequisiteInstallerKind::Exe => {
-                let mut arguments = match request.builtin {
-                    BuiltinProvider::VisualCppV14 => {
-                        vec!["/install".to_owned(), "/quiet".to_owned()]
-                    }
-                    BuiltinProvider::WebView2Evergreen => {
-                        vec!["/silent".to_owned(), "/install".to_owned()]
-                    }
-                    BuiltinProvider::DotNetRuntime => {
-                        vec!["/install".to_owned(), "/quiet".to_owned()]
-                    }
-                    BuiltinProvider::Msi | BuiltinProvider::ExplicitExe => Vec::new(),
-                };
-                arguments.extend(request.arguments.iter().cloned());
-                if !arguments
-                    .iter()
-                    .any(|argument| argument.eq_ignore_ascii_case("/norestart"))
-                {
-                    arguments.push("/norestart".to_owned());
-                }
-                (request.executable.clone(), arguments)
-            }
-        };
-        if !program.is_absolute() {
-            return Err(BootstrapError::ProviderPreflight(
-                "prerequisite executable path is not absolute".into(),
-            ));
-        }
-        let status = Command::new(&program)
-            .args(&arguments)
+        let launch = plan_launch(request, format)?;
+        let status = Command::new(&launch.program)
+            .args(&launch.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -163,6 +287,126 @@ impl PrerequisiteProvider for WindowsPrerequisiteProvider {
                 "prerequisite exited with code {code}"
             )))
         }
+    }
+}
+
+/// The command line used to install one verified artifact.
+struct Launch {
+    program: PathBuf,
+    arguments: Vec<String>,
+}
+
+fn plan_launch(
+    request: &ProviderRequest,
+    format: ArtifactFormat,
+) -> Result<Launch, BootstrapError> {
+    let launch = match format {
+        ArtifactFormat::WindowsInstaller => {
+            let msiexec = system_directory()
+                .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?
+                .join("msiexec.exe");
+            if !msiexec.is_absolute() {
+                return Err(BootstrapError::ProviderPreflight(
+                    "msiexec path is not absolute".into(),
+                ));
+            }
+            let mut arguments = vec![
+                "/i".to_owned(),
+                request.executable.display().to_string(),
+                "/qn".to_owned(),
+            ];
+            arguments.extend(request.arguments.iter().cloned());
+            arguments.push("/norestart".to_owned());
+            Launch {
+                program: msiexec,
+                arguments,
+            }
+        }
+        ArtifactFormat::Executable => {
+            let mut arguments = default_arguments(&request.requirement);
+            arguments.extend(request.arguments.iter().cloned());
+            if !arguments
+                .iter()
+                .any(|argument| argument.eq_ignore_ascii_case("/norestart"))
+            {
+                arguments.push("/norestart".to_owned());
+            }
+            Launch {
+                program: request.executable.clone(),
+                arguments,
+            }
+        }
+    };
+    if !launch.program.is_absolute() {
+        return Err(BootstrapError::ProviderPreflight(
+            "prerequisite executable path is not absolute".into(),
+        ));
+    }
+    Ok(launch)
+}
+
+/// Provider-owned silent arguments for runtimes with a known installer contract.
+fn default_arguments(requirement: &PrerequisiteRequirement) -> Vec<String> {
+    let PrerequisiteRequirement::Runtime(runtime) = requirement else {
+        return Vec::new();
+    };
+    match runtime.id.as_str() {
+        runtime_requirements::VISUAL_CPP_V14 | runtime_requirements::DOTNET_DESKTOP => {
+            vec!["/install".to_owned(), "/quiet".to_owned()]
+        }
+        runtime_requirements::DOTNET_RUNTIME => vec!["/install".to_owned(), "/quiet".to_owned()],
+        runtime_requirements::WEBVIEW2_EVERGREEN => {
+            vec!["/silent".to_owned(), "/install".to_owned()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Verify the artifact still matches its declared identity and classify its format.
+fn verify_artifact(
+    path: &Path,
+    expected_digest: zup_core::Sha256Digest,
+    expected_size: Option<u64>,
+) -> Result<ArtifactFormat, BootstrapError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| BootstrapError::Provider(format!("artifact metadata: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(BootstrapError::Provider(
+            "artifact is not a regular file".into(),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| BootstrapError::Provider(format!("artifact open: {error}")))?;
+    let (size, digest) = zup_core::hash_reader(&file)
+        .map_err(|error| BootstrapError::Provider(format!("artifact hash: {error}")))?;
+    if size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES
+        || digest != expected_digest
+        || expected_size.is_some_and(|expected| expected != size)
+    {
+        return Err(BootstrapError::Provider(
+            "artifact digest or size changed before execution".into(),
+        ));
+    }
+    Ok(classify_artifact(&mut file))
+}
+
+fn classify_artifact(file: &mut std::fs::File) -> ArtifactFormat {
+    use std::io::Seek;
+    if file.seek(std::io::SeekFrom::Start(0)).is_err() {
+        return ArtifactFormat::Executable;
+    }
+    let mut magic = [0u8; COMPOUND_FILE_MAGIC.len()];
+    match file.read_exact(&mut magic) {
+        Ok(()) if magic == COMPOUND_FILE_MAGIC => ArtifactFormat::WindowsInstaller,
+        _ => ArtifactFormat::Executable,
     }
 }
 
@@ -186,259 +430,19 @@ fn system_directory() -> Result<PathBuf, BootstrapError> {
 #[cfg(not(windows))]
 fn system_directory() -> Result<PathBuf, BootstrapError> {
     Err(BootstrapError::Provider(
-        "MSI prerequisites require Windows".into(),
+        "Windows Installer packages require Windows".into(),
     ))
 }
 
-fn verify_artifact(
-    path: &Path,
-    expected_digest: zup_core::Sha256Digest,
-    expected_size: Option<u64>,
-) -> Result<std::fs::File, BootstrapError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| BootstrapError::Provider(format!("artifact metadata: {error}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(BootstrapError::Provider(
-            "artifact is not a regular file".into(),
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(1);
-    }
-    let file = options
-        .open(path)
-        .map_err(|error| BootstrapError::Provider(format!("artifact open: {error}")))?;
-    let (size, digest) = hash_reader(&file)
-        .map_err(|error| BootstrapError::Provider(format!("artifact hash: {error}")))?;
-    if size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES
-        || digest != expected_digest
-        || expected_size.is_some_and(|expected| expected != size)
-    {
-        return Err(BootstrapError::Provider(
-            "artifact digest or size changed before execution".into(),
-        ));
-    }
-    Ok(file)
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
 }
 
-fn detect_registry_version(
-    hive: RegistryHive,
-    path: &str,
-    value_name: &str,
-    requirement: Option<&VersionReq>,
-    architecture: PrerequisiteArchitecture,
-) -> Result<DetectionResult, BootstrapError> {
-    let Some(key) = open_registry_key(hive, path, architecture)? else {
-        return Ok(DetectionResult::Missing);
-    };
-    let Some(value) = read_version_value(&key, value_name)? else {
-        return Ok(DetectionResult::Missing);
-    };
-    let Some(version) = parse_runtime_version(&value) else {
-        return Ok(DetectionResult::Missing);
-    };
-    if requirement.is_some_and(|requirement| !requirement.matches(&version)) {
-        return Ok(DetectionResult::Incompatible {
-            found: version,
-            required: requirement.expect("checked above").clone(),
-        });
-    }
-    Ok(DetectionResult::Satisfied {
-        version: Some(version),
-        evidence: format!("registry {path}\\{value_name}"),
-    })
-}
-
-fn detect_dotnet(
-    architecture: PrerequisiteArchitecture,
-    desktop: bool,
-    requirement: Option<&VersionReq>,
-    runtime: &str,
-) -> Result<DetectionResult, BootstrapError> {
-    let architecture_name = architecture_name(architecture);
-    let path = format!(
-        "SOFTWARE\\dotnet\\Setup\\InstalledVersions\\{architecture_name}\\sharedfx\\Microsoft\\{runtime}"
-    );
-    let Some(key) = open_registry_key(RegistryHive::LocalMachine, &path, architecture)? else {
-        return Ok(DetectionResult::Missing);
-    };
-    let Some(value) = read_version_value(&key, "Version")? else {
-        return Ok(DetectionResult::Missing);
-    };
-    let Some(version) = parse_runtime_version(&value) else {
-        return Ok(DetectionResult::Missing);
-    };
-    if requirement.is_some_and(|requirement| !requirement.matches(&version)) {
-        return Ok(DetectionResult::Incompatible {
-            found: version,
-            required: requirement.expect("checked above").clone(),
-        });
-    }
-    let _ = desktop;
-    Ok(DetectionResult::Satisfied {
-        version: Some(version),
-        evidence: format!("registry {path}\\Version"),
-    })
-}
-
-fn detect_registry_value(
-    hive: RegistryHive,
-    path: &str,
-    value_name: &str,
-    requirement: Option<&VersionReq>,
-    expected: Option<&str>,
-    architecture: PrerequisiteArchitecture,
-) -> Result<DetectionResult, BootstrapError> {
-    let Some(key) = open_registry_key(hive, path, architecture)? else {
-        return Ok(DetectionResult::Missing);
-    };
-    let value = match key.get_value(value_name) {
-        Ok(value) => value,
-        Err(error) if registry_not_found(&error) => return Ok(DetectionResult::Missing),
-        Err(error) => {
-            return Err(BootstrapError::Detector(format!(
-                "registry value {path}\\{value_name}: {error}"
-            )));
-        }
-    };
-    let text = match value.ty() {
-        Type::String | Type::ExpandString => String::try_from(value).ok(),
-        Type::U32 => u32::try_from(value).ok().map(|value| value.to_string()),
-        Type::U64 => u64::try_from(value).ok().map(|value| value.to_string()),
-        _ => None,
-    };
-    let Some(text) = text else {
-        return Ok(DetectionResult::Missing);
-    };
-    if let Some(expected) = expected
-        && !text.eq_ignore_ascii_case(expected)
-    {
-        return Ok(DetectionResult::Missing);
-    }
-    if let Some(requirement) = requirement {
-        let Some(version) = parse_runtime_version(&text) else {
-            return Ok(DetectionResult::Missing);
-        };
-        if !requirement.matches(&version) {
-            return Ok(DetectionResult::Incompatible {
-                found: version,
-                required: requirement.clone(),
-            });
-        }
-        return Ok(DetectionResult::Satisfied {
-            version: Some(version),
-            evidence: format!("registry {path}\\{value_name}"),
-        });
-    }
-    Ok(DetectionResult::Satisfied {
-        version: None,
-        evidence: format!("registry {path}\\{value_name}"),
-    })
-}
-
-fn detect_msi(
-    product_code: &str,
-    requirement: Option<&VersionReq>,
-) -> Result<DetectionResult, BootstrapError> {
-    let product: Vec<u16> = product_code.encode_utf16().chain(Some(0)).collect();
-    let state = unsafe {
-        windows::Win32::System::ApplicationInstallationAndServicing::MsiQueryProductStateW(
-            windows::core::PCWSTR(product.as_ptr()),
-        )
-    };
-    if state != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_LOCAL
-        && state
-            != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_DEFAULT
-    {
-        return Ok(DetectionResult::Missing);
-    }
-    if let Some(requirement) = requirement {
-        let attribute: Vec<u16> = "VersionString".encode_utf16().chain(Some(0)).collect();
-        let mut length = 0u32;
-        let code = unsafe {
-            windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
-                windows::core::PCWSTR(product.as_ptr()),
-                windows::core::PCWSTR(attribute.as_ptr()),
-                None,
-                Some(&mut length),
-            )
-        };
-        if code != 0 || length == 0 {
-            return Err(BootstrapError::Detector(format!(
-                "MSI product query failed for {product_code}"
-            )));
-        }
-        let mut buffer = vec![0u16; length as usize];
-        let code = unsafe {
-            windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
-                windows::core::PCWSTR(product.as_ptr()),
-                windows::core::PCWSTR(attribute.as_ptr()),
-                Some(windows::core::PWSTR(buffer.as_mut_ptr())),
-                Some(&mut length),
-            )
-        };
-        if code != 0 {
-            return Err(BootstrapError::Detector(format!(
-                "MSI version query failed for {product_code}"
-            )));
-        }
-        let text = String::from_utf16_lossy(&buffer[..length.saturating_sub(1) as usize]);
-        let Some(version) = parse_runtime_version(&text) else {
-            return Ok(DetectionResult::Missing);
-        };
-        if !requirement.matches(&version) {
-            return Ok(DetectionResult::Incompatible {
-                found: version,
-                required: requirement.clone(),
-            });
-        }
-        return Ok(DetectionResult::Satisfied {
-            version: Some(version),
-            evidence: format!("MSI product {product_code}"),
-        });
-    }
-    Ok(DetectionResult::Satisfied {
-        version: None,
-        evidence: format!("MSI product {product_code}"),
-    })
-}
-
-fn detect_file_version(
-    path: &Path,
-    requirement: Option<&VersionReq>,
-) -> Result<DetectionResult, BootstrapError> {
-    let Some(version) = read_file_version(path)? else {
-        return Ok(DetectionResult::Missing);
-    };
-    if let Some(requirement) = requirement
-        && !requirement.matches(&version)
-    {
-        return Ok(DetectionResult::Incompatible {
-            found: version,
-            required: requirement.clone(),
-        });
-    }
-    Ok(DetectionResult::Satisfied {
-        version: Some(version),
-        evidence: path.display().to_string(),
-    })
-}
-
-fn open_registry_key(
-    hive: RegistryHive,
+fn open_machine_key(
     path: &str,
     architecture: PrerequisiteArchitecture,
 ) -> Result<Option<Key>, BootstrapError> {
-    let root = match hive {
-        RegistryHive::CurrentUser => windows_registry::CURRENT_USER,
-        RegistryHive::LocalMachine => LOCAL_MACHINE,
-        RegistryHive::ClassesRoot => windows_registry::CLASSES_ROOT,
-    };
-    let mut options = root.options();
+    let mut options = windows_registry::LOCAL_MACHINE.options();
     options.read();
     match architecture {
         PrerequisiteArchitecture::X86 => {
@@ -452,7 +456,7 @@ fn open_registry_key(
     match options.open(path) {
         Ok(key) => Ok(Some(key)),
         Err(error) if registry_not_found(&error) => Ok(None),
-        Err(error) => Err(BootstrapError::Detector(format!(
+        Err(error) => Err(BootstrapError::Requirement(format!(
             "registry open {path}: {error}"
         ))),
     }
@@ -468,7 +472,7 @@ fn read_version_value(key: &Key, name: &str) -> Result<Option<String>, Bootstrap
         Ok(value) => value,
         Err(error) if registry_not_found(&error) => return Ok(None),
         Err(error) => {
-            return Err(BootstrapError::Detector(format!(
+            return Err(BootstrapError::Requirement(format!(
                 "registry value {name}: {error}"
             )));
         }
@@ -531,19 +535,26 @@ fn read_file_version(path: &Path) -> Result<Option<Version>, BootstrapError> {
         file_date_ls: u32,
     }
 
-    let wide = path
+    let encoded = path
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None) };
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(encoded.as_ptr()), None) };
     if size == 0 {
         return Ok(None);
     }
     let mut data = vec![0u8; size as usize];
-    unsafe { GetFileVersionInfoW(PCWSTR(wide.as_ptr()), None, size, data.as_mut_ptr().cast()) }
-        .map_err(|error| BootstrapError::Detector(format!("file version query: {error}")))?;
-    let query: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(encoded.as_ptr()),
+            None,
+            size,
+            data.as_mut_ptr().cast(),
+        )
+    }
+    .map_err(|error| BootstrapError::Requirement(format!("file version query: {error}")))?;
+    let query = wide("\\");
     let mut info = std::ptr::null_mut();
     let mut length = 0u32;
     let ok = unsafe {
@@ -571,4 +582,208 @@ fn read_file_version(path: &Path) -> Result<Option<Version>, BootstrapError> {
 #[cfg(not(windows))]
 fn read_file_version(_path: &Path) -> Result<Option<Version>, BootstrapError> {
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+    use zup_core::{
+        InstalledPackage, InstalledPackageId, PrerequisiteId, Runtime, RuntimeRequirementId,
+        Sha256Digest,
+    };
+
+    use super::*;
+
+    const PE_MAGIC: &[u8; 2] = b"MZ";
+
+    fn digest(bytes: &[u8]) -> Sha256Digest {
+        zup_core::hash_reader(bytes).unwrap().1
+    }
+
+    fn compound_file_bytes() -> Vec<u8> {
+        let mut bytes = COMPOUND_FILE_MAGIC.to_vec();
+        bytes.extend_from_slice(&[0u8; 512]);
+        bytes
+    }
+
+    fn artifact(bytes: &[u8], name: &str) -> (TempDir, PathBuf) {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        (root, path)
+    }
+
+    fn runtime_requirement(id: &str) -> PrerequisiteRequirement {
+        PrerequisiteRequirement::Runtime(Runtime {
+            id: RuntimeRequirementId::new(id).unwrap(),
+            version: None,
+        })
+    }
+
+    fn provider_request(
+        executable: PathBuf,
+        requirement: PrerequisiteRequirement,
+    ) -> ProviderRequest {
+        ProviderRequest {
+            prerequisite_id: PrerequisiteId::new("runtime").unwrap(),
+            requirement,
+            executable,
+            arguments: Vec::new(),
+            expected_digest: Sha256Digest::from_bytes([0u8; 32]),
+            expected_size: None,
+            success_exit_codes: vec![0],
+            reboot_exit_codes: vec![1641, 3010],
+        }
+    }
+
+    #[test]
+    fn windows_owned_ids_are_valid_portable_requirement_ids() {
+        for id in [
+            runtime_requirements::VISUAL_CPP_V14,
+            runtime_requirements::DOTNET_DESKTOP,
+            runtime_requirements::DOTNET_RUNTIME,
+            runtime_requirements::WEBVIEW2_EVERGREEN,
+        ] {
+            assert!(
+                RuntimeRequirementId::new(id).is_ok(),
+                "`{id}` must be usable"
+            );
+        }
+        assert!(InstalledPackageId::new(package_requirements::WEBVIEW2_BOOTSTRAPPER).is_ok());
+    }
+
+    #[test]
+    fn artifact_format_comes_from_verified_content() {
+        let package = compound_file_bytes();
+        let (_root, path) = artifact(&package, "runtime.msi");
+        assert_eq!(
+            verify_artifact(&path, digest(&package), Some(package.len() as u64)).unwrap(),
+            ArtifactFormat::WindowsInstaller
+        );
+        let (_root, tampered) = artifact(b"not the declared package", "runtime.msi");
+        assert!(verify_artifact(&tampered, digest(&package), None).is_err());
+        assert!(verify_artifact(&path, digest(&package), Some(1)).is_err());
+
+        let executable = [PE_MAGIC.as_slice(), &[0u8; 64]].concat();
+        let (_root, path) = artifact(&executable, "runtime.exe");
+        assert_eq!(
+            verify_artifact(&path, digest(&executable), Some(executable.len() as u64)).unwrap(),
+            ArtifactFormat::Executable
+        );
+    }
+
+    #[test]
+    fn windows_installer_packages_run_through_msiexec_silently() {
+        let package = compound_file_bytes();
+        let (_root, path) = artifact(&package, "runtime.msi");
+        let mut request = provider_request(path.clone(), runtime_requirement("windows.vc.v14"));
+        request.arguments = vec!["ALLUSERS=1".to_owned()];
+        let launch = plan_launch(&request, ArtifactFormat::WindowsInstaller).unwrap();
+        assert_eq!(
+            launch.program,
+            system_directory().unwrap().join("msiexec.exe")
+        );
+        assert_eq!(
+            launch.arguments,
+            [
+                "/i".to_owned(),
+                path.display().to_string(),
+                "/qn".to_owned(),
+                "ALLUSERS=1".to_owned(),
+                "/norestart".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn executables_keep_their_own_silent_contract_and_run_directly() {
+        let package = compound_file_bytes();
+        let (_root, path) = artifact(&package, "runtime.exe");
+        let launch = plan_launch(
+            &provider_request(
+                path.clone(),
+                runtime_requirement(runtime_requirements::VISUAL_CPP_V14),
+            ),
+            ArtifactFormat::Executable,
+        )
+        .unwrap();
+        assert_eq!(launch.program, path);
+        assert_eq!(launch.arguments, ["/install", "/quiet", "/norestart"]);
+
+        let launch = plan_launch(
+            &provider_request(
+                path.clone(),
+                runtime_requirement(runtime_requirements::WEBVIEW2_EVERGREEN),
+            ),
+            ArtifactFormat::Executable,
+        )
+        .unwrap();
+        assert_eq!(launch.arguments, ["/silent", "/install", "/norestart"]);
+
+        let mut request = provider_request(
+            path.clone(),
+            runtime_requirement(runtime_requirements::DOTNET_DESKTOP),
+        );
+        request.arguments = vec!["/norestart".to_owned()];
+        let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
+        assert_eq!(launch.arguments, ["/install", "/quiet", "/norestart"]);
+
+        let request = provider_request(
+            path.clone(),
+            PrerequisiteRequirement::InstalledPackage(InstalledPackage {
+                id: InstalledPackageId::new(package_requirements::WEBVIEW2_BOOTSTRAPPER).unwrap(),
+                version: None,
+            }),
+        );
+        let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
+        assert_eq!(launch.arguments, ["/norestart"]);
+    }
+
+    #[test]
+    fn unknown_runtime_ids_are_rejected_instead_of_reported_missing() {
+        let operation = BootstrapOperation {
+            id: PrerequisiteId::new("runtime").unwrap(),
+            name: "Runtime".into(),
+            target: PrerequisiteArchitecture::Current,
+            requirement: runtime_requirement("windows.vc.v99"),
+            package: zup_core::PrerequisitePackage::Remote {
+                url: "https://cdn.example.test/vc.exe".into(),
+                sha256: digest(b"vc"),
+                size: Some(2),
+                filename: "vc.exe".into(),
+            },
+            installer: zup_core::PrerequisiteInstaller::default(),
+        };
+        assert!(matches!(
+            WindowsPrerequisiteDetector.satisfy(&operation),
+            Err(BootstrapError::Requirement(_))
+        ));
+    }
+
+    #[test]
+    fn an_absent_installed_package_is_missing_rather_than_an_error() {
+        let requirement = PrerequisiteRequirement::InstalledPackage(InstalledPackage {
+            id: InstalledPackageId::new("{00000000-0000-0000-0000-000000000000}").unwrap(),
+            version: None,
+        });
+        let operation = BootstrapOperation {
+            id: PrerequisiteId::new("runtime").unwrap(),
+            name: "Runtime".into(),
+            target: PrerequisiteArchitecture::Current,
+            requirement,
+            package: zup_core::PrerequisitePackage::Remote {
+                url: "https://cdn.example.test/pkg.msi".into(),
+                sha256: digest(b"pkg"),
+                size: Some(3),
+                filename: "pkg.msi".into(),
+            },
+            installer: zup_core::PrerequisiteInstaller::default(),
+        };
+        assert_eq!(
+            WindowsPrerequisiteDetector.satisfy(&operation).unwrap(),
+            DetectionResult::Missing
+        );
+    }
 }

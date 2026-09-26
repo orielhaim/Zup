@@ -68,7 +68,7 @@ pub struct InstallModel {
     pub install_directory: Option<String>,
     pub allow_directory_override: bool,
     pub estimated_bytes: u64,
-    pub requires_elevation: bool,
+    pub requires_authorization: bool,
     pub preview: Option<PlanPreview>,
 }
 
@@ -400,7 +400,7 @@ impl UiModel {
 
     fn apply_runtime(&mut self, event: RuntimeEvent) {
         match event {
-            RuntimeEvent::WaitingForElevation => self.action("Waiting for approval…"),
+            RuntimeEvent::WaitingForAuthorization => self.action("Waiting for approval…"),
             RuntimeEvent::WorkerConnected => self.action("Starting…"),
             RuntimeEvent::PrerequisiteCheck {
                 name, satisfied, ..
@@ -435,7 +435,7 @@ impl UiModel {
                 self.state = ViewState::Error;
             }
             RuntimeEvent::PreflightStarted => self.action("Checking for open applications…"),
-            RuntimeEvent::BlockingProcessesFound { detail, .. } => {
+            RuntimeEvent::ResourceBlocked { detail, .. } => {
                 self.blockers = detail.lines().map(str::to_owned).collect();
                 self.state = ViewState::Blocked;
             }
@@ -490,7 +490,7 @@ impl UiModel {
             }
             RuntimeEvent::StateChanged { state } => match state {
                 RuntimeState::Preparing => self.action("Preparing…"),
-                RuntimeState::WaitingForElevation => self.action("Waiting for approval…"),
+                RuntimeState::WaitingForAuthorization => self.action("Waiting for approval…"),
                 RuntimeState::CheckingPrerequisites => self.action("Checking requirements…"),
                 RuntimeState::InstallingPrerequisites => {
                     self.action("Installing required components…")
@@ -540,8 +540,8 @@ fn friendly_action(id: &str) -> String {
     let id = id.to_ascii_lowercase();
     if id.contains("service") {
         "Registering services…".into()
-    } else if id.contains("shortcut") {
-        "Updating shortcuts…".into()
+    } else if id.contains("launcher") {
+        "Updating launchers…".into()
     } else if id.contains("file") {
         "Installing files…".into()
     } else {
@@ -1017,7 +1017,7 @@ fn installer_body(
                 .justify_between()
                 .text_color(theme.colors.muted_foreground)
                 .child("Permissions")
-                .child(if install.requires_elevation {
+                .child(if install.requires_authorization {
                     "Administrator approval required"
                 } else {
                     "Current user"
@@ -1298,7 +1298,7 @@ fn change_preview(preview: &PlanPreview, theme: &Theme) -> impl IntoElement {
                         .text_size(px(13.0))
                         .child(format!("{}  {}", change.kind.label(), change.label))
                         .child(change.location.clone().unwrap_or_else(|| {
-                            if change.requires_elevation {
+                            if change.requires_authorization {
                                 "Elevation"
                             } else {
                                 ""
@@ -1761,7 +1761,7 @@ mod tests {
                 install_directory: None,
                 allow_directory_override: false,
                 estimated_bytes: 0,
-                requires_elevation: false,
+                requires_authorization: false,
                 preview: None,
             },
         })
@@ -1806,7 +1806,7 @@ mod tests {
             selected_components: vec![],
             estimated_bytes: 42,
             download_bytes: 0,
-            requires_elevation: false,
+            requires_authorization: false,
             groups: vec![],
             requirements: vec![],
         };
@@ -1871,7 +1871,7 @@ mod tests {
                 install_directory: None,
                 allow_directory_override: false,
                 estimated_bytes: 0,
-                requires_elevation: false,
+                requires_authorization: false,
                 preview: None,
             },
         });
@@ -1905,7 +1905,7 @@ mod tests {
     #[test]
     fn restart_manager_blockers_and_retry_are_explicit() {
         let mut model = installer();
-        model.apply(UiEvent::Runtime(RuntimeEvent::BlockingProcessesFound {
+        model.apply(UiEvent::Runtime(RuntimeEvent::ResourceBlocked {
             detail: "Editor.exe\nAgent.exe".into(),
             pids: vec![4820, 7312],
         }));
@@ -1986,18 +1986,17 @@ mod tests {
 mod windows_smoke {
     use super::*;
     use gpui_kit::test::TestWindowExt;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
-    use zup_core::{RelativePath, ResourceKey, hash_reader};
-    use zup_exec::{
-        ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
-    };
+    use zup_core::{Privilege, RelativePath, ResourceKey, TargetTriple, hash_reader};
     use zup_platform::TargetPath;
     use zup_runtime::{CancellationHandle, RuntimeRequest, run_install_control};
+    use zup_transaction::{
+        FileDelta, FilePrecondition, FileWork, TransactionInput, compile_transaction,
+    };
 
-    fn smoke_request() -> RuntimeRequest {
+    fn smoke_request() -> (RuntimeRequest, zup_windows::WindowsRuntimeBackend) {
         let root = TempDir::new().unwrap().keep();
         let payload = root.join("payload");
         std::fs::create_dir_all(&payload).unwrap();
@@ -2006,46 +2005,33 @@ mod windows_smoke {
         let digest = hash_reader(&b"smoke payload"[..]).unwrap().1;
         let source_relative = RelativePath::new("zup-smoke.bin").unwrap();
         let destination_text = destination.to_string_lossy().into_owned();
-        RuntimeRequest {
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let mut input = TransactionInput::new(target.clone());
+        input.files.push(FileWork {
+            key: ResourceKey::File {
+                destination: destination_text.clone(),
+            },
+            source_relative,
+            destination: TargetPath::new(target.clone(), &destination_text).unwrap(),
+            precondition: FilePrecondition::Absent,
+            expected_sha256: digest,
+            expected_size: 13,
+            privilege: Privilege::User,
+            delta: FileDelta::Create,
+        });
+        let request = RuntimeRequest {
+            target,
             app_id: zup_core::AppId::new("com.zup.ui-smoke").unwrap(),
             app_version: "1.0.0".parse().unwrap(),
             scope: SelectedScope::User,
-            execution_plan: ExecutionPlan {
-                selected_components: vec![],
-                install_directory: None,
-                uninstall: false,
-                removals: vec![],
-                files: vec![FileOperation {
-                    key: ResourceKey::File {
-                        destination: destination_text.clone(),
-                    },
-                    kind: FileOperationKind::Create,
-                    destination: TargetPath::new(PathBuf::from(destination_text)).unwrap(),
-                    source_relative,
-                    precondition: FilePrecondition::Absent,
-                    expected_sha256: digest,
-                    expected_size: 13,
-                    conflict: None,
-                }],
-                shortcuts: vec![],
-                path_entries: vec![],
-                services: vec![],
-                protocols: vec![],
-                file_types: vec![],
-                uninstall_entries: vec![],
-                summary: ExecutionSummary {
-                    files_create: 1,
-                    ..Default::default()
-                },
-            },
+            transaction_plan: compile_transaction(&input).unwrap(),
             state_root: root.join("state"),
             work_root: root.join("work"),
-            payload_root: payload,
-            payload_overlay_root: None,
-            payload_overlay_base_root: None,
             recovery_id: None,
             bootstrap: None,
-        }
+        };
+        let backend = zup_windows::WindowsRuntimeBackend::from_path(payload, None).unwrap();
+        (request, backend)
     }
 
     #[test]
@@ -2063,8 +2049,10 @@ mod windows_smoke {
                         .enable_all()
                         .build()
                         .unwrap();
+                    let (request, backend) = smoke_request();
                     runtime.block_on(run_install_control(
-                        smoke_request(),
+                        &backend,
+                        request,
                         CancellationHandle::new(),
                         tokio::sync::broadcast::channel(64).0,
                     ))
@@ -2106,7 +2094,7 @@ mod windows_smoke {
                     install_directory: None,
                     allow_directory_override: false,
                     estimated_bytes: 0,
-                    requires_elevation: false,
+                    requires_authorization: false,
                     preview: None,
                 },
             };
@@ -2163,7 +2151,7 @@ mod windows_smoke {
                     install_directory: None,
                     allow_directory_override: false,
                     estimated_bytes: 0,
-                    requires_elevation: false,
+                    requires_authorization: false,
                     preview: None,
                 },
             }),
@@ -2198,9 +2186,11 @@ mod windows_smoke {
             .enable_all()
             .build()
             .unwrap();
+        let (request, backend) = smoke_request();
         let outcome = runtime
             .block_on(run_install_control(
-                smoke_request(),
+                &backend,
+                request,
                 CancellationHandle::new(),
                 runtime_events,
             ))

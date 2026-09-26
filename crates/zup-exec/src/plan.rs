@@ -1,4 +1,4 @@
-//! Pure delta planner: TargetPlan + MachineSnapshot → ExecutionPlan.
+//! Pure delta planner: TargetPlan + HostSnapshot → ExecutionPlan.
 
 use std::collections::BTreeMap;
 
@@ -9,18 +9,18 @@ use zup_core::ResourceKey;
 use zup_platform::TargetPlan;
 
 use crate::observe::{
-    MachineSnapshot, ObservedFileState, ObservedFileType, ObservedPathEntry, ObservedProgIdState,
-    ObservedProtocolState, ObservedServiceState, ObservedShortcutState, PathEntryState,
+    HostSnapshot, ObservedFileAssociationState, ObservedFileState, ObservedLauncherState,
+    ObservedProtocolState, ObservedServiceState,
 };
 use crate::operation::{
-    Conflict, ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
-    FileTypeOperation, FileTypeOperationKind, PathOperation, PathOperationKind, ProtocolOperation,
-    ProtocolOperationKind, ServiceOperation, ServiceOperationKind, ShortcutOperation,
-    ShortcutOperationKind,
+    Conflict, ExecutionPlan, ExecutionSummary, FileAssociationOperation,
+    FileAssociationOperationKind, FileOperation, FileOperationKind, FilePrecondition,
+    LauncherOperation, LauncherOperationKind, PathOperation, PathOperationKind, ProtocolOperation,
+    ProtocolOperationKind, ServiceOperation, ServiceOperationKind,
 };
 use crate::{
-    ExtensionState, InstallLedger, OwnedResource, ProgIdState, ProtocolState, ServiceState,
-    ShortcutState,
+    ExtensionState, FileAssociationState, InstallLedger, LauncherState, OwnedResource,
+    ProtocolState, ServiceState,
 };
 
 /// Errors produced while computing an execution plan (consistency / overflow).
@@ -50,7 +50,7 @@ pub enum ExecutionPlanError {
 /// Compare desired and observed state. Pure — zero I/O.
 pub fn plan_execution(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
 ) -> Result<ExecutionPlan, ExecutionPlanError> {
     let _span = info_span!("plan_execution").entered();
@@ -60,35 +60,36 @@ pub fn plan_execution(
         ledger.schema != crate::INSTALL_LEDGER_SCHEMA
             || ledger.app_id != target.app.id
             || ledger.scope != target.scope
+            || ledger.target != target.target
     }) {
         return Err(ExecutionPlanError::LedgerMismatch);
     }
 
     let mut summary = ExecutionSummary {
-        requires_elevation: target.summary.requires_elevation,
+        requires_authorization: target.summary.requires_authorization,
         ..Default::default()
     };
 
     let files = plan_files(target, snapshot, ledger, &mut summary)?;
-    let shortcuts = plan_shortcuts(target, snapshot, ledger, &mut summary);
+    let launchers = plan_launchers(target, snapshot, ledger, &mut summary);
     let path_entries = plan_paths(target, snapshot, ledger, &mut summary);
     let services = plan_services(target, snapshot, ledger, &mut summary);
     let protocols = plan_protocols(target, snapshot, ledger, &mut summary);
-    let file_types = plan_file_types(target, snapshot, ledger, &mut summary);
+    let file_associations = plan_file_associations(target, snapshot, ledger, &mut summary);
 
     info!(
         create = summary.files_create
-            + summary.shortcuts_create
+            + summary.launchers_create
             + summary.path_entries_add
             + summary.services_create
             + summary.protocols_create
-            + summary.file_types_create,
+            + summary.file_associations_create,
         conflict = summary.files_conflict
-            + summary.shortcuts_conflict
+            + summary.launchers_conflict
             + summary.path_entries_conflict
             + summary.services_conflict
             + summary.protocols_conflict
-            + summary.file_types_conflict,
+            + summary.file_associations_conflict,
         "execution plan complete"
     );
 
@@ -98,12 +99,11 @@ pub fn plan_execution(
         uninstall: false,
         removals: Vec::new(),
         files,
-        shortcuts,
+        launchers,
         path_entries,
         services,
         protocols,
-        file_types,
-        uninstall_entries: Vec::new(),
+        file_associations,
         summary,
     })
 }
@@ -114,12 +114,12 @@ fn key_debug(key: &ResourceKey) -> String {
 
 fn validate_snapshot(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
 ) -> Result<(), ExecutionPlanError> {
     check_unique(&snapshot.files.iter().map(|o| &o.key).collect::<Vec<_>>())?;
     check_unique(
         &snapshot
-            .shortcuts
+            .launchers
             .iter()
             .map(|o| &o.key)
             .collect::<Vec<_>>(),
@@ -141,7 +141,7 @@ fn validate_snapshot(
     )?;
     check_unique(
         &snapshot
-            .file_types
+            .file_associations
             .iter()
             .map(|o| &o.key)
             .collect::<Vec<_>>(),
@@ -181,41 +181,41 @@ fn validate_snapshot(
         }
     }
 
-    // Shortcuts
+    // Launchers
     let mut seen = BTreeMap::new();
-    for observed in &snapshot.shortcuts {
+    for observed in &snapshot.launchers {
         if seen.insert(&observed.key, observed).is_some() {
             return Err(ExecutionPlanError::DuplicateSnapshotObservation {
                 key: key_debug(&observed.key),
             });
         }
     }
-    for desired in &target.shortcuts {
+    for desired in &target.launchers {
         let Some(observed) = seen.get(&desired.key) else {
             return Err(ExecutionPlanError::MissingSnapshotObservation {
                 key: key_debug(&desired.key),
             });
         };
-        if observed.link_path != desired.link_path {
+        if observed.launcher_path != desired.launcher_path {
             return Err(ExecutionPlanError::SnapshotResourceMismatch {
                 key: key_debug(&desired.key),
                 reason: format!(
                     "link path mismatch: `{}` vs `{}`",
-                    observed.link_path, desired.link_path
+                    observed.launcher_path, desired.launcher_path
                 ),
             });
         }
     }
     for key in seen.keys() {
-        if !target.shortcuts.iter().any(|s| &s.key == *key) {
+        if !target.launchers.iter().any(|s| &s.key == *key) {
             return Err(ExecutionPlanError::SnapshotResourceMismatch {
                 key: key_debug(key),
-                reason: "unexpected shortcut observation".to_owned(),
+                reason: "unexpected launcher observation".to_owned(),
             });
         }
     }
 
-    // PATH, services, protocols, file types: key presence only.
+    // Search path, services, protocols, associations: key presence only.
     check_pairs(
         &target
             .path_entries
@@ -244,13 +244,17 @@ fn validate_snapshot(
         "protocol",
     )?;
     check_pairs(
-        &target.file_types.iter().map(|x| &x.key).collect::<Vec<_>>(),
-        &snapshot
-            .file_types
+        &target
+            .file_associations
             .iter()
             .map(|x| &x.key)
             .collect::<Vec<_>>(),
-        "file type",
+        &snapshot
+            .file_associations
+            .iter()
+            .map(|x| &x.key)
+            .collect::<Vec<_>>(),
+        "file association",
     )?;
 
     Ok(())
@@ -301,7 +305,7 @@ fn check_pairs(
 
 fn plan_files(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
 ) -> Result<Vec<FileOperation>, ExecutionPlanError> {
@@ -376,36 +380,37 @@ fn plan_files(
             precondition,
             expected_sha256: desired.sha256,
             expected_size: desired.size,
+            privilege: desired.privilege,
             conflict,
         });
     }
     Ok(out)
 }
 
-fn plan_shortcuts(
+fn plan_launchers(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
-) -> Vec<ShortcutOperation> {
-    let mut out = Vec::with_capacity(target.shortcuts.len());
-    for (desired, observed) in target.shortcuts.iter().zip(snapshot.shortcuts.iter()) {
+) -> Vec<LauncherOperation> {
+    let mut out = Vec::with_capacity(target.launchers.len());
+    for (desired, observed) in target.launchers.iter().zip(snapshot.launchers.iter()) {
         let owned = ledger.and_then(|l| l.resources.get(&desired.key));
         let installed = match owned {
-            Some(OwnedResource::Shortcut {
-                link_path,
+            Some(OwnedResource::Launcher {
+                launcher_path,
                 installed,
                 ..
-            }) if link_path == &desired.link_path => Some(installed),
+            }) if launcher_path == &desired.launcher_path => Some(installed),
             _ => None,
         };
         let current = match &observed.state {
-            ObservedShortcutState::Absent => Some(ShortcutState::Absent),
-            ObservedShortcutState::Shortcut {
+            ObservedLauncherState::Absent => Some(LauncherState::Absent),
+            ObservedLauncherState::Launcher {
                 target,
                 arguments,
                 working_directory,
-            } => Some(ShortcutState::Link {
+            } => Some(LauncherState::Launcher {
                 target: target.clone(),
                 arguments: arguments.clone(),
                 working_directory: working_directory.clone(),
@@ -415,21 +420,21 @@ fn plan_shortcuts(
         let (kind, conflict) = if owned.is_some() && installed.is_none()
             || installed.is_some_and(|installed| current.as_ref() != Some(installed))
         {
-            summary.shortcuts_conflict += 1;
+            summary.launchers_conflict += 1;
             (
-                ShortcutOperationKind::Drift,
-                Some(Conflict::ShortcutAlreadyOwnedByDifferentTarget {
-                    link_path: observed.link_path.to_string(),
-                    reason: "owned shortcut changed after installation".to_owned(),
+                LauncherOperationKind::Drift,
+                Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
+                    launcher_path: observed.launcher_path.to_string(),
+                    reason: "owned launcher changed after installation".to_owned(),
                 }),
             )
         } else {
             match &observed.state {
-                ObservedShortcutState::Absent => {
-                    summary.shortcuts_create += 1;
-                    (ShortcutOperationKind::Create, None)
+                ObservedLauncherState::Absent => {
+                    summary.launchers_create += 1;
+                    (LauncherOperationKind::Create, None)
                 }
-                ObservedShortcutState::Shortcut {
+                ObservedLauncherState::Launcher {
                     target,
                     arguments,
                     working_directory,
@@ -438,54 +443,55 @@ fn plan_shortcuts(
                         && *arguments == desired.arguments
                         && *working_directory == desired.working_directory;
                     if matches {
-                        summary.shortcuts_unchanged += 1;
-                        (ShortcutOperationKind::NoOp, None)
+                        summary.launchers_unchanged += 1;
+                        (LauncherOperationKind::NoOp, None)
                     } else {
                         if installed.is_some() {
-                            summary.shortcuts_create += 1;
-                            (ShortcutOperationKind::UpdateOwned, None)
+                            summary.launchers_create += 1;
+                            (LauncherOperationKind::UpdateOwned, None)
                         } else {
-                            summary.shortcuts_conflict += 1;
+                            summary.launchers_conflict += 1;
                             (
-                                ShortcutOperationKind::Conflict,
-                                Some(Conflict::ShortcutAlreadyOwnedByDifferentTarget {
-                                    link_path: observed.link_path.to_string(),
-                                    reason: "existing shortcut content differs from desired"
+                                LauncherOperationKind::Conflict,
+                                Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
+                                    launcher_path: observed.launcher_path.to_string(),
+                                    reason: "existing launcher content differs from desired"
                                         .to_owned(),
                                 }),
                             )
                         }
                     }
                 }
-                ObservedShortcutState::InvalidShortcut => {
-                    summary.shortcuts_conflict += 1;
+                ObservedLauncherState::InvalidLauncher => {
+                    summary.launchers_conflict += 1;
                     (
-                        ShortcutOperationKind::Conflict,
-                        Some(Conflict::ShortcutAlreadyOwnedByDifferentTarget {
-                            link_path: observed.link_path.to_string(),
+                        LauncherOperationKind::Conflict,
+                        Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
+                            launcher_path: observed.launcher_path.to_string(),
                             reason: "existing file is not a valid shell link".to_owned(),
                         }),
                     )
                 }
-                ObservedShortcutState::NonFile => {
-                    summary.shortcuts_conflict += 1;
+                ObservedLauncherState::NonFile => {
+                    summary.launchers_conflict += 1;
                     (
-                        ShortcutOperationKind::Conflict,
+                        LauncherOperationKind::Conflict,
                         Some(Conflict::TargetNonFile {
-                            path: observed.link_path.to_string(),
+                            path: observed.launcher_path.to_string(),
                         }),
                     )
                 }
             }
         };
 
-        out.push(ShortcutOperation {
+        out.push(LauncherOperation {
             key: desired.key.clone(),
             kind,
-            link_path: desired.link_path.clone(),
+            launcher_path: desired.launcher_path.clone(),
             target: desired.target.clone(),
             arguments: desired.arguments.clone(),
             working_directory: desired.working_directory.clone(),
+            privilege: desired.privilege,
             previous: observed.state.clone(),
             conflict,
         });
@@ -495,57 +501,43 @@ fn plan_shortcuts(
 
 fn plan_paths(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
 ) -> Vec<PathOperation> {
     let mut out = Vec::with_capacity(target.path_entries.len());
     for (desired, observed) in target.path_entries.iter().zip(snapshot.path_entries.iter()) {
-        let owned = matches!(ledger.and_then(|l| l.resources.get(&desired.key)), Some(OwnedResource::PathEntry { value, .. }) if value == &desired.value);
-        let (kind, conflict) = match &observed.state {
-            PathEntryState::Absent => {
-                if owned {
-                    summary.path_entries_conflict += 1;
-                    (
-                        PathOperationKind::Drift,
-                        Some(Conflict::PathEntryConflict {
-                            value: desired.value.to_string(),
-                            reason: "previously owned PATH entry was removed".into(),
-                        }),
-                    )
-                } else {
-                    summary.path_entries_add += 1;
-                    (PathOperationKind::Add, None)
-                }
+        let owned = matches!(ledger.and_then(|l| l.resources.get(&desired.key)), Some(OwnedResource::PathEntry { value, .. }) if value.equivalent(&desired.value));
+        // Membership of an already target-normalized entry. Splitting, case
+        // folding, and host formatting happened in the inspecting adapter.
+        let present = observed.search_path.contains(&desired.value);
+        let (kind, conflict) = match present {
+            true => {
+                summary.path_entries_present += 1;
+                (PathOperationKind::Present, None)
             }
-            PathEntryState::Present { raw_entry } => {
-                if owned && raw_entry != &desired.value.to_string() {
-                    summary.path_entries_conflict += 1;
-                    (
-                        PathOperationKind::Drift,
-                        Some(Conflict::PathEntryConflict {
-                            value: desired.value.to_string(),
-                            reason: "owned PATH entry changed form".into(),
-                        }),
-                    )
-                } else {
-                    summary.path_entries_present += 1;
-                    (PathOperationKind::Present, None)
-                }
+            false if owned => {
+                summary.path_entries_conflict += 1;
+                (
+                    PathOperationKind::Drift,
+                    Some(Conflict::PathEntryConflict {
+                        value: desired.value.to_string(),
+                        reason: "previously owned search-path entry is missing".into(),
+                    }),
+                )
             }
-        };
-        let _ = &ObservedPathEntry {
-            key: observed.key.clone(),
-            desired: observed.desired.clone(),
-            scope: observed.scope,
-            state: observed.state.clone(),
+            false => {
+                summary.path_entries_add += 1;
+                (PathOperationKind::Add, None)
+            }
         };
         out.push(PathOperation {
             key: desired.key.clone(),
             kind,
             value: desired.value.clone(),
             scope: desired.scope,
-            previous: observed.state.clone(),
+            privilege: desired.privilege,
+            present,
             previously_owned: owned,
             conflict,
         });
@@ -555,7 +547,7 @@ fn plan_paths(
 
 fn plan_services(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
 ) -> Vec<ServiceOperation> {
@@ -646,6 +638,7 @@ fn plan_services(
                 .unwrap_or_else(|| desired.name.to_string()),
             command: desired.command.clone(),
             start: desired.start,
+            privilege: desired.privilege,
             previous: observed.state.clone(),
             conflict,
         });
@@ -655,7 +648,7 @@ fn plan_services(
 
 fn plan_protocols(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
 ) -> Vec<ProtocolOperation> {
@@ -733,6 +726,7 @@ fn plan_protocols(
             scheme: desired.scheme.clone(),
             command: desired.command.clone(),
             scope: desired.scope,
+            privilege: desired.privilege,
             previous: observed.state.clone(),
             conflict,
         });
@@ -740,126 +734,129 @@ fn plan_protocols(
     out
 }
 
-fn plan_file_types(
+fn plan_file_associations(
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
-) -> Vec<FileTypeOperation> {
-    let mut out = Vec::with_capacity(target.file_types.len());
-    for (desired, observed) in target.file_types.iter().zip(snapshot.file_types.iter()) {
-        let ext_key = ResourceKey::FileTypeExtension {
+) -> Vec<FileAssociationOperation> {
+    let mut out = Vec::with_capacity(target.file_associations.len());
+    for (desired, observed) in target
+        .file_associations
+        .iter()
+        .zip(snapshot.file_associations.iter())
+    {
+        let ext_key = ResourceKey::FileAssociationExtension {
             extension: desired.extension.clone(),
         };
         let owned_id = ledger.and_then(|l| l.resources.get(&desired.key));
         let owned_ext = ledger.and_then(|l| l.resources.get(&ext_key));
-        let id_owned_matches = matches!(owned_id, Some(OwnedResource::ProgId { installed, .. }) if progid_observed_matches(installed, &observed.id_state));
+        let id_owned_matches = matches!(owned_id, Some(OwnedResource::FileAssociation { installed, .. }) if file_association_observed_matches(installed, &observed.association_state));
         let ext_owned_matches = matches!(owned_ext, Some(OwnedResource::Extension { installed, .. }) if extension_observed_matches(installed, &observed.extension_state));
         let desired_desc = desired.description.clone();
-        let id_ok = match &observed.id_state {
-            ObservedProgIdState::Absent => false,
-            ObservedProgIdState::Registration {
+        let id_ok = match &observed.association_state {
+            ObservedFileAssociationState::Absent => false,
+            ObservedFileAssociationState::Registration {
                 description,
                 command,
             } => *description == desired_desc && commands_match(command, &desired.command),
-            ObservedProgIdState::Malformed { .. } => false,
+            ObservedFileAssociationState::Malformed { .. } => false,
         };
         let ext_ok = match &observed.extension_state {
             crate::observe::ObservedExtensionState::Absent => false,
-            crate::observe::ObservedExtensionState::Mapped { prog_id } => {
-                prog_id.eq_ignore_ascii_case(desired.id.as_str())
+            crate::observe::ObservedExtensionState::Mapped { association_id } => {
+                association_id.eq_ignore_ascii_case(desired.id.as_str())
             }
             crate::observe::ObservedExtensionState::Malformed { .. } => false,
         };
 
-        let prog_id_kind = if owned_id.is_some() && !id_owned_matches {
-            FileTypeOperationKind::Drift
+        let association_kind = if owned_id.is_some() && !id_owned_matches {
+            FileAssociationOperationKind::Drift
         } else if id_ok {
-            FileTypeOperationKind::NoOp
-        } else if matches!(observed.id_state, ObservedProgIdState::Absent) && owned_id.is_none() {
-            FileTypeOperationKind::Create
+            FileAssociationOperationKind::NoOp
+        } else if matches!(
+            observed.association_state,
+            ObservedFileAssociationState::Absent
+        ) && owned_id.is_none()
+        {
+            FileAssociationOperationKind::Create
         } else if id_owned_matches {
-            FileTypeOperationKind::UpdateOwned
+            FileAssociationOperationKind::UpdateOwned
         } else if owned_id.is_some() {
-            FileTypeOperationKind::Drift
+            FileAssociationOperationKind::Drift
         } else {
-            FileTypeOperationKind::Conflict
+            FileAssociationOperationKind::Conflict
         };
         let extension_kind = if owned_ext.is_some() && !ext_owned_matches {
-            FileTypeOperationKind::Drift
+            FileAssociationOperationKind::Drift
         } else if ext_ok {
-            FileTypeOperationKind::NoOp
+            FileAssociationOperationKind::NoOp
         } else if matches!(
             observed.extension_state,
             crate::observe::ObservedExtensionState::Absent
         ) && owned_ext.is_none()
         {
-            FileTypeOperationKind::Create
+            FileAssociationOperationKind::Create
         } else if ext_owned_matches {
-            FileTypeOperationKind::UpdateOwned
+            FileAssociationOperationKind::UpdateOwned
         } else if owned_ext.is_some() {
-            FileTypeOperationKind::Drift
+            FileAssociationOperationKind::Drift
         } else {
-            FileTypeOperationKind::Conflict
+            FileAssociationOperationKind::Conflict
         };
 
-        let (kind, conflict) = if [prog_id_kind, extension_kind]
-            .contains(&FileTypeOperationKind::Drift)
-        {
-            summary.file_types_conflict += 1;
-            (
-                FileTypeOperationKind::Drift,
-                Some(Conflict::FileTypeProgIdConflict {
-                    id: desired.id.to_string(),
-                    reason: "zup-owned association drifted".into(),
-                }),
-            )
-        } else if [prog_id_kind, extension_kind].contains(&FileTypeOperationKind::Conflict) {
-            summary.file_types_conflict += 1;
-            (
-                FileTypeOperationKind::Conflict,
-                Some(Conflict::FileTypeProgIdConflict {
-                    id: desired.id.to_string(),
-                    reason: "foreign association differs".into(),
-                }),
-            )
-        } else if prog_id_kind == FileTypeOperationKind::NoOp
-            && extension_kind == FileTypeOperationKind::NoOp
-        {
-            summary.file_types_unchanged += 1;
-            (FileTypeOperationKind::NoOp, None)
-        } else {
-            summary.file_types_create += 1;
-            (
-                if [prog_id_kind, extension_kind].contains(&FileTypeOperationKind::UpdateOwned) {
-                    FileTypeOperationKind::UpdateOwned
-                } else {
-                    FileTypeOperationKind::Create
-                },
-                None,
-            )
-        };
+        let (kind, conflict) =
+            if [association_kind, extension_kind].contains(&FileAssociationOperationKind::Drift) {
+                summary.file_associations_conflict += 1;
+                (
+                    FileAssociationOperationKind::Drift,
+                    Some(Conflict::FileAssociationConflict {
+                        id: desired.id.to_string(),
+                        reason: "zup-owned association drifted".into(),
+                    }),
+                )
+            } else if [association_kind, extension_kind]
+                .contains(&FileAssociationOperationKind::Conflict)
+            {
+                summary.file_associations_conflict += 1;
+                (
+                    FileAssociationOperationKind::Conflict,
+                    Some(Conflict::FileAssociationConflict {
+                        id: desired.id.to_string(),
+                        reason: "foreign association differs".into(),
+                    }),
+                )
+            } else if association_kind == FileAssociationOperationKind::NoOp
+                && extension_kind == FileAssociationOperationKind::NoOp
+            {
+                summary.file_associations_unchanged += 1;
+                (FileAssociationOperationKind::NoOp, None)
+            } else {
+                summary.file_associations_create += 1;
+                (
+                    if [association_kind, extension_kind]
+                        .contains(&FileAssociationOperationKind::UpdateOwned)
+                    {
+                        FileAssociationOperationKind::UpdateOwned
+                    } else {
+                        FileAssociationOperationKind::Create
+                    },
+                    None,
+                )
+            };
 
-        let _ = ObservedFileType {
-            key: observed.key.clone(),
-            extension: observed.extension.clone(),
-            id: observed.id.clone(),
-            scope: observed.scope,
-            id_state: observed.id_state.clone(),
-            extension_state: observed.extension_state.clone(),
-        };
-
-        out.push(FileTypeOperation {
+        out.push(FileAssociationOperation {
             key: desired.key.clone(),
             kind,
-            prog_id_kind,
+            association_kind,
             extension_kind,
             extension: desired.extension.to_string(),
             id: desired.id.to_string(),
             description: desired.description.clone(),
             command: desired.command.clone(),
             scope: desired.scope,
-            previous_id: observed.id_state.clone(),
+            privilege: desired.privilege,
+            previous_association: observed.association_state.clone(),
             previous_extension: observed.extension_state.clone(),
             conflict,
         });
@@ -881,15 +878,18 @@ fn protocol_observed_matches(expected: &ProtocolState, observed: &ObservedProtoc
     }
 }
 
-fn progid_observed_matches(expected: &ProgIdState, observed: &ObservedProgIdState) -> bool {
+fn file_association_observed_matches(
+    expected: &FileAssociationState,
+    observed: &ObservedFileAssociationState,
+) -> bool {
     match (expected, observed) {
-        (ProgIdState::Absent, ObservedProgIdState::Absent) => true,
+        (FileAssociationState::Absent, ObservedFileAssociationState::Absent) => true,
         (
-            ProgIdState::Registration {
+            FileAssociationState::Registration {
                 description: a,
                 command: ac,
             },
-            ObservedProgIdState::Registration {
+            ObservedFileAssociationState::Registration {
                 description: b,
                 command: bc,
             },
@@ -905,48 +905,14 @@ fn extension_observed_matches(
     match (expected, observed) {
         (ExtensionState::Absent, crate::observe::ObservedExtensionState::Absent) => true,
         (
-            ExtensionState::Mapped { prog_id: a },
-            crate::observe::ObservedExtensionState::Mapped { prog_id: b },
+            ExtensionState::Mapped { association_id: a },
+            crate::observe::ObservedExtensionState::Mapped { association_id: b },
         ) => a.eq_ignore_ascii_case(b),
         _ => false,
     }
 }
 
-/// Semantic command equality (path case/separator-insensitive; args exact).
+/// Semantic command equality (target-aware path semantics; args exact).
 fn commands_match(a: &zup_platform::CommandSpec, b: &zup_platform::CommandSpec) -> bool {
-    paths_equal(&a.executable, &b.executable) && a.arguments == b.arguments
-}
-
-fn paths_equal(a: &zup_platform::TargetPath, b: &zup_platform::TargetPath) -> bool {
-    let an = a.to_string().replace('\\', "/").to_lowercase();
-    let bn = b.to_string().replace('\\', "/").to_lowercase();
-    an.trim_end_matches('/') == bn.trim_end_matches('/')
-}
-
-/// Normalize a PATH segment for comparison (quotes, slashes, case, trailing sep).
-pub fn normalize_path_entry(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let unquoted = trimmed
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed)
-        .trim();
-    let normalized = unquoted.replace('\\', "/").to_lowercase();
-    normalized.trim_end_matches('/').to_owned()
-}
-
-/// True when `desired` appears in the PATH string under Windows PATH rules.
-pub fn path_contains_entry(path_value: &str, desired: &zup_platform::TargetPath) -> bool {
-    let want = normalize_path_entry(&desired.to_string());
-    path_value
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .any(|entry| {
-            // Do not treat `%VAR%` forms as equal to concrete paths.
-            if entry.contains('%') {
-                return false;
-            }
-            normalize_path_entry(entry) == want
-        })
+    a.executable.equivalent(&b.executable) && a.arguments == b.arguments
 }

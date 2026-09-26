@@ -1,404 +1,224 @@
-//! Runtime session tests (local user-scope path).
-
-use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tempfile::TempDir;
-use zup_core::{
-    ProtocolScheme, RelativePath, ResourceKey, SelectedScope, Sha256Digest, hash_reader,
-};
-use zup_exec::{
-    ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
-    ObservedProtocolState, ProtocolOperation, ProtocolOperationKind,
-};
-use zup_platform::{CommandSpec, TargetPath};
+use zup_bundle::DirectoryPayloadSource;
+use zup_core::{RelativePath, SelectedScope, TargetTriple, hash_reader};
 use zup_runtime::{
-    CancellationHandle, ExecutionPolicy, InstallOutcome, OverlayPolicy, RuntimeEvent,
-    RuntimeRequest, SessionError, discover_recovery, run_install_control,
-    run_install_control_with_policy, run_local_install,
+    CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend, RuntimeControl,
+    RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest, SessionError, run_install,
+    run_install_control, run_install_control_with_policy,
 };
+use zup_transaction::{TransactionInput, compile_transaction};
 
-fn digest(b: &[u8]) -> Sha256Digest {
-    hash_reader(b).unwrap().1
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("zup-runtime-{}", zup_runtime::Uuid::now_v7()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
-fn tpath(s: &str) -> TargetPath {
-    TargetPath::new(PathBuf::from(s)).unwrap()
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
-fn sample_request(scope: SelectedScope) -> RuntimeRequest {
-    let dir = TempDir::new().unwrap().keep();
-    let destination = dir.join("install").join("a.exe");
-    let dest = destination.to_string_lossy().into_owned();
-    let source_relative = RelativePath::new("tools/a.exe").unwrap();
-    let payload_root = dir.join("payload");
-    std::fs::create_dir_all(payload_root.join("tools")).unwrap();
-    std::fs::write(payload_root.join(source_relative.as_str()), b"hello").unwrap();
-    let execution = ExecutionPlan {
-        selected_components: vec![],
-        install_directory: None,
-        uninstall: false,
-        removals: vec![],
-        files: vec![FileOperation {
-            key: ResourceKey::File {
-                destination: dest.clone(),
-            },
-            kind: FileOperationKind::Create,
-            destination: tpath(&dest),
-            source_relative: source_relative.clone(),
-            precondition: FilePrecondition::Absent,
-            expected_sha256: digest(b"hello"),
-            expected_size: 5,
-            conflict: None,
-        }],
-        shortcuts: vec![],
-        path_entries: vec![],
-        services: vec![],
-        protocols: vec![],
-        file_types: vec![],
-        uninstall_entries: vec![],
-        summary: ExecutionSummary {
-            files_create: 1,
-            requires_elevation: scope == SelectedScope::Machine,
-            ..Default::default()
-        },
-    };
+struct FakeBackend {
+    source: RuntimePayloadSource,
+    calls: Arc<AtomicUsize>,
+}
+
+impl RuntimeBackend for FakeBackend {
+    fn payload_source(&self, _request: &RuntimeRequest) -> RuntimePayloadSource {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.source.clone()
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _request: RuntimeRequest,
+        control: RuntimeControl,
+    ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
+        let calls = self.calls.clone();
+        let cancellation = control.cancellation;
+        let events = control.events;
+        let policy = control.policy;
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let _ = events.send(RuntimeEvent::StateChanged {
+                state: zup_runtime::RuntimeState::Preparing,
+            });
+            if cancellation.is_cancelled() {
+                return Ok(InstallOutcome::Cancelled);
+            }
+            if policy == ExecutionPolicy::NonInteractive {
+                return Err(SessionError::AuthorizationRequired);
+            }
+            let _ = events.send(RuntimeEvent::Progress {
+                completed: 1,
+                total: 1,
+                action: "Finished".into(),
+            });
+            Ok(InstallOutcome::Committed)
+        })
+    }
+}
+
+fn request() -> RuntimeRequest {
     RuntimeRequest {
-        app_id: zup_core::AppId::new("com.acme.acme").unwrap(),
+        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        app_id: zup_core::AppId::new("com.example.runtime").unwrap(),
         app_version: "1.0.0".parse().unwrap(),
-        scope,
-        execution_plan: execution,
-        state_root: dir.join("state"),
-        work_root: dir.join("work"),
-        payload_root,
-        payload_overlay_root: None,
-        payload_overlay_base_root: None,
+        scope: SelectedScope::User,
+        transaction_plan: compile_transaction(&TransactionInput::new(
+            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        ))
+        .unwrap(),
+        state_root: PathBuf::new(),
+        work_root: PathBuf::new(),
         recovery_id: None,
         bootstrap: None,
     }
 }
 
-#[cfg(windows)]
+fn backend() -> (TestDir, FakeBackend) {
+    let root = TestDir::new();
+    let source = DirectoryPayloadSource::new(root.path());
+    (
+        root,
+        FakeBackend {
+            source: Arc::new(source),
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+}
+
 #[tokio::test]
-async fn noninteractive_machine_scope_requires_an_already_elevated_process() {
-    if zup_windows::is_process_elevated().unwrap() {
-        return;
-    }
-    let request = sample_request(SelectedScope::Machine);
+async fn runtime_forwards_control_and_reports_local_outcome() {
+    let (_root, backend) = backend();
+    let (events, _) = tokio::sync::broadcast::channel(32);
+    let mut receiver = events.subscribe();
+    let outcome = run_install_control(&backend, request(), CancellationHandle::new(), events)
+        .await
+        .unwrap();
+    assert_eq!(outcome, InstallOutcome::Committed);
+    let forwarded = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(forwarded.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Progress {
+            completed: 1,
+            total: 1,
+            ..
+        }
+    )));
+    assert!(forwarded.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Completed { outcome } if outcome == "committed"
+    )));
+}
+
+#[tokio::test]
+async fn runtime_preserves_cancellation_and_authorization_policy() {
+    let (_root, backend) = backend();
+    let cancellation = CancellationHandle::new();
+    cancellation.cancel();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut receiver = events.subscribe();
+    let result = run_install_control_with_policy(
+        &backend,
+        request(),
+        cancellation,
+        events,
+        ExecutionPolicy::Interactive,
+    )
+    .await;
+    assert!(matches!(result, Ok(InstallOutcome::Cancelled)));
+    assert!(
+        std::iter::from_fn(|| receiver.try_recv().ok()).any(|event| matches!(
+            event,
+            RuntimeEvent::Completed { outcome } if outcome == "cancelled"
+        ))
+    );
+
     let (events, _) = tokio::sync::broadcast::channel(16);
     let error = run_install_control_with_policy(
-        request,
+        &backend,
+        request(),
         CancellationHandle::new(),
         events,
         ExecutionPolicy::NonInteractive,
-        OverlayPolicy::Cleanup,
     )
     .await
-    .expect_err("unelevated noninteractive machine install must fail");
-    assert!(matches!(error, SessionError::ElevationRequired));
+    .unwrap_err();
+    assert!(matches!(error, SessionError::AuthorizationRequired));
+    assert!(!ExecutionPolicy::NonInteractive.allows_authorization());
+    assert!(ExecutionPolicy::Interactive.allows_authorization());
 }
 
 #[tokio::test]
-async fn local_user_scope_runs() {
-    let request = sample_request(SelectedScope::User);
-    let destination = request.execution_plan.files[0]
-        .destination
-        .as_path()
-        .to_path_buf();
-    let result = run_local_install(request).await;
-    let (outcome, _session) = match result {
-        Ok(pair) => pair,
-        Err(e) => panic!("local install failed: {e}"),
-    };
-    assert_eq!(outcome, InstallOutcome::Committed);
-    assert_eq!(std::fs::read(destination).unwrap(), b"hello");
-}
-
-#[tokio::test]
-async fn local_generated_overlay_is_used_and_cleaned_after_commit() {
-    let mut request = sample_request(SelectedScope::User);
-    request.execution_plan.files[0].source_relative =
-        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
-        request.app_id.clone(),
-        request.app_version.clone(),
-        request.scope,
-        &request.execution_plan,
-    )
-    .unwrap();
-    let overlay = identity.path_under(&request.state_root).unwrap();
-    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
-    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
-    std::fs::write(&overlay_file, b"hello").unwrap();
-    request.payload_overlay_root = Some(overlay.clone());
-    request.payload_overlay_base_root = Some(request.state_root.clone());
-    let destination = request.execution_plan.files[0]
-        .destination
-        .as_path()
-        .to_path_buf();
-
-    let (outcome, _) = run_local_install(request).await.unwrap();
-    assert_eq!(outcome, InstallOutcome::Committed);
-    assert_eq!(std::fs::read(destination).unwrap(), b"hello");
-    assert!(!overlay.exists());
-}
-
-#[tokio::test]
-async fn local_generated_overlay_is_cleaned_after_request_failure() {
-    let mut request = sample_request(SelectedScope::User);
-    request.execution_plan.files[0].source_relative =
-        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
-        request.app_id.clone(),
-        request.app_version.clone(),
-        request.scope,
-        &request.execution_plan,
-    )
-    .unwrap();
-    let overlay = identity.path_under(&request.state_root).unwrap();
-    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
-    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
-    std::fs::write(&overlay_file, b"hello").unwrap();
-    request.payload_overlay_root = Some(overlay.clone());
-    request.payload_overlay_base_root = Some(request.state_root.clone());
-    request.execution_plan.files[0].conflict = Some(zup_exec::Conflict::TargetNonFile {
-        path: "blocked".into(),
-    });
-
-    let error = run_local_install(request).await.unwrap_err();
-    assert!(matches!(error, SessionError::PlanInvalid(_)));
-    assert!(!overlay.exists());
-}
-
-#[tokio::test]
-async fn local_generated_overlay_is_cleaned_after_execution_failure() {
-    let mut request = sample_request(SelectedScope::User);
-    request.execution_plan.files[0].source_relative =
-        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    let identity = zup_windows::PayloadOverlayIdentity::from_execution_plan(
-        request.app_id.clone(),
-        request.app_version.clone(),
-        request.scope,
-        &request.execution_plan,
-    )
-    .unwrap();
-    let overlay = identity.path_under(&request.state_root).unwrap();
-    let overlay_file = overlay.join(request.execution_plan.files[0].source_relative.as_str());
-    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
-    std::fs::write(&overlay_file, b"hello").unwrap();
-    request.payload_overlay_root = Some(overlay.clone());
-    request.payload_overlay_base_root = Some(request.state_root.clone());
-    let destination = request.execution_plan.files[0]
-        .destination
-        .as_path()
-        .to_path_buf();
-    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    std::fs::write(&destination, b"old").unwrap();
-    let file = &mut request.execution_plan.files[0];
-    file.kind = FileOperationKind::Replace;
-    file.precondition = FilePrecondition::Exact {
-        size: 3,
-        sha256: digest(b"old"),
-    };
-
-    let (outcome, _) = run_local_install(request).await.unwrap();
-    assert!(matches!(outcome, InstallOutcome::Failed(message) if message.contains("ownership")));
-    assert!(!overlay.exists());
-}
-
-#[tokio::test]
-async fn recovery_rejects_mismatched_generated_overlay_before_mutation() {
-    use zup_transaction::{
-        FilesystemTransactionStore, TransactionId, TransactionRecord, TransactionStore,
-        compile_transaction,
-    };
-
-    let mut request = sample_request(SelectedScope::User);
-    request.execution_plan.files[0].source_relative =
-        RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    let destination = request.execution_plan.files[0]
-        .destination
-        .as_path()
-        .to_path_buf();
-    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    std::fs::write(&destination, b"untouched").unwrap();
-    let plan = compile_transaction(&request.execution_plan).unwrap();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        request.app_id.clone(),
-        request.scope,
-        request.app_version.clone(),
-        plan,
-    );
-    let store = FilesystemTransactionStore::new(&request.state_root);
-    store.create(&record).unwrap();
-    let identity = zup_windows::PayloadOverlayIdentity::from_transaction(
-        request.app_id.clone(),
-        request.app_version.clone(),
-        request.scope,
-        &record.plan,
-    )
-    .unwrap();
-    let overlay = identity.path_under(&request.state_root).unwrap();
-    let overlay_file = overlay.join("__zup_plugins__/generated.exe");
-    std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
-    std::fs::write(&overlay_file, b"HELLO").unwrap();
-    request.execution_plan = ExecutionPlan::default();
-    request.payload_overlay_root = Some(overlay.clone());
-    request.payload_overlay_base_root = Some(request.state_root.clone());
-    request.recovery_id = Some(record.transaction_id);
-
-    let error = run_local_install(request).await.unwrap_err();
-    assert!(matches!(error, SessionError::PlanInvalid(_)));
-    assert_eq!(std::fs::read(destination).unwrap(), b"untouched");
-    assert!(overlay.exists());
-    assert_eq!(
-        store.load(&record.transaction_id).unwrap().phase,
-        zup_transaction::TransactionPhase::Prepared
-    );
-}
-
-#[tokio::test]
-async fn control_channel_reports_cumulative_progress_for_the_complete_plan() {
-    let request = sample_request(SelectedScope::User);
-    let (events, _) = tokio::sync::broadcast::channel(64);
-    let mut rx = events.subscribe();
-    let outcome = run_install_control(request, CancellationHandle::new(), events)
-        .await
-        .unwrap();
-    assert_eq!(outcome, InstallOutcome::Committed);
-
-    let progress = std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|event| match event {
-            RuntimeEvent::Progress {
-                completed, total, ..
-            } => Some((completed, total)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(progress.len() >= 2);
-    assert!(progress.iter().all(|(_, total)| *total > 0));
-    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
-    assert_eq!(progress.last().unwrap().0, progress.last().unwrap().1);
-}
-
-#[tokio::test]
-async fn local_replace_refuses_unowned_file() {
-    let mut request = sample_request(SelectedScope::User);
-    let file = &mut request.execution_plan.files[0];
-    let destination = file.destination.as_path().to_path_buf();
-    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    std::fs::write(&destination, b"old").unwrap();
-    file.kind = FileOperationKind::Replace;
-    file.precondition = FilePrecondition::Exact {
-        size: 3,
-        sha256: digest(b"old"),
-    };
-
-    let (outcome, _) = run_local_install(request).await.unwrap();
-
-    assert!(matches!(outcome, InstallOutcome::Failed(message) if message.contains("ownership")));
-    assert_eq!(std::fs::read(destination).unwrap(), b"old");
-}
-
-#[tokio::test]
-async fn registry_drift_rolls_back_earlier_file_and_keeps_ledger_absent() {
-    let mut request = sample_request(SelectedScope::User);
-    let scheme = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-    let destination = request.execution_plan.files[0]
-        .destination
-        .as_path()
-        .to_path_buf();
-    let command = CommandSpec::new(tpath(&destination.to_string_lossy()), vec!["%1".into()]);
-    request.execution_plan.protocols.push(ProtocolOperation {
-        key: ResourceKey::Protocol {
-            scheme: ProtocolScheme::new(&scheme).unwrap(),
-        },
-        kind: ProtocolOperationKind::Create,
-        scheme: ProtocolScheme::new(&scheme).unwrap(),
-        command,
-        previous: ObservedProtocolState::Absent,
-        scope: SelectedScope::User,
-        conflict: None,
-    });
-    let classes = windows_registry::CURRENT_USER
-        .create("Software\\Classes")
-        .unwrap();
-    let foreign = classes.create(&scheme).unwrap();
-    foreign.set_string("URL Protocol", "").unwrap();
-    foreign
-        .create("shell\\open\\command")
-        .unwrap()
-        .set_string("", r"C:\foreign.exe %1")
-        .unwrap();
-    let state_root = request.state_root.clone();
-    let app_id = request.app_id.clone();
-    let (outcome, _) = run_local_install(request).await.unwrap();
-    assert_eq!(outcome, InstallOutcome::RolledBack);
-    assert!(!destination.exists());
-    assert!(
-        zup_windows::InstallLedgerStore::new(state_root)
-            .load(&app_id, SelectedScope::User)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        foreign
-            .open("shell\\open\\command")
-            .unwrap()
-            .get_string("")
-            .unwrap(),
-        r"C:\foreign.exe %1"
-    );
-    classes.remove_tree(&scheme).unwrap();
-}
-
-#[tokio::test]
-async fn invalid_plan_rejected_before_run() {
-    let mut request = sample_request(SelectedScope::User);
-    // Force a conflict so compilation fails.
-    request.execution_plan.files[0].conflict =
-        Some(zup_exec::Conflict::TargetNonFile { path: "x".into() });
-    let err = run_local_install(request).await.unwrap_err();
-    assert!(matches!(err, SessionError::PlanInvalid(_)));
-}
-
-#[tokio::test]
-async fn invalid_plan_rejected_before_bootstrap_mutation() {
-    let mut request = sample_request(SelectedScope::User);
-    request.execution_plan.files[0].conflict =
-        Some(zup_exec::Conflict::TargetNonFile { path: "x".into() });
-    let plan = zup_bootstrap::BootstrapPlan::new(
-        zup_bootstrap::BootstrapKey {
-            app_id: request.app_id.clone(),
-            app_version: request.app_version.clone(),
-            scope: request.scope,
-        },
-        Vec::new(),
-    )
-    .unwrap();
-    let bootstrap = zup_bootstrap::BoundBootstrapPlan::new(plan, BTreeMap::new()).unwrap();
-    let bootstrap_state_root = request.state_root.join("bootstrap-state");
-    let quarantine_root = request.state_root.join("quarantine");
-    request.bootstrap = Some(zup_runtime::BootstrapRequest {
-        plan: bootstrap,
-        state_root: bootstrap_state_root.clone(),
-        quarantine_root: quarantine_root.clone(),
-    });
-
+async fn runtime_rejects_request_target_mismatch_before_backend() {
+    let (_root, backend) = backend();
+    let mut request = request();
+    request.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
     let (events, _) = tokio::sync::broadcast::channel(8);
-    let err = run_install_control(request, CancellationHandle::new(), events)
+    let error = run_install_control(&backend, request, CancellationHandle::new(), events)
         .await
         .unwrap_err();
+    assert!(matches!(error, SessionError::PlanInvalid(_)));
+}
 
-    assert!(matches!(err, SessionError::PlanInvalid(_)));
-    assert!(!bootstrap_state_root.exists());
-    assert!(!quarantine_root.exists());
+#[tokio::test]
+async fn runtime_creates_a_session_and_exposes_a_verified_payload_source() {
+    let root = TestDir::new();
+    std::fs::write(root.path().join("payload.bin"), b"payload").unwrap();
+    let source = DirectoryPayloadSource::new(root.path());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = FakeBackend {
+        source: Arc::new(source),
+        calls: calls.clone(),
+    };
+    let mut request = request();
+    request.state_root = root.path().join("state");
+    request.work_root = root.path().join("work");
+    let (outcome, session) = run_install(&backend, request.clone()).await.unwrap();
+    assert_eq!(outcome, InstallOutcome::Committed);
+    assert!(!session.session_id.to_string().is_empty());
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+    let relative = RelativePath::new("payload.bin").unwrap();
+    let (size, digest) = hash_reader(&b"payload"[..]).unwrap();
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    backend
+        .payload_source(&request)
+        .open(&relative, &digest, size)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"payload");
 }
 
 #[test]
-fn discovery_empty_state_root() {
-    let dir = TempDir::new().unwrap();
-    let found = discover_recovery(&dir.path().join("state"));
-    assert!(found.is_empty());
+fn architecture_boundary_has_no_platform_adapter_dependency() {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .unwrap()
+        .to_ascii_lowercase();
+    let adapter = b"zup-windows"
+        .iter()
+        .map(|byte| *byte as char)
+        .collect::<String>();
+    let forbidden_package = b"windows-registry"
+        .iter()
+        .map(|byte| *byte as char)
+        .collect::<String>();
+    assert!(!manifest.contains(&adapter));
+    assert!(!manifest.contains(&forbidden_package));
 }

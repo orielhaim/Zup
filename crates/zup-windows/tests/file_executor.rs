@@ -1,53 +1,55 @@
 //! Windows file executor integration tests (temporary trees only).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use zup_bundle::DirectoryPayloadSource;
-use zup_core::{RelativePath, Sha256Digest, hash_reader};
-use zup_transaction::OperationId;
-use zup_windows::{
-    FilePrecondition, InstallationLock, NullProgress, WindowsFileExecutor, apply_node,
-    create_durable, move_durable, reconcile_node, volume_root, write_durable,
+use zup_core::{RelativePath, Sha256Digest, TargetTriple, hash_reader};
+use zup_transaction::{
+    FileDelta, FilePrecondition, OperationId, TransactionInput, compile_transaction,
 };
+use zup_windows::{
+    InstallationLock, NullProgress, WindowsFileExecutor, apply_node, create_durable, move_durable,
+    reconcile_node, to_host_path, volume_root, write_durable,
+};
+
+fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
+    zup_platform::TargetPath::new(
+        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        path.as_ref().to_string_lossy(),
+    )
+    .unwrap()
+}
 
 #[test]
 fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
-    use zup_core::{ResourceKey, SelectedScope};
-    use zup_exec::{ExecutionPlan, OwnedResource, RemovalKind, RemovalOperation};
-    use zup_platform::TargetPath;
-    use zup_transaction::{
-        NodeKind, OperationReceipt as TransactionReceipt, ReconcileResult, compile_transaction,
-    };
+    use zup_core::{Privilege, ResourceKey, SelectedScope};
+    use zup_transaction::{FileRemoval, FileRemovalKind, NodeKind, ReconcileResult};
 
     let (dir, _payload, target_root, source) = setup();
-    let destination = TargetPath::new(target_root.join("owned.bin")).unwrap();
-    std::fs::write(destination.as_path(), b"owned").unwrap();
+    let destination = target_path(target_root.join("owned.bin"));
+    std::fs::write(to_host_path(&destination).unwrap(), b"owned").unwrap();
     let key = ResourceKey::File {
         destination: destination.to_string(),
     };
-    let owned = OwnedResource::File {
+    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    input.uninstall = true;
+    input.retired_keys.push(key.clone());
+    input.removals.push(FileRemoval {
+        key: key.clone(),
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: Privilege::User,
         destination: destination.clone(),
-        source_relative: RelativePath::new("owned.bin").unwrap(),
         sha256: digest(b"owned"),
         size: 5,
         created_directories: vec![],
-    };
-    let execution = ExecutionPlan {
-        uninstall: true,
-        removals: vec![RemovalOperation {
-            key: key.clone(),
-            kind: RemovalKind::RemoveOwned,
-            scope: SelectedScope::User,
-            owned,
-        }],
-        ..Default::default()
-    };
-    let plan = compile_transaction(&execution).unwrap();
+    });
+    let plan = compile_transaction(&input).unwrap();
     let node = plan
         .nodes
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::OwnedRemoval { .. }))
+        .find(|node| matches!(node.kind, NodeKind::FileRemoval { .. }))
         .unwrap();
     let exec = WindowsFileExecutor::new(
         source,
@@ -60,45 +62,62 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
         ReconcileResult::NotApplied
     );
     let receipt = exec.apply_owned_file_removal(node).unwrap();
-    assert!(!destination.as_path().exists());
+    assert!(!to_host_path(&destination).unwrap().exists());
     assert!(matches!(
         exec.reconcile_owned_file_removal(node).unwrap(),
-        ReconcileResult::AppliedWithReceipt(TransactionReceipt::RemoveFile { .. })
+        ReconcileResult::AppliedWithReceipt(zup_transaction::OperationReceipt::RemoveFile { .. })
     ));
     exec.rollback_transaction_receipt(&receipt).unwrap();
-    assert_eq!(std::fs::read(destination.as_path()).unwrap(), b"owned");
+    assert_eq!(
+        std::fs::read(to_host_path(&destination).unwrap()).unwrap(),
+        b"owned"
+    );
     let receipt = exec.apply_owned_file_removal(node).unwrap();
-    std::fs::write(destination.as_path(), b"user data").unwrap();
+    std::fs::write(to_host_path(&destination).unwrap(), b"user data").unwrap();
     assert!(exec.rollback_transaction_receipt(&receipt).is_err());
-    assert_eq!(std::fs::read(destination.as_path()).unwrap(), b"user data");
+    assert_eq!(
+        std::fs::read(to_host_path(&destination).unwrap()).unwrap(),
+        b"user data"
+    );
 }
 
 #[test]
 fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
-    use zup_core::{AppId, ResourceKey, SelectedScope};
-    use zup_exec::{ExecutionPlan, OwnedResource, RemovalKind, RemovalOperation};
-    use zup_platform::TargetPath;
+    use zup_core::{AppId, Privilege, ResourceKey, SelectedScope};
     use zup_transaction::{
-        FilesystemTransactionStore, NodeKind, NodeState, OperationExecutor,
-        OperationReceipt as TransactionReceipt, ReconcileResult, TransactionId, TransactionOutcome,
-        TransactionPhase, TransactionRecord, TransactionStore, compile_transaction, recover,
+        FileRemoval, FileRemovalKind, FilesystemTransactionStore, NodeKind, NodeState,
+        OperationExecutor, ReconcileResult, TransactionId, TransactionOutcome, TransactionPhase,
+        TransactionRecord, TransactionStore, recover,
     };
 
     struct RemovalExecutor(WindowsFileExecutor<DirectoryPayloadSource>);
     impl OperationExecutor for RemovalExecutor {
         type Error = String;
+        fn prepare(&mut self, _node: &zup_transaction::TransactionNode) -> Result<(), Self::Error> {
+            Ok(())
+        }
         fn apply(
             &mut self,
             node: &zup_transaction::TransactionNode,
-        ) -> Result<TransactionReceipt, Self::Error> {
+        ) -> Result<zup_transaction::OperationReceipt, Self::Error> {
+            if matches!(node.kind, zup_transaction::NodeKind::Barrier) {
+                return Ok(zup_transaction::OperationReceipt::Control);
+            }
             self.0
                 .apply_owned_file_removal(node)
                 .map_err(|error| error.to_string())
         }
+        fn verify(
+            &mut self,
+            _node: &zup_transaction::TransactionNode,
+            receipt: &zup_transaction::OperationReceipt,
+        ) -> Result<(), Self::Error> {
+            zup_windows::verify_installed_file(receipt).map_err(|error| error.to_string())
+        }
         fn rollback(
             &mut self,
             _: &zup_transaction::TransactionNode,
-            receipt: &TransactionReceipt,
+            receipt: &zup_transaction::OperationReceipt,
         ) -> Result<(), Self::Error> {
             self.0
                 .rollback_transaction_receipt(receipt)
@@ -107,7 +126,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         fn reconcile(
             &mut self,
             node: &zup_transaction::TransactionNode,
-            _: Option<&TransactionReceipt>,
+            _: Option<&zup_transaction::OperationReceipt>,
         ) -> Result<ReconcileResult, Self::Error> {
             self.0
                 .reconcile_owned_file_removal(node)
@@ -115,28 +134,25 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         }
     }
     let (dir, _, target_root, source) = setup();
-    let destination = TargetPath::new(target_root.join("app.exe")).unwrap();
-    std::fs::write(destination.as_path(), b"owned").unwrap();
+    let destination = target_path(target_root.join("app.exe"));
+    std::fs::write(to_host_path(&destination).unwrap(), b"owned").unwrap();
     let key = ResourceKey::File {
         destination: destination.to_string(),
     };
-    let plan = compile_transaction(&ExecutionPlan {
-        uninstall: true,
-        removals: vec![RemovalOperation {
-            key,
-            kind: RemovalKind::RemoveOwned,
-            scope: SelectedScope::User,
-            owned: OwnedResource::File {
-                destination: destination.clone(),
-                source_relative: RelativePath::new("app.exe").unwrap(),
-                sha256: digest(b"owned"),
-                size: 5,
-                created_directories: vec![],
-            },
-        }],
-        ..Default::default()
-    })
-    .unwrap();
+    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    input.uninstall = true;
+    input.retired_keys.push(key.clone());
+    input.removals.push(FileRemoval {
+        key,
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: Privilege::User,
+        destination: destination.clone(),
+        sha256: digest(b"owned"),
+        size: 5,
+        created_directories: vec![],
+    });
+    let plan = compile_transaction(&input).unwrap();
     let store = FilesystemTransactionStore::new(dir.path());
     let mut record = TransactionRecord::new(
         TransactionId::new_v7(),
@@ -150,7 +166,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         .plan
         .nodes
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::OwnedRemoval { .. }))
+        .find(|node| matches!(node.kind, NodeKind::FileRemoval { .. }))
         .unwrap()
         .clone();
     let mut executor = RemovalExecutor(WindowsFileExecutor::new(
@@ -165,13 +181,21 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
     record.touch();
     store.compare_and_swap(revision, &record).unwrap();
     executor.0.apply_owned_file_removal(&node).unwrap();
-    assert!(!destination.as_path().exists());
+    assert!(!to_host_path(&destination).unwrap().exists());
     let (record, outcome) = recover(record, &store, &mut executor).unwrap();
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert!(
-        matches!(record.nodes.get(&node.id), Some(NodeState::Applied { receipt }) if matches!(receipt.as_ref(), TransactionReceipt::RemoveFile { .. }))
+        matches!(
+            record.receipt(&node.id),
+            Some(zup_transaction::OperationReceipt::RemoveFile { .. })
+        ),
+        "the reconciled removal is journaled with its receipt"
     );
-    assert!(!destination.as_path().exists());
+    assert!(
+        matches!(record.nodes.get(&node.id), Some(NodeState::Verified { .. })),
+        "a committed removal is verified"
+    );
+    assert!(!to_host_path(&destination).unwrap().exists());
 }
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
@@ -313,7 +337,7 @@ fn fresh_install_create() {
             key: zup_core::ResourceKey::File {
                 destination: dest.display().to_string(),
             },
-            delta: zup_exec::Delta::Create,
+            delta: FileDelta::Create,
         },
         declaration_order: 2,
         meta: zup_transaction::NodeMeta::default(),
@@ -372,7 +396,7 @@ fn update_replace_keeps_backup() {
             key: zup_core::ResourceKey::File {
                 destination: dest.display().to_string(),
             },
-            delta: zup_exec::Delta::Replace,
+            delta: FileDelta::Replace,
         },
         declaration_order: 2,
         meta: zup_transaction::NodeMeta::default(),
@@ -421,7 +445,7 @@ fn plan_drift_create_when_target_appears() {
             key: zup_core::ResourceKey::File {
                 destination: dest.display().to_string(),
             },
-            delta: zup_exec::Delta::Create,
+            delta: FileDelta::Create,
         },
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
@@ -460,7 +484,7 @@ fn plan_drift_replace_when_target_changed() {
             key: zup_core::ResourceKey::File {
                 destination: dest.display().to_string(),
             },
-            delta: zup_exec::Delta::Replace,
+            delta: FileDelta::Replace,
         },
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
@@ -541,4 +565,252 @@ fn large_file_staged_streaming() {
         big.len() as u64,
     );
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage large");
+}
+
+#[test]
+fn installed_file_verification_follows_the_receipt() {
+    use zup_windows::verify_installed_file;
+
+    let (_dir, payload_root, target_root, src) = setup();
+    std::fs::write(payload_root.join("a.bin"), b"hello").unwrap();
+    let dest = target_root.join("a.bin");
+    let op_id = OperationId::resource(
+        "create",
+        &zup_core::ResourceKey::File {
+            destination: dest.display().to_string(),
+        },
+    );
+    let mut exec = WindowsFileExecutor::new(
+        src,
+        target_root.join("work"),
+        "tx-verify".into(),
+        Box::new(NullProgress),
+    );
+    let rel = RelativePath::new("a.bin").unwrap();
+    let stage = zup_transaction::TransactionNode {
+        id: stage_op("a"),
+        phase: zup_transaction::Phase::Stage,
+        kind: zup_transaction::NodeKind::StageFile {
+            key: zup_core::ResourceKey::File {
+                destination: dest.display().to_string(),
+            },
+        },
+        declaration_order: 1,
+        meta: zup_transaction::NodeMeta::default(),
+    };
+    exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"hello"), 5);
+    let stage_receipt = apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
+    let zup_windows::OperationReceipt::StageFile(staged) = &stage_receipt else {
+        panic!("expected a stage receipt");
+    };
+    let staged_path = staged.staged_path.clone();
+    let staged_receipt = zup_windows::transaction_receipt(stage_receipt);
+    verify_installed_file(&staged_receipt).expect("staged payload matches");
+
+    let create = zup_transaction::TransactionNode {
+        id: op_id.clone(),
+        phase: zup_transaction::Phase::FileMutation,
+        kind: zup_transaction::NodeKind::FileMutation {
+            key: zup_core::ResourceKey::File {
+                destination: dest.display().to_string(),
+            },
+            delta: FileDelta::Create,
+        },
+        declaration_order: 2,
+        meta: zup_transaction::NodeMeta::default(),
+    };
+    exec.note_file(&create.id, FilePrecondition::Absent, digest(b"hello"), 5);
+    let receipt = apply_node(&mut exec, &create, &rel, &dest).expect("create");
+    let receipt = zup_windows::transaction_receipt(receipt);
+    let zup_transaction::OperationReceipt::CreateFile {
+        destination,
+        installed_sha256,
+        installed_size,
+        ..
+    } = &receipt
+    else {
+        panic!("expected a create receipt");
+    };
+    verify_installed_file(&receipt).expect("installed file matches its receipt");
+
+    // The published file is the installed state, so the staged copy is gone
+    // and staging is no longer verifiable — verification covers the mutation.
+    assert!(
+        verify_installed_file(&staged_receipt).is_err(),
+        "a published payload is not still staged"
+    );
+    assert!(!std::path::Path::new(&staged_path).exists());
+
+    // Anything other than the recorded bytes fails verification.
+    std::fs::write(&dest, b"HELLO").unwrap();
+    let error = verify_installed_file(&receipt).unwrap_err();
+    assert!(matches!(
+        error,
+        zup_windows::WindowsFileExecutorError::Verification { .. }
+    ));
+    std::fs::remove_file(&dest).unwrap();
+    assert!(
+        verify_installed_file(&receipt).is_err(),
+        "a missing installed file is not verified"
+    );
+    let _ = (destination, installed_sha256, installed_size);
+}
+
+#[test]
+fn replaced_file_verification_checks_installed_and_backup() {
+    use zup_windows::verify_installed_file;
+
+    let (_dir, payload_root, target_root, src) = setup();
+    std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
+    let dest = target_root.join("a.bin");
+    std::fs::write(&dest, b"old!").unwrap();
+    let op_id = OperationId::resource(
+        "replace",
+        &zup_core::ResourceKey::File {
+            destination: dest.display().to_string(),
+        },
+    );
+    let mut exec = WindowsFileExecutor::new(
+        src,
+        target_root.join("work"),
+        "tx-verify-replace".into(),
+        Box::new(NullProgress),
+    );
+    let rel = RelativePath::new("a.bin").unwrap();
+    let stage = zup_transaction::TransactionNode {
+        id: stage_op("a"),
+        phase: zup_transaction::Phase::Stage,
+        kind: zup_transaction::NodeKind::StageFile {
+            key: zup_core::ResourceKey::File {
+                destination: dest.display().to_string(),
+            },
+        },
+        declaration_order: 1,
+        meta: zup_transaction::NodeMeta::default(),
+    };
+    exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
+    apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
+
+    let replace = zup_transaction::TransactionNode {
+        id: op_id,
+        phase: zup_transaction::Phase::FileMutation,
+        kind: zup_transaction::NodeKind::FileMutation {
+            key: zup_core::ResourceKey::File {
+                destination: dest.display().to_string(),
+            },
+            delta: FileDelta::Replace,
+        },
+        declaration_order: 2,
+        meta: zup_transaction::NodeMeta::default(),
+    };
+    exec.note_file(
+        &replace.id,
+        FilePrecondition::Exact {
+            size: 4,
+            sha256: digest(b"old!"),
+        },
+        digest(b"new!"),
+        4,
+    );
+    let receipt = apply_node(&mut exec, &replace, &rel, &dest).expect("replace");
+    let receipt = zup_windows::transaction_receipt(receipt);
+    verify_installed_file(&receipt).expect("replace matches its receipt");
+
+    let zup_transaction::OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
+        panic!("expected a replace receipt");
+    };
+    let backup = std::path::PathBuf::from(backup_path);
+    std::fs::write(&backup, b"zzzz").unwrap();
+    assert!(
+        verify_installed_file(&receipt).is_err(),
+        "a changed backup fails verification"
+    );
+    std::fs::write(&backup, b"old!").unwrap();
+    std::fs::write(&dest, b"nope").unwrap();
+    assert!(
+        verify_installed_file(&receipt).is_err(),
+        "a changed installed file fails verification"
+    );
+}
+
+#[test]
+fn removal_verification_requires_absent_destination_and_intact_backup() {
+    use zup_core::{Privilege, ResourceKey, SelectedScope};
+    use zup_transaction::{FileRemoval, FileRemovalKind, NodeKind};
+    use zup_windows::verify_installed_file;
+
+    let (dir, _payload, target_root, source) = setup();
+    let destination = target_path(target_root.join("owned.bin"));
+    std::fs::write(to_host_path(&destination).unwrap(), b"owned").unwrap();
+    let key = ResourceKey::File {
+        destination: destination.to_string(),
+    };
+    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    input.uninstall = true;
+    input.retired_keys.push(key.clone());
+    input.removals.push(FileRemoval {
+        key: key.clone(),
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: Privilege::User,
+        destination: destination.clone(),
+        sha256: digest(b"owned"),
+        size: 5,
+        created_directories: vec![],
+    });
+    let plan = compile_transaction(&input).unwrap();
+    let node = plan
+        .nodes
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::FileRemoval { .. }))
+        .unwrap();
+    let exec = WindowsFileExecutor::new(
+        source,
+        dir.path().join("work"),
+        "removal-verify".into(),
+        Box::new(NullProgress),
+    );
+    let receipt = exec.apply_owned_file_removal(node).unwrap();
+    verify_installed_file(&receipt).expect("removal matches its receipt");
+
+    // A file that reappeared at the destination is no longer removed.
+    std::fs::write(to_host_path(&destination).unwrap(), b"owned").unwrap();
+    assert!(
+        verify_installed_file(&receipt).is_err(),
+        "a reappeared destination fails verification"
+    );
+    std::fs::remove_file(to_host_path(&destination).unwrap()).unwrap();
+
+    let zup_transaction::OperationReceipt::RemoveFile { backup_path, .. } = &receipt else {
+        panic!("expected a removal receipt");
+    };
+    std::fs::write(to_host_path(backup_path).unwrap(), b"zzz").unwrap();
+    assert!(
+        verify_installed_file(&receipt).is_err(),
+        "a changed backup fails verification"
+    );
+}
+
+#[test]
+fn backend_receipts_are_not_file_verifications() {
+    use zup_core::ResourceKey;
+    use zup_windows::verify_installed_file;
+
+    let error = verify_installed_file(&zup_transaction::OperationReceipt::Control)
+        .expect_err("a barrier receipt names no file state");
+    assert!(matches!(
+        error,
+        zup_windows::WindowsFileExecutorError::Unsupported { .. }
+    ));
+    let error = verify_installed_file(&zup_transaction::OperationReceipt::Backend {
+        key: ResourceKey::Backend {
+            id: zup_core::BackendResourceId::new("fake.backend").unwrap(),
+        },
+        payload: b"opaque".to_vec(),
+    })
+    .expect_err("an opaque backend receipt is not a file receipt");
+    assert!(matches!(
+        error,
+        zup_windows::WindowsFileExecutorError::Unsupported { .. }
+    ));
 }

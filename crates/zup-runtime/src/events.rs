@@ -9,7 +9,7 @@ pub enum RuntimeState {
     Preparing,
     CheckingPrerequisites,
     InstallingPrerequisites,
-    WaitingForElevation,
+    WaitingForAuthorization,
     RebootRequired,
     ConnectingWorker,
     Executing,
@@ -19,14 +19,14 @@ pub enum RuntimeState {
     Failed,
 }
 
-/// Frontend-neutral events (CLI, GPUI, silent installer).
+/// Frontend-neutral events (CLI, native UI, silent installer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeEvent {
     StateChanged {
         state: RuntimeState,
     },
-    WaitingForElevation,
+    WaitingForAuthorization,
     WorkerConnected,
     PrerequisiteCheck {
         id: String,
@@ -48,7 +48,7 @@ pub enum RuntimeEvent {
         exit_code: i32,
     },
     PreflightStarted,
-    BlockingProcessesFound {
+    ResourceBlocked {
         detail: String,
         pids: Vec<u32>,
     },

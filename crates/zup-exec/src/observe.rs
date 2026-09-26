@@ -1,6 +1,8 @@
-//! Immutable observation of target-machine resource state.
+//! Immutable observation of target-host resource state.
 //!
 //! Inspection reports facts only. Delta decisions live in [`crate::plan`].
+//! Nothing here names an operating-system facility: a service is a service
+//! wherever it lives, and a registration is a registration.
 
 use serde::{Deserialize, Serialize};
 use zup_core::{ProtocolScheme, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest};
@@ -23,46 +25,86 @@ pub enum ObservedFileState {
     NonFile,
 }
 
-/// Observed state of one desired shortcut.
+/// Observed state of one desired launcher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservedShortcut {
+pub struct ObservedLauncher {
     pub key: ResourceKey,
-    pub link_path: TargetPath,
-    pub state: ObservedShortcutState,
+    pub launcher_path: TargetPath,
+    pub state: ObservedLauncherState,
 }
 
-/// Semantic content of an existing `.lnk`, or why it cannot be read as one.
+/// Semantic content of an existing launcher, or why it cannot be read as one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObservedShortcutState {
+pub enum ObservedLauncherState {
     Absent,
-    Shortcut {
+    Launcher {
         target: TargetPath,
         arguments: Vec<String>,
         working_directory: Option<TargetPath>,
     },
-    InvalidShortcut,
+    InvalidLauncher,
     NonFile,
 }
 
-/// Observed state of one desired PATH entry.
+/// One persistent executable search path, as the host stores it.
+///
+/// Entries arrive already split and normalized to [`TargetPath`], so a platform
+/// adapter owns the separator, quoting, and case rules of its own host format.
+/// This crate only asks whether a desired entry is in the set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SearchPath {
+    entries: Vec<TargetPath>,
+}
+
+impl SearchPath {
+    pub fn new(entries: Vec<TargetPath>) -> Self {
+        Self { entries }
+    }
+
+    /// Stored entries, in stored order.
+    pub fn entries(&self) -> &[TargetPath] {
+        &self.entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Set-membership decision for one entry.
+    pub fn contains(&self, entry: &TargetPath) -> bool {
+        self.entries.iter().any(|stored| stored.equivalent(entry))
+    }
+}
+
+impl FromIterator<TargetPath> for SearchPath {
+    fn from_iter<I: IntoIterator<Item = TargetPath>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a SearchPath {
+    type Item = &'a TargetPath;
+    type IntoIter = std::slice::Iter<'a, TargetPath>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+/// Observed state of one desired search-path entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedPathEntry {
     pub key: ResourceKey,
     pub desired: TargetPath,
+    /// Persistent search path that owns `desired`.
     pub scope: SelectedScope,
-    pub state: PathEntryState,
-}
-
-/// Whether the persistent PATH already contains a matching entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PathEntryState {
-    Absent,
-    Present {
-        /// Raw PATH segment as stored on the machine.
-        raw_entry: String,
-    },
+    /// Contents of that search path at inspection time.
+    pub search_path: SearchPath,
 }
 
 /// Observed state of one desired service.
@@ -73,7 +115,7 @@ pub struct ObservedService {
     pub state: ObservedServiceState,
 }
 
-/// SCM-observed service configuration.
+/// Service registration and configuration, as the host reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedServiceState {
@@ -109,7 +151,7 @@ pub struct ObservedProtocol {
     pub state: ObservedProtocolState,
 }
 
-/// Registry-observed protocol handler.
+/// Protocol handler registration, as the host reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedProtocolState {
@@ -123,21 +165,21 @@ pub enum ObservedProtocolState {
     },
 }
 
-/// Observed file-type ProgID and extension mapping (tracked independently).
+/// Observed file-association and extension mapping (tracked independently).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservedFileType {
+pub struct ObservedFileAssociation {
     pub key: ResourceKey,
     pub extension: String,
     pub id: String,
     pub scope: SelectedScope,
-    pub id_state: ObservedProgIdState,
+    pub association_state: ObservedFileAssociationState,
     pub extension_state: ObservedExtensionState,
 }
 
-/// Observed ProgID registration.
+/// File-association registration, as the host reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObservedProgIdState {
+pub enum ObservedFileAssociationState {
     Absent,
     Registration {
         description: Option<String>,
@@ -148,29 +190,29 @@ pub enum ObservedProgIdState {
     },
 }
 
-/// Observed `.ext` → ProgID mapping.
+/// Extension-to-association mapping, as the host reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedExtensionState {
     Absent,
     Mapped {
-        /// Default ProgID currently associated with the extension.
-        prog_id: String,
+        /// Logical association currently mapped to the extension.
+        association_id: String,
     },
     Malformed {
         reason: String,
     },
 }
 
-/// Immutable snapshot of observed machine state for planned resources.
+/// Immutable snapshot of observed host state for planned resources.
 ///
 /// Every collection follows `TargetPlan` ordering. Inspection never mutates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct MachineSnapshot {
+pub struct HostSnapshot {
     pub files: Vec<ObservedFile>,
-    pub shortcuts: Vec<ObservedShortcut>,
+    pub launchers: Vec<ObservedLauncher>,
     pub path_entries: Vec<ObservedPathEntry>,
     pub services: Vec<ObservedService>,
     pub protocols: Vec<ObservedProtocol>,
-    pub file_types: Vec<ObservedFileType>,
+    pub file_associations: Vec<ObservedFileAssociation>,
 }

@@ -18,8 +18,12 @@ The native installer and maintenance UI are frontends to the same planner, trans
 
 Installers are launched directly from Windows Explorer. Maintenance executables are installed with the application. Machine-scope work requests elevation only when the operation requires it.
 
+Windows is the only implemented platform backend. A non-Windows target is refused at the backend boundary before the source tree is read, and a Windows target on a non-Windows build host is refused with a separate message. No artifact is written in either case.
+
 ## Capabilities and Constraints
 
+- The manifest is schema 1 and targets a matrix of named profiles; each profile names a canonical target triple.
+- Only Windows target triples have a backend. A non-Windows target fails at an explicit boundary instead of falling back.
 - Keep the developer CLI and headless lifecycle path functional.
 - UI commands and progress use typed interfaces; GPUI does not implement lifecycle behavior.
 - The default visual accent is cool blue on neutral surfaces, with system light and dark themes.

@@ -1,0 +1,17 @@
+[package]
+name = "zup-xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Package matrices and portable boundary checks for zup"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

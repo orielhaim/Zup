@@ -1,12 +1,14 @@
 //! Parsing tests for `zup_manifest::parse`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use rstest::rstest;
 use semver::Version;
 use zup_manifest::{
-    App, AppId, Frontend, Install, InstallDirectory, InstallScope, Manifest, ManifestError,
-    NonEmptyString, SCHEMA_VERSION, Source, Template, Variable, parse, parse_and_compile,
+    App, AppId, Build, Frontend, Install, InstallDirectory, InstallLocation, InstallScope,
+    Manifest, ManifestError, NonEmptyString, SCHEMA_VERSION, Source, TargetProfile,
+    TargetProfileId, TargetTriple, Template, Variable, parse, parse_and_compile,
 };
 
 fn minimal(scope: &str) -> String {
@@ -19,15 +21,18 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = {{ directory = "dist/windows-x64" }}
 
 [install]
 scope = "{scope}"
 
 [install.directory]
-user = "${{known.local_app_data}}/Acme"
-machine = "${{known.program_files}}/Acme"
+user = "${{location.user_data}}/Acme"
+machine = "${{location.programs}}/Acme"
 "#
     )
 }
@@ -38,12 +43,22 @@ fn without_section(src: &str, section: &str) -> String {
     let header = format!("[{section}]");
 
     for line in src.lines() {
-        if line.trim() == header {
+        let trimmed = line.trim_start();
+        if section == "build" {
+            if trimmed == "[build]" {
+                skipping = true;
+                continue;
+            }
+            if skipping {
+                if trimmed.is_empty() || trimmed.starts_with("[build.") {
+                    continue;
+                }
+                skipping = false;
+            }
+        } else if trimmed == header {
             skipping = true;
             continue;
-        }
-        if skipping {
-            let trimmed = line.trim_start();
+        } else if skipping {
             if trimmed.starts_with('[') {
                 skipping = false;
             } else {
@@ -83,8 +98,11 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.2.3"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
 
 [install]
 scope = "user"
@@ -105,18 +123,18 @@ name = "Core"
     assert_eq!(manifest.app.description, None);
 
     assert_eq!(manifest.components.len(), 1);
-    let component = &manifest.components[0];
+    let component = &manifest.components[0].value;
     assert!(!component.required);
     assert!(component.default);
     assert!(component.requires.is_empty());
 
     assert!(manifest.plugins.is_empty());
     assert!(manifest.files.is_empty());
-    assert!(manifest.shortcuts.is_empty());
+    assert!(manifest.launchers.is_empty());
     assert!(manifest.path.is_empty());
     assert!(manifest.services.is_empty());
     assert!(manifest.protocols.is_empty());
-    assert!(manifest.file_types.is_empty());
+    assert!(manifest.file_associations.is_empty());
 }
 
 #[test]
@@ -137,15 +155,25 @@ fn valid_minimal_manifest() {
                 main: None,
                 description: None,
             },
-            source: Source {
-                directory: PathBuf::from("dist"),
+            build: Build {
+                targets: BTreeMap::from([(
+                    TargetProfileId::new("windows-x64").unwrap(),
+                    TargetProfile {
+                        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                        source: Source {
+                            directory: PathBuf::from("dist/windows-x64"),
+                        },
+                        frontend: None,
+                        install: None,
+                    },
+                )]),
             },
             prerequisites: Vec::new(),
             install: Install {
                 scope: InstallScope::User,
                 directory: InstallDirectory {
-                    user: Some(Template::parse("${known.local_app_data}/Acme").unwrap()),
-                    machine: Some(Template::parse("${known.program_files}/Acme").unwrap()),
+                    user: Some(Template::parse("${location.user_data}/Acme").unwrap()),
+                    machine: Some(Template::parse("${location.programs}/Acme").unwrap()),
                 },
                 allow_directory_override: false,
             },
@@ -153,11 +181,11 @@ fn valid_minimal_manifest() {
             components: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
-            shortcuts: Vec::new(),
+            launchers: Vec::new(),
             path: Vec::new(),
             services: Vec::new(),
             protocols: Vec::new(),
-            file_types: Vec::new(),
+            file_associations: Vec::new(),
         }
     );
 }
@@ -168,7 +196,7 @@ fn frontend_defaults_to_gui() {
     let manifest = parse(&source).expect("valid manifest");
     assert_eq!(manifest.frontend, Frontend::Gui);
 
-    let installer = parse_and_compile(&source).expect("valid installer");
+    let installer = parse_and_compile(&source, "windows-x64").expect("valid installer");
     assert_eq!(installer.frontend, Frontend::Gui);
 }
 
@@ -179,7 +207,7 @@ fn frontend_override_is_parsed_and_preserved() {
     let manifest = parse(&source).expect("valid manifest");
     assert_eq!(manifest.frontend, Frontend::Console);
 
-    let installer = parse_and_compile(&source).expect("valid installer");
+    let installer = parse_and_compile(&source, "windows-x64").expect("valid installer");
     assert_eq!(installer.frontend, Frontend::Console);
 }
 
@@ -191,7 +219,7 @@ fn plugin_defaults() {
     );
     let manifest = parse(&src).expect("valid plugin");
     assert_eq!(manifest.plugins.len(), 1);
-    let plugin = &manifest.plugins[0];
+    let plugin = &manifest.plugins[0].value;
     assert_eq!(plugin.id.as_str(), "acme.plugin_1-x");
     assert_eq!(plugin.source, "plugins/acme.wasm");
     assert_eq!(plugin.component, None);
@@ -205,7 +233,7 @@ fn plugin_component_and_condition_are_parsed() {
         minimal("user")
     );
     let manifest = parse(&src).expect("valid plugin fields");
-    let plugin = &manifest.plugins[0];
+    let plugin = &manifest.plugins[0].value;
     assert_eq!(
         plugin.component.as_ref().map(|id| id.as_str()),
         Some("core")
@@ -306,23 +334,33 @@ fn ui_branding_is_optional_and_constrained() {
         "[install]",
         "[ui]\naccent = \"#2563eb\"\ntheme = \"dark\"\n\n[install]",
     );
-    let manifest = parse_and_compile(&source).unwrap();
+    let manifest = parse_and_compile(&source, "windows-x64").unwrap();
     let ui = manifest.ui.unwrap();
     assert_eq!(ui.accent.as_deref(), Some("#2563eb"));
     assert_eq!(ui.theme, zup_core::UiTheme::Dark);
 
     let invalid = source.replace("#2563eb", "blue");
-    let error = parse_and_compile(&invalid).unwrap_err();
+    let error = parse_and_compile(&invalid, "windows-x64").unwrap_err();
     assert!(matches!(error, ManifestError::InvalidUiAccent { .. }));
 }
 
 #[rstest]
 #[case::app("app")]
-#[case::source("source")]
+#[case::build("build")]
 #[case::install("install")]
 fn missing_required_section(#[case] section: &str) {
     let src = without_section(&minimal("user"), section);
     let err = parse(&src).expect_err("missing section");
+    assert!(matches!(err, ManifestError::Invalid { .. }), "{err:?}");
+}
+
+#[test]
+fn top_level_source_is_rejected() {
+    let src = minimal("user").replace(
+        "[build]\n\n[build.targets.windows-x64]\ntarget = \"x86_64-pc-windows-msvc\"\nsource = { directory = \"dist/windows-x64\" }",
+        "[source]\ndirectory = \"dist\"",
+    );
+    let err = parse(&src).expect_err("top-level source is not supported");
     assert!(matches!(err, ManifestError::Invalid { .. }), "{err:?}");
 }
 
@@ -332,7 +370,11 @@ fn unsupported_schema_version() {
     let err = parse(&src).expect_err("unsupported schema");
     assert!(matches!(
         err,
-        ManifestError::UnsupportedSchema { found: 2, .. }
+        ManifestError::UnsupportedSchema {
+            found: 2,
+            supported: SCHEMA_VERSION,
+            ..
+        }
     ));
 }
 
@@ -359,14 +401,14 @@ fn empty_app_name() {
 
 #[test]
 fn empty_source_directory() {
-    let src = minimal("user").replace(r#"directory = "dist""#, r#"directory = """#);
+    let src = minimal("user").replace(r#"directory = "dist/windows-x64""#, r#"directory = """#);
     let err = parse(&src).expect_err("empty source directory");
     assert!(matches!(err, ManifestError::Invalid { .. }));
 }
 
 #[test]
 fn unknown_template_variable_rejected() {
-    let src = minimal("user").replace("${known.local_app_data}/Acme", "${known.foo}/Acme");
+    let src = minimal("user").replace("${location.user_data}/Acme", "${known.foo}/Acme");
     let err = parse(&src).expect_err("unknown variable");
     match &err {
         ManifestError::Invalid { message, .. } => {
@@ -378,7 +420,7 @@ fn unknown_template_variable_rejected() {
 
 #[test]
 fn malformed_template_rejected() {
-    let src = minimal("user").replace("${known.local_app_data}/Acme", "${install/missing-close");
+    let src = minimal("user").replace("${location.user_data}/Acme", "${install/missing-close");
     let err = parse(&src).expect_err("malformed template");
     assert!(matches!(err, ManifestError::Invalid { .. }));
 }
@@ -431,7 +473,7 @@ when = 'component("cli")'
         minimal("user")
     );
     let manifest = parse(&src).expect("valid when");
-    assert!(manifest.files[0].when.is_some());
+    assert!(manifest.files[0].value.when.is_some());
 }
 
 #[test]
@@ -462,7 +504,7 @@ fn template_parts_are_structural() {
     assert_eq!(
         directory.parts(),
         [
-            zup_manifest::TemplatePart::Variable(Variable::KnownLocalAppData),
+            zup_manifest::TemplatePart::Variable(Variable::Location(InstallLocation::UserData)),
             zup_manifest::TemplatePart::Literal("/Acme".to_owned()),
         ]
     );

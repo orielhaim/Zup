@@ -22,4 +22,10 @@ pub enum ValueError {
 
     #[error("invalid prerequisite id `{id}`")]
     InvalidPrerequisiteId { id: String },
+
+    #[error("invalid runtime requirement id `{id}`")]
+    InvalidRuntimeRequirementId { id: String },
+
+    #[error("invalid installed package id `{id}`")]
+    InvalidInstalledPackageId { id: String },
 }

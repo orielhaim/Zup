@@ -1,6 +1,5 @@
-//! Transaction coordinator: durable apply / rollback / recovery.
+//! Transaction coordinator: durable prepare / apply / verify / commit.
 
-use jiff::Timestamp;
 use miette::Diagnostic;
 use semver::Version;
 use thiserror::Error;
@@ -9,7 +8,7 @@ use zup_core::{AppId, SelectedScope};
 
 use crate::executor::{OperationExecutor, OperationReceipt, ReconcileResult};
 use crate::id::{OperationId, TransactionId};
-use crate::plan::{NodeKind, TransactionNode, TransactionPlan};
+use crate::plan::{NodeKind, Phase, TransactionNode, TransactionPlan};
 use crate::record::{NodeState, StoreError, TransactionPhase, TransactionRecord};
 use crate::store::TransactionStore;
 
@@ -65,6 +64,9 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
     }
 
     /// Execute the prepared transaction to a stable outcome.
+    ///
+    /// Preparation and staging run under `Prepared`; the commit-intent barrier
+    /// is where the record becomes `Applying`.
     pub fn execute<E: OperationExecutor>(
         &self,
         mut record: TransactionRecord,
@@ -73,41 +75,32 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
     where
         E::Error: std::fmt::Display,
     {
-        // Prepared → Applying is the durable commit-intent boundary.
-        record.phase = record
-            .phase
-            .transition(TransactionPhase::Applying)
-            .map_err(|e| TransactionError::InvalidState(e.to_string()))?;
-        self.persist(&mut record)?;
-        info!(transaction_id = %record.transaction_id, "commit intent");
-
-        match apply_all(&self.store, &mut record, executor) {
+        match drive(&self.store, &mut record, executor) {
             Ok(()) => {
-                record.phase = TransactionPhase::Committed;
-                self.persist(&mut record)?;
+                commit_phase(&mut record, &self.store, TransactionPhase::Committed)?;
                 info!(transaction_id = %record.transaction_id, "commit");
                 Ok((record, TransactionOutcome::Committed))
             }
-            Err(err) => {
-                warn!(transaction_id = %record.transaction_id, error = %err, "apply failed");
-                if record.phase == TransactionPhase::RecoveryRequired {
-                    return Ok((record, TransactionOutcome::RecoveryRequired));
+            Err(error) => {
+                if is_store_error(&error) {
+                    // The journal is the authority and it could not be
+                    // written, so this attempt is over. Rolling back from a
+                    // record the store never accepted would only compound it.
+                    return Err(error);
                 }
-                let outcome = rollback_after_failure(&self.store, &mut record, executor)?;
+                warn!(transaction_id = %record.transaction_id, error = %error, "execution failed");
+                let outcome = fail(&self.store, &mut record, executor)?;
                 Ok((record, outcome))
             }
         }
-    }
-
-    fn persist(&self, record: &mut TransactionRecord) -> Result<(), TransactionError> {
-        save(record, &self.store)
     }
 }
 
 /// Recover a transaction from durable state after a crash.
 ///
-/// Reconciles every `Running` node before doing anything else. Rolls forward
-/// when the transaction had already crossed commit intent (`Applying`).
+/// Reconciles every `Running` node before doing anything else, then resumes
+/// the phase the record was in: preparation is undone, applied work rolls
+/// forward, an interrupted rollback continues rolling back.
 pub fn recover<E: OperationExecutor, S: TransactionStore>(
     mut record: TransactionRecord,
     store: &S,
@@ -116,92 +109,88 @@ pub fn recover<E: OperationExecutor, S: TransactionStore>(
 where
     E::Error: std::fmt::Display,
 {
+    record
+        .validate()
+        .map_err(|error| TransactionError::InvalidState(error.to_string()))?;
     info!(transaction_id = %record.transaction_id, phase = ?record.phase, "recovery");
 
-    let running: Vec<OperationId> = record
-        .nodes
-        .iter()
-        .filter(|(_, s)| **s == NodeState::Running)
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    let mut ambiguous = false;
-    for op_id in &running {
-        let node = find_node(&record.plan, op_id)?;
-        if matches!(node.kind, NodeKind::Barrier) {
-            continue;
-        }
-        info!(operation = %op_id, "reconciliation");
-        match executor
-            .reconcile(node, None)
-            .map_err(|e| TransactionError::Executor {
-                operation: op_id.to_string(),
-                message: e.to_string(),
-            })? {
-            ReconcileResult::NotApplied => {
-                set_node_state(&mut record, op_id, NodeState::Pending)?;
-                save(&mut record, store)?;
-            }
-            ReconcileResult::Applied => {
-                set_node_state(
-                    &mut record,
-                    op_id,
-                    NodeState::Applied {
-                        receipt: Box::new(OperationReceipt::Control),
-                    },
-                )?;
-                save(&mut record, store)?;
-            }
-            ReconcileResult::AppliedWithReceipt(receipt) => {
-                set_node_state(
-                    &mut record,
-                    op_id,
-                    NodeState::Applied {
-                        receipt: Box::new(receipt),
-                    },
-                )?;
-                save(&mut record, store)?;
-            }
-            ReconcileResult::Ambiguous => {
-                ambiguous = true;
-                warn!(operation = %op_id, "ambiguous reconciliation");
-            }
-        }
+    if matches!(
+        record.phase,
+        TransactionPhase::Committed
+            | TransactionPhase::RolledBack
+            | TransactionPhase::RecoveryRequired
+    ) {
+        let outcome = settled(record.phase);
+        return Ok((record, outcome));
     }
 
-    if ambiguous {
-        record.phase = TransactionPhase::RecoveryRequired;
-        save(&mut record, store)?;
-        return Ok((record, TransactionOutcome::RecoveryRequired));
-    }
-
-    if record.phase == TransactionPhase::Committed {
-        return Ok((record, TransactionOutcome::Committed));
-    }
-    if record.phase == TransactionPhase::RolledBack {
-        return Ok((record, TransactionOutcome::RolledBack));
-    }
+    reconcile_running(&mut record, store, executor)?;
     if record.phase == TransactionPhase::RecoveryRequired {
         return Ok((record, TransactionOutcome::RecoveryRequired));
     }
 
-    let crossed_commit_intent = matches!(
-        record.phase,
-        TransactionPhase::Applying | TransactionPhase::RollingBack
-    );
-
-    if crossed_commit_intent {
-        roll_forward(record, store, executor)
-    } else {
-        // Crash before commit intent — no application state was intentionally
-        // mutated. Abandon/clean up.
-        record.phase = TransactionPhase::RolledBack;
-        save(&mut record, store)?;
-        Ok((record, TransactionOutcome::RolledBack))
+    match record.phase {
+        // Commit intent was crossed: finish the plan, verification included.
+        TransactionPhase::Applying => match drive(store, &mut record, executor) {
+            Ok(()) => {
+                commit_phase(&mut record, store, TransactionPhase::Committed)?;
+                info!(transaction_id = %record.transaction_id, "recovery commit");
+                Ok((record, TransactionOutcome::Committed))
+            }
+            Err(error) => {
+                if is_store_error(&error) {
+                    return Err(error);
+                }
+                warn!(transaction_id = %record.transaction_id, error = %error, "recovery failed");
+                let outcome = fail(store, &mut record, executor)?;
+                Ok((record, outcome))
+            }
+        },
+        // A crash before commit intent left only preparation and staging, so
+        // that work is undone rather than adopted. A crash during rollback
+        // must never be turned into a commit.
+        TransactionPhase::Prepared | TransactionPhase::RollingBack => {
+            let outcome = rollback_after_failure(store, &mut record, executor)?;
+            Ok((record, outcome))
+        }
+        _ => {
+            let outcome = settled(record.phase);
+            Ok((record, outcome))
+        }
     }
 }
 
-fn apply_all<S: TransactionStore, E: OperationExecutor>(
+fn settled(phase: TransactionPhase) -> TransactionOutcome {
+    match phase {
+        TransactionPhase::Committed => TransactionOutcome::Committed,
+        TransactionPhase::RolledBack => TransactionOutcome::RolledBack,
+        _ => TransactionOutcome::RecoveryRequired,
+    }
+}
+
+/// Turn a failed drive into a stable outcome.
+fn fail<S: TransactionStore, E: OperationExecutor>(
+    store: &S,
+    record: &mut TransactionRecord,
+    executor: &mut E,
+) -> Result<TransactionOutcome, TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    if record.phase == TransactionPhase::RecoveryRequired {
+        return Ok(TransactionOutcome::RecoveryRequired);
+    }
+    rollback_after_failure(store, record, executor)
+}
+
+/// A journal write that did not land, not an executor failure.
+fn is_store_error(error: &TransactionError) -> bool {
+    matches!(error, TransactionError::Store(_))
+}
+
+/// Walk the plan in execution order, crossing every barrier and verifying
+/// every applied mutation before the commit barrier.
+fn drive<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
     executor: &mut E,
@@ -212,76 +201,272 @@ where
     let order = record.plan.execution_order.clone();
     for op_id in &order {
         let node = find_node(&record.plan, op_id)?.clone();
-        if matches!(node.kind, NodeKind::Barrier) {
-            continue;
-        }
         let state = record
             .nodes
             .get(op_id)
             .cloned()
             .unwrap_or(NodeState::Pending);
-        if !matches!(state, NodeState::Pending) {
-            continue;
-        }
-
-        // Durable intent BEFORE side effect.
-        set_node_state(record, op_id, NodeState::Running)?;
-        save(record, store)?;
-        info!(operation = %op_id, "node intent");
-
-        let receipt = match executor.apply(&node) {
-            Ok(receipt) => receipt,
-            Err(err) => {
-                match executor.reconcile(&node, None) {
-                    Ok(ReconcileResult::NotApplied) => {
-                        set_node_state(record, op_id, NodeState::Failed)?;
-                        save(record, store)?;
-                    }
-                    Ok(ReconcileResult::AppliedWithReceipt(receipt)) => {
-                        set_node_state(
-                            record,
-                            op_id,
-                            NodeState::Applied {
-                                receipt: Box::new(receipt),
-                            },
-                        )?;
-                        save(record, store)?;
-                    }
-                    Ok(ReconcileResult::Applied) => {
-                        set_node_state(
-                            record,
-                            op_id,
-                            NodeState::Applied {
-                                receipt: Box::new(OperationReceipt::Control),
-                            },
-                        )?;
-                        save(record, store)?;
-                    }
-                    Ok(ReconcileResult::Ambiguous) | Err(_) => {
-                        record.phase = TransactionPhase::RecoveryRequired;
-                        save(record, store)?;
-                    }
-                }
-                return Err(TransactionError::Executor {
-                    operation: op_id.to_string(),
-                    message: err.to_string(),
-                });
+        if node.kind.is_barrier() {
+            if matches!(state, NodeState::Applied { .. }) {
+                cross_commit_intent(record, store, &node)?;
+                continue;
             }
-        };
-
-        set_node_state(
-            record,
-            op_id,
-            NodeState::Applied {
-                receipt: Box::new(receipt),
-            },
-        )?;
-        save(record, store)?;
-        info!(operation = %op_id, "node applied");
+            if node.phase == Phase::Verify {
+                verify_applied(store, record, executor)?;
+            }
+            cross_barrier(store, record, executor, &node)?;
+        } else if matches!(state, NodeState::Pending) {
+            run_mutation(store, record, executor, &node)?;
+        }
     }
     Ok(())
 }
 
+/// Barriers that guard the plan: each one is prepared before it is crossed.
+fn barrier_prepares(phase: Phase) -> bool {
+    matches!(phase, Phase::Begin | Phase::Preflight)
+}
+
+/// Prepare a barrier, then journal that it was crossed.
+///
+/// The barrier's own state is the durable record of the crossing, so a crash
+/// can never replay a completed barrier as an untracked side effect.
+fn cross_barrier<S: TransactionStore, E: OperationExecutor>(
+    store: &S,
+    record: &mut TransactionRecord,
+    executor: &mut E,
+    node: &TransactionNode,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    if barrier_prepares(node.phase) {
+        executor
+            .prepare(node)
+            .map_err(|error| TransactionError::Executor {
+                operation: node.id.to_string(),
+                message: error.to_string(),
+            })?;
+    }
+    commit_node(record, store, &node.id, NodeState::Running)?;
+    let receipt = match executor.apply(node) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            // A barrier carries no side effect of its own, so an unfinished
+            // barrier is simply pending again.
+            commit_node(record, store, &node.id, NodeState::Pending)?;
+            return Err(TransactionError::Executor {
+                operation: node.id.to_string(),
+                message: error.to_string(),
+            });
+        }
+    };
+    commit_node(
+        record,
+        store,
+        &node.id,
+        NodeState::Applied {
+            receipt: Box::new(receipt),
+        },
+    )?;
+    cross_commit_intent(record, store, node)?;
+    info!(operation = %node.id, phase = ?node.phase, "barrier crossed");
+    Ok(())
+}
+
+/// Cross commit intent when this barrier carries it.
+fn cross_commit_intent<S: TransactionStore>(
+    record: &mut TransactionRecord,
+    store: &S,
+    node: &TransactionNode,
+) -> Result<(), TransactionError> {
+    if node.phase != Phase::CommitIntent {
+        return Ok(());
+    }
+    commit_phase(record, store, TransactionPhase::Applying)?;
+    info!(operation = %node.id, "commit intent");
+    Ok(())
+}
+
+/// Apply one mutating node, or settle it into a durable state after failure.
+fn run_mutation<S: TransactionStore, E: OperationExecutor>(
+    store: &S,
+    record: &mut TransactionRecord,
+    executor: &mut E,
+    node: &TransactionNode,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    // Durable intent BEFORE side effect.
+    commit_node(record, store, &node.id, NodeState::Running)?;
+    info!(operation = %node.id, "node intent");
+
+    let receipt = match executor.apply(node) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            settle_failed_mutation(store, record, executor, node)?;
+            return Err(TransactionError::Executor {
+                operation: node.id.to_string(),
+                message: error.to_string(),
+            });
+        }
+    };
+    commit_node(
+        record,
+        store,
+        &node.id,
+        NodeState::Applied {
+            receipt: Box::new(receipt),
+        },
+    )?;
+    info!(operation = %node.id, "node applied");
+    Ok(())
+}
+
+/// Decide what a failed apply actually did, using the executor's own
+/// reconciliation, and journal that decision.
+fn settle_failed_mutation<S: TransactionStore, E: OperationExecutor>(
+    store: &S,
+    record: &mut TransactionRecord,
+    executor: &mut E,
+    node: &TransactionNode,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    let op_id = &node.id;
+    match executor.reconcile(node, None) {
+        Ok(ReconcileResult::NotApplied) => {
+            commit_node(record, store, op_id, NodeState::Failed)?;
+        }
+        Ok(ReconcileResult::AppliedWithReceipt(receipt)) => {
+            commit_node(
+                record,
+                store,
+                op_id,
+                NodeState::Applied {
+                    receipt: Box::new(receipt),
+                },
+            )?;
+        }
+        Ok(ReconcileResult::Applied) => {
+            commit_node(
+                record,
+                store,
+                op_id,
+                NodeState::Applied {
+                    receipt: Box::new(OperationReceipt::Control),
+                },
+            )?;
+        }
+        Ok(ReconcileResult::Ambiguous) | Err(_) => {
+            commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+        }
+    }
+    Ok(())
+}
+
+/// Verify every applied mutation against its receipt, journaling each result
+/// so recovery never re-runs a completed verification.
+fn verify_applied<S: TransactionStore, E: OperationExecutor>(
+    store: &S,
+    record: &mut TransactionRecord,
+    executor: &mut E,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    let order = record.plan.execution_order.clone();
+    for op_id in &order {
+        let node = find_node(&record.plan, op_id)?.clone();
+        if !node.kind.requires_verification() {
+            continue;
+        }
+        let receipt = match record.nodes.get(op_id) {
+            Some(NodeState::Applied { receipt }) => receipt.clone(),
+            _ => continue,
+        };
+        executor
+            .verify(&node, &receipt)
+            .map_err(|error| TransactionError::Executor {
+                operation: op_id.to_string(),
+                message: error.to_string(),
+            })?;
+        commit_node(record, store, op_id, NodeState::Verified { receipt })?;
+        info!(operation = %op_id, "node verified");
+    }
+    Ok(())
+}
+
+/// Reconcile every node the journal caught mid-flight.
+fn reconcile_running<S: TransactionStore, E: OperationExecutor>(
+    record: &mut TransactionRecord,
+    store: &S,
+    executor: &mut E,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    let running: Vec<OperationId> = record
+        .nodes
+        .iter()
+        .filter(|(_, state)| **state == NodeState::Running)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let mut ambiguous = false;
+    for op_id in &running {
+        let node = find_node(&record.plan, op_id)?.clone();
+        if let NodeKind::Barrier = node.kind {
+            // A barrier is pure control, so an interrupted one did not happen.
+            commit_node(record, store, op_id, NodeState::Pending)?;
+            continue;
+        }
+        info!(operation = %op_id, "reconciliation");
+        match executor
+            .reconcile(&node, None)
+            .map_err(|error| TransactionError::Executor {
+                operation: op_id.to_string(),
+                message: error.to_string(),
+            })? {
+            ReconcileResult::NotApplied => {
+                commit_node(record, store, op_id, NodeState::Pending)?;
+            }
+            ReconcileResult::Applied => {
+                commit_node(
+                    record,
+                    store,
+                    op_id,
+                    NodeState::Applied {
+                        receipt: Box::new(OperationReceipt::Control),
+                    },
+                )?;
+            }
+            ReconcileResult::AppliedWithReceipt(receipt) => {
+                commit_node(
+                    record,
+                    store,
+                    op_id,
+                    NodeState::Applied {
+                        receipt: Box::new(receipt),
+                    },
+                )?;
+            }
+            ReconcileResult::Ambiguous => {
+                ambiguous = true;
+                warn!(operation = %op_id, "ambiguous reconciliation");
+            }
+        }
+    }
+
+    if ambiguous {
+        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+    }
+    Ok(())
+}
+
+/// Undo every applied node in reverse dependency order.
 fn rollback_after_failure<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -290,77 +475,131 @@ fn rollback_after_failure<S: TransactionStore, E: OperationExecutor>(
 where
     E::Error: std::fmt::Display,
 {
-    record.phase = TransactionPhase::RollingBack;
-    save(record, store)?;
-    info!("rollback started");
+    if record
+        .nodes
+        .values()
+        .any(|state| *state == NodeState::RollingBack)
+    {
+        // A node was mid-rollback when the process died: its receipt is no
+        // longer in the journal, so nothing can name how to undo it.
+        warn!(transaction_id = %record.transaction_id, "rollback was interrupted");
+        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+        return Ok(TransactionOutcome::RecoveryRequired);
+    }
+
+    commit_phase(record, store, TransactionPhase::RollingBack)?;
+    info!(transaction_id = %record.transaction_id, "rollback started");
 
     let mut rollback_failed = false;
     let rollback_order = record.plan.rollback_order.clone();
     for op_id in &rollback_order {
         let node = find_node(&record.plan, op_id)?.clone();
-        if matches!(node.kind, NodeKind::Barrier) {
+        let state = record
+            .nodes
+            .get(op_id)
+            .cloned()
+            .unwrap_or(NodeState::Pending);
+        if node.kind.is_barrier() {
+            // A crossed barrier has no work to undo; the transaction just no
+            // longer stands on it.
+            if matches!(state, NodeState::Applied { .. }) {
+                commit_node(record, store, op_id, NodeState::RolledBack)?;
+            }
             continue;
         }
-        let receipt = match record.nodes.get(op_id) {
-            Some(NodeState::Applied { receipt }) => receipt.clone(),
+        let receipt = match state {
+            NodeState::Applied { receipt } | NodeState::Verified { receipt } => receipt,
             _ => continue,
         };
-        set_node_state(record, op_id, NodeState::RollingBack)?;
-        save(record, store)?;
+        commit_node(record, store, op_id, NodeState::RollingBack)?;
 
         match executor.rollback(&node, &receipt) {
             Ok(()) => {
-                set_node_state(record, op_id, NodeState::RolledBack)?;
-                save(record, store)?;
+                commit_node(record, store, op_id, NodeState::RolledBack)?;
                 info!(operation = %op_id, "node rolled back");
             }
-            Err(err) => {
+            Err(error) => {
                 rollback_failed = true;
-                let _ = set_node_state(record, op_id, NodeState::Failed);
-                let _ = save(record, store);
-                warn!(operation = %op_id, error = %err, "rollback failed");
+                let _ = commit_node(record, store, op_id, NodeState::Failed);
+                warn!(operation = %op_id, error = %error, "rollback failed");
             }
         }
     }
 
     if rollback_failed {
-        record.phase = TransactionPhase::RecoveryRequired;
-        save(record, store)?;
+        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
         return Ok(TransactionOutcome::RecoveryRequired);
     }
 
-    record.phase = TransactionPhase::RolledBack;
-    save(record, store)?;
+    commit_phase(record, store, TransactionPhase::RolledBack)?;
     Ok(TransactionOutcome::RolledBack)
 }
 
-fn roll_forward<S: TransactionStore, E: OperationExecutor>(
-    mut record: TransactionRecord,
-    store: &S,
-    executor: &mut E,
-) -> Result<(TransactionRecord, TransactionOutcome), TransactionError>
-where
-    E::Error: std::fmt::Display,
-{
-    if record.phase == TransactionPhase::Prepared {
-        record.phase = TransactionPhase::Applying;
-        save(&mut record, store)?;
-    }
-    apply_all(store, &mut record, executor)?;
-    record.phase = TransactionPhase::Committed;
-    save(&mut record, store)?;
-    Ok((record, TransactionOutcome::Committed))
-}
-
-fn save<S: TransactionStore>(
+/// Journal one durable change and adopt exactly what was committed.
+///
+/// Every write the coordinator makes is a read-modify-write cycle against a
+/// record other actors also write, so each one goes through the store's update
+/// path: the change is applied to the freshest state and retried if the record
+/// moved underneath it. The committed record then replaces the local copy, so
+/// no later decision is made against a revision that no longer exists.
+fn commit<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,
+    mut change: impl FnMut(&mut TransactionRecord) -> Result<(), String>,
 ) -> Result<(), TransactionError> {
-    let expected = record.revision;
-    record.updated_at = Timestamp::now();
-    record.revision = expected.saturating_add(1);
-    store.compare_and_swap(expected, record)?;
+    let id = record.transaction_id;
+    let committed = store
+        .update(&id, &mut |fresh| {
+            change(fresh).map_err(|reason| StoreError::Rejected {
+                id: id.to_string(),
+                reason,
+            })
+        })
+        .map_err(TransactionError::Store)?;
+    *record = committed;
     Ok(())
+}
+
+/// Move one node to `state` durably.
+///
+/// A node that is already in `state` is left alone, so an actor that got there
+/// first is not undone. Any other move has to be a legal one: a refusal is how
+/// this stays from erasing a receipt that names work which really landed.
+fn commit_node<S: TransactionStore>(
+    record: &mut TransactionRecord,
+    store: &S,
+    op_id: &OperationId,
+    state: NodeState,
+) -> Result<(), TransactionError> {
+    commit(record, store, move |fresh| {
+        let Some(current) = fresh.nodes.get(op_id) else {
+            return Err(format!("missing node {op_id}"));
+        };
+        if *current == state {
+            return Ok(());
+        }
+        let next = current
+            .clone()
+            .transition(state.clone())
+            .map_err(|_| format!("node {op_id} cannot enter {state:?} from {current:?}"))?;
+        fresh.nodes.insert(op_id.clone(), next);
+        Ok(())
+    })
+}
+
+/// Cross into `next` durably, leaving the phase alone where the record cannot
+/// legally reach it — another actor may already have moved past it.
+fn commit_phase<S: TransactionStore>(
+    record: &mut TransactionRecord,
+    store: &S,
+    next: TransactionPhase,
+) -> Result<(), TransactionError> {
+    commit(record, store, move |fresh| {
+        if let Ok(phase) = fresh.phase.transition(next) {
+            fresh.phase = phase;
+        }
+        Ok(())
+    })
 }
 
 fn find_node<'a>(
@@ -371,17 +610,4 @@ fn find_node<'a>(
         .iter()
         .find(|n| &n.id == id)
         .ok_or_else(|| TransactionError::InvalidState(format!("unknown node {id}")))
-}
-
-fn set_node_state(
-    record: &mut TransactionRecord,
-    id: &OperationId,
-    state: NodeState,
-) -> Result<(), TransactionError> {
-    let current = record
-        .nodes
-        .get_mut(id)
-        .ok_or_else(|| TransactionError::InvalidState(format!("missing node {id}")))?;
-    *current = state;
-    Ok(())
 }

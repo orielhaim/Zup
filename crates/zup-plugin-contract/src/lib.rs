@@ -9,8 +9,8 @@ mod validation;
 pub const HOST_TARGET: &str = env!("ZUP_BUILD_TARGET");
 
 pub use bindings::exports::zup::plugin::planner::{
-    Context, FileType, GeneratedFile, InstallScope, InstallationPlan, PathEntry, PluginError,
-    Protocol, ResourceItem, Service, ServiceStart, Shortcut, ShortcutLocation,
+    Context, FileAssociation, GeneratedFile, InstallScope, InstallationPlan, Launcher,
+    LauncherLocation, PathEntry, PluginError, Protocol, ResourceItem, Service, ServiceStart,
 };
 pub use config::{
     AOT_FORMAT_VERSION, EPOCH_DEADLINE_TICKS, EngineError, INVOCATION_DEADLINE_MILLIS,

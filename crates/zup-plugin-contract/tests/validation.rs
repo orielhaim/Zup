@@ -37,7 +37,7 @@ fn component_for_body(body: &str) -> Vec<u8> {
             (type (func (param i32 i32 i32 i32) (result i32)))
             (type (func))
             (memory (export "cm32p2_memory") 1)
-            (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32) (result i32)
+            (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
                 {body}
             )
             (func (export "cm32p2|zup:plugin/planner@1|plan_post") (param i32))
@@ -71,10 +71,9 @@ fn context() -> Context {
         app_id: "com.example.app".to_owned(),
         app_name: "App".to_owned(),
         app_version: "1.0.0".to_owned(),
-        install_directory: "${known.local_app_data}/App".to_owned(),
+        install_directory: "${location.user_data}/App".to_owned(),
         install_scope: InstallScope::User,
-        os: "windows".to_owned(),
-        architecture: "x86_64".to_owned(),
+        target: "x86_64-pc-windows-msvc".to_owned(),
         selected_components: Vec::new(),
     }
 }
@@ -321,6 +320,6 @@ fn fingerprint_is_stable() {
     assert_eq!(first, second);
     assert_eq!(
         first.to_hex(),
-        "6221cb7640d893e59890350df87f4daae61dc078bb48995aaa6a11ca40318996"
+        "bb10e7c2044e5f55ace87ae79d15a4f4846e61d3614101e3dbff11b0f0a918ef"
     );
 }

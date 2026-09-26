@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Payload and container layer for zup"
+description = "Portable content-addressed package and payload layer for zup"
 
 [dependencies]
 thiserror.workspace = true
@@ -16,7 +16,6 @@ tempfile.workspace = true
 zup-core.workspace = true
 zup-build.workspace = true
 zup-plugin-contract.workspace = true
-windows-link.workspace = true
 
 [dev-dependencies]
 zup-manifest.workspace = true

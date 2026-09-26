@@ -9,6 +9,41 @@ use thiserror::Error;
 /// Errors produced while materializing installer sources into a build plan.
 #[derive(Debug, Error, Diagnostic)]
 pub enum BuildError {
+    /// No target profile was selected for materialization.
+    #[error("no target profiles were selected")]
+    #[diagnostic(code(zup_build::empty_target_selection))]
+    EmptyTargetSelection,
+
+    /// A target profile was selected more than once.
+    #[error("target profile `{profile}` was selected more than once")]
+    #[diagnostic(code(zup_build::duplicate_target_profile))]
+    DuplicateTargetProfile { profile: String },
+
+    /// Two selected profiles resolve to the same canonical target.
+    #[error("canonical target `{target}` was selected more than once")]
+    #[diagnostic(code(zup_build::duplicate_target))]
+    DuplicateTarget { target: String },
+
+    /// A target config and compiled installer do not describe the same target.
+    #[error(
+        "target profile `{profile}` is configured for `{config}`, but its installer targets `{installer}`"
+    )]
+    #[diagnostic(code(zup_build::target_mismatch))]
+    TargetMismatch {
+        profile: String,
+        config: String,
+        installer: String,
+    },
+
+    /// A target-specific materialization operation failed.
+    #[error("target profile `{profile}`: {source}")]
+    #[diagnostic(code(zup_build::target))]
+    Target {
+        profile: String,
+        #[source]
+        source: Box<BuildError>,
+    },
+
     /// The configured source root does not exist.
     #[error("source directory `{path}` does not exist")]
     #[diagnostic(code(zup_build::source_missing))]
@@ -28,7 +63,7 @@ pub enum BuildError {
     #[diagnostic(
         code(zup_build::source_escapes_project),
         help(
-            "`[source].directory` is resolved relative to `zup.toml` and must stay inside the project"
+            "`[build.targets.<profile>].source.directory` is resolved relative to `zup.toml` and must stay inside the project"
         )
     )]
     SourceEscapesProject { path: PathBuf },
@@ -76,26 +111,6 @@ pub enum BuildError {
         destination: String,
         first: String,
         second: String,
-    },
-
-    /// Two resolved files target destinations that differ only by case.
-    #[error("Windows destination collision: `{first}` and `{second}` both map to `{canonical}`")]
-    #[diagnostic(
-        code(zup_build::windows_destination_collision),
-        help("Windows destination names are case-insensitive")
-    )]
-    WindowsDestinationCollision {
-        first: String,
-        second: String,
-        canonical: String,
-    },
-
-    /// A literal destination segment is not a legal Windows filename.
-    #[error("invalid Windows destination name `{segment}` in `{destination}`")]
-    #[diagnostic(code(zup_build::invalid_windows_destination_name))]
-    InvalidWindowsDestinationName {
-        segment: String,
-        destination: String,
     },
 
     /// Reading a source file failed.

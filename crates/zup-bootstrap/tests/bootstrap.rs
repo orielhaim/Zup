@@ -3,45 +3,22 @@ use std::sync::{Arc, Mutex};
 use semver::Version;
 use tempfile::TempDir;
 use zup_bootstrap::{
-    BootstrapError, BootstrapId, BootstrapKey, BootstrapOperation, BootstrapOperationState,
-    BootstrapOutcome, BootstrapPlan, BootstrapState, BootstrapStateStore, DetectionResult,
-    FilesystemBootstrapStateStore, PrerequisiteDetector, PrerequisiteProvider, ProviderOutcome,
-    ProviderRequest, Quarantine, QuarantineError, execute_operation, recover,
+    BootstrapError, BootstrapId, BootstrapOperation, BootstrapOperationState, BootstrapOutcome,
+    BootstrapState, BootstrapStateStore, DetectionResult, FilesystemBootstrapStateStore,
+    PrerequisiteProvider, PrerequisiteSatisfier, ProviderOutcome, ProviderRequest, Quarantine,
+    QuarantineError, execute_operation, recover,
 };
-use zup_core::{
-    AppId, PrerequisiteArchitecture, PrerequisiteDetector as DetectorSpec, PrerequisiteId,
-    PrerequisiteInstaller, PrerequisitePackage, RelativePath, SelectedScope, Sha256Digest,
-};
+use zup_core::{PrerequisiteId, RelativePath, TargetTriple};
 
-fn digest(bytes: &[u8]) -> Sha256Digest {
-    zup_core::hash_reader(bytes).unwrap().1
-}
+mod common;
+use common::{digest, embedded, plan};
 
-fn plan(package: PrerequisitePackage) -> BootstrapPlan {
-    BootstrapPlan::new(
-        BootstrapKey {
-            app_id: AppId::new("com.example.bootstrap").unwrap(),
-            app_version: Version::new(1, 0, 0),
-            scope: SelectedScope::User,
-        },
-        vec![BootstrapOperation {
-            id: PrerequisiteId::new("runtime").unwrap(),
-            name: "Runtime".into(),
-            target: PrerequisiteArchitecture::Current,
-            detector: DetectorSpec::VisualCppV14 { version: None },
-            package,
-            installer: PrerequisiteInstaller::default(),
-        }],
-    )
-    .unwrap()
-}
-
-struct FakeDetector {
+struct FakeSatisfier {
     satisfied: Arc<Mutex<bool>>,
 }
 
-impl PrerequisiteDetector for FakeDetector {
-    fn detect(&self, _operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
+impl PrerequisiteSatisfier for FakeSatisfier {
+    fn satisfy(&self, _operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
         if *self.satisfied.lock().unwrap() {
             Ok(DetectionResult::Satisfied {
                 version: Some(Version::new(14, 0, 0)),
@@ -68,20 +45,12 @@ impl PrerequisiteProvider for FakeProvider {
     }
 }
 
-fn embedded(bytes: &[u8]) -> PrerequisitePackage {
-    PrerequisitePackage::Embedded {
-        path: RelativePath::new("runtime.exe").unwrap(),
-        sha256: digest(bytes),
-        size: bytes.len() as u64,
-    }
-}
-
 #[test]
 fn already_satisfied_prerequisite_is_not_executed() {
     let package = embedded(b"runtime");
     let plan = plan(package);
     let satisfied = Arc::new(Mutex::new(true));
-    let detector = FakeDetector {
+    let satisfier = FakeSatisfier {
         satisfied: satisfied.clone(),
     };
     let provider = FakeProvider {
@@ -95,7 +64,7 @@ fn already_satisfied_prerequisite_is_not_executed() {
     let executable = root.path().join("runtime.exe");
     std::fs::write(&executable, b"runtime").unwrap();
     let outcome = execute_operation(
-        &plan, operation, &detector, &provider, executable, &mut state,
+        &plan, operation, &satisfier, &provider, executable, &mut state,
     )
     .unwrap();
     assert_eq!(outcome, BootstrapOutcome::Ready);
@@ -106,10 +75,10 @@ fn already_satisfied_prerequisite_is_not_executed() {
 }
 
 #[test]
-fn successful_process_with_unsatisfied_detector_fails_closed() {
+fn successful_process_with_unsatisfied_requirement_fails_closed() {
     let plan = plan(embedded(b"runtime"));
     let satisfied = Arc::new(Mutex::new(false));
-    let detector = FakeDetector {
+    let satisfier = FakeSatisfier {
         satisfied: satisfied.clone(),
     };
     let provider = FakeProvider {
@@ -124,20 +93,20 @@ fn successful_process_with_unsatisfied_detector_fails_closed() {
     let error = execute_operation(
         &plan,
         &plan.operations[0],
-        &detector,
+        &satisfier,
         &provider,
         executable,
         &mut state,
     )
     .unwrap_err();
-    assert!(matches!(error, BootstrapError::DetectorStillUnsatisfied));
+    assert!(matches!(error, BootstrapError::RequirementStillUnsatisfied));
 }
 
 #[test]
 fn reboot_exit_code_is_durable_and_blocks_completion() {
     let plan = plan(embedded(b"runtime"));
     let satisfied = Arc::new(Mutex::new(false));
-    let detector = FakeDetector {
+    let satisfier = FakeSatisfier {
         satisfied: satisfied.clone(),
     };
     let provider = FakeProvider {
@@ -152,7 +121,7 @@ fn reboot_exit_code_is_durable_and_blocks_completion() {
     let outcome = execute_operation(
         &plan,
         &plan.operations[0],
-        &detector,
+        &satisfier,
         &provider,
         executable,
         &mut state,
@@ -172,14 +141,14 @@ fn reboot_exit_code_is_durable_and_blocks_completion() {
 fn assessment_does_not_trust_stale_satisfied_state() {
     let plan = plan(embedded(b"runtime"));
     let satisfied = Arc::new(Mutex::new(true));
-    let detector = FakeDetector {
+    let satisfier = FakeSatisfier {
         satisfied: satisfied.clone(),
     };
     let mut state = BootstrapState::new(&plan);
-    zup_bootstrap::assess(&plan, &detector, &mut state).unwrap();
+    zup_bootstrap::assess(&plan, &satisfier, &mut state).unwrap();
     assert!(state.remaining.is_empty());
     *satisfied.lock().unwrap() = false;
-    let remaining = zup_bootstrap::assess(&plan, &detector, &mut state).unwrap();
+    let remaining = zup_bootstrap::assess(&plan, &satisfier, &mut state).unwrap();
     assert_eq!(remaining, vec![PrerequisiteId::new("runtime").unwrap()]);
 }
 
@@ -210,7 +179,7 @@ fn bound_plan_rejects_wrong_artifact_paths_and_identities() {
 fn failed_bootstrap_is_not_silently_retried() {
     let plan = plan(embedded(b"runtime"));
     let satisfied = Arc::new(Mutex::new(false));
-    let detector = FakeDetector { satisfied };
+    let satisfier = FakeSatisfier { satisfied };
     let mut state = BootstrapState::new(&plan);
     state
         .mark(
@@ -223,7 +192,7 @@ fn failed_bootstrap_is_not_silently_retried() {
         .unwrap();
     state.recompute();
     assert!(matches!(
-        zup_bootstrap::assess(&plan, &detector, &mut state),
+        zup_bootstrap::assess(&plan, &satisfier, &mut state),
         Err(BootstrapError::RecoveryRequired(_))
     ));
 }
@@ -275,16 +244,67 @@ fn state_store_checks_integrity_and_resume_identity() {
 }
 
 #[test]
+fn state_store_does_not_resume_another_target() {
+    let plan = plan(embedded(b"runtime"));
+    let state = BootstrapState::new(&plan);
+    let root = TempDir::new().unwrap();
+    let store = FilesystemBootstrapStateStore::new(root.path());
+    store.create(&state).unwrap();
+
+    assert!(
+        store
+            .find_resumable(
+                &plan.key.app_id,
+                plan.key.scope,
+                &TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .find_resumable(&plan.key.app_id, plan.key.scope, &plan.key.target)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn target_is_part_of_bootstrap_identity_and_fingerprint() {
+    let first = plan(embedded(b"runtime"));
+    let mut second = first.clone();
+    second.key.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+
+    assert_ne!(first.fingerprint(), second.fingerprint());
+    assert_ne!(
+        BootstrapId::for_plan(&first),
+        BootstrapId::for_plan(&second)
+    );
+}
+
+#[test]
+fn recovery_rejects_state_from_another_target() {
+    let first = plan(embedded(b"runtime"));
+    let mut second = first.clone();
+    second.key.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+    let mut state = BootstrapState::new(&first);
+    let satisfied = Arc::new(Mutex::new(true));
+    let error = recover(&second, &FakeSatisfier { satisfied }, &mut state).unwrap_err();
+    assert!(matches!(error, BootstrapError::TargetMismatch));
+}
+
+#[test]
 fn crash_recovery_re_detects_running_operation() {
     let plan = plan(embedded(b"runtime"));
     let satisfied = Arc::new(Mutex::new(false));
-    let detector = FakeDetector { satisfied };
+    let satisfier = FakeSatisfier { satisfied };
     let mut state = BootstrapState::new(&plan);
     state
         .mark(&plan.operations[0].id, BootstrapOperationState::Running)
         .unwrap();
     assert_eq!(
-        recover(&plan, &detector, &mut state).unwrap(),
+        recover(&plan, &satisfier, &mut state).unwrap(),
         BootstrapOutcome::RecoveryRequired
     );
     assert_eq!(state.phase, zup_bootstrap::BootstrapPhase::RecoveryRequired);

@@ -30,6 +30,7 @@ windows-result.workspace = true
 lnks.workspace = true
 windows-service.workspace = true
 zup-bootstrap.workspace = true
+zup-build.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
@@ -37,7 +38,9 @@ zup-plan.workspace = true
 zup-platform.workspace = true
 semver.workspace = true
 zup-protocol.workspace = true
+zup-runtime.workspace = true
 zup-transaction.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -56,6 +59,5 @@ ignored = ["windows-bindgen"]
 
 [dev-dependencies]
 serde_json.workspace = true
-tempfile.workspace = true
-zup-build.workspace = true
 zup-manifest.workspace = true
+zup-plugin-contract.workspace = true

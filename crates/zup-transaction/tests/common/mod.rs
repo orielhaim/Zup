@@ -1,104 +1,87 @@
-//! Shared fixtures for transaction tests.
-
 #![allow(dead_code)]
 
-use zup_core::{RelativePath, ResourceKey, SelectedScope, ServiceId, Sha256Digest, hash_reader};
-use zup_exec::{
-    ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition,
-    ShortcutOperation, ShortcutOperationKind,
+use zup_core::{
+    BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest,
+    TargetTriple, hash_reader,
 };
 use zup_platform::TargetPath;
-use zup_transaction::{TransactionPlan, compile_transaction};
+use zup_transaction::{
+    BackendOperation, FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
+    TransactionInput, TransactionPlan, compile_transaction,
+};
 
-pub fn tpath(s: &str) -> TargetPath {
-    TargetPath::new(std::path::PathBuf::from(s)).unwrap()
+pub fn target() -> TargetTriple {
+    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
 }
 
-pub fn digest(b: &[u8]) -> Sha256Digest {
-    hash_reader(b).unwrap().1
+pub fn tpath(value: &str) -> TargetPath {
+    TargetPath::new(target(), value).unwrap()
 }
 
-/// Two file creates and one shortcut create.
-pub fn sample_execution() -> ExecutionPlan {
-    ExecutionPlan {
-        selected_components: vec![],
-        install_directory: None,
-        uninstall: false,
-        removals: vec![],
-        files: vec![
-            FileOperation {
-                key: ResourceKey::File {
-                    destination: r"C:\PF\Acme\a.exe".into(),
-                },
-                kind: FileOperationKind::Create,
-                destination: tpath(r"C:\PF\Acme\a.exe"),
-                source_relative: RelativePath::new("a.exe").unwrap(),
-                precondition: FilePrecondition::Absent,
-                expected_sha256: digest(b"a"),
-                expected_size: 1,
-                conflict: None,
-            },
-            FileOperation {
-                key: ResourceKey::File {
-                    destination: r"C:\PF\Acme\b.dll".into(),
-                },
-                kind: FileOperationKind::Create,
-                destination: tpath(r"C:\PF\Acme\b.dll"),
-                source_relative: RelativePath::new("b.dll").unwrap(),
-                precondition: FilePrecondition::Absent,
-                expected_sha256: digest(b"b"),
-                expected_size: 1,
-                conflict: None,
-            },
-        ],
-        shortcuts: vec![ShortcutOperation {
-            key: ResourceKey::Shortcut {
-                location: zup_core::ShortcutLocation::StartMenu,
-                name: "Acme".into(),
-            },
-            kind: ShortcutOperationKind::Create,
-            link_path: tpath(r"C:\Programs\Acme.lnk"),
-            target: tpath(r"C:\PF\Acme\a.exe"),
-            arguments: vec![],
-            working_directory: None,
-            previous: zup_exec::ObservedShortcutState::Absent,
-            conflict: None,
-        }],
-        path_entries: vec![],
-        services: vec![],
-        protocols: vec![],
-        file_types: vec![],
-        uninstall_entries: vec![],
-        summary: ExecutionSummary {
-            files_create: 2,
-            shortcuts_create: 1,
-            requires_elevation: true,
-            ..Default::default()
+pub fn digest(bytes: &[u8]) -> Sha256Digest {
+    hash_reader(bytes).unwrap().1
+}
+
+fn file(name: &str, contents: &[u8]) -> FileWork {
+    FileWork {
+        key: ResourceKey::File {
+            destination: format!(r"C:\PF\Acme\{name}"),
         },
+        source_relative: RelativePath::new(name).unwrap(),
+        destination: tpath(&format!(r"C:\PF\Acme\{name}")),
+        precondition: FilePrecondition::Absent,
+        expected_sha256: digest(contents),
+        expected_size: contents.len() as u64,
+        privilege: Privilege::User,
+        delta: FileDelta::Create,
     }
 }
 
-/// Linear A → B → C file creates for rollback-order tests.
-pub fn chain_execution() -> ExecutionPlan {
-    let mut plan = sample_execution();
-    plan.files.push(FileOperation {
-        key: ResourceKey::File {
-            destination: r"C:\PF\Acme\c.txt".into(),
-        },
-        kind: FileOperationKind::Create,
-        destination: tpath(r"C:\PF\Acme\c.txt"),
-        source_relative: RelativePath::new("c.txt").unwrap(),
-        precondition: FilePrecondition::Absent,
-        expected_sha256: digest(b"c"),
-        expected_size: 1,
-        conflict: None,
+fn backend() -> BackendOperation {
+    let id = BackendResourceId::new("fake.backend").unwrap();
+    BackendOperation::apply(
+        ResourceKey::Backend { id: id.clone() },
+        id,
+        Privilege::System,
+        b"opaque-backend-payload".to_vec(),
+    )
+}
+
+pub fn sample_input() -> TransactionInput {
+    let mut input = TransactionInput::new(target());
+    input.files = vec![file("a.exe", b"a"), file("b.dll", b"b")];
+    input.backend_operations = vec![backend()];
+    input
+}
+
+pub fn chain_input() -> TransactionInput {
+    let mut input = sample_input();
+    input.files.push(file("c.txt", b"c"));
+    input.backend_operations.clear();
+    input
+}
+
+pub fn removal_input() -> TransactionInput {
+    let mut input = TransactionInput::new(target());
+    let key = ResourceKey::File {
+        destination: r"C:\PF\Acme\old.exe".into(),
+    };
+    input.retired_keys.push(key.clone());
+    input.removals.push(FileRemoval {
+        key,
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: Privilege::User,
+        destination: tpath(r"C:\PF\Acme\old.exe"),
+        sha256: digest(b"old"),
+        size: 3,
+        created_directories: Vec::new(),
     });
-    plan.shortcuts.clear();
-    plan
+    input
 }
 
 pub fn sample_plan() -> TransactionPlan {
-    compile_transaction(&sample_execution()).unwrap()
+    compile_transaction(&sample_input()).unwrap()
 }
 
 pub fn sample_app_id() -> zup_core::AppId {
@@ -108,7 +91,3 @@ pub fn sample_app_id() -> zup_core::AppId {
 pub fn sample_version() -> semver::Version {
     "1.4.0".parse().unwrap()
 }
-
-// Silence unused import in some tests.
-#[allow(unused)]
-fn _unused(_: SelectedScope, _: ServiceId) {}

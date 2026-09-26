@@ -16,6 +16,8 @@ pub const MAX_PREREQUISITE_ID_BYTES: usize = 128;
 pub const MAX_PREREQUISITE_ARGUMENTS: usize = 128;
 pub const MAX_PREREQUISITE_ARGUMENT_BYTES: usize = 4096;
 pub const MAX_PREREQUISITE_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_RUNTIME_REQUIREMENT_ID_BYTES: usize = 128;
+pub const MAX_INSTALLED_PACKAGE_ID_BYTES: usize = 256;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -103,71 +105,172 @@ impl PrerequisiteArchitecture {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RegistryHive {
-    #[default]
-    CurrentUser,
-    LocalMachine,
-    ClassesRoot,
+/// Opaque identifier of a runtime a platform provider knows how to observe.
+///
+/// The identifier is a namespaced, lowercase dotted path such as
+/// `provider.toolchain.v14`. Portable crates validate its shape but never
+/// interpret it; the platform backend owns the meaning of each id it
+/// publishes, and only the backend may attach a meaning to a segment.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[schemars(transparent)]
+pub struct RuntimeRequirementId(String);
+
+impl RuntimeRequirementId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
+        let value = value.as_ref();
+        if value.is_empty() || value.len() > MAX_RUNTIME_REQUIREMENT_ID_BYTES {
+            return Err(ValueError::Empty {
+                kind: "runtime requirement id",
+            });
+        }
+        for segment in value.split('.') {
+            if segment.is_empty()
+                || !segment.starts_with(|byte: char| byte.is_ascii_lowercase())
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                || segment.ends_with('_')
+            {
+                return Err(ValueError::InvalidRuntimeRequirementId {
+                    id: value.to_owned(),
+                });
+            }
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
+impl fmt::Display for RuntimeRequirementId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for RuntimeRequirementId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for RuntimeRequirementId {
+    type Error = ValueError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+/// A runtime that must be present, optionally within a version range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    pub id: RuntimeRequirementId,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub version: Option<VersionReq>,
+}
+
+/// Opaque identifier of an installed package, such as a product code.
+///
+/// Portable crates validate the shape only; the platform backend decides which
+/// identifiers it can answer and what they mean.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[schemars(transparent)]
+pub struct InstalledPackageId(String);
+
+impl InstalledPackageId {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
+        let value = value.as_ref();
+        if value.trim().is_empty() || value.len() > MAX_INSTALLED_PACKAGE_ID_BYTES {
+            return Err(ValueError::Empty {
+                kind: "installed package id",
+            });
+        }
+        if value.trim() != value
+            || value
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+            || value.contains(['/', '\\', ':', '\0'])
+        {
+            return Err(ValueError::InvalidInstalledPackageId {
+                id: value.to_owned(),
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for InstalledPackageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for InstalledPackageId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for InstalledPackageId {
+    type Error = ValueError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+/// An installed package that must be present, optionally within a version range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledPackage {
+    pub id: InstalledPackageId,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub version: Option<VersionReq>,
+}
+
+/// A file that must exist, optionally with a matching file version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileVersion {
+    pub path: Template,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub version: Option<VersionReq>,
+}
+
+/// The portable semantic condition a prerequisite must satisfy.
+///
+/// Every variant names a fact the target system can be asked about. Detection
+/// mechanics, package formats, and registry layout belong to the platform
+/// provider, not to this model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PrerequisiteDetector {
-    VisualCppV14 {
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-    },
-    #[serde(rename = "dotnet_runtime", alias = "dot_net_runtime")]
-    DotNetRuntime {
-        #[serde(default)]
-        desktop: bool,
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-    },
-    #[serde(rename = "webview2_evergreen", alias = "web_view2_evergreen")]
-    WebView2Evergreen {
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-    },
-    MsiProduct {
-        product_code: String,
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-    },
-    RegistryValue {
-        #[serde(default)]
-        hive: RegistryHive,
-        key: String,
-        value: String,
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-        #[serde(default)]
-        expected: Option<String>,
-    },
-    FileVersion {
-        path: Template,
-        #[serde(default)]
-        #[schemars(with = "Option<String>")]
-        version: Option<VersionReq>,
-    },
+pub enum PrerequisiteRequirement {
+    Runtime(Runtime),
+    InstalledPackage(InstalledPackage),
+    FileVersion(FileVersion),
 }
 
-impl PrerequisiteDetector {
+impl PrerequisiteRequirement {
     pub const fn kind_name(&self) -> &'static str {
         match self {
-            Self::VisualCppV14 { .. } => "visual_cpp_v14",
-            Self::DotNetRuntime { .. } => "dotnet_runtime",
-            Self::WebView2Evergreen { .. } => "webview2_evergreen",
-            Self::MsiProduct { .. } => "msi_product",
-            Self::RegistryValue { .. } => "registry_value",
-            Self::FileVersion { .. } => "file_version",
+            Self::Runtime(_) => "runtime",
+            Self::InstalledPackage(_) => "installed_package",
+            Self::FileVersion(_) => "file_version",
         }
     }
 }
@@ -214,37 +317,30 @@ impl PrerequisitePackage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PrerequisiteInstallerKind {
-    #[default]
-    Exe,
-    Msi,
-}
-
+/// How a prerequisite package is run once its requirement is unsatisfied.
+///
+/// The provider owns the command line it builds; the manifest only supplies
+/// extra arguments, the accepted exit codes, and the privilege it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrerequisiteInstaller {
     #[serde(default)]
-    pub kind: PrerequisiteInstallerKind,
-    #[serde(default, alias = "args")]
     pub arguments: Vec<String>,
     #[serde(default = "default_success_exit_codes")]
     pub success_exit_codes: Vec<i32>,
     #[serde(default = "default_reboot_exit_codes")]
     pub reboot_exit_codes: Vec<i32>,
-    #[serde(default = "default_machine_privilege")]
+    #[serde(default = "default_system_privilege")]
     pub privilege: Privilege,
 }
 
 impl Default for PrerequisiteInstaller {
     fn default() -> Self {
         Self {
-            kind: PrerequisiteInstallerKind::Exe,
             arguments: Vec::new(),
             success_exit_codes: default_success_exit_codes(),
             reboot_exit_codes: default_reboot_exit_codes(),
-            privilege: Privilege::Machine,
+            privilege: Privilege::System,
         }
     }
 }
@@ -257,8 +353,8 @@ fn default_reboot_exit_codes() -> Vec<i32> {
     vec![1641, 3010]
 }
 
-fn default_machine_privilege() -> Privilege {
-    Privilege::Machine
+fn default_system_privilege() -> Privilege {
+    Privilege::System
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -274,11 +370,9 @@ pub struct Prerequisite {
     pub when: Option<Condition>,
     #[serde(default)]
     pub target: PrerequisiteArchitecture,
-    #[serde(alias = "detect")]
-    pub detector: PrerequisiteDetector,
-    #[serde(alias = "source", alias = "artifact")]
+    pub requirement: PrerequisiteRequirement,
     pub package: PrerequisitePackage,
-    #[serde(default, alias = "install")]
+    #[serde(default)]
     pub installer: PrerequisiteInstaller,
 }
 

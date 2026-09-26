@@ -3,10 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, PluginBinding, Protocol,
-    Service, Shortcut, UiBranding,
+    App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry,
+    PluginBinding, Protocol, Service, UiBranding,
 };
 use crate::prerequisite::Prerequisite;
+use crate::target::TargetTriple;
 
 /// Engine-facing installer representation.
 ///
@@ -17,6 +18,7 @@ use crate::prerequisite::Prerequisite;
 #[serde(deny_unknown_fields)]
 pub struct Installer {
     pub app: App,
+    pub target: TargetTriple,
     #[serde(default)]
     pub frontend: Frontend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,11 +30,11 @@ pub struct Installer {
     pub components: Vec<Component>,
     pub plugins: Vec<PluginBinding>,
     pub files: Vec<FileMapping>,
-    pub shortcuts: Vec<Shortcut>,
+    pub launchers: Vec<Launcher>,
     pub path: Vec<PathEntry>,
     pub services: Vec<Service>,
     pub protocols: Vec<Protocol>,
-    pub file_types: Vec<FileType>,
+    pub file_associations: Vec<FileAssociation>,
 }
 
 /// Runtime update trust configuration embedded by the build step.

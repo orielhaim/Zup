@@ -13,13 +13,12 @@ interface planner {
     app-version: string,
     install-directory: string,
     install-scope: install-scope,
-    os: string,
-    architecture: string,
+    target: string,
     selected-components: list<string>,
   }
 
-  enum shortcut-location {
-    start-menu,
+  enum launcher-location {
+    menu,
     desktop,
   }
 
@@ -28,8 +27,8 @@ interface planner {
     contents: list<u8>,
   }
 
-  record shortcut {
-    location: shortcut-location,
+  record launcher {
+    location: launcher-location,
     name: string,
     target: string,
     arguments: list<string>,
@@ -61,7 +60,7 @@ interface planner {
     args: list<string>,
   }
 
-  record file-type {
+  record file-association {
     extension: string,
     id: string,
     description: option<string>,
@@ -70,11 +69,11 @@ interface planner {
 
   variant resource-item {
     generated-file(generated-file),
-    shortcut(shortcut),
+    launcher(launcher),
     path-entry(path-entry),
     service(service),
     protocol(protocol),
-    file-type(file-type),
+    file-association(file-association),
   }
 
   record installation-plan {

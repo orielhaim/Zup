@@ -6,20 +6,18 @@
 #![forbid(unsafe_code)]
 
 mod command;
-mod known_folders;
+mod install_locations;
 mod resolve;
 mod target_path;
 mod target_plan;
 
 pub use command::CommandSpec;
-pub use known_folders::{
-    KnownFolder, KnownFolderError, KnownFolderResolver, known_folder_for_variable,
-};
+pub use install_locations::{InstallLocationError, InstallLocationResolver};
 pub use resolve::{TemplateResolveError, resolve_template_path};
 pub use target_path::{TargetPath, TargetPathError};
 pub use target_plan::{
-    TargetFile, TargetFileType, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetPrerequisite,
-    TargetProtocol, TargetService, TargetShortcut,
+    TargetFile, TargetFileAssociation, TargetLauncher, TargetPathEntry, TargetPlan,
+    TargetPlanSummary, TargetPrerequisite, TargetProtocol, TargetService,
 };
 
 pub use zup_core::SelectedScope;

@@ -1,16 +1,18 @@
-//! Payload and container layer for zup.
+//! Portable content-addressed package and payload access for zup.
 //!
-//! Portable payload access by `RelativePath` + expected digest. The final
-//! `.zup` bundle/container format is not implemented yet.
+//! `BundleWriter` creates schema-1 package bytes from one `TargetBuildPlan`.
+//! `Package::open` and `Package::parse` verify the package and expose payload,
+//! plugin, and prerequisite data without requiring an executable. `Package`
+//! contains one target plan; multi-target containers are not part of this
+//! format.
 
 mod format;
 mod payload;
 
 pub use format::{
-    BundleError, BundlePayloadSource, BundleWriter, CompiledPluginArtifact, EmbeddedBundle,
-    MAX_PLUGIN_AOT_TOTAL_BYTES, PayloadEntry, PeSubsystem, PluginArtifact, PortableBuildPlan,
-    PrerequisiteArtifact, build_self_contained_executable, embed_bundle_file, read_pe_frontend,
-    read_pe_subsystem, read_pe_target, validate_pe_frontend,
+    BundleWriter, CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PACKAGE_SCHEMA, Package,
+    PackageError, PackageIndex, PackagePayloadSource, PayloadEntry, PluginArtifact,
+    PortableBuildPlan, PrerequisiteArtifact,
 };
 pub use payload::{
     AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,

@@ -3,8 +3,10 @@
 use std::fs;
 
 use rstest::rstest;
-use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId};
-use zup_manifest::{ManifestError, compile, parse, parse_and_compile};
+use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId, TargetTriple};
+use zup_manifest::{
+    Manifest, ManifestError, TargetOverrides, compile, parse, parse_and_compile, select_targets,
+};
 
 fn fixture() -> String {
     fs::read_to_string(concat!(
@@ -23,15 +25,18 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
 
 [install]
 scope = "user"
 
 [install.directory]
-user = "${known.local_app_data}/Acme"
-machine = "${known.program_files}/Acme"
+user = "${location.user_data}/Acme"
+machine = "${location.programs}/Acme"
 "#
     .to_owned()
 }
@@ -40,11 +45,21 @@ fn with(src: &str) -> String {
     format!("{}\n{}", base(), src.trim_start())
 }
 
+fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
+    let overrides = TargetOverrides::default();
+    let targets = select_targets(manifest, &["windows-x64"], &overrides).unwrap();
+    compile(manifest, &targets[0], &overrides)
+}
+
 #[test]
 fn fixture_compiles_to_ir() {
-    let installer = parse_and_compile(&fixture()).expect("fixture compiles");
+    let installer = parse_and_compile(&fixture(), "windows-x64").expect("fixture compiles");
 
     assert_eq!(installer.app.id.as_str(), "com.acme.acme");
+    assert_eq!(
+        installer.target,
+        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+    );
     assert_eq!(installer.app.version.to_string(), "1.4.0");
     assert_eq!(installer.frontend, Frontend::Gui);
     assert_eq!(installer.install.scope, InstallScope::Either);
@@ -52,11 +67,11 @@ fn fixture_compiles_to_ir() {
     assert_eq!(installer.plugins.len(), 1);
     assert_eq!(installer.plugins[0].id.as_str(), "setup-helper");
     assert_eq!(installer.files.len(), 1);
-    assert_eq!(installer.shortcuts.len(), 1);
+    assert_eq!(installer.launchers.len(), 1);
     assert_eq!(installer.path.len(), 1);
     assert_eq!(installer.services.len(), 1);
     assert_eq!(installer.protocols.len(), 1);
-    assert_eq!(installer.file_types.len(), 1);
+    assert_eq!(installer.file_associations.len(), 1);
 
     assert_eq!(
         installer.components[0].id,
@@ -73,8 +88,8 @@ fn fixture_compiles_to_ir() {
 
 #[test]
 fn compilation_is_deterministic() {
-    let a = parse_and_compile(&fixture()).unwrap();
-    let b = parse_and_compile(&fixture()).unwrap();
+    let a = parse_and_compile(&fixture(), "windows-x64").unwrap();
+    let b = parse_and_compile(&fixture(), "windows-x64").unwrap();
     assert_eq!(a, b);
 }
 
@@ -93,7 +108,7 @@ component = "core"
 when = 'component("core")'
 "#,
     );
-    let installer = parse_and_compile(&src).expect("valid plugin");
+    let installer = parse_and_compile(&src, "windows-x64").expect("valid plugin");
     assert_eq!(installer.plugins.len(), 1);
     let plugin = &installer.plugins[0];
     assert_eq!(plugin.id.as_str(), "setup.helper");
@@ -122,7 +137,7 @@ id = "helper"
 source = "plugins/two.wasm"
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
@@ -142,7 +157,7 @@ id = "helper"
 source = "plugins/two.wasm"
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
@@ -159,8 +174,8 @@ source = "plugins/helper.wasm"
 "#,
     ))
     .unwrap();
-    manifest.plugins[0].source = "../helper.wasm".to_owned();
-    let err = compile(manifest).unwrap_err();
+    manifest.plugins[0].value.source = "../helper.wasm".to_owned();
+    let err = compile_selected(&manifest).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::InvalidPluginSource { ref path, .. } if path == "../helper.wasm"
@@ -177,7 +192,7 @@ source = "plugins/helper.wasm"
 component = "missing"
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::UnknownComponent { ref id, ref context, .. }
@@ -195,7 +210,7 @@ source = "plugins/helper.wasm"
 when = 'component("missing")'
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::UnknownComponent { ref id, ref context, .. }
@@ -216,7 +231,7 @@ id = "a-plugin"
 source = "plugins/a.wasm"
 "#,
     );
-    let installer = parse_and_compile(&src).unwrap();
+    let installer = parse_and_compile(&src, "windows-x64").unwrap();
     let ids: Vec<_> = installer
         .plugins
         .iter()
@@ -227,7 +242,7 @@ source = "plugins/a.wasm"
 
 #[test]
 fn ir_serialization_roundtrip() {
-    let installer = parse_and_compile(&fixture()).unwrap();
+    let installer = parse_and_compile(&fixture(), "windows-x64").unwrap();
     let json = serde_json::to_string_pretty(&installer).unwrap();
     let restored: Installer = serde_json::from_str(&json).unwrap();
     assert_eq!(installer, restored);
@@ -247,7 +262,7 @@ name = "A"
 requires = ["b"]
 "#,
     );
-    let installer = parse_and_compile(&src).unwrap();
+    let installer = parse_and_compile(&src, "windows-x64").unwrap();
     let ids: Vec<_> = installer
         .components
         .iter()
@@ -267,7 +282,7 @@ required = true
 default = true
 "#,
     );
-    let installer = parse_and_compile(&src).unwrap();
+    let installer = parse_and_compile(&src, "windows-x64").unwrap();
     assert!(installer.components[0].required);
     assert!(installer.components[0].default);
     assert!(installer.components[0].requires.is_empty());
@@ -286,7 +301,7 @@ id = "core"
 name = "Also core"
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::DuplicateComponent { ref id, .. } if id == "core"
@@ -310,7 +325,7 @@ binary = "${install}/svc2.exe"
 start = "manual"
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::DuplicateService { ref id, .. } if id == "svc"
@@ -328,7 +343,7 @@ required = true
 default = false
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::RequiredComponentDisabled { ref id, .. } if id == "core"
@@ -345,7 +360,7 @@ name = "CLI"
 requires = ["tools"]
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::UnknownComponent { ref id, ref context, .. }
@@ -363,7 +378,7 @@ name = "Core"
 requires = ["core"]
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::ComponentSelfDependency { ref id, .. } if id == "core"
@@ -385,7 +400,7 @@ name = "B"
 requires = ["a"]
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     match err {
         ManifestError::ComponentCycle { path, .. } => {
             assert!(path.contains('a'), "path: {path}");
@@ -415,7 +430,7 @@ name = "C"
 requires = ["a"]
 "#,
     );
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     match err {
         ManifestError::ComponentCycle { path, .. } => {
             assert!(path.contains("a →"), "path: {path}");
@@ -435,16 +450,16 @@ component = "tools"
     "tools",
     "file"
 )]
-#[case::shortcut(
+#[case::launcher(
     r#"
-[[shortcuts]]
+[[launchers]]
 location = "desktop"
 name = "App"
 target = "${install}/a.exe"
 component = "tools"
 "#,
     "tools",
-    "shortcut"
+    "launcher"
 )]
 #[case::path(
     r#"
@@ -478,7 +493,7 @@ when = 'component("tools")'
 )]
 fn unknown_component_reference(#[case] body: &str, #[case] id: &str, #[case] context: &str) {
     let src = with(body);
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     match err {
         ManifestError::UnknownComponent {
             id: found,
@@ -516,7 +531,7 @@ when = 'component("cli") && !component("missing")'
 "#,
     );
     // "missing" is referenced from the condition and must be rejected.
-    let err = compile(parse(&src).unwrap()).unwrap_err();
+    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
     assert!(matches!(
         err,
         ManifestError::UnknownComponent { ref id, ref context, .. }
@@ -548,25 +563,25 @@ value = "${install}/bin"
 when = 'component("cli") || component("core")'
 "#,
     );
-    let installer = parse_and_compile(&src).expect("valid refs");
+    let installer = parse_and_compile(&src, "windows-x64").expect("valid refs");
     assert_eq!(installer.files.len(), 1);
     assert_eq!(installer.path.len(), 1);
 }
 
 #[rstest]
-#[case::user_scope("user", Some("${known.local_app_data}/Acme"), None, true)]
+#[case::user_scope("user", Some("${location.user_data}/Acme"), None, true)]
 #[case::user_scope_missing("user", None, None, false)]
-#[case::user_scope_wrong_side("user", None, Some("${known.program_files}/Acme"), false)]
-#[case::machine_scope("machine", None, Some("${known.program_files}/Acme"), true)]
+#[case::user_scope_wrong_side("user", None, Some("${location.programs}/Acme"), false)]
+#[case::machine_scope("machine", None, Some("${location.programs}/Acme"), true)]
 #[case::machine_scope_missing("machine", None, None, false)]
 #[case::either_scope(
     "either",
-    Some("${known.local_app_data}/Acme"),
-    Some("${known.program_files}/Acme"),
+    Some("${location.user_data}/Acme"),
+    Some("${location.programs}/Acme"),
     true
 )]
-#[case::either_missing_machine("either", Some("${known.local_app_data}/Acme"), None, false)]
-#[case::either_missing_user("either", None, Some("${known.program_files}/Acme"), false)]
+#[case::either_missing_machine("either", Some("${location.user_data}/Acme"), None, false)]
+#[case::either_missing_user("either", None, Some("${location.programs}/Acme"), false)]
 fn install_directory_coverage(
     #[case] scope: &str,
     #[case] user: Option<&str>,
@@ -590,8 +605,11 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = {{ directory = "dist/windows-x64" }}
 
 [install]
 scope = "{scope}"
@@ -600,7 +618,7 @@ scope = "{scope}"
 "#
     );
 
-    let result = parse_and_compile(&src);
+    let result = parse_and_compile(&src, "windows-x64");
     if ok {
         assert!(result.is_ok(), "expected success, got {:?}", result.err());
     } else {
@@ -621,20 +639,27 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "does-not-exist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "does-not-exist" }
 
 [install]
 scope = "user"
 
 [install.directory]
-user = "${known.local_app_data}/Acme"
+user = "${location.user_data}/Acme"
 
 [[files]]
 source = "**/*.exe"
 destination = "${install}"
 "#;
-    let installer = parse_and_compile(src).expect("pure compile ignores filesystem");
+    let installer = parse_and_compile(src, "windows-x64").expect("pure compile ignores filesystem");
+    assert_eq!(
+        installer.target,
+        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+    );
     assert_eq!(installer.files.len(), 1);
 }
 
@@ -651,12 +676,12 @@ id = "vc-x64"
 name = "Visual C++ v14 Runtime"
 component = "core"
 target = "x64"
-detector = { kind = "visual_cpp_v14", version = ">=14.0.0" }
+requirement = { kind = "runtime", id = "windows.vc.v14", version = ">=14.0.0" }
 package = { type = "embedded", path = "prerequisites/vc.exe", sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 42 }
-installer = { kind = "exe", args = ["/install", "/quiet", "/norestart"] }
+installer = { arguments = ["/install", "/quiet", "/norestart"] }
 "#,
     );
-    let installer = parse_and_compile(&src).expect("valid prerequisite");
+    let installer = parse_and_compile(&src, "windows-x64").expect("valid prerequisite");
     assert_eq!(installer.prerequisites.len(), 1);
     assert_eq!(installer.prerequisites[0].id.as_str(), "vc-x64");
     assert_eq!(
@@ -664,9 +689,83 @@ installer = { kind = "exe", args = ["/install", "/quiet", "/norestart"] }
         zup_core::PrerequisiteArchitecture::X64
     );
     assert_eq!(
-        installer.prerequisites[0].detector.kind_name(),
-        "visual_cpp_v14"
+        installer.prerequisites[0].requirement.kind_name(),
+        "runtime"
     );
+    let zup_core::PrerequisiteRequirement::Runtime(runtime) =
+        &installer.prerequisites[0].requirement
+    else {
+        panic!("runtime requirement");
+    };
+    assert_eq!(runtime.id.as_str(), "windows.vc.v14");
+    assert_eq!(
+        runtime.version,
+        Some(semver::VersionReq::parse(">=14.0.0").unwrap())
+    );
+    assert_eq!(
+        installer.prerequisites[0].installer.arguments,
+        vec!["/install", "/quiet", "/norestart"]
+    );
+}
+
+#[test]
+fn installed_package_requirements_declare_opaque_product_identities() {
+    let src = with(
+        r#"
+[[prerequisites]]
+id = "desktop"
+name = "Desktop runtime"
+requirement = { kind = "installed_package", id = "{F3017226-FE2A-4295-8A7C-971BF3207148}", version = ">=120.0" }
+package = { type = "embedded", path = "desktop.msi", sha256 = "4444444444444444444444444444444444444444444444444444444444444444", size = 1 }
+"#,
+    );
+    let installer = parse_and_compile(&src, "windows-x64").expect("valid installed package");
+    let zup_core::PrerequisiteRequirement::InstalledPackage(package) =
+        &installer.prerequisites[0].requirement
+    else {
+        panic!("installed package requirement");
+    };
+    assert_eq!(
+        package.id.as_str(),
+        "{F3017226-FE2A-4295-8A7C-971BF3207148}"
+    );
+}
+
+#[test]
+fn requirement_kinds_carry_no_platform_implementation_details() {
+    let src = with(
+        r#"
+[[prerequisites]]
+id = "registry-probe"
+name = "Registry probe"
+requirement = { kind = "registry_value", hive = "local_machine", key = "SOFTWARE\\Acme", value = "Version" }
+package = { type = "embedded", path = "probe.exe", sha256 = "5555555555555555555555555555555555555555555555555555555555555555", size = 1 }
+"#,
+    );
+    assert!(parse_and_compile(&src, "windows-x64").is_err());
+    let product_detector = with(
+        r#"
+[[prerequisites]]
+id = "desktop"
+name = "Desktop runtime"
+requirement = { kind = "msi_product", product_code = "{F3017226-FE2A-4295-8A7C-971BF3207148}" }
+package = { type = "embedded", path = "desktop.msi", sha256 = "4444444444444444444444444444444444444444444444444444444444444444", size = 1 }
+"#,
+    );
+    assert!(parse_and_compile(&product_detector, "windows-x64").is_err());
+    for kind in ["exe", "msi"] {
+        let installer_kind = with(&format!(
+            r#"
+[[prerequisites]]
+id = "runtime"
+name = "Runtime"
+requirement = {{ kind = "runtime", id = "windows.vc.v14" }}
+package = {{ type = "embedded", path = "runtime.msi", sha256 = "6666666666666666666666666666666666666666666666666666666666666666", size = 1 }}
+installer = {{ kind = "{kind}" }}
+"#
+        ));
+        assert!(parse_and_compile(&installer_kind, "windows-x64").is_err());
+    }
 }
 
 #[test]
@@ -676,21 +775,21 @@ fn remote_prerequisite_requires_https_and_digest() {
 [[prerequisites]]
 id = "webview2"
 name = "WebView2 Evergreen Runtime"
-detector = { kind = "webview2_evergreen", version = ">=120.0" }
+requirement = { kind = "runtime", id = "windows.webview2.evergreen", version = ">=120.0" }
 package = { type = "remote", url = "https://cdn.example.test/webview2.exe", filename = "webview2.exe", sha256 = "1111111111111111111111111111111111111111111111111111111111111111", size = 100 }
 "#,
     );
-    assert!(parse_and_compile(&src).is_ok());
+    assert!(parse_and_compile(&src, "windows-x64").is_ok());
     let insecure = src.replace("https://", "http://");
     assert!(matches!(
-        parse_and_compile(&insecure),
+        parse_and_compile(&insecure, "windows-x64"),
         Err(ManifestError::InvalidPrerequisite { .. })
     ));
     let unpinned = src.replace(
         "sha256 = \"1111111111111111111111111111111111111111111111111111111111111111\", ",
         "",
     );
-    assert!(parse_and_compile(&unpinned).is_err());
+    assert!(parse_and_compile(&unpinned, "windows-x64").is_err());
 }
 
 #[test]
@@ -700,18 +799,18 @@ fn prerequisite_rejects_duplicate_and_unknown_component_references() {
 [[prerequisites]]
 id = "runtime"
 name = "Runtime"
-detector = { kind = "visual_cpp_v14" }
+requirement = { kind = "runtime", id = "windows.vc.v14" }
 package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
 
 [[prerequisites]]
 id = "runtime"
 name = "Runtime again"
-detector = { kind = "visual_cpp_v14" }
+requirement = { kind = "runtime", id = "windows.vc.v14" }
 package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333333333333333333333333333333333333333333333333333", size = 1 }
 "#,
     );
     assert!(matches!(
-        parse_and_compile(&duplicate),
+        parse_and_compile(&duplicate, "windows-x64"),
         Err(ManifestError::DuplicatePrerequisite { .. })
     ));
     let case_duplicate = with(
@@ -719,18 +818,18 @@ package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333
 [[prerequisites]]
 id = "runtime"
 name = "Runtime"
-detector = { kind = "visual_cpp_v14" }
+requirement = { kind = "runtime", id = "windows.vc.v14" }
 package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
 
 [[prerequisites]]
 id = "Runtime"
 name = "Runtime again"
-detector = { kind = "visual_cpp_v14" }
+requirement = { kind = "runtime", id = "windows.vc.v14" }
 package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333333333333333333333333333333333333333333333333333", size = 1 }
 "#,
     );
     assert!(matches!(
-        parse_and_compile(&case_duplicate),
+        parse_and_compile(&case_duplicate, "windows-x64"),
         Err(ManifestError::DuplicatePrerequisite { .. })
     ));
     let unknown = with(
@@ -739,29 +838,11 @@ package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333
 id = "runtime"
 name = "Runtime"
 component = "missing"
-detector = { kind = "visual_cpp_v14" }
+requirement = { kind = "runtime", id = "windows.vc.v14" }
 package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
 "#,
     );
-    assert!(parse_and_compile(&unknown).is_err());
-}
-
-#[test]
-fn msi_installer_requires_msi_product_detector() {
-    let src = with(
-        r#"
-[[prerequisites]]
-id = "desktop"
-name = "Desktop runtime"
-detector = { kind = "visual_cpp_v14" }
-package = { type = "embedded", path = "desktop.msi", sha256 = "4444444444444444444444444444444444444444444444444444444444444444", size = 1 }
-installer = { kind = "msi" }
-"#,
-    );
-    assert!(matches!(
-        parse_and_compile(&src),
-        Err(ManifestError::InvalidPrerequisite { .. })
-    ));
+    assert!(parse_and_compile(&unknown, "windows-x64").is_err());
 }
 
 #[test]
@@ -774,16 +855,19 @@ id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
 
 [install]
 scope = "user"
 
 [install.directory]
-user = "${known.local_app_data}/Acme"
+user = "${location.user_data}/Acme"
 "#;
-    let installer = parse_and_compile(src).unwrap();
+    let installer = parse_and_compile(src, "windows-x64").unwrap();
     assert_eq!(installer.install.scope, InstallScope::User);
     assert!(installer.install.directory.machine.is_none());
 }

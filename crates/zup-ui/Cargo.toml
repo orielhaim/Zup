@@ -24,5 +24,8 @@ windows = { version = "0.62", features = [
 gpui-kit = { version = "0.6", features = ["test-support"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tempfile.workspace = true
-zup-exec.workspace = true
 zup-platform.workspace = true
+zup-transaction.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+zup-windows.workspace = true

@@ -5,17 +5,87 @@
   "description": "Declarative application installer manifest for zup.",
   "type": "object",
   "properties": {
-    "schema": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
-    },
     "app": {
       "$ref": "#/$defs/App"
+    },
+    "build": {
+      "$ref": "#/$defs/Build"
+    },
+    "components": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted2"
+      }
+    },
+    "file_associations": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted9"
+      }
+    },
+    "files": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted4"
+      }
     },
     "frontend": {
       "$ref": "#/$defs/Frontend",
       "default": "gui"
+    },
+    "install": {
+      "$ref": "#/$defs/Install"
+    },
+    "launchers": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted5"
+      }
+    },
+    "path": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted6"
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted3"
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted"
+      }
+    },
+    "protocols": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted8"
+      }
+    },
+    "schema": {
+      "type": "integer",
+      "format": "uint32",
+      "const": 1,
+      "minimum": 0
+    },
+    "services": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Targeted7"
+      }
     },
     "ui": {
       "anyOf": [
@@ -28,19 +98,6 @@
       ],
       "default": null
     },
-    "source": {
-      "$ref": "#/$defs/Source"
-    },
-    "install": {
-      "$ref": "#/$defs/Install"
-    },
-    "prerequisites": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Prerequisite"
-      },
-      "default": []
-    },
     "updates": {
       "anyOf": [
         {
@@ -50,115 +107,64 @@
           "type": "null"
         }
       ]
-    },
-    "components": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Component"
-      },
-      "default": []
-    },
-    "plugins": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Plugin"
-      },
-      "default": []
-    },
-    "files": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/FileMapping"
-      },
-      "default": []
-    },
-    "shortcuts": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Shortcut"
-      },
-      "default": []
-    },
-    "path": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/PathEntry"
-      },
-      "default": []
-    },
-    "services": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Service"
-      },
-      "default": []
-    },
-    "protocols": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Protocol"
-      },
-      "default": []
-    },
-    "file_types": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/FileType"
-      },
-      "default": []
     }
   },
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "app",
-    "source",
-    "install"
-  ],
   "examples": [
     {
-      "schema": 1,
       "app": {
         "id": "com.example.acme",
         "name": "Acme",
         "version": "1.0.0"
       },
-      "source": {
-        "directory": "dist"
+      "build": {
+        "targets": {
+          "windows-x64": {
+            "frontend": "console",
+            "install": {
+              "directory": {
+                "user": "${location.user_data}/Acme"
+              },
+              "scope": "user"
+            },
+            "source": {
+              "directory": "dist/windows-x64"
+            },
+            "target": "x86_64-pc-windows-msvc"
+          }
+        }
       },
       "install": {
-        "scope": "user",
         "allow_directory_override": true,
         "directory": {
-          "user": "${known.local_app_data}/Acme"
-        }
-      }
+          "machine": "${location.programs}/Acme",
+          "user": "${location.user_data}/Acme"
+        },
+        "scope": "either"
+      },
+      "schema": 1
     }
+  ],
+  "required": [
+    "schema",
+    "app",
+    "build",
+    "install"
   ],
   "$defs": {
     "App": {
       "description": "Application identity and display metadata.",
       "type": "object",
       "properties": {
-        "id": {
-          "$ref": "#/$defs/AppId"
-        },
-        "name": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "version": {
-          "type": "string"
-        },
-        "publisher": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonEmptyString"
-            },
-            {
-              "type": "null"
-            }
+        "description": {
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
+        },
+        "id": {
+          "$ref": "#/$defs/AppId"
         },
         "main": {
           "anyOf": [
@@ -171,12 +177,22 @@
           ],
           "default": null
         },
-        "description": {
-          "type": [
-            "string",
-            "null"
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
           ],
           "default": null
+        },
+        "version": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
@@ -190,220 +206,21 @@
       "description": "Stable logical application identifier.",
       "type": "string"
     },
-    "NonEmptyString": {
-      "description": "Non-empty display name or label.",
-      "type": "string"
-    },
-    "Template": {
-      "description": "A path or command template using zup variables such as ${install} and ${known.local_app_data}.",
-      "type": "string",
-      "examples": [
-        "${install}/app.exe",
-        "${known.program_files}/Acme"
-      ]
-    },
-    "Frontend": {
-      "type": "string",
-      "enum": [
-        "gui",
-        "console",
-        "headless"
-      ]
-    },
-    "UiBranding": {
+    "Build": {
+      "description": "Build configuration and target matrix.",
       "type": "object",
       "properties": {
-        "logo": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Template"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "accent": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "theme": {
-          "$ref": "#/$defs/UiTheme",
-          "default": "system"
-        },
-        "license_link": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "legal_text": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false
-    },
-    "UiTheme": {
-      "type": "string",
-      "enum": [
-        "system",
-        "light",
-        "dark"
-      ]
-    },
-    "Source": {
-      "description": "Payload source for the installer (build-time, not install-time).",
-      "type": "object",
-      "properties": {
-        "directory": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "directory"
-      ]
-    },
-    "Install": {
-      "description": "Installation scope and destination templates.",
-      "type": "object",
-      "properties": {
-        "scope": {
-          "$ref": "#/$defs/InstallScope"
-        },
-        "directory": {
-          "$ref": "#/$defs/InstallDirectory",
-          "default": {
-            "user": null,
-            "machine": null
-          }
-        },
-        "allow_directory_override": {
-          "type": "boolean",
-          "default": false
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TargetProfile"
+          },
+          "minProperties": 1
         }
       },
       "additionalProperties": false,
       "required": [
-        "scope"
-      ]
-    },
-    "InstallScope": {
-      "description": "Scope an installer may target.",
-      "type": "string",
-      "enum": [
-        "user",
-        "machine",
-        "either"
-      ]
-    },
-    "InstallDirectory": {
-      "description": "Unresolved install-root templates by scope.",
-      "type": "object",
-      "properties": {
-        "user": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Template"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "machine": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Template"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false
-    },
-    "Prerequisite": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "name": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "when": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Condition"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "target": {
-          "$ref": "#/$defs/PrerequisiteArchitecture",
-          "default": "current"
-        },
-        "detector": {
-          "$ref": "#/$defs/PrerequisiteDetector"
-        },
-        "package": {
-          "$ref": "#/$defs/PrerequisitePackage"
-        },
-        "installer": {
-          "$ref": "#/$defs/PrerequisiteInstaller",
-          "default": {
-            "kind": "exe",
-            "arguments": [],
-            "success_exit_codes": [
-              0
-            ],
-            "reboot_exit_codes": [
-              1641,
-              3010
-            ],
-            "privilege": "machine"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "name",
-        "detector",
-        "package"
+        "targets"
       ]
     },
     "ComponentId": {
@@ -418,6 +235,100 @@
         "!component(\"debug\")"
       ]
     },
+    "FileAssociationId": {
+      "description": "Stable logical file-association identifier.",
+      "type": "string"
+    },
+    "FileExtension": {
+      "description": "A bare file extension such as `.acme`.",
+      "type": "string"
+    },
+    "Frontend": {
+      "type": "string",
+      "enum": [
+        "gui",
+        "console",
+        "headless"
+      ]
+    },
+    "Install": {
+      "description": "Installation scope and destination templates.",
+      "type": "object",
+      "properties": {
+        "allow_directory_override": {
+          "type": "boolean",
+          "default": false
+        },
+        "directory": {
+          "$ref": "#/$defs/InstallDirectory",
+          "default": {
+            "machine": null,
+            "user": null
+          }
+        },
+        "scope": {
+          "$ref": "#/$defs/InstallScope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope"
+      ]
+    },
+    "InstallDirectory": {
+      "description": "Unresolved install-root templates by scope.",
+      "type": "object",
+      "properties": {
+        "machine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "InstallScope": {
+      "description": "Scope an installer may target.",
+      "type": "string",
+      "enum": [
+        "user",
+        "machine",
+        "either"
+      ]
+    },
+    "InstalledPackageId": {
+      "description": "Opaque identifier of an installed package, such as a product code.\n\nPortable crates validate the shape only; the platform backend decides which\nidentifiers it can answer and what they mean.",
+      "type": "string"
+    },
+    "LauncherLocation": {
+      "description": "Portable application launcher location.",
+      "type": "string",
+      "enum": [
+        "menu",
+        "desktop"
+      ]
+    },
+    "NonEmptyString": {
+      "description": "Non-empty display name or label.",
+      "type": "string"
+    },
     "PrerequisiteArchitecture": {
       "type": "string",
       "enum": [
@@ -428,162 +339,44 @@
         "any"
       ]
     },
-    "PrerequisiteDetector": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "visual_cpp_v14"
-            }
-          },
-          "required": [
-            "kind"
-          ]
+    "PrerequisiteInstaller": {
+      "description": "How a prerequisite package is run once its requirement is unsatisfied.\n\nThe provider owns the command line it builds; the manifest only supplies\nextra arguments, the accepted exit codes, and the privilege it needs.",
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
-        {
-          "type": "object",
-          "properties": {
-            "desktop": {
-              "type": "boolean",
-              "default": false
-            },
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "dotnet_runtime"
-            }
-          },
-          "required": [
-            "kind"
-          ]
+        "privilege": {
+          "$ref": "#/$defs/Privilege",
+          "default": "system"
         },
-        {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "webview2_evergreen"
-            }
-          },
-          "required": [
-            "kind"
-          ]
+        "reboot_exit_codes": {
+          "type": "array",
+          "default": [
+            1641,
+            3010
+          ],
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          }
         },
-        {
-          "type": "object",
-          "properties": {
-            "product_code": {
-              "type": "string"
-            },
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "msi_product"
-            }
-          },
-          "required": [
-            "kind",
-            "product_code"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "hive": {
-              "$ref": "#/$defs/RegistryHive",
-              "default": "current_user"
-            },
-            "key": {
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            },
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "expected": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "registry_value"
-            }
-          },
-          "required": [
-            "kind",
-            "key",
-            "value"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "path": {
-              "$ref": "#/$defs/Template"
-            },
-            "version": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "file_version"
-            }
-          },
-          "required": [
-            "kind",
-            "path"
-          ]
+        "success_exit_codes": {
+          "type": "array",
+          "default": [
+            0
+          ],
+          "items": {
+            "type": "integer",
+            "format": "int32"
+          }
         }
-      ]
-    },
-    "RegistryHive": {
-      "type": "string",
-      "enum": [
-        "current_user",
-        "local_machine",
-        "classes_root"
-      ]
+      },
+      "additionalProperties": false
     },
     "PrerequisitePackage": {
       "oneOf": [
@@ -616,7 +409,7 @@
         {
           "type": "object",
           "properties": {
-            "url": {
+            "filename": {
               "type": "string"
             },
             "sha256": {
@@ -628,15 +421,15 @@
                 "null"
               ],
               "format": "uint64",
-              "minimum": 0,
-              "default": null
-            },
-            "filename": {
-              "type": "string"
+              "default": null,
+              "minimum": 0
             },
             "type": {
               "type": "string",
               "const": "remote"
+            },
+            "url": {
+              "type": "string"
             }
           },
           "required": [
@@ -648,131 +441,181 @@
         }
       ]
     },
-    "PrerequisiteInstaller": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/PrerequisiteInstallerKind",
-          "default": "exe"
-        },
-        "arguments": {
-          "type": "array",
-          "items": {
-            "type": "string"
+    "PrerequisiteRequirement": {
+      "description": "The portable semantic condition a prerequisite must satisfy.\n\nEvery variant names a fact the target system can be asked about. Detection\nmechanics, package formats, and registry layout belong to the platform\nprovider, not to this model.",
+      "oneOf": [
+        {
+          "description": "A runtime that must be present, optionally within a version range.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/RuntimeRequirementId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "runtime"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
           },
-          "default": []
-        },
-        "success_exit_codes": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "default": [
-            0
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
           ]
         },
-        "reboot_exit_codes": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "int32"
+        {
+          "description": "An installed package that must be present, optionally within a version range.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/InstalledPackageId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "installed_package"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
           },
-          "default": [
-            1641,
-            3010
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
           ]
         },
-        "privilege": {
-          "$ref": "#/$defs/Privilege",
-          "default": "machine"
+        {
+          "description": "A file that must exist, optionally with a matching file version.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_version"
+            },
+            "path": {
+              "$ref": "#/$defs/Template"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "path"
+          ]
         }
-      },
-      "additionalProperties": false
-    },
-    "PrerequisiteInstallerKind": {
-      "type": "string",
-      "enum": [
-        "exe",
-        "msi"
       ]
     },
     "Privilege": {
-      "type": "string",
-      "enum": [
-        "user",
-        "machine"
+      "description": "Authorization an operation needs on the target host.\n\nThis names *who* must perform an operation, never *how* the host obtains\nthat authority. Elevation, impersonation, and policy prompts are platform\nconcerns resolved by a platform runtime, not by this value.",
+      "oneOf": [
+        {
+          "description": "The signed-in user is enough.",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "Host-wide authority is required.",
+          "type": "string",
+          "const": "system"
+        }
       ]
     },
-    "Updates": {
-      "description": "Build-time update repository settings.",
+    "ProtocolScheme": {
+      "description": "URI scheme such as `acme` in `acme://`.",
+      "type": "string"
+    },
+    "RuntimeRequirementId": {
+      "description": "Opaque identifier of a runtime a platform provider knows how to observe.\n\nThe identifier is a namespaced, lowercase dotted path such as\n`provider.toolchain.v14`. Portable crates validate its shape but never\ninterpret it; the platform backend owns the meaning of each id it\npublishes, and only the backend may attach a meaning to a segment.",
+      "type": "string"
+    },
+    "ServiceId": {
+      "description": "Stable logical service identifier.",
+      "type": "string"
+    },
+    "ServiceStart": {
+      "description": "Platform-neutral service start policy.",
+      "type": "string",
+      "enum": [
+        "automatic",
+        "manual",
+        "disabled"
+      ]
+    },
+    "Source": {
+      "description": "Payload source for the installer (build-time, not install-time).",
       "type": "object",
       "properties": {
-        "repository": {
-          "type": "string"
-        },
-        "channel": {
-          "type": "string"
-        },
-        "root": {
+        "directory": {
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
-        "repository",
-        "channel",
-        "root"
+        "directory"
       ]
     },
-    "Component": {
-      "description": "A selectable application component.",
+    "TargetProfile": {
+      "description": "Build payload declared for one target profile.",
       "type": "object",
       "properties": {
-        "id": {
-          "$ref": "#/$defs/ComponentId"
-        },
-        "name": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
+        "frontend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Frontend"
+            },
+            {
+              "type": "null"
+            }
           ],
           "default": null
         },
-        "required": {
-          "type": "boolean",
-          "default": false
+        "install": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Install"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
-        "default": {
-          "type": "boolean",
-          "default": true
+        "source": {
+          "$ref": "#/$defs/Source"
         },
-        "requires": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ComponentId"
-          },
-          "default": []
+        "target": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
-        "id",
-        "name"
+        "target",
+        "source"
       ]
     },
-    "Plugin": {
+    "TargetProfileId": {
+      "description": "Stable, human-readable identity for a target profile.",
+      "type": "string"
+    },
+    "Targeted": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string"
-        },
-        "source": {
-          "type": "string"
-        },
         "component": {
           "anyOf": [
             {
@@ -783,6 +626,144 @@
             }
           ],
           "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "installer": {
+          "$ref": "#/$defs/PrerequisiteInstaller",
+          "default": {
+            "arguments": [],
+            "privilege": "system",
+            "reboot_exit_codes": [
+              1641,
+              3010
+            ],
+            "success_exit_codes": [
+              0
+            ]
+          }
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "package": {
+          "$ref": "#/$defs/PrerequisitePackage"
+        },
+        "requirement": {
+          "$ref": "#/$defs/PrerequisiteRequirement"
+        },
+        "target": {
+          "$ref": "#/$defs/PrerequisiteArchitecture",
+          "default": "current"
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "requirement",
+        "package"
+      ]
+    },
+    "Targeted2": {
+      "description": "A resource declaration with optional target-profile applicability.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "id": {
+          "$ref": "#/$defs/ComponentId"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "requires": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ComponentId"
+          }
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "Targeted3": {
+      "description": "A resource declaration with optional target-profile applicability.",
+      "type": "object",
+      "properties": {
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
         },
         "when": {
           "anyOf": [
@@ -802,15 +783,14 @@
         "source"
       ]
     },
-    "FileMapping": {
-      "description": "Declarative file mapping. Patterns are not expanded here.",
+    "Targeted4": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "source": {
-          "type": "string"
-        },
-        "destination": {
-          "$ref": "#/$defs/Template"
+        "allow_empty": {
+          "description": "Allow a pattern that matches zero files. Default: reject.",
+          "type": "boolean",
+          "default": false
         },
         "component": {
           "anyOf": [
@@ -823,6 +803,19 @@
           ],
           "default": null
         },
+        "destination": {
+          "$ref": "#/$defs/Template"
+        },
+        "source": {
+          "type": "string"
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
+        },
         "when": {
           "anyOf": [
             {
@@ -833,11 +826,6 @@
             }
           ],
           "default": null
-        },
-        "allow_empty": {
-          "description": "Allow a pattern that matches zero files. Default: reject.",
-          "type": "boolean",
-          "default": false
         }
       },
       "additionalProperties": false,
@@ -846,36 +834,16 @@
         "destination"
       ]
     },
-    "Shortcut": {
-      "description": "High-level application launcher intent.",
+    "Targeted5": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "location": {
-          "$ref": "#/$defs/ShortcutLocation"
-        },
-        "name": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "target": {
-          "$ref": "#/$defs/Template"
-        },
         "arguments": {
           "type": "array",
+          "default": [],
           "items": {
             "type": "string"
-          },
-          "default": []
-        },
-        "working_directory": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Template"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          }
         },
         "component": {
           "anyOf": [
@@ -888,10 +856,37 @@
           ],
           "default": null
         },
+        "location": {
+          "$ref": "#/$defs/LauncherLocation"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "target": {
+          "$ref": "#/$defs/Template"
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
+        },
         "when": {
           "anyOf": [
             {
               "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "working_directory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
             },
             {
               "type": "null"
@@ -907,21 +902,10 @@
         "target"
       ]
     },
-    "ShortcutLocation": {
-      "description": "Portable application-shortcut location.",
-      "type": "string",
-      "enum": [
-        "start-menu",
-        "desktop"
-      ]
-    },
-    "PathEntry": {
-      "description": "A logical PATH entry to add to the installation-appropriate scope.",
+    "Targeted6": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "value": {
-          "$ref": "#/$defs/Template"
-        },
         "component": {
           "anyOf": [
             {
@@ -932,6 +916,16 @@
             }
           ],
           "default": null
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
+        },
+        "value": {
+          "$ref": "#/$defs/Template"
         },
         "when": {
           "anyOf": [
@@ -950,15 +944,30 @@
         "value"
       ]
     },
-    "Service": {
-      "description": "Platform-neutral service intent.",
+    "Targeted7": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "id": {
-          "$ref": "#/$defs/ServiceId"
+        "arguments": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
-        "name": {
-          "$ref": "#/$defs/NonEmptyString"
+        "binary": {
+          "$ref": "#/$defs/Template"
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "display_name": {
           "anyOf": [
@@ -971,29 +980,21 @@
           ],
           "default": null
         },
-        "binary": {
-          "$ref": "#/$defs/Template"
+        "id": {
+          "$ref": "#/$defs/ServiceId"
         },
-        "arguments": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
         },
         "start": {
           "$ref": "#/$defs/ServiceStart"
         },
-        "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
         },
         "when": {
           "anyOf": [
@@ -1015,35 +1016,29 @@
         "start"
       ]
     },
-    "ServiceId": {
-      "description": "Stable logical service identifier.",
-      "type": "string"
-    },
-    "ServiceStart": {
-      "description": "Platform-neutral service start policy.",
-      "type": "string",
-      "enum": [
-        "automatic",
-        "manual",
-        "disabled"
-      ]
-    },
-    "Protocol": {
-      "description": "URI-scheme launch capability.",
+    "Targeted8": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "scheme": {
-          "$ref": "#/$defs/ProtocolScheme"
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
         "executable": {
           "$ref": "#/$defs/Template"
         },
-        "args": {
+        "scheme": {
+          "$ref": "#/$defs/ProtocolScheme"
+        },
+        "targets": {
           "type": "array",
+          "default": [],
           "items": {
-            "type": "string"
-          },
-          "default": []
+            "$ref": "#/$defs/TargetProfileId"
+          }
         },
         "when": {
           "anyOf": [
@@ -1063,20 +1058,10 @@
         "executable"
       ]
     },
-    "ProtocolScheme": {
-      "description": "URI scheme such as `acme` in `acme://`.",
-      "type": "string"
-    },
-    "FileType": {
-      "description": "File extension registration intent. Does not set default handlers.",
+    "Targeted9": {
+      "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
-        "extension": {
-          "$ref": "#/$defs/FileExtension"
-        },
-        "id": {
-          "$ref": "#/$defs/FileTypeId"
-        },
         "description": {
           "type": [
             "string",
@@ -1086,6 +1071,19 @@
         },
         "executable": {
           "$ref": "#/$defs/Template"
+        },
+        "extension": {
+          "$ref": "#/$defs/FileExtension"
+        },
+        "id": {
+          "$ref": "#/$defs/FileAssociationId"
+        },
+        "targets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          }
         },
         "when": {
           "anyOf": [
@@ -1106,13 +1104,84 @@
         "executable"
       ]
     },
-    "FileExtension": {
-      "description": "A bare file extension such as `.acme`.",
-      "type": "string"
+    "Template": {
+      "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
+      "type": "string",
+      "examples": [
+        "${install}/app.exe",
+        "${location.programs}/Acme"
+      ]
     },
-    "FileTypeId": {
-      "description": "Stable logical file-type identifier (for example a ProgID-like name).",
-      "type": "string"
+    "UiBranding": {
+      "type": "object",
+      "properties": {
+        "accent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "legal_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "license_link": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "logo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "theme": {
+          "$ref": "#/$defs/UiTheme",
+          "default": "system"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UiTheme": {
+      "type": "string",
+      "enum": [
+        "system",
+        "light",
+        "dark"
+      ]
+    },
+    "Updates": {
+      "description": "Build-time update repository settings.",
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "channel",
+        "root"
+      ]
     }
   }
 }

@@ -1,16 +1,19 @@
-//! Ownership-aware PATH, protocol, ProgID, and extension mutations.
-
 use std::collections::BTreeMap;
+
 use windows_link::link;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
-use zup_core::{ResourceKey, SelectedScope};
+use zup_core::{ResourceKey, SelectedScope, TargetTriple};
 use zup_exec::{
-    ExtensionState, ManagedOperation, OwnedResource, ProgIdState, ProtocolState, ServiceState,
-    ShortcutState,
+    ExtensionState, FileAssociationState, LauncherState, OwnedResource, ProtocolState, ServiceState,
 };
 use zup_transaction::{OperationReceipt, ReconcileResult, TransactionNode};
 
-use crate::cmdline::{command_spec_from_command_line, format_command_line, path_entry_matches};
+use crate::cmdline::{command_spec_from_command_line, format_command_line};
+use crate::lowering::host_path;
+use crate::transaction_payload::{
+    ApplyPayload, AppsFeaturesOperation, AppsFeaturesState, AppsFeaturesValue, BackendReceipt,
+    NativeReconcileResult, RemovePayload, decode, receipt_bytes, receipt_from_bytes,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IntegrationError {
@@ -23,340 +26,786 @@ pub enum IntegrationError {
 }
 
 pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, IntegrationError> {
-    match node
+    let operation = node
         .meta
-        .managed
+        .backend
         .as_ref()
-        .ok_or(IntegrationError::Unsupported)?
+        .ok_or(IntegrationError::Unsupported)?;
+    let key = operation.key.clone();
+    match decode::<ApplyPayload>(&operation.payload)
+        .map_err(|error| IntegrationError::Drift(error.to_string()))?
     {
-        ManagedOperation::Shortcut(op) => {
-            crate::shortcuts::apply(op).map_err(IntegrationError::Drift)
-        }
-        ManagedOperation::Path(op) => apply_path(op),
-        ManagedOperation::Service(op) => {
-            crate::services::apply(op).map_err(IntegrationError::Drift)
-        }
-        ManagedOperation::Protocol(op) => apply_protocol(op),
-        ManagedOperation::ProgId(op) => apply_progid(op),
-        ManagedOperation::Extension(op) => apply_extension(op),
-        ManagedOperation::UninstallEntry(op) => {
-            if read_uninstall_entry(op.scope, &op.key_path)? != op.previous {
-                return Err(IntegrationError::Drift(format!(
-                    "uninstall entry {} changed",
-                    op.key_path
-                )));
-            }
-            write_uninstall_entry(op.scope, &op.key_path, Some(&op.installed))?;
-            Ok(OperationReceipt::UninstallEntry {
-                scope: op.scope,
-                key_path: op.key_path.clone(),
-                previous: op.previous.clone(),
-                installed: Some(op.installed.clone()),
-            })
-        }
+        ApplyPayload::Launcher(op) => native_apply(
+            key,
+            crate::shortcuts::apply(&op).map_err(IntegrationError::Drift)?,
+        ),
+        ApplyPayload::Path(op) => apply_path(&key, &op),
+        ApplyPayload::Service(op) => native_apply(
+            key,
+            crate::services::apply(&op).map_err(IntegrationError::Drift)?,
+        ),
+        ApplyPayload::Protocol(op) => apply_protocol(&key, &op),
+        ApplyPayload::FileAssociation(op) => apply_progid(&key, &op),
+        ApplyPayload::Extension(op) => apply_extension(&key, &op),
+        ApplyPayload::AppsFeatures { operation } => apply_apps(&key, &operation),
     }
 }
 
-fn removal_receipt(node: &TransactionNode) -> Result<OperationReceipt, IntegrationError> {
-    let scope = node
-        .meta
-        .removal_scope
-        .ok_or(IntegrationError::Unsupported)?;
-    let owned = node
-        .meta
-        .removal
-        .as_ref()
-        .ok_or(IntegrationError::Unsupported)?;
-    let zup_transaction::NodeKind::OwnedRemoval { key, .. } = &node.kind else {
-        return Err(IntegrationError::Unsupported);
-    };
-    match (key, owned) {
-        (
-            ResourceKey::Shortcut { .. },
-            OwnedResource::Shortcut {
-                link_path,
-                previous,
-                installed,
-            },
-        ) => Ok(OperationReceipt::Shortcut {
-            link_path: link_path.clone(),
-            previous: Box::new(previous.clone()),
-            installed: Box::new(installed.clone()),
-        }),
-        (ResourceKey::PathEntry { .. }, OwnedResource::PathEntry { value, value_type }) => {
-            Ok(OperationReceipt::PathEntry {
-                scope,
-                entry: value.to_string(),
-                value_type: value_type.clone(),
-            })
-        }
-        (
-            ResourceKey::Service { .. },
-            OwnedResource::Service {
-                name,
-                previous,
-                installed,
-            },
-        ) => Ok(OperationReceipt::Service {
-            name: name.clone(),
-            previous: Box::new(previous.clone()),
-            installed: Box::new(installed.clone()),
-        }),
-        (
-            ResourceKey::Protocol { scheme },
-            OwnedResource::Protocol {
-                previous,
-                installed,
-            },
-        ) => Ok(OperationReceipt::Protocol {
-            scope,
-            scheme: scheme.to_string(),
-            previous: previous.clone(),
-            installed: installed.clone(),
-        }),
-        (
-            ResourceKey::FileType { id },
-            OwnedResource::ProgId {
-                previous,
-                installed,
-            },
-        ) => Ok(OperationReceipt::ProgId {
-            scope,
-            id: id.to_string(),
-            previous: previous.clone(),
-            installed: installed.clone(),
-        }),
-        (
-            ResourceKey::FileTypeExtension { extension },
-            OwnedResource::Extension {
-                previous,
-                installed,
-            },
-        ) => Ok(OperationReceipt::Extension {
-            scope,
-            extension: extension.to_string(),
-            previous: previous.clone(),
-            installed: installed.clone(),
-        }),
-        (
-            ResourceKey::UninstallEntry { app_id },
-            OwnedResource::UninstallEntry {
-                scope: owned_scope,
-                state,
-            },
-        ) if *owned_scope == scope => Ok(OperationReceipt::UninstallEntry {
-            scope,
-            key_path: format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}"),
-            previous: None,
-            installed: Some(state.clone()),
-        }),
-        _ => Err(IntegrationError::Unsupported),
-    }
-}
-
-fn inverted_removal_receipt(
-    receipt: OperationReceipt,
+fn native_apply(
+    key: ResourceKey,
+    receipt: BackendReceipt,
 ) -> Result<OperationReceipt, IntegrationError> {
+    let payload =
+        receipt_bytes(&receipt).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    Ok(OperationReceipt::Backend { key, payload })
+}
+
+fn native_reconcile(
+    key: ResourceKey,
+    result: Result<NativeReconcileResult, String>,
+) -> Result<ReconcileResult, IntegrationError> {
+    match result.map_err(IntegrationError::Drift)? {
+        NativeReconcileResult::AppliedWithReceipt(receipt) => Ok(
+            ReconcileResult::AppliedWithReceipt(native_apply(key, *receipt)?),
+        ),
+        NativeReconcileResult::NotApplied => Ok(ReconcileResult::NotApplied),
+        NativeReconcileResult::Ambiguous => Ok(ReconcileResult::Ambiguous),
+    }
+}
+
+fn native_owned_receipt(
+    key: ResourceKey,
+    scope: SelectedScope,
+    owned: &OwnedResource,
+) -> Result<BackendReceipt, IntegrationError> {
+    let privilege = owned.privilege();
+    Ok(match owned {
+        OwnedResource::Launcher {
+            launcher_path,
+            previous,
+            installed,
+            ..
+        } => BackendReceipt::Launcher {
+            launcher_path: launcher_path.clone(),
+            privilege,
+            previous: previous.clone(),
+            installed: installed.clone(),
+        },
+        OwnedResource::PathEntry {
+            value, value_type, ..
+        } => BackendReceipt::Path {
+            scope,
+            entry: value.to_string(),
+            value_type: value_type.clone(),
+            privilege,
+        },
+        OwnedResource::Service {
+            name,
+            previous,
+            installed,
+            ..
+        } => BackendReceipt::Service {
+            name: name.clone(),
+            privilege,
+            previous: previous.clone(),
+            installed: installed.clone(),
+        },
+        OwnedResource::Protocol {
+            previous,
+            installed,
+            ..
+        } => BackendReceipt::Protocol {
+            scope,
+            scheme: match &key {
+                ResourceKey::Protocol { scheme } => scheme.to_string(),
+                _ => String::new(),
+            },
+            privilege,
+            previous: previous.clone(),
+            installed: installed.clone(),
+        },
+        OwnedResource::FileAssociation {
+            previous,
+            installed,
+            ..
+        } => BackendReceipt::FileAssociation {
+            scope,
+            id: match &key {
+                ResourceKey::FileAssociation { id } => id.to_string(),
+                _ => String::new(),
+            },
+            privilege,
+            previous: previous.clone(),
+            installed: installed.clone(),
+        },
+        OwnedResource::Extension {
+            previous,
+            installed,
+            ..
+        } => BackendReceipt::Extension {
+            scope,
+            extension: match &key {
+                ResourceKey::FileAssociationExtension { extension } => extension.to_string(),
+                _ => String::new(),
+            },
+            privilege,
+            previous: previous.clone(),
+            installed: installed.clone(),
+        },
+        OwnedResource::Backend { .. } => return Err(IntegrationError::Unsupported),
+        OwnedResource::File { .. } => return Err(IntegrationError::Unsupported),
+    })
+}
+
+fn invert_receipt(receipt: BackendReceipt) -> Result<BackendReceipt, IntegrationError> {
     Ok(match receipt {
-        OperationReceipt::Shortcut {
-            link_path,
+        BackendReceipt::Launcher {
+            launcher_path,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::Shortcut {
-            link_path,
+        } => BackendReceipt::Launcher {
+            launcher_path,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        OperationReceipt::PathEntry {
+        BackendReceipt::Path {
             scope,
             entry,
             value_type,
-        } => OperationReceipt::RemovePathEntry {
+            privilege,
+        } => BackendReceipt::RemovePath {
             scope,
             entry,
             value_type,
+            privilege,
         },
-        OperationReceipt::Service {
+        BackendReceipt::RemovePath {
+            scope,
+            entry,
+            value_type,
+            privilege,
+        } => BackendReceipt::Path {
+            scope,
+            entry,
+            value_type,
+            privilege,
+        },
+        BackendReceipt::Service {
             name,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::Service {
+        } => BackendReceipt::Service {
             name,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        OperationReceipt::Protocol {
+        BackendReceipt::Protocol {
             scope,
             scheme,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::Protocol {
+        } => BackendReceipt::Protocol {
             scope,
             scheme,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        OperationReceipt::ProgId {
+        BackendReceipt::FileAssociation {
             scope,
             id,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::ProgId {
+        } => BackendReceipt::FileAssociation {
             scope,
             id,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        OperationReceipt::Extension {
+        BackendReceipt::Extension {
             scope,
             extension,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::Extension {
+        } => BackendReceipt::Extension {
             scope,
             extension,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        OperationReceipt::UninstallEntry {
+        BackendReceipt::AppsFeatures {
             scope,
             key_path,
+            privilege,
             previous,
             installed,
-        } => OperationReceipt::UninstallEntry {
+        } => BackendReceipt::AppsFeatures {
             scope,
             key_path,
+            privilege,
             previous: installed,
             installed: previous,
         },
-        _ => return Err(IntegrationError::Unsupported),
     })
 }
 
 pub fn apply_owned_removal(node: &TransactionNode) -> Result<OperationReceipt, IntegrationError> {
-    let original = removal_receipt(node)?;
-    rollback_managed(&original)?;
-    inverted_removal_receipt(original)
+    let operation = node
+        .meta
+        .backend
+        .as_ref()
+        .ok_or(IntegrationError::Unsupported)?;
+    let key = operation.key.clone();
+    let payload: RemovePayload =
+        decode(&operation.payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    match payload {
+        RemovePayload::Owned {
+            scope,
+            key: semantic_key,
+            owned,
+        } => {
+            let original = native_owned_receipt(semantic_key, scope, &owned)?;
+            rollback_native(&original)?;
+            native_apply(key, invert_receipt(original)?)
+        }
+        RemovePayload::AppsFeatures {
+            scope,
+            key_path,
+            state,
+        } => {
+            match read_apps_features(scope, &key_path)? {
+                Some(current) if current == state => {
+                    write_apps_features(scope, &key_path, None)?;
+                }
+                None => {}
+                Some(_) => {
+                    return Err(IntegrationError::Drift(
+                        "Apps & Features registration changed".into(),
+                    ));
+                }
+            }
+            native_apply(
+                key,
+                BackendReceipt::AppsFeatures {
+                    scope,
+                    key_path,
+                    privilege: operation.privilege,
+                    previous: Some(state),
+                    installed: None,
+                },
+            )
+        }
+    }
 }
 
 pub fn reconcile_owned_removal(
     node: &TransactionNode,
 ) -> Result<ReconcileResult, IntegrationError> {
-    let original = removal_receipt(node)?;
-    let status = match &original {
-        OperationReceipt::Shortcut {
-            link_path,
-            previous,
+    let operation = node
+        .meta
+        .backend
+        .as_ref()
+        .ok_or(IntegrationError::Unsupported)?;
+    let key = operation.key.clone();
+    let payload: RemovePayload =
+        decode(&operation.payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    match payload {
+        RemovePayload::Owned {
+            scope,
+            key: semantic_key,
+            owned,
+        } => {
+            let original = native_owned_receipt(semantic_key, scope, &owned)?;
+            let status = reconcile_native(&original)?;
+            if status == ReconcileResult::Applied {
+                Ok(ReconcileResult::AppliedWithReceipt(native_apply(
+                    key,
+                    invert_receipt(original)?,
+                )?))
+            } else {
+                Ok(status)
+            }
+        }
+        RemovePayload::AppsFeatures {
+            scope,
+            key_path,
+            state,
+        } => match read_apps_features(scope, &key_path)? {
+            Some(current) if current == state => Ok(ReconcileResult::NotApplied),
+            None => Ok(ReconcileResult::AppliedWithReceipt(native_apply(
+                key,
+                BackendReceipt::AppsFeatures {
+                    scope,
+                    key_path,
+                    privilege: operation.privilege,
+                    previous: Some(state),
+                    installed: None,
+                },
+            )?)),
+            Some(_) => Err(IntegrationError::Drift(
+                "Apps & Features registration changed".into(),
+            )),
+        },
+    }
+}
+
+pub fn rollback_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
+    let OperationReceipt::Backend { payload, .. } = receipt else {
+        return Err(IntegrationError::Unsupported);
+    };
+    let receipt =
+        receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    rollback_native(&receipt)
+}
+
+/// Confirm that a backend apply or removal left the host in the state its
+/// receipt says it installed.
+///
+/// The journal stores backend receipts as opaque bytes, so this is the only
+/// place that can read one back: `zup-transaction` never sees a payload. A
+/// removal's receipt records the *removed* state as its installed state, which
+/// is what makes one comparison cover both directions.
+pub(crate) fn verify_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
+    let OperationReceipt::Backend { payload, .. } = receipt else {
+        return Err(IntegrationError::Unsupported);
+    };
+    let receipt =
+        receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    verify_native(&receipt)
+}
+
+fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
+    match receipt {
+        BackendReceipt::Launcher {
+            launcher_path,
             installed,
+            ..
         } => {
             use crate::shortcuts::ShortcutReader;
-            match crate::shortcuts::WindowsShortcutReader.read_shortcut(link_path) {
-                Ok(zup_exec::ObservedShortcutState::Absent) => {
-                    compare_removal(&ShortcutState::Absent, previous, installed)
+            let observed = crate::shortcuts::WindowsShortcutReader
+                .read_shortcut(launcher_path)
+                .map_err(IntegrationError::Drift)?;
+            expect(
+                "launcher",
+                &launcher_path.to_string(),
+                &observed_launcher(observed)?,
+                installed,
+            )
+        }
+        BackendReceipt::Path {
+            scope,
+            entry,
+            value_type,
+            ..
+        }
+        | BackendReceipt::RemovePath {
+            scope,
+            entry,
+            value_type,
+            ..
+        } => {
+            let (current_type, raw) = read_path(*scope)?;
+            if current_type != *value_type
+                && !crate::search_path::lost_expansion(value_type, &current_type)
+            {
+                return Err(IntegrationError::Drift(
+                    "search-path value type changed".into(),
+                ));
+            }
+            let installed = search_path_entry_count(&raw, entry) == 1;
+            let expected = matches!(receipt, BackendReceipt::Path { .. });
+            if installed != expected {
+                return Err(IntegrationError::Drift(format!(
+                    "search path does not name `{entry}` as installed"
+                )));
+            }
+            Ok(())
+        }
+        BackendReceipt::Service {
+            name,
+            previous,
+            installed,
+            ..
+        } => {
+            let Some(target) =
+                service_state_target(installed).or_else(|| service_state_target(previous))
+            else {
+                return Err(IntegrationError::Drift("service target is missing".into()));
+            };
+            let observed =
+                crate::scm::query_service(name, target).map_err(IntegrationError::Drift)?;
+            expect("service", name, &observed_service(observed)?, installed)
+        }
+        BackendReceipt::Protocol {
+            scope,
+            scheme,
+            previous,
+            installed,
+            ..
+        } => {
+            let target = protocol_target(installed)
+                .or_else(|| protocol_target(previous))
+                .ok_or_else(|| IntegrationError::Drift("protocol target is missing".into()))?;
+            expect(
+                "protocol",
+                scheme,
+                &read_protocol(*scope, scheme, target)?,
+                installed,
+            )
+        }
+        BackendReceipt::FileAssociation {
+            scope,
+            id,
+            previous,
+            installed,
+            ..
+        } => {
+            let target = file_association_target(installed)
+                .or_else(|| file_association_target(previous))
+                .ok_or_else(|| {
+                    IntegrationError::Drift("file association target is missing".into())
+                })?;
+            expect(
+                "file association",
+                id,
+                &read_progid(*scope, id, target)?,
+                installed,
+            )
+        }
+        BackendReceipt::Extension {
+            scope,
+            extension,
+            installed,
+            ..
+        } => expect(
+            "extension",
+            extension,
+            &read_extension(*scope, extension)?,
+            installed,
+        ),
+        BackendReceipt::AppsFeatures {
+            scope,
+            key_path,
+            installed,
+            ..
+        } => expect(
+            "Apps & Features registration",
+            key_path,
+            &read_apps_features(*scope, key_path)?,
+            installed,
+        ),
+    }
+}
+
+fn expect<T: PartialEq + std::fmt::Debug>(
+    what: &str,
+    which: &str,
+    found: &T,
+    installed: &T,
+) -> Result<(), IntegrationError> {
+    if found == installed {
+        Ok(())
+    } else {
+        Err(IntegrationError::Drift(format!(
+            "{what} `{which}` is {found:?}, not the installed state {installed:?}"
+        )))
+    }
+}
+
+fn observed_launcher(
+    observed: zup_exec::ObservedLauncherState,
+) -> Result<LauncherState, IntegrationError> {
+    Ok(match observed {
+        zup_exec::ObservedLauncherState::Absent => LauncherState::Absent,
+        zup_exec::ObservedLauncherState::Launcher {
+            target,
+            arguments,
+            working_directory,
+        } => LauncherState::Launcher {
+            target,
+            arguments,
+            working_directory,
+        },
+        zup_exec::ObservedLauncherState::InvalidLauncher
+        | zup_exec::ObservedLauncherState::NonFile => {
+            return Err(IntegrationError::Drift("launcher is unreadable".into()));
+        }
+    })
+}
+
+fn observed_service(
+    observed: zup_exec::ObservedServiceState,
+) -> Result<ServiceState, IntegrationError> {
+    Ok(match observed {
+        zup_exec::ObservedServiceState::Absent => ServiceState::Absent,
+        zup_exec::ObservedServiceState::Service {
+            display_name,
+            command,
+            start,
+            ..
+        } => ServiceState::Registration {
+            display_name,
+            command,
+            start,
+        },
+    })
+}
+
+fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
+    match receipt {
+        BackendReceipt::Launcher {
+            launcher_path,
+            previous,
+            installed,
+            ..
+        } => crate::shortcuts::rollback(launcher_path, previous, installed)
+            .map_err(IntegrationError::Drift),
+        BackendReceipt::Service {
+            name,
+            previous,
+            installed,
+            ..
+        } => crate::services::rollback(name, previous, installed).map_err(IntegrationError::Drift),
+        BackendReceipt::Path {
+            scope,
+            entry,
+            value_type,
+            ..
+        } => rollback_path(*scope, entry, value_type),
+        BackendReceipt::RemovePath {
+            scope,
+            entry,
+            value_type,
+            ..
+        } => restore_removed_path(*scope, entry, value_type),
+        BackendReceipt::Protocol {
+            scope,
+            scheme,
+            previous,
+            installed,
+            ..
+        } => {
+            let target = protocol_target(installed)
+                .or_else(|| protocol_target(previous))
+                .ok_or(IntegrationError::Drift("protocol target is missing".into()))?;
+            if read_protocol(*scope, scheme, target)? != *installed {
+                return Err(IntegrationError::Drift(format!("protocol {scheme}")));
+            }
+            write_protocol(*scope, scheme, previous)
+        }
+        BackendReceipt::FileAssociation {
+            scope,
+            id,
+            previous,
+            installed,
+            ..
+        } => {
+            let target = file_association_target(installed)
+                .or_else(|| file_association_target(previous))
+                .ok_or(IntegrationError::Drift(
+                    "file association target is missing".into(),
+                ))?;
+            if read_progid(*scope, id, target)? != *installed {
+                return Err(IntegrationError::Drift(format!("file association {id}")));
+            }
+            write_progid(*scope, id, previous)
+        }
+        BackendReceipt::Extension {
+            scope,
+            extension,
+            previous,
+            installed,
+            ..
+        } => {
+            if read_extension(*scope, extension)? != *installed {
+                return Err(IntegrationError::Drift(format!("extension {extension}")));
+            }
+            write_extension(*scope, extension, previous)
+        }
+        BackendReceipt::AppsFeatures {
+            scope,
+            key_path,
+            previous,
+            installed,
+            ..
+        } => {
+            if read_apps_features(*scope, key_path)? != installed.clone() {
+                return Err(IntegrationError::Drift(
+                    "Apps & Features registration changed".into(),
+                ));
+            }
+            write_apps_features(*scope, key_path, previous.as_ref())
+        }
+    }
+}
+
+fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, IntegrationError> {
+    match receipt {
+        BackendReceipt::Launcher {
+            launcher_path,
+            previous,
+            installed,
+            ..
+        } => {
+            use crate::shortcuts::ShortcutReader;
+            match crate::shortcuts::WindowsShortcutReader.read_shortcut(launcher_path) {
+                Ok(zup_exec::ObservedLauncherState::Absent) => {
+                    Ok(compare_removal(&LauncherState::Absent, previous, installed))
                 }
-                Ok(zup_exec::ObservedShortcutState::Shortcut {
+                Ok(zup_exec::ObservedLauncherState::Launcher {
                     target,
                     arguments,
                     working_directory,
-                }) => compare_removal(
-                    &ShortcutState::Link {
+                }) => Ok(compare_removal(
+                    &LauncherState::Launcher {
                         target,
                         arguments,
                         working_directory,
                     },
                     previous,
                     installed,
-                ),
-                _ => ReconcileResult::Ambiguous,
+                )),
+                _ => Ok(ReconcileResult::Ambiguous),
             }
         }
-        OperationReceipt::PathEntry {
+        BackendReceipt::Path {
             scope,
             entry,
             value_type,
+            ..
+        }
+        | BackendReceipt::RemovePath {
+            scope,
+            entry,
+            value_type,
+            ..
         } => match read_path(*scope) {
             Ok((ty, raw))
-                if ty == *value_type
-                    || (value_type == "missing"
-                        && matches!(ty.as_str(), "missing" | "expand_sz")) =>
+                if ty == *value_type || crate::search_path::lost_expansion(value_type, &ty) =>
             {
-                let count = raw.split(';').filter(|part| *part == entry).count();
-                match count {
-                    0 => ReconcileResult::Applied,
-                    1 => ReconcileResult::NotApplied,
-                    _ => ReconcileResult::Ambiguous,
+                match search_path_entry_count(&raw, entry) {
+                    0 => Ok(ReconcileResult::Applied),
+                    1 => Ok(ReconcileResult::NotApplied),
+                    _ => Ok(ReconcileResult::Ambiguous),
                 }
             }
-            _ => ReconcileResult::Ambiguous,
+            _ => Ok(ReconcileResult::Ambiguous),
         },
-        OperationReceipt::Service {
+        BackendReceipt::Service {
             name,
             previous,
             installed,
-        } => match crate::scm::query_service(name) {
-            Ok(zup_exec::ObservedServiceState::Absent) => {
-                compare_removal(&ServiceState::Absent, previous, installed)
-            }
-            Ok(zup_exec::ObservedServiceState::Service {
-                display_name,
-                command,
-                start,
-                ..
-            }) => compare_removal(
-                &ServiceState::Registration {
+            ..
+        } => {
+            let target = service_state_target(installed).or_else(|| service_state_target(previous));
+            let Some(target) = target else {
+                return Ok(ReconcileResult::Ambiguous);
+            };
+            match crate::scm::query_service(name, target) {
+                Ok(zup_exec::ObservedServiceState::Absent) => {
+                    Ok(compare_removal(&ServiceState::Absent, previous, installed))
+                }
+                Ok(zup_exec::ObservedServiceState::Service {
                     display_name,
                     command,
                     start,
-                },
-                previous,
-                installed,
-            ),
-            Err(_) => ReconcileResult::Ambiguous,
-        },
-        OperationReceipt::Protocol {
+                    ..
+                }) => Ok(compare_removal(
+                    &ServiceState::Registration {
+                        display_name,
+                        command,
+                        start,
+                    },
+                    previous,
+                    installed,
+                )),
+                Err(_) => Ok(ReconcileResult::Ambiguous),
+            }
+        }
+        BackendReceipt::Protocol {
             scope,
             scheme,
             previous,
             installed,
-        } => match read_protocol(*scope, scheme) {
-            Ok(current) => compare_removal(&current, previous, installed),
-            Err(_) => ReconcileResult::Ambiguous,
-        },
-        OperationReceipt::ProgId {
+            ..
+        } => {
+            let Some(target) = protocol_target(installed).or_else(|| protocol_target(previous))
+            else {
+                return Ok(ReconcileResult::Ambiguous);
+            };
+            match read_protocol(*scope, scheme, target) {
+                Ok(current) => Ok(compare_removal(&current, previous, installed)),
+                Err(_) => Ok(ReconcileResult::Ambiguous),
+            }
+        }
+        BackendReceipt::FileAssociation {
             scope,
             id,
             previous,
             installed,
-        } => match read_progid(*scope, id) {
-            Ok(current) => compare_removal(&current, previous, installed),
-            Err(_) => ReconcileResult::Ambiguous,
-        },
-        OperationReceipt::Extension {
+            ..
+        } => {
+            let Some(target) =
+                file_association_target(installed).or_else(|| file_association_target(previous))
+            else {
+                return Ok(ReconcileResult::Ambiguous);
+            };
+            match read_progid(*scope, id, target) {
+                Ok(current) => Ok(compare_removal(&current, previous, installed)),
+                Err(_) => Ok(ReconcileResult::Ambiguous),
+            }
+        }
+        BackendReceipt::Extension {
             scope,
             extension,
             previous,
             installed,
+            ..
         } => match read_extension(*scope, extension) {
-            Ok(current) => compare_removal(&current, previous, installed),
-            Err(_) => ReconcileResult::Ambiguous,
+            Ok(current) => Ok(compare_removal(&current, previous, installed)),
+            Err(_) => Ok(ReconcileResult::Ambiguous),
         },
-        OperationReceipt::UninstallEntry {
+        BackendReceipt::AppsFeatures {
             scope,
             key_path,
             previous,
             installed,
-        } => match read_uninstall_entry(*scope, key_path) {
-            Ok(current) => compare_removal(&current, previous, installed),
-            Err(_) => ReconcileResult::Ambiguous,
+            ..
+        } => match read_apps_features(*scope, key_path) {
+            Ok(current) if current == *previous => Ok(ReconcileResult::Applied),
+            Ok(current) if current == *installed => Ok(ReconcileResult::NotApplied),
+            _ => Ok(ReconcileResult::Ambiguous),
         },
-        _ => return Err(IntegrationError::Unsupported),
-    };
-    if status == ReconcileResult::Applied {
-        Ok(ReconcileResult::AppliedWithReceipt(
-            inverted_removal_receipt(original)?,
-        ))
-    } else {
-        Ok(status)
+    }
+}
+
+fn service_state_target(state: &ServiceState) -> Option<&TargetTriple> {
+    match state {
+        ServiceState::Registration { command, .. } => Some(command.executable.target()),
+        ServiceState::Absent => None,
+    }
+}
+
+fn protocol_target(state: &ProtocolState) -> Option<&TargetTriple> {
+    match state {
+        ProtocolState::Registration { command, .. } => Some(command.executable.target()),
+        ProtocolState::Absent => None,
+    }
+}
+
+fn file_association_target(state: &FileAssociationState) -> Option<&TargetTriple> {
+    match state {
+        FileAssociationState::Registration { command, .. } => Some(command.executable.target()),
+        FileAssociationState::Absent => None,
     }
 }
 
@@ -370,220 +819,196 @@ fn compare_removal<T: PartialEq>(current: &T, previous: &T, installed: &T) -> Re
     }
 }
 
-pub fn rollback_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
-    match receipt {
-        OperationReceipt::Shortcut {
-            link_path,
-            previous,
-            installed,
-        } => crate::shortcuts::rollback(link_path, previous, installed)
-            .map_err(IntegrationError::Drift),
-        OperationReceipt::Service {
-            name,
-            previous,
-            installed,
-        } => crate::services::rollback(name, previous, installed).map_err(IntegrationError::Drift),
-        OperationReceipt::PathEntry {
-            scope,
-            entry,
-            value_type,
-        } => rollback_path(*scope, entry, value_type),
-        OperationReceipt::RemovePathEntry {
-            scope,
-            entry,
-            value_type,
-        } => restore_removed_path(*scope, entry, value_type),
-        OperationReceipt::Protocol {
-            scope,
-            scheme,
-            previous,
-            installed,
-        } => {
-            if read_protocol(*scope, scheme)? != *installed {
-                return Err(IntegrationError::Drift(format!("protocol {scheme}")));
-            }
-            write_protocol(*scope, scheme, previous)
-        }
-        OperationReceipt::ProgId {
-            scope,
-            id,
-            previous,
-            installed,
-        } => {
-            if read_progid(*scope, id)? != *installed {
-                return Err(IntegrationError::Drift(format!("ProgID {id}")));
-            }
-            write_progid(*scope, id, previous)
-        }
-        OperationReceipt::Extension {
-            scope,
-            extension,
-            previous,
-            installed,
-        } => {
-            if read_extension(*scope, extension)? != *installed {
-                return Err(IntegrationError::Drift(format!("extension {extension}")));
-            }
-            write_extension(*scope, extension, previous)
-        }
-        OperationReceipt::UninstallEntry {
-            scope,
-            key_path,
-            previous,
-            installed,
-        } => {
-            if read_uninstall_entry(*scope, key_path)? != *installed {
-                return Err(IntegrationError::Drift(format!(
-                    "uninstall entry {key_path}"
-                )));
-            }
-            write_uninstall_entry(*scope, key_path, previous.as_ref())
-        }
-        _ => Err(IntegrationError::Unsupported),
-    }
-}
-
 pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, IntegrationError> {
-    let result = match node
-        .meta
-        .managed
-        .as_ref()
-        .ok_or(IntegrationError::Unsupported)?
+    let Some(operation) = node.meta.backend.as_ref() else {
+        return Err(IntegrationError::Unsupported);
+    };
+    let key = operation.key.clone();
+    match decode::<ApplyPayload>(&operation.payload)
+        .map_err(|error| IntegrationError::Drift(error.to_string()))?
     {
-        ManagedOperation::Shortcut(op) => {
-            return crate::shortcuts::reconcile(op).map_err(IntegrationError::Drift);
-        }
-        ManagedOperation::Path(op) => {
+        ApplyPayload::Launcher(op) => native_reconcile(key, crate::shortcuts::reconcile(&op)),
+        ApplyPayload::Path(op) => {
             let (value_type, raw) = match read_path(op.scope) {
                 Ok(value) => value,
                 Err(_) => return Ok(ReconcileResult::Ambiguous),
             };
             let entry = op.value.to_string();
-            if raw.split(';').any(|s| s == entry) {
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::PathEntry {
-                    scope: op.scope,
-                    entry,
-                    value_type,
-                })
-            } else if matches!(op.previous, zup_exec::PathEntryState::Absent) {
-                ReconcileResult::NotApplied
+            if search_path_entry_count(&raw, &entry) == 1 {
+                native_reconcile(
+                    key,
+                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                        BackendReceipt::Path {
+                            scope: op.scope,
+                            entry,
+                            value_type,
+                            privilege: op.privilege,
+                        },
+                    ))),
+                )
+            } else if !op.present {
+                Ok(ReconcileResult::NotApplied)
             } else {
-                ReconcileResult::Ambiguous
+                Ok(ReconcileResult::Ambiguous)
             }
         }
-        ManagedOperation::Protocol(op) => {
-            let current = match read_protocol(op.scope, op.scheme.as_str()) {
-                Ok(value) => value,
-                Err(_) => return Ok(ReconcileResult::Ambiguous),
-            };
+        ApplyPayload::Service(op) => native_reconcile(key, crate::services::reconcile(&op)),
+        ApplyPayload::Protocol(op) => {
+            let current =
+                match read_protocol(op.scope, op.scheme.as_str(), op.command.executable.target()) {
+                    Ok(value) => value,
+                    Err(_) => return Ok(ReconcileResult::Ambiguous),
+                };
             let previous = protocol_from_observed(&op.previous)?;
             let installed = ProtocolState::Registration {
                 command: op.command.clone(),
             };
             if current == installed {
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::Protocol {
-                    scope: op.scope,
-                    scheme: op.scheme.to_string(),
-                    previous,
-                    installed,
-                })
+                native_reconcile(
+                    key,
+                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                        BackendReceipt::Protocol {
+                            scope: op.scope,
+                            scheme: op.scheme.to_string(),
+                            privilege: op.privilege,
+                            previous,
+                            installed,
+                        },
+                    ))),
+                )
             } else {
-                ReconcileResult::NotApplied
+                Ok(ReconcileResult::NotApplied)
             }
         }
-        ManagedOperation::Service(op) => {
-            return crate::services::reconcile(op).map_err(IntegrationError::Drift);
-        }
-        ManagedOperation::ProgId(op) => {
-            let current = match read_progid(op.scope, &op.id) {
+        ApplyPayload::FileAssociation(op) => {
+            let current = match read_progid(op.scope, &op.id, op.command.executable.target()) {
                 Ok(value) => value,
                 Err(_) => return Ok(ReconcileResult::Ambiguous),
             };
-            let previous = progid_from_observed(&op.previous_id)?;
-            let installed = ProgIdState::Registration {
+            let previous = file_association_from_observed(&op.previous_association)?;
+            let installed = FileAssociationState::Registration {
                 description: op.description.clone(),
                 command: op.command.clone(),
             };
             if current == installed {
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::ProgId {
-                    scope: op.scope,
-                    id: op.id.clone(),
-                    previous,
-                    installed,
-                })
+                native_reconcile(
+                    key,
+                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                        BackendReceipt::FileAssociation {
+                            scope: op.scope,
+                            id: op.id.clone(),
+                            privilege: op.privilege,
+                            previous,
+                            installed,
+                        },
+                    ))),
+                )
             } else {
-                ReconcileResult::NotApplied
+                Ok(ReconcileResult::NotApplied)
             }
         }
-        ManagedOperation::Extension(op) => {
+        ApplyPayload::Extension(op) => {
             let current = match read_extension(op.scope, &op.extension) {
                 Ok(value) => value,
                 Err(_) => return Ok(ReconcileResult::Ambiguous),
             };
             let previous = extension_from_observed(&op.previous_extension)?;
             let installed = ExtensionState::Mapped {
-                prog_id: op.id.clone(),
+                association_id: op.id.clone(),
             };
             if current == installed {
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::Extension {
-                    scope: op.scope,
-                    extension: op.extension.clone(),
-                    previous,
-                    installed,
-                })
+                native_reconcile(
+                    key,
+                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                        BackendReceipt::Extension {
+                            scope: op.scope,
+                            extension: op.extension.clone(),
+                            privilege: op.privilege,
+                            previous,
+                            installed,
+                        },
+                    ))),
+                )
             } else {
-                ReconcileResult::NotApplied
+                Ok(ReconcileResult::NotApplied)
             }
         }
-        ManagedOperation::UninstallEntry(op) => {
-            let current = match read_uninstall_entry(op.scope, &op.key_path) {
+        ApplyPayload::AppsFeatures { operation } => {
+            let current = match read_apps_features(operation.scope, &operation.key_path) {
                 Ok(value) => value,
                 Err(_) => return Ok(ReconcileResult::Ambiguous),
             };
-            if current.as_ref() == Some(&op.installed) {
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::UninstallEntry {
-                    scope: op.scope,
-                    key_path: op.key_path.clone(),
-                    previous: op.previous.clone(),
-                    installed: Some(op.installed.clone()),
-                })
-            } else if current == op.previous {
-                ReconcileResult::NotApplied
+            if current == Some(operation.installed.clone()) {
+                native_reconcile(
+                    key,
+                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                        BackendReceipt::AppsFeatures {
+                            scope: operation.scope,
+                            key_path: operation.key_path,
+                            privilege: operation.privilege,
+                            previous: operation.previous,
+                            installed: Some(operation.installed),
+                        },
+                    ))),
+                )
+            } else if current == operation.previous {
+                Ok(ReconcileResult::NotApplied)
             } else {
-                ReconcileResult::Ambiguous
+                Ok(ReconcileResult::Ambiguous)
             }
         }
-    };
-    Ok(result)
+    }
 }
 
-fn apply_path(op: &zup_exec::PathOperation) -> Result<OperationReceipt, IntegrationError> {
-    let key = environment_key(op.scope, true)?
+fn apply_path(
+    key: &ResourceKey,
+    op: &zup_exec::PathOperation,
+) -> Result<OperationReceipt, IntegrationError> {
+    let target = op.value.target();
+    let registry_key = environment_key(op.scope, true)?
         .ok_or_else(|| IntegrationError::Registry("environment key".into()))?;
-    let (value_type, raw) = read_path_from_key(&key)?;
-    if raw
-        .split(';')
-        .filter(|s| !s.trim().is_empty())
-        .any(|s| path_entry_matches(s.trim(), &op.value))
-    {
+    let (value_type, raw) = read_path_from_key(&registry_key)?;
+    if crate::search_path::contains(target, &raw, &op.value) {
         return Err(IntegrationError::Drift(
-            "PATH entry appeared after planning".into(),
+            "search-path entry appeared after planning".into(),
         ));
     }
     let entry = op.value.to_string();
-    let next = if raw.is_empty() {
-        entry.clone()
+    let next = append_search_path_entry(&raw, &entry);
+    set_path(
+        &registry_key,
+        crate::search_path::write_value_type(&value_type),
+        &next,
+    )?;
+    native_apply(
+        key.clone(),
+        BackendReceipt::Path {
+            scope: op.scope,
+            entry,
+            value_type,
+            privilege: op.privilege,
+        },
+    )
+}
+
+/// Append one segment, preserving the host's trailing-separator shape so an
+/// unrelated value round-trips byte-for-byte apart from the addition.
+fn append_search_path_entry(raw: &str, entry: &str) -> String {
+    if raw.is_empty() {
+        entry.to_owned()
     } else if raw.ends_with(';') {
         format!("{raw}{entry}")
     } else {
         format!("{raw};{entry}")
-    };
-    set_path(&key, &value_type, &next)?;
-    Ok(OperationReceipt::PathEntry {
-        scope: op.scope,
-        entry,
-        value_type,
-    })
+    }
+}
+
+/// True when a stored value still names `entry` exactly once.
+fn search_path_entry_count(raw: &str, entry: &str) -> usize {
+    crate::search_path::split(raw)
+        .into_iter()
+        .filter(|segment| *segment == entry)
+        .count()
 }
 
 fn rollback_path(
@@ -592,20 +1017,23 @@ fn rollback_path(
     value_type: &str,
 ) -> Result<(), IntegrationError> {
     let Some(key) = environment_key(scope, true)? else {
-        return Err(IntegrationError::Drift("PATH key missing".into()));
+        return Err(IntegrationError::Drift("search-path key missing".into()));
     };
     let (current_type, raw) = read_path_from_key(&key)?;
-    if current_type != value_type && !(value_type == "missing" && current_type == "expand_sz") {
-        return Err(IntegrationError::Drift("PATH value type changed".into()));
-    }
-    if raw.split(';').filter(|part| *part == entry).count() != 1 {
+    if current_type != value_type && !crate::search_path::lost_expansion(value_type, &current_type)
+    {
         return Err(IntegrationError::Drift(
-            "installed PATH entry is missing or duplicated".into(),
+            "search-path value type changed".into(),
+        ));
+    }
+    if search_path_entry_count(&raw, entry) != 1 {
+        return Err(IntegrationError::Drift(
+            "installed search-path entry is missing or duplicated".into(),
         ));
     }
     let mut removed = false;
-    let kept: Vec<&str> = raw
-        .split(';')
+    let kept: Vec<&str> = crate::search_path::split(&raw)
+        .into_iter()
         .filter(|part| {
             if !removed && *part == entry {
                 removed = true;
@@ -617,21 +1045,17 @@ fn rollback_path(
         .collect();
     if !removed {
         return Err(IntegrationError::Drift(
-            "installed PATH entry changed or disappeared".into(),
+            "installed search-path entry changed or disappeared".into(),
         ));
     }
-    if value_type == "missing" && kept.iter().all(|part| part.is_empty()) {
-        key.remove_value("Path")
+    if value_type == crate::search_path::VALUE_TYPE_MISSING && kept.is_empty() {
+        key.remove_value(crate::search_path::PATH_VALUE_NAME)
             .or_else(ignore_missing)
             .map_err(regerr)?;
     } else {
         set_path(
             &key,
-            if value_type == "missing" {
-                "expand_sz"
-            } else {
-                value_type
-            },
+            crate::search_path::write_value_type(value_type),
             &kept.join(";"),
         )?;
     }
@@ -645,96 +1069,132 @@ fn restore_removed_path(
     value_type: &str,
 ) -> Result<(), IntegrationError> {
     let key = environment_key(scope, true)?
-        .ok_or_else(|| IntegrationError::Drift("PATH key missing".into()))?;
+        .ok_or_else(|| IntegrationError::Drift("search-path key missing".into()))?;
     let (current_type, raw) = read_path_from_key(&key)?;
-    if current_type != value_type
-        && !(value_type == "missing" && matches!(current_type.as_str(), "missing" | "expand_sz"))
+    if current_type != value_type && !crate::search_path::lost_expansion(value_type, &current_type)
     {
         return Err(IntegrationError::Drift(
-            "PATH value type changed after removal".into(),
+            "search-path value type changed after removal".into(),
         ));
     }
-    if raw.split(';').any(|part| part == entry) {
+    if search_path_entry_count(&raw, entry) > 0 {
         return Err(IntegrationError::Drift(
-            "removed PATH entry appeared again".into(),
+            "removed search-path entry appeared again".into(),
         ));
     }
-    let next = if raw.is_empty() {
-        entry.to_owned()
-    } else if raw.ends_with(';') {
-        format!("{raw}{entry}")
-    } else {
-        format!("{raw};{entry}")
-    };
+    let next = append_search_path_entry(&raw, entry);
     set_path(
         &key,
-        if current_type == "missing" {
-            "expand_sz"
-        } else {
-            &current_type
-        },
+        crate::search_path::write_value_type(&current_type),
         &next,
     )?;
     broadcast_environment_change();
     Ok(())
 }
 
-fn apply_protocol(op: &zup_exec::ProtocolOperation) -> Result<OperationReceipt, IntegrationError> {
+fn apply_protocol(
+    key: &ResourceKey,
+    op: &zup_exec::ProtocolOperation,
+) -> Result<OperationReceipt, IntegrationError> {
     let previous = protocol_from_observed(&op.previous)?;
-    if read_protocol(op.scope, op.scheme.as_str())? != previous {
-        return Err(IntegrationError::Drift(format!(
-            "protocol {} changed",
-            op.scheme
-        )));
+    if read_protocol(op.scope, op.scheme.as_str(), op.command.executable.target())? != previous {
+        return Err(IntegrationError::Drift(format!("protocol {}", op.scheme)));
     }
     let installed = ProtocolState::Registration {
         command: op.command.clone(),
     };
     write_protocol(op.scope, op.scheme.as_str(), &installed)?;
-    Ok(OperationReceipt::Protocol {
-        scope: op.scope,
-        scheme: op.scheme.to_string(),
-        previous,
-        installed,
-    })
+    native_apply(
+        key.clone(),
+        BackendReceipt::Protocol {
+            scope: op.scope,
+            scheme: op.scheme.to_string(),
+            privilege: op.privilege,
+            previous,
+            installed,
+        },
+    )
 }
 
-fn apply_progid(op: &zup_exec::FileTypeOperation) -> Result<OperationReceipt, IntegrationError> {
-    let previous = progid_from_observed(&op.previous_id)?;
-    if read_progid(op.scope, &op.id)? != previous {
-        return Err(IntegrationError::Drift(format!("ProgID {} changed", op.id)));
+fn apply_progid(
+    key: &ResourceKey,
+    op: &zup_exec::FileAssociationOperation,
+) -> Result<OperationReceipt, IntegrationError> {
+    let previous = file_association_from_observed(&op.previous_association)?;
+    if read_progid(op.scope, &op.id, op.command.executable.target())? != previous {
+        return Err(IntegrationError::Drift(format!(
+            "file association {}",
+            op.id
+        )));
     }
-    let installed = ProgIdState::Registration {
+    let installed = FileAssociationState::Registration {
         description: op.description.clone(),
         command: op.command.clone(),
     };
     write_progid(op.scope, &op.id, &installed)?;
-    Ok(OperationReceipt::ProgId {
-        scope: op.scope,
-        id: op.id.clone(),
-        previous,
-        installed,
-    })
+    native_apply(
+        key.clone(),
+        BackendReceipt::FileAssociation {
+            scope: op.scope,
+            id: op.id.clone(),
+            privilege: op.privilege,
+            previous,
+            installed,
+        },
+    )
 }
 
-fn apply_extension(op: &zup_exec::FileTypeOperation) -> Result<OperationReceipt, IntegrationError> {
+fn apply_extension(
+    key: &ResourceKey,
+    op: &zup_exec::FileAssociationOperation,
+) -> Result<OperationReceipt, IntegrationError> {
     let previous = extension_from_observed(&op.previous_extension)?;
     if read_extension(op.scope, &op.extension)? != previous {
         return Err(IntegrationError::Drift(format!(
-            "extension {} changed",
+            "extension {}",
             op.extension
         )));
     }
     let installed = ExtensionState::Mapped {
-        prog_id: op.id.clone(),
+        association_id: op.id.clone(),
     };
     write_extension(op.scope, &op.extension, &installed)?;
-    Ok(OperationReceipt::Extension {
-        scope: op.scope,
-        extension: op.extension.clone(),
-        previous,
-        installed,
-    })
+    native_apply(
+        key.clone(),
+        BackendReceipt::Extension {
+            scope: op.scope,
+            extension: op.extension.clone(),
+            privilege: op.privilege,
+            previous,
+            installed,
+        },
+    )
+}
+
+fn apply_apps(
+    key: &ResourceKey,
+    operation: &AppsFeaturesOperation,
+) -> Result<OperationReceipt, IntegrationError> {
+    if read_apps_features(operation.scope, &operation.key_path)? != operation.previous {
+        return Err(IntegrationError::Drift(
+            "Apps & Features registration changed".into(),
+        ));
+    }
+    write_apps_features(
+        operation.scope,
+        &operation.key_path,
+        Some(&operation.installed),
+    )?;
+    native_apply(
+        key.clone(),
+        BackendReceipt::AppsFeatures {
+            scope: operation.scope,
+            key_path: operation.key_path.clone(),
+            privilege: operation.privilege,
+            previous: operation.previous.clone(),
+            installed: Some(operation.installed.clone()),
+        },
+    )
 }
 
 fn classes(scope: SelectedScope, create: bool) -> Result<Key, IntegrationError> {
@@ -751,10 +1211,10 @@ fn classes(scope: SelectedScope, create: bool) -> Result<Key, IntegrationError> 
     .map_err(regerr)
 }
 
-pub(crate) fn read_uninstall_entry(
+pub(crate) fn read_apps_features(
     scope: SelectedScope,
     key_path: &str,
-) -> Result<Option<zup_exec::UninstallEntryState>, IntegrationError> {
+) -> Result<Option<AppsFeaturesState>, IntegrationError> {
     let root = match scope {
         SelectedScope::User => &CURRENT_USER,
         SelectedScope::Machine => &LOCAL_MACHINE,
@@ -763,40 +1223,38 @@ pub(crate) fn read_uninstall_entry(
         return Ok(None);
     };
     if key.keys().map_err(regerr)?.next().is_some() {
-        return Err(IntegrationError::Drift(format!(
-            "uninstall key {key_path} has child keys"
-        )));
+        return Err(IntegrationError::Drift(
+            "registration key has child keys".into(),
+        ));
     }
     let mut values = BTreeMap::new();
     for (name, raw) in key.values().map_err(regerr)? {
         let value = match raw.ty() {
-            Type::String => {
-                zup_exec::UninstallEntryValue::String(String::try_from(raw).map_err(regerr)?)
-            }
-            Type::U32 => zup_exec::UninstallEntryValue::Dword(u32::try_from(raw).map_err(regerr)?),
+            Type::String => AppsFeaturesValue::String(String::try_from(raw).map_err(regerr)?),
+            Type::U32 => AppsFeaturesValue::Dword(u32::try_from(raw).map_err(regerr)?),
             _ => {
-                return Err(IntegrationError::Drift(format!(
-                    "uninstall value {name} has unsupported registry type"
-                )));
+                return Err(IntegrationError::Drift(
+                    "unsupported registration value type".into(),
+                ));
             }
         };
         values.insert(name, value);
     }
-    Ok(Some(zup_exec::UninstallEntryState { values }))
+    Ok(Some(AppsFeaturesState { values }))
 }
 
 pub fn inspect_uninstall_registration(
     scope: SelectedScope,
     app_id: &str,
-) -> Result<Option<zup_exec::UninstallEntryState>, IntegrationError> {
+) -> Result<Option<AppsFeaturesState>, IntegrationError> {
     let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
-    read_uninstall_entry(scope, &key_path)
+    read_apps_features(scope, &key_path)
 }
 
-fn write_uninstall_entry(
+fn write_apps_features(
     scope: SelectedScope,
     key_path: &str,
-    state: Option<&zup_exec::UninstallEntryState>,
+    state: Option<&AppsFeaturesState>,
 ) -> Result<(), IntegrationError> {
     let root = match scope {
         SelectedScope::User => &CURRENT_USER,
@@ -805,9 +1263,9 @@ fn write_uninstall_entry(
     let Some(state) = state else {
         if let Some(key) = open_optional(root, key_path, true)? {
             if key.keys().map_err(regerr)?.next().is_some() {
-                return Err(IntegrationError::Drift(format!(
-                    "uninstall key {key_path} gained child keys"
-                )));
+                return Err(IntegrationError::Drift(
+                    "registration key gained child keys".into(),
+                ));
             }
             root.remove_tree(key_path)
                 .or_else(ignore_missing)
@@ -828,8 +1286,8 @@ fn write_uninstall_entry(
     }
     for (name, value) in &state.values {
         match value {
-            zup_exec::UninstallEntryValue::String(value) => key.set_string(name, value),
-            zup_exec::UninstallEntryValue::Dword(value) => key.set_u32(name, *value),
+            AppsFeaturesValue::String(value) => key.set_string(name, value),
+            AppsFeaturesValue::Dword(value) => key.set_u32(name, *value),
         }
         .map_err(regerr)?;
     }
@@ -849,37 +1307,48 @@ fn environment_key(scope: SelectedScope, create: bool) -> Result<Option<Key>, In
     } else {
         root.open(path)
     } {
-        Ok(k) => Ok(Some(k)),
-        Err(e) if !create && is_not_found(&e) => Ok(None),
-        Err(e) => Err(regerr(e)),
+        Ok(key) => Ok(Some(key)),
+        Err(error) if !create && is_not_found(&error) => Ok(None),
+        Err(error) => Err(regerr(error)),
     }
 }
+
 pub(crate) fn read_path(scope: SelectedScope) -> Result<(String, String), IntegrationError> {
     match environment_key(scope, false)? {
         Some(key) => read_path_from_key(&key),
-        None => Ok(("missing".into(), String::new())),
+        None => Ok((crate::search_path::VALUE_TYPE_MISSING.into(), String::new())),
     }
 }
+
 fn read_path_from_key(key: &Key) -> Result<(String, String), IntegrationError> {
-    match key.get_value("Path") {
-        Ok(value) => match value.ty() {
-            Type::String => Ok(("sz".into(), String::try_from(value).map_err(regerr)?)),
-            Type::ExpandString => {
-                Ok(("expand_sz".into(), String::try_from(value).map_err(regerr)?))
-            }
-            _ => Ok(("invalid".into(), String::new())),
-        },
-        Err(e) if is_not_found(&e) => Ok(("missing".into(), String::new())),
-        Err(e) => Err(regerr(e)),
+    match key.get_value(crate::search_path::PATH_VALUE_NAME) {
+        Ok(value) => {
+            let kind = match value.ty() {
+                Type::String => crate::search_path::VALUE_TYPE_PLAIN,
+                Type::ExpandString => crate::search_path::VALUE_TYPE_EXPAND,
+                _ => {
+                    return Err(IntegrationError::Drift(
+                        "search path has an unsupported host type".into(),
+                    ));
+                }
+            };
+            Ok((kind.into(), String::try_from(value).map_err(regerr)?))
+        }
+        Err(error) if is_not_found(&error) => {
+            Ok((crate::search_path::VALUE_TYPE_MISSING.into(), String::new()))
+        }
+        Err(error) => Err(regerr(error)),
     }
 }
-fn set_path(key: &Key, ty: &str, value: &str) -> Result<(), IntegrationError> {
-    match ty {
-        "sz" => key.set_string("Path", value),
-        "expand_sz" | "missing" => key.set_expand_string("Path", value),
+
+fn set_path(key: &Key, value_type: &str, value: &str) -> Result<(), IntegrationError> {
+    let name = crate::search_path::PATH_VALUE_NAME;
+    match value_type {
+        crate::search_path::VALUE_TYPE_PLAIN => key.set_string(name, value),
+        crate::search_path::VALUE_TYPE_EXPAND => key.set_expand_string(name, value),
         _ => {
             return Err(IntegrationError::Drift(
-                "PATH has unsupported registry type".into(),
+                "search path has an unsupported host type".into(),
             ));
         }
     }
@@ -889,6 +1358,7 @@ fn set_path(key: &Key, ty: &str, value: &str) -> Result<(), IntegrationError> {
 pub(crate) fn read_protocol(
     scope: SelectedScope,
     scheme: &str,
+    target: &TargetTriple,
 ) -> Result<ProtocolState, IntegrationError> {
     let root = classes(scope, false)?;
     let Some(key) = open_optional(&root, scheme, false)? else {
@@ -907,18 +1377,19 @@ pub(crate) fn read_protocol(
         return if registration_tree_empty(&key)? {
             Ok(ProtocolState::Absent)
         } else {
-            Err(IntegrationError::Drift(format!(
-                "protocol {scheme} has unowned registry content"
-            )))
+            Err(IntegrationError::Drift(
+                "protocol has unowned content".into(),
+            ))
         };
     }
     if !marker {
         return Err(IntegrationError::Drift("protocol marker missing".into()));
     }
     let raw = raw.ok_or_else(|| IntegrationError::Drift("protocol command missing".into()))?;
-    let command = command_spec_from_command_line(&raw).map_err(IntegrationError::Drift)?;
+    let command = command_spec_from_command_line(&raw, target).map_err(IntegrationError::Drift)?;
     Ok(ProtocolState::Registration { command })
 }
+
 fn write_protocol(
     scope: SelectedScope,
     scheme: &str,
@@ -949,15 +1420,20 @@ fn write_protocol(
             let key = root.create(scheme).map_err(regerr)?;
             key.set_string("URL Protocol", "").map_err(regerr)?;
             key.create("shell\\open\\command")
-                .and_then(|k| k.set_string("", format_spec(command)))
+                .and_then(|command_key| command_key.set_string("", format_spec(command)))
                 .map_err(regerr)
         }
     }
 }
-pub(crate) fn read_progid(scope: SelectedScope, id: &str) -> Result<ProgIdState, IntegrationError> {
+
+pub(crate) fn read_progid(
+    scope: SelectedScope,
+    id: &str,
+    target: &TargetTriple,
+) -> Result<FileAssociationState, IntegrationError> {
     let root = classes(scope, false)?;
     let Some(key) = open_optional(&root, id, false)? else {
-        return Ok(ProgIdState::Absent);
+        return Ok(FileAssociationState::Absent);
     };
     let description =
         read_optional_string(&key, "FriendlyTypeName")?.or(read_optional_string(&key, "")?);
@@ -967,28 +1443,30 @@ pub(crate) fn read_progid(scope: SelectedScope, id: &str) -> Result<ProgIdState,
     };
     if description.is_none() && raw.is_none() {
         return if registration_tree_empty(&key)? {
-            Ok(ProgIdState::Absent)
+            Ok(FileAssociationState::Absent)
         } else {
-            Err(IntegrationError::Drift(format!(
-                "ProgID {id} has unowned registry content"
-            )))
+            Err(IntegrationError::Drift(
+                "file association has unowned content".into(),
+            ))
         };
     }
-    let raw = raw.ok_or_else(|| IntegrationError::Drift("ProgID command missing".into()))?;
-    let command = command_spec_from_command_line(&raw).map_err(IntegrationError::Drift)?;
-    Ok(ProgIdState::Registration {
+    let raw =
+        raw.ok_or_else(|| IntegrationError::Drift("file association command missing".into()))?;
+    let command = command_spec_from_command_line(&raw, target).map_err(IntegrationError::Drift)?;
+    Ok(FileAssociationState::Registration {
         description,
         command,
     })
 }
+
 fn write_progid(
     scope: SelectedScope,
     id: &str,
-    state: &ProgIdState,
+    state: &FileAssociationState,
 ) -> Result<(), IntegrationError> {
     let root = classes(scope, true)?;
     match state {
-        ProgIdState::Absent => {
+        FileAssociationState::Absent => {
             if let Some(key) = open_optional(&root, id, true)? {
                 key.remove_value("FriendlyTypeName")
                     .or_else(ignore_missing)
@@ -1007,76 +1485,79 @@ fn write_progid(
             }
             Ok(())
         }
-        ProgIdState::Registration {
+        FileAssociationState::Registration {
             description,
             command,
         } => {
             let key = root.create(id).map_err(regerr)?;
-            if let Some(d) = description {
-                key.set_string("FriendlyTypeName", d).map_err(regerr)?;
+            if let Some(description) = description {
+                key.set_string("FriendlyTypeName", description)
+                    .map_err(regerr)?;
             } else {
                 key.remove_value("FriendlyTypeName")
                     .or_else(ignore_missing)
                     .map_err(regerr)?;
             }
             key.create("shell\\open\\command")
-                .and_then(|k| k.set_string("", format_spec(command)))
+                .and_then(|command_key| command_key.set_string("", format_spec(command)))
                 .map_err(regerr)
         }
     }
 }
+
 pub(crate) fn read_extension(
     scope: SelectedScope,
-    ext: &str,
+    extension: &str,
 ) -> Result<ExtensionState, IntegrationError> {
     let root = classes(scope, false)?;
-    let Some(key) = open_optional(&root, ext, false)? else {
+    let Some(key) = open_optional(&root, extension, false)? else {
         return Ok(ExtensionState::Absent);
     };
     match key.get_value("") {
         Ok(value) if matches!(value.ty(), Type::String | Type::ExpandString) => {
             Ok(ExtensionState::Mapped {
-                prog_id: String::try_from(value).map_err(regerr)?,
+                association_id: String::try_from(value).map_err(regerr)?,
             })
         }
-        Ok(_) => Err(IntegrationError::Drift(format!(
-            "extension {ext} has an unsupported value type"
-        ))),
-        Err(e) if is_not_found(&e) => {
+        Ok(_) => Err(IntegrationError::Drift(
+            "extension value has an unsupported type".into(),
+        )),
+        Err(error) if is_not_found(&error) => {
             if registration_tree_empty(&key)? {
                 Ok(ExtensionState::Absent)
             } else {
-                Err(IntegrationError::Drift(format!(
-                    "extension {ext} has unowned registry content"
-                )))
+                Err(IntegrationError::Drift(
+                    "extension has unowned content".into(),
+                ))
             }
         }
-        Err(e) => Err(regerr(e)),
+        Err(error) => Err(regerr(error)),
     }
 }
+
 fn write_extension(
     scope: SelectedScope,
-    ext: &str,
+    extension: &str,
     state: &ExtensionState,
 ) -> Result<(), IntegrationError> {
     let root = classes(scope, true)?;
     match state {
         ExtensionState::Absent => {
-            if let Some(key) = open_optional(&root, ext, true)? {
+            if let Some(key) = open_optional(&root, extension, true)? {
                 key.remove_value("")
                     .or_else(ignore_missing)
                     .map_err(regerr)?;
                 if registration_tree_empty(&key)? {
-                    root.remove_tree(ext)
+                    root.remove_tree(extension)
                         .or_else(ignore_missing)
                         .map_err(regerr)?;
                 }
             }
             Ok(())
         }
-        ExtensionState::Mapped { prog_id } => root
-            .create(ext)
-            .and_then(|k| k.set_string("", prog_id))
+        ExtensionState::Mapped { association_id } => root
+            .create(extension)
+            .and_then(|key| key.set_string("", association_id))
             .map_err(regerr),
     }
 }
@@ -1097,42 +1578,51 @@ fn protocol_from_observed(
         )),
     }
 }
-fn progid_from_observed(
-    value: &zup_exec::ObservedProgIdState,
-) -> Result<ProgIdState, IntegrationError> {
+
+fn file_association_from_observed(
+    value: &zup_exec::ObservedFileAssociationState,
+) -> Result<FileAssociationState, IntegrationError> {
     match value {
-        zup_exec::ObservedProgIdState::Absent => Ok(ProgIdState::Absent),
-        zup_exec::ObservedProgIdState::Registration {
+        zup_exec::ObservedFileAssociationState::Absent => Ok(FileAssociationState::Absent),
+        zup_exec::ObservedFileAssociationState::Registration {
             description,
             command,
-        } => Ok(ProgIdState::Registration {
+        } => Ok(FileAssociationState::Registration {
             description: description.clone(),
             command: command.clone(),
         }),
         _ => Err(IntegrationError::Drift(
-            "invalid ProgID precondition".into(),
+            "invalid file association precondition".into(),
         )),
     }
 }
+
 fn extension_from_observed(
     value: &zup_exec::ObservedExtensionState,
 ) -> Result<ExtensionState, IntegrationError> {
     match value {
         zup_exec::ObservedExtensionState::Absent => Ok(ExtensionState::Absent),
-        zup_exec::ObservedExtensionState::Mapped { prog_id } => Ok(ExtensionState::Mapped {
-            prog_id: prog_id.clone(),
+        zup_exec::ObservedExtensionState::Mapped { association_id } => Ok(ExtensionState::Mapped {
+            association_id: association_id.clone(),
         }),
         _ => Err(IntegrationError::Drift(
             "invalid extension precondition".into(),
         )),
     }
 }
+
+fn format_spec(command: &zup_platform::CommandSpec) -> String {
+    format_command_line(&host_path(&command.executable), &command.arguments)
+}
+
 fn regerr(error: windows_result::Error) -> IntegrationError {
     IntegrationError::Registry(error.message().to_owned())
 }
+
 fn is_not_found(error: &windows_result::Error) -> bool {
     error.code().0 as u32 == 0x8007_0002
 }
+
 fn open_optional(parent: &Key, path: &str, write: bool) -> Result<Option<Key>, IntegrationError> {
     let result = if write {
         parent.options().read().write().open(path)
@@ -1145,18 +1635,20 @@ fn open_optional(parent: &Key, path: &str, write: bool) -> Result<Option<Key>, I
         Err(error) => Err(regerr(error)),
     }
 }
+
 fn read_optional_string(key: &Key, name: &str) -> Result<Option<String>, IntegrationError> {
     match key.get_value(name) {
         Ok(value) if matches!(value.ty(), Type::String | Type::ExpandString) => {
             Ok(Some(String::try_from(value).map_err(regerr)?))
         }
-        Ok(_) => Err(IntegrationError::Drift(format!(
-            "registry value {name} has an unsupported type"
-        ))),
+        Ok(_) => Err(IntegrationError::Drift(
+            "registry value has an unsupported type".into(),
+        )),
         Err(error) if is_not_found(&error) => Ok(None),
         Err(error) => Err(regerr(error)),
     }
 }
+
 fn registration_tree_empty(key: &Key) -> Result<bool, IntegrationError> {
     if key.values().map_err(regerr)?.next().is_some() {
         return Ok(false);
@@ -1169,6 +1661,7 @@ fn registration_tree_empty(key: &Key) -> Result<bool, IntegrationError> {
     }
     Ok(true)
 }
+
 fn ignore_missing(error: windows_result::Error) -> Result<(), windows_result::Error> {
     if is_not_found(&error) {
         Ok(())
@@ -1177,15 +1670,11 @@ fn ignore_missing(error: windows_result::Error) -> Result<(), windows_result::Er
     }
 }
 
-fn format_spec(command: &zup_platform::CommandSpec) -> String {
-    format_command_line(command.executable.as_path(), &command.arguments)
-}
-
 type Hwnd = *mut core::ffi::c_void;
 link!("user32.dll" "system" fn SendMessageTimeoutW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize, flags: u32, timeout: u32, result: *mut usize) -> isize);
+
 fn broadcast_environment_change() {
     let name: Vec<u16> = "Environment".encode_utf16().chain([0]).collect();
-    // SAFETY: HWND_BROADCAST is a documented sentinel and name remains alive for the call.
     unsafe {
         SendMessageTimeoutW(
             0xffffusize as Hwnd,
@@ -1201,7 +1690,13 @@ fn broadcast_environment_change() {
 
 pub fn notify_committed_path_change(record: &zup_transaction::TransactionRecord) {
     if record.phase == zup_transaction::TransactionPhase::Committed
-        && record.nodes.values().any(|state| matches!(state, zup_transaction::NodeState::Applied { receipt } if matches!(receipt.as_ref(), OperationReceipt::PathEntry { .. }))) {
+        && record.plan.nodes.iter().any(|node| {
+            record
+                .receipt(&node.id)
+                .is_some_and(|receipt| matches!(receipt, OperationReceipt::Backend { payload, .. }
+                    if receipt_from_bytes(payload).is_ok_and(|receipt| matches!(receipt, BackendReceipt::Path { .. } | BackendReceipt::RemovePath { .. }))))
+        })
+    {
         broadcast_environment_change();
     }
 }
@@ -1209,698 +1704,150 @@ pub fn notify_committed_path_change(record: &zup_transaction::TransactionRecord)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shortcuts::ShortcutReader;
-    use tempfile::TempDir;
-    use zup_core::{AppId, FileTypeId, ProtocolScheme, ResourceKey};
-    use zup_exec::{
-        FileTypeOperation, FileTypeOperationKind, PathOperation, PathOperationKind,
-        ProtocolOperation, ProtocolOperationKind,
-    };
-    use zup_platform::{CommandSpec, TargetPath};
-    use zup_transaction::{
-        FilesystemTransactionStore, NodeKind, NodeState, OperationExecutor, TransactionCoordinator,
-        TransactionOutcome, TransactionPhase, TransactionStore, compile_transaction, recover,
-    };
+    use crate::transaction_payload::{ApplyPayload, RemovePayload, encode};
+    use zup_core::{AppId, Privilege};
+    use zup_transaction::{BackendOperation, BackendOperationIntent, OperationId, Phase};
 
-    fn command(name: &str) -> CommandSpec {
-        CommandSpec::new(
-            TargetPath::new(std::path::PathBuf::from(format!(
-                r"C:\zup-tests\{name}.exe"
-            )))
-            .unwrap(),
-            vec!["%1".into()],
-        )
-    }
-
-    struct RegistryCleanup {
-        classes: Vec<String>,
-        user_choice_extension: Option<String>,
-    }
-
-    impl RegistryCleanup {
-        fn classes(keys: Vec<String>) -> Self {
-            Self {
-                classes: keys,
-                user_choice_extension: None,
-            }
-        }
-    }
-
-    impl Drop for RegistryCleanup {
-        fn drop(&mut self) {
-            if let Ok(root) = classes(SelectedScope::User, true) {
-                for key in &self.classes {
-                    let _ = root.remove_tree(key).or_else(ignore_missing);
-                }
-            }
-            if let Some(extension) = &self.user_choice_extension
-                && let Ok(root) = CURRENT_USER
-                    .options()
-                    .read()
-                    .write()
-                    .open(r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts")
-            {
-                let _ = root.remove_tree(extension).or_else(ignore_missing);
-            }
-        }
-    }
-
-    #[test]
-    fn protocol_create_upgrade_drift_and_rollback() {
-        let scheme = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-        let _cleanup = RegistryCleanup::classes(vec![scheme.clone()]);
-        let key = ResourceKey::Protocol {
-            scheme: ProtocolScheme::new(&scheme).unwrap(),
-        };
-        let first = ProtocolOperation {
-            key: key.clone(),
-            kind: ProtocolOperationKind::Create,
-            scheme: ProtocolScheme::new(&scheme).unwrap(),
-            command: command("first"),
-            previous: zup_exec::ObservedProtocolState::Absent,
+    fn apps_operation(app_id: &AppId) -> AppsFeaturesOperation {
+        AppsFeaturesOperation {
             scope: SelectedScope::User,
-            conflict: None,
-        };
-        let first_receipt = apply_protocol(&first).unwrap();
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            ProtocolState::Registration {
-                command: command("first")
-            }
-        );
-        let second = ProtocolOperation {
-            command: command("second"),
-            kind: ProtocolOperationKind::UpdateOwned,
-            previous: zup_exec::ObservedProtocolState::Registration {
-                command: command("first"),
-                url_protocol_marker: true,
-            },
-            ..first
-        };
-        let second_receipt = apply_protocol(&second).unwrap();
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            ProtocolState::Registration {
-                command: command("second")
-            }
-        );
-        write_protocol(
-            SelectedScope::User,
-            &scheme,
-            &ProtocolState::Registration {
-                command: command("foreign"),
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            rollback_managed(&second_receipt),
-            Err(IntegrationError::Drift(_))
-        ));
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            ProtocolState::Registration {
-                command: command("foreign")
-            }
-        );
-        write_protocol(
-            SelectedScope::User,
-            &scheme,
-            &ProtocolState::Registration {
-                command: command("second"),
-            },
-        )
-        .unwrap();
-        rollback_managed(&second_receipt).unwrap();
-        rollback_managed(&first_receipt).unwrap();
-    }
-
-    #[test]
-    fn association_parts_leave_user_choice_untouched() {
-        let suffix = uuid::Uuid::now_v7().simple().to_string();
-        let id = format!("Zup.Test.{suffix}");
-        let extension = format!(".zup{suffix}");
-        let _cleanup = RegistryCleanup {
-            classes: vec![id.clone(), extension.clone()],
-            user_choice_extension: Some(extension.clone()),
-        };
-        let choice_root = CURRENT_USER
-            .create(format!(
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{extension}"
-            ))
-            .unwrap();
-        choice_root
-            .create("UserChoice")
-            .unwrap()
-            .set_string("ProgId", "Foreign.Document")
-            .unwrap();
-        let op = FileTypeOperation {
-            key: ResourceKey::FileType {
-                id: FileTypeId::new(&id).unwrap(),
-            },
-            kind: FileTypeOperationKind::Create,
-            prog_id_kind: FileTypeOperationKind::Create,
-            extension_kind: FileTypeOperationKind::Create,
-            extension: extension.clone(),
-            id: id.clone(),
-            description: Some("Zup test".into()),
-            command: command("document"),
-            scope: SelectedScope::User,
-            previous_id: zup_exec::ObservedProgIdState::Absent,
-            previous_extension: zup_exec::ObservedExtensionState::Absent,
-            conflict: None,
-        };
-        let id_receipt = apply_progid(&op).unwrap();
-        let extension_receipt = apply_extension(&op).unwrap();
-        assert_eq!(
-            read_extension(SelectedScope::User, &extension).unwrap(),
-            ExtensionState::Mapped {
-                prog_id: id.clone()
-            }
-        );
-        assert_eq!(
-            choice_root
-                .open("UserChoice")
-                .unwrap()
-                .get_string("ProgId")
-                .unwrap(),
-            "Foreign.Document"
-        );
-        rollback_managed(&extension_receipt).unwrap();
-        rollback_managed(&id_receipt).unwrap();
-        assert_eq!(
-            choice_root
-                .open("UserChoice")
-                .unwrap()
-                .get_string("ProgId")
-                .unwrap(),
-            "Foreign.Document"
-        );
-        CURRENT_USER
-            .open(r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts")
-            .unwrap()
-            .remove_tree(&extension)
-            .unwrap();
-    }
-
-    #[test]
-    fn path_rollback_preserves_unrelated_entries() {
-        let entry = format!(r"C:\zup-test-{}\bin", uuid::Uuid::now_v7().simple());
-        let value = TargetPath::new(std::path::PathBuf::from(&entry)).unwrap();
-        let before = read_path(SelectedScope::User).unwrap();
-        let op = PathOperation {
-            key: ResourceKey::PathEntry {
-                value: entry.clone(),
-            },
-            kind: PathOperationKind::Add,
-            value,
-            scope: SelectedScope::User,
-            previous: zup_exec::PathEntryState::Absent,
-            previously_owned: false,
-            conflict: None,
-        };
-        let receipt = apply_path(&op).unwrap();
-        let (_, current) = read_path(SelectedScope::User).unwrap();
-        assert!(current.contains(&entry));
-        assert!(current.contains(&before.1));
-        rollback_managed(&receipt).unwrap();
-        let after = read_path(SelectedScope::User).unwrap();
-        assert!(!after.1.split(';').any(|part| part == entry));
-        assert_eq!(after.0, before.0);
-    }
-
-    struct RegistryExecutor {
-        applied: usize,
-        fail_after: Option<usize>,
-    }
-    impl OperationExecutor for RegistryExecutor {
-        type Error = String;
-        fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
-            if self.fail_after == Some(self.applied) {
-                return Err("injected failure".into());
-            }
-            self.applied += 1;
-            apply_managed(node).map_err(|e| e.to_string())
-        }
-        fn rollback(
-            &mut self,
-            _node: &TransactionNode,
-            receipt: &OperationReceipt,
-        ) -> Result<(), Self::Error> {
-            rollback_managed(receipt).map_err(|e| e.to_string())
-        }
-        fn reconcile(
-            &mut self,
-            node: &TransactionNode,
-            _receipt: Option<&OperationReceipt>,
-        ) -> Result<ReconcileResult, Self::Error> {
-            reconcile_managed(node).map_err(|e| e.to_string())
-        }
-    }
-
-    fn protocol_execution(schemes: &[String]) -> zup_exec::ExecutionPlan {
-        zup_exec::ExecutionPlan {
-            selected_components: vec![],
-            install_directory: None,
-            uninstall: false,
-            removals: vec![],
-            files: vec![],
-            shortcuts: vec![],
-            path_entries: vec![],
-            services: vec![],
-            file_types: vec![],
-            uninstall_entries: vec![],
-            protocols: schemes
-                .iter()
-                .map(|scheme| ProtocolOperation {
-                    key: ResourceKey::Protocol {
-                        scheme: ProtocolScheme::new(scheme).unwrap(),
-                    },
-                    kind: ProtocolOperationKind::Create,
-                    scheme: ProtocolScheme::new(scheme).unwrap(),
-                    command: command("coordinator"),
-                    previous: zup_exec::ObservedProtocolState::Absent,
-                    scope: SelectedScope::User,
-                    conflict: None,
-                })
-                .collect(),
-            summary: zup_exec::ExecutionSummary::default(),
-        }
-    }
-
-    #[test]
-    fn coordinator_rolls_back_first_registration_after_second_fails() {
-        let prefix = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-        let schemes = vec![format!("{prefix}-a"), format!("{prefix}-b")];
-        let _cleanup = RegistryCleanup::classes(schemes.clone());
-        let directory = TempDir::new().unwrap();
-        let store = FilesystemTransactionStore::new(directory.path());
-        let coordinator = TransactionCoordinator::new(store);
-        let plan = compile_transaction(&protocol_execution(&schemes)).unwrap();
-        let record = coordinator
-            .begin(
-                AppId::new("com.zup.registry-test").unwrap(),
-                SelectedScope::User,
-                "1.0.0".parse().unwrap(),
-                plan,
-            )
-            .unwrap();
-        let mut executor = RegistryExecutor {
-            applied: 0,
-            fail_after: Some(1),
-        };
-        let (_, outcome) = coordinator.execute(record, &mut executor).unwrap();
-        assert_eq!(outcome, TransactionOutcome::RolledBack);
-        for scheme in &schemes {
-            assert_eq!(
-                read_protocol(SelectedScope::User, scheme).unwrap(),
-                ProtocolState::Absent
-            );
-        }
-        assert!(
-            crate::ledger::InstallLedgerStore::new(directory.path())
-                .load(
-                    &AppId::new("com.zup.registry-test").unwrap(),
-                    SelectedScope::User
-                )
-                .unwrap()
-                .is_none()
-        );
-        let root = classes(SelectedScope::User, true).unwrap();
-        for scheme in schemes {
-            root.remove_tree(scheme).or_else(ignore_missing).unwrap();
-        }
-    }
-
-    #[test]
-    fn coordinator_recovers_write_before_receipt() {
-        let scheme = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-        let _cleanup = RegistryCleanup::classes(vec![scheme.clone()]);
-        let directory = TempDir::new().unwrap();
-        let store = FilesystemTransactionStore::new(directory.path());
-        let plan = compile_transaction(&protocol_execution(std::slice::from_ref(&scheme))).unwrap();
-        let mut record = zup_transaction::TransactionRecord::new(
-            zup_transaction::TransactionId::new_v7(),
-            AppId::new("com.zup.recovery-test").unwrap(),
-            SelectedScope::User,
-            "1.0.0".parse().unwrap(),
-            plan,
-        );
-        store.create(&record).unwrap();
-        let node = record
-            .plan
-            .nodes
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::ManagedIntegration { .. }))
-            .unwrap()
-            .clone();
-        record.phase = TransactionPhase::Applying;
-        record.nodes.insert(node.id.clone(), NodeState::Running);
-        let revision = record.revision;
-        record.touch();
-        store.compare_and_swap(revision, &record).unwrap();
-        apply_managed(&node).unwrap();
-        let mut executor = RegistryExecutor {
-            applied: 0,
-            fail_after: None,
-        };
-        let (record, outcome) = recover(record, &store, &mut executor).unwrap();
-        assert_eq!(outcome, TransactionOutcome::Committed);
-        assert!(
-            matches!(record.nodes.get(&node.id), Some(NodeState::Applied { receipt }) if matches!(receipt.as_ref(), OperationReceipt::Protocol { .. }))
-        );
-        let ledger = crate::ledger::InstallLedgerStore::new(directory.path())
-            .publish_committed(&record, SelectedScope::User)
-            .unwrap();
-        assert_eq!(ledger.resources.len(), 1);
-        classes(SelectedScope::User, true)
-            .unwrap()
-            .remove_tree(scheme)
-            .unwrap();
-    }
-
-    #[test]
-    fn coordinator_recovers_shortcut_write_before_receipt() {
-        let directory = TempDir::new().unwrap();
-        let target = TargetPath::new(directory.path().join("App.exe")).unwrap();
-        std::fs::write(target.as_path(), b"app").unwrap();
-        let link_path = TargetPath::new(directory.path().join("App.lnk")).unwrap();
-        let execution = zup_exec::ExecutionPlan {
-            selected_components: vec![],
-            install_directory: None,
-            uninstall: false,
-            removals: vec![],
-            files: vec![],
-            shortcuts: vec![zup_exec::ShortcutOperation {
-                key: ResourceKey::Shortcut {
-                    location: zup_core::ShortcutLocation::Desktop,
-                    name: "App".into(),
-                },
-                kind: zup_exec::ShortcutOperationKind::Create,
-                link_path: link_path.clone(),
-                target: target.clone(),
-                arguments: vec!["a b".into()],
-                working_directory: None,
-                previous: zup_exec::ObservedShortcutState::Absent,
-                conflict: None,
-            }],
-            path_entries: vec![],
-            services: vec![],
-            protocols: vec![],
-            file_types: vec![],
-            uninstall_entries: vec![],
-            summary: zup_exec::ExecutionSummary::default(),
-        };
-        let store = FilesystemTransactionStore::new(directory.path());
-        let plan = compile_transaction(&execution).unwrap();
-        let app_id = AppId::new("com.zup.shortcut-recovery").unwrap();
-        let mut record = zup_transaction::TransactionRecord::new(
-            zup_transaction::TransactionId::new_v7(),
-            app_id.clone(),
-            SelectedScope::User,
-            "1.0.0".parse().unwrap(),
-            plan,
-        );
-        store.create(&record).unwrap();
-        let node = record
-            .plan
-            .nodes
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::ManagedIntegration { .. }))
-            .unwrap()
-            .clone();
-        record.phase = TransactionPhase::Applying;
-        record.nodes.insert(node.id.clone(), NodeState::Running);
-        let revision = record.revision;
-        record.touch();
-        store.compare_and_swap(revision, &record).unwrap();
-        apply_managed(&node).unwrap();
-        let mut executor = RegistryExecutor {
-            applied: 0,
-            fail_after: None,
-        };
-        let (record, outcome) = recover(record, &store, &mut executor).unwrap();
-        assert_eq!(outcome, TransactionOutcome::Committed);
-        assert!(
-            matches!(record.nodes.get(&node.id), Some(NodeState::Applied { receipt }) if matches!(receipt.as_ref(), OperationReceipt::Shortcut { .. }))
-        );
-        let ledger = crate::ledger::InstallLedgerStore::new(directory.path());
-        assert!(ledger.load(&app_id, SelectedScope::User).unwrap().is_none());
-        let published = ledger
-            .publish_committed(&record, SelectedScope::User)
-            .unwrap();
-        assert_eq!(published.resources.len(), 1);
-        assert!(matches!(
-            crate::shortcuts::WindowsShortcutReader
-                .read_shortcut(&link_path)
-                .unwrap(),
-            zup_exec::ObservedShortcutState::Shortcut { .. }
-        ));
-    }
-
-    #[test]
-    fn coordinator_recovers_service_write_before_receipt_when_elevated() {
-        if !crate::transport::is_process_elevated().unwrap() {
-            eprintln!("SCM recovery mutation requires an elevated test process");
-            return;
-        }
-        struct Cleanup(String);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                use windows_service::service::ServiceAccess;
-                use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-                if let Ok(manager) =
-                    ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-                    && let Ok(service) = manager.open_service(&self.0, ServiceAccess::DELETE)
-                {
-                    let _ = service.delete();
-                }
-            }
-        }
-        let directory = TempDir::new().unwrap();
-        let name = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-        let _cleanup = Cleanup(name.clone());
-        let binary = TargetPath::new(std::env::current_exe().unwrap()).unwrap();
-        let operation = zup_exec::ServiceOperation {
-            key: ResourceKey::Service {
-                id: zup_core::ServiceId::new(&name).unwrap(),
-            },
-            kind: zup_exec::ServiceOperationKind::Create,
-            id: name.clone(),
-            name: name.clone(),
-            display_name: "Zup Recovery Test".into(),
-            command: zup_platform::CommandSpec::new(binary, vec!["--service".into()]),
-            start: zup_core::ServiceStart::Disabled,
-            previous: zup_exec::ObservedServiceState::Absent,
-            conflict: None,
-        };
-        let execution = zup_exec::ExecutionPlan {
-            selected_components: vec![],
-            install_directory: None,
-            uninstall: false,
-            removals: vec![],
-            files: vec![],
-            shortcuts: vec![],
-            path_entries: vec![],
-            services: vec![operation],
-            protocols: vec![],
-            file_types: vec![],
-            uninstall_entries: vec![],
-            summary: zup_exec::ExecutionSummary::default(),
-        };
-        let store = FilesystemTransactionStore::new(directory.path());
-        let plan = compile_transaction(&execution).unwrap();
-        let app_id = AppId::new("com.zup.service-recovery").unwrap();
-        let mut record = zup_transaction::TransactionRecord::new(
-            zup_transaction::TransactionId::new_v7(),
-            app_id.clone(),
-            SelectedScope::Machine,
-            "1.0.0".parse().unwrap(),
-            plan,
-        );
-        store.create(&record).unwrap();
-        let node = record
-            .plan
-            .nodes
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::ManagedIntegration { .. }))
-            .unwrap()
-            .clone();
-        record.phase = TransactionPhase::Applying;
-        record.nodes.insert(node.id.clone(), NodeState::Running);
-        let revision = record.revision;
-        record.touch();
-        store.compare_and_swap(revision, &record).unwrap();
-        apply_managed(&node).unwrap();
-        let mut executor = RegistryExecutor {
-            applied: 0,
-            fail_after: None,
-        };
-        let (record, outcome) = recover(record, &store, &mut executor).unwrap();
-        assert_eq!(outcome, TransactionOutcome::Committed);
-        assert!(
-            matches!(record.nodes.get(&node.id), Some(NodeState::Applied { receipt }) if matches!(receipt.as_ref(), OperationReceipt::Service { .. }))
-        );
-        let ledger = crate::ledger::InstallLedgerStore::new(directory.path());
-        assert!(
-            ledger
-                .load(&app_id, SelectedScope::Machine)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            ledger
-                .publish_committed(&record, SelectedScope::Machine)
-                .unwrap()
-                .resources
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn owned_protocol_removal_restores_previous_and_refuses_later_drift() {
-        let scheme = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
-        let _cleanup = RegistryCleanup::classes(vec![scheme.clone()]);
-        let previous = ProtocolState::Registration {
-            command: command("foreign"),
-        };
-        let installed = ProtocolState::Registration {
-            command: command("owned"),
-        };
-        write_protocol(SelectedScope::User, &scheme, &installed).unwrap();
-        let key = ResourceKey::Protocol {
-            scheme: ProtocolScheme::new(&scheme).unwrap(),
-        };
-        let plan = compile_transaction(&zup_exec::ExecutionPlan {
-            removals: vec![zup_exec::RemovalOperation {
-                key,
-                kind: zup_exec::RemovalKind::RemoveOwned,
-                scope: SelectedScope::User,
-                owned: zup_exec::OwnedResource::Protocol {
-                    previous: previous.clone(),
-                    installed: installed.clone(),
-                },
-            }],
-            ..Default::default()
-        })
-        .unwrap();
-        let node = plan
-            .nodes
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::OwnedRemoval { .. }))
-            .unwrap();
-        assert_eq!(
-            reconcile_owned_removal(node).unwrap(),
-            ReconcileResult::NotApplied
-        );
-        let receipt = apply_owned_removal(node).unwrap();
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            previous
-        );
-        assert!(matches!(
-            reconcile_owned_removal(node).unwrap(),
-            ReconcileResult::AppliedWithReceipt(_)
-        ));
-        rollback_managed(&receipt).unwrap();
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            installed
-        );
-        write_protocol(
-            SelectedScope::User,
-            &scheme,
-            &ProtocolState::Registration {
-                command: command("user-edit"),
-            },
-        )
-        .unwrap();
-        assert!(apply_owned_removal(node).is_err());
-        assert_eq!(
-            reconcile_owned_removal(node).unwrap(),
-            ReconcileResult::Ambiguous
-        );
-        assert_eq!(
-            read_protocol(SelectedScope::User, &scheme).unwrap(),
-            ProtocolState::Registration {
-                command: command("user-edit")
-            }
-        );
-    }
-
-    #[test]
-    fn apps_and_features_registration_reconciles_and_refuses_drifted_rollback() {
-        let app_id = format!("com.zup.arp-{}", uuid::Uuid::now_v7().simple());
-        let key_path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app_id}");
-        let _cleanup = RegistryCleanup::classes(vec![]);
-        let mut values = BTreeMap::new();
-        values.insert(
-            "DisplayName".into(),
-            zup_exec::UninstallEntryValue::String("Acme".into()),
-        );
-        values.insert(
-            "EstimatedSize".into(),
-            zup_exec::UninstallEntryValue::Dword(42),
-        );
-        let installed = zup_exec::UninstallEntryState { values };
-        let op = zup_exec::UninstallEntryOperation {
-            key: ResourceKey::UninstallEntry {
-                app_id: app_id.clone(),
-            },
-            scope: SelectedScope::User,
-            key_path: key_path.clone(),
+            privilege: Privilege::User,
+            key_path: format!(
+                r"Software\Microsoft\Windows\CurrentVersion\Uninstall\zup-verify-{}",
+                app_id.as_str()
+            ),
             previous: None,
-            installed: installed.clone(),
-        };
-        let plan = compile_transaction(&zup_exec::ExecutionPlan {
-            uninstall_entries: vec![op],
-            ..Default::default()
-        })
-        .unwrap();
-        let node = plan
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    node.kind,
-                    NodeKind::ManagedIntegration {
-                        resource: zup_transaction::ManagedResource::UninstallEntry,
-                        ..
-                    }
-                )
-            })
-            .unwrap();
-        let receipt = apply_managed(node).unwrap();
-        assert_eq!(
-            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
-            Some(installed.clone())
-        );
-        assert!(matches!(
-            reconcile_managed(node).unwrap(),
-            ReconcileResult::AppliedWithReceipt(OperationReceipt::UninstallEntry { .. })
-        ));
-        rollback_managed(&receipt).unwrap();
-        assert_eq!(
-            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
-            None
-        );
+            installed: AppsFeaturesState {
+                values: BTreeMap::from([(
+                    "DisplayName".to_owned(),
+                    AppsFeaturesValue::String("Zup Verify Fixture".to_owned()),
+                )]),
+            },
+        }
+    }
 
-        let receipt = apply_managed(node).unwrap();
-        let changed = zup_exec::UninstallEntryState {
-            values: BTreeMap::from([(
-                "DisplayName".into(),
-                zup_exec::UninstallEntryValue::String("Changed externally".into()),
-            )]),
+    fn backend_apply_node(app_id: &AppId, operation: AppsFeaturesOperation) -> TransactionNode {
+        let key = crate::transaction_payload::apps_key(app_id);
+        let id = match &key {
+            ResourceKey::Backend { id } => id.clone(),
+            other => panic!("not a backend key: {other:?}"),
         };
-        write_uninstall_entry(SelectedScope::User, &key_path, Some(&changed)).unwrap();
-        assert!(matches!(
-            rollback_managed(&receipt),
-            Err(IntegrationError::Drift(_))
-        ));
-        assert_eq!(
-            read_uninstall_entry(SelectedScope::User, &key_path).unwrap(),
-            Some(changed)
+        TransactionNode {
+            id: OperationId::resource("backend_apply", &key),
+            phase: Phase::Backend,
+            kind: zup_transaction::NodeKind::BackendOperation {
+                key: key.clone(),
+                intent: BackendOperationIntent::Apply,
+            },
+            declaration_order: 1,
+            meta: zup_transaction::NodeMeta {
+                privilege: Some(Privilege::User),
+                backend: Some(BackendOperation {
+                    key,
+                    id,
+                    privilege: Privilege::User,
+                    intent: BackendOperationIntent::Apply,
+                    payload: encode(&ApplyPayload::AppsFeatures { operation })
+                        .expect("bounded payload"),
+                    dependencies: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn backend_remove_node(app_id: &AppId, operation: &AppsFeaturesOperation) -> TransactionNode {
+        let key = crate::transaction_payload::apps_key(app_id);
+        let id = match &key {
+            ResourceKey::Backend { id } => id.clone(),
+            other => panic!("not a backend key: {other:?}"),
+        };
+        TransactionNode {
+            id: OperationId::resource("backend_remove", &key),
+            phase: Phase::Backend,
+            kind: zup_transaction::NodeKind::BackendRemoval { key: key.clone() },
+            declaration_order: 2,
+            meta: zup_transaction::NodeMeta {
+                privilege: Some(Privilege::User),
+                backend: Some(BackendOperation {
+                    key,
+                    id,
+                    privilege: Privilege::User,
+                    intent: BackendOperationIntent::Remove,
+                    payload: encode(&RemovePayload::AppsFeatures {
+                        scope: operation.scope,
+                        key_path: operation.key_path.clone(),
+                        state: operation.installed.clone(),
+                    })
+                    .expect("bounded payload"),
+                    dependencies: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn fixture() -> (AppId, AppsFeaturesOperation) {
+        let app_id = AppId::new(format!("com.zup.verify-{}", uuid::Uuid::now_v7().simple()))
+            .expect("app id");
+        let operation = apps_operation(&app_id);
+        (app_id, operation)
+    }
+
+    fn cleanup(key_path: &str) {
+        let _ = windows_registry::CURRENT_USER.remove_tree(key_path);
+    }
+
+    #[test]
+    fn backend_apply_verification_follows_the_installed_state() {
+        let (app_id, operation) = fixture();
+        let node = backend_apply_node(&app_id, operation.clone());
+        let receipt = apply_managed(&node).expect("apply");
+        verify_managed(&receipt).expect("the live registration is the installed state");
+
+        // Drift the registration after the apply: the receipt no longer
+        // describes the host.
+        windows_registry::CURRENT_USER
+            .create(&operation.key_path)
+            .expect("open for write")
+            .set_string("DisplayName", "someone else")
+            .expect("drift");
+        assert!(
+            verify_managed(&receipt).is_err(),
+            "a drifted registration must not verify"
         );
-        CURRENT_USER.remove_tree(&key_path).unwrap();
+        cleanup(&operation.key_path);
+    }
+
+    #[test]
+    fn backend_removal_verification_follows_the_removed_state() {
+        let (app_id, operation) = fixture();
+        let apply = backend_apply_node(&app_id, operation.clone());
+        let applied = apply_managed(&apply).expect("apply");
+
+        // A removal receipt records the removed state as its installed state,
+        // so one comparison covers a removal in the other direction.
+        let remove = backend_remove_node(&app_id, &operation);
+        let removed = apply_owned_removal(&remove).expect("remove");
+        verify_managed(&removed).expect("the removed state is the installed state");
+        assert!(
+            read_apps_features(operation.scope, operation.key_path.as_str())
+                .expect("read")
+                .is_none(),
+            "the registration is gone"
+        );
+        assert!(
+            verify_managed(&applied).is_err(),
+            "the apply receipt no longer describes the host"
+        );
+        cleanup(&operation.key_path);
+    }
+
+    #[test]
+    fn control_receipts_are_not_backend_verifications() {
+        assert!(matches!(
+            verify_managed(&zup_transaction::OperationReceipt::Control),
+            Err(IntegrationError::Unsupported)
+        ));
     }
 }

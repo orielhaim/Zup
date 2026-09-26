@@ -1,7 +1,7 @@
 //! Transaction graph, durable journal, and recovery engine for zup.
 //!
 //! ```text
-//! ExecutionPlan → TransactionPlan → TransactionRecord → TransactionCoordinator
+//! TransactionInput → TransactionPlan → TransactionRecord → TransactionCoordinator
 //! ```
 //!
 //! Synchronous and deterministic. No Windows APIs, no async runtime.
@@ -11,6 +11,7 @@
 mod coordinator;
 mod executor;
 mod id;
+mod input;
 mod journal_fs;
 mod plan;
 mod record;
@@ -21,9 +22,14 @@ pub use executor::{
     CancellationProbe, NeverCancel, OperationExecutor, OperationReceipt, ReconcileResult,
 };
 pub use id::OperationId;
+pub use input::{
+    BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
+    FileRemovalKind, FileWork, MAX_BACKEND_DEPENDENCIES, MAX_BACKEND_PAYLOAD_BYTES,
+    TransactionInput, TransactionInputError, TransactionResource,
+};
 pub use plan::{
-    Dependency, ManagedResource, NodeKind, NodeMeta, Phase, TransactionAudit, TransactionNode,
-    TransactionPlan, TransactionPlanError, compile_transaction,
+    Dependency, NodeKind, NodeMeta, Phase, TRANSACTION_PLAN_SCHEMA, TransactionAudit,
+    TransactionNode, TransactionPlan, TransactionPlanError, compile_transaction,
 };
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,

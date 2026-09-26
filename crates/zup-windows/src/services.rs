@@ -1,16 +1,24 @@
-//! SCM-backed service inspection and managed mutation.
+//! Windows service inspection and managed mutation, through the host's
+//! service control manager.
 
+use crate::transaction_payload::{BackendReceipt, NativeReconcileResult};
 use windows_service::service::{
     ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+use zup_core::{Privilege, TargetTriple};
 use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind, ServiceState};
-use zup_transaction::{OperationReceipt, ReconcileResult};
+
+use crate::lowering::host_path;
 
 /// Read-only service inspection surface.
 pub trait ServiceReader {
     /// Observe service `name`, or `Absent` if it does not exist.
-    fn read_service(&self, name: &str) -> Result<ObservedServiceState, String>;
+    fn read_service(
+        &self,
+        name: &str,
+        target: &TargetTriple,
+    ) -> Result<ObservedServiceState, String>;
 }
 
 /// Production SCM-backed reader.
@@ -18,8 +26,12 @@ pub trait ServiceReader {
 pub struct WindowsServiceReader;
 
 impl ServiceReader for WindowsServiceReader {
-    fn read_service(&self, name: &str) -> Result<ObservedServiceState, String> {
-        crate::scm::query_service(name)
+    fn read_service(
+        &self,
+        name: &str,
+        target: &TargetTriple,
+    ) -> Result<ObservedServiceState, String> {
+        crate::scm::query_service(name, target)
     }
 }
 
@@ -31,7 +43,11 @@ pub struct FakeServiceReader {
 }
 
 impl ServiceReader for FakeServiceReader {
-    fn read_service(&self, name: &str) -> Result<ObservedServiceState, String> {
+    fn read_service(
+        &self,
+        name: &str,
+        _target: &TargetTriple,
+    ) -> Result<ObservedServiceState, String> {
         if self.fail {
             return Err("access denied".to_owned());
         }
@@ -43,8 +59,8 @@ impl ServiceReader for FakeServiceReader {
     }
 }
 
-fn state(name: &str) -> Result<ServiceState, String> {
-    match crate::scm::query_service(name)? {
+fn state(name: &str, target: &TargetTriple) -> Result<ServiceState, String> {
+    match crate::scm::query_service(name, target)? {
         ObservedServiceState::Absent => Ok(ServiceState::Absent),
         ObservedServiceState::Service {
             display_name,
@@ -83,6 +99,13 @@ fn installed(op: &ServiceOperation) -> ServiceState {
     }
 }
 
+fn state_target(state: &ServiceState) -> Option<&TargetTriple> {
+    match state {
+        ServiceState::Registration { command, .. } => Some(command.executable.target()),
+        ServiceState::Absent => None,
+    }
+}
+
 fn start_type(start: zup_core::ServiceStart) -> ServiceStartType {
     match start {
         zup_core::ServiceStart::Automatic => ServiceStartType::AutoStart,
@@ -110,7 +133,7 @@ fn service_info(
         service_type: existing.map_or(ServiceType::OWN_PROCESS, |config| config.service_type),
         start_type: start_type(*start),
         error_control: existing.map_or(ServiceErrorControl::Normal, |config| config.error_control),
-        executable_path: command.executable.as_path().to_path_buf(),
+        executable_path: host_path(&command.executable),
         launch_arguments: command.arguments.iter().map(Into::into).collect(),
         dependencies: existing.map_or_else(Vec::new, |config| config.dependencies.clone()),
         account_name: None,
@@ -159,7 +182,7 @@ fn write(name: &str, value: &ServiceState) -> Result<(), String> {
     }
 }
 
-pub fn apply(op: &ServiceOperation) -> Result<OperationReceipt, String> {
+pub fn apply(op: &ServiceOperation) -> Result<BackendReceipt, String> {
     if !matches!(
         op.kind,
         ServiceOperationKind::Create
@@ -169,15 +192,16 @@ pub fn apply(op: &ServiceOperation) -> Result<OperationReceipt, String> {
         return Err("service is not executable".into());
     }
     let previous = previous(op);
-    if state(&op.name)? != previous {
+    if state(&op.name, op.command.executable.target())? != previous {
         return Err("service changed since planning".into());
     }
     let installed = installed(op);
     write(&op.name, &installed)?;
-    Ok(OperationReceipt::Service {
+    Ok(BackendReceipt::Service {
         name: op.name.clone(),
-        previous: Box::new(previous),
-        installed: Box::new(installed),
+        privilege: op.privilege,
+        previous,
+        installed,
     })
 }
 
@@ -186,46 +210,57 @@ pub fn rollback(
     previous: &ServiceState,
     installed: &ServiceState,
 ) -> Result<(), String> {
-    if state(name)? != *installed {
+    let target = state_target(installed)
+        .or_else(|| state_target(previous))
+        .ok_or_else(|| "service target is missing".to_owned())?;
+    if state(name, target)? != *installed {
         return Err("service changed after installation".into());
     }
     write(name, previous)
 }
 
-pub fn reconcile(op: &ServiceOperation) -> Result<ReconcileResult, String> {
-    let current = match state(&op.name) {
+pub fn reconcile(op: &ServiceOperation) -> Result<NativeReconcileResult, String> {
+    let current = match state(&op.name, op.command.executable.target()) {
         Ok(state) => state,
-        Err(_) => return Ok(ReconcileResult::Ambiguous),
+        Err(_) => return Ok(NativeReconcileResult::Ambiguous),
     };
     let previous = previous(op);
     let installed = installed(op);
-    Ok(classify_reconcile(&op.name, current, previous, installed))
+    Ok(classify_reconcile(
+        &op.name,
+        op.privilege,
+        current,
+        previous,
+        installed,
+    ))
 }
 
 fn classify_reconcile(
     name: &str,
+    privilege: Privilege,
     current: ServiceState,
     previous: ServiceState,
     installed: ServiceState,
-) -> ReconcileResult {
+) -> NativeReconcileResult {
     if current == installed {
-        ReconcileResult::AppliedWithReceipt(OperationReceipt::Service {
+        NativeReconcileResult::AppliedWithReceipt(Box::new(BackendReceipt::Service {
             name: name.to_owned(),
-            previous: Box::new(previous),
-            installed: Box::new(installed),
-        })
+            privilege,
+            previous,
+            installed,
+        }))
     } else if current == previous {
-        ReconcileResult::NotApplied
+        NativeReconcileResult::NotApplied
     } else {
-        ReconcileResult::Ambiguous
+        NativeReconcileResult::Ambiguous
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use zup_core::{ResourceKey, ServiceId, ServiceStart};
+    use crate::transaction_payload::NativeReconcileResult;
+    use zup_core::{Privilege, ResourceKey, ServiceId, ServiceStart, TargetTriple};
     use zup_platform::{CommandSpec, TargetPath};
 
     struct Cleanup(String);
@@ -248,7 +283,11 @@ mod tests {
         let desired = ServiceState::Registration {
             display_name: "Zup Test".into(),
             command: CommandSpec::new(
-                TargetPath::new(PathBuf::from(r"C:\Zup\svc.exe")).unwrap(),
+                TargetPath::new(
+                    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                    r"C:\Zup\svc.exe",
+                )
+                .unwrap(),
                 vec![],
             ),
             start: ServiceStart::Disabled,
@@ -256,28 +295,30 @@ mod tests {
         assert_eq!(
             classify_reconcile(
                 "zup-test",
+                Privilege::System,
                 previous.clone(),
                 previous.clone(),
                 desired.clone()
             ),
-            ReconcileResult::NotApplied
+            NativeReconcileResult::NotApplied
         );
         assert!(matches!(
             classify_reconcile(
                 "zup-test",
+                Privilege::System,
                 desired.clone(),
                 previous.clone(),
                 desired.clone()
             ),
-            ReconcileResult::AppliedWithReceipt(_)
+            NativeReconcileResult::AppliedWithReceipt(_)
         ));
         let mut foreign = desired.clone();
         if let ServiceState::Registration { display_name, .. } = &mut foreign {
             *display_name = "Foreign".into();
         }
         assert_eq!(
-            classify_reconcile("zup-test", foreign, previous, desired),
-            ReconcileResult::Ambiguous
+            classify_reconcile("zup-test", Privilege::System, foreign, previous, desired),
+            NativeReconcileResult::Ambiguous
         );
     }
 
@@ -290,8 +331,12 @@ mod tests {
         let name = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
         let _cleanup = Cleanup(name.clone());
         let id = ServiceId::new(&name).unwrap();
-        let executable =
-            TargetPath::new(PathBuf::from(r"C:\Program Files\Zup Test\service.exe")).unwrap();
+        let target_triple = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let executable = TargetPath::new(
+            target_triple.clone(),
+            r"C:\Program Files\Zup Test\service.exe",
+        )
+        .unwrap();
         let mut op = ServiceOperation {
             key: ResourceKey::Service { id },
             kind: ServiceOperationKind::Create,
@@ -303,21 +348,22 @@ mod tests {
                 vec!["a b".into(), "say \"hello\"".into(), "世界".into()],
             ),
             start: ServiceStart::Disabled,
+            privilege: Privilege::System,
             previous: ObservedServiceState::Absent,
             conflict: None,
         };
-        assert_eq!(reconcile(&op).unwrap(), ReconcileResult::NotApplied);
+        assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::NotApplied);
         let first = apply(&op).unwrap();
-        assert_eq!(state(&name).unwrap(), installed(&op));
+        assert_eq!(state(&name, &target_triple).unwrap(), installed(&op));
         assert!(matches!(
             reconcile(&op).unwrap(),
-            ReconcileResult::AppliedWithReceipt(_)
+            NativeReconcileResult::AppliedWithReceipt(_)
         ));
         op.kind = ServiceOperationKind::UpdateOwned;
-        op.previous = crate::scm::query_service(&name).unwrap();
+        op.previous = crate::scm::query_service(&name, &target_triple).unwrap();
         op.start = ServiceStart::Manual;
         let second = apply(&op).unwrap();
-        let OperationReceipt::Service {
+        let BackendReceipt::Service {
             previous,
             installed,
             ..
@@ -326,7 +372,7 @@ mod tests {
             panic!("service receipt")
         };
         rollback(&name, &previous, &installed).unwrap();
-        let OperationReceipt::Service {
+        let BackendReceipt::Service {
             previous,
             installed,
             ..
@@ -334,12 +380,12 @@ mod tests {
         else {
             panic!("service receipt")
         };
-        let mut foreign = (*installed).clone();
+        let mut foreign = installed.clone();
         if let ServiceState::Registration { display_name, .. } = &mut foreign {
             *display_name = "Foreign".into();
         }
         write(&name, &foreign).unwrap();
         assert!(rollback(&name, &previous, &installed).is_err());
-        assert_eq!(reconcile(&op).unwrap(), ReconcileResult::Ambiguous);
+        assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::Ambiguous);
     }
 }

@@ -4,22 +4,82 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use zup_core::{
-    ComponentId, Install, InstallScope, Installer, PluginBinding, Prerequisite,
-    PrerequisiteDetector, PrerequisiteInstallerKind, PrerequisitePackage, UiBranding,
+    App, ComponentId, Install, InstallScope, Installer, PluginBinding, Prerequisite,
+    PrerequisitePackage, PrerequisiteRequirement, ResolvedTargetConfig, TargetOverrides,
+    UiBranding,
 };
 
 use crate::error::ManifestError;
-use crate::model::Manifest;
+use crate::model::{Manifest, Targeted, Updates};
 use crate::plugin::is_valid_source;
+use crate::target::{resolve_target_config, validate_target_matrix, validate_target_references};
 
-/// Compile a parsed manifest into platform-independent Installer IR.
+struct ManifestView {
+    app: App,
+    ui: Option<UiBranding>,
+    install: Install,
+    prerequisites: Vec<Prerequisite>,
+    updates: Option<Updates>,
+    components: Vec<zup_core::Component>,
+    plugins: Vec<crate::Plugin>,
+    files: Vec<zup_core::FileMapping>,
+    launchers: Vec<zup_core::Launcher>,
+    path: Vec<zup_core::PathEntry>,
+    services: Vec<zup_core::Service>,
+    protocols: Vec<zup_core::Protocol>,
+    file_associations: Vec<zup_core::FileAssociation>,
+}
+
+impl ManifestView {
+    fn for_target(manifest: &Manifest, target: &ResolvedTargetConfig) -> Self {
+        let profile = &target.profile;
+        Self {
+            app: manifest.app.clone(),
+            ui: manifest.ui.clone(),
+            install: target.install.clone(),
+            prerequisites: targeted_values(&manifest.prerequisites, profile),
+            updates: manifest.updates.clone(),
+            components: targeted_values(&manifest.components, profile),
+            plugins: targeted_values(&manifest.plugins, profile),
+            files: targeted_values(&manifest.files, profile),
+            launchers: targeted_values(&manifest.launchers, profile),
+            path: targeted_values(&manifest.path, profile),
+            services: targeted_values(&manifest.services, profile),
+            protocols: targeted_values(&manifest.protocols, profile),
+            file_associations: targeted_values(&manifest.file_associations, profile),
+        }
+    }
+}
+
+fn targeted_values<T: Clone>(
+    values: &[Targeted<T>],
+    profile: &zup_core::TargetProfileId,
+) -> Vec<T> {
+    values
+        .iter()
+        .filter(|value| value.applies_to(profile))
+        .map(|value| value.value.clone())
+        .collect()
+}
+
+/// Compile a parsed manifest and one selected target into Installer IR.
 ///
-/// Performs semantic validation only: uniqueness, cross-references, component
-/// graph checks, and install-directory coverage. No filesystem access.
-pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
-    validate_install(&manifest.install)?;
-    validate_ui(manifest.ui.as_ref())?;
-    if let Some(updates) = &manifest.updates
+/// The resolved config and caller overrides must still match the declared
+/// profile. Other validation covers uniqueness, cross-references, component
+/// graphs, and install-directory coverage. No filesystem access.
+pub fn compile(
+    manifest: &Manifest,
+    target: &ResolvedTargetConfig,
+    overrides: &TargetOverrides,
+) -> Result<Installer, ManifestError> {
+    validate_target_matrix(manifest)?;
+    validate_target_references(manifest)?;
+    validate_resolved_target(manifest, target, overrides)?;
+    let view = ManifestView::for_target(manifest, target);
+
+    validate_install(&view.install)?;
+    validate_ui(view.ui.as_ref())?;
+    if let Some(updates) = &view.updates
         && (updates.channel.is_empty()
             || updates.channel.len() > 32
             || !updates
@@ -34,61 +94,146 @@ pub fn compile(manifest: Manifest) -> Result<Installer, ManifestError> {
             span: None,
         });
     }
-    validate_components(&manifest.components)?;
-    validate_prerequisites(&manifest)?;
-    validate_resources(&manifest)?;
+    validate_components(&view.components)?;
+    validate_prerequisites(&view)?;
+    validate_resources(&view)?;
 
-    let Manifest {
-        app,
-        frontend,
-        ui,
-        install,
-        prerequisites,
-        components,
-        files,
-        shortcuts,
-        path,
-        services,
-        protocols,
-        file_types,
-        plugins,
-        ..
-    } = manifest;
-    let plugins = plugins
-        .into_iter()
+    let plugins = view
+        .plugins
+        .iter()
         .map(|plugin| PluginBinding {
-            id: plugin.id,
-            component: plugin.component,
-            when: plugin.when,
+            id: plugin.id.clone(),
+            component: plugin.component.clone(),
+            when: plugin.when.clone(),
         })
         .collect();
 
     Ok(Installer {
-        app,
-        frontend,
-        ui,
+        app: view.app,
+        target: target.target.clone(),
+        frontend: target.frontend,
+        ui: view.ui,
         updates: None,
-        install,
-        prerequisites,
-        components,
+        install: view.install,
+        prerequisites: view.prerequisites,
+        components: view.components,
         plugins,
-        files,
-        shortcuts,
-        path,
-        services,
-        protocols,
-        file_types,
+        files: view.files,
+        launchers: view.launchers,
+        path: view.path,
+        services: view.services,
+        protocols: view.protocols,
+        file_associations: view.file_associations,
     })
 }
 
-/// Parse and compile in one step, attaching source text to diagnostics.
-pub fn parse_and_compile(source: &str) -> Result<Installer, ManifestError> {
-    parse_and_compile_named(source, "zup.toml")
+/// Parse and compile one selected target without caller overrides.
+///
+/// Source text is attached to diagnostics.
+pub fn parse_and_compile(source: &str, selector: &str) -> Result<Installer, ManifestError> {
+    parse_and_compile_named(source, "zup.toml", selector)
 }
 
-pub fn parse_and_compile_named(source: &str, name: &str) -> Result<Installer, ManifestError> {
+/// Parse and compile one target without overrides using a diagnostic source name.
+pub fn parse_and_compile_named(
+    source: &str,
+    name: &str,
+    selector: &str,
+) -> Result<Installer, ManifestError> {
     let manifest = crate::parse::parse_named(source, name)?;
-    compile(manifest).map_err(|err| err.with_source_named(source, name))
+    let overrides = TargetOverrides::default();
+    let selected = crate::select_targets(&manifest, &[selector], &overrides)
+        .map_err(|err| err.with_source_named(source, name))?;
+    let target = &selected[0];
+    compile(&manifest, target, &overrides).map_err(|err| err.with_source_named(source, name))
+}
+
+/// Reject a resolved config that no manifest declaration and no declared
+/// override can produce.
+///
+/// The expected value is recomputed through the single resolution function, so
+/// a caller can only smuggle a source or install-directory override by also
+/// declaring it. Every field is compared, and every diagnostic names the field
+/// that drifted.
+fn validate_resolved_target(
+    manifest: &Manifest,
+    resolved: &ResolvedTargetConfig,
+    overrides: &TargetOverrides,
+) -> Result<(), ManifestError> {
+    let invalid = |reason: String| ManifestError::InvalidResolvedTargetConfig {
+        profile: resolved.profile.to_string(),
+        reason,
+        src: None,
+        span: None,
+    };
+    let Some(declared) = manifest.build.targets.get(&resolved.profile) else {
+        return Err(invalid(
+            "profile is not declared in [build.targets]".to_owned(),
+        ));
+    };
+    let expected = resolve_target_config(
+        &resolved.profile,
+        declared,
+        manifest.frontend,
+        &manifest.install,
+        overrides,
+    );
+    if resolved.target != expected.target {
+        return Err(invalid(format!(
+            "target is `{}`, expected `{}`",
+            resolved.target, expected.target
+        )));
+    }
+    if resolved.source != expected.source {
+        return Err(invalid(format!(
+            "source is `{}`, expected `{}` from the declared override and profile",
+            resolved.source.directory.display(),
+            expected.source.directory.display()
+        )));
+    }
+    if resolved.install.scope != expected.install.scope {
+        return Err(invalid(format!(
+            "install scope is `{}`, expected `{}` from the profile or common manifest",
+            resolved.install.scope, expected.install.scope
+        )));
+    }
+    if resolved.install.allow_directory_override != expected.install.allow_directory_override {
+        return Err(invalid(
+            "install directory-override policy does not match the profile or common manifest"
+                .to_owned(),
+        ));
+    }
+    if resolved.install.directory != expected.install.directory {
+        return Err(invalid(format!(
+            "install directory is `{}`, expected `{}` from the declared override and profile",
+            render_install_directory(&resolved.install),
+            render_install_directory(&expected.install),
+        )));
+    }
+    if resolved.frontend != expected.frontend {
+        return Err(invalid(format!(
+            "frontend is `{}`, expected `{}` from the supplied overrides and declaration",
+            resolved.frontend, expected.frontend
+        )));
+    }
+    Ok(())
+}
+
+/// A readable summary of an install directory, for a resolution diagnostic.
+fn render_install_directory(install: &Install) -> String {
+    let user = install
+        .directory
+        .user
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "-".to_owned());
+    let machine = install
+        .directory
+        .machine
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "-".to_owned());
+    format!("user={user} machine={machine}")
 }
 
 fn validate_ui(ui: Option<&UiBranding>) -> Result<(), ManifestError> {
@@ -244,7 +389,7 @@ fn check_cycles(index: &BTreeMap<ComponentId, &zup_core::Component>) -> Result<(
     Ok(())
 }
 
-fn validate_prerequisites(manifest: &Manifest) -> Result<(), ManifestError> {
+fn validate_prerequisites(manifest: &ManifestView) -> Result<(), ManifestError> {
     let mut seen = BTreeSet::new();
     for prerequisite in &manifest.prerequisites {
         if !seen.insert(prerequisite.id.as_str().to_ascii_lowercase()) {
@@ -329,51 +474,24 @@ fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestErro
             validate_filename(filename).map_err(|reason| invalid(&reason))?;
         }
     }
-    if prerequisite.installer.kind == PrerequisiteInstallerKind::Msi
-        && !matches!(
-            prerequisite.detector,
-            PrerequisiteDetector::MsiProduct { .. }
-        )
-    {
-        return Err(invalid("MSI installers require an msi_product detector"));
-    }
-    match &prerequisite.detector {
-        PrerequisiteDetector::RegistryValue { key, value, .. } => {
-            if key.is_empty() || key.contains('\0') || value.is_empty() || value.contains('\0') {
-                return Err(invalid(
-                    "registry detector key and value must be non-empty and NUL-free",
-                ));
-            }
+    if let PrerequisiteRequirement::FileVersion(file) = &prerequisite.requirement {
+        if file
+            .path
+            .parts()
+            .iter()
+            .any(|part| matches!(part, zup_core::TemplatePart::Variable(_)))
+        {
+            return Err(invalid(
+                "prerequisite file-version paths must be literal absolute paths",
+            ));
         }
-        PrerequisiteDetector::FileVersion { path, .. } => {
-            if path
-                .parts()
-                .iter()
-                .any(|part| matches!(part, zup_core::TemplatePart::Variable(_)))
-            {
-                return Err(invalid(
-                    "prerequisite file-version paths must be literal absolute paths",
-                ));
-            }
-            if path
-                .as_literal()
-                .is_none_or(|value| !Path::new(value).is_absolute())
-            {
-                return Err(invalid("prerequisite file-version path must be absolute"));
-            }
+        if file
+            .path
+            .as_literal()
+            .is_none_or(|value| !Path::new(value).is_absolute())
+        {
+            return Err(invalid("prerequisite file-version path must be absolute"));
         }
-        PrerequisiteDetector::MsiProduct { product_code, .. } => {
-            if product_code.is_empty()
-                || product_code.len() > 256
-                || product_code.contains('\0')
-                || product_code.contains(['/', '\\'])
-            {
-                return Err(invalid("MSI product code is invalid"));
-            }
-        }
-        PrerequisiteDetector::VisualCppV14 { .. }
-        | PrerequisiteDetector::DotNetRuntime { .. }
-        | PrerequisiteDetector::WebView2Evergreen { .. } => {}
     }
     Ok(())
 }
@@ -423,7 +541,7 @@ fn validate_filename(filename: &str) -> Result<(), String> {
     }
 }
 
-fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
+fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
     let known: BTreeSet<ComponentId> = manifest
         .components
         .iter()
@@ -471,20 +589,20 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
         }
     }
 
-    let mut file_type_ids = BTreeSet::new();
-    let mut file_type_exts = BTreeSet::new();
-    for file_type in &manifest.file_types {
-        if file_type.when.is_none() {
-            if !file_type_ids.insert(file_type.id.clone()) {
-                return Err(ManifestError::DuplicateFileType {
-                    id: file_type.id.to_string(),
+    let mut file_association_ids = BTreeSet::new();
+    let mut file_association_exts = BTreeSet::new();
+    for file_association in &manifest.file_associations {
+        if file_association.when.is_none() {
+            if !file_association_ids.insert(file_association.id.clone()) {
+                return Err(ManifestError::DuplicateFileAssociation {
+                    id: file_association.id.to_string(),
                     src: None,
                     span: None,
                 });
             }
-            if !file_type_exts.insert(file_type.extension.clone()) {
+            if !file_association_exts.insert(file_association.extension.clone()) {
                 return Err(ManifestError::DuplicateExtension {
-                    extension: file_type.extension.to_string(),
+                    extension: file_association.extension.to_string(),
                     src: None,
                     span: None,
                 });
@@ -500,9 +618,9 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
         check_ref(file.component.as_ref(), &known, "file mapping")?;
         check_condition(file.when.as_ref(), &known, "condition")?;
     }
-    for shortcut in &manifest.shortcuts {
-        check_ref(shortcut.component.as_ref(), &known, "shortcut")?;
-        check_condition(shortcut.when.as_ref(), &known, "condition")?;
+    for launcher in &manifest.launchers {
+        check_ref(launcher.component.as_ref(), &known, "launcher")?;
+        check_condition(launcher.when.as_ref(), &known, "condition")?;
     }
     for entry in &manifest.path {
         check_ref(entry.component.as_ref(), &known, "path entry")?;
@@ -515,8 +633,8 @@ fn validate_resources(manifest: &Manifest) -> Result<(), ManifestError> {
     for protocol in &manifest.protocols {
         check_condition(protocol.when.as_ref(), &known, "condition")?;
     }
-    for file_type in &manifest.file_types {
-        check_condition(file_type.when.as_ref(), &known, "condition")?;
+    for file_association in &manifest.file_associations {
+        check_condition(file_association.when.as_ref(), &known, "condition")?;
     }
     for plugin in &manifest.plugins {
         check_ref(plugin.component.as_ref(), &known, "plugin")?;

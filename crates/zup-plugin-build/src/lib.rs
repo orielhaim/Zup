@@ -7,9 +7,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use zup_build::MAX_PLUGIN_SOURCE_BYTES;
-use zup_build::{BuildPlan, ResolvedPlugin};
+use zup_build::{ResolvedPlugin, TargetBuildPlan};
 use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PluginArtifact};
-use zup_core::{MAX_PLUGIN_ARTIFACTS, Sha256Digest};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, Sha256Digest, TargetTriple};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,
     WASMTIME_VERSION, wit_package_digest,
@@ -38,17 +38,16 @@ pub enum PluginBuildError {
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error(transparent)]
-    Artifact(#[from] zup_bundle::BundleError),
+    Artifact(#[from] zup_bundle::PackageError),
 }
 
 pub fn compile_plugins(
-    plan: &BuildPlan,
-    target: &str,
+    plan: &TargetBuildPlan,
 ) -> Result<Vec<CompiledPluginArtifact>, PluginBuildError> {
     if plan.plugins.len() > MAX_PLUGIN_ARTIFACTS
         || plan.installer.plugins.len() > MAX_PLUGIN_ARTIFACTS
     {
-        return Err(zup_bundle::BundleError::TooManyPluginArtifacts {
+        return Err(zup_bundle::PackageError::TooManyPluginArtifacts {
             count: plan.plugins.len().max(plan.installer.plugins.len()),
             limit: MAX_PLUGIN_ARTIFACTS,
         }
@@ -63,19 +62,20 @@ pub fn compile_plugins(
     {
         return Err(PluginBuildError::PlanMismatch);
     }
-    let engine = PluginEngine::new(target)?;
+    let target = &plan.installer.target;
+    let engine = PluginEngine::new(target.as_str())?;
     compile_with_engine(&plan.plugins, target, &engine)
 }
 
-fn add_aot_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::BundleError> {
+fn add_aot_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::PackageError> {
     *total = total
         .checked_add(size)
-        .ok_or(zup_bundle::BundleError::PluginAotTooLarge {
+        .ok_or(zup_bundle::PackageError::PluginAotTooLarge {
             size: u64::MAX,
             limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
         })?;
     if *total > MAX_PLUGIN_AOT_TOTAL_BYTES {
-        return Err(zup_bundle::BundleError::PluginAotTooLarge {
+        return Err(zup_bundle::PackageError::PluginAotTooLarge {
             size: *total,
             limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
         });
@@ -85,7 +85,7 @@ fn add_aot_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::BundleErro
 
 fn compile_with_engine(
     plugins: &[ResolvedPlugin],
-    target: &str,
+    target: &TargetTriple,
     engine: &PluginEngine,
 ) -> Result<Vec<CompiledPluginArtifact>, PluginBuildError> {
     let mut artifacts = Vec::with_capacity(plugins.len());
@@ -108,7 +108,7 @@ fn compile_with_engine(
         }
         let aot = engine.precompile_component(&source)?;
         let aot_size =
-            u64::try_from(aot.len()).map_err(|_| zup_bundle::BundleError::PluginAotTooLarge {
+            u64::try_from(aot.len()).map_err(|_| zup_bundle::PackageError::PluginAotTooLarge {
                 size: u64::MAX,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             })?;
@@ -119,7 +119,7 @@ fn compile_with_engine(
             plugin_id: resolved.id.clone(),
             source_size: resolved.size,
             source_sha256: resolved.sha256,
-            target: target.to_owned(),
+            target: target.clone(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -207,7 +207,7 @@ mod tests {
         let mut total = MAX_PLUGIN_AOT_TOTAL_BYTES - 1;
         assert!(matches!(
             add_aot_size(&mut total, 2),
-            Err(zup_bundle::BundleError::PluginAotTooLarge {
+            Err(zup_bundle::PackageError::PluginAotTooLarge {
                 size,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             }) if size == MAX_PLUGIN_AOT_TOTAL_BYTES + 1
@@ -215,7 +215,7 @@ mod tests {
         let mut total = u64::MAX;
         assert!(matches!(
             add_aot_size(&mut total, 1),
-            Err(zup_bundle::BundleError::PluginAotTooLarge {
+            Err(zup_bundle::PackageError::PluginAotTooLarge {
                 size: u64::MAX,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             })

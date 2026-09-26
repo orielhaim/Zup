@@ -50,6 +50,7 @@ clap.workspace = true
 clap_complete = { workspace = true, optional = true }
 inquire = { workspace = true, optional = true }
 miette.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 toml_edit = { workspace = true, optional = true }
 tokio = { version = "1", features = [
@@ -92,8 +93,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-base64 = "0.23.1"
 tempfile.workspace = true
+wat = "1"
 windows-registry.workspace = true
 wit-component = { version = "=0.259.0", features = ["dummy-module"] }
 wit-parser = "=0.259.0"

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::condition::Condition;
 use crate::ids::{
-    AppId, ComponentId, FileTypeId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
+    AppId, ComponentId, FileAssociationId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
 };
 use crate::template::Template;
 use crate::value::ValueError;
@@ -183,20 +183,20 @@ pub struct FileMapping {
     pub allow_empty: bool,
 }
 
-/// Portable application-shortcut location.
+/// Portable application launcher location.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
-pub enum ShortcutLocation {
-    StartMenu,
+pub enum LauncherLocation {
+    Menu,
     Desktop,
 }
 
-impl std::fmt::Display for ShortcutLocation {
+impl std::fmt::Display for LauncherLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::StartMenu => "start-menu",
+            Self::Menu => "menu",
             Self::Desktop => "desktop",
         })
     }
@@ -205,8 +205,8 @@ impl std::fmt::Display for ShortcutLocation {
 /// High-level application launcher intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Shortcut {
-    pub location: ShortcutLocation,
+pub struct Launcher {
+    pub location: LauncherLocation,
     pub name: NonEmptyString,
     pub target: Template,
     #[serde(default)]
@@ -219,7 +219,7 @@ pub struct Shortcut {
     pub when: Option<Condition>,
 }
 
-/// A logical PATH entry to add to the installation-appropriate scope.
+/// A logical search-path entry to add to the install scope that owns it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
@@ -272,9 +272,9 @@ pub struct Protocol {
 /// File extension registration intent. Does not set default handlers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FileType {
+pub struct FileAssociation {
     pub extension: FileExtension,
-    pub id: FileTypeId,
+    pub id: FileAssociationId,
     #[serde(default)]
     pub description: Option<String>,
     pub executable: Template,
@@ -329,11 +329,20 @@ impl<'de> Deserialize<'de> for FileExtension {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Authorization an operation needs on the target host.
+///
+/// This names *who* must perform an operation, never *how* the host obtains
+/// that authority. Elevation, impersonation, and policy prompts are platform
+/// concerns resolved by a platform runtime, not by this value.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Privilege {
+    /// The signed-in user is enough.
     User,
-    Machine,
+    /// Host-wide authority is required.
+    System,
 }
 
 /// Payload source for the installer (build-time, not install-time).

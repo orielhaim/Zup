@@ -4,9 +4,29 @@ Updates use TUF metadata and static files. There is no zup update service.
 
 ## Configure and build
 
-Add this to `zup.toml`:
+Add `[updates]` to `zup.toml`:
 
 ```toml
+schema = 1
+
+[app]
+id = "com.acme.desktop"
+name = "Acme"
+version = "1.4.0"
+main = "Acme.exe"
+
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Acme"
+
 [updates]
 repository = "https://updates.example.com/acme"
 channel = "stable"
@@ -61,4 +81,21 @@ For smoke checks, `tuftool download --root <trusted-root> --metadata-url <repo>/
 
 ## Client behavior
 
-Run `Setup.exe update check` to inspect the signed channel descriptor or `Setup.exe update` to download and start a verified upgrade. Safe TUF expiration checks are always enabled. Timestamp, snapshot, and targets metadata are persisted at `<update-state-root>/updates/<app-id>/<channel>/tuf/`; do not delete that directory to recover from a verification failure. For machine installs, the invoking user's `%LOCALAPPDATA%\zup` is the update state root so metadata and the verified download are writable before the existing lifecycle requests elevation for machine changes. Target bytes remain in a private `.partial` quarantine file until the complete `tough` stream succeeds, then are atomically renamed and passed to the existing upgrade lifecycle. The downloaded installer publishes itself as maintenance only if its transaction commits.
+Run `Setup.exe update check` to inspect the signed channel descriptor, or
+`Setup.exe update` to download and start a verified upgrade. Both accept
+`--scope`, `--state-root`, `--output`, `--non-interactive`, and `--yes`; `--scope`
+takes `user`, `machine`, or `either`, and `--output` takes `human`, `json`, or
+`jsonl`. Safe TUF expiration checks are always enabled. Timestamp, snapshot,
+and targets metadata are persisted at
+`<update-state-root>/updates/<app-id>/<channel>/tuf/`; do not delete that
+directory to recover from a verification failure. For machine installs, the
+invoking user's `%LOCALAPPDATA%\zup` is the update state root so metadata and
+the verified download are writable before the existing lifecycle requests
+elevation for machine changes. Target bytes remain in a private `.partial`
+quarantine file until the complete `tough` stream succeeds, then are atomically
+renamed and passed to the existing upgrade lifecycle. The downloaded installer
+publishes itself as maintenance only if its transaction commits.
+
+A downgrade is refused: the lifecycle requires the new package version to be
+greater than the installed version, an equal version is a modify, and a lower
+version is an error. There is no manifest option to allow it.

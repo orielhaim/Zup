@@ -1,11 +1,11 @@
 //! Desired-versus-observed execution delta planning for zup.
 //!
 //! ```text
-//! TargetPlan + MachineSnapshot → ExecutionPlan
+//! TargetPlan + HostSnapshot → ExecutionPlan
 //! ```
 //!
-//! Pure and platform-API independent. `zup-windows` reports observed facts;
-//! this crate decides Create / Replace / NoOp / Conflict.
+//! Pure and platform-API independent. A platform runtime reports observed
+//! facts; this crate decides Create / Replace / NoOp / Conflict.
 
 #![forbid(unsafe_code)]
 
@@ -16,21 +16,21 @@ mod operation;
 mod plan;
 
 pub use ledger::{
-    ExtensionState, INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource, ProgIdState,
-    ProtocolState, ServiceState, ShortcutState, UninstallEntryState, UninstallEntryValue,
+    ExtensionState, FileAssociationState, INSTALL_LEDGER_SCHEMA, InstallLedger, LauncherState,
+    OwnedResource, ProtocolState, ServiceState,
 };
 pub use lifecycle::{LifecycleAction, LifecycleError, plan_lifecycle};
 pub use observe::{
-    MachineSnapshot, ObservedExtensionState, ObservedFile, ObservedFileState, ObservedFileType,
-    ObservedPathEntry, ObservedProgIdState, ObservedProtocol, ObservedProtocolState,
-    ObservedService, ObservedServiceState, ObservedShortcut, ObservedShortcutState, PathEntryState,
-    ServiceRuntimeState,
+    HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
+    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
+    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
+    ObservedServiceState, SearchPath, ServiceRuntimeState,
 };
 pub use operation::{
-    Conflict, Delta, ExecutionPlan, ExecutionSummary, FileOperation, FileOperationKind,
-    FilePrecondition, FileTypeOperation, FileTypeOperationKind, ManagedOperation, PathOperation,
-    PathOperationKind, ProtocolOperation, ProtocolOperationKind, RemovalKind, RemovalOperation,
-    ServiceOperation, ServiceOperationKind, ShortcutOperation, ShortcutOperationKind,
-    UninstallEntryOperation,
+    Conflict, Delta, ExecutionPlan, ExecutionSummary, FileAssociationOperation,
+    FileAssociationOperationKind, FileOperation, FileOperationKind, FilePrecondition,
+    LauncherOperation, LauncherOperationKind, ManagedOperation, PathOperation, PathOperationKind,
+    ProtocolOperation, ProtocolOperationKind, RemovalKind, RemovalOperation, ServiceOperation,
+    ServiceOperationKind,
 };
-pub use plan::{ExecutionPlanError, normalize_path_entry, path_contains_entry, plan_execution};
+pub use plan::{ExecutionPlanError, plan_execution};

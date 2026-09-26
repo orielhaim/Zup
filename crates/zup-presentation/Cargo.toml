@@ -12,3 +12,4 @@ serde_json.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
+zup-transaction.workspace = true

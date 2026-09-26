@@ -1,13 +1,13 @@
 use std::fmt;
 
-use zup_core::{PluginBinding, SelectedScope, ServiceStart, ShortcutLocation};
+use zup_core::{LauncherLocation, PluginBinding, SelectedScope, ServiceStart, TargetTriple};
 use zup_plan::{
     CancellationQuery, PluginExecutor, PluginFailure, PluginPlanningContext, PluginResource,
     PluginResourceProposal,
 };
 use zup_plugin_contract::{
-    Context, InstallScope, InvocationError, ResourceItem, ServiceStart as ContractServiceStart,
-    ShortcutLocation as ContractShortcutLocation,
+    Context, InstallScope, InvocationError, LauncherLocation as ContractLauncherLocation,
+    ResourceItem, ServiceStart as ContractServiceStart,
 };
 
 use crate::loader::{LoadError, LoadedBundle, load_bundle};
@@ -28,15 +28,15 @@ impl fmt::Debug for WasmtimePluginExecutor {
 
 impl WasmtimePluginExecutor {
     pub fn load(
-        bundle: zup_bundle::EmbeddedBundle,
-        expected_target: &str,
+        package: zup_bundle::Package,
+        expected_target: &TargetTriple,
     ) -> Result<Self, LoadError> {
         Ok(Self {
-            loaded: load_bundle(bundle, expected_target)?,
+            loaded: load_bundle(package, expected_target)?,
         })
     }
 
-    pub fn target(&self) -> &str {
+    pub fn target(&self) -> &TargetTriple {
         &self.loaded.target
     }
 
@@ -46,12 +46,22 @@ impl WasmtimePluginExecutor {
 }
 
 impl PluginExecutor for WasmtimePluginExecutor {
+    fn target(&self) -> &TargetTriple {
+        &self.loaded.target
+    }
+
     fn plan(
         &mut self,
         binding: &PluginBinding,
         context: &PluginPlanningContext,
         cancellation: &dyn CancellationQuery,
     ) -> Result<PluginResourceProposal, PluginFailure> {
+        if context.target != self.loaded.target {
+            return Err(PluginFailure::target_mismatch(
+                self.loaded.target.clone(),
+                context.target.clone(),
+            ));
+        }
         if cancellation.is_cancelled() {
             return Err(PluginFailure::Cancelled);
         }
@@ -86,8 +96,7 @@ fn contract_context(binding: &PluginBinding, context: &PluginPlanningContext) ->
             SelectedScope::User => InstallScope::User,
             SelectedScope::Machine => InstallScope::Machine,
         },
-        os: context.host.os().as_str().to_owned(),
-        architecture: context.host.architecture().as_str().to_owned(),
+        target: context.target.to_string(),
         selected_components: context
             .selected_components
             .iter()
@@ -102,15 +111,15 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
             destination: file.destination,
             contents: file.contents,
         },
-        ResourceItem::Shortcut(shortcut) => PluginResource::Shortcut {
-            location: match shortcut.location {
-                ContractShortcutLocation::StartMenu => ShortcutLocation::StartMenu,
-                ContractShortcutLocation::Desktop => ShortcutLocation::Desktop,
+        ResourceItem::Launcher(launcher) => PluginResource::Launcher {
+            location: match launcher.location {
+                ContractLauncherLocation::Menu => LauncherLocation::Menu,
+                ContractLauncherLocation::Desktop => LauncherLocation::Desktop,
             },
-            name: shortcut.name,
-            target: shortcut.target,
-            arguments: shortcut.arguments,
-            working_directory: shortcut.working_directory,
+            name: launcher.name,
+            target: launcher.target,
+            arguments: launcher.arguments,
+            working_directory: launcher.working_directory,
         },
         ResourceItem::PathEntry(entry) => PluginResource::PathEntry { value: entry.value },
         ResourceItem::Service(service) => PluginResource::Service {
@@ -130,11 +139,11 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
             executable: protocol.executable,
             args: protocol.args,
         },
-        ResourceItem::FileType(file_type) => PluginResource::FileType {
-            extension: file_type.extension,
-            id: file_type.id,
-            description: file_type.description,
-            executable: file_type.executable,
+        ResourceItem::FileAssociation(file_association) => PluginResource::FileAssociation {
+            extension: file_association.extension,
+            id: file_association.id,
+            description: file_association.description,
+            executable: file_association.executable,
         },
     }
 }
@@ -165,10 +174,9 @@ fn map_invocation_error(error: InvocationError) -> PluginFailure {
 mod tests {
     use super::*;
     use zup_core::{AppId, NonEmptyString};
-    use zup_plan::{PluginArchitecture, PluginHostFacts, PluginOperatingSystem};
     use zup_plugin_contract::{
-        FileType, GeneratedFile, PathEntry, Protocol, ResourceItem, Service,
-        ServiceStart as ContractServiceStart, ShortcutLocation as ContractShortcutLocation,
+        FileAssociation, GeneratedFile, LauncherLocation as ContractLauncherLocation, PathEntry,
+        Protocol, ResourceItem, Service, ServiceStart as ContractServiceStart,
     };
 
     #[test]
@@ -178,8 +186,8 @@ mod tests {
                 destination: "file".to_owned(),
                 contents: vec![1, 2, 3],
             }),
-            ResourceItem::Shortcut(zup_plugin_contract::Shortcut {
-                location: ContractShortcutLocation::Desktop,
+            ResourceItem::Launcher(zup_plugin_contract::Launcher {
+                location: ContractLauncherLocation::Desktop,
                 name: "name".to_owned(),
                 target: "target".to_owned(),
                 arguments: vec!["arg".to_owned()],
@@ -201,7 +209,7 @@ mod tests {
                 executable: "executable".to_owned(),
                 args: Vec::new(),
             }),
-            ResourceItem::FileType(FileType {
+            ResourceItem::FileAssociation(FileAssociation {
                 extension: ".ext".to_owned(),
                 id: "type".to_owned(),
                 description: None,
@@ -214,11 +222,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(converted.len(), 6);
         assert!(matches!(converted[0], PluginResource::GeneratedFile { .. }));
-        assert!(matches!(converted[1], PluginResource::Shortcut { .. }));
+        assert!(matches!(converted[1], PluginResource::Launcher { .. }));
         assert!(matches!(
             &converted[1],
-            PluginResource::Shortcut {
-                location: ShortcutLocation::Desktop,
+            PluginResource::Launcher {
+                location: LauncherLocation::Desktop,
                 ..
             }
         ));
@@ -232,11 +240,14 @@ mod tests {
             }
         ));
         assert!(matches!(converted[4], PluginResource::Protocol { .. }));
-        assert!(matches!(converted[5], PluginResource::FileType { .. }));
+        assert!(matches!(
+            converted[5],
+            PluginResource::FileAssociation { .. }
+        ));
     }
 
     #[test]
-    fn passes_plugin_identity_and_host_facts_exactly() {
+    fn passes_plugin_identity_and_target_exactly() {
         let binding = PluginBinding {
             id: zup_core::PluginId::new("helper").unwrap(),
             component: None,
@@ -252,20 +263,19 @@ mod tests {
         };
         let planning = PluginPlanningContext {
             app,
-            install_directory: zup_core::Template::parse("${known.local_app_data}/App").unwrap(),
+            install_directory: zup_core::Template::parse("${location.user_data}/App").unwrap(),
             scope: SelectedScope::Machine,
             selected_components: vec![zup_core::ComponentId::new("core").unwrap()],
-            host: PluginHostFacts::new(PluginOperatingSystem::Windows, PluginArchitecture::Aarch64),
+            target: TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
         };
         let context = contract_context(&binding, &planning);
         assert_eq!(context.plugin_id, "helper");
         assert_eq!(context.app_id, "com.example.app");
         assert_eq!(context.app_name, "App");
         assert_eq!(context.app_version, "1.2.3");
-        assert_eq!(context.install_directory, "${known.local_app_data}/App");
+        assert_eq!(context.install_directory, "${location.user_data}/App");
         assert!(matches!(context.install_scope, InstallScope::Machine));
-        assert_eq!(context.os, "windows");
-        assert_eq!(context.architecture, "aarch64");
+        assert_eq!(context.target, "aarch64-pc-windows-msvc");
         assert_eq!(context.selected_components, ["core"]);
     }
 

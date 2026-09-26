@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use zup_core::{
-    AppId, Prerequisite, PrerequisiteArchitecture,
-    PrerequisiteDetector as PrerequisiteDetectorSpec, PrerequisiteId, PrerequisiteInstaller,
-    PrerequisiteInstallerKind, PrerequisitePackage, RelativePath, SelectedScope, Sha256Digest,
+    AppId, Prerequisite, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
+    PrerequisitePackage, PrerequisiteRequirement, RelativePath, SelectedScope, Sha256Digest,
+    TargetTriple,
 };
 
 pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 1;
@@ -65,6 +65,7 @@ pub struct BootstrapKey {
     pub app_id: AppId,
     pub app_version: Version,
     pub scope: SelectedScope,
+    pub target: TargetTriple,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +73,7 @@ pub struct BootstrapOperation {
     pub id: PrerequisiteId,
     pub name: String,
     pub target: PrerequisiteArchitecture,
-    pub detector: PrerequisiteDetectorSpec,
+    pub requirement: PrerequisiteRequirement,
     pub package: PrerequisitePackage,
     pub installer: PrerequisiteInstaller,
 }
@@ -83,7 +84,7 @@ impl BootstrapOperation {
             id: prerequisite.id.clone(),
             name: prerequisite.name.to_string(),
             target: prerequisite.target,
-            detector: prerequisite.detector.clone(),
+            requirement: prerequisite.requirement.clone(),
             package: prerequisite.package.clone(),
             installer: prerequisite.installer.clone(),
         }
@@ -132,6 +133,10 @@ impl BootstrapPlan {
     pub fn fingerprint(&self) -> Sha256Digest {
         let bytes = serde_json::to_vec(self).expect("bootstrap plan serializes");
         Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    pub fn target(&self) -> &TargetTriple {
+        &self.key.target
     }
 
     pub fn operation(&self, id: &PrerequisiteId) -> Option<&BootstrapOperation> {
@@ -337,6 +342,9 @@ impl BootstrapState {
     }
 
     pub fn validate(&self, plan: &BootstrapPlan) -> Result<(), BootstrapError> {
+        if self.key.target != plan.key.target {
+            return Err(BootstrapError::TargetMismatch);
+        }
         if self.schema != BOOTSTRAP_STATE_SCHEMA
             || self.id != BootstrapId::for_plan(plan)
             || self.key != plan.key
@@ -496,28 +504,18 @@ pub enum DetectionResult {
     },
 }
 
-pub trait PrerequisiteDetector: Send + Sync {
-    fn detect(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError>;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinProvider {
-    VisualCppV14,
-    DotNetRuntime,
-    WebView2Evergreen,
-    Msi,
-    ExplicitExe,
+pub trait PrerequisiteSatisfier: Send + Sync {
+    fn satisfy(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRequest {
     pub prerequisite_id: PrerequisiteId,
+    pub requirement: PrerequisiteRequirement,
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub expected_digest: Sha256Digest,
     pub expected_size: Option<u64>,
-    pub installer_kind: PrerequisiteInstallerKind,
-    pub builtin: BuiltinProvider,
     pub success_exit_codes: Vec<i32>,
     pub reboot_exit_codes: Vec<i32>,
 }
@@ -553,6 +551,8 @@ pub enum BootstrapError {
     MissingArtifact(String),
     #[error("bootstrap artifact for `{0}` does not match its package identity")]
     ArtifactMismatch(String),
+    #[error("bootstrap target mismatch")]
+    TargetMismatch,
     #[error("bootstrap state is invalid: {0}")]
     InvalidState(&'static str),
     #[error("bootstrap recovery is required: {0}")]
@@ -561,29 +561,18 @@ pub enum BootstrapError {
     Provider(String),
     #[error("bootstrap provider preflight failed: {0}")]
     ProviderPreflight(String),
-    #[error("bootstrap detector failed: {0}")]
-    Detector(String),
+    #[error("bootstrap requirement check failed: {0}")]
+    Requirement(String),
     #[error("prerequisite process unexpectedly initiated a reboot")]
     UnexpectedReboot,
-    #[error("prerequisite returned success but the detector is still unsatisfied")]
-    DetectorStillUnsatisfied,
+    #[error("prerequisite returned success but the requirement is still unsatisfied")]
+    RequirementStillUnsatisfied,
     #[error("bootstrap limit exceeded: {0}")]
     Limit(&'static str),
     #[error("bootstrap I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("bootstrap JSON failed: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-pub fn builtin_for_detector(detector: &PrerequisiteDetectorSpec) -> BuiltinProvider {
-    match detector {
-        PrerequisiteDetectorSpec::VisualCppV14 { .. } => BuiltinProvider::VisualCppV14,
-        PrerequisiteDetectorSpec::DotNetRuntime { .. } => BuiltinProvider::DotNetRuntime,
-        PrerequisiteDetectorSpec::WebView2Evergreen { .. } => BuiltinProvider::WebView2Evergreen,
-        PrerequisiteDetectorSpec::MsiProduct { .. } => BuiltinProvider::Msi,
-        PrerequisiteDetectorSpec::RegistryValue { .. }
-        | PrerequisiteDetectorSpec::FileVersion { .. } => BuiltinProvider::ExplicitExe,
-    }
 }
 
 fn validate_operation(operation: &BootstrapOperation) -> Result<(), BootstrapError> {

@@ -72,12 +72,15 @@ schema = 1
 id = "com.example.plan"
 name = "Plan"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/Plan"
+user = "${location.user_data}/Plan"
 "#,
     )
     .unwrap();
@@ -100,7 +103,7 @@ user = "${known.local_app_data}/Plan"
     );
     let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(value["preview"]["application"], "Plan");
-    assert!(value["execution"]["install_directory"].is_string());
+    assert!(value["transaction"]["install_directory"]["path"].is_string());
 }
 
 #[test]
@@ -109,7 +112,7 @@ fn fmt_preserves_author_comments_and_check_detects_clean_manifests() {
     let manifest = root.path().join("zup.toml");
     fs::write(
         &manifest,
-        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[source]\ndirectory=\"dist\"\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${known.local_app_data}/Fmt\"\n",
+        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget=\"x86_64-pc-windows-msvc\"\nsource={directory=\"dist\"}\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${location.user_data}/Fmt\"\n",
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
@@ -143,12 +146,15 @@ fn check_renders_source_aware_semantic_diagnostics() {
 id = "com.example.bad"
 name = "Bad"
 version = "1.0.0"
-[source]
-directory = "dist"
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 [install]
 scope = "user"
 [install.directory]
-user = "${known.local_app_data}/Bad"
+user = "${location.user_data}/Bad"
 [[files]]
 source = "x"
 destination = "${install}/x"

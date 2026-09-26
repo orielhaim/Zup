@@ -19,6 +19,20 @@ cargo build -p zup --no-default-features --features headless --bin zup-setup-hea
 
 `zup-setup` remains a compatibility alias. With the default `gui` feature it is the GUI launcher; the three explicit template names are the supported frontend entry points.
 
+The `zup` library compiles only with the `build` feature, so the three template
+commands above do not build today. Adding `build` to each feature set produces a
+template:
+
+```powershell
+cargo build -p zup --no-default-features --features build,gui --bin zup-setup-gui --release
+cargo build -p zup --no-default-features --features build,console --bin zup-setup-console --release
+cargo build -p zup --no-default-features --features build,headless --bin zup-setup-headless --release
+```
+
+That ships the plugin compiler inside the runtime, which
+[plugins](plugins.md) otherwise excludes. The feature sets above are the ones
+`scripts/verify-frontend-features.ps1` builds in CI.
+
 Use one template as the runtime input. The output can still be named `Acme-Setup.exe`:
 
 ```powershell
@@ -30,10 +44,47 @@ zup build --frontend headless --runtime target\release\zup-setup-headless.exe
 A manifest can set the default:
 
 ```toml
+schema = 1
 frontend = "console"
+
+[app]
+id = "com.acme.desktop"
+name = "Acme"
+version = "1.4.0"
+main = "Acme.exe"
+
+[build]
+
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Acme"
 ```
 
 `--frontend` takes precedence. The build rejects a runtime with the wrong PE subsystem or template name. GUI templates use the Windows GUI subsystem. Console and headless templates use the Windows CUI subsystem and are compiled with separate Cargo feature sets.
+
+## Build readiness
+
+`zup doctor` answers whether `zup build` would succeed right now. It resolves the manifest, the target matrix, the runtime templates, and the output paths through the same code the build uses, then reports one row per check per target profile: canonical target, manifest compilation, source root and payload digest, plugin engine and AOT readiness, trusted update root, resolved frontend, runtime template, runtime target, runtime subsystem, build backend, target lowering, and output parent writability.
+
+```powershell
+zup doctor --manifest zup.toml
+zup doctor --manifest zup.toml --target windows-x64 --runtime target\release\zup-setup-gui.exe
+zup doctor --manifest zup.toml --format json
+```
+
+The command is read-only. It never writes an installer artifact, downloads a tool, or changes machine state; plugin sources are hashed and AOT-compiled in memory, and output directories are probed for write access without creating anything. Every failing check across every selected target is reported in one pass, and the process exits nonzero when any check fails.
+
+`--target` is repeatable and accepts a profile name or a canonical target triple; an empty selection covers every profile. One `--runtime` and one `--output` are required per selected target, exactly as in `zup build`; a single target may omit `--runtime` and use the template discovered next to the `zup` executable. A missing runtime, a missing output directory, or the wrong number of inputs is reported as a diagnostic rather than a usage error, so one run shows every problem.
+
+Only Windows targets have an implemented backend. A non-Windows target reports `backend not implemented`, and a Windows target on a non-Windows host reports `backend unavailable`. Neither case produces an artifact. The portable engine still builds and tests natively on Linux; see [architecture](architecture.md#the-target-matrix-and-the-backend-boundary) for the boundary that keeps it portable and for the CI job that verifies it.
+
+`zup doctor` uses `--format`, with the values `human` and `json`. The lifecycle commands use `--output`, with the values `human`, `json`, and `jsonl`; `zup plan` uses `--json`. `--format json` prints one versioned report, `version: 1`, with a `profile`, `target`, `kind`, `status`, `message`, and `path` field per check. The shape is stable, so automation can read `status` and `path` without parsing prose.
 
 Check the graph before packaging:
 
@@ -42,7 +93,7 @@ cargo tree -p zup --no-default-features --features headless --edges normal
 cargo tree -p zup --no-default-features --features console --edges normal
 ```
 
-The headless graph does not contain `zup-ui`, `gpui-kit`, `cliclack`, `indicatif`, or `console`. The console graph does not contain GPUI. Do not build lightweight templates with unrelated all-feature workspace commands, because Cargo feature unification is global within one invocation. The repository includes `scripts/verify-frontend-features.ps1` to run the graph checks, build all three release templates, verify PE subsystems, and print their sizes.
+The headless graph does not contain `zup-ui`, `gpui-kit`, `cliclack`, `indicatif`, or `console`. The console graph does not contain GPUI. Do not build lightweight templates with unrelated all-feature workspace commands, because Cargo feature unification is global within one invocation. The repository includes `scripts/verify-frontend-features.ps1` to run the graph checks, build all three release templates, verify PE subsystems, and print their sizes; the Windows CI job runs it on every push to `main` and every pull request.
 
 ## Console behavior
 
@@ -73,7 +124,7 @@ The event stream uses explicit DTOs, not serialized internal Rust structures:
 {"type":"completed","outcome":"success"}
 ```
 
-A final JSON result includes `outcome`, `code`, application identity, scope, install directory when known, log path, and drift information. Blocker events include process IDs when Windows Restart Manager supplies them.
+A final JSON result includes `outcome`, `code`, application identity, scope, install directory when known, log path, and drift information. Blocker events include process IDs when the Windows Restart Manager supplies them.
 
 ## Exit codes
 
@@ -81,14 +132,15 @@ Clap keeps conventional argument and usage behavior. Runtime outcomes use a smal
 
 | Code | Outcome |
 | ---: | --- |
-| 0 | success |
-| 2 | cancelled |
-| 3 | invalid invocation or configuration |
-| 4 | ownership conflict or drift |
-| 5 | elevation required |
-| 6 | trust or update verification failure |
-| 7 | recovery required |
-| 1 | other operation failure |
+| 0 | `success` |
+| 2 | `cancelled` |
+| 3 | `invalid_invocation` or `configuration` |
+| 4 | `ownership_conflict` |
+| 5 | `authorization_required` |
+| 6 | `verification_failure` |
+| 7 | `recovery_required` |
+| 3010 | `reboot_required` |
+| 1 | `failure` |
 
 The same mapping appears in `outcome` for JSON and JSONL callers.
 

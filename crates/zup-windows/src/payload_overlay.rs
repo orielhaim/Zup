@@ -8,7 +8,6 @@ use thiserror::Error;
 use zup_core::{
     AppId, ComponentId, PLUGIN_PAYLOAD_ROOT, RelativePath, SelectedScope, Sha256Digest, hash_reader,
 };
-use zup_exec::ExecutionPlan;
 use zup_plan::{GeneratedFile, InstallPlan};
 use zup_transaction::{NodeKind, TransactionPlan};
 
@@ -163,29 +162,6 @@ impl PayloadOverlayIdentity {
                     source_relative: file.source_relative.clone(),
                     size: file.size,
                     sha256: file.sha256,
-                }),
-            true,
-        )
-    }
-
-    pub fn from_execution_plan(
-        app_id: AppId,
-        app_version: Version,
-        scope: SelectedScope,
-        plan: &ExecutionPlan,
-    ) -> Result<Self, PayloadOverlayError> {
-        Self::from_parts(
-            app_id,
-            app_version,
-            scope,
-            plan.selected_components.clone(),
-            plan.files
-                .iter()
-                .filter(|file| is_plugin_payload_path(&file.source_relative))
-                .map(|file| PayloadOverlayFileIdentity {
-                    source_relative: file.source_relative.clone(),
-                    size: file.expected_size,
-                    sha256: file.expected_sha256,
                 }),
             true,
         )
@@ -520,7 +496,7 @@ pub fn cleanup_app_payload_overlays(
 pub fn is_plugin_payload_path(path: &RelativePath) -> bool {
     path.components()
         .next()
-        .is_some_and(|component| component.eq_ignore_ascii_case(PLUGIN_PAYLOAD_ROOT))
+        .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)
 }
 
 fn insert_file(
@@ -826,10 +802,12 @@ fn io_error(path: &Path, source: std::io::Error) -> PayloadOverlayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::{App, NonEmptyString, ResourceKey, Template};
-    use zup_exec::{ExecutionSummary, FileOperation, FileOperationKind, FilePrecondition};
+    use zup_core::{App, NonEmptyString, ResourceKey, TargetTriple, Template};
     use zup_plan::{PlanSummary, PlannedFile};
     use zup_platform::TargetPath;
+    use zup_transaction::{
+        FileDelta, FilePrecondition, FileWork, TransactionInput, compile_transaction,
+    };
 
     fn generated_source() -> RelativePath {
         RelativePath::new("__zup_plugins__/generated.bin").unwrap()
@@ -857,8 +835,9 @@ mod tests {
                 main: None,
                 description: None,
             },
+            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
             scope: SelectedScope::User,
-            install_directory: Template::parse("${known.local_app_data}/Overlay").unwrap(),
+            install_directory: Template::parse("${location.user_data}/Overlay").unwrap(),
             selected_components: vec![ComponentId::new("core").unwrap()],
             prerequisites: Vec::new(),
             files: vec![PlannedFile {
@@ -871,17 +850,17 @@ mod tests {
                 sha256: generated.sha256,
                 privilege: zup_core::Privilege::User,
             }],
-            shortcuts: Vec::new(),
+            launchers: Vec::new(),
             path_entries: Vec::new(),
             services: Vec::new(),
             protocols: Vec::new(),
-            file_types: Vec::new(),
+            file_associations: Vec::new(),
             summary: PlanSummary {
                 file_count: 1,
                 install_bytes: generated.size,
                 selected_component_count: 1,
                 resource_count: 0,
-                requires_elevation: false,
+                requires_authorization: false,
                 prerequisite_count: 0,
                 download_bytes: 0,
             },
@@ -906,35 +885,28 @@ mod tests {
     }
 
     #[test]
-    fn install_execution_and_transaction_derive_the_same_recovery_path() {
+    fn install_and_transaction_derive_the_same_recovery_path() {
         let install = install_plan();
-        let source = install.files[0].source_relative.clone();
-        let destination = install.files[0].destination.to_string();
-        let execution = ExecutionPlan {
-            selected_components: install.selected_components.clone(),
-            files: vec![FileOperation {
-                key: install.files[0].key.clone(),
-                kind: FileOperationKind::Create,
-                destination: TargetPath::new(destination.into()).unwrap(),
-                source_relative: source,
-                precondition: FilePrecondition::Absent,
-                expected_sha256: install.files[0].sha256,
-                expected_size: install.files[0].size,
-                conflict: None,
-            }],
-            summary: ExecutionSummary::default(),
-            ..Default::default()
-        };
-        let transaction = zup_transaction::compile_transaction(&execution).unwrap();
+        let mut input = TransactionInput::new(install.target.clone());
+        input.selected_components = install.selected_components.clone();
+        input.files.push(FileWork {
+            key: install.files[0].key.clone(),
+            source_relative: install.files[0].source_relative.clone(),
+            destination: TargetPath::new(
+                TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                install.files[0].destination.to_string(),
+            )
+            .unwrap(),
+            precondition: FilePrecondition::Absent,
+            expected_sha256: install.files[0].sha256,
+            expected_size: install.files[0].size,
+            // A file node carries the privilege its own plan assigned.
+            privilege: install.files[0].privilege,
+            delta: FileDelta::Create,
+        });
+        let transaction = compile_transaction(&input).unwrap();
         let state_root = Path::new("state");
         let from_install = PayloadOverlayIdentity::from_install_plan(&install).unwrap();
-        let from_execution = PayloadOverlayIdentity::from_execution_plan(
-            install.app.id.clone(),
-            install.app.version.clone(),
-            install.scope,
-            &execution,
-        )
-        .unwrap();
         let from_transaction = PayloadOverlayIdentity::from_transaction(
             install.app.id.clone(),
             install.app.version.clone(),
@@ -942,10 +914,6 @@ mod tests {
             &transaction,
         )
         .unwrap();
-        assert_eq!(
-            from_install.path_under(state_root),
-            from_execution.path_under(state_root)
-        );
         assert_eq!(
             from_install.path_under(state_root),
             from_transaction.path_under(state_root)

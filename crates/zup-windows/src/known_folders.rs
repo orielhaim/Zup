@@ -1,75 +1,73 @@
-//! Windows Known Folder resolution via `SHGetKnownFolderPath`.
-
-use std::path::PathBuf;
-
-use zup_core::SelectedScope;
-use zup_platform::{KnownFolder, KnownFolderError, KnownFolderResolver};
+use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 use crate::bindings::{
-    CoTaskMemFree, FOLDERID_CommonPrograms, FOLDERID_CommonStartMenu, FOLDERID_Desktop,
-    FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_Programs,
-    FOLDERID_PublicDesktop, FOLDERID_StartMenu, GUID, SHGetKnownFolderPath,
+    CoTaskMemFree, FOLDERID_CommonStartMenu, FOLDERID_Desktop, FOLDERID_LocalAppData,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_PublicDesktop, FOLDERID_StartMenu, GUID,
+    SHGetKnownFolderPath,
 };
 
-/// Production known-folder resolver backed by the Win32 Known Folder API.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct WindowsKnownFolderResolver;
+pub struct WindowsInstallLocationResolver;
 
-impl KnownFolderResolver for WindowsKnownFolderResolver {
+impl InstallLocationResolver for WindowsInstallLocationResolver {
     fn resolve(
         &self,
-        folder: KnownFolder,
+        location: InstallLocation,
         scope: SelectedScope,
-    ) -> Result<PathBuf, KnownFolderError> {
-        let guid = match (folder, scope) {
-            (KnownFolder::ProgramFiles, _) => FOLDERID_ProgramFiles,
-            (KnownFolder::LocalAppData, _) => FOLDERID_LocalAppData,
-            (KnownFolder::ProgramData, _) => FOLDERID_ProgramData,
-            (KnownFolder::StartMenu, SelectedScope::User) => FOLDERID_StartMenu,
-            (KnownFolder::StartMenu, SelectedScope::Machine) => FOLDERID_CommonStartMenu,
-            (KnownFolder::Desktop, SelectedScope::User) => FOLDERID_Desktop,
-            (KnownFolder::Desktop, SelectedScope::Machine) => FOLDERID_PublicDesktop,
-            (KnownFolder::Programs, SelectedScope::User) => FOLDERID_Programs,
-            (KnownFolder::Programs, SelectedScope::Machine) => FOLDERID_CommonPrograms,
+        target: &TargetTriple,
+    ) -> Result<TargetPath, InstallLocationError> {
+        let failed = |source: Box<dyn std::error::Error + Send + Sync + 'static>| {
+            InstallLocationError::ResolutionFailed {
+                location,
+                scope,
+                source,
+            }
         };
-
-        known_folder_path(guid).map_err(|source| KnownFolderError::ResolutionFailed {
-            folder,
-            scope,
-            source: source.into(),
-        })
+        let guid = folder_guid(location, scope);
+        let path = known_folder_path(guid).map_err(|source| failed(source.into()))?;
+        TargetPath::new(target, &path).map_err(|source| failed(source.into()))
     }
 }
 
-fn known_folder_path(guid: GUID) -> Result<PathBuf, WindowsKnownFolderError> {
+fn folder_guid(location: InstallLocation, scope: SelectedScope) -> GUID {
+    match (location, scope) {
+        (InstallLocation::Programs, _) => FOLDERID_ProgramFiles,
+        (InstallLocation::UserData, _) => FOLDERID_LocalAppData,
+        (InstallLocation::SharedData, _) => FOLDERID_ProgramData,
+        (InstallLocation::Menu, SelectedScope::User) => FOLDERID_StartMenu,
+        (InstallLocation::Menu, SelectedScope::Machine) => FOLDERID_CommonStartMenu,
+        (InstallLocation::Desktop, SelectedScope::User) => FOLDERID_Desktop,
+        (InstallLocation::Desktop, SelectedScope::Machine) => FOLDERID_PublicDesktop,
+    }
+}
+
+fn known_folder_path(guid: GUID) -> Result<String, WindowsInstallLocationError> {
     let mut path_ptr: *mut u16 = std::ptr::null_mut();
 
-    // SAFETY: `guid` is a valid KNOWNFOLDERID. On success `path_ptr` is a
-    // CoTaskMemAlloc'd UTF-16 string we must free exactly once.
     unsafe {
         let hr = SHGetKnownFolderPath(&guid, 0, std::ptr::null_mut(), &mut path_ptr);
         if hr < 0 {
-            return Err(WindowsKnownFolderError::HResult(hr));
+            return Err(WindowsInstallLocationError::HResult(hr));
         }
         if path_ptr.is_null() {
-            return Err(WindowsKnownFolderError::NullPath);
+            return Err(WindowsInstallLocationError::NullPath);
         }
 
         let path = utf16_to_string(path_ptr);
         CoTaskMemFree(path_ptr.cast());
 
-        let path = path.map_err(|_| WindowsKnownFolderError::InvalidUtf16)?;
+        let path = path.map_err(|_| WindowsInstallLocationError::InvalidUtf16)?;
         if path.is_empty() {
-            return Err(WindowsKnownFolderError::EmptyPath);
+            return Err(WindowsInstallLocationError::EmptyPath);
         }
-        Ok(PathBuf::from(path))
+        if path.contains('\0') {
+            return Err(WindowsInstallLocationError::InvalidPath);
+        }
+        Ok(path)
     }
 }
 
-/// Copy a NUL-terminated UTF-16 string into a Rust `String`.
-///
-/// # Safety
-/// `ptr` must be a valid NUL-terminated UTF-16 buffer.
 unsafe fn utf16_to_string(ptr: *const u16) -> Result<String, ()> {
     unsafe {
         let mut len = 0usize;
@@ -81,24 +79,79 @@ unsafe fn utf16_to_string(ptr: *const u16) -> Result<String, ()> {
     }
 }
 
-/// Low-level known-folder failure (never part of the public API surface).
 #[derive(Debug)]
-enum WindowsKnownFolderError {
+enum WindowsInstallLocationError {
     HResult(i32),
     NullPath,
     EmptyPath,
     InvalidUtf16,
+    InvalidPath,
 }
 
-impl std::fmt::Display for WindowsKnownFolderError {
+impl std::fmt::Display for WindowsInstallLocationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HResult(hr) => write!(f, "SHGetKnownFolderPath failed with HRESULT({hr:#x})"),
             Self::NullPath => f.write_str("SHGetKnownFolderPath returned a null path"),
             Self::EmptyPath => f.write_str("SHGetKnownFolderPath returned an empty path"),
             Self::InvalidUtf16 => f.write_str("SHGetKnownFolderPath returned invalid UTF-16"),
+            Self::InvalidPath => f.write_str("SHGetKnownFolderPath returned an invalid path"),
         }
     }
 }
 
-impl std::error::Error for WindowsKnownFolderError {}
+impl std::error::Error for WindowsInstallLocationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bindings::{
+        FOLDERID_CommonStartMenu, FOLDERID_Desktop, FOLDERID_LocalAppData, FOLDERID_ProgramData,
+        FOLDERID_ProgramFiles, FOLDERID_PublicDesktop, FOLDERID_StartMenu,
+    };
+
+    fn guid_key(guid: GUID) -> (u32, u16, u16, [u8; 8]) {
+        (guid.data1, guid.data2, guid.data3, guid.data4)
+    }
+
+    #[test]
+    fn maps_semantic_locations_to_windows_folder_ids() {
+        assert_eq!(
+            guid_key(folder_guid(InstallLocation::Programs, SelectedScope::User)),
+            guid_key(FOLDERID_ProgramFiles)
+        );
+        assert_eq!(
+            guid_key(folder_guid(
+                InstallLocation::UserData,
+                SelectedScope::Machine
+            )),
+            guid_key(FOLDERID_LocalAppData)
+        );
+        assert_eq!(
+            guid_key(folder_guid(
+                InstallLocation::SharedData,
+                SelectedScope::User
+            )),
+            guid_key(FOLDERID_ProgramData)
+        );
+        assert_eq!(
+            guid_key(folder_guid(InstallLocation::Menu, SelectedScope::User)),
+            guid_key(FOLDERID_StartMenu)
+        );
+        assert_eq!(
+            guid_key(folder_guid(InstallLocation::Menu, SelectedScope::Machine)),
+            guid_key(FOLDERID_CommonStartMenu)
+        );
+        assert_eq!(
+            guid_key(folder_guid(InstallLocation::Desktop, SelectedScope::User)),
+            guid_key(FOLDERID_Desktop)
+        );
+        assert_eq!(
+            guid_key(folder_guid(
+                InstallLocation::Desktop,
+                SelectedScope::Machine
+            )),
+            guid_key(FOLDERID_PublicDesktop)
+        );
+    }
+}

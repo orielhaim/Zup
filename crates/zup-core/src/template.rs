@@ -33,26 +33,22 @@ pub enum Variable {
     AppName,
     AppVersion,
     Install,
-    KnownProgramFiles,
-    KnownLocalAppData,
-    KnownProgramData,
-    KnownStartMenu,
-    KnownDesktop,
+    Location(crate::InstallLocation),
 }
 
 impl Variable {
-    /// Parse a variable name such as `install` or `known.program_files`.
+    /// Parse a variable name such as `install` or `location.user_data`.
     pub fn parse(name: &str) -> Result<Self, TemplateError> {
+        if let Some(location) = name.strip_prefix("location.")
+            && let Some(location) = crate::InstallLocation::parse(location)
+        {
+            return Ok(Self::Location(location));
+        }
         match name {
             "app.id" => Ok(Self::AppId),
             "app.name" => Ok(Self::AppName),
             "app.version" => Ok(Self::AppVersion),
             "install" => Ok(Self::Install),
-            "known.program_files" => Ok(Self::KnownProgramFiles),
-            "known.local_app_data" => Ok(Self::KnownLocalAppData),
-            "known.program_data" => Ok(Self::KnownProgramData),
-            "known.start_menu" => Ok(Self::KnownStartMenu),
-            "known.desktop" => Ok(Self::KnownDesktop),
             other => Err(TemplateError::UnknownVariable {
                 name: other.to_owned(),
             }),
@@ -60,24 +56,23 @@ impl Variable {
     }
 
     /// The canonical variable name used inside `${...}`.
-    pub const fn as_str(self) -> &'static str {
+    ///
+    /// A location variable names its [`crate::InstallLocation`], so the name is
+    /// composed from the location rather than tabulated a second time.
+    pub fn as_str(self) -> Cow<'static, str> {
         match self {
-            Self::AppId => "app.id",
-            Self::AppName => "app.name",
-            Self::AppVersion => "app.version",
-            Self::Install => "install",
-            Self::KnownProgramFiles => "known.program_files",
-            Self::KnownLocalAppData => "known.local_app_data",
-            Self::KnownProgramData => "known.program_data",
-            Self::KnownStartMenu => "known.start_menu",
-            Self::KnownDesktop => "known.desktop",
+            Self::AppId => Cow::Borrowed("app.id"),
+            Self::AppName => Cow::Borrowed("app.name"),
+            Self::AppVersion => Cow::Borrowed("app.version"),
+            Self::Install => Cow::Borrowed("install"),
+            Self::Location(location) => Cow::Owned(format!("location.{location}")),
         }
     }
 }
 
 impl fmt::Display for Variable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.as_str())
     }
 }
 
@@ -295,8 +290,8 @@ impl JsonSchema for Template {
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "string",
-            "description": "A path or command template using zup variables such as ${install} and ${known.local_app_data}.",
-            "examples": ["${install}/app.exe", "${known.program_files}/Acme"]
+            "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
+            "examples": ["${install}/app.exe", "${location.programs}/Acme"]
         })
     }
 }

@@ -11,6 +11,18 @@
 **Default UI:** GPUI
 **Extension model:** Planner-only WebAssembly components with a typed WIT world
 
+> **Partially superseded.** This document is the original design record. Its
+> reasoning still holds; its `zup.toml` surface does not. The manifest is now
+> schema 1: a top-level `schema = 1` and a `[build.targets.<profile>]` map
+> replaced `[build] target`, `[target]`, and `[source]`, and install locations
+> are `${location.*}` semantic variables rather than `${known.*}` host paths.
+> Sections 8, 10, 11, 12, 13, and 159 below are updated to the shipped syntax;
+> smaller snippets are illustrative and use the same vocabulary. For the
+> authoritative surface, see [architecture](architecture.md) and
+> [schema/zup.schema.json](../schema/zup.schema.json). Windows remains the only
+> implemented platform backend; the manifest accepts other targets and the
+> build refuses them at an explicit boundary.
+
 ---
 
 ## 1. Abstract
@@ -27,22 +39,32 @@ A typical installer should require little more than a declarative manifest:
 
 ```toml
 schema = 1
+frontend = "gui"
 
 [app]
 id = "com.acme.myapp"
 name = "MyApp"
 version = "1.4.0"
 publisher = "Acme"
+main = "myapp.exe"
 
-[source]
-directory = "./dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "./dist" }
 
 [install]
 scope = "either"
 
-[[shortcuts]]
-location = "start-menu"
-target = "${install}/myapp.exe"
+[install.directory]
+user = "${location.user_data}/Programs/MyApp"
+machine = "${location.programs}/MyApp"
+
+[[launchers]]
+location = "menu"
+name = "MyApp"
+target = "${location.programs}/MyApp/myapp.exe"
 ```
 
 From this, `zup` should be able to produce a polished standalone installer with sensible installation, upgrade, repair, rollback, recovery, and uninstall semantics.
@@ -53,7 +75,7 @@ The default experience should be simple.
 
 The underlying system should not be.
 
-The long-term objective is a fully cross-platform installer framework. The first implementation targets Windows only, because Windows combines the largest traditional installer surface with many of the system integration primitives that the architecture must eventually model: per-user and per-machine installation, services, registry state, application registration, shortcuts, locked executable files, UAC, reboot handling, and enterprise deployment.
+The long-term objective is a fully cross-platform installer framework. The first implementation targets Windows only, because Windows combines the largest traditional installer surface with many of the system integration primitives that the architecture must eventually model: per-user and per-machine installation, services, registry state, application registration, launchers, locked executable files, UAC, reboot handling, and enterprise deployment.
 
 The central design principle is:
 
@@ -356,7 +378,7 @@ Most applications need concepts such as:
 
 ```text
 install these files
-create this shortcut
+create this launcher
 register this service
 add this directory to PATH
 ```
@@ -366,15 +388,16 @@ These should be data.
 For example:
 
 ```toml
-[[shortcuts]]
-location = "start-menu"
-target = "${install}/Acme.exe"
+[[launchers]]
+location = "menu"
+name = "Acme"
+target = "${location.programs}/Acme/Acme.exe"
 ```
 
 not:
 
 ```text
-OpenShortcutManager()
+OpenLauncherManager()
 ResolveStartMenu()
 CreateShellLink()
 ...
@@ -678,9 +701,10 @@ The primary project entry point is a versioned declarative manifest.
 schema = 1
 ```
 
-Schema versioning is explicit from the beginning.
-
-A schema change must not silently reinterpret an old installer.
+Schema versioning is explicit from the beginning. The parser refuses any
+`schema` value other than the supported one, and there is no read path for the
+previous shape: a version break means old manifests are rewritten, not
+migrated.
 
 ---
 
@@ -688,6 +712,7 @@ A schema change must not silently reinterpret an old installer.
 
 ```toml
 schema = 1
+frontend = "gui"
 
 [app]
 id = "com.acme.myapp"
@@ -696,19 +721,23 @@ version = "1.4.0"
 publisher = "Acme"
 main = "myapp.exe"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 
 [install]
 scope = "either"
 
 [install.directory]
-user = "${known.local_app_data}/Programs/Acme/MyApp"
-machine = "${known.program_files}/Acme/MyApp"
+user = "${location.user_data}/Programs/Acme/MyApp"
+machine = "${location.programs}/Acme/MyApp"
 
-[[shortcuts]]
-location = "start-menu"
-target = "${install}/myapp.exe"
+[[launchers]]
+location = "menu"
+name = "MyApp"
+target = "${location.programs}/Acme/MyApp/myapp.exe"
 ```
 
 This should already be sufficient for a production-quality default installer.
@@ -752,7 +781,7 @@ A separate installation identifier may exist when multiple independent instances
 
 # 10. Installation Scope
 
-Windows distinguishes meaningfully between per-user and per-machine installations. Windows Installer itself models these as separate installation contexts with different filesystem, registry and shortcut behavior.
+Windows distinguishes meaningfully between per-user and per-machine installations. Windows Installer itself models these as separate installation contexts with different filesystem, registry and launcher behavior.
 
 `zup` should model scope explicitly:
 
@@ -775,12 +804,15 @@ scope = "either"
 
 For `either`, the UI may expose the choice if both plans are valid.
 
+Every scope the manifest can install to needs a directory template, so the
+three alternatives above are each paired with the block below.
+
 A semantic path may therefore depend on scope:
 
 ```toml
 [install.directory]
-user = "${known.local_app_data}/Programs/Acme/MyApp"
-machine = "${known.program_files}/Acme/MyApp"
+user = "${location.user_data}/Programs/Acme/MyApp"
+machine = "${location.programs}/Acme/MyApp"
 ```
 
 The planner resolves the final path only once scope is known.
@@ -797,14 +829,22 @@ Examples:
 ${app.id}
 ${app.name}
 ${app.version}
-${install}
-${scope}
-${arch}
-${os}
-${known.program_files}
-${known.local_app_data}
-${known.start_menu}
+${location.programs}
+${location.user_data}
+${location.shared_data}
+${location.menu}
+${location.desktop}
 ```
+
+A `${location.*}` variable names a semantic install location, not a host path.
+The backend maps it for the selected scope, so the same manifest text is correct
+on every machine: `programs` is the machine-wide program folder, `user_data`
+and `shared_data` are the per-user and per-machine data folders, and `menu` and
+`desktop` are the scope's own menu folder and desktop.
+
+There is also an `install` variable, which expands to the install directory
+template of the selected scope. It is useful where a resource must follow the
+resolved install directory rather than a fixed location.
 
 Variables are not general-purpose code.
 
@@ -821,21 +861,18 @@ Conditions must be expressive enough for application installation but deliberate
 Example:
 
 ```toml
-when = 'arch == "x86_64" && component("cli")'
+when = 'component("cli") && !component("debug")'
 ```
 
-Possible primitive queries include:
+The only primitive query is component selection:
 
 ```text
-os
-arch
-scope
 component(...)
-feature(...)
-file_exists(...)
-registry_exists(...)        # Windows-specific namespace if required
-os_version
 ```
+
+combined with `!`, `&&`, `||`, and parentheses. Target identity is not a
+condition: applicability to a target is declared separately, with
+`targets = ["<profile>"]` on the resource.
 
 Conditions are:
 
@@ -874,12 +911,19 @@ default = false
 A component may describe:
 
 * dependencies,
-* conflicts,
-* supported platforms,
-* supported architectures,
-* installation size,
+* supported targets,
 * default state,
 * required state.
+
+Supported targets are named profiles, not architectures:
+
+```toml
+[[components]]
+id = "cli"
+name = "Command-line tools"
+default = true
+targets = ["windows-x64"]
+```
 
 Example:
 
@@ -895,7 +939,8 @@ Actions can be conditional on selected components:
 
 ```toml
 [[path]]
-value = "${install}/bin"
+value = "${location.programs}/Acme/bin"
+component = "cli"
 when = 'component("cli")'
 ```
 
@@ -1068,9 +1113,9 @@ Success should not be inferred purely from an API return code when observable st
 For example:
 
 ```text
-Create shortcut
+Create launcher
 ↓
-Verify shortcut exists and resolves to expected target
+Verify launcher exists and resolves to expected target
 ```
 
 or:
@@ -1115,7 +1160,7 @@ Action {
     id: "install-main-files",
     kind: FileTreeInstall,
     requires: [],
-    privilege: Machine,
+    privilege: System,
     resources: [
         Path("C:\\Program Files\\Acme")
     ],
@@ -1153,7 +1198,7 @@ The following are expected to be native concepts rather than opaque scripts.
 ## Windows system integration
 
 * registry value/key
-* shortcut
+* launcher
 * service
 * environment variable
 * PATH entry
@@ -1216,7 +1261,7 @@ Changes
   + Install 43 files (86.3 MB)
   + Install service "acme-agent"
   + Add C:\Program Files\Acme\bin to system PATH
-  + Create Start Menu shortcut
+  + Create Start Menu launcher
   + Register acme:// protocol
 
 Requires elevation
@@ -1268,7 +1313,7 @@ Example:
                   │
         ┌─────────┴─────────┐
         ▼                   ▼
- Write registry       Create shortcuts
+ Write registry       Create launchers
         │                   │
         └─────────┬─────────┘
                   ▼
@@ -1316,7 +1361,7 @@ There is no universal atomic transaction combining:
 filesystem
 registry
 SCM
-shortcuts
+launchers
 network access
 ```
 
@@ -1577,11 +1622,11 @@ It must not restore an old entire PATH string and thereby destroy unrelated chan
 
 ---
 
-## 29.3 Shortcut example
+## 29.3 Launcher example
 
-If a shortcut still points to the target and metadata created by `zup`, it can be removed.
+If a launcher still points to the target and metadata created by `zup`, it can be removed.
 
-If another tool has replaced the shortcut, `zup` should avoid claiming ownership merely because the filename matches.
+If another tool has replaced the launcher, `zup` should avoid claiming ownership merely because the filename matches.
 
 ---
 
@@ -1623,7 +1668,7 @@ For example:
 ```text
 Acme.exe missing
 foo.dll correct
-shortcut missing
+launcher missing
 service correct
 ```
 
@@ -1631,7 +1676,7 @@ produces:
 
 ```text
 restore Acme.exe
-recreate shortcut
+recreate launcher
 ```
 
 not a full blind reinstall.
@@ -1675,16 +1720,10 @@ The same journal, rollback, ownership and platform mechanisms remain in use.
 
 # 33. Downgrades
 
-Downgrades should be denied by default.
-
-Manifest configuration may explicitly permit them:
-
-```toml
-[update]
-downgrades = "allow"
-```
-
-but version ordering and trust metadata must prevent accidental rollback to stale releases.
+Downgrades are denied. The lifecycle compares the package version against the
+installed version, treats an equal version as a modify, and refuses a lower one
+outright. There is no manifest option to permit a downgrade, and version
+ordering plus trust metadata prevent accidental rollback to stale releases.
 
 ---
 
@@ -2036,12 +2075,15 @@ Windows provides the Known Folder API, including `SHGetKnownFolderPath`, and Mic
 This should back variables such as:
 
 ```text
-${known.program_files}
-${known.local_app_data}
-${known.program_data}
-${known.start_menu}
-${known.desktop}
+${location.programs}
+${location.user_data}
+${location.shared_data}
+${location.menu}
+${location.desktop}
 ```
+
+The manifest never names a host path; the backend maps each semantic location to
+the right known folder for the selected scope.
 
 ---
 
@@ -2062,15 +2104,10 @@ Windows exposes distinct 32-bit and 64-bit registry views on 64-bit systems. Exp
 
 Therefore a registry action must not silently depend on the bitness of the installer process.
 
-Conceptually:
-
-```toml
-[[windows.registry]]
-path = "HKLM\\Software\\Acme"
-name = "InstallPath"
-value = "${install}"
-view = "64"
-```
+Registry state is an opaque backend payload, not a portable manifest resource.
+The engine journals the bytes and hands them back to the adapter, so the
+manifest never spells a key. A value that must point at the application is
+written by the adapter from the lowered target path, not by a template.
 
 ---
 
@@ -2084,11 +2121,12 @@ A declarative service definition may look like:
 
 ```toml
 [[services]]
+id = "acme-agent"
 name = "acme-agent"
 display_name = "Acme Agent"
-binary = "${install}/acme-agent.exe"
+binary = "${location.programs}/Acme/acme-agent.exe"
 start = "automatic"
-when = 'component("service")'
+component = "service"
 ```
 
 The backend should model:
@@ -2104,7 +2142,7 @@ The backend should model:
 
 ---
 
-# 52. Shortcuts
+# 52. Launchers
 
 Windows `.lnk` creation should use shell APIs rather than hand-authoring binary link files unless there is a strong reason otherwise.
 
@@ -2113,11 +2151,11 @@ Windows `.lnk` creation should use shell APIs rather than hand-authoring binary 
 Example:
 
 ```toml
-[[shortcuts]]
-location = "start-menu"
+[[launchers]]
+location = "menu"
 name = "Acme"
-target = "${install}/Acme.exe"
-working_directory = "${install}"
+target = "${location.programs}/Acme/Acme.exe"
+working_directory = "${location.programs}/Acme"
 ```
 
 ---
@@ -2134,10 +2172,13 @@ Example:
 
 ```toml
 [[path]]
-value = "${install}/bin"
-scope = "install"
+value = "${location.programs}/Acme/bin"
+component = "cli"
 when = 'component("cli")'
 ```
+
+The entry belongs to the install scope that owns it, so uninstall removes
+exactly this logical entry and nothing else.
 
 ---
 
@@ -2157,7 +2198,7 @@ from:
 make application the user's default
 ```
 
-Modern Windows default-app behavior is user-controlled. The installer should register proper application capabilities/ProgIDs and must not silently hijack user defaults.
+Modern Windows default-app behavior is user-controlled. The installer should register proper application capabilities and COM class identifiers, and must not silently hijack user defaults.
 
 ---
 
@@ -2170,7 +2211,7 @@ Example:
 ```toml
 [[protocols]]
 scheme = "acme"
-executable = "${install}/Acme.exe"
+executable = "${location.programs}/Acme/Acme.exe"
 args = ["--url", "%1"]
 ```
 
@@ -2466,9 +2507,9 @@ Components
 [ ] Background service               12 MB
 
 Options
-[x] Start Menu shortcut
+[x] Start Menu launcher
 [x] Add command-line tools to PATH
-[ ] Desktop shortcut
+[ ] Desktop launcher
 ```
 
 This is not a second "wizard mode".
@@ -2686,7 +2727,7 @@ Example:
 ```json
 {
   "scope": "machine",
-  "requires_elevation": true,
+  "requires_authorization": true,
   "install_bytes": 95839872,
   "download_bytes": 0,
   "blocking_processes": [],
@@ -2708,13 +2749,25 @@ Example conceptual manifest:
 
 ```toml
 [[prerequisites]]
-id = "vc-runtime"
-detect = "..."
-source = "https://..."
-sha256 = "..."
-installer = "vc_redist.x64.exe"
-args = ["/quiet", "/norestart"]
+id = "provider.toolchain.v14"
+name = "Acme Toolchain 14"
+target = "x64"
+requirement = { kind = "runtime", id = "provider.toolchain.v14", version = ">=14, <15" }
+package = { type = "remote", url = "https://downloads.example.com/toolchain/x64/toolchain.exe", sha256 = "0000000000000000000000000000000000000000000000000000000000000000", filename = "toolchain.exe" }
+
+[prerequisites.installer]
+arguments = ["/quiet", "/norestart"]
+success_exit_codes = [0]
+reboot_exit_codes = [1641, 3010]
+privilege = "system"
 ```
+
+`requirement` is one of `runtime`, `installed_package`, or `file_version`, and
+`package` is `embedded` or `remote`; each is an internally tagged value, so its
+`kind` or `type` names the variant. The identifier shape is namespaced and the
+platform backend owns what each identifier means. An `embedded` package names a
+project-relative `path` with a `sha256` and `size`; a `remote` package names a
+`url`, a `sha256`, and a `filename`.
 
 A prerequisite model should understand:
 
@@ -2984,21 +3037,23 @@ Registry view, Program Files location and payload architecture should therefore 
 
 # 89. Architecture Selection
 
-A release may contain platform/architecture variants:
+A release may contain architecture variants, declared as a target matrix:
 
 ```toml
-[[artifacts]]
-platform = "windows"
-arch = "x86_64"
-source = "dist/windows-x64"
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist/windows-x64" }
 
-[[artifacts]]
-platform = "windows"
-arch = "aarch64"
-source = "dist/windows-arm64"
+[build.targets.windows-arm64]
+target = "aarch64-pc-windows-msvc"
+source = { directory = "dist/windows-arm64" }
 ```
 
-A universal web installer can select the appropriate payload.
+A release is selected by profile name or by canonical target triple, so a
+variant is addressed by the identity of the machine it targets rather than by a
+platform/architecture string pair.
+
+A web installer can select the appropriate payload.
 
 An offline installer may be platform-specific or multi-architecture.
 
@@ -3073,7 +3128,7 @@ The installer does not load third-party DLLs or other native plugins into the pr
 
 # 94. Implemented Planner World
 
-The current extension boundary is the checked-in `wit/zup-plugin.wit` world `plugin`. A component exports exactly `zup:plugin/planner@1.0.0` and its `plan` function. It must have zero imports and receives only explicit typed context: application identity, install directory and scope, host facts, and selected components.
+The current extension boundary is the checked-in `wit/zup-plugin.wit` world `plugin`. A component exports exactly `zup:plugin/planner@1.0.0` and its `plan` function. It must have zero imports and receives only explicit typed context: application identity, install directory and scope, the canonical target, and selected components.
 
 The planner returns typed installation resources or a typed `plugin-error`. It does not inspect the environment, clock, filesystem, network, randomness, or other host state. The host remains responsible for resolving templates, validating collisions, applying elevation, and executing the resulting plan.
 
@@ -3202,7 +3257,7 @@ It is useful, although direct `SHGetKnownFolderPath` calls through `windows-rs` 
 
 `lnks` wraps native interfaces such as `IShellLinkW` and `IPersistFile`.
 
-This is a candidate for shortcut implementation.
+This is a candidate for launcher implementation.
 
 Again, because the native API surface is relatively small, `zup` may instead own a narrow wrapper.
 
@@ -3243,7 +3298,7 @@ zup transaction coordinator
 ├── filesystem transaction layer
 ├── registry receipts
 ├── service receipts
-├── shortcut receipts
+├── launcher receipts
 └── system-integration receipts
 ```
 
@@ -3735,7 +3790,7 @@ Owns:
 Known Folders
 registry
 SCM
-shortcuts
+launchers
 Restart Manager
 UAC/elevation worker
 Task Scheduler
@@ -4111,7 +4166,7 @@ An update may first replace/update the maintenance runtime and then apply the ap
 
 # 159. Example Full Manifest
 
-The following is illustrative rather than a frozen syntax specification:
+The following is a complete schema-1 manifest:
 
 ```toml
 schema = 1
@@ -4122,18 +4177,20 @@ name = "Acme"
 version = "1.4.0"
 publisher = "Acme Inc."
 main = "Acme.exe"
-icon = "installer-assets/icon.ico"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
 
 [install]
 scope = "either"
-downgrades = "deny"
+allow_directory_override = true
 
 [install.directory]
-user = "${known.local_app_data}/Programs/Acme"
-machine = "${known.program_files}/Acme"
+user = "${location.user_data}/Programs/Acme"
+machine = "${location.programs}/Acme"
 
 [[components]]
 id = "core"
@@ -4156,60 +4213,48 @@ requires = ["core"]
 
 [[files]]
 source = "**/*"
-destination = "${install}"
+destination = "${location.programs}/Acme"
 component = "core"
 
-[[shortcuts]]
-location = "start-menu"
+[[launchers]]
+location = "menu"
 name = "Acme"
-target = "${install}/Acme.exe"
+target = "${location.programs}/Acme/Acme.exe"
 component = "core"
-
-[[shortcuts]]
-location = "desktop"
-name = "Acme"
-target = "${install}/Acme.exe"
-component = "core"
-default = false
 
 [[path]]
-value = "${install}/bin"
-scope = "install"
+value = "${location.programs}/Acme/bin"
+component = "cli"
 when = 'component("cli")'
 
 [[services]]
+id = "acme-agent"
 name = "acme-agent"
 display_name = "Acme Agent"
-binary = "${install}/acme-agent.exe"
+binary = "${location.programs}/Acme/acme-agent.exe"
 start = "automatic"
-when = 'component("service")'
+component = "service"
 
 [[protocols]]
 scheme = "acme"
-executable = "${install}/Acme.exe"
+executable = "${location.programs}/Acme/Acme.exe"
 args = ["--url", "%1"]
 
-[[file_types]]
+[[file_associations]]
 extension = ".acme"
-prog_id = "Acme.Document"
+id = "Acme.Document"
 description = "Acme Document"
-executable = "${install}/Acme.exe"
+executable = "${location.programs}/Acme/Acme.exe"
 
-[update]
-enabled = true
+[updates]
 channel = "stable"
 repository = "https://updates.example.com/acme"
+root = "update-root.json"
 
 [ui]
-mode = "default"
 accent = "#7c5cff"
-allow_scope_change = true
-allow_directory_change = true
-show_components = true
-
-[ui.finish]
-launch = true
-launch_default = true
+theme = "system"
+logo = "${location.programs}/Acme/Acme.exe"
 ```
 
 No Rust is required.
@@ -4222,13 +4267,8 @@ Yet the engine retains enough structure to understand most mutations.
 
 # 160. Example Custom UI Relationship
 
-A custom layout may be referenced:
-
-```toml
-[ui]
-mode = "custom"
-layout = "installer-assets/layout.zup-ui"
-```
+A custom layout is not part of the manifest. The `[ui]` table carries branding
+only, and the frontend supplies its own layout.
 
 Conceptually, that document binds to values such as:
 
@@ -4240,7 +4280,7 @@ app.version
 plan.install_path
 plan.install_size
 plan.download_size
-plan.requires_elevation
+plan.requires_authorization
 
 engine.phase
 engine.progress
@@ -4573,7 +4613,7 @@ For example:
 
 ```text
 install into user-local directory → user
-user Start Menu shortcut          → user
+user Start Menu launcher          → user
 HKCU registry                     → user
 
 Program Files                     → machine
@@ -5033,7 +5073,7 @@ Its conceptual product surface includes:
 * split UAC elevation,
 * managed files/directories,
 * registry operations,
-* shortcuts,
+* launchers,
 * Windows services,
 * PATH/environment integration,
 * file association registration,
@@ -5195,7 +5235,7 @@ The project can be summarized in four statements.
 
 ### 1. Installation should be data when possible
 
-If an application wants a shortcut, it should declare a shortcut.
+If an application wants a launcher, it should declare a launcher.
 
 ### 2. Machine mutation should be transactional where practical and recoverable everywhere else
 
@@ -5329,9 +5369,19 @@ schema = 1
 id = "com.example.acme"
 name = "Acme"
 version = "1.0.0"
+main = "Acme.exe"
 
-[source]
-directory = "dist"
+[build]
+
+[build.targets.windows-x64]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "dist" }
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Acme"
 ```
 
 and:

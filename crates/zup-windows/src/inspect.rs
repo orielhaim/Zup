@@ -1,4 +1,4 @@
-//! Read-only inspection of target-machine state.
+//! Read-only inspection of target-host state.
 //!
 //! **Invariant: inspection must never mutate the machine.** No create, write,
 //! registry set, service configure, or execute calls are permitted here.
@@ -7,18 +7,18 @@ use std::fs::{self, File};
 
 use thiserror::Error;
 use tracing::{info, info_span};
+use zup_core::SelectedScope;
 use zup_core::hash_reader;
 use zup_exec::{
-    MachineSnapshot, ObservedExtensionState, ObservedFile, ObservedFileState, ObservedFileType,
-    ObservedPathEntry, ObservedProgIdState, ObservedProtocol, ObservedProtocolState,
-    ObservedService, ObservedShortcut, PathEntryState,
+    HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
+    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedPathEntry,
+    ObservedProtocol, ObservedProtocolState, ObservedService, SearchPath,
 };
 use zup_platform::TargetPlan;
 
 use crate::cmdline;
-use crate::registry::{
-    RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader, read_path_value,
-};
+use crate::lowering::host_path;
+use crate::registry::{RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader};
 use crate::services::{ServiceReader, WindowsServiceReader};
 use crate::shortcuts::{ShortcutReader, WindowsShortcutReader};
 
@@ -45,15 +45,15 @@ pub enum InspectError {
     #[error("registry inspection failed")]
     Registry(#[from] RegistryError),
 
-    #[error("shortcut inspection failed for `{path}`: {reason}")]
-    ShortcutFailed { path: String, reason: String },
+    #[error("launcher inspection failed for `{path}`: {reason}")]
+    LauncherInspectionFailed { path: String, reason: String },
 
     #[error("service inspection failed for `{name}`: {reason}")]
     ServiceQueryFailed { name: String, reason: String },
 }
 
 /// Inspect every active target resource and produce an immutable snapshot.
-pub fn inspect_target(target: &TargetPlan) -> Result<MachineSnapshot, InspectError> {
+pub fn inspect_target(target: &TargetPlan) -> Result<HostSnapshot, InspectError> {
     let registry = WindowsRegistryReader;
     let services = WindowsServiceReader;
     let shortcuts = WindowsShortcutReader;
@@ -66,7 +66,7 @@ pub fn inspect_target_with<R, S, K>(
     registry: &R,
     services: &S,
     shortcuts: &K,
-) -> Result<MachineSnapshot, InspectError>
+) -> Result<HostSnapshot, InspectError>
 where
     R: RegistryReader,
     S: ServiceReader,
@@ -76,11 +76,11 @@ where
     info!("inspection started (read-only)");
 
     let files = inspect_files(target)?;
-    let shortcut_obs = inspect_shortcuts(target, shortcuts)?;
+    let shortcut_obs = inspect_launchers(target, shortcuts)?;
     let path_entries = inspect_path_entries(target, registry)?;
     let service_obs = inspect_services(target, services)?;
     let protocol_obs = inspect_protocols(target, registry)?;
-    let file_types = inspect_file_types(target, registry)?;
+    let file_associations = inspect_file_associations(target, registry)?;
 
     info!(
         files = files.len(),
@@ -88,17 +88,17 @@ where
         path_entries = path_entries.len(),
         services = service_obs.len(),
         protocols = protocol_obs.len(),
-        file_types = file_types.len(),
+        file_associations = file_associations.len(),
         "inspection complete"
     );
 
-    Ok(MachineSnapshot {
+    Ok(HostSnapshot {
         files,
-        shortcuts: shortcut_obs,
+        launchers: shortcut_obs,
         path_entries,
         services: service_obs,
         protocols: protocol_obs,
-        file_types,
+        file_associations,
     })
 }
 
@@ -108,8 +108,8 @@ pub fn inspect_files(target: &TargetPlan) -> Result<Vec<ObservedFile>, InspectEr
     let mut bytes_inspected = 0u64;
 
     for file in &target.files {
-        let path = file.destination.as_path();
-        let state = observe_file(path, &mut bytes_inspected)?;
+        let path = host_path(&file.destination);
+        let state = observe_file(&path, &mut bytes_inspected)?;
         files.push(ObservedFile {
             key: file.key.clone(),
             path: file.destination.clone(),
@@ -136,8 +136,8 @@ fn observe_file(
         }
     };
 
-    let file_type = meta.file_type();
-    if file_type.is_symlink() || !file_type.is_file() {
+    let file_association = meta.file_type();
+    if file_association.is_symlink() || !file_association.is_file() {
         return Ok(ObservedFileState::NonFile);
     }
 
@@ -175,21 +175,21 @@ fn observe_file(
     Ok(ObservedFileState::File { size, sha256 })
 }
 
-fn inspect_shortcuts<K: ShortcutReader>(
+fn inspect_launchers<K: ShortcutReader>(
     target: &TargetPlan,
     reader: &K,
-) -> Result<Vec<ObservedShortcut>, InspectError> {
-    let mut out = Vec::with_capacity(target.shortcuts.len());
-    for shortcut in &target.shortcuts {
+) -> Result<Vec<ObservedLauncher>, InspectError> {
+    let mut out = Vec::with_capacity(target.launchers.len());
+    for shortcut in &target.launchers {
         let state = reader
-            .read_shortcut(&shortcut.link_path)
-            .map_err(|reason| InspectError::ShortcutFailed {
-                path: shortcut.link_path.to_string(),
+            .read_shortcut(&shortcut.launcher_path)
+            .map_err(|reason| InspectError::LauncherInspectionFailed {
+                path: shortcut.launcher_path.to_string(),
                 reason,
             })?;
-        out.push(ObservedShortcut {
+        out.push(ObservedLauncher {
             key: shortcut.key.clone(),
-            link_path: shortcut.link_path.clone(),
+            launcher_path: shortcut.launcher_path.clone(),
             state,
         });
     }
@@ -200,46 +200,32 @@ fn inspect_path_entries<R: RegistryReader>(
     target: &TargetPlan,
     registry: &R,
 ) -> Result<Vec<ObservedPathEntry>, InspectError> {
-    let mut cache: Vec<(zup_core::SelectedScope, Option<String>)> = Vec::new();
+    // One read per owning search path, then the portable, target-normalized
+    // view is reused for every entry that path owns.
+    let mut cache: Vec<(SelectedScope, SearchPath)> = Vec::new();
     let mut out = Vec::with_capacity(target.path_entries.len());
 
     for entry in &target.path_entries {
-        if !cache.iter().any(|(s, _)| *s == entry.scope) {
-            let value = read_path_value(registry, entry.scope)?;
-            cache.push((entry.scope, value));
+        if !cache.iter().any(|(scope, _)| *scope == entry.scope) {
+            let search_path = match crate::search_path::read(registry, entry.scope)
+                .map_err(InspectError::Registry)?
+            {
+                Some((_value_type, value)) => crate::search_path::collect(&target.target, &value),
+                None => SearchPath::default(),
+            };
+            cache.push((entry.scope, search_path));
         }
-        let path_value = cache
+        let search_path = cache
             .iter()
-            .find(|(s, _)| *s == entry.scope)
-            .and_then(|(_, v)| v.clone());
-
-        let state = match path_value {
-            None => PathEntryState::Absent,
-            Some(raw) => {
-                // Find the matching raw segment, if any.
-                let mut found = None;
-                for seg in raw.split(';') {
-                    let seg = seg.trim();
-                    if seg.is_empty() {
-                        continue;
-                    }
-                    if cmdline::path_entry_matches(seg, &entry.value) {
-                        found = Some(seg.to_owned());
-                        break;
-                    }
-                }
-                match found {
-                    Some(raw_entry) => PathEntryState::Present { raw_entry },
-                    None => PathEntryState::Absent,
-                }
-            }
-        };
+            .find(|(scope, _)| *scope == entry.scope)
+            .map(|(_, search_path)| search_path.clone())
+            .expect("search path was cached above");
 
         out.push(ObservedPathEntry {
             key: entry.key.clone(),
             desired: entry.value.clone(),
             scope: entry.scope,
-            state,
+            search_path,
         });
     }
     Ok(out)
@@ -252,7 +238,7 @@ fn inspect_services<S: ServiceReader>(
     let mut out = Vec::with_capacity(target.services.len());
     for service in &target.services {
         let state = reader
-            .read_service(service.name.as_str())
+            .read_service(service.name.as_str(), &target.target)
             .map_err(|reason| InspectError::ServiceQueryFailed {
                 name: service.name.to_string(),
                 reason,
@@ -282,13 +268,15 @@ fn inspect_protocols<R: RegistryReader>(
                     None => ObservedProtocolState::Malformed {
                         reason: "missing shell\\open\\command".to_owned(),
                     },
-                    Some(raw) => match cmdline::command_spec_from_command_line(&raw) {
-                        Ok(command) => ObservedProtocolState::Registration {
-                            command,
-                            url_protocol_marker: marker,
-                        },
-                        Err(reason) => ObservedProtocolState::Malformed { reason },
-                    },
+                    Some(raw) => {
+                        match cmdline::command_spec_from_command_line(&raw, &target.target) {
+                            Ok(command) => ObservedProtocolState::Registration {
+                                command,
+                                url_protocol_marker: marker,
+                            },
+                            Err(reason) => ObservedProtocolState::Malformed { reason },
+                        }
+                    }
                 }
             }
         };
@@ -302,15 +290,15 @@ fn inspect_protocols<R: RegistryReader>(
     Ok(out)
 }
 
-fn inspect_file_types<R: RegistryReader>(
+fn inspect_file_associations<R: RegistryReader>(
     target: &TargetPlan,
     registry: &R,
-) -> Result<Vec<ObservedFileType>, InspectError> {
-    let mut out = Vec::with_capacity(target.file_types.len());
-    for file_type in &target.file_types {
-        let id = file_type.id.as_str();
-        let id_state = match registry.open_classes_key(file_type.scope, id)? {
-            None => ObservedProgIdState::Absent,
+) -> Result<Vec<ObservedFileAssociation>, InspectError> {
+    let mut out = Vec::with_capacity(target.file_associations.len());
+    for file_association in &target.file_associations {
+        let id = file_association.id.as_str();
+        let association_state = match registry.open_classes_key(file_association.scope, id)? {
+            None => ObservedFileAssociationState::Absent,
             Some(key) => {
                 let description = match R::read_value(&key, "FriendlyTypeName") {
                     RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) if !s.is_empty() => Some(s),
@@ -323,28 +311,30 @@ fn inspect_file_types<R: RegistryReader>(
                 };
                 match open_command(registry, &key) {
                     None if description.is_none() && registry_key_empty(&key)? => {
-                        ObservedProgIdState::Absent
+                        ObservedFileAssociationState::Absent
                     }
-                    None => ObservedProgIdState::Malformed {
+                    None => ObservedFileAssociationState::Malformed {
                         reason: "missing shell\\open\\command".to_owned(),
                     },
-                    Some(raw) => match cmdline::command_spec_from_command_line(&raw) {
-                        Ok(command) => ObservedProgIdState::Registration {
-                            description,
-                            command,
-                        },
-                        Err(reason) => ObservedProgIdState::Malformed { reason },
-                    },
+                    Some(raw) => {
+                        match cmdline::command_spec_from_command_line(&raw, &target.target) {
+                            Ok(command) => ObservedFileAssociationState::Registration {
+                                description,
+                                command,
+                            },
+                            Err(reason) => ObservedFileAssociationState::Malformed { reason },
+                        }
+                    }
                 }
             }
         };
 
-        let ext = file_type.extension.as_str();
-        let extension_state = match registry.open_classes_key(file_type.scope, ext)? {
+        let ext = file_association.extension.as_str();
+        let extension_state = match registry.open_classes_key(file_association.scope, ext)? {
             None => ObservedExtensionState::Absent,
             Some(key) => match R::read_value(&key, "") {
                 RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) if !s.is_empty() => {
-                    ObservedExtensionState::Mapped { prog_id: s }
+                    ObservedExtensionState::Mapped { association_id: s }
                 }
                 RegistryValue::Missing if registry_key_empty(&key)? => {
                     ObservedExtensionState::Absent
@@ -360,12 +350,12 @@ fn inspect_file_types<R: RegistryReader>(
             },
         };
 
-        out.push(ObservedFileType {
-            key: file_type.key.clone(),
+        out.push(ObservedFileAssociation {
+            key: file_association.key.clone(),
             extension: ext.to_owned(),
             id: id.to_owned(),
-            scope: file_type.scope,
-            id_state,
+            scope: file_association.scope,
+            association_state,
             extension_state,
         });
     }

@@ -1,90 +1,126 @@
-//! Resolve structural templates into concrete target paths.
-
-use std::path::PathBuf;
 use thiserror::Error;
 use zup_core::{Template, TemplatePart, Variable};
 
-use crate::known_folders::{KnownFolderError, KnownFolderResolver, known_folder_for_variable};
+use crate::install_locations::{InstallLocationError, InstallLocationResolver};
 use crate::target_path::{TargetPath, TargetPathError};
 
-/// Errors produced while resolving a template to a target path.
 #[derive(Debug, Error)]
 pub enum TemplateResolveError {
-    /// A known folder failed to resolve.
     #[error(transparent)]
-    KnownFolder(#[from] KnownFolderError),
+    InstallLocation(#[from] InstallLocationError),
 
-    /// The template produced an invalid target path.
     #[error(transparent)]
     InvalidPath(#[from] TargetPathError),
 
-    /// A non-known-folder variable was still present after static substitution.
     #[error("template variable `${variable}` cannot be resolved on the target")]
     UnresolvedVariable { variable: Variable },
 
-    /// A literal path segment was invalid.
+    /// A substituted value carried a `${` sequence that no parse had seen, so
+    /// it came from substitution text rather than from the template itself.
+    #[error("substituted text contains an unresolved `${{` sequence: `{text}`")]
+    UnresolvedLiteral { text: String },
+
+    /// The install location resolver answered with a path for another target.
+    #[error("install location resolved to `{path}`, which is not on target `{target}`")]
+    ResolverTargetMismatch { path: String, target: String },
+
     #[error("invalid path segment `{segment}` in template")]
     InvalidSegment { segment: String },
 }
 
-/// Resolve a structural template into an absolute [`TargetPath`].
-///
-/// Builds the path deliberately from parts — never by string concatenation of
-/// a single giant Windows path.
-pub fn resolve_template_path<R: KnownFolderResolver + ?Sized>(
+pub fn resolve_template_path<R: InstallLocationResolver + ?Sized>(
     template: &Template,
+    target: &zup_core::TargetTriple,
     resolver: &R,
     scope: zup_core::SelectedScope,
 ) -> Result<TargetPath, TemplateResolveError> {
-    let mut out = PathBuf::new();
+    let mut output: Option<TargetPath> = None;
 
     for part in template.parts() {
         match part {
+            TemplatePart::Variable(Variable::Location(location)) => {
+                let location_path = resolver.resolve(*location, scope, target)?;
+                output = Some(match output {
+                    None => location_path,
+                    Some(existing) => append_target_path(&existing, &location_path)?,
+                });
+            }
             TemplatePart::Variable(variable) => {
-                let Some(folder) = known_folder_for_variable(*variable) else {
-                    return Err(TemplateResolveError::UnresolvedVariable {
-                        variable: *variable,
-                    });
-                };
-                let resolved = resolver.resolve(folder, scope)?;
-                if out.as_os_str().is_empty() {
-                    out = resolved;
-                } else {
-                    for component in resolved.components() {
-                        out.push(component);
-                    }
-                }
+                return Err(TemplateResolveError::UnresolvedVariable {
+                    variable: *variable,
+                });
             }
             TemplatePart::Literal(text) => {
-                let normalized = text.replace('\\', "/");
-                if out.as_os_str().is_empty() && std::path::Path::new(&normalized).is_absolute() {
-                    if normalized.split('/').any(|segment| segment == "..") {
-                        return Err(TemplateResolveError::InvalidSegment {
-                            segment: "..".into(),
-                        });
-                    }
-                    out = PathBuf::from(normalized);
-                    continue;
-                }
-                for segment in normalized.split('/') {
-                    if segment.is_empty() || segment == "." {
-                        continue;
-                    }
-                    if segment == ".." {
-                        return Err(TemplateResolveError::InvalidSegment {
-                            segment: segment.to_owned(),
-                        });
-                    }
-                    if segment.contains("${") {
-                        return Err(TemplateResolveError::UnresolvedVariable {
-                            variable: Variable::Install,
-                        });
-                    }
-                    out.push(segment);
-                }
+                output = Some(match output {
+                    None => TargetPath::new(target, text)?,
+                    Some(existing) => append_literal(&existing, target, text)?,
+                });
             }
         }
     }
 
-    Ok(TargetPath::new(out)?)
+    Ok(output.ok_or(TargetPathError::Empty)?)
+}
+
+fn append_literal(
+    existing: &TargetPath,
+    target: &zup_core::TargetTriple,
+    text: &str,
+) -> Result<TargetPath, TemplateResolveError> {
+    if text.contains("${") {
+        return Err(TemplateResolveError::UnresolvedLiteral {
+            text: text.to_owned(),
+        });
+    }
+    let separator = if target.operating_system() == zup_core::TargetOperatingSystem::Windows {
+        '\\'
+    } else {
+        '/'
+    };
+    let mut output = existing.clone();
+    let is_windows = target.operating_system() == zup_core::TargetOperatingSystem::Windows;
+    for segment in
+        text.split(|character| character == separator || (is_windows && character == '/'))
+    {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment == "." || segment == ".." {
+            return Err(TemplateResolveError::InvalidSegment {
+                segment: segment.to_owned(),
+            });
+        }
+        output = output.join(segment)?;
+    }
+    Ok(output)
+}
+
+fn append_target_path(
+    existing: &TargetPath,
+    addition: &TargetPath,
+) -> Result<TargetPath, TemplateResolveError> {
+    // A resolver is told which target to answer for; answering for another one
+    // is a broken resolver rather than a bad template.
+    if existing.target() != addition.target() {
+        return Err(TemplateResolveError::ResolverTargetMismatch {
+            path: addition.as_str().to_owned(),
+            target: addition.target().to_string(),
+        });
+    }
+    let separator =
+        if existing.target().operating_system() == zup_core::TargetOperatingSystem::Windows {
+            '\\'
+        } else {
+            '/'
+        };
+    let root_len = addition.root_len();
+    let suffix = addition.as_str().get(root_len..).unwrap_or_default();
+    let mut output = existing.clone();
+    for segment in suffix.split(separator) {
+        if segment.is_empty() {
+            continue;
+        }
+        output = output.join(segment)?;
+    }
+    Ok(output)
 }

@@ -4,12 +4,12 @@ use serde::Deserialize;
 use serde_spanned::Spanned;
 use zup_core::Prerequisite;
 use zup_core::{
-    App, Component, FileMapping, FileType, Frontend, Install, PathEntry, Protocol, Service,
-    Shortcut, Source, UiBranding,
+    App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry, Protocol,
+    Service, UiBranding,
 };
 
 use crate::error::{ManifestError, named_source_named, source_span};
-use crate::model::{Manifest, SCHEMA_VERSION};
+use crate::model::{Build, Manifest, SCHEMA_VERSION, Targeted};
 use crate::plugin::{Plugin, is_valid_source};
 
 /// Parse and field-validate a `zup.toml` manifest from source text.
@@ -35,34 +35,38 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
         });
     }
 
-    for plugin in &raw.plugins {
-        if !is_valid_source(&plugin.source) {
-            return Err(ManifestError::InvalidPluginSource {
-                path: plugin.source.clone(),
-                src: Some(named_source_named(name, source)),
-                span: None,
-            });
-        }
-    }
-
-    Ok(Manifest {
+    let manifest = Manifest {
         schema,
         app: raw.app,
         frontend: raw.frontend,
         ui: raw.ui,
-        source: raw.source,
+        build: raw.build,
         install: raw.install,
         prerequisites: raw.prerequisites,
         updates: raw.updates,
         components: raw.components,
         plugins: raw.plugins,
         files: raw.files,
-        shortcuts: raw.shortcuts,
+        launchers: raw.launchers,
         path: raw.path,
         services: raw.services,
         protocols: raw.protocols,
-        file_types: raw.file_types,
-    })
+        file_associations: raw.file_associations,
+    };
+    crate::target::validate_target_matrix(&manifest)
+        .map_err(|error| error.with_source_named(source, name))?;
+    crate::target::validate_target_references(&manifest)
+        .map_err(|error| error.with_source_named(source, name))?;
+    for plugin in &manifest.plugins {
+        if !is_valid_source(&plugin.value.source) {
+            return Err(ManifestError::InvalidPluginSource {
+                path: plugin.value.source.clone(),
+                src: Some(named_source_named(name, source)),
+                span: None,
+            });
+        }
+    }
+    Ok(manifest)
 }
 
 #[derive(Deserialize)]
@@ -74,25 +78,25 @@ struct RawManifest {
     frontend: Frontend,
     #[serde(default)]
     ui: Option<UiBranding>,
-    source: Source,
+    build: Build,
     install: Install,
     #[serde(default)]
-    prerequisites: Vec<Prerequisite>,
+    prerequisites: Vec<Targeted<Prerequisite>>,
     updates: Option<crate::model::Updates>,
     #[serde(default)]
-    components: Vec<Component>,
+    components: Vec<Targeted<Component>>,
     #[serde(default)]
-    plugins: Vec<Plugin>,
+    plugins: Vec<Targeted<Plugin>>,
     #[serde(default)]
-    files: Vec<FileMapping>,
+    files: Vec<Targeted<FileMapping>>,
     #[serde(default)]
-    shortcuts: Vec<Shortcut>,
+    launchers: Vec<Targeted<Launcher>>,
     #[serde(default)]
-    path: Vec<PathEntry>,
+    path: Vec<Targeted<PathEntry>>,
     #[serde(default)]
-    services: Vec<Service>,
+    services: Vec<Targeted<Service>>,
     #[serde(default)]
-    protocols: Vec<Protocol>,
+    protocols: Vec<Targeted<Protocol>>,
     #[serde(default)]
-    file_types: Vec<FileType>,
+    file_associations: Vec<Targeted<FileAssociation>>,
 }

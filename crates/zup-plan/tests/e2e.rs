@@ -6,13 +6,17 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zup_build::materialize;
-use zup_core::{ComponentId, Privilege, Variable};
-use zup_manifest::{parse, parse_and_compile};
+use zup_core::{ComponentId, InstallLocation, Privilege, TargetTriple, Variable};
+use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{ComponentOverrides, PlanRequest, SelectedScope, plan};
 
 fn write(path: PathBuf, contents: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
+}
+
+fn target() -> TargetTriple {
+    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
 }
 
 fn acme_project() -> (TempDir, zup_build::BuildPlan) {
@@ -25,9 +29,18 @@ fn acme_project() -> (TempDir, zup_build::BuildPlan) {
 
     let source = include_str!("fixtures/acme.toml");
     let manifest = parse(source).expect("parse acme");
-    let installer = parse_and_compile(source).expect("compile acme");
-    let build =
-        materialize(&dir.path().join("zup.toml"), &manifest, installer).expect("materialize");
+    let config = select_targets(&manifest, &["windows-x64"], &TargetOverrides::default())
+        .expect("target")
+        .into_iter()
+        .next()
+        .expect("selected target");
+    let installer = compile(&manifest, &config, &TargetOverrides::default()).expect("compile acme");
+    let build = materialize(
+        &dir.path().join("zup.toml"),
+        &manifest,
+        vec![(config, installer)],
+    )
+    .expect("materialize");
     (dir, build)
 }
 
@@ -41,7 +54,7 @@ fn ids(values: &[&str]) -> BTreeSet<ComponentId> {
 #[test]
 fn user_default_plan() {
     let (_dir, build) = acme_project();
-    let result = plan(&build, &PlanRequest::new(SelectedScope::User)).expect("user plan");
+    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).expect("user plan");
 
     let selected: Vec<_> = result
         .selected_components
@@ -57,22 +70,22 @@ fn user_default_plan() {
     // User install directory with app.name resolved.
     assert_eq!(
         result.install_directory.to_string(),
-        "${known.local_app_data}/Programs/Acme"
+        "${location.user_data}/Programs/Acme"
     );
 
     // No ${install} / ${app.*} remain.
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("${install}"));
     assert!(!json.contains("${app."));
-    assert!(json.contains("${known."));
+    assert!(json.contains("${location."));
 
-    // core files: payload under component core + shortcut/path/cli files.
-    // Fixture: files **/* component=core; path component=cli; shortcut core.
+    // core files: payload under component core + launcher/path/cli files.
+    // Fixture: files **/* component=core; path component=cli; launcher core.
     assert!(!result.files.is_empty());
-    assert!(!result.shortcuts.is_empty());
+    assert!(!result.launchers.is_empty());
     assert_eq!(result.path_entries.len(), 1);
 
-    assert!(!result.summary.requires_elevation);
+    assert!(!result.summary.requires_authorization);
     assert_eq!(result.summary.selected_component_count, 2);
 
     // Correct byte count = sum of active file sizes only.
@@ -85,6 +98,7 @@ fn user_default_plan() {
 fn machine_plan_with_service_enabled() {
     let (_dir, build) = acme_project();
     let request = PlanRequest {
+        target: target(),
         scope: SelectedScope::Machine,
         install_directory: None,
         components: ComponentOverrides {
@@ -103,14 +117,14 @@ fn machine_plan_with_service_enabled() {
 
     assert_eq!(result.services.len(), 1);
     assert_eq!(result.services[0].id.as_str(), "acme-agent");
-    assert_eq!(result.services[0].privilege, Privilege::Machine);
+    assert_eq!(result.services[0].privilege, Privilege::System);
 
     assert_eq!(
         result.install_directory.to_string(),
-        "${known.program_files}/Acme"
+        "${location.programs}/Acme"
     );
 
-    assert!(result.summary.requires_elevation);
+    assert!(result.summary.requires_authorization);
 
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("${install}"));
@@ -121,20 +135,20 @@ fn machine_plan_with_service_enabled() {
 #[test]
 fn install_directory_variables_resolved_into_destinations() {
     let (_dir, build) = acme_project();
-    let result = plan(&build, &PlanRequest::new(SelectedScope::Machine)).unwrap();
+    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::Machine)).unwrap();
 
     // file destination `${install}` + relative path expands install directory.
     for file in &result.files {
         let dest = file.destination.to_string();
         assert!(
-            dest.starts_with("${known.program_files}/Acme"),
+            dest.starts_with("${location.programs}/Acme"),
             "dest: {dest}"
         );
     }
     assert!(
         result
             .install_directory
-            .contains_variable(Variable::KnownProgramFiles)
+            .contains_variable(Variable::Location(InstallLocation::Programs))
     );
     assert!(
         !result

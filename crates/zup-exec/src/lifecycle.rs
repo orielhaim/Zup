@@ -3,16 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
-use zup_core::{ResourceKey, SelectedScope};
+use zup_core::{Privilege, ResourceKey};
 use zup_platform::TargetPlan;
 
 use crate::{
-    ExecutionPlan, ExecutionPlanError, ExtensionState, FileOperationKind, FilePrecondition,
-    FileTypeOperationKind, InstallLedger, MachineSnapshot, ObservedExtensionState,
-    ObservedFileState, ObservedProgIdState, ObservedProtocolState, ObservedServiceState,
-    ObservedShortcutState, OwnedResource, PathEntryState, PathOperationKind, ProgIdState,
-    ProtocolOperationKind, ProtocolState, RemovalKind, RemovalOperation, ServiceOperationKind,
-    ServiceState, ShortcutOperationKind, ShortcutState, plan_execution,
+    ExecutionPlan, ExecutionPlanError, ExtensionState, FileAssociationOperationKind,
+    FileAssociationState, FileOperationKind, FilePrecondition, HostSnapshot, InstallLedger,
+    LauncherOperationKind, LauncherState, ObservedExtensionState, ObservedFileAssociationState,
+    ObservedFileState, ObservedLauncherState, ObservedProtocolState, ObservedServiceState,
+    OwnedResource, PathOperationKind, ProtocolOperationKind, ProtocolState, RemovalKind,
+    RemovalOperation, ServiceOperationKind, ServiceState, plan_execution,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub enum LifecycleError {
 pub fn plan_lifecycle(
     action: LifecycleAction,
     target: Option<&TargetPlan>,
-    snapshot: Option<&MachineSnapshot>,
+    snapshot: Option<&HostSnapshot>,
     ledger: Option<&InstallLedger>,
     owned_matches: &BTreeMap<ResourceKey, bool>,
 ) -> Result<ExecutionPlan, LifecycleError> {
@@ -130,7 +130,7 @@ pub fn plan_lifecycle(
         && !matches!(action, LifecycleAction::Repair { .. })
     {
         for (key, owned) in &ledger.resources {
-            if desired_keys.contains(key) {
+            if desired_keys.contains(key) || matches!(owned, OwnedResource::Backend { .. }) {
                 continue;
             }
             let matches = *owned_matches
@@ -144,14 +144,25 @@ pub fn plan_lifecycle(
                     RemovalKind::Drift
                 },
                 scope: ledger.scope,
+                // The authority recorded when the resource was installed, not
+                // an inference from the scope the ledger happens to carry.
+                privilege: owned.privilege(),
                 owned: owned.clone(),
             });
         }
     }
     if action == LifecycleAction::Uninstall {
         execution.uninstall = true;
-        execution.summary.requires_elevation =
-            ledger.is_some_and(|ledger| ledger.scope == SelectedScope::Machine);
+        execution.summary.requires_authorization = execution
+            .removals
+            .iter()
+            .any(|removal| removal.privilege == Privilege::System)
+            || ledger.is_some_and(|ledger| {
+                ledger
+                    .resources
+                    .values()
+                    .any(|owned| owned.privilege() == Privilege::System)
+            });
     }
     Ok(execution)
 }
@@ -159,22 +170,13 @@ pub fn plan_lifecycle(
 fn target_keys(target: &TargetPlan) -> BTreeSet<ResourceKey> {
     let mut keys = BTreeSet::new();
     keys.extend(target.files.iter().map(|item| item.key.clone()));
-    if target
-        .files
-        .iter()
-        .any(|item| matches!(item.key, ResourceKey::Maintenance { .. }))
-    {
-        keys.insert(ResourceKey::UninstallEntry {
-            app_id: target.app.id.to_string(),
-        });
-    }
-    keys.extend(target.shortcuts.iter().map(|item| item.key.clone()));
+    keys.extend(target.launchers.iter().map(|item| item.key.clone()));
     keys.extend(target.path_entries.iter().map(|item| item.key.clone()));
     keys.extend(target.services.iter().map(|item| item.key.clone()));
     keys.extend(target.protocols.iter().map(|item| item.key.clone()));
-    for item in &target.file_types {
+    for item in &target.file_associations {
         keys.insert(item.key.clone());
-        keys.insert(ResourceKey::FileTypeExtension {
+        keys.insert(ResourceKey::FileAssociationExtension {
             extension: item.extension.clone(),
         });
     }
@@ -184,7 +186,7 @@ fn target_keys(target: &TargetPlan) -> BTreeSet<ResourceKey> {
 fn repair_owned(
     execution: &mut ExecutionPlan,
     target: &TargetPlan,
-    snapshot: &MachineSnapshot,
+    snapshot: &HostSnapshot,
     ledger: &InstallLedger,
     force_files: bool,
 ) -> Result<(), LifecycleError> {
@@ -240,30 +242,23 @@ fn repair_owned(
             _ => {}
         }
     }
-    for (op, observed) in execution.shortcuts.iter_mut().zip(&snapshot.shortcuts) {
-        if op.kind == ShortcutOperationKind::Drift
-            && matches!(observed.state, ObservedShortcutState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Shortcut { installed: ShortcutState::Link { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
+    for (op, observed) in execution.launchers.iter_mut().zip(&snapshot.launchers) {
+        if op.kind == LauncherOperationKind::Drift
+            && matches!(observed.state, ObservedLauncherState::Absent)
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
         {
-            op.kind = ShortcutOperationKind::RestoreOwned;
+            op.kind = LauncherOperationKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == ShortcutOperationKind::UpdateOwned
-            || (op.kind == ShortcutOperationKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == LauncherOperationKind::UpdateOwned
+            || (op.kind == LauncherOperationKind::Create && !ledger.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });
         }
     }
-    for (op, observed) in execution
-        .path_entries
-        .iter_mut()
-        .zip(&snapshot.path_entries)
-    {
-        if op.kind == PathOperationKind::Drift
-            && matches!(observed.state, PathEntryState::Absent)
-            && op.previously_owned
-        {
+    for op in &mut execution.path_entries {
+        if op.kind == PathOperationKind::Drift && op.previously_owned {
             op.kind = PathOperationKind::RestoreOwned;
             op.conflict = None;
         } else if op.kind == PathOperationKind::Add && !op.previously_owned {
@@ -302,51 +297,60 @@ fn repair_owned(
             });
         }
     }
-    for (op, observed) in execution.file_types.iter_mut().zip(&snapshot.file_types) {
-        if op.prog_id_kind == FileTypeOperationKind::Drift
-            && matches!(observed.id_state, ObservedProgIdState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::ProgId { installed: ProgIdState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
+    for (op, observed) in execution
+        .file_associations
+        .iter_mut()
+        .zip(&snapshot.file_associations)
+    {
+        if op.association_kind == FileAssociationOperationKind::Drift
+            && matches!(
+                observed.association_state,
+                ObservedFileAssociationState::Absent
+            )
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
         {
-            op.prog_id_kind = FileTypeOperationKind::RestoreOwned;
+            op.association_kind = FileAssociationOperationKind::RestoreOwned;
         }
-        let extension_key = ResourceKey::FileTypeExtension {
+        let extension_key = ResourceKey::FileAssociationExtension {
             extension: target
-                .file_types
+                .file_associations
                 .iter()
                 .find(|item| item.key == op.key)
                 .expect("validated target")
                 .extension
                 .clone(),
         };
-        if op.extension_kind == FileTypeOperationKind::Drift
+        if op.extension_kind == FileAssociationOperationKind::Drift
             && matches!(observed.extension_state, ObservedExtensionState::Absent)
-            && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { prog_id }, .. }) if prog_id == &op.id)
+            && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
         {
-            op.extension_kind = FileTypeOperationKind::RestoreOwned;
+            op.extension_kind = FileAssociationOperationKind::RestoreOwned;
         }
         if matches!(
-            op.prog_id_kind,
-            FileTypeOperationKind::Create | FileTypeOperationKind::UpdateOwned
+            op.association_kind,
+            FileAssociationOperationKind::Create | FileAssociationOperationKind::UpdateOwned
         ) || matches!(
             op.extension_kind,
-            FileTypeOperationKind::Create | FileTypeOperationKind::UpdateOwned
+            FileAssociationOperationKind::Create | FileAssociationOperationKind::UpdateOwned
         ) {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });
         }
-        if (matches!(op.prog_id_kind, FileTypeOperationKind::RestoreOwned)
-            || matches!(op.extension_kind, FileTypeOperationKind::RestoreOwned))
-            && matches!(
-                op.prog_id_kind,
-                FileTypeOperationKind::NoOp | FileTypeOperationKind::RestoreOwned
-            )
-            && matches!(
-                op.extension_kind,
-                FileTypeOperationKind::NoOp | FileTypeOperationKind::RestoreOwned
-            )
-        {
-            op.kind = FileTypeOperationKind::RestoreOwned;
+        if (matches!(
+            op.association_kind,
+            FileAssociationOperationKind::RestoreOwned
+        ) || matches!(
+            op.extension_kind,
+            FileAssociationOperationKind::RestoreOwned
+        )) && matches!(
+            op.association_kind,
+            FileAssociationOperationKind::NoOp | FileAssociationOperationKind::RestoreOwned
+        ) && matches!(
+            op.extension_kind,
+            FileAssociationOperationKind::NoOp | FileAssociationOperationKind::RestoreOwned
+        ) {
+            op.kind = FileAssociationOperationKind::RestoreOwned;
             op.conflict = None;
         }
     }
