@@ -29,7 +29,8 @@ pub struct Matrix {
 
 /// Crates whose production code and tests must build and run on a non-Windows
 /// host: the semantic model, the build inventory, planning, execution,
-/// transaction, packaging, runtime, presentation, updates, and plugins.
+/// transaction, packaging, runtime, presentation, updates, plugins, and the
+/// release plane.
 pub const PORTABLE_CORE: &[&str] = &[
     "zup-core",
     "zup-manifest",
@@ -43,6 +44,9 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-acquire",
     "zup-acquire-http",
     "zup-artifact",
+    "zup-publish",
+    "zup-publish-github",
+    "zup-distribute-github",
     "zup-protocol",
     "zup-runtime",
     "zup-presentation",

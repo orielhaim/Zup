@@ -13,9 +13,13 @@ build = [
   "dep:zup-build",
   "dep:zup-manifest",
   "dep:zup-plugin-build",
+  "dep:zup-publish",
+  "dep:zup-publish-github",
+  "dep:zup-distribute-github",
   "dep:clap_complete",
   "dep:inquire",
   "dep:toml_edit",
+  "dep:sha2",
 ]
 gui = ["dep:zup-ui"]
 console = ["dep:cliclack", "dep:console", "dep:indicatif"]
@@ -79,6 +83,9 @@ zup-manifest = { workspace = true, optional = true }
 zup-plan.workspace = true
 zup-platform.workspace = true
 zup-presentation.workspace = true
+zup-publish = { workspace = true, optional = true }
+zup-publish-github = { workspace = true, optional = true }
+zup-distribute-github = { workspace = true, optional = true }
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-update.workspace = true
@@ -86,6 +93,7 @@ zup-ui = { path = "../zup-ui", optional = true }
 cliclack = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 uuid.workspace = true
 semver.workspace = true
 thiserror.workspace = true

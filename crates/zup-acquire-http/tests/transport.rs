@@ -616,6 +616,88 @@ async fn a_document_is_fetched_whole_and_bounded_by_its_limit() {
     );
 }
 
+#[tokio::test]
+async fn a_body_is_streamed_into_a_sink_chunk_by_chunk() {
+    // The property that makes a large body resumable: chunks reach the sink as
+    // they arrive, so a connection that drops part-way through leaves the
+    // progress that did arrive on disk. Reading the body whole first would hand
+    // over nothing until the last byte, and a sink that is fed only at the end
+    // cannot resume.
+    let server = TestServer::start();
+    let body: Vec<u8> = (0..64 * 1024u32).map(|index| index as u8).collect();
+    server.route("blobs/big", Behaviour::DisconnectAfter(body.clone(), 4096));
+
+    let client = zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("a client");
+    let origin = zup_acquire_http::Origin::parse(&server.url()).expect("the origin parses");
+    let address = url::Url::parse(&format!("{}/blobs/big", server.url())).expect("a url");
+
+    let mut seen: Vec<usize> = Vec::new();
+    let mut kept = Vec::new();
+    let error = client
+        .get(&origin, &address, 0)
+        .await
+        .expect("the response arrives")
+        .stream_into(u64::MAX, |chunk| {
+            seen.push(chunk.len());
+            kept.extend_from_slice(chunk);
+            Ok(())
+        })
+        .await
+        .expect_err("a body that stops early is a failure");
+    assert!(
+        matches!(
+            error,
+            zup_acquire_http::HttpError::Transport { .. }
+                | zup_acquire_http::HttpError::Disconnected { .. }
+        ),
+        "{error}"
+    );
+    // What arrived reached the sink. How many chunks that took is the transport's
+    // business and not a guarantee, so the assertion is about the bytes rather
+    // than the framing: a caller writing to disk has the progress to resume from.
+    assert!(!seen.is_empty(), "the sink saw the bytes that arrived");
+    assert_eq!(
+        kept.len(),
+        seen.iter().sum::<usize>(),
+        "and kept every one of them"
+    );
+    assert!(kept.len() < body.len(), "short of the whole body");
+    assert_eq!(kept, body[..kept.len()], "and it is the front of it");
+}
+
+#[tokio::test]
+async fn a_streamed_body_is_bounded_by_its_limit() {
+    // The bound is a ceiling, not a hint, and it is checked before anything is
+    // written as well as while: a server that sends more than the caller will
+    // accept is refused rather than truncated.
+    let server = TestServer::start();
+    server.route("blobs/big", Behaviour::Serve(vec![7u8; 4096]));
+
+    let client = zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("a client");
+    let origin = zup_acquire_http::Origin::parse(&server.url()).expect("the origin parses");
+    let address = url::Url::parse(&format!("{}/blobs/big", server.url())).expect("a url");
+
+    let mut written = 0usize;
+    let error = client
+        .get(&origin, &address, 0)
+        .await
+        .expect("the response arrives")
+        .stream_into(1024, |chunk| {
+            written += chunk.len();
+            Ok(())
+        })
+        .await
+        .expect_err("a body over the limit is refused");
+    assert!(
+        matches!(error, zup_acquire_http::HttpError::TooLarge { .. }),
+        "{error}"
+    );
+    assert!(
+        written < 4096,
+        "and it stopped early, after {written} bytes"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_repository_location_refuses_a_channel_that_could_escape() {
     let origins = OriginSet::from_urls("https://updates.example.com/acme", Vec::<&str>::new())

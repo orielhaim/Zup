@@ -69,6 +69,33 @@ forever. The server understands no components, targets, or installation logic.
 The same tree is a valid offline seed: `--source dist/web` satisfies an install
 with no network and no second packaging format.
 
+## Host the release on GitHub instead
+
+A project that wants no bucket, no CDN, and no origin can put the release itself
+on GitHub and let the acquisition engine read it back:
+
+```powershell
+zup publish stage --packages dist/packages
+zup publish github
+```
+
+```toml
+[distribution]
+host = "github"
+
+[publish.github]
+repository = "acme/acme"
+```
+
+That publishes one asset per variant rather than one per content object — a
+release page with nine thousand hexadecimal filenames is unusable, and GitHub's
+per-release asset limit is a thousand — and the client reads it back as ordinary
+verified content, indistinguishable from a CDN's.
+
+The credentials, the discovery rules, the state machine, the generated release
+workflow, the range behaviour, and the honest list of what this is not are all in
+[GitHub distribution](github-distribution.md).
+
 ## The two thin installers
 
 `--thin` emits two files, and they are one artifact with two promises:
@@ -108,7 +135,6 @@ target's plan compiled into it and none of the content - a few megabytes, and it
 knows exactly what it would install. That image is staged into the web tree as
 ordinary verified content, because a bootstrapper that fetched something the graph
 did not name would have nothing to check it against.
-
 
 ## Sign with tuftool
 

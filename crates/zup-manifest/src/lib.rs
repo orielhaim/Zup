@@ -55,8 +55,9 @@ mod target;
 pub use compile::{compile, parse_and_compile, parse_and_compile_named};
 pub use error::ManifestError;
 pub use model::{
-    ArtifactId, ArtifactKind, ArtifactMode, ArtifactProfile, Build, Manifest, SCHEMA_VERSION,
-    Targeted, Updates,
+    ArtifactId, ArtifactKind, ArtifactMode, ArtifactProfile, Build, Distribution, DistributionHost,
+    Github, GithubNotes, GithubTag, GithubWorkflow, Manifest, Publish, SCHEMA_VERSION, Targeted,
+    Updates,
 };
 pub use parse::{parse, parse_named};
 pub use plugin::Plugin;

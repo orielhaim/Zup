@@ -44,6 +44,8 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
         install: raw.install,
         prerequisites: raw.prerequisites,
         updates: raw.updates,
+        distribution: raw.distribution,
+        publish: raw.publish,
         components: raw.components,
         plugins: raw.plugins,
         files: raw.files,
@@ -83,6 +85,10 @@ struct RawManifest {
     #[serde(default)]
     prerequisites: Vec<Targeted<Prerequisite>>,
     updates: Option<crate::model::Updates>,
+    #[serde(default)]
+    distribution: Option<crate::model::Distribution>,
+    #[serde(default)]
+    publish: Option<crate::model::Publish>,
     #[serde(default)]
     components: Vec<Targeted<Component>>,
     #[serde(default)]

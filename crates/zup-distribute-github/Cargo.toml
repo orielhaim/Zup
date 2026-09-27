@@ -1,0 +1,35 @@
+[package]
+name = "zup-distribute-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read zup release content back out of GitHub Releases"
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+url = "2"
+zup-acquire.workspace = true
+zup-acquire-http.workspace = true
+zup-core.workspace = true
+zup-publish.workspace = true
+zup-publish-github.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+zup-publish.workspace = true
+zup-publish-github.workspace = true

@@ -55,6 +55,13 @@ pub enum HttpError {
     /// A body stream ended early.
     #[error("origin {origin} closed the connection after {received} bytes")]
     Disconnected { origin: String, received: u64 },
+    /// The caller's sink refused a chunk.
+    ///
+    /// The cache is the only sink that exists today, and its refusals are a bound
+    /// or a digest mismatch — both of which mean the content is not what was
+    /// promised, which is a fact about the origin rather than about this client.
+    #[error("origin {origin} could not accept the content: {reason}")]
+    Body { origin: String, reason: String },
     /// The caller cancelled.
     #[error("the transfer was cancelled")]
     Cancelled,
@@ -87,7 +94,8 @@ impl HttpError {
             | Self::RangeUnsupported { origin, .. }
             | Self::RangeMismatch { origin, .. }
             | Self::Redirect { origin, .. }
-            | Self::Disconnected { origin, .. } => Some(origin),
+            | Self::Disconnected { origin, .. }
+            | Self::Body { origin, .. } => Some(origin),
             Self::Cancelled | Self::Cache(_) => None,
         }
     }
@@ -98,6 +106,7 @@ impl HttpError {
             Self::Transport { reason, .. } => reason.clone(),
             Self::Status { status, .. } => format!("status {status}"),
             Self::Disconnected { received, .. } => format!("closed after {received} bytes"),
+            Self::Body { reason, .. } => reason.clone(),
             Self::Truncated { .. } => "short response".to_owned(),
             Self::TooLarge { .. } => "response too large".to_owned(),
             Self::RangeUnsupported { .. } => "no range support".to_owned(),

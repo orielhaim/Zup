@@ -278,7 +278,7 @@ fn execute_before_auth_rejected() {
         version: PROTOCOL_VERSION,
         session_id: b.session_id,
         sequence: 1,
-        message: Message::ExecuteTransaction(ExecuteTransaction {
+        message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
             target: target(),
             plan_json: "{}".into(),
             plan_hash: b.expected_plan_hash.clone(),
@@ -292,7 +292,7 @@ fn execute_before_auth_rejected() {
             work_root: r"C:\work".into(),
             recovery_id: None,
             release: None,
-        }),
+        })),
     };
     assert!(matches!(
         session.handle_message(env),
@@ -323,7 +323,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             version: PROTOCOL_VERSION,
             session_id: b.session_id,
             sequence: 2,
-            message: Message::ExecuteTransaction(ExecuteTransaction {
+            message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
                 target: TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
                 plan_json: "not json".into(),
                 plan_hash: b.expected_plan_hash.clone(),
@@ -337,7 +337,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
                 work_root: r"C:\work".into(),
                 recovery_id: None,
                 release: None,
-            }),
+            })),
         })
         .unwrap_err();
     assert!(matches!(error, WorkerError::TargetMismatch));
@@ -373,7 +373,7 @@ fn second_execute_rejected() {
         version: PROTOCOL_VERSION,
         session_id: b.session_id,
         sequence: 2,
-        message: Message::ExecuteTransaction(ExecuteTransaction {
+        message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
             target: target(),
             plan_json: "[]".into(),
             plan_hash: "c".repeat(64),
@@ -387,7 +387,7 @@ fn second_execute_rejected() {
             work_root: r"C:\work".into(),
             recovery_id: None,
             release: None,
-        }),
+        })),
     };
     assert!(matches!(
         session.handle_message(env),

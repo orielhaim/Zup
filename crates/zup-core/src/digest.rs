@@ -106,6 +106,16 @@ impl From<[u8; 32]> for Sha256Digest {
     }
 }
 
+/// Hash a byte slice.
+///
+/// The companion to [`hash_reader`] for content that is already in memory, so a
+/// caller does not have to wrap a slice in a reader to measure it.
+pub fn hash_bytes(bytes: &[u8]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Sha256Digest::from_hasher(hasher)
+}
+
 /// Stream `reader` through SHA-256 without buffering the whole input.
 ///
 /// Returns `(bytes_read, digest)`.

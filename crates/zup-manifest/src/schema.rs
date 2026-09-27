@@ -6,7 +6,7 @@ use zup_core::{
     Service,
 };
 
-use crate::{Build, Plugin, SCHEMA_VERSION, Targeted, Updates};
+use crate::{Build, Distribution, Plugin, Publish, SCHEMA_VERSION, Targeted, Updates};
 
 #[allow(dead_code)]
 #[derive(JsonSchema)]
@@ -24,6 +24,10 @@ struct SchemaManifest {
     prerequisites: Vec<Targeted<Prerequisite>>,
     #[serde(default)]
     updates: Option<Updates>,
+    #[serde(default)]
+    distribution: Option<Distribution>,
+    #[serde(default)]
+    publish: Option<Publish>,
     #[serde(default)]
     components: Vec<Targeted<Component>>,
     #[serde(default)]

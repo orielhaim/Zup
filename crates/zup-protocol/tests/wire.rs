@@ -112,13 +112,13 @@ fn plan_hash_binding_message_roundtrips_with_overlay() {
         version: PROTOCOL_VERSION,
         session_id: SessionId::new_v7(),
         sequence: 1,
-        message: Message::ExecuteTransaction(msg.clone()),
+        message: Message::ExecuteTransaction(Box::new(msg.clone())),
     };
     let decoded = decode_payload(&encode_payload(&envelope).unwrap()).unwrap();
     assert_eq!(decoded, envelope);
     let Message::ExecuteTransaction(decoded) = decoded.message else {
         panic!("wrong message");
     };
-    assert_eq!(decoded, msg);
+    assert_eq!(*decoded, msg);
     assert!(MAX_PAYLOAD_OVERLAY_PATH_BYTES >= msg.payload_overlay_root.unwrap().len());
 }

@@ -32,6 +32,15 @@
 //!   unification that nothing currently needs.
 //! - Proxy configuration is whatever the platform and the environment already
 //!   say. This crate adds no proxy handling of its own, and never logs a URL.
+//!
+//! # Requests that are not immutable object reads
+//!
+//! [`HttpClient::send`] exists because a release publisher has to speak an API,
+//! not because the acquisition path stopped being the point. It applies the same
+//! policy to a `POST` a client could not otherwise make safely: bounded
+//! redirects, HTTPS on every hop, and a credential confined to one host. The
+//! body is either bytes the caller holds or a file streamed from disk, because a
+//! multi-gigabyte upload that has to be resident is a limitation, not a design.
 
 #![forbid(unsafe_code)]
 
@@ -41,7 +50,10 @@ mod origin;
 mod retry;
 mod source;
 
-pub use client::{HttpClient, HttpClientConfig, Response, SecretHeader, TimeoutPolicy, USER_AGENT};
+pub use client::{
+    Body, HttpClient, HttpClientConfig, Range, Request, Response, SecretHeader, TimeoutPolicy,
+    USER_AGENT,
+};
 pub use error::{HttpError, RetryDecision, is_resumable, is_retryable_status, retry_after};
 pub use origin::{Origin, OriginSet, RepositoryLocation};
 pub use retry::{BackoffPolicy, RetryOutcome, RetryState};

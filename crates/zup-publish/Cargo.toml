@@ -1,0 +1,17 @@
+[package]
+name = "zup-publish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-neutral release plan, publication decisions, and receipts for zup"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zup-acquire.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

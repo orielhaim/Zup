@@ -178,7 +178,7 @@ impl WorkerSession {
                 "worker hello is parent-side only".into(),
             )),
             Message::ParentHello(hello) => self.on_parent_hello(envelope.sequence, hello),
-            Message::ExecuteTransaction(exec) => self.on_execute(envelope.sequence, exec),
+            Message::ExecuteTransaction(exec) => self.on_execute(envelope.sequence, *exec),
             Message::ExecuteBootstrap(exec) => self.on_bootstrap(envelope.sequence, exec),
             Message::Cancel => Ok(None),
             Message::Ping => Ok(Some(WireEnvelope {

@@ -38,6 +38,8 @@ jiff = { version = "0.2", default-features = false, features = [
 uuid = { version = "1", features = ["v7", "serde"] }
 semver = { version = "1", features = ["serde"] }
 target-lexicon = { version = "0.13", features = ["std"] }
+bytes = "1"
+futures-util = "0.3"
 
 # Workspace crates
 zup-core = { path = "crates/zup-core" }
@@ -54,6 +56,9 @@ zup-platform = { path = "crates/zup-platform" }
 zup-exec = { path = "crates/zup-exec" }
 zup-transaction = { path = "crates/zup-transaction" }
 zup-bundle = { path = "crates/zup-bundle" }
+zup-publish = { path = "crates/zup-publish" }
+zup-publish-github = { path = "crates/zup-publish-github" }
+zup-distribute-github = { path = "crates/zup-distribute-github" }
 zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
 zup-presentation = { path = "crates/zup-presentation" }

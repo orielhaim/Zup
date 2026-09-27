@@ -1075,29 +1075,31 @@ async fn run_elevated_worker(
             version: zup_protocol::PROTOCOL_VERSION,
             session_id,
             sequence: 2,
-            message: zup_protocol::Message::ExecuteTransaction(zup_protocol::ExecuteTransaction {
-                target: request.target.clone(),
-                plan_json,
-                plan_hash,
-                app_id: request.app_id.to_string(),
-                app_version: request.app_version.to_string(),
-                scope: match request.scope {
-                    SelectedScope::User => "user",
-                    SelectedScope::Machine => "machine",
-                }
-                .into(),
-                payload_root: payload_root.display().to_string(),
-                payload_overlay_root: payload_overlay_root
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                payload_overlay_base_root: payload_overlay_base_root
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                state_root: request.state_root.display().to_string(),
-                work_root: request.work_root.display().to_string(),
-                recovery_id: request.recovery_id.map(|id| id.as_uuid()),
-                release: request.release.clone(),
-            }),
+            message: zup_protocol::Message::ExecuteTransaction(Box::new(
+                zup_protocol::ExecuteTransaction {
+                    target: request.target.clone(),
+                    plan_json,
+                    plan_hash,
+                    app_id: request.app_id.to_string(),
+                    app_version: request.app_version.to_string(),
+                    scope: match request.scope {
+                        SelectedScope::User => "user",
+                        SelectedScope::Machine => "machine",
+                    }
+                    .into(),
+                    payload_root: payload_root.display().to_string(),
+                    payload_overlay_root: payload_overlay_root
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    payload_overlay_base_root: payload_overlay_base_root
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    state_root: request.state_root.display().to_string(),
+                    work_root: request.work_root.display().to_string(),
+                    recovery_id: request.recovery_id.map(|id| id.as_uuid()),
+                    release: request.release.clone(),
+                },
+            )),
         })
         .await
         .map_err(|e| SessionError::Protocol(e.to_string()))?;

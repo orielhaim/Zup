@@ -47,16 +47,39 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
     input
 }
 
-async fn execute_with_test_worker(
-    plan: &TransactionPlan,
-    version: &str,
-    payload_root: &Path,
-    state_root: &Path,
-    work_root: &Path,
+/// The one worker invocation these tests share.
+///
+/// A struct rather than eight positional arguments, because a test helper whose
+/// arguments are four paths and two options is a test helper whose call sites
+/// cannot be read.
+struct Worker {
+    plan: TransactionPlan,
+    version: String,
+    payload_root: PathBuf,
+    state_root: PathBuf,
+    work_root: PathBuf,
     recovery_id: Option<uuid::Uuid>,
-    release: None,
-    payload_overlay_root: Option<&Path>,
-) -> String {
+    release: Option<zup_core::ReleaseIdentity>,
+    payload_overlay_root: Option<PathBuf>,
+}
+
+async fn execute_with_test_worker(worker: &Worker) -> String {
+    let Worker {
+        plan,
+        version,
+        payload_root,
+        state_root,
+        work_root,
+        recovery_id,
+        release,
+        payload_overlay_root,
+    } = worker;
+    let plan = plan.clone();
+    let recovery_id = *recovery_id;
+    let payload_root = payload_root.as_path();
+    let state_root = state_root.as_path();
+    let work_root = work_root.as_path();
+    let payload_overlay_root = payload_overlay_root.as_deref();
     let plan = if let Some(id) = recovery_id {
         use zup_transaction::TransactionStore;
         zup_transaction::FilesystemTransactionStore::new(state_root)
@@ -126,7 +149,7 @@ async fn execute_with_test_worker(
             version: PROTOCOL_VERSION,
             session_id,
             sequence: 2,
-            message: Message::ExecuteTransaction(ExecuteTransaction {
+            message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
                 target: plan.target.clone(),
                 plan_json,
                 plan_hash,
@@ -144,7 +167,8 @@ async fn execute_with_test_worker(
                 state_root: state_root.display().to_string(),
                 work_root: work_root.display().to_string(),
                 recovery_id,
-            }),
+                release: release.clone(),
+            })),
         })
         .await
         .expect("execute");
@@ -180,15 +204,16 @@ async fn multi_process_named_pipe_handshake_and_execute() {
     ))
     .unwrap();
     assert_eq!(
-        execute_with_test_worker(
-            &plan,
-            "1.0.0",
-            &payload_root,
-            &state_root,
-            &work_root,
-            None,
-            None,
-        )
+        execute_with_test_worker(&Worker {
+            plan,
+            version: "1.0.0".to_owned(),
+            payload_root,
+            state_root,
+            work_root,
+            recovery_id: None,
+            release: None,
+            payload_overlay_root: None,
+        })
         .await,
         "committed"
     );
@@ -223,15 +248,16 @@ async fn authenticated_worker_consumes_generated_overlay() {
     std::fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
     std::fs::write(&overlay_file, bytes).unwrap();
     assert_eq!(
-        execute_with_test_worker(
-            &plan,
-            "1.0.0",
-            &payload_root,
-            &state_root,
-            &work_root,
-            None,
-            Some(&overlay),
-        )
+        execute_with_test_worker(&Worker {
+            plan,
+            version: "1.0.0".to_owned(),
+            payload_root,
+            state_root,
+            work_root,
+            recovery_id: None,
+            release: None,
+            payload_overlay_root: Some(overlay.clone()),
+        })
         .await,
         "committed"
     );

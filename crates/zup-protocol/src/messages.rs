@@ -33,12 +33,17 @@ pub struct WireEnvelope {
 }
 
 /// All protocol messages. No generic "run command" surface.
+///
+/// `ExecuteTransaction` is boxed because it is by far the largest message, and an
+/// unboxed variant would put its size on the stack of every `match` over this
+/// enum — including the ones that only handle `Cancel` or `Pong`. `Box<T>` is
+/// transparent to serde, so the wire shape is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Message {
     WorkerHello(WorkerHello),
     ParentHello(ParentHello),
-    ExecuteTransaction(ExecuteTransaction),
+    ExecuteTransaction(Box<ExecuteTransaction>),
     ExecuteBootstrap(ExecuteBootstrap),
     Cancel,
     Progress(ProgressReport),

@@ -375,6 +375,10 @@ Authoring commands share the target selection and override rules above.
 | `zup check` | Validate a manifest and its build inputs |
 | `zup doctor` | Report build readiness for the selected targets |
 | `zup plan` | Print the real installation plan without touching the machine |
+| `zup publish stage` | Write the web tree a static origin serves, and the transport packages a release host holds |
+| `zup publish github` | Publish a release to GitHub Releases |
+| `zup ci github generate` | Write `.github/workflows/release.yml` from the manifest |
+| `zup ci github check` | Report whether the committed workflow matches the generator |
 | `zup schema` | Print or write the authoritative JSON Schema |
 | `zup fmt` | Format `zup.toml` while preserving comments |
 | `zup completions <shell>` | Write shell completions to stdout |
@@ -436,6 +440,15 @@ prose.
 
 `zup schema --output schema/zup.schema.json` regenerates the published JSON
 Schema; CI fails when the checked-in file differs from what the code emits.
+
+`zup publish stage` writes what a static origin serves and, with `--packages`,
+the transport packages a release host holds: one per variant, sharded only at a
+fixed boundary and only when a package would exceed the host's per-asset limit.
+`zup publish github` derives everything — the repository, the tag, the asset
+list, the digests — and refuses rather than guessing when a repository cannot be
+found. `zup ci github generate` and `zup ci github check` write and verify the
+committed release workflow. All four are documented in
+[GitHub distribution](github-distribution.md).
 
 `zup build` embeds a runtime template executable, so a frontend runtime has to
 exist before the build runs. The `zup` library compiles only with the `build`

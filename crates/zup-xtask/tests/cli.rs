@@ -71,6 +71,9 @@ portable-core: crates that build and test on a non-Windows host
   zup-acquire
   zup-acquire-http
   zup-artifact
+  zup-publish
+  zup-publish-github
+  zup-distribute-github
   zup-protocol
   zup-runtime
   zup-presentation
@@ -136,7 +139,8 @@ fn a_repeated_matrix_selector_keeps_the_requested_order() {
         "portable-tests: portable crates that verify the stack instead of shipping in an installer\n  zup-xtask\n\
          portable-core: crates that build and test on a non-Windows host\n  zup-core\n  zup-manifest\n  \
          zup-build\n  zup-plan\n  zup-platform\n  zup-exec\n  zup-transaction\n  zup-bootstrap\n  \
-         zup-bundle\n  zup-acquire\n  zup-acquire-http\n  zup-artifact\n  zup-protocol\n  zup-runtime\n  \
+         zup-bundle\n  zup-acquire\n  zup-acquire-http\n  zup-artifact\n  zup-publish\n  \
+         zup-publish-github\n  zup-distribute-github\n  zup-protocol\n  zup-runtime\n  \
          zup-presentation\n  zup-update\n  \
          zup-plugin-contract\n  zup-plugin-build\n  zup-plugin-runtime\n"
     );
@@ -154,7 +158,7 @@ fn cargo_args_format_emits_package_flags_for_one_matrix() {
         ]),
         "-p zup-core -p zup-manifest -p zup-build -p zup-plan -p zup-platform -p zup-exec \
          -p zup-transaction -p zup-bootstrap -p zup-bundle -p zup-acquire -p zup-acquire-http \
-         -p zup-artifact -p zup-protocol \
+         -p zup-artifact -p zup-publish -p zup-publish-github -p zup-distribute-github -p zup-protocol \
          -p zup-runtime -p zup-presentation -p zup-update -p zup-plugin-contract \
          -p zup-plugin-build -p zup-plugin-runtime\n"
     );

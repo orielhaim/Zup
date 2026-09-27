@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use clap::CommandFactory;
 use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use std::io::IsTerminal;
+#[cfg(feature = "build")]
 use zup_acquire::{CachePolicy, ProgressSink};
 use zup_bootstrap::{
     BootstrapId, BootstrapKey, BootstrapOperation, BootstrapPlan, BootstrapState,
@@ -22,6 +23,7 @@ use zup_core::{
 use zup_exec::LifecycleAction;
 use zup_presentation::{AutomationEvent, AutomationResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest};
+#[cfg(feature = "build")]
 use zup_update::{ComponentSelection, TrustContext};
 
 #[cfg(feature = "build")]
@@ -29,11 +31,23 @@ mod artifacts;
 #[cfg(feature = "build")]
 mod build_inputs;
 #[cfg(feature = "build")]
+pub mod ci;
+#[cfg(feature = "build")]
 pub mod doctor;
+// A release graph and a handoff are both produced by the build plane: one by
+// `zup publish stage`, the other by a launcher the build plane composed. Without
+// it there is nothing to resolve and nothing to hand over, so neither module is
+// compiled rather than compiled and unused.
+#[cfg(feature = "build")]
 mod graph;
+#[cfg(feature = "build")]
 mod handoff;
 #[cfg(feature = "build")]
 mod inspect_artifact;
+#[cfg(feature = "build")]
+mod packages;
+#[cfg(feature = "build")]
+pub mod publish_github;
 
 /// Process entry point for the internal worker mode.
 #[derive(Debug, Parser)]
@@ -59,6 +73,9 @@ enum Commands {
     #[cfg(feature = "build")]
     /// Stage the immutable web tree a static origin serves.
     Publish(PublishCommand),
+    /// Generate and check the release pipeline this project commits.
+    #[cfg(feature = "build")]
+    Ci(ci::CiCommand),
     /// Create a small, editable zup.toml project.
     #[cfg(feature = "build")]
     Init(InitCommand),
@@ -484,6 +501,76 @@ struct PublishCommand {
 enum PublishSubcommand {
     /// Write the immutable web tree a static origin serves.
     Stage(PublishStageCommand),
+    /// Publish the release to GitHub.
+    Github(PublishGithubCommand),
+}
+
+/// Publish a release to GitHub.
+///
+/// Everything a developer normally has to type is derived: the repository from
+/// the remote or `GITHUB_REPOSITORY`, the tag from the version, the asset list
+/// from `zup-release.json` and the staged tree, and the digests from the files.
+/// The flags are for the cases where the derivation is wrong, and none of them is
+/// needed for the ordinary one.
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct PublishGithubCommand {
+    #[arg(long, default_value = DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+    /// The directory a build wrote its release description into.
+    #[arg(long, default_value = "dist", value_hint = ValueHint::DirPath)]
+    release_dir: PathBuf,
+    /// The staged content tree, for the documents a client authenticates.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    web: Option<PathBuf>,
+    /// The directory holding the transport packages, for GitHub-hosted content.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    packages: Option<PathBuf>,
+    /// `owner/name`, or `host/owner/name` for GitHub Enterprise.
+    #[arg(long, value_name = "OWNER/NAME")]
+    repo: Option<String>,
+    /// The release tag. Derived from the version as `v<version>`.
+    #[arg(long)]
+    tag: Option<String>,
+    /// Leave the release a draft.
+    #[arg(long)]
+    draft: bool,
+    /// Mark the release a prerelease.
+    #[arg(long)]
+    prerelease: bool,
+    /// Plan and verify everything, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Replace a differing asset on a draft release.
+    ///
+    /// Never applies to a published release: those bytes are already public and
+    /// are what somebody downloaded.
+    #[arg(long)]
+    replace_conflicts: bool,
+    /// The release body, when the project does not keep it in a file.
+    #[arg(long, value_name = "TEXT")]
+    notes_text: Option<String>,
+    /// Where the provider's receipt is written.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    receipt: Option<PathBuf>,
+    /// Readable text or the versioned JSON report.
+    #[arg(long, value_enum, default_value = "human")]
+    format: GithubFormatArg,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum GithubFormatArg {
+    #[default]
+    Human,
+    Json,
+}
+
+#[cfg(feature = "build")]
+impl GithubFormatArg {
+    const fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
 }
 
 /// Stage everything a static origin serves and a TUF repository signs.
@@ -544,6 +631,30 @@ struct PublishStageCommand {
     /// Finished installers to record as downloadable files, repeatable.
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     download: Vec<PathBuf>,
+    /// Also write one transport package per variant.
+    ///
+    /// A package is not an installer: it is a container the acquisition engine
+    /// reads, and it exists so that a project hosting its release on GitHub can
+    /// carry its content in one or two assets per variant instead of one per
+    /// object. Nothing reads them unless a distribution host is configured for
+    /// it.
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
+    packages: Option<PathBuf>,
+    /// The largest a transport package may be before it is split.
+    ///
+    /// Only relevant with `--packages`, and only for content packs: a
+    /// user-facing installer is never split.
+    #[arg(long, value_name = "BYTES")]
+    shard_bytes: Option<u64>,
+    /// Compose from a release another job already built.
+    ///
+    /// This is the local/global split made explicit: a build matrix produces
+    /// per-target outputs on separate machines, and one compose job reads them
+    /// back together. `--source` and `--runtime` are given once per target in
+    /// manifest order, and every other target flag behaves as it does for a
+    /// local build.
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
+    release_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "build")]
@@ -699,10 +810,13 @@ fn run_command(cli: Cli, runtime_frontend: Option<Frontend>) -> miette::Result<(
             ArtifactSubcommand::Inspect(args) => run_artifact_inspect(args)?,
         },
         #[cfg(feature = "build")]
-        #[cfg(feature = "build")]
         Some(Commands::Publish(args)) => match args.command {
             PublishSubcommand::Stage(args) => run_publish_stage(args)?,
+            #[cfg(feature = "build")]
+            PublishSubcommand::Github(args) => run_publish_github(args)?,
         },
+        #[cfg(feature = "build")]
+        Some(Commands::Ci(args)) => ci::run(args)?,
         #[cfg(feature = "build")]
         Some(Commands::Init(args)) => run_init(args)?,
         #[cfg(feature = "build")]
@@ -719,6 +833,7 @@ fn run_command(cli: Cli, runtime_frontend: Option<Frontend>) -> miette::Result<(
         Some(Commands::Completions(args)) => run_completions(args)?,
         Some(Commands::Install(args)) => run_manifest_transition(LifecycleAction::Install, args)?,
         Some(Commands::Upgrade(args)) => run_manifest_transition(LifecycleAction::Upgrade, args)?,
+        #[cfg(feature = "build")]
         Some(Commands::Update(args)) => run_update(args)?,
         Some(Commands::Modify(args)) => run_manifest_transition(LifecycleAction::Modify, args)?,
         Some(Commands::Repair(args)) => run_manifest_transition(
@@ -788,6 +903,14 @@ fn run_command(cli: Cli, runtime_frontend: Option<Frontend>) -> miette::Result<(
                 }
                 Err(error) => return Err(miette::miette!("installer package: {error}")),
             }
+        }
+        // `update` resolves a release graph, which only the build plane does.
+        #[cfg(not(feature = "build"))]
+        Some(Commands::Update(_)) => {
+            return Err(miette::miette!(
+                "`zup update` needs a release graph, which is built by `zup publish stage`; \
+                 this build of the installer does not include the build plane"
+            ));
         }
     }
     Ok(())
@@ -1034,6 +1157,7 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
 }
 
 /// What a build run was asked to produce.
+#[cfg(feature = "build")]
 enum BuildIntent {
     /// One installer per selected target.
     Variants,
@@ -1185,6 +1309,213 @@ fn run_publish_stage(args: PublishStageCommand) -> miette::Result<()> {
     if thin {
         stage_thin_installers(&args, &loaded, &borrowed, &tree.root)?;
     }
+    if let Some(packages) = &args.packages {
+        stage_packages(&args, &loaded, &graph, &tree, packages)?;
+    }
+    if let Some(release_dir) = &args.release_dir {
+        compose_release(release_dir, &loaded.manifest.app)?;
+    }
+    Ok(())
+}
+
+/// Fold a build matrix's per-variant descriptions into one release description.
+///
+/// This is the local/global split made explicit. A matrix builds each target on
+/// its own machine and leaves a description behind; one compose job reads them
+/// all back together and writes the single document that `zup publish github`
+/// and every downstream consumer read.
+///
+/// A merge, not a rebuild, and a strict one: every file a variant claims is
+/// measured on disk, and a file that is claimed and absent is a hard failure.
+/// Silently dropping it would produce a release that installs on the machines
+/// whose variant survived and not on the others, which is the worst possible
+/// failure mode for a release.
+#[cfg(feature = "build")]
+fn compose_release(release_dir: &Path, app: &zup_core::App) -> miette::Result<()> {
+    let mut composed = zup_artifact::ReleaseManifest::new(app);
+    let mut variants = 0usize;
+    let mut entries = std::fs::read_dir(release_dir.join("variants"))
+        .map_err(|error| {
+            miette::miette!(
+                "`{}/variants`: {error}; the compose job collects the matrix's outputs there",
+                release_dir.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| miette::miette!("`{}/variants`: {error}", release_dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let directory = entry.path();
+        if !directory.is_dir() {
+            continue;
+        }
+        let description = directory.join(zup_artifact::RELEASE_MANIFEST_NAME);
+        let Ok(bytes) = std::fs::read(&description) else {
+            continue;
+        };
+        let part = zup_artifact::ReleaseManifest::parse(&bytes)
+            .map_err(|error| miette::miette!("`{}`: {error}", description.display()))?;
+        for variant in &part.variants {
+            composed
+                .add_variant(variant)
+                .map_err(|error| miette::miette!("`{}`: {error}", description.display()))?;
+            variants += 1;
+        }
+        for artifact in &part.artifacts {
+            // The file is measured again here rather than trusted from the
+            // per-variant description, because the compose job is the last place
+            // a digest can be wrong before the release is signed and published.
+            let path = join_release_path(release_dir, &artifact.path)?;
+            let size = std::fs::metadata(&path)
+                .map(|meta| meta.len())
+                .map_err(|error| {
+                    miette::miette!(
+                        "`{}` claims `{}` but the compose job could not see it: {error}",
+                        description.display(),
+                        path.display()
+                    )
+                })?;
+            if size != artifact.size {
+                return Err(miette::miette!(
+                    "`{}` is {size} bytes and the release description says {}",
+                    path.display(),
+                    artifact.size
+                ));
+            }
+            composed
+                .add_composed(artifact, &path)
+                .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+        }
+    }
+    if variants == 0 {
+        return Err(miette::miette!(
+            "`{}/variants` holds no release descriptions; the build matrix writes one per \
+             target and the compose job reads them all",
+            release_dir.display()
+        ));
+    }
+    let path = release_dir.join(zup_artifact::RELEASE_MANIFEST_NAME);
+    let bytes = composed
+        .encode()
+        .map_err(|error| miette::miette!("composing the release description: {error}"))?;
+    std::fs::write(&path, &bytes)
+        .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+    println!();
+    println!(
+        "Composed {} {} ({} files · {variants} variants)",
+        app.name,
+        app.version,
+        composed.artifacts.len()
+    );
+    println!("  Release     {}", path.display());
+    Ok(())
+}
+
+/// Join a release-root-relative path, refusing anything that is not one.
+#[cfg(feature = "build")]
+fn join_release_path(root: &Path, relative: &str) -> miette::Result<PathBuf> {
+    let relative = relative.replace('\\', "/");
+    if relative.starts_with('/') || relative.contains("..") || relative.contains(':') {
+        return Err(miette::miette!(
+            "`{relative}` is not a path inside the release root"
+        ));
+    }
+    Ok(root.join(relative))
+}
+
+/// Write one transport package per variant, plus the descriptor naming each.
+///
+/// One package per variant rather than one per release, because a package's
+/// purpose is to let a machine fetch only the content it needs: a host that
+/// serves a release to a thousand machines of several architectures should not
+/// make every one of them download the union.
+#[cfg(feature = "build")]
+fn stage_packages(
+    args: &PublishStageCommand,
+    loaded: &LoadedProject,
+    graph: &zup_artifact::ArtifactGraph,
+    tree: &zup_artifact::WebTree,
+    output: &Path,
+) -> miette::Result<()> {
+    let channel = args.channel.as_str();
+    let catalog_bytes = std::fs::read(
+        tree.root.join(
+            zup_acquire::WebLayout::catalog(channel)
+                .map_err(|error| miette::miette!("{error}"))?
+                .to_string(),
+        ),
+    )
+    .map_err(|error| {
+        miette::miette!(
+            "the content catalog is missing from the staged tree; re-run `zup publish stage`"
+        )
+        .wrap_err(error)
+    })?;
+    let catalog = zup_acquire::ContentCatalog::parse(&catalog_bytes)
+        .map_err(|error| miette::miette!("the content catalog is not readable: {error}"))?;
+    let catalog_document = zup_distribute_github::Document {
+        digest: zup_core::hash_bytes(&catalog_bytes),
+        size: catalog_bytes.len() as u64,
+    };
+    let shard_bytes = args
+        .shard_bytes
+        .unwrap_or(zup_publish_github::PACKAGE_SHARD_BYTES);
+    let name = loaded
+        .manifest
+        .app
+        .name
+        .as_str()
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '/')
+        .collect::<String>();
+    println!();
+    println!("Transport packages");
+    for variant in graph.manifests() {
+        let manifest_bytes = &variant.bytes;
+        let document = zup_distribute_github::Document {
+            digest: zup_core::hash_bytes(manifest_bytes),
+            size: manifest_bytes.len() as u64,
+        };
+        let Some(content) = graph.content_of(&variant.id) else {
+            continue;
+        };
+        let blobs: Vec<(zup_core::Sha256Digest, u64, u64)> = content
+            .digests
+            .iter()
+            .filter_map(|digest| {
+                catalog
+                    .entry(digest)
+                    .map(|entry| (*digest, entry.compressed_size, entry.size))
+            })
+            .collect();
+        let request = packages::Request {
+            variant: &variant.id,
+            target: graph
+                .index()
+                .variants
+                .iter()
+                .find(|described| described.id == variant.id)
+                .map(|described| described.target.as_str())
+                .unwrap_or_default(),
+            application: loaded.manifest.app.id.as_str(),
+            manifest: document,
+            catalog: catalog_document,
+            blobs: &blobs,
+        };
+        let written = packages::write(&request, &tree.root, output, &name, shard_bytes)?;
+        println!(
+            "  {:<24} {} · {} objects · {}",
+            variant.id,
+            zup_publish::format_bytes(written.size),
+            written.blob_count,
+            written
+                .names
+                .iter()
+                .map(|piece| piece.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -1205,6 +1536,92 @@ fn build_plan_only_runtime(
     zup_windows::plan_only_runtime_bytes(template, plan, &[])
         .map(|(bytes, _)| bytes)
         .map_err(|error| miette::miette!("building the thin runtime: {error}"))
+}
+
+/// Publish a release to GitHub.
+///
+/// The whole command in one place, because the interesting part is not the
+/// request: it is that every step before the one that makes the release public is
+/// idempotent, and that a dry run performs all of them and writes none of them.
+#[cfg(feature = "build")]
+fn run_publish_github(args: PublishGithubCommand) -> miette::Result<()> {
+    let manifest = load_manifest(&args.manifest)?;
+    let mut config = zup_publish_github::PublishConfig::resolve(&manifest)?;
+    if let Some(tag) = &args.tag {
+        config.tag = Some(tag.clone());
+        config.tag_prefix = None;
+    }
+    if args.draft {
+        config.draft = true;
+    }
+    if args.prerelease {
+        config.prerelease = true;
+    }
+    if args.replace_conflicts {
+        config.replace_conflicts = true;
+    }
+    let working = args
+        .manifest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (repository, how) =
+        publish_github::resolve_repository(&config, args.repo.as_deref(), &working)?;
+    let token = match zup_publish_github::discover(&zup_publish_github::ProcessEnvironment) {
+        Ok(token) => token,
+        Err(error) => {
+            // A dry run still has to establish that a credential exists, because
+            // "would this work" includes "could this authenticate". But a dry run
+            // that cannot find one is still useful, so it degrades to a plan and
+            // says why.
+            if !args.dry_run {
+                return Err(miette::miette!("{error}"));
+            }
+            eprintln!("  - no credential: {error}");
+            eprintln!("  - the plan below is complete; publication was not attempted");
+            return Ok(());
+        }
+    };
+    let staged = publish_github::Staged {
+        release_dir: args.release_dir.clone(),
+        web: args.web.clone(),
+        packages: args.packages.clone(),
+    };
+    let options = publish_github::Options {
+        dry_run: args.dry_run,
+        draft: None,
+        prerelease: None,
+        receipt: args.receipt.clone(),
+        notes_text: args.notes_text.clone(),
+    };
+    let report = publish_github::run(&manifest, &config, &staged, &repository, &token, &options)?;
+    if args.format.is_json() {
+        let json = serde_json::to_string_pretty(&report)
+            .map_err(|error| miette::miette!("report: {error}"))?;
+        println!("{json}");
+    } else {
+        println!("{}", report.human());
+        if std::io::stdout().is_terminal() {
+            eprintln!();
+            eprintln!("repository  {repository} ({how})");
+        }
+    }
+    if !report.is_complete() {
+        OUTPUT_FAILURE_EMITTED.store(true, Ordering::SeqCst);
+        return Err(miette::miette!("publishing {} did not finish", report.tag));
+    }
+    Ok(())
+}
+
+/// Read and compile a manifest, for a command that does not need its sources.
+#[cfg(feature = "build")]
+fn load_manifest(path: &Path) -> miette::Result<zup_manifest::Manifest> {
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let source = std::fs::read_to_string(&absolute)
+        .map_err(|error| miette::miette!("`{}`: {error}", absolute.display()))?;
+    zup_manifest::parse_named(&source, &absolute.display().to_string())
+        .map_err(|error| miette::miette!("{error}"))
 }
 
 /// Write the two thin installers.
@@ -3503,57 +3920,70 @@ fn run_manifest_transition_with_policy(
     // release this process is installing. A handoff that does not verify is a
     // refusal here rather than a surprise three phases later.
     if let Some(handoff_path) = &args.handoff {
-        let cache_root = args.acquired.clone().ok_or_else(|| {
-            miette::miette!(
-                "--handoff was given without --acquired, so there is no verified content"
-            )
-        })?;
-        let accepted = handoff::accept(
-            &executable,
-            &cache_root,
-            handoff_path,
-            args.handoff_digest.as_deref(),
-        )
-        .map_err(|error| {
-            // The guarantee is stated rather than implied: every one of these
-            // checks runs before the transaction engine is asked for a plan.
-            debug_assert!(error.left_machine_unchanged());
-            miette::miette!("{error}")
-        })?;
-        // The bootstrapper's progress is the runtime's starting point, not a new
-        // one: the bytes it already fetched are in this cache and are still here.
-        let resume = accepted.session.resume_line();
-        if args.output == OutputArg::Human && !resume.is_empty() {
-            eprintln!("{resume}");
-        }
-        // The handoff says which lifecycle this is, and it agrees with the verb
-        // the user typed. A disagreement means one of the two processes is not
-        // the one that thinks it is, which is worth a refusal.
-        let expected = match accepted.mode {
-            zup_acquire::HandoffMode::Install => LifecycleAction::Install,
-            zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
-            zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
-            zup_acquire::HandoffMode::Repair => LifecycleAction::Repair { force_files: false },
-        };
-        if expected != action {
+        #[cfg(not(feature = "build"))]
+        {
+            let _ = (handoff_path, &args, action, policy, executable);
             return Err(miette::miette!(
-                "the launcher handed over a `{}` handoff but `{}` was requested",
-                accepted.mode.verb(),
-                lifecycle_action_name(action)
+                "a handoff names a release graph, which only the build plane can resolve; \
+                 this build of the installer does not include it"
             ));
         }
-        return run_acquired_transition(
-            graph::Request {
-                action: Some(action),
-                enable: args.enable.clone(),
-                disable: args.disable.clone(),
-                install_directory: args.install_directory.clone(),
-                scope: Some(accepted.scope),
-            },
-            &accepted.acquired,
-            args.output.into(),
-            policy,
-        );
+        #[cfg(feature = "build")]
+        {
+            let cache_root = args.acquired.clone().ok_or_else(|| {
+                miette::miette!(
+                    "--handoff was given without --acquired, so there is no verified content"
+                )
+            })?;
+            let accepted = handoff::accept(
+                &executable,
+                &cache_root,
+                handoff_path,
+                args.handoff_digest.as_deref(),
+            )
+            .map_err(|error| {
+                // The guarantee is stated rather than implied: every one of these
+                // checks runs before the transaction engine is asked for a plan.
+                debug_assert!(error.left_machine_unchanged());
+                miette::miette!("{error}")
+            })?;
+            // The bootstrapper's progress is the runtime's starting point, not a new
+            // one: the bytes it already fetched are in this cache and are still here.
+            let resume = accepted.session.resume_line();
+            if args.output == OutputArg::Human && !resume.is_empty() {
+                eprintln!("{resume}");
+            }
+            // The handoff says which lifecycle this is, and it agrees with the verb
+            // the user typed. A disagreement means one of the two processes is not
+            // the one that thinks it is, which is worth a refusal.
+            let expected = match accepted.mode {
+                zup_acquire::HandoffMode::Install => LifecycleAction::Install,
+                zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
+                zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
+                zup_acquire::HandoffMode::Repair => LifecycleAction::Repair { force_files: false },
+            };
+            if expected != action {
+                return Err(miette::miette!(
+                    "the launcher handed over a `{}` handoff but `{}` was requested",
+                    accepted.mode.verb(),
+                    lifecycle_action_name(action)
+                ));
+            }
+            // A handed-over graph is a graph a launcher resolved online, and only the
+            // build plane can turn one into a machine change.
+            return run_acquired_transition(
+                graph::Request {
+                    action: Some(action),
+                    enable: args.enable.clone(),
+                    disable: args.disable.clone(),
+                    install_directory: args.install_directory.clone(),
+                    scope: Some(accepted.scope),
+                },
+                &accepted.acquired,
+                args.output.into(),
+                policy,
+            );
+        }
     }
     match zup_windows::EmbeddedBundle::open(&executable) {
         Ok(bundle) if bundle.package().is_plan_only() => {
@@ -3562,7 +3992,15 @@ fn run_manifest_transition_with_policy(
             // Every lifecycle it runs is therefore a graph lifecycle, including
             // the first one, and the closure is computed by the same code that
             // computed it for the bootstrapper.
-            run_graph_transition(action, &args, &bundle, policy)
+            #[cfg(feature = "build")]
+            {
+                run_graph_transition(action, &args, &bundle, policy)
+            }
+            #[cfg(not(feature = "build"))]
+            {
+                let _ = (action, args, bundle, policy);
+                unreachable!("a plan-only runtime is produced by the build plane")
+            }
         }
         Ok(bundle) => {
             let build = embedded_target_plan(&bundle)?;
@@ -3918,6 +4356,7 @@ fn run_manifest_source_transition(
 /// The offline installer is still published, because enterprise and disconnected
 /// installs want one file. It is a claim in the graph rather than a second
 /// package representation, and this path never needs it.
+#[cfg(feature = "build")]
 fn run_update(args: UpdateCommand) -> miette::Result<()> {
     let output: OutputFormat = args.output.into();
     let check_only = args.command.is_some();
@@ -4098,6 +4537,7 @@ fn run_update(args: UpdateCommand) -> miette::Result<()> {
 
 /// A stand-in identity for an installation that has none, so the version
 /// comparison still has something to compare against.
+#[cfg(feature = "build")]
 fn placeholder_identity(
     ledger: &zup_exec::InstallLedger,
     app_id: AppId,
@@ -4119,6 +4559,7 @@ fn placeholder_identity(
     }
 }
 
+#[cfg(feature = "build")]
 fn report_up_to_date(
     output: OutputFormat,
     application: &str,
@@ -4162,6 +4603,7 @@ fn report_up_to_date(
     Ok(())
 }
 
+#[cfg(feature = "build")]
 fn report_update_available(
     output: OutputFormat,
     application: &str,
@@ -4204,6 +4646,7 @@ fn report_update_available(
 }
 
 /// Whether to ask before installing.
+#[cfg(feature = "build")]
 fn should_confirm(args: &UpdateCommand, output: OutputFormat) -> miette::Result<bool> {
     if args.yes || args.non_interactive || output != OutputFormat::Human {
         return Ok(false);
@@ -4236,6 +4679,7 @@ fn should_confirm(args: &UpdateCommand, output: OutputFormat) -> miette::Result<
 /// whose payload the executor reads out of the verified cache. Everything above
 /// this line is content and identity; everything below is the existing lifecycle,
 /// unchanged.
+#[cfg(feature = "build")]
 fn run_acquired_transition(
     request: graph::Request,
     acquired: &graph::Acquired,
@@ -4402,6 +4846,7 @@ fn run_acquired_transition(
 
 /// Plan an install from a graph, honouring the component rules a lifecycle
 /// already had.
+#[cfg(feature = "build")]
 fn plan_from_graph(
     build: &zup_build::TargetBuildPlan,
     action: LifecycleAction,
@@ -5599,6 +6044,10 @@ fn ui_backend(
                     .map_or_else(|| "unknown".into(), |(_, _, version)| version.to_string());
                 std::thread::spawn(move || {
                     let status_events = events.clone();
+                    // A release graph is the build plane's, so a frontend built
+                    // without it has no update to run and says so rather than
+                    // presenting a button that cannot work.
+                    #[cfg(feature = "build")]
                     let result = update_from_ui(&exe, scope, move |state| {
                         let _ = status_events.send(zup_ui::UiEvent::UpdateStatus(
                             zup_presentation::UpdatePresentation {
@@ -5609,6 +6058,14 @@ fn ui_backend(
                             },
                         ));
                     });
+                    #[cfg(not(feature = "build"))]
+                    let result = {
+                        let _ = (&exe, scope, &status_events);
+                        Err(
+                            "this build of the installer does not include the build plane"
+                                .to_owned(),
+                        )
+                    };
                     match result {
                         Ok(Some((current, available))) => {
                             let _ = events.send(E::UpdateAvailable { current, available });
@@ -6068,7 +6525,7 @@ fn installed_components(
 /// It acquires exactly what changed and then runs the same lifecycle, so a window
 /// and a terminal install the same bytes — and a window does not cost the machine
 /// a second copy of the application.
-#[cfg(feature = "gui")]
+#[cfg(all(feature = "gui", feature = "build"))]
 fn update_from_ui(
     executable: &Path,
     scope: SelectedScope,

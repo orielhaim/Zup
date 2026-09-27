@@ -11102,6 +11102,7 @@ dependencies = [
  "zup-build",
  "zup-bundle",
  "zup-core",
+ "zup-distribute-github",
  "zup-exec",
  "zup-manifest",
  "zup-pe",
@@ -11111,6 +11112,8 @@ dependencies = [
  "zup-plugin-contract",
  "zup-plugin-runtime",
  "zup-presentation",
+ "zup-publish",
+ "zup-publish-github",
  "zup-runtime",
  "zup-transaction",
  "zup-ui",
@@ -11139,6 +11142,7 @@ name = "zup-acquire-http"
 version = "0.0.1"
 dependencies = [
  "backon",
+ "bytes",
  "futures-util",
  "reqwest",
  "serde_json",
@@ -11254,6 +11258,25 @@ dependencies = [
  "zup-update",
  "zup-windows",
  "zup-xtask",
+]
+
+[[package]]
+name = "zup-distribute-github"
+version = "0.0.1"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "zstd",
+ "zup-acquire",
+ "zup-acquire-http",
+ "zup-core",
+ "zup-publish",
+ "zup-publish-github",
 ]
 
 [[package]]
@@ -11396,6 +11419,38 @@ dependencies = [
  "thiserror 2.0.21",
  "uuid",
  "zup-core",
+]
+
+[[package]]
+name = "zup-publish"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zup-acquire",
+ "zup-core",
+]
+
+[[package]]
+name = "zup-publish-github"
+version = "0.0.1"
+dependencies = [
+ "reqwest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "zup-acquire-http",
+ "zup-artifact",
+ "zup-core",
+ "zup-manifest",
+ "zup-publish",
 ]
 
 [[package]]

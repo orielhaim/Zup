@@ -147,6 +147,8 @@ fn valid_minimal_manifest() {
             schema: SCHEMA_VERSION,
             ui: None,
             frontend: Frontend::Gui,
+            distribution: None,
+            publish: None,
             app: App {
                 id: AppId::new("com.example.acme").unwrap(),
                 name: NonEmptyString::new("Acme").unwrap(),

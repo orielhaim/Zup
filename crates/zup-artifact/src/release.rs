@@ -168,6 +168,67 @@ impl ReleaseManifest {
         }
     }
 
+    /// Record a variant without an artifact.
+    ///
+    /// For a description assembled from per-target builds rather than composed
+    /// in one place: the variant's own numbers are already known, and the
+    /// artifact that will carry it may be recorded by a later merge.
+    pub fn add_variant(&mut self, variant: &ReleaseVariant) -> Result<(), ReleaseError> {
+        match self
+            .variants
+            .iter_mut()
+            .find(|entry| entry.id == variant.id)
+        {
+            Some(entry) => {
+                if entry.target != variant.target {
+                    return Err(ReleaseError::Invalid);
+                }
+                for artifact in &variant.artifacts {
+                    if !entry.artifacts.contains(artifact) {
+                        entry.artifacts.push(artifact.clone());
+                    }
+                }
+            }
+            None => self.variants.push(variant.clone()),
+        }
+        Ok(())
+    }
+
+    /// Record a file another job produced, re-measuring it here.
+    ///
+    /// The digest is recomputed from the bytes on disk rather than copied from
+    /// the description that claimed them, because the merge is the last place a
+    /// digest can be wrong before the release is signed and published — and a
+    /// release whose manifest disagrees with its files is not verifiable at all.
+    pub fn add_composed(
+        &mut self,
+        artifact: &ReleaseArtifact,
+        path: &std::path::Path,
+    ) -> Result<(), ReleaseError> {
+        require_relative(&artifact.path)?;
+        let file = std::fs::File::open(path).map_err(|_| ReleaseError::Invalid)?;
+        let (_, digest) = zup_core::hash_reader(std::io::BufReader::new(file))
+            .map_err(|_| ReleaseError::Invalid)?;
+        let mut recorded = artifact.clone();
+        recorded.digest = digest;
+        match self
+            .artifacts
+            .iter_mut()
+            .find(|entry| entry.id == artifact.id)
+        {
+            Some(entry) => *entry = recorded,
+            None => self.artifacts.push(recorded),
+        }
+        Ok(())
+    }
+
+    /// The total bytes every artifact in this description takes.
+    pub fn bytes(&self) -> u64 {
+        self.artifacts
+            .iter()
+            .fold(0u64, |sum, artifact| sum.saturating_add(artifact.size))
+    }
+
     /// Record a composed artifact and what its output file measured.
     ///
     /// The measurements are a group rather than a list of arguments because they

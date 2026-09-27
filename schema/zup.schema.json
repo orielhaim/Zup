@@ -52,6 +52,26 @@
         }
       ]
     },
+    "distribution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Distribution"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "publish": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Publish"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "components": {
       "type": "array",
       "items": {
@@ -812,6 +832,262 @@
         "channel",
         "root"
       ]
+    },
+    "Distribution": {
+      "description": "Where a published release is hosted.\n\nThe section exists so \"publish there\" and \"fetch from there\" are separate\ndecisions. A project can publish installers to GitHub and still serve\ncontent from a CDN it controls, or publish to both. The only thing this\nsection says is where a *client* looks.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Where a client fetches release content from.\n\n`static` is a plain file tree a CDN or web server serves, which is the\ndefault and needs no configuration. `github` is release assets, which is\nthe zero-infrastructure option: no bucket, no CDN, no origin.",
+          "$ref": "#/$defs/DistributionHost"
+        },
+        "channel": {
+          "description": "The channel the `github` host's stable alias follows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DistributionHost": {
+      "description": "Where a client fetches release content from.",
+      "oneOf": [
+        {
+          "description": "A plain directory of files: `blobs/`, `releases/`, `metadata/`.",
+          "type": "string",
+          "const": "static"
+        },
+        {
+          "description": "Release assets, addressed by tag or by the host's stable alias.",
+          "type": "string",
+          "const": "github"
+        }
+      ]
+    },
+    "Publish": {
+      "description": "Where a release is published.",
+      "type": "object",
+      "properties": {
+        "github": {
+          "description": "GitHub Releases.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Github"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Github": {
+      "description": "GitHub Releases as a publish target.\n\nThere is deliberately no field for a credential. A manifest is committed and\nshared, so a token in one reaches every fork of the project; the credential\ncomes from the environment or from `gh`, and this type cannot hold it.",
+      "type": "object",
+      "properties": {
+        "repository": {
+          "description": "`owner/name`, or `host/owner/name` for GitHub Enterprise.",
+          "type": "string"
+        },
+        "workflow": {
+          "description": "The generated release workflow's settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GithubWorkflow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tag": {
+          "description": "How a release's tag is spelled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GithubTag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "description": "What a release's notes say.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GithubNotes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draft": {
+          "description": "Leave the release a draft.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prerelease": {
+          "description": "Mark the release a prerelease.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "create_tag": {
+          "description": "Let the publisher create the tag when it does not exist.\n\nOff by default, and the reason is specific rather than general: a\nprovider that creates a tag from whatever its default branch points at\nwill one day publish a release for code that was never built, and no\namount of downstream verification puts that commit back.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "replace_conflicts": {
+          "description": "Replace a differing asset on a draft release.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository"
+      ]
+    },
+    "GithubWorkflow": {
+      "description": "The generated release workflow's settings.\n\nEvery field here is a decision a project makes and the generator only\nreflects. The *matrix* is not one of them: it comes from the resolved target\nprofiles, because a developer should not have to enumerate targets in YAML\nand keep the two in sync.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The workflow's `name:`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag_glob": {
+          "description": "The tag glob that triggers a release.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "description": "A GitHub environment to gate the publish phase behind.\n\nOpt-in. Required reviewers, environment secrets, and tag restrictions\nare three clicks on an environment, and reimplementing any of them in\nzup would be a worse version of the same thing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attestations": {
+          "description": "Whether to generate build-provenance attestations.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "attest_paths": {
+          "description": "Extra globs to attest, relative to the release directory.\n\nEmpty by default. Which files a user runs is the project's decision, so\nthe generator does not guess it; the release manifest is attested either\nway, because it is the document that names every other digest.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sign": {
+          "description": "Commands that sign the composed artifacts.\n\nA list of lines rather than one string, because the generated workflow\nwrites them into a `run:` block and a project needs to see the shape of\nwhat it is authorizing.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "compose_runner": {
+          "description": "The runner that composes the final artifacts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runners": {
+          "description": "Runner labels the project pinned itself, by target triple.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "release_dir": {
+          "description": "The directory the release is composed in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receipt": {
+          "description": "Where the publisher writes its receipt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "GithubTag": {
+      "description": "How a release's tag is spelled.",
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "description": "A prefix followed by the version. `v1.4.0` by default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "An exact tag, when the project does not derive one from the version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "GithubNotes": {
+      "description": "Where a release's notes come from.",
+      "type": "object",
+      "properties": {
+        "policy": {
+          "description": "`generated`, `file`, `text`, or `none`.",
+          "type": "string",
+          "default": "generated"
+        },
+        "file": {
+          "description": "The file to read, when the policy is `file`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The text to use, when the policy is `text`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "Targeted2": {
       "description": "A resource declaration with optional target-profile applicability.",

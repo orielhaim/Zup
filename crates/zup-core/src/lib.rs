@@ -24,7 +24,7 @@ mod template;
 mod value;
 
 pub use condition::{Condition, ConditionError};
-pub use digest::{DigestParseError, Sha256Digest, hash_reader};
+pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};
 pub use encoding::{base64_decode, base64_encode};
 pub use ids::{
     AppId, BackendResourceId, ComponentId, FileAssociationId, NonEmptyString, PluginId,
