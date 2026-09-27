@@ -6,12 +6,6 @@
 //! unmaintained code. `refresh` is an edit: it reaches the network and changes a
 //! file, and it must never run inside a build, because a ref that moved under
 //! somebody who only regenerated a matrix is a supply-chain change they did not make.
-//!
-//! `check` verifies syntax, shape, and the consistency a lock can be wrong about on
-//! its own: a 40-character lowercase hex SHA, a ref a workflow can spell, a date, an
-//! action zup actually uses, and a `uses:` line in every committed workflow that
-//! matches the lock. `--online` adds what cannot be checked locally — whether a
-//! newer major series exists, and whether each ref still points where it did.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -83,8 +77,7 @@ pub struct Moved {
 
 /// The upstream a lock is resolved against.
 ///
-/// Fixed, because a lock is only meaningful if it has exactly one answer, and
-/// deliberately private: every caller passes a repository name so the URL is built
+/// Deliberately private: every caller passes a repository name so the URL is built
 /// in one place. Git answers a doubled URL with `remote: Not Found`, and since
 /// `check --online` treats an unreachable repository as nothing to report, that
 /// failure is indistinguishable from a clean result.
@@ -232,8 +225,7 @@ fn required_presence() -> Vec<Problem> {
 /// Every `uses:` line in every committed workflow that names a locked action.
 ///
 /// What makes the lock load-bearing rather than decorative: it catches a workflow
-/// hand-edited to a ref the lock does not track, which no amount of lock hygiene
-/// would otherwise notice.
+/// hand-edited to a ref the lock does not track.
 fn committed_workflows(root: &Path) -> Vec<Problem> {
     let mut problems = Vec::new();
     let directory = root.join(".github").join("workflows");
@@ -274,18 +266,17 @@ fn committed_workflows(root: &Path) -> Vec<Problem> {
                 .iter()
                 .find(|pin| pin.repository == repository.trim())
             else {
-                // A workflow may use an action zup does not track — a project's
-                // own action, a fixture. That is not this lock's business.
+                // A workflow may use an action zup does not track — a project's own
+                // action, a fixture. That is not this lock's business.
                 continue;
             };
             if revision == locked.version {
                 continue;
             }
-            // A workflow on a *different* ref than the lock tracks is the failure a
-            // version ref makes possible and this check exists to catch: a developer
-            // bumped one file in a hurry, or a bot bumped a subset. A full commit
-            // SHA in a workflow is reported too, and differently — it is not drift,
-            // it is a file that no longer matches the repository's convention.
+            // Drift is the failure a version ref makes possible: a developer bumped
+            // one file in a hurry, or a bot bumped a subset. A full commit SHA in a
+            // workflow is reported too, and differently — it is not drift, it is a
+            // file that no longer matches the repository's convention.
             let remedy = if locked.is_series() && looks_like_a_series(revision) {
                 format!("expected `@{}`", locked.version)
             } else {
@@ -331,9 +322,7 @@ fn uses_reference(line: &str) -> Option<String> {
 
 /// Report what the tracked refs look like upstream, right now.
 ///
-/// Two questions, and the second is the one a version ref cannot answer on its own:
-/// is a newer major series out, and does this ref still point where it did? A
-/// workflow reading `@v7` runs whatever `v7` means today, so the lock's recorded
+/// A workflow reading `@v7` runs whatever `v7` means today, so the lock's recorded
 /// SHA is the only thing that distinguishes "unchanged" from "somebody moved a tag".
 fn report_online(current: &PinLock) -> (Vec<Outdated>, Vec<Moved>) {
     let mut newer = Vec::new();
@@ -433,9 +422,9 @@ pub fn refresh(root: &Path, added: &[String]) -> std::result::Result<Report, Err
             newer_series(&tags, &pin).unwrap_or_else(|| action.version.clone())
         };
         // A ref whose commit cannot be read is not written: a lock with a
-        // plausible-looking SHA nobody resolved is worse than a failed refresh.
-        // Writing `checkedAt` only for a SHA this command actually resolved is what
-        // makes the date mean "verified on" rather than "somebody ran a command".
+        // plausible-looking SHA nobody resolved is worse than a failed refresh. It
+        // also keeps `checkedAt` meaning "verified on" rather than "somebody ran a
+        // command".
         let sha = resolve_commit(repository, &version).ok_or_else(|| Error::Unreachable {
             repository: repository.clone(),
         })?;
@@ -484,9 +473,8 @@ fn render(current: &PinLock) -> String {
 
 /// Today's date, for `checkedAt`.
 ///
-/// A UTC date rather than a timestamp: the question the field answers is "how
-/// long ago did somebody look at this?", and a day is the resolution that answers
-/// it. A timestamp would make `refresh` produce a different file every run.
+/// A UTC date rather than a timestamp: a timestamp would make `refresh` produce a
+/// different file every run.
 fn today() -> String {
     // `SystemTime` cannot format a civil date, and `jiff` would be a dependency for
     // a string. This is Howard Hinnant's `civil_from_days`, the algorithm `date`
@@ -592,11 +580,10 @@ fn resolve_commit(repository: &str, ref_name: &str) -> Option<String> {
 
 /// The newest stable semver tag, `v`-prefixed.
 ///
-/// The list is sorted rather than scanned, because `git ls-remote` output is in no
-/// particular order and "the last one that parses" is not "the newest one".
-///
-/// A prerelease is not a candidate because a release pipeline that depends on
-/// `v2.0.0-rc.1` is a pipeline whose next run resolves to a different binary.
+/// `git ls-remote` output is in no particular order, so the list is sorted rather
+/// than scanned: "the last one that parses" is not "the newest one". A prerelease
+/// is not a candidate, because a pipeline that depends on `v2.0.0-rc.1` is a
+/// pipeline whose next run resolves to a different binary.
 fn newest_stable(tags: &[String]) -> Option<String> {
     let mut stable: Vec<&String> = tags.iter().filter(|tag| is_stable_version(tag)).collect();
     stable.sort_by_key(|tag| tag_key(tag));
@@ -714,8 +701,6 @@ mod tests {
 
     #[test]
     fn a_computed_date_is_today_or_tomorrow() {
-        // Without a clock, the only property worth asserting is that the arithmetic
-        // does not produce a month 13 or a negative year.
         let date = today();
         assert!(is_date(&date), "{date}");
         let (year, month, day) = (
@@ -745,8 +730,6 @@ mod tests {
         );
     }
 
-    /// Verbatim, `v` and all: the result is a ref to write into a workflow, not a
-    /// version to display.
     #[test]
     fn a_prerelease_is_never_the_newest_stable() {
         let tags = tags_of(&["v1.0.0", "v2.0.0-beta.1", "v1.9.0"]);
@@ -763,7 +746,6 @@ mod tests {
 
     #[test]
     fn an_unordered_tag_list_finds_the_right_release() {
-        // `git ls-remote` output is not sorted, and neither is a directory listing.
         let ordered = tags_of(&["v1.0.0", "v1.9.0", "v2.0.0-rc.1", "v10.0.0"]);
         let mut shuffled = ordered.clone();
         shuffled.reverse();
@@ -779,9 +761,8 @@ mod tests {
 
     #[test]
     fn a_channel_ref_is_never_advanced_or_reported_as_outdated() {
-        // `stable` has no newer self, so there is nothing for `refresh` to move and
-        // nothing for `--online` to report. Treating it as a series would make a
-        // correct lock look stale forever.
+        // `stable` has no newer self, so treating it as a series would make a correct
+        // lock look stale forever.
         let pin = ActionPin {
             repository: "dtolnay/rust-toolchain".to_owned(),
             version: "stable".to_owned(),

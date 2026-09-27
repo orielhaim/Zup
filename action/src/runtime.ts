@@ -9,22 +9,19 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
+import { mkdir, readFile, rm, stat } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
 import * as core from '@actions/core'
 import * as exec from '@actions/exec'
-import * as io from '@actions/io'
 import * as toolCache from '@actions/tool-cache'
 import { RELEASE_MANIFEST_NAME } from './phases.js'
 import type {
   ArtifactUpload,
-  ArtifactUploader,
   ArtifactUploadResult,
   AttestationSubject,
-  Attestor,
   CommandResult,
   CommandSpec,
   DownloadedFile,
@@ -32,7 +29,6 @@ import type {
   FileSystem,
   GithubContext,
   Log,
-  ProcessRunner,
   SourceLocation,
 } from './ports.js'
 import type { ReleaseAsset, ReleaseSource } from './tool.js'
@@ -42,9 +38,9 @@ import type { ReleaseAsset, ReleaseSource } from './tool.js'
  *
  * `core.setSecret` masks a value in the runner's own log but not in a workflow
  * command emitted before the masking list exists, and it is not something a test can
- * assert against. So this keeps its own list and scrubs every message it writes,
- * annotations, outputs and job summary included. Defence in depth, not a
- * replacement — and the reason the property is testable without a runner.
+ * assert against. So this keeps its own list and scrubs every message it writes.
+ * Defence in depth, not a replacement — and the reason the property is testable
+ * without a runner.
  */
 export class ToolkitLog implements Log {
   private readonly secrets: string[] = []
@@ -132,10 +128,8 @@ export class ToolkitLog implements Log {
 /**
  * Replace every registered secret in a message.
  *
- * A pure function so the property is testable without intercepting the toolkit, and
- * a list because a step can legitimately hold more than one secret. `split`/`join`
- * rather than a regular expression, because a token is arbitrary text that may
- * contain pattern syntax.
+ * `split`/`join` rather than a regular expression, because a token is arbitrary
+ * text that may contain pattern syntax.
  */
 export function redact(message: string, secrets: readonly string[]): string {
   let result = message
@@ -149,15 +143,7 @@ export function redact(message: string, secrets: readonly string[]): string {
 }
 
 /** A process runner that never touches a shell. */
-export class SpawnRunner implements ProcessRunner {
-  async which(program: string): Promise<string | undefined> {
-    try {
-      return await io.which(program, true)
-    } catch {
-      return undefined
-    }
-  }
-
+export class SpawnRunner {
   async run(spec: CommandSpec): Promise<CommandResult> {
     if (spec.stream) {
       // `getExecOutput` streams *and* captures, so one call does both.
@@ -169,10 +155,6 @@ export class SpawnRunner implements ProcessRunner {
       })
       return { code: output.exitCode, stdout: output.stdout, stderr: output.stderr }
     }
-    return this.spawn(spec)
-  }
-
-  private spawn(spec: CommandSpec): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(spec.program, spec.args, {
         cwd: spec.cwd,
@@ -222,22 +204,6 @@ export class NodeFileSystem implements FileSystem {
     return new Uint8Array(await readFile(target))
   }
 
-  async isDirectory(target: string): Promise<boolean> {
-    try {
-      return (await stat(target)).isDirectory()
-    } catch {
-      return false
-    }
-  }
-
-  async listFiles(directory: string): Promise<string[]> {
-    const entries = await readdir(directory, { withFileTypes: true })
-    return entries
-      .filter((entry) => entry.isFile())
-      .map((entry) => path.join(directory, entry.name))
-      .sort()
-  }
-
   async ensureDirectory(directory: string): Promise<void> {
     await mkdir(directory, { recursive: true })
   }
@@ -279,13 +245,9 @@ export class ToolkitDownloader implements Downloader {
     } catch (error) {
       throw new Error(`could not download ${options.label ?? url}: ${(error as Error).message}`)
     } finally {
-      await removeTemporary(destination).catch(() => undefined)
+      await rm(destination, { force: true }).catch(() => undefined)
     }
   }
-}
-
-async function removeTemporary(target: string): Promise<void> {
-  await rm(target, { force: true })
 }
 
 /** A short, stable, filesystem-safe name for a URL. */
@@ -303,7 +265,6 @@ function label(value: string): string {
  * absent on an older release.
  */
 interface ReleaseAssets {
-  tag_name?: string
   assets: {
     name: string
     size: number
@@ -429,13 +390,15 @@ function stripAlgorithm(value: string | undefined): string | undefined {
  * Uploads to workflow artifact storage through the toolkit.
  *
  * `skipArchive` uploads a single file without a zip, which is right for a `.exe` or
- * a `.zup` package and saves CPU and storage. It has one surprise worth knowing:
- * **the service names the artifact after the file**, ignoring the name that was
- * passed. A matrix that must distinguish `installer-x64` from `installer-arm64`
- * therefore needs distinct *file* names, not distinct artifact names. That is
- * reported rather than worked around — the caller gets the name the service used.
+ * a `.zup` package. It has one surprise worth knowing: **the service names the
+ * artifact after the file**, ignoring the name that was passed. A matrix that must
+ * distinguish `installer-x64` from `installer-arm64` therefore needs distinct *file*
+ * names, not distinct artifact names. That is reported rather than worked around —
+ * the caller gets the name the service used.
  */
-export class ToolkitArtifactUploader implements ArtifactUploader {
+export class ToolkitArtifactUploader {
+  constructor(private readonly github: GithubContext) {}
+
   async upload(request: ArtifactUpload): Promise<ArtifactUploadResult> {
     // The artifact client carries a generated Twirp/protobuf stack of about a
     // megabyte, reachable only when a workflow sets `upload-workflow-artifacts`.
@@ -462,21 +425,15 @@ export class ToolkitArtifactUploader implements ArtifactUploader {
   /**
    * The web URL for an uploaded artifact.
    *
-   * Built from the repository context because the service's response carries an id
-   * and a digest and nothing a browser can open. Derived from `GITHUB_SERVER_URL`,
-   * so a GHES run produces a GHES link.
+   * The service's response carries an id and a digest and nothing a browser can
+   * open. Derived from the run's own context, so a GHES run produces a GHES link.
    */
   private artifactUrl(id: number | undefined): string | undefined {
-    if (id === undefined || id === 0) {
+    const { repository, runId, serverUrl } = this.github
+    if (id === undefined || id === 0 || repository.length === 0 || runId.length === 0) {
       return undefined
     }
-    const server = process.env['GITHUB_SERVER_URL'] ?? 'https://github.com'
-    const repository = process.env['GITHUB_REPOSITORY'] ?? ''
-    const run = process.env['GITHUB_RUN_ID'] ?? ''
-    if (repository.length === 0 || run.length === 0) {
-      return undefined
-    }
-    return `${server}/${repository}/actions/runs/${run}/artifacts/${id}`
+    return `${serverUrl}/${repository}/actions/runs/${runId}/artifacts/${id}`
   }
 }
 
@@ -492,7 +449,7 @@ export class ToolkitArtifactUploader implements ArtifactUploader {
  * import is dynamic. The OIDC token is fetched rather than supplied, because the
  * audience and the claims are the service's to choose.
  */
-export class ToolkitAttestor implements Attestor {
+export class ToolkitAttestor {
   async attest(subjects: AttestationSubject[]): Promise<void> {
     if (subjects.length === 0) {
       return
@@ -511,12 +468,13 @@ export class ToolkitAttestor implements Attestor {
 /** The workflow context, as far as the action needs it. */
 export function context(env: NodeJS.ProcessEnv = process.env): GithubContext {
   const serverUrl = env['GITHUB_SERVER_URL'] ?? 'https://github.com'
-  const repository = env['GITHUB_REPOSITORY'] ?? ''
   let event: Record<string, unknown> = {}
   const eventPath = env['GITHUB_EVENT_PATH']
   if (eventPath !== undefined && eventPath.length > 0) {
     try {
-      event = JSON.parse(readFileSyncText(eventPath)) as Record<string, unknown>
+      // Synchronous because the context is assembled before anything can be
+      // awaited, and a partially-parsed event is worse than an empty one.
+      event = JSON.parse(readFileSync(eventPath, 'utf8')) as Record<string, unknown>
     } catch {
       event = {}
     }
@@ -524,26 +482,12 @@ export function context(env: NodeJS.ProcessEnv = process.env): GithubContext {
   return {
     serverUrl,
     apiUrl: env['GITHUB_API_URL'] ?? `${serverUrl}/api/v3`,
-    repository,
-    workflow: env['GITHUB_WORKFLOW'] ?? '',
+    repository: env['GITHUB_REPOSITORY'] ?? '',
     runId: env['GITHUB_RUN_ID'] ?? '',
     eventName: env['GITHUB_EVENT_NAME'] ?? '',
-    ref: env['GITHUB_REF'] ?? '',
-    actor: env['GITHUB_ACTOR'] ?? '',
     event,
     env: env as GithubContext['env'],
-    isDebug: env['RUNNER_DEBUG'] === '1' || env['ACTIONS_STEP_DEBUG'] === 'true',
   }
-}
-
-function readFileSyncText(target: string): string {
-  // Synchronous because the context is assembled before anything can be awaited, and
-  // a partially-parsed event is worse than an empty one. `createRequire` rather than
-  // `require` because this file is an ES module.
-  const { readFileSync } = createRequire(import.meta.url)('node:fs') as {
-    readFileSync: (path: string, encoding: 'utf8') => string
-  }
-  return readFileSync(target, 'utf8')
 }
 
 /** Whether this run's checkout came from a fork. */

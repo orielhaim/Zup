@@ -36,12 +36,11 @@ ArtifactGraph                              the content-addressed descriptor grap
 DistributionArtifact                       the file a user downloads
 ```
 
-`DistributionVariant` and `DistributionArtifact` are different things and are
-not interchangeable. A variant is one machine's worth of work, built locally,
-cached, and executable on its own. An artifact is one file, possibly carrying
-several variants, composed after every variant it needs exists. Keeping them
-apart is what lets variants be built in parallel on different machines and
-artifacts be composed wherever the outputs meet.
+A `DistributionVariant` is one machine's worth of work, built locally, cached and
+executable on its own; a `DistributionArtifact` is one file, possibly carrying
+several variants, composed after every variant it needs exists. They are not
+interchangeable, and keeping them apart is what lets variants be built in parallel
+on different machines and artifacts composed wherever the outputs meet.
 
 On the install side the chain continues:
 
@@ -71,81 +70,11 @@ Each arrow is a typed hand-off. A stage cannot read the previous stage's
 inputs from the filesystem, and no stage below the adapter imports a Windows
 crate.
 
-### The artifact graph
+`docs/artifact-graph.md` owns the artifact graph itself: the four rules its
+readers enforce, how a variant is selected, the resource layout of the universal
+Windows artifact, the dispatcher, and what a machine keeps after an install.
 
-`zup-artifact` owns the whole model and is portable. A graph is a
-content-addressed descriptor set, modelled on OCI's, with four rules:
-
-- **Deterministic.** Blobs are packed into a table in ascending digest order and
-  split into fixed-size segments, so the same content always produces the same
-  table and the same byte layout. Canonical JSON is the only accepted encoding;
-  a document that is merely *valid* JSON is refused.
-- **Bounds-checked.** Every index, table, manifest, and metadata document has a
-  declared size limit, and a reader allocates from a declared count rather than
-  from a length field in the data. A corrupt or hostile artifact cannot make a
-  reader allocate.
-- **Content-addressed.** Every descriptor names a SHA-256 digest and a size.
-  A reader verifies a blob before exposing it, so a store cannot be laundered
-  into content that merely happens to parse.
-- **Forward-versioned and fail-closed.** An index carries a required-feature
-  bitmask. A reader that does not understand a required feature refuses the
-  artifact rather than installing a subset of it.
-
-Selection is driven by the index, never by a file name. `zup-artifact::select`
-scores every candidate the index names and returns a typed answer — a
-`CandidateVariant`, a `Compatibility`, a `SelectionScore` — rather than a
-boolean. Native beats emulated; a tie is a refusal, not a coin flip; and a
-variant that requires a machine component the host lacks is not offered as an
-emulated fallback, because emulation cannot provide it.
-
-OCI is used as an *adapter* only. `zup-artifact::oci` maps the same graph onto
-`oci-spec`'s index and manifest types, and `export_oci_layout` writes a local
-`oci-layout` directory for a consumer that already speaks OCI. Nothing in the
-installer path depends on it, and no OCI client library is linked.
-
-### The universal Windows artifact
-
-`zup-windows` turns a composed graph into one PE file:
-
-```text
-Acme-Windows-Setup.exe
-    dispatcher              a launcher, not an installer
-    resource 1              the artifact index
-    resource 2              the content store table
-    resources 3..           one variant manifest per variant
-    resources ..            one native runtime per variant
-    resources ..            the content store, one region per segment
-```
-
-The layout is fixed and total, and `UniversalLayout` owns the identifier
-arithmetic, so a reader knows which identifier holds what without consulting
-the index first. Everything lives inside Authenticode-hashed image sections,
-because resources are written before the image is signed; there is no trailing
-overlay, so a signature covers the whole artifact.
-
-The dispatcher is a launcher and nothing else. It inspects the host, validates
-the index, selects a variant, verifies and materializes it into a per-user,
-SID-bound content store, starts the variant's own native runtime, and forwards
-its exit code. It holds no lifecycle authority: no registry, no services, no
-elevation, no prerequisites. Every privileged operation happens inside the
-selected native runtime, in its own architecture, which is what lets the
-dispatcher be small enough to run under an emulation layer on a machine whose
-native variant is something else.
-
-`zup-pe` holds the PE header and resource primitives the dispatcher and the
-composer share, so there is one implementation of the certificate table and the
-resource directory. `zup-windows::bundle_packager` delegates to it.
-
-The dispatcher is built for **32-bit x86**. Windows runs 32-bit x86 everywhere,
-and 64-bit only where the operating system is 64-bit, so the narrowest variant
-in an artifact decides how wide a dispatcher may be: a host that can run the
-narrowest variant must be able to start the dispatcher first. Composition
-enforces this rather than trusting the build step, and refuses a dispatcher
-wider than the narrowest included variant. `scripts/build-dispatcher.ps1`
-produces the images and installs them beside the `zup` executable, which is
-where `zup build` and the composition tests look for a template.
-
-### Authoring
+## Authoring
 
 `zup-manifest` owns `zup.toml`: parsing, `schema` version validation, the JSON
 schema, and the target matrix. It produces `zup_core::Installer`, the semantic
@@ -235,9 +164,14 @@ publishes:
 | `channel` | Release channel this artifact follows. Absent means an exact version. |
 | `output` | File name. Absent derives one from the app name. |
 
-A project that declares no artifacts builds one installer per selected target,
-which is the simplest thing that works and the behaviour before artifacts
-existed. Declaring artifacts changes what `zup build` produces, nothing else.
+A project that declares no artifacts builds one installer per selected target.
+Declaring artifacts changes what `zup build` produces, nothing else.
+
+Every resource declaration is a `Targeted<T>`: the value plus an optional
+`targets` list. An empty list means every selected profile; a non-empty list names
+profiles explicitly, and an unknown profile name is a validation error. Filtering
+happens once, during compilation for the selected profile, so the IR contains
+only resources that target will install.
 
 ### Target resolution and canonical target identity
 
@@ -271,15 +205,7 @@ Missing, duplicated, or miscounted inputs are reported per target, so one run
 shows every problem instead of the first. `zup doctor` reports the same
 resolution read-only, as readiness checks.
 
-### Profile resource filters
-
-Every resource declaration is a `Targeted<T>`: the value plus an optional
-`targets` list. An empty list means every selected profile; a non-empty list
-names profiles explicitly, and an unknown profile name is a validation error.
-Filtering happens once, during compilation for the selected profile, so the IR
-contains only resources that target will install.
-
-### Build inventory
+## From inventory to transaction
 
 `zup-build` walks the source directory without following links, expands
 `[[files]]` patterns, and resolves each destination to a `RelativePath` plus a
@@ -288,26 +214,20 @@ any parent is a reparse point or a symlink, so a package cannot smuggle a
 trusted-looking path out of its source tree. The result is sorted and
 platform-neutral: it describes a payload, not an installer.
 
-### Planning
-
 `zup-plan` answers one question: what should this installation contain for this
 scope and component selection? It expands templates symbolically, selects
 components, and assigns a `Privilege` to every resource. Scope says *where* an
-application lives; `Privilege` says *how the host authorizes the work*, and
-only defaults are shared.
+application lives; `Privilege` says *how the host authorizes the work*, and only
+defaults are shared. Plugins join the plan as a `PluginExecutor`: a bounded
+WebAssembly component returns typed resources and generated files, which are
+hashed and merged into the ordinary plan, and generated files use the same
+transaction, ownership, repair, and uninstall path as manifest files.
 
-Plugins join the plan as a `PluginExecutor`: a bounded WebAssembly component
-returns typed resources and generated files, which are hashed and merged into
-the ordinary plan. Generated files use the same transaction, ownership, repair,
-and uninstall path as manifest files.
-
-### Target lowering
-
-Lowering converts a platform-neutral plan into paths on a concrete machine. It
+Lowering converts that platform-neutral plan into paths on a concrete machine. It
 resolves install locations and templates, produces `zup_platform::TargetPlan`,
 and rejects invalid target paths and case-insensitive collisions. The output
-contains no `Template` values and no build-machine paths, so it is a
-description of a machine, not of a build.
+contains no `Template` values and no build-machine paths, so it is a description
+of a machine, not of a build.
 
 A template resolves `${location.*}` against a semantic `InstallLocation` that
 the backend maps for the selected scope: `programs`, `user_data`, `shared_data`,
@@ -318,10 +238,8 @@ template variables are `app.id`, `app.name`, `app.version`, and `install`, which
 expands to the install directory template of the selected scope. A template that
 leaves a variable unresolved at lowering time is an error, not an empty path.
 
-### Opaque backend transaction
-
-The portable engine cannot undo a registry write, a service, or a shell link,
-so it does not pretend to. `zup_transaction` journals file operations with full
+The portable engine cannot undo a registry write, a service, or a shell link, so
+it does not pretend to. `zup_transaction` journals file operations with full
 receipts and delegates platform state to the backend as an **opaque payload**
 keyed by a `BackendResourceId`:
 
@@ -330,22 +248,55 @@ OperationReceipt::Backend { key, payload }
 ```
 
 The engine validates the payload's size, journals it, hands it back to the
-adapter on verify, rollback, and reconcile, and never interprets it. Ownership
-of a backend resource is therefore decided by the adapter that created it,
-which is what makes ownership-aware uninstall possible.
+adapter on verify, rollback, and reconcile, and never interprets it. Ownership of
+a backend resource is therefore decided by the adapter that created it, which is
+what makes ownership-aware uninstall possible.
 
-### Runtime
+`zup_runtime` owns the session: the event stream, cooperative cancellation, the
+session log, recovery discovery, and the authorization policy. The synchronous
+transaction engine runs under `spawn_blocking`.
 
-`zup_runtime` owns the session: the event stream, cooperative cancellation,
-the session log, recovery discovery, and the authorization policy. The
-synchronous transaction engine runs under `spawn_blocking`.
+### Runtime backend seam
+
+The runtime never names a platform backend. It depends on one trait:
+
+```rust
+pub trait RuntimeBackend: Send + Sync {
+    fn payload_source(&self, request: &RuntimeRequest) -> RuntimePayloadSource;
+    fn execute<'a>(&'a self, request: RuntimeRequest, control: RuntimeControl)
+        -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>>;
+}
+```
+
+`WindowsRuntimeBackend` is the only implementation: it supplies a payload source
+over the embedded package and the temporary payload overlay, then runs the
+transaction coordinator, the Restart Manager preflight, and the authenticated
+worker. A second backend implements the same trait and nothing else.
+
+### Target binding
+
+Canonical target identity is checked wherever a target crosses a trust or
+persistence boundary.
+
+- **Bootstrap.** A `BoundBootstrapPlan` carries the target it was planned for.
+  `run_install_control` refuses a request whose target differs from the
+  transaction plan or from the bootstrap plan.
+- **Plugins.** A component is compiled ahead of time for the build host triple
+  (`ZUP_BUILD_TARGET`) and embedded with that target, the WIT digest, the engine
+  fingerprint, and its AOT format version. The loader requires the package
+  target, the requested target, and the host compile target to be the same
+  triple, and refuses an artifact whose fingerprint, API version, or AOT format
+  does not match. A component built for another target cannot be loaded.
+- **Protocol.** `zup-protocol` frames carry `PROTOCOL_VERSION`; a mismatch fails
+  the handshake instead of misreading a frame. The parent/worker pair also
+  verifies process identity and the plan hash before executing.
 
 ## The target matrix and the backend boundary
 
 `zup build` and `zup check` classify every selected target against the backends
-this host implements, before the source tree is walked. The classification
-reads nothing from disk, so an unsupported target never costs a payload
-inventory or a prerequisite resolution first.
+this host implements, before the source tree is walked. The classification reads
+nothing from disk, so an unsupported target never costs a payload inventory or a
+prerequisite resolution first.
 
 | Target | Build host | Result |
 | --- | --- | --- |
@@ -360,7 +311,7 @@ continues with the remaining checks, so one run shows every problem; the
 `lowering` check is skipped for a target with no backend.
 
 There is no Linux backend. No crate in this repository lowers a plan to Linux
-system integration. A portable target triple is accepted by the manifest, parsed,
+system integration: a portable target triple is accepted by the manifest, parsed,
 and canonicalized, and then refused at the boundary.
 
 ## Command line
@@ -409,8 +360,10 @@ selected target into one file" and is refused alongside `--artifact`.
 `--dispatcher` names the launcher template a composed artifact is written into.
 The template must be unsigned, must present the launcher experience the
 artifact's variants agreed on, and must be no wider than the narrowest machine
-among them. When the flag is absent, `zup build` looks for `zup-dispatch.exe`
-or `zup-dispatch-console.exe` beside itself.
+among them. When the flag is absent, `zup build` looks for `zup-dispatch.exe` or
+`zup-dispatch-console.exe` beside itself. `scripts/build-dispatcher.ps1` produces
+the images and installs them beside the `zup` executable, which is where
+`zup build` and the composition tests look for a template.
 
 `zup artifact inspect <ARTIFACT> [--format <human|json>]` reads a composed
 artifact with the same parser the dispatcher and the runtime use, and verifies
@@ -422,32 +375,27 @@ variant completeness.
 
 `zup check` takes `--manifest`, `--source`, `--install-directory`, and
 `--target`. `zup plan` takes `--manifest`, `--target`, `--scope`, `--state-root`,
-`--enable`, `--disable`, `--install-directory`, and `--json`; it requires
-exactly one target, so a multi-profile manifest must name one with `--target`.
+`--enable`, `--disable`, `--install-directory`, and `--json`; it requires exactly
+one target, so a multi-profile manifest must name one with `--target`.
 
 `zup doctor` takes `--manifest`, `--runtime`, `--output`, `--source`,
-`--install-directory`, `--frontend`, `--target`, and
-`--format <human|json>`. It reports one row per check per profile, for the
-canonical target, manifest compile, source payload, plugin engine, update root,
-frontend, runtime template, runtime target, runtime subsystem, build backend,
-target lowering, output parent, and composition. The composition row reports
-what the selected targets would cost as separate installers and what one
-composed artifact would store once, so the value of a universal artifact is
-visible before anyone builds one. The JSON report is versioned
-(`version: 1`) and carries `profile`, `target`, `kind`, `status`, `message`,
-and `path` per check, so a consumer reads `status` and `path` without parsing
-prose.
+`--install-directory`, `--frontend`, `--target`, and `--format <human|json>`. It
+reports one row per check per profile, for the canonical target, manifest
+compile, source payload, plugin engine, update root, frontend, runtime template,
+runtime target, runtime subsystem, build backend, target lowering, output parent,
+and composition. The composition row reports what the selected targets would cost
+as separate installers and what one composed artifact would store once, so the
+value of a universal artifact is visible before anyone builds one. The JSON
+report is versioned (`version: 1`) and carries `profile`, `target`, `kind`,
+`status`, `message`, and `path` per check, so a consumer reads `status` and
+`path` without parsing prose.
 
 `zup schema --output schema/zup.schema.json` regenerates the published JSON
 Schema; CI fails when the checked-in file differs from what the code emits.
 
 `zup publish stage` writes what a static origin serves and, with `--packages`,
-the transport packages a release host holds: one per variant, sharded only at a
-fixed boundary and only when a package would exceed the host's per-asset limit.
-`zup publish github` derives everything — the repository, the tag, the asset
-list, the digests — and refuses rather than guessing when a repository cannot be
-found. `zup ci github generate` and `zup ci github check` write and verify the
-committed release workflow. All four are documented in
+the transport packages a release host holds. `zup publish github` and
+`zup ci github generate` / `zup ci github check` are documented in
 [GitHub distribution](github-distribution.md).
 
 `zup build` embeds a runtime template executable, so a frontend runtime has to
@@ -479,8 +427,8 @@ cargo xtask emit-portable-matrix
 `zup` is the composition CLI. It is Windows-only because it links the Windows
 adapter to answer `zup plan` and to run the lifecycle, not because the manifest
 model or the build pipeline needs a Windows host. `zup-artifact` and `zup-pe`
-are on the opposite sides of that line from each other, which is the point:
-the artifact model is portable and the PE primitives are not.
+are on the opposite sides of that line from each other, which is the point: the
+artifact model is portable and the PE primitives are not.
 
 `cargo xtask verify-portable-boundaries` fails when a portable crate:
 
@@ -495,96 +443,52 @@ the artifact model is portable and the PE primitives are not.
 
 String literals are a separate rule and a separate pass: a concept spelled in a
 literal is matched in its decoded form, case-insensitively, so `registry` in a
-message string is a finding. Windows is allowed in `zup-windows`, in the
-product frontends and binaries, in tests and documentation, and inside
-target-lexicon identifiers such as `TargetOperatingSystem::Windows`. The check
-reads files only, so it returns the same answer on every host. Comments are
-blanked before matching and `#[cfg(test)]` blocks are skipped, so prose and test
-fixtures do not produce findings. Findings are ordered by matrix, package,
-path, and line.
+message string is a finding. Windows is allowed in `zup-windows`, in the product
+frontends and binaries, in tests and documentation, and inside target-lexicon
+identifiers such as `TargetOperatingSystem::Windows`. The check reads files only,
+so it returns the same answer on every host. Comments are blanked before matching
+and `#[cfg(test)]` blocks are skipped, so prose and test fixtures do not produce
+findings. Findings are ordered by matrix, package, path, and line.
 
-The check also requires the matrices and the workspace to agree: every member
-is classified, every matrix package exists, and no package is in two matrices.
-Adding a crate means adding it to exactly one matrix.
+The check also requires the matrices and the workspace to agree: every member is
+classified, every matrix package exists, and no package is in two matrices. Adding
+a crate means adding it to exactly one matrix.
 
 ## Package and executable
 
 `zup-bundle` writes a portable schema-1 package: a 60-byte header, a
 SHA-256-protected JSON index for one target, and Zstandard-compressed
-content-addressed blobs. `Package::open` verifies the index and every blob
-before exposing payload, plugin, or prerequisite data. The same bytes are
-readable on any host without an executable. `BundleWriter::write_plan` writes a
-package from an already-compressed blob set, which is how one variant is
-materialized out of a shared multi-gigabyte store without decompressing and
-recompressing anything.
+content-addressed blobs. `Package::open` verifies the index and every blob before
+exposing payload, plugin, or prerequisite data. The same bytes are readable on any
+host without an executable. `BundleWriter::write_plan` writes a package from an
+already-compressed blob set, which is how one variant is materialized out of a
+shared multi-gigabyte store without decompressing and recompressing anything.
 
 `zup-windows` adapts that package to a PE. The index becomes resource 1 and
-each compressed blob becomes the following resource; identifiers are assigned
-at embed time and are not part of the package schema. `zup build` also rejects
-a runtime whose PE subsystem or template name does not match the selected
-frontend, and refuses to embed into an already signed executable. Sign the
-finished artifact, because Authenticode covers the embedded package.
+each compressed blob becomes the following resource; identifiers are assigned at
+embed time and are not part of the package schema. `zup-pe` holds the PE header
+and resource primitives the dispatcher and the composer share, so there is one
+implementation of the certificate table and the resource directory, and
+`zup-windows::bundle_packager` delegates to it. `zup build` also rejects a runtime
+whose PE subsystem or template name does not match the selected frontend, and
+refuses to embed into an already signed executable. Sign the finished artifact,
+because Authenticode covers the embedded package.
 
 `AutoPayloadSource` reads its payload from one of two places: the package
 embedded in the running executable, or a `variant.zup` sidecar beside a bare
 `Setup.exe`. The sidecar is how a native runtime finds its content after the
 dispatcher has staged it.
 
-## Staging and what survives an install
-
 `stage_variant` materializes one selected variant into a per-user, SID-bound
 content store and writes three files: the variant's native runtime, its package,
-and the artifact index. It creates files and returns the digests it proved. It
-opens nothing privileged, reads no registry, and touches no lifecycle state.
-
-The store is per-user and SID-bound, never a machine-wide location, because the
-dispatcher that writes it has no elevation and must not need any. Its
-directories are verified to be real directories and not reparse points before
-anything is written through them, and each records the digest of its own
-identity so a substituted directory is detected rather than trusted.
-
-After an install the machine keeps the **selected variant's** maintenance state
-and nothing else. The full universal artifact is not retained: a machine that
-installed the x64 variant has no copy of the ARM64 one, and `stage_variant`
-streams the selected variant's blobs out of the shared store so that is true by
-construction rather than by cleanup.
-
-## Runtime backend seam
-
-The runtime never names a platform backend. It depends on one trait:
-
-```rust
-pub trait RuntimeBackend: Send + Sync {
-    fn payload_source(&self, request: &RuntimeRequest) -> RuntimePayloadSource;
-    fn execute<'a>(&'a self, request: RuntimeRequest, control: RuntimeControl)
-        -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>>;
-}
-```
-
-`WindowsRuntimeBackend` is the only implementation: it supplies a payload
-source over the embedded package and the temporary payload overlay, then runs
-the transaction coordinator, the Restart Manager preflight, and the
-authenticated worker. A second backend implements the same trait and nothing
-else.
-
-## Target binding
-
-Canonical target identity is checked wherever a target crosses a trust or
-persistence boundary.
-
-- **Bootstrap.** A `BoundBootstrapPlan` carries the target it was planned for.
-  `run_install_control` refuses a request whose target differs from the
-  transaction plan or from the bootstrap plan.
-- **Plugins.** A component is compiled ahead of time for the build host triple
-  (`ZUP_BUILD_TARGET`) and embedded with that target, the WIT digest, the
-  engine fingerprint, and its AOT format version. The loader requires the
-  package target, the requested target, and the host compile target to be the
-  same triple, and refuses an artifact whose fingerprint, API version, or AOT
-  format does not match. A component built for another target cannot be
-  loaded.
-- **Protocol.** `zup-protocol` frames carry `PROTOCOL_VERSION`; a mismatch
-  fails the handshake instead of misreading a frame. The parent/worker pair
-  also verifies process identity and the plan hash before executing.
+and the artifact index. It creates files and returns the digests it proved; it
+opens nothing privileged, reads no registry, and touches no lifecycle state. The
+store is per-user and never machine-wide, because the dispatcher that writes it
+has no elevation and must not need any. Its directories are verified to be real
+directories and not reparse points before anything is written through them, and
+each records the digest of its own identity so a substituted directory is detected
+rather than trusted. What a machine keeps afterwards is in
+[the artifact graph report](artifact-graph.md).
 
 ## Persisted formats
 
@@ -631,8 +535,8 @@ templates build with the intended dependency graphs and PE subsystems.
 
 The dispatcher is a required input to the composition tests, not something
 `cargo test` builds: it is a separate package with a deliberately small
-dependency closure, which is the wrong trade for a 128 MB installer and the
-right one for a launcher whose size is a design constraint. A test that needs a
+dependency closure, which is the wrong trade for a 128 MB installer and the right
+one for a launcher whose size is a design constraint. A test that needs a
 dispatcher says so rather than passing without composing anything.
 
 The Ubuntu job emits both portable matrices, then verifies the portable stack
@@ -650,36 +554,14 @@ git diff --check
 ```
 
 `$PORTABLE` is the `-p` argument list of `portable-core` plus `portable-tests`.
-
 The Linux job proves one thing: the portable stack compiles and its tests pass
-natively on a non-Windows host. It is not evidence of a Linux backend, because
-no crate lowers a plan to Linux system integration. A manifest naming a
+natively on a non-Windows host. It is not evidence of a Linux backend, because no
+crate lowers a plan to Linux system integration, and a manifest naming a
 non-Windows target is refused at the boundary on any host.
 
-`action.yml` covers the GitHub Action itself, and is where the pin-lock gate
-lives. It uses two runtimes on purpose: **Bun** installs, tests and bundles the
-action, and **Node 24** runs the result, because Node 24 is what the runner
-provides.
-
-- `check` — `bun install --frozen-lockfile`, type checking under two tsconfigs
-  (the shipped source with no Bun types in scope, the tests with them), `biome
-  check`, `bun test`, the bundle build, `git diff --exit-code -- action/dist`, a
-  metadata check that `action.yml` and the implementation declare the same inputs
-  and outputs, and `node scripts/verify-runtime.mjs`, which *executes* the built
-  bundle as a child process.
-- `e2e` — the action invoked as `uses: ./` on `ubuntu-latest`, `windows-latest`,
-  `macos-15`, `ubuntu-24.04-arm` and `windows-11-arm`, against a locally built
-  `zup` supplied through `zup-path` so testing the action does not require having
-  released it. It covers setup, build, outputs, a project path containing a
-  space, the job summary, and a failing zup failing the step.
-- `tool-bootstrap` — opt-in, because it needs a published zup release and reaches
-  the network.
-
-Two of those steps exist because the toolchain and the runtime are different
-programs. `git diff --exit-code` on `action/dist` catches a stale bundle, and
-`verify-runtime.mjs` catches the case Bun and Node disagree — a bundle Bun is
-happy with and Node cannot load is a green CI run and a broken release in
-somebody else's workflow.
+`action.yml` covers the GitHub Action itself, including the pin-lock gate, the
+Bun/Node toolchain split, and the three jobs it runs; see
+[the zup GitHub Action](action.md).
 
 ## Current status
 
@@ -688,12 +570,13 @@ installer for every Windows target, or one universal offline installer carrying
 several of them, and the runtime installs, updates, repairs, and uninstalls
 through the transaction engine and the authenticated worker.
 
-Composition is complete for the offline mode. A thin artifact - one that
-carries the index and a launcher and fetches content - is not yet produced;
+Composition is complete for the offline mode. A thin artifact - one that carries
+the index and a launcher and fetches content - is not yet produced;
 `[build.artifacts]` accepts `mode = "thin"` and a `channel`, and composition
 records both, but nothing fills a thin store yet. `zup-update` still resolves
 updates from the release description's variant list rather than from a
-content-addressed fetch.
+content-addressed fetch. `docs/online-acquisition.md` has the acquisition design
+and its measurements.
 
 The portable stack is not a claim about Linux support. It is the property that
 the semantic model, the build inventory, the artifact graph, planning, the

@@ -2,16 +2,15 @@
 //!
 //! # Why this is a function and not a lookup table
 //!
-//! Because "Windows" stopped meaning x64 in 2025 and will stop meaning much
-//! else later. A table keyed on the operating system would have kept working
-//! silently while being wrong, which is the worst failure mode for a table whose
-//! entire job is to be right about a machine's architecture.
-//!
-//! So the mapping is by triple, and it says what it knows:
+//! Because "Windows" stopped meaning x64 in 2025 and will stop meaning much else
+//! later. A table keyed on the operating system would have kept working silently while
+//! being wrong, which is the worst failure mode for a table whose entire job is to be
+//! right about a machine's architecture. So the mapping is by triple, and it says what
+//! it knows:
 //!
 //! ```text
 //! x86_64 windows    → windows-latest
-//! aarch64 windows   → windows-11-arm          (or windows-11-vs2026-arm)
+//! aarch64 windows   → windows-11-arm
 //! i686 windows      → no native runner; cross-compiled on windows-latest
 //! x86_64 linux      → ubuntu-latest
 //! aarch64 linux     → ubuntu-24.04-arm
@@ -21,11 +20,11 @@
 //!
 //! # The rule that matters most
 //!
-//! **The runner's architecture is never the artifact's identity.** A job that
-//! runs on `windows-latest` and produces a `aarch64-pc-windows-msvc` artifact is
-//! a cross-compile, and the release manifest says `aarch64-pc-windows-msvc`
-//! because that is what the file is. Conflating the two is how a project ends up
-//! with an `arm64` release that is really an x64 build with a misleading name.
+//! **The runner's architecture is never the artifact's identity.** A job that runs on
+//! `windows-latest` and produces a `aarch64-pc-windows-msvc` artifact is a
+//! cross-compile, and the release manifest says `aarch64-pc-windows-msvc` because
+//! that is what the file is. Conflating the two is how a project ends up with an
+//! `arm64` release that is really an x64 build with a misleading name.
 
 /// A runner label and whether it is the architecture the target wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

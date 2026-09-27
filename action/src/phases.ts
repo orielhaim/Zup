@@ -12,9 +12,6 @@
  *
  * Attestation before signing would attest bytes that no longer exist; publishing
  * before attesting would put out a release and then try to attach provenance to it.
- * `attest` reads the release manifest rather than globbing, because a glob over a
- * build directory finds the intermediate artifacts too, and an attestation of a file
- * nobody downloads is noise.
  */
 
 import type { Inputs } from './inputs.js'
@@ -50,106 +47,88 @@ export function phasesFor(operation: string): Phase[] {
 }
 
 /**
- * The argument vector for one phase.
+ * The argument vector for one phase, advanced arguments last.
  *
  * Every value goes through as a separate argument, so a project directory with a
- * space, an ampersand or a backtick in it is just a directory.
+ * space, an ampersand or a backtick in it is just a directory. `inputs.args` goes
+ * last so a typed input can be overridden.
  */
 export function argumentsFor(phase: Phase, inputs: Inputs): string[] {
+  return [...phaseArguments(phase, inputs), ...inputs.args]
+}
+
+function phaseArguments(phase: Phase, inputs: Inputs): string[] {
   switch (phase) {
-    case 'build':
-      return buildArguments(inputs)
-    case 'compose':
-      return composeArguments(inputs)
+    case 'build': {
+      const args = ['build', '--format', 'json']
+      for (const target of inputs.targets) {
+        args.push('--target', target)
+      }
+      for (const artifact of inputs.artifacts) {
+        args.push('--artifact', artifact)
+      }
+      args.push('--output', inputs.releaseDir)
+      args.push('--release-manifest', releaseManifestPath(inputs.releaseDir))
+      return args
+    }
+    case 'compose': {
+      const args = [
+        'publish',
+        'stage',
+        '--format',
+        'json',
+        '--output',
+        `${inputs.releaseDir}/web`,
+        '--packages',
+        `${inputs.releaseDir}/packages`,
+        '--release-dir',
+        inputs.releaseDir,
+      ]
+      if (inputs.dryRun) {
+        args.push('--dry-run')
+      }
+      return args
+    }
     case 'attest':
-      return attestArguments(inputs)
-    case 'publish':
-      return publishArguments(inputs)
+      // `attest` is not a zup subcommand. zup does not talk to Sigstore and should
+      // not: OIDC token exchange is GitHub's and the signature format is
+      // Sigstore's. What zup owns is which bytes are worth attesting, and it says
+      // so in the release manifest, which the action reads itself.
+      return []
+    case 'publish': {
+      const args = [
+        'publish',
+        'github',
+        '--format',
+        'json',
+        '--release-dir',
+        inputs.releaseDir,
+        '--web',
+        `${inputs.releaseDir}/web`,
+        '--packages',
+        `${inputs.releaseDir}/packages`,
+      ]
+      if (inputs.receipt !== undefined) {
+        args.push('--receipt', inputs.receipt)
+      }
+      if (inputs.repo !== undefined) {
+        args.push('--repo', inputs.repo)
+      }
+      if (inputs.tag !== undefined) {
+        args.push('--tag', inputs.tag)
+      }
+      if (inputs.draft) {
+        args.push('--draft')
+      }
+      if (inputs.prerelease) {
+        args.push('--prerelease')
+      }
+      if (inputs.dryRun) {
+        args.push('--dry-run')
+      }
+      return args
+    }
   }
-}
-
-function buildArguments(inputs: Inputs): string[] {
-  const args = ['build', '--format', 'json']
-  for (const target of inputs.targets) {
-    args.push('--target', target)
-  }
-  for (const artifact of inputs.artifacts) {
-    args.push('--artifact', artifact)
-  }
-  args.push('--output', inputs.releaseDir)
-  args.push('--release-manifest', releaseManifestPath(inputs.releaseDir))
-  return args
-}
-
-function composeArguments(inputs: Inputs): string[] {
-  const args = [
-    'publish',
-    'stage',
-    '--format',
-    'json',
-    '--output',
-    `${inputs.releaseDir}/web`,
-    '--packages',
-    `${inputs.releaseDir}/packages`,
-    '--release-dir',
-    inputs.releaseDir,
-  ]
-  if (inputs.dryRun) {
-    args.push('--dry-run')
-  }
-  return args
-}
-
-/**
- * `attest` is not a zup subcommand.
- *
- * zup does not talk to Sigstore and should not: OIDC token exchange is GitHub's,
- * the signature format is Sigstore's, and the policy is the project's. What zup
- * owns is which bytes are worth attesting, and it says so in the release manifest.
- * The action runs zup to learn the subjects, then uses `@actions/attest`.
- */
-function attestArguments(inputs: Inputs): string[] {
-  void inputs
-  return []
-}
-
-function publishArguments(inputs: Inputs): string[] {
-  const args = [
-    'publish',
-    'github',
-    '--format',
-    'json',
-    '--release-dir',
-    inputs.releaseDir,
-    '--web',
-    `${inputs.releaseDir}/web`,
-    '--packages',
-    `${inputs.releaseDir}/packages`,
-  ]
-  if (inputs.receipt !== undefined) {
-    args.push('--receipt', inputs.receipt)
-  }
-  if (inputs.repo !== undefined) {
-    args.push('--repo', inputs.repo)
-  }
-  if (inputs.tag !== undefined) {
-    args.push('--tag', inputs.tag)
-  }
-  if (inputs.draft) {
-    args.push('--draft')
-  }
-  if (inputs.prerelease) {
-    args.push('--prerelease')
-  }
-  if (inputs.dryRun) {
-    args.push('--dry-run')
-  }
-  return args
-}
-
-/** The advanced arguments, appended last so a typed input can be overridden. */
-export function withAdvanced(args: string[], inputs: Inputs): string[] {
-  return [...args, ...inputs.args]
 }
 
 /** The release manifest path, relative to the project. */

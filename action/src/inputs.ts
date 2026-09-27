@@ -5,8 +5,8 @@
  * Everything that describes what an application is — its name, its installer
  * metadata, its update channels, which repository it publishes to — lives in
  * `zup.toml`, versioned with the project and reviewable next to the build that
- * consumes it. An input that duplicates a manifest field is a second source of
- * truth that can disagree with the first.
+ * consumes it. An input that duplicates a manifest field is a second source of truth
+ * that can disagree with the first.
  *
  * What is here is what a workflow must decide and `zup.toml` cannot know: which
  * operation this step is, where the project is, which zup to install, and the one
@@ -21,14 +21,6 @@ import * as core from '@actions/core'
 
 /** What this step does. */
 export type Operation = 'setup' | 'build' | 'compose' | 'attest' | 'publish' | 'release'
-
-/** The credential, and whether the step may use it. */
-export interface Token {
-  /** The value, or `undefined` when the step is not allowed to have one. */
-  value: string | undefined
-  /** Why it is missing, for a failure message that says what to do. */
-  absent: string | undefined
-}
 
 /** Everything the action was asked to do. */
 export interface Inputs {
@@ -45,7 +37,8 @@ export interface Inputs {
   targets: string[]
   /** Declared distribution artifacts to compose. */
   artifacts: string[]
-  token: Token
+  /** The publish credential, absent unless the step was given one. */
+  token: string | undefined
   /** Override the repository a release belongs to, as `owner/name`. */
   repo: string | undefined
   tag: string | undefined
@@ -120,31 +113,31 @@ const RAW: Readonly<Record<string, string>> = Object.freeze(
 export function readInputs(): Inputs {
   return {
     operation: readOperation(),
-    projectPath: core.toPlatformPath(RAW['project-path'] || '.'),
-    zupVersion: optional('zup-version'),
-    zupPath: optional('zup-path'),
-    releaseDir: RAW['release-dir'] || 'dist',
+    projectPath: core.toPlatformPath(text('project-path') ?? '.'),
+    zupVersion: text('zup-version'),
+    zupPath: text('zup-path'),
+    releaseDir: text('release-dir') ?? 'dist',
     targets: list('target'),
     artifacts: list('artifact'),
     token: readToken(),
-    repo: optional('repo'),
-    tag: optional('tag'),
+    repo: text('repo'),
+    tag: text('tag'),
     draft: flag('draft'),
     prerelease: flag('prerelease'),
     dryRun: flag('dry-run'),
     uploadWorkflowArtifacts: flag('upload-workflow-artifacts'),
-    workflowArtifactName: optional('workflow-artifact-name'),
+    workflowArtifactName: text('workflow-artifact-name'),
     artifactRetentionDays: number('artifact-retention-days'),
     attest: flag('attest'),
     attestPaths: list('attest-paths'),
     allowUnsafePublish: flag('allow-unsafe-publish'),
-    args: tokenize(optional('args') ?? '', process.platform),
-    receipt: optional('receipt'),
+    args: tokenize(text('args') ?? '', process.platform),
+    receipt: text('receipt'),
   }
 }
 
 function readOperation(): Operation {
-  const raw = optional('operation') ?? 'build'
+  const raw = text('operation') ?? 'build'
   const found = OPERATIONS.find((candidate) => candidate === raw)
   if (!found) {
     throw new InputError(
@@ -159,52 +152,26 @@ function readOperation(): Operation {
 /**
  * The publish credential.
  *
- * A missing token is not an error until an operation that needs one runs, so a
- * build with no token at all works. An empty input *is* reported, because
- * `github-token: ''` is a configuration mistake rather than an intent.
+ * A missing token is not an error until an operation that needs one runs, so a build
+ * with no token at all works. A workflow that copies an expression into a place it
+ * is not interpolated leaves the literal text behind, which can only ever fail
+ * later as a confusing 401; it is treated as no token at all.
  */
-function readToken(): Token {
+function readToken(): string | undefined {
   const raw = RAW['github-token'] ?? ''
-  if (raw.length === 0) {
-    return {
-      value: undefined,
-      absent:
-        'no `github-token` was provided. Pass `github-token: ' +
-        GITHUB_TOKEN_EXPRESSION +
-        '`, or grant `contents: write` for a job-scoped token.',
-    }
+  if (raw.length === 0 || raw.includes(UNINTERPOLATED)) {
+    return undefined
   }
-  // A workflow that copies an expression into a place it is not interpolated
-  // leaves the literal text behind. Treating that as a credential would fail with a
-  // confusing HTTP 401 rather than saying what happened.
-  if (raw.includes(UNINTERPOLATED)) {
-    return {
-      value: undefined,
-      absent:
-        'the `github-token` input still contains `' +
-        UNINTERPOLATED +
-        ' … }}`, which means the expression was not interpolated. ' +
-        'Quote it as `github-token: ' +
-        GITHUB_TOKEN_EXPRESSION +
-        '`.',
-    }
-  }
-  return { value: raw, absent: undefined }
+  return raw
 }
 
 /** The opening of a workflow expression the runner failed to interpolate. */
 const UNINTERPOLATED = '${{'
 
-// biome-ignore lint/suspicious/noTemplateCurlyInString: a literal, so the message quotes it.
-const GITHUB_TOKEN_EXPRESSION = '${{ github.token }}'
-
+/** An input's value, or `undefined` when it was left empty. */
 function text(name: string): string | undefined {
   const value = RAW[name] ?? ''
   return value.length > 0 ? value : undefined
-}
-
-function optional(name: string): string | undefined {
-  return text(name)
 }
 
 /**
@@ -234,7 +201,7 @@ function flag(name: string): boolean {
   if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
     return true
   }
-  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === '') {
+  if (normalized === 'false' || normalized === '0' || normalized === 'no') {
     return false
   }
   throw new InputError(name, `is \`${raw}\`, which is not a boolean`, 'Expected `true` or `false`.')
@@ -260,17 +227,15 @@ function number(name: string): number | undefined {
  * Split an advanced-arguments input into argv.
  *
  * Never a shell. The action spawns zup with an argument vector, so a value
- * containing `;`, `|`, `&&` or a backtick is just a string — there is no
- * interpreter to give it meaning. That is the whole security property, and it is why
- * this function is allowed to be small.
+ * containing `;`, `|`, `&&` or a backtick is just a string — there is no interpreter
+ * to give it meaning. That is the whole security property, and it is why this
+ * function is allowed to be small.
  *
- * Two quoting rules, one per platform family, because they are genuinely different:
- *
- * - POSIX: single quotes are literal, double quotes allow `\"`, and a backslash
- *   escapes the next character outside single quotes.
- * - Windows: quotes group, and a backslash is a *path separator*, not an escape.
- *   `C:\Program Files\zup\zup.exe` is one argument containing no escapes at all, and
- *   treating `\` as an escape there would silently delete it.
+ * The two quoting rules are genuinely different. POSIX: single quotes are literal,
+ * double quotes allow `\"`, and a backslash escapes the next character outside single
+ * quotes. Windows: quotes group, and a backslash is a *path separator*, not an
+ * escape — `C:\Program Files\zup\zup.exe` is one argument containing no escapes at
+ * all, and treating `\` as an escape there would silently delete it.
  */
 export function tokenize(input: string, platform: NodeJS.Platform = process.platform): string[] {
   const windows = platform === 'win32'

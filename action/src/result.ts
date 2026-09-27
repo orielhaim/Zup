@@ -2,12 +2,12 @@
  * The shape zup emits for machines, and the shape this action reads.
  *
  * The action runs zup with `--format json` and parses one versioned envelope whose
- * `schema` field is the contract. A zup that changes the envelope bumps `schema`,
- * and this file is where a new version is taught — one place, one test per field.
+ * `schema` field is the contract. A zup that changes the envelope bumps `schema`, and
+ * this file is where a new version is taught.
  *
- * The envelope is deliberately not action-specific. The same document is what a
- * Tauri adapter or a CI system that is not GitHub would read, and a contract only
- * the action can produce gets extended one field at a time forever.
+ * The envelope is deliberately not action-specific. The same document is what a Tauri
+ * adapter or a CI system that is not GitHub would read, and a contract only the action
+ * can produce gets extended one field at a time forever.
  */
 
 /** The envelope version this action understands. */
@@ -92,10 +92,8 @@ export class ResultFormatError extends Error {
     readonly raw: string,
   ) {
     super(
-      `zup did not emit a readable result: ${reason}. ` +
-        'This is a zup bug rather than a configuration problem — ' +
-        'the action expects one versioned JSON envelope on stdout and ' +
-        'reports the version it found.',
+      `zup did not emit a readable result: ${reason}. This is a zup bug rather than a ` +
+        'configuration problem — the action expects one versioned JSON envelope on stdout.',
     )
     this.name = 'ResultFormatError'
   }
@@ -199,7 +197,7 @@ function parseArtifact(found: unknown): ArtifactResult[] {
       kind: typeof value['kind'] === 'string' ? value['kind'] : 'unknown',
       mode: typeof value['mode'] === 'string' ? value['mode'] : 'unknown',
       signature: asString(value, 'signature'),
-    } as ArtifactResult,
+    },
   ]
 }
 

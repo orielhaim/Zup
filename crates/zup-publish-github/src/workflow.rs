@@ -3,41 +3,30 @@
 //! # A committed file, and a readable pipeline
 //!
 //! `zup ci github generate` writes a YAML file a developer can read, review, and
-//! edit. It is not hidden behind a runtime generator inside someone else's CI,
-//! because a release pipeline is the thing a project most needs to audit: "what
-//! does your release do?" has to have an answer that is a file in the repository,
-//! and a generator trusted with the release is trusted by a version range nobody
-//! reviewed. The phases are already explicit, so the file keeps one job per phase
-//! and the zup action appears inside them rather than replacing the pipeline.
+//! edit. A release pipeline is the thing a project most needs to audit, so "what does
+//! your release do?" has to have an answer that is a file in the repository, and a
+//! generator trusted with the release is trusted by a version range nobody reviewed.
 //!
-//! # The zup action, and what it is not
-//!
-//! The generated workflow calls the official zup action to install and run the
-//! CLI, because a consumer project does not have a zup workspace checked out.
-//! `cargo build -p zup` only ever worked inside the zup repository itself, so a
-//! generated file using it was correct for exactly one project. An action that
-//! installs a released zup is correct for all of them.
-//!
-//! What the action must never become is a way to collapse the pipeline: it is
-//! invoked once per phase, the phases stay visible, and the release architecture
-//! is still readable in the diff.
+//! The generated file calls the official zup action rather than `cargo build -p zup`,
+//! which only ever worked inside the zup repository itself. The action is invoked once
+//! per phase: it never collapses the pipeline, and the release architecture stays
+//! readable in the diff.
 //!
 //! # What is generated and what is chosen
 //!
-//! The *matrix* is generated, because zup knows the target profiles and a
-//! developer should not have to enumerate them in YAML and keep the two in sync.
-//! Everything else is a decision a project makes and the generator only reflects:
-//! whether to sign, whether to attest, which environment to gate publication
-//! behind, and which zup action ref the pipeline calls.
+//! The *matrix* is generated, because zup knows the target profiles and a developer
+//! should not have to enumerate them in YAML and keep the two in sync. Everything else
+//! is a decision a project makes and the generator only reflects: whether to sign,
+//! whether to attest, which environment to gate publication behind, and which zup
+//! action ref the pipeline calls.
 //!
 //! # Reproducibility
 //!
 //! [`generate`] is a pure function of its inputs, byte for byte, so
-//! `zup ci github check` is meaningful: it re-derives the file and compares, and
-//! the only reason it can differ is that the generator, the manifest, or the
-//! action ref lock changed — a change somebody made on purpose. The lock lives in
-//! `github-actions.lock.json` and is compiled in, so regenerating a matrix offline
-//! can never move a ref.
+//! `zup ci github check` is meaningful: it re-derives the file and compares, and the
+//! only reason it can differ is that the generator, the manifest, or the action ref
+//! lock changed. The lock lives in `github-actions.lock.json` and is compiled in, so
+//! regenerating a matrix offline can never move a ref.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -76,10 +65,9 @@ impl MatrixTarget {
 
 /// How a command signs the composed artifacts.
 ///
-/// A command rather than a vendor, because signing is platform and vendor
-/// specific and this milestone does not own either. The generated workflow runs
-/// it, checks that it succeeded, and then does nothing else — the sign step is a
-/// phase boundary, not an integration.
+/// A command rather than a vendor, because signing is platform and vendor specific.
+/// The generated workflow runs it, checks that it succeeded, and then does nothing
+/// else — the sign step is a phase boundary, not an integration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signing {
     /// The command, run from the compose directory.
@@ -95,28 +83,25 @@ pub struct WorkflowPolicy {
     pub tag_glob: String,
     /// A GitHub environment to gate the publish phase behind.
     ///
-    /// Opt-in. Required reviewers, environment secrets, and tag restrictions are
-    /// all things a project can configure on an environment in three clicks, and
-    /// reimplementing any of them inside zup would be a worse version of the
-    /// same thing.
+    /// Opt-in. Required reviewers, environment secrets and tag restrictions are all
+    /// things a project configures on an environment in three clicks, and
+    /// reimplementing them inside zup would be a worse version of the same thing.
     pub environment: Option<String>,
     /// Whether to generate build-provenance attestations.
     pub attestations: bool,
     /// Extra globs to attest, relative to the release directory.
     ///
-    /// Empty by default, and the default is the point: which files a user runs is
-    /// a project's decision, not this crate's, and a portable crate that spelled a
-    /// platform's executable extensions would be assuming an answer it does not
-    /// have. The release manifest is always attested, because it is the document
-    /// that names the digests of everything else.
+    /// Empty by default, and the default is the point: which files a user runs is a
+    /// project's decision, and a portable crate that spelled a platform's executable
+    /// extensions would be assuming an answer it does not have. The release manifest
+    /// is always attested, because it names the digests of everything else.
     pub attest_paths: Vec<String>,
     /// How to sign, if the project signs.
     pub signing: Option<Signing>,
     /// The runner that composes the final artifacts.
     ///
-    /// Composition writes a portable executable, so on this project that is a
-    /// Windows machine. A project whose backend emits a Mach-O or ELF container
-    /// overrides it.
+    /// Composition writes a portable executable, so on this project that is a Windows
+    /// machine. A project whose backend emits a Mach-O or ELF container overrides it.
     pub compose_runner: String,
     /// Runner labels a project pinned itself, by triple.
     pub runner_overrides: BTreeMap<String, String>,
@@ -126,9 +111,10 @@ pub struct WorkflowPolicy {
     pub receipt: String,
     /// The zup action ref the generated pipeline calls, as `owner/repo@ref`.
     ///
-    /// The action installs a released zup rather than compiling one, which is the
-    /// only thing that works in a project that is not the zup repository. A
-    /// project that wants an immutable pipeline names an exact ref here.
+    /// Defaults to a floating major ref, because that is what an action ref is for: a
+    /// project writes it once and dependabot keeps it current. A project that wants
+    /// the release pipeline pinned to an immutable ref names one here instead, and the
+    /// generated file shows exactly what it will run.
     pub action: String,
 }
 
@@ -206,10 +192,8 @@ pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
     out.push_str("# cannot write to the repository; only the publish job can.\n");
     out.push_str("permissions:\n  contents: read\n");
     out.push('\n');
-    // A release must never be cancelled half-published by a second run of the
-    // same workflow. `cancel-in-progress: false` is the whole reason this group
-    // exists: two jobs mutating one release is how a partially uploaded release
-    // becomes published.
+    // Two jobs mutating one release is how a partially uploaded release becomes
+    // published, so a second run queues behind the first rather than cancelling it.
     out.push_str("concurrency:\n");
     let _ = writeln!(
         out,
@@ -243,14 +227,11 @@ fn plan(_policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
         &uses("actions/checkout"),
         &["fetch-depth: '0'"],
     );
-    // The plan is resolved by the CLI rather than enumerated in YAML, so the
-    // matrix below and the manifest cannot drift apart. It runs before the
-    // matrix on purpose: a stale workflow should cost one runner-second, not
-    // eleven minutes of cross-compilation.
-    //
-    // `profiles` is the one thing a hand-written job downstream might want, and
-    // the only declared output — an output nobody writes is worse than none,
-    // because it resolves to an empty string in the job that reads it.
+    // The plan is resolved by the CLI rather than enumerated in YAML, so the matrix
+    // below and the manifest cannot drift apart. It runs before the matrix on purpose:
+    // a stale workflow should cost one runner-second, not eleven minutes of
+    // cross-compilation. `profiles` is the only declared output, because an output
+    // nobody writes resolves to an empty string in the job that reads it.
     out.push_str("      - name: Resolve the plan\n        run: |\n");
     out.push_str("          zup ci github check --format json\n");
     let _ = writeln!(
@@ -296,12 +277,10 @@ fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
         &uses("actions/checkout"),
         &["persist-credentials: false"],
     );
-    // Each build job produces one target's native output and nothing else. It does
-    // not upload to the release: a matrix of jobs racing to mutate one release is
-    // how a partially published release happens. It hands the variant to the
-    // compose job as a workflow artifact instead, which is immutable and scoped to
-    // the run.
-    //
+    // Each build job produces one target's native output and nothing else. It does not
+    // upload to the release: a matrix of jobs racing to mutate one release is how a
+    // partially published release happens. It hands the variant to the compose job as
+    // a workflow artifact instead, which is immutable and scoped to the run.
     // `--target` takes the profile name, which is what the developer writes in
     // `zup.toml`, rather than the triple the matrix also carries.
     let _ = writeln!(
@@ -387,15 +366,10 @@ fn attest(policy: &WorkflowPolicy, out: &mut String) {
         &uses("actions/download-artifact"),
         &["pattern: compose", "path: dist"],
     );
-    // Only what a project says is worth attesting, plus the manifest that names
-    // the hashes. Attesting every icon would produce an attestation store nobody
-    // reads, and guessing which files a user runs would be a portable crate
-    // assuming a platform's answer.
-    //
-    // `attest: true` rather than an `actions/attest` step, so the subject list
-    // comes from the release manifest rather than a glob a human wrote: the action
-    // attests the final bytes of exactly the artifacts the manifest names, which is
-    // what makes an attestation mean something.
+    // Only what a project says is worth attesting, plus the manifest that names the
+    // hashes: attesting every icon would produce an attestation store nobody reads.
+    // `attest: true` rather than an `actions/attest` step, so the subject list comes
+    // from the release manifest rather than a glob a human wrote.
     let _ = writeln!(
         out,
         "      - name: Attest provenance\n        uses: {}\n        with:\n          operation: attest\n          release-dir: {}",
@@ -413,15 +387,14 @@ fn attest(policy: &WorkflowPolicy, out: &mut String) {
 fn publish(policy: &WorkflowPolicy, attestations: bool, out: &mut String) {
     out.push_str("  publish:\n");
     out.push_str("    name: publish\n");
-    // A job that names a dependency which does not exist is a workflow that
-    // cannot start, so the attest job is only in the list when it is generated.
+    // A job that names a dependency which does not exist is a workflow that cannot
+    // start, so the attest job is only in the list when it is generated.
     out.push_str(if attestations {
         "    needs: [compose, attest]\n"
     } else {
         "    needs: [compose]\n"
     });
     out.push_str("    runs-on: ubuntu-latest\n");
-    // The only job in the file that can write to the repository.
     out.push_str("    permissions:\n      contents: write\n");
     if let Some(environment) = &policy.environment {
         let _ = writeln!(out, "    environment: {environment}");
@@ -438,15 +411,15 @@ fn publish(policy: &WorkflowPolicy, attestations: bool, out: &mut String) {
         "      - name: Collect release\n        uses: {}\n        with:\n          pattern: compose\n          path: dist",
         uses("actions/download-artifact")
     );
-    // One call owns the whole publication: create-or-resume the draft, upload
-    // what is missing, verify every remote digest, and publish once. A matrix of
-    // publish jobs would race, and a partially published release is the one
-    // outcome this whole sequence exists to prevent.
+    // One call owns the whole publication: create-or-resume the draft, upload what is
+    // missing, verify every remote digest, and publish once. A matrix of publish jobs
+    // would race, and a partially published release is the one outcome this whole
+    // sequence exists to prevent.
     //
     // The token is an *input* rather than a step-level `env:`, which is the whole
     // security design: a build may run Tauri, Electron, Cargo build scripts and npm
-    // scripts, and a token in that environment is a token in every one of them.
-    // The action gives the build no token at all and exposes it only to the
+    // scripts, and a token in that environment is a token in every one of them. The
+    // action gives the build no token at all and exposes it only to the
     // `zup publish github` process.
     let _ = writeln!(
         out,

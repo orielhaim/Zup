@@ -2,38 +2,34 @@
 //!
 //! # Why not a GitHub SDK
 //!
-//! Because the surface is small and already enumerated: look up a repository,
-//! find a release by tag, create a draft, list its assets, upload one, remove
-//! one, update the release, generate notes. That is eight endpoints.
+//! Because the surface is small and already enumerated: look up a repository, find a
+//! release by tag, create a draft, list its assets, upload one, remove one, update the
+//! release, generate notes. That is eight endpoints.
 //!
-//! Every general-purpose GitHub crate models the whole API — issues, pull
-//! requests, checks, code search, pages, reactions, and a Git data API — and
-//! most of them bring a version-locking mechanism that decides *which* shapes are
-//! acceptable, which is a poor fit for a client whose only job is to be exactly
-//! right about eight endpoints. `octocrab` was measured against this surface and
-//! rejected: it is larger than every crate that would use it combined, it types
-//! the response bodies behind generated enums that do not round-trip a field
-//! GitHub adds, and it hides the retry and reconciliation decisions that are the
-//! hard part of this problem behind a method name.
+//! Every general-purpose GitHub crate models the whole API and most bring a
+//! version-locking mechanism that decides *which* response shapes are acceptable, which
+//! is a poor fit for a client whose only job is to be exactly right about eight
+//! endpoints. `octocrab` was measured against this surface and rejected: larger than
+//! every crate that would use it combined, it types bodies behind generated enums that
+//! do not round-trip a field GitHub adds, and it hides the retry and reconciliation
+//! decisions that are the hard part of this problem behind a method name.
 //!
-//! What that buys is the ability to change this decision later without touching
-//! anything above it. Everything GitHub-shaped in zup is in this crate; the
-//! release model in `zup-publish` has never heard of any of it.
+//! Everything GitHub-shaped in zup is in this crate; the release model in
+//! `zup-publish` has never heard of any of it.
 //!
 //! # What is enforced here rather than by a caller
 //!
 //! - **One API version, from one constant.** [`API_VERSION`](crate::endpoint::API_VERSION)
-//!   is sent on every request, so a repository cannot change how this client
-//!   behaves and no endpoint can be pinned to a different version by accident.
-//! - **The credential goes to one host.** The token is bound to the API host it
-//!   was configured for, and a redirect to a third party does not receive it.
-//! - **A rate limit is not a permanent failure.** GitHub answers an exhausted
-//!   limit with `403` or `429` plus `x-ratelimit-remaining: 0`, which a generic
-//!   retry classifier reads as "do not retry". This client reads the headers.
-//! - **An error message is read once.** GitHub's JSON error body is the only
-//!   useful difference between "the tag is taken" and "the token is read-only",
-//!   and a `422` with a field name in it is a different developer action from a
-//!   `422` without one.
+//!   is sent on every request, so no endpoint can be pinned to a different version by
+//!   accident.
+//! - **The credential goes to one host.** The token is bound to the API host it was
+//!   configured for, and a redirect to a third party does not receive it.
+//! - **A rate limit is not a permanent failure.** GitHub answers an exhausted limit with
+//!   `403` or `429` plus `x-ratelimit-remaining: 0`, which a generic retry classifier
+//!   reads as "do not retry". This client reads the headers.
+//! - **An error message is read once.** GitHub's JSON error body is the only useful
+//!   difference between "the tag is taken" and "the token is read-only", and a `422`
+//!   with a field name in it is a different developer action from a `422` without one.
 
 use std::time::Duration;
 

@@ -12,8 +12,7 @@
  * published as an attested subject.
  *
  * The manifest is always attested too. It names every other digest, so an
- * attestation of anything without an attestation of it is a chain with a missing
- * link.
+ * attestation of anything without an attestation of it is a chain with a missing link.
  */
 
 import { createHash } from 'node:crypto'

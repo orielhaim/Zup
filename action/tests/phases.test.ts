@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test'
-import type { Inputs } from '../src/inputs.js'
 import {
   argumentsFor,
   mergeResults,
@@ -8,36 +7,9 @@ import {
   phasesFor,
   producesArtifacts,
   releaseManifestPath,
-  withAdvanced,
 } from '../src/phases.js'
 import type { OperationResult } from '../src/result.js'
-
-function inputs(overrides: Partial<Inputs> = {}): Inputs {
-  return {
-    operation: 'build',
-    projectPath: '/w',
-    zupVersion: undefined,
-    zupPath: undefined,
-    releaseDir: 'dist',
-    targets: [],
-    artifacts: [],
-    token: { value: 'ghp_x', absent: undefined },
-    repo: undefined,
-    tag: undefined,
-    draft: false,
-    prerelease: false,
-    dryRun: false,
-    uploadWorkflowArtifacts: false,
-    workflowArtifactName: undefined,
-    artifactRetentionDays: undefined,
-    attest: false,
-    attestPaths: [],
-    allowUnsafePublish: false,
-    args: [],
-    receipt: undefined,
-    ...overrides,
-  }
-}
+import { inputs, result } from './fixtures.js'
 
 describe('phasesFor', () => {
   it('maps each operation to the phases it runs', () => {
@@ -163,14 +135,22 @@ describe('argumentsFor', () => {
 })
 
 describe('advanced arguments', () => {
-  it('appends them last, so a typed input can be overridden', () => {
-    const args = withAdvanced(argumentsFor('build', inputs()), inputs({ args: ['--force'] }))
+  it('appends advanced arguments last, so a typed input can be overridden', () => {
+    const args = argumentsFor('build', inputs({ args: ['--force'] }))
     expect(args[args.length - 1]).toBe('--force')
+    expect(args).toContain('build')
   })
 
   it('leaves the arguments unchanged when there are none', () => {
-    const base = argumentsFor('build', inputs())
-    expect(withAdvanced(base, inputs())).toEqual(base)
+    expect(argumentsFor('build', inputs())).toEqual([
+      'build',
+      '--format',
+      'json',
+      '--output',
+      'dist',
+      '--release-manifest',
+      'dist/zup-release.json',
+    ])
   })
 })
 
@@ -193,19 +173,6 @@ describe('phase properties', () => {
 })
 
 describe('mergeResults', () => {
-  function result(overrides: Partial<OperationResult>): OperationResult {
-    return {
-      schema: 1,
-      operation: 'build',
-      success: true,
-      appVersion: '1.4.0',
-      targets: [],
-      artifacts: [],
-      diagnostics: [],
-      ...overrides,
-    }
-  }
-
   it('returns nothing when no phase produced a result', () => {
     expect(mergeResults(['build'], new Map())).toBeUndefined()
   })

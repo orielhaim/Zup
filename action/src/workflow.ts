@@ -18,6 +18,7 @@ import {
   ManifestError,
   manifestArtifacts,
   parseManifest,
+  type ReleaseManifestDocument,
   shouldUploadDirect,
 } from './artifacts.js'
 import { InputError, type Inputs, readInputs } from './inputs.js'
@@ -29,13 +30,11 @@ import {
   phasesFor,
   producesArtifacts,
   releaseManifestPath,
-  withAdvanced,
 } from './phases.js'
 import { UnsupportedRunnerError } from './platform.js'
-import type { Log } from './ports.js'
+import type { GithubContext, Log } from './ports.js'
 import { type OperationResult, parseResult, ResultFormatError } from './result.js'
 import {
-  assetName,
   checkoutIsFromFork,
   context,
   NodeFileSystem,
@@ -48,7 +47,7 @@ import {
 } from './runtime.js'
 import { checkSafety } from './security.js'
 import { renderSummary, type Summary } from './summary.js'
-import { type ResolvedTool, resolveTool, ToolError } from './tool.js'
+import { type ResolvedTool, resolveTool, ToolError, toolDirectory } from './tool.js'
 
 /**
  * The zup version this action build was tested against.
@@ -56,8 +55,7 @@ import { type ResolvedTool, resolveTool, ToolError } from './tool.js'
  * Not "latest from the internet": a workflow that pins an action ref should get
  * reproducible tool behaviour, and the way to have that is for the action to carry
  * the version it was built against. A developer who wants a different one says so
- * with `zup-version`. `latest` is still accepted, and the action warns in the log
- * because a non-reproducible install should not be silent.
+ * with `zup-version`.
  */
 const TESTED_ZUP_VERSION = '0.0.1'
 
@@ -70,8 +68,7 @@ const ZUP_REPOSITORY = 'orielhaim/zup'
  * An allowlist, so a credential GitHub adds to the environment next year is not in
  * a zup build by default. Kept small on purpose: the toolchain variables, the proxy
  * variables a corporate runner needs to reach the network, and the locale a build's
- * output formatting depends on. `CI` and the GitHub paths are here because zup
- * reports CI context in a build receipt.
+ * output formatting depends on.
  */
 const INHERITED = [
   'CI',
@@ -144,9 +141,9 @@ export async function run(): Promise<void> {
 
     // Registered before anything else can print it. A token that reaches the log
     // before `setSecret` was called is a token in the workflow log, which is
-    // world-readable for a public repository and retained for a private one.
-    if (inputs.token.value !== undefined && inputs.token.value.length > 0) {
-      log.setSecret(inputs.token.value)
+    // world-readable for a public repository.
+    if (inputs.token !== undefined && inputs.token.length > 0) {
+      log.setSecret(inputs.token)
     }
 
     const verdict = checkSafety({
@@ -168,15 +165,14 @@ export async function run(): Promise<void> {
     const result = await execute(inputs, tool, log, github)
     outcome = result
 
-    report(inputs, result, log, github)
+    report(inputs, result, log)
     if (result.failure !== undefined) {
       log.fail(`${result.failure.message} ${result.failure.remedy}`)
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    const remedy = remedyFor(error)
     log.annotate('error', message)
-    log.fail(`${message} ${remedy}`)
+    log.fail(`${message} ${remedyFor(error)}`)
     if (outcome === undefined) {
       log.debug('the step failed before any phase completed')
     }
@@ -184,11 +180,7 @@ export async function run(): Promise<void> {
 }
 
 /** Install zup, or use the one the workflow pointed at. */
-async function install(
-  inputs: Inputs,
-  log: ToolkitLog,
-  github: ReturnType<typeof context>,
-): Promise<ResolvedTool> {
+async function install(inputs: Inputs, log: Log, github: GithubContext): Promise<ResolvedTool> {
   log.startGroup('Setup zup')
   try {
     const version = inputs.zupVersion ?? TESTED_ZUP_VERSION
@@ -198,6 +190,7 @@ async function install(
           'Pin an exact version unless you are deliberately testing the newest one.',
       )
     }
+    const filesystem = new NodeFileSystem()
     const tool = await resolveTool(
       {
         zupPath: inputs.zupPath,
@@ -225,7 +218,7 @@ async function install(
           },
         },
         downloader: new ToolkitDownloader(),
-        filesystem: new NodeFileSystem(),
+        filesystem,
         releases: new ZupReleaseSource(ZUP_REPOSITORY, github.apiUrl, version, log),
         log,
         releaseRepository: ZUP_REPOSITORY,
@@ -234,7 +227,7 @@ async function install(
     )
     // `addPath` writes to GITHUB_PATH, which is how a step changes its *successors'*
     // environment without touching its own.
-    core.addPath(dirname(tool.path))
+    core.addPath(toolDirectory(tool, filesystem))
     log.info(
       tool.source === 'explicit'
         ? `Using the zup at ${tool.path}`
@@ -246,18 +239,12 @@ async function install(
   }
 }
 
-function dirname(target: string): string {
-  const separator = target.includes('\\') && !target.includes('/') ? '\\' : '/'
-  const index = target.lastIndexOf(separator)
-  return index <= 0 ? target : target.slice(0, index)
-}
-
 /** Run every phase the operation expands to. */
 async function execute(
   inputs: Inputs,
   tool: ResolvedTool,
-  log: ToolkitLog,
-  github: ReturnType<typeof context>,
+  log: Log,
+  github: GithubContext,
 ): Promise<Outcome> {
   const filesystem = new NodeFileSystem()
   const runner = new SpawnRunner()
@@ -280,7 +267,7 @@ async function execute(
         attestation = await attest(inputs, log, filesystem)
       }
       if (producesArtifacts(phase) && inputs.uploadWorkflowArtifacts) {
-        await upload(inputs, tool, log, filesystem, results.get(phase))
+        await upload(inputs, tool, log, github, filesystem, results.get(phase))
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -311,17 +298,30 @@ async function runPhase(
   phase: Phase,
   inputs: Inputs,
   tool: ResolvedTool,
-  log: ToolkitLog,
-  github: ReturnType<typeof context>,
+  log: Log,
+  github: GithubContext,
   runner: SpawnRunner,
   filesystem: NodeFileSystem,
 ): Promise<OperationResult | undefined> {
   if (phase === 'attest') {
-    return attestResult(inputs, log, filesystem)
+    const manifest = await readReleaseManifest(inputs, filesystem)
+    const artifacts = manifestArtifacts(manifest.document)
+    log.info(
+      `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in the release manifest`,
+    )
+    return {
+      schema: 1,
+      operation: 'attest',
+      success: true,
+      appVersion: manifest.document.application.version,
+      targets: manifest.document.variants.map((variant) => variant.target),
+      artifacts,
+      releaseManifest: manifest.relative,
+      diagnostics: [],
+    }
   }
 
-  const args = withAdvanced(argumentsFor(phase, inputs), inputs)
-  const environment = buildEnvironment(phase, inputs, github)
+  const args = argumentsFor(phase, inputs)
   log.debug(`zup ${args.join(' ')}`)
 
   // Streaming is right for a build: a developer watching a compile wants to see it
@@ -331,7 +331,7 @@ async function runPhase(
     program: tool.path,
     args,
     cwd: inputs.projectPath,
-    env: environment,
+    env: buildEnvironment(phase, inputs, github),
     stream: true,
   })
 
@@ -341,11 +341,19 @@ async function runPhase(
   return parseResult(outcome.stdout, phase)
 }
 
-/** The environment a phase's subprocess sees. */
+/**
+ * The environment a phase's subprocess sees.
+ *
+ * The token is absent rather than scrubbed: a scrub is a list of things somebody
+ * remembered to remove, and a build that grows a new variable tomorrow is otherwise
+ * a credential leak. `needsToken` rather than the operation string, so a new
+ * operation that publishes gets the token by construction rather than by
+ * remembering.
+ */
 export function buildEnvironment(
   phase: Phase,
   inputs: Inputs,
-  github: ReturnType<typeof context>,
+  github: GithubContext,
 ): Record<string, string> {
   const environment: Record<string, string> = {}
   for (const name of INHERITED) {
@@ -354,46 +362,33 @@ export function buildEnvironment(
       environment[name] = value
     }
   }
-  // A dry run still needs to know it is one: `zup publish github` prints the plan
-  // instead of creating a draft, and a workflow wants that visible.
+  // The CLI's own contract, checked by the CLI, so the action and zup cannot
+  // disagree about whether this is a dry run.
   if (inputs.dryRun) {
     environment['ZUP_DRY_RUN'] = '1'
   }
-  // The only line in this file that reads the token, guarded by `needsToken` rather
-  // than by the operation string, so a new operation that publishes gets it by
-  // construction rather than by remembering.
-  if (needsToken(phase) && inputs.token.value !== undefined) {
+  if (inputs.token !== undefined && needsToken(phase)) {
     for (const name of TOKEN_VARIABLES) {
-      environment[name] = inputs.token.value
+      environment[name] = inputs.token
     }
   }
   return environment
 }
 
-/** The result an `attest` phase produces: what the manifest says was built. */
-async function attestResult(
+/** The release manifest, resolved, checked for existence, and parsed. */
+async function readReleaseManifest(
   inputs: Inputs,
-  log: ToolkitLog,
   filesystem: NodeFileSystem,
-): Promise<OperationResult> {
-  const path = filesystem.resolve(inputs.projectPath, releaseManifestPath(inputs.releaseDir))
-  if (!(await filesystem.exists(path))) {
-    throw new MissingManifest(path, inputs.releaseDir)
+): Promise<{ absolute: string; relative: string; document: ReleaseManifestDocument }> {
+  const relative = releaseManifestPath(inputs.releaseDir)
+  const absolute = filesystem.resolve(inputs.projectPath, relative)
+  if (!(await filesystem.exists(absolute))) {
+    throw new MissingManifest(absolute, inputs.releaseDir)
   }
-  const manifest = parseManifest(await filesystem.readText(path), path)
-  const artifacts = manifestArtifacts(manifest)
-  log.info(
-    `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in the release manifest`,
-  )
   return {
-    schema: 1,
-    operation: 'attest',
-    success: true,
-    appVersion: manifest.application.version,
-    targets: manifest.variants.map((variant) => variant.target),
-    artifacts,
-    releaseManifest: releaseManifestPath(inputs.releaseDir),
-    diagnostics: [],
+    absolute,
+    relative,
+    document: parseManifest(await filesystem.readText(absolute), absolute),
   }
 }
 
@@ -412,7 +407,7 @@ export function attestationRequested(inputs: Inputs): boolean {
 /** Attest the final bytes, discovered from the release manifest. */
 async function attest(
   inputs: Inputs,
-  log: ToolkitLog,
+  log: Log,
   filesystem: NodeFileSystem,
 ): Promise<{ requested: boolean; performed: boolean; subjects: number }> {
   if (!attestationRequested(inputs)) {
@@ -422,25 +417,12 @@ async function attest(
     log.info('skipping attestation: this is a dry run')
     return { requested: true, performed: false, subjects: 0 }
   }
-  const manifestAbsolute = filesystem.resolve(
-    inputs.projectPath,
-    releaseManifestPath(inputs.releaseDir),
-  )
-  if (!(await filesystem.exists(manifestAbsolute))) {
-    throw new MissingManifest(manifestAbsolute, inputs.releaseDir)
-  }
-  const manifest = parseManifest(await filesystem.readText(manifestAbsolute), manifestAbsolute)
-  const subjects = await attestSubjects(
-    manifestAbsolute,
-    manifest,
-    inputs.releaseDir,
-    inputs.attestPaths,
-    {
-      resolve: (...segments) => filesystem.resolve(inputs.projectPath, ...segments),
-      exists: (candidate) => filesystem.exists(candidate),
-      digest: digestOfFile,
-    },
-  )
+  const { absolute, document } = await readReleaseManifest(inputs, filesystem)
+  const subjects = await attestSubjects(absolute, document, inputs.releaseDir, inputs.attestPaths, {
+    resolve: (...segments) => filesystem.resolve(inputs.projectPath, ...segments),
+    exists: (candidate) => filesystem.exists(candidate),
+    digest: digestOfFile,
+  })
   log.info(`attesting ${subjects.length} subject${subjects.length === 1 ? '' : 's'}`)
   await new ToolkitAttestor().attest(subjects)
   return { requested: true, performed: true, subjects: subjects.length }
@@ -450,7 +432,8 @@ async function attest(
 async function upload(
   inputs: Inputs,
   tool: ResolvedTool,
-  log: ToolkitLog,
+  log: Log,
+  github: GithubContext,
   filesystem: NodeFileSystem,
   result: OperationResult | undefined,
 ): Promise<void> {
@@ -466,7 +449,7 @@ async function upload(
       ? `uploading ${directory} as an unarchived artifact`
       : `uploading ${directory} as an archived artifact`,
   )
-  const uploaded = await new ToolkitArtifactUploader().upload({
+  const uploaded = await new ToolkitArtifactUploader(github).upload({
     name,
     paths: [directory],
     rootDirectory: directory,
@@ -479,10 +462,8 @@ async function upload(
         'because an unarchived artifact takes the file name. Reference it as written.',
     )
   }
-  if (result !== undefined) {
-    for (const artifact of result.artifacts) {
-      log.debug(`${artifact.path} ${artifact.digest}`)
-    }
+  for (const artifact of result?.artifacts ?? []) {
+    log.debug(`${artifact.path} ${artifact.digest}`)
   }
 }
 
@@ -518,12 +499,7 @@ function absolute(file: string, projectPath: string): string {
 }
 
 /** Declare the outputs and write the summary. */
-function report(
-  inputs: Inputs,
-  outcome: Outcome,
-  log: ToolkitLog,
-  _github: ReturnType<typeof context>,
-): void {
+function report(inputs: Inputs, outcome: Outcome, log: Log): void {
   const result = outcome.result
   log.setOutput('zup-path', outcome.tool.path)
   log.setOutput('zup-version', outcome.tool.version)
@@ -531,8 +507,8 @@ function report(
     log.setOutput('app-version', result.appVersion)
   }
   if (result?.artifacts.length) {
-    // JSON, not a newline-joined list: a caller that needs to iterate has to parse,
-    // and JSON is the one form that survives a path with a space in it.
+    // JSON, not a newline-joined list: JSON is the one form that survives a path
+    // with a space in it.
     log.setOutput(
       'artifact-paths',
       JSON.stringify(
@@ -547,7 +523,7 @@ function report(
   if (result?.releaseManifest !== undefined) {
     log.setOutput('release-manifest', result.releaseManifest)
   }
-  if (result?.release?.releaseId !== undefined && result.release.releaseId > 0) {
+  if (result?.release !== undefined && result.release.releaseId > 0) {
     log.setOutput('release-id', String(result.release.releaseId))
   }
   if (result?.release?.url !== undefined) {
@@ -598,9 +574,8 @@ export class CommandFailure extends Error {
 export class MissingOutput extends Error {
   constructor(readonly path: string) {
     super(
-      `${path} does not exist. ` +
-        'A phase that uploads or attests needs the build before it; check the ' +
-        '`needs:` between your jobs, and that `release-dir` names the same ' +
+      `${path} does not exist. A phase that uploads or attests needs the build before it; ` +
+        'check the `needs:` between your jobs, and that `release-dir` names the same ' +
         'directory in each of them.',
     )
     this.name = 'MissingOutput'
@@ -615,8 +590,7 @@ export class MissingManifest extends Error {
   ) {
     super(
       `no release manifest at ${path}. ` +
-        `\`zup build --release-manifest ${releaseDir}/zup-release.json\` writes one; ` +
-        'without it there is nothing to attest and no release to publish.',
+        `\`zup build --release-manifest ${releaseDir}/zup-release.json\` writes one.`,
     )
     this.name = 'MissingManifest'
   }
@@ -625,38 +599,27 @@ export class MissingManifest extends Error {
 /**
  * What to do about a failure, on top of what went wrong.
  *
- * Empty when there is nothing useful to add, because the caller concatenates it. An
- * earlier version returned `error.message` for a generic error, so a failure the
- * action had no advice for printed its own message twice.
+ * Empty when there is nothing useful to add, because the caller concatenates it.
+ * Errors whose message already carries their own advice return `''`, so a failure
+ * the action had no advice for does not print the same sentence twice.
  */
 export function remedyFor(error: unknown): string {
-  if (error instanceof InputError) {
+  if (error instanceof InputError || error instanceof ManifestError) {
     return error.remedy
-  }
-  if (error instanceof ResultFormatError) {
-    return error.message
   }
   if (error instanceof CommandFailure) {
     return 'Read the output above: zup printed why. Rerun with `ACTIONS_STEP_DEBUG: true` for the exact command line.'
   }
   if (
+    error instanceof ResultFormatError ||
     error instanceof MissingOutput ||
     error instanceof MissingManifest ||
     error instanceof UnsupportedRunnerError ||
     error instanceof ToolError
   ) {
-    // These carry their own remedy in the message.
-    return ''
-  }
-  if (error instanceof ManifestError) {
-    return error.remedy
-  }
-  if (error instanceof Error) {
-    // Unrecognised: its message is the whole report, and inventing advice for it
-    // would be worse than saying nothing.
     return ''
   }
   return 'See the log above.'
 }
 
-export { assetName, INHERITED, TESTED_ZUP_VERSION, TOKEN_VARIABLES, ZUP_REPOSITORY }
+export { INHERITED, TESTED_ZUP_VERSION, TOKEN_VARIABLES, ZUP_REPOSITORY }

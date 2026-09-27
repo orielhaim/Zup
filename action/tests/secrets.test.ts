@@ -1,114 +1,19 @@
 import { describe, expect, it } from 'bun:test'
-
-import type { Inputs } from '../src/inputs.js'
-import type { GithubContext, Log, SourceLocation } from '../src/ports.js'
+import type { SourceLocation } from '../src/ports.js'
 import { redact } from '../src/runtime.js'
 import { annotate, buildEnvironment, INHERITED, TOKEN_VARIABLES } from '../src/workflow.js'
-
-const SECRET = 'ghp_this_must_never_appear'
-
-/** A context with a controlled environment and a token in it. */
-function context(overrides: Record<string, string | undefined> = {}): GithubContext {
-  const env: Record<string, string | undefined> = {
-    // Every one of these is the kind of variable a hosted runner provides, and
-    // the action is expected to pass the innocuous ones through while excluding
-    // anything credential-shaped.
-    RUNNER_OS: 'linux',
-    RUNNER_ARCH: 'X64',
-    HOME: '/home/runner',
-    PATH: '/usr/bin',
-    GITHUB_WORKSPACE: '/w',
-    GITHUB_OUTPUT: '/w/out',
-    GITHUB_ENV: '/w/env',
-    GITHUB_PATH: '/w/path',
-    GITHUB_STEP_SUMMARY: '/w/summary',
-    GITHUB_REPOSITORY: 'acme/acme',
-    CI: 'true',
-    GITHUB_TOKEN: SECRET,
-    GH_TOKEN: SECRET,
-    ...overrides,
-  }
-  return {
-    serverUrl: 'https://github.com',
-    apiUrl: 'https://api.github.com',
-    repository: 'acme/acme',
-    workflow: 'release',
-    runId: '1',
-    eventName: 'push',
-    ref: 'refs/tags/v1.4.0',
-    actor: 'someone',
-    event: {},
-    env: env as GithubContext['env'],
-    isDebug: false,
-  }
-}
-
-function inputs(overrides: Partial<Inputs> = {}): Inputs {
-  return {
-    operation: 'release',
-    projectPath: '/w',
-    zupVersion: undefined,
-    zupPath: undefined,
-    releaseDir: 'dist',
-    targets: [],
-    artifacts: [],
-    token: { value: SECRET, absent: undefined },
-    repo: undefined,
-    tag: undefined,
-    draft: false,
-    prerelease: false,
-    dryRun: false,
-    uploadWorkflowArtifacts: false,
-    workflowArtifactName: undefined,
-    artifactRetentionDays: undefined,
-    attest: false,
-    attestPaths: [],
-    allowUnsafePublish: false,
-    args: [],
-    receipt: undefined,
-    ...overrides,
-  }
-}
-
-/** A log that records everything, so a test can inspect what a user would read. */
-function recordingLog(): { log: Log; lines: string[] } {
-  const lines: string[] = []
-  const record = (prefix: string) => (message: string) => {
-    lines.push(`${prefix} ${message}`)
-  }
-  return {
-    lines,
-    log: {
-      debug: record('debug'),
-      info: record('info'),
-      notice: record('notice'),
-      warning: record('warning'),
-      error: record('error'),
-      startGroup: record('group'),
-      endGroup: () => undefined,
-      setSecret: record('secret'),
-      summary: record('summary'),
-      setOutput: (name, value) => {
-        lines.push(`output ${name}=${value}`)
-      },
-      annotate: (level, message, location) => {
-        lines.push(`annotate ${level} ${message} ${JSON.stringify(location ?? {})}`)
-      },
-      fail: record('fail'),
-    },
-  }
-}
+import { context, inputs, recordingLog, SECRET } from './fixtures.js'
 
 /**
  * The secret-isolation acceptance criterion, as executable assertions.
  *
  * Each of these is a hard requirement, not a nicety: `zup build` may invoke Tauri,
- * Electron, Cargo build scripts and npm scripts, and a token in that environment
- * is a token handed to whatever the project's build does.
+ * Electron, Cargo build scripts and npm scripts, and a token in that environment is a
+ * token handed to whatever the project's build does.
  */
 describe('secret isolation', () => {
   it('gives a build subprocess no token at all', () => {
-    const env = buildEnvironment('build', inputs(), context())
+    const env = buildEnvironment('build', inputs({ token: SECRET }), context())
     for (const name of TOKEN_VARIABLES) {
       expect(env[name]).toBeUndefined()
     }
@@ -116,33 +21,34 @@ describe('secret isolation', () => {
   })
 
   it('gives a compose subprocess no token at all', () => {
-    expect(JSON.stringify(buildEnvironment('compose', inputs(), context()))).not.toContain(SECRET)
+    expect(
+      JSON.stringify(buildEnvironment('compose', inputs({ token: SECRET }), context())),
+    ).not.toContain(SECRET)
   })
 
   it('gives an attest subprocess no token at all', () => {
-    expect(JSON.stringify(buildEnvironment('attest', inputs(), context()))).not.toContain(SECRET)
+    expect(
+      JSON.stringify(buildEnvironment('attest', inputs({ token: SECRET }), context())),
+    ).not.toContain(SECRET)
   })
 
   it('gives the publish subprocess the token, under both variable names', () => {
     // zup reads `GH_TOKEN` then `GITHUB_TOKEN`. Both are set so a developer's
     // local `gh auth` cannot shadow a job-scoped token with a stale one.
-    const env = buildEnvironment('publish', inputs(), context())
+    const env = buildEnvironment('publish', inputs({ token: SECRET }), context())
     expect(env['GH_TOKEN']).toBe(SECRET)
     expect(env['GITHUB_TOKEN']).toBe(SECRET)
   })
 
   it('gives the publish subprocess nothing when no token was provided', () => {
-    const env = buildEnvironment(
-      'publish',
-      inputs({ token: { value: undefined, absent: 'no token' } }),
-      context(),
-    )
-    expect(JSON.stringify(env)).not.toContain(SECRET)
+    const env = buildEnvironment('publish', inputs(), context({ GITHUB_TOKEN: SECRET }))
+    expect(env['GH_TOKEN']).toBeUndefined()
+    expect(env['GITHUB_TOKEN']).toBeUndefined()
   })
 
   it('never forwards the parent PATH, which is not in the allowlist', () => {
-    // A PATH a developer set by hand is a PATH the action did not choose. zup
-    // still gets a working one from the runner's own variables.
+    // A PATH a developer set by hand is a PATH the action did not choose. zup still
+    // gets a working one from the runner's own variables.
     expect(
       buildEnvironment('build', inputs(), context({ PATH: '/poisoned' }))['PATH'],
     ).toBeUndefined()
@@ -166,9 +72,8 @@ describe('secret isolation', () => {
   })
 
   it('marks a dry run in the environment rather than in a flag', () => {
-    // A flag the action chose is a flag zup might not have; an environment
-    // variable named `ZUP_DRY_RUN` is the CLI's own contract and is checked by
-    // the CLI, so the two cannot disagree.
+    // A flag the action chose is a flag zup might not have; an environment variable
+    // named `ZUP_DRY_RUN` is the CLI's own contract, so the two cannot disagree.
     expect(buildEnvironment('publish', inputs({ dryRun: true }), context())['ZUP_DRY_RUN']).toBe(
       '1',
     )

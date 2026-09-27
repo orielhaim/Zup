@@ -192,24 +192,25 @@ fn check(args: CiGithubCheckCommand) -> miette::Result<()> {
     let config = zup_publish_github::PublishConfig::resolve(&manifest)?;
     let root = root_of(&args.manifest);
     let freshness = publish_github::workflow(&root, &manifest, &config)?;
-    let config = &config;
     let report = Report {
         version: REPORT_VERSION,
         path: freshness.path.clone(),
         present: freshness.present,
         current: freshness.current,
         detail: freshness.detail.clone(),
-        tag: publish_github::preview_tag(&manifest, config),
+        tag: publish_github::preview_tag(&manifest, &config),
         profiles: publish_github::matrix(&manifest)
             .iter()
-            .map(|target| Profile {
-                profile: target.profile.clone(),
-                target: target.triple.clone(),
-                runner: zup_publish_github::native_runner(&target.triple)
-                    .map(|runner| runner.label().to_owned())
-                    .unwrap_or_else(|| "cross-compiled".to_owned()),
-                native: zup_publish_github::native_runner(&target.triple)
-                    .is_some_and(|runner| runner.native),
+            .map(|target| {
+                let native = zup_publish_github::native_runner(&target.triple);
+                Profile {
+                    profile: target.profile.clone(),
+                    target: target.triple.clone(),
+                    runner: native
+                        .map(|runner| runner.label().to_owned())
+                        .unwrap_or_else(|| "cross-compiled".to_owned()),
+                    native: native.is_some_and(|runner| runner.native),
+                }
             })
             .collect(),
         attestations: config.workflow.attestations,

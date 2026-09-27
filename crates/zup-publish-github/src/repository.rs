@@ -6,36 +6,30 @@
 //!
 //! 1. **Explicit.** `--repo owner/name`, or `[publish.github] repository`.
 //! 2. **The environment.** `GITHUB_REPOSITORY`, which Actions sets to
-//!    `owner/name` for the repository the workflow is running in. That is the
-//!    authoritative answer in CI and it is right there, so it is preferred over
-//!    anything on disk.
+//!    `owner/name` for the repository the workflow is running in.
 //! 3. **The Git remote.** Asked of Git itself.
 //!
-//! # Why `git remote get-url` rather than reading `.git/config`
+//! # Why `git remote` rather than reading `.git/config`
 //!
-//! Because Git already knows how to answer this and knows more than a parser
-//! does. A remote URL can come from an `include` in a global config, a
+//! Because Git already knows how to answer this and knows more than a parser does. A
+//! remote URL can come from an `include` in a global config, a
 //! `url.<base>.insteadOf` rewrite, a conditional include that applies only inside a
 //! worktree, or the `.git` *file* a linked worktree uses to point at the real
-//! directory. Git resolves all four. An INI reader resolves none of them and gets
-//! the right answer for the wrong reason on the ones it does handle — which is
-//! worse than failing, because a release published to `owner/repo` instead of a
-//! fork is a mistake that does not announce itself.
+//! directory. Git resolves all four; an INI reader resolves none and gets the right
+//! answer for the wrong reason on the ones it does handle — which is worse than
+//! failing, because a release published to the wrong repository does not announce
+//! itself.
 //!
-//! So Git is asked first, and the URL it prints is parsed by `git-url-parse`,
-//! which knows all three dialects Git writes. The `.git/config` reader stays as a
-//! fallback for one real case: the project is on disk and there is no `git`
-//! binary — a release built from an extracted source archive, a container image
-//! assembled without Git. There the developer gets the local remote rather than a
-//! refusal.
+//! The `.git/config` reader stays as a fallback for one real case: the project is on
+//! disk and there is no `git` binary, as in a release built from an extracted source
+//! archive. There the developer gets the local remote rather than a refusal.
 //!
 //! # Why it refuses rather than guesses
 //!
-//! A repository with an `origin` on github.com and a fork on another host has
-//! two plausible answers, and publishing a release to the wrong one is not a
-//! mistake that announces itself: the release succeeds, the tag is created, and
-//! the wrong project now has a `v1.4.0`. So: exactly one candidate, or a name
-//! the developer chose.
+//! A repository with an `origin` on github.com and a fork on another host has two
+//! plausible answers, and publishing to the wrong one succeeds, creates the tag, and
+//! gives the wrong project a `v1.4.0`. So: exactly one candidate, or a name the
+//! developer chose.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -102,9 +96,8 @@ impl GithubRepository {
 
     /// Whether this is github.com rather than an Enterprise installation.
     ///
-    /// A repository on github.com is the case where a runtime client can fetch
-    /// release assets with no credential at all, which is a difference in what a
-    /// project can promise rather than a detail.
+    /// This is the case where a runtime client can fetch release assets with no
+    /// credential at all, which is a difference in what a project can promise.
     pub fn is_public_host(&self) -> bool {
         self.host.dotcom
     }
@@ -128,10 +121,8 @@ pub struct RepositorySpec {
 impl RepositorySpec {
     /// Parse `owner/name` or `host/owner/name`.
     ///
-    /// Three segments is how a project writes an Enterprise repository, and
-    /// accepting it here is what lets a single `--repo` flag cover both
-    /// installations. Two segments means the caller's host, which is github.com
-    /// unless discovery already found otherwise.
+    /// Three segments is how a project writes an Enterprise repository, and accepting
+    /// it here is what lets a single `--repo` flag cover both installations.
     pub fn parse(value: &str) -> Result<Self, GithubError> {
         let value = value.trim().trim_end_matches(".git").trim_matches('/');
         let parts: Vec<&str> = value.split('/').collect();
@@ -244,9 +235,9 @@ pub fn resolve(
 
 /// The installation the environment says this is, if it says one.
 ///
-/// `GITHUB_API_URL` is the one that is actually authoritative: Actions sets it
-/// from the server the workflow runs against, so on an Enterprise installation
-/// it is already the API base with `/api/v3/` on the end of it.
+/// `GITHUB_API_URL` is the one that is actually authoritative: Actions sets it from
+/// the server the workflow runs against, so on an Enterprise installation it is
+/// already the API base with `/api/v3/` on the end of it.
 pub fn install_from_environ(environ: &dyn Environment) -> Option<GithubHost> {
     if let Some(base) = environ.get("GITHUB_API_URL")
         && let Ok(url) = url::Url::parse(base.trim())
@@ -383,11 +374,11 @@ fn config_remotes(working_directory: &Path) -> Vec<(String, String)> {
 
 /// The GitHub parts of a Git remote URL.
 ///
-/// The three shapes Git writes are an HTTPS URL, an SCP-style `user@host:path`,
-/// and an `ssh://` URL. `git-url-parse` reduces all three to the same three
-/// strings, and it does so correctly for the awkward cases: a port on an SSH
-/// remote, a percent-encoded path, a `file://` remote that is not a repository at
-/// all. Anything that is not a GitHub-shaped host is not a candidate.
+/// The three shapes Git writes are an HTTPS URL, an SCP-style `user@host:path`, and
+/// an `ssh://` URL. `git-url-parse` reduces all three to the same three strings, and
+/// does so correctly for the awkward cases: a port on an SSH remote, a
+/// percent-encoded path, a `file://` remote that is not a repository at all. Anything
+/// that is not a GitHub-shaped host is not a candidate.
 pub fn parse_remote_url(url: &str) -> Option<(String, String, String)> {
     let url = url.trim();
     if url.is_empty() {
@@ -410,10 +401,9 @@ pub fn parse_remote_url(url: &str) -> Option<(String, String, String)> {
 
 /// Whether a hostname is one zup will publish to.
 ///
-/// `github.com` and anything that names itself as a GitHub installation. A
-/// hostname is *not* assumed from a remote: an unknown host is a question, not a
-/// match, and a project on a self-hosted forge must say so with an explicit
-/// `--repo` rather than discover it by accident.
+/// `github.com` and anything that names itself as a GitHub installation. A hostname
+/// is *not* assumed from a remote: an unknown host is a question, not a match, and a
+/// project on a self-hosted forge must say so with an explicit `--repo`.
 fn is_github_host(host: &str) -> bool {
     let host = host.trim().to_ascii_lowercase();
     host == GITHUB_COM || host.ends_with(".github.com") || host.starts_with("github.")
@@ -422,8 +412,7 @@ fn is_github_host(host: &str) -> bool {
 /// The environment, narrowed to what discovery reads.
 ///
 /// A trait rather than the process environment so every branch of the precedence
-/// order is reachable from a test, and so a library caller that has its own
-/// settings is not forced to mutate global state to use it.
+/// order is reachable from a test.
 pub trait Environment {
     fn get(&self, name: &str) -> Option<String>;
 }

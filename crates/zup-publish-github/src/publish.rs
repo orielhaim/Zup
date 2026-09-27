@@ -16,40 +16,38 @@
 //! publish the draft once
 //! ```
 //!
-//! Every step is idempotent, and that is the whole reason this is a sequence of
-//! small functions rather than one big one: `zup publish github` is expected to
-//! be run again after a failure, on purpose or by a CI retry, and the second run
-//! has to be indistinguishable from a first run that had nothing to do.
+//! Every step is idempotent, and that is the whole reason this is a sequence of small
+//! functions rather than one big one: `zup publish github` is expected to be run again
+//! after a failure, on purpose or by a CI retry, and the second run has to be
+//! indistinguishable from a first run that had nothing to do.
 //!
 //! # What is never done
 //!
-//! - A public release is never created before its files exist. `create_draft`
-//!   asks for a draft unconditionally, and the only call that clears the flag is
-//!   the last one.
-//! - A failed upload does not delete the draft. A draft with eleven of twelve
-//!   files is a *resumable* draft; deleting it throws away eleven uploads so
-//!   that the twelfth can start again.
-//! - A published release is never mutated. A mismatch against a published
-//!   release is a refusal, not a repair: the tag is already public, and the
-//!   bytes behind it are already what somebody downloaded.
-//! - A conflicting asset on a draft is never silently overwritten. It is a
-//!   refusal unless the caller explicitly asked to replace it, because
-//!   "different bytes under this name" means either the plan changed or something
-//!   else wrote here, and neither is the publisher's call.
+//! - A public release is never created before its files exist. `create_draft` asks for
+//!   a draft unconditionally, and the only call that clears the flag is the last one.
+//! - A failed upload does not delete the draft. A draft with eleven of twelve files is
+//!   a *resumable* draft; deleting it throws away eleven uploads so that the twelfth can
+//!   start again.
+//! - A published release is never mutated. A mismatch against a published release is a
+//!   refusal, not a repair: the tag is already public, and the bytes behind it are
+//!   already what somebody downloaded.
+//! - A conflicting asset on a draft is never silently overwritten. It is a refusal
+//!   unless the caller explicitly asked to replace it, because "different bytes under
+//!   this name" means either the plan changed or something else wrote here, and neither
+//!   is the publisher's call.
 //!
 //! # Why uploads are reconciled rather than trusted
 //!
-//! GitHub documents a specific and unpleasant failure: an upload can fail
-//! upstream *after* the asset record was created, leaving a zero-byte asset in
-//! the `starter` state under the name that was being uploaded. That asset then
-//! blocks every subsequent upload of the same name, because the name is taken.
+//! GitHub documents a specific and unpleasant failure: an upload can fail upstream
+//! *after* the asset record was created, leaving a zero-byte asset in the `starter`
+//! state under the name that was being uploaded. That asset then blocks every
+//! subsequent upload of the same name, because the name is taken.
 //!
-//! So an uncertain upload is never a bare retry. The sequence is: list the
-//! release's assets, look for a `starter` entry with this name, remove exactly
-//! that one, and only then retry — bounded, with backoff. A *valid* asset is
-//! never removed, including when the HTTP request that uploaded it failed after
-//! the server processed it, because the reconciliation is exactly what tells the
-//! two apart.
+//! So an uncertain upload is never a bare retry. The sequence is: list the release's
+//! assets, look for a `starter` entry with this name, remove exactly that one, and
+//! only then retry — bounded, with backoff. A *valid* asset is never removed, including
+//! when the HTTP request that uploaded it failed after the server processed it, because
+//! the reconciliation is exactly what tells the two apart.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

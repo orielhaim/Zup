@@ -2,10 +2,9 @@
  * Which runner is this, and which zup release asset does that mean.
  *
  * Runner and target are different axes. A Windows x64 runner that cross-compiles an
- * aarch64 Linux installer still needs a `windows-x64` zup, because zup is what does
- * the compiling. This module maps runner identity to tool identity and never
- * consults the project's target matrix; the installer's own target triple is the
- * Rust CLI's business.
+ * aarch64 Linux installer still needs a `windows-x64` zup, because zup is what does the
+ * compiling. This module maps runner identity to tool identity and never consults the
+ * project's target matrix.
  */
 
 /** A runner platform, normalized. */
@@ -114,9 +113,9 @@ export function identifyRunner(environ: RunnerEnvironment): RunnerIdentity {
  * The zup release asset for one runner.
  *
  * The name is the release contract rather than a preference: `zup publish github`
- * uploads `zup-<platform>-<arch>` for the CLI and this resolves against that same
- * name. The `.exe` matters too — a `zup` without it on a Windows runner is a file
- * the shell will not run and the cache will happily store.
+ * uploads `zup-<platform>-<arch>` for the CLI and this resolves against that same name.
+ * The `.exe` matters too — a `zup` without it on a Windows runner is a file the shell
+ * will not run and the cache will happily store.
  */
 export function toolAsset(identity: RunnerIdentity): ToolAsset {
   const base = `zup-${identity.platform}-${identity.arch}`

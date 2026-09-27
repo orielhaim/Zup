@@ -1,9 +1,10 @@
 /**
  * Every effect the action has, as a type.
  *
- * `runtime.ts` binds these to the GitHub Toolkit and Node; the tests bind them to
- * records. That substitution is what lets the secret-isolation tests assert a
- * property rather than assert that a string is absent from a log line.
+ * A port exists here only when a test substitutes it; `runtime.ts` binds these to
+ * the GitHub Toolkit and Node. The substitution is what lets the secret-isolation
+ * tests assert a property rather than assert that a string is absent from a log
+ * line.
  */
 
 import type { RunnerEnvironment } from './platform.js'
@@ -34,26 +35,19 @@ export interface CommandResult {
   stderr: string
 }
 
-export interface ProcessRunner {
-  run(spec: CommandSpec): Promise<CommandResult>
-  which(program: string): Promise<string | undefined>
-}
-
-/**
- * Reads a release asset.
- *
- * The expected size and digest are parameters rather than something the
- * implementation looks up afterwards: a downloader that cannot be told what to
- * expect is a downloader with no verification.
- */
 export interface Downloader {
+  /**
+   * The expected size and digest are the caller's to know and to pass on, not
+   * something this looks up afterwards: a downloader that cannot be told what to
+   * expect is a downloader with no verification.
+   */
   fetch(
     url: string,
     options: { headers?: Record<string, string>; label?: string },
   ): Promise<DownloadedFile>
 }
 
-/** Bytes that arrived, and the `Content-Length` the server reported, if any. */
+/** Bytes that arrived, and the byte count the server reported, if any. */
 export interface DownloadedFile {
   bytes: Uint8Array
   contentLength: number | undefined
@@ -64,8 +58,6 @@ export interface FileSystem {
   readText(path: string): Promise<string>
   /** Raw bytes. Separate from `readText` because verification hashes them. */
   readBytes(path: string): Promise<Uint8Array>
-  isDirectory(path: string): Promise<boolean>
-  listFiles(directory: string): Promise<string[]>
   ensureDirectory(directory: string): Promise<void>
   /** Write bytes, creating parents. Fails rather than truncating silently. */
   writeBytes(path: string, content: Uint8Array): Promise<void>
@@ -109,21 +101,12 @@ export interface GithubContext {
   readonly serverUrl: string
   readonly apiUrl: string
   readonly repository: string
-  readonly workflow: string
   readonly runId: string
   readonly eventName: string
-  readonly ref: string
-  readonly actor: string
   /** The event payload, for the checks that need it. */
   readonly event: Record<string, unknown>
   /** The environment the runner provided. */
   readonly env: RunnerEnvironment & Record<string, string | undefined>
-  /** Whether the runner is in debug mode. */
-  readonly isDebug: boolean
-}
-
-export interface ArtifactUploader {
-  upload(request: ArtifactUpload): Promise<ArtifactUploadResult>
 }
 
 export interface ArtifactUpload {
@@ -157,8 +140,4 @@ export interface AttestationSubject {
   name: string
   /** Lowercase hex SHA-256, as the release manifest recorded it. */
   digest: string
-}
-
-export interface Attestor {
-  attest(subjects: AttestationSubject[]): Promise<void>
 }

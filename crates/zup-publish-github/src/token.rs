@@ -8,30 +8,26 @@
 //! `gh auth token` ┘   only if the environment had nothing
 //! ```
 //!
-//! `gh auth token` is a subprocess and therefore a last resort: a convenience for
-//! a developer who has already authenticated `gh`, skipped entirely when an
-//! environment token exists so a CI job is never slowed by a process spawn or
-//! surprised by an interactive helper.
+//! `gh auth token` is a subprocess and therefore a last resort: a convenience for a
+//! developer who has already authenticated `gh`, skipped entirely when an environment
+//! token exists so a CI job is never slowed by a process spawn.
 //!
 //! # Where a token is never
 //!
-//! Not in `zup.toml`. Not in a release manifest. Not in a receipt. Not in a
-//! `Debug` output, a log line, a retry message, or a panic.
-//!
-//! Those are not stylistic rules. A manifest is committed and a receipt is
-//! uploaded as a build output; a token in either one reaches every fork, every
-//! mirror, and every issue somebody pastes a diagnostic into.
+//! Not in `zup.toml`. Not in a release manifest. Not in a receipt. Not in a `Debug`
+//! output, a log line, a retry message, or a panic. Those are not stylistic rules: a
+//! manifest is committed and a receipt is uploaded as a build output, so a token in
+//! either one reaches every fork, every mirror, and every issue somebody pastes a
+//! diagnostic into.
 //!
 //! # Why `secrecy`
 //!
 //! A hand-written `Debug` impl is one derive away from not working:
-//! `#[derive(Debug)]` on any struct holding a `Token` prints the value, and
-//! nothing in the type system objects. `SecretString` makes that impossible — its
-//! `Debug` prints `[REDACTED]`, it has no `Display`, and the only way out is
-//! [`ExposeSecret::expose_secret`]. It has no dependencies of its own.
-//!
-//! Redacting `Debug` says nothing about the wire, so the `Authorization` header is
-//! still built by hand and still marked sensitive.
+//! `#[derive(Debug)]` on any struct holding a `Token` prints the value, and nothing in
+//! the type system objects. `SecretString` makes that impossible — its `Debug` prints
+//! `[REDACTED]`, it has no `Display`, and the only way out is
+//! [`ExposeSecret::expose_secret`]. Redacting `Debug` says nothing about the wire, so
+//! the `Authorization` header is still built by hand and still marked sensitive.
 
 use std::fmt;
 use std::process::Command;
@@ -45,8 +41,8 @@ use crate::repository::Environment;
 ///
 /// The value lives in a [`SecretString`], so leaking it is not a matter of
 /// remembering to be careful: the value is reachable only through
-/// [`expose`](Token::expose), which reads like the dangerous thing it is at every
-/// call site.
+/// [`expose`](Token::expose), which reads like the dangerous thing it is at every call
+/// site.
 #[derive(Clone)]
 pub struct Token {
     value: SecretString,
@@ -56,9 +52,9 @@ pub struct Token {
 impl Token {
     /// Wrap a token value.
     ///
-    /// Public because a caller may have a token from a source this crate does
-    /// not know about, such as a test harness or a corporate wrapper. The
-    /// redaction, not the acquisition, is what this type is for.
+    /// Public because a caller may have a token from a source this crate does not know
+    /// about, such as a test harness or a corporate wrapper. The redaction, not the
+    /// acquisition, is what this type is for.
     pub fn new(value: impl Into<String>) -> Self {
         Self {
             value: SecretString::from(value.into()),
@@ -67,9 +63,6 @@ impl Token {
     }
 
     /// The value, for a request builder.
-    ///
-    /// Named after the unsafe thing it is: every call site is a place a token
-    /// could reach a log.
     pub fn expose(&self) -> &str {
         self.value.expose_secret()
     }
@@ -81,9 +74,8 @@ impl Token {
 
     /// Whether this is the job-scoped token Actions provides.
     ///
-    /// Worth knowing because its permissions are whatever the workflow granted,
-    /// which is usually narrower than a personal token's and is a better
-    /// configuration rather than a limitation to work around.
+    /// Worth knowing because its permissions are whatever the workflow granted, which
+    /// is usually narrower than a personal token's.
     pub fn is_ambient(&self) -> bool {
         self.source == Source::Environment
     }
@@ -144,10 +136,10 @@ pub fn discover(environ: &dyn Environment) -> Result<Token, GithubError> {
 
 /// Find a credential, with the `gh` fallback supplied by the caller.
 ///
-/// The fallback is a parameter because it is the only part of discovery that is
-/// not a pure function of the environment — it shells out — and a test that
-/// cannot control it is a test whose result depends on whether the developer has
-/// the `gh` CLI installed.
+/// The fallback is a parameter because it is the only part of discovery that is not a
+/// pure function of the environment — it shells out — and a test that cannot control
+/// it is a test whose result depends on whether the developer has the `gh` CLI
+/// installed.
 pub fn discover_with(
     environ: &dyn Environment,
     fallback: impl FnOnce() -> Option<String>,
@@ -183,12 +175,11 @@ fn non_empty(environ: &dyn Environment, name: &str) -> Option<String> {
 
 /// Ask the `gh` CLI for a token.
 ///
-/// Two deliberate restrictions. The command is given no arguments that could make
-/// it interactive, and its output is read from a pipe rather than from a
-/// terminal, so a developer without `gh` installed gets a normal command-not-found
-/// failure instead of a hang. A token that fails to be found is `None`, never an
-/// error: it is a fallback, and a fallback that can fail the operation is not a
-/// fallback.
+/// Two deliberate restrictions. The command is given no arguments that could make it
+/// interactive, and its output is read from a pipe rather than from a terminal, so a
+/// developer without `gh` installed gets a normal command-not-found failure instead of
+/// a hang. A token that fails to be found is `None`, never an error: a fallback that
+/// can fail the operation is not a fallback.
 fn gh_auth_token() -> Option<String> {
     let output = Command::new("gh")
         .args(["auth", "token", "--hostname", "github.com"])

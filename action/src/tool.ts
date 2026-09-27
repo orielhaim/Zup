@@ -20,7 +20,6 @@
  * Verification happens before the file is made executable and long before it runs.
  * Bytes that fail are deleted rather than left for the next step to find.
  */
-
 import { createHash } from 'node:crypto'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -30,7 +29,6 @@ import {
   type RunnerIdentity,
   toolAsset,
   toolCacheVersion,
-  UnsupportedRunnerError,
 } from './platform.js'
 import type { Downloader, FileSystem, Log } from './ports.js'
 
@@ -54,13 +52,7 @@ export class ToolError extends Error {
   }
 }
 
-/**
- * The tool cache, narrowed to what installation needs.
- *
- * The shape follows `@actions/tool-cache`: `find` answers a version, and
- * `cacheFile` takes bytes staged on disk and returns the runner-owned directory
- * they now live in, which is what makes the entry visible to the next step.
- */
+/** The tool cache, narrowed to what installation needs. */
 export interface ToolCache {
   find(version: string, arch: string): Promise<string | undefined>
   cacheFile(
@@ -114,8 +106,7 @@ export interface ToolDependencies {
  * repository tests its own action against a locally built zup, and the only
  * supported way to run on a self-hosted runner with an architecture zup does not
  * publish.
- */
-export async function resolveTool(
+ */ export async function resolveTool(
   request: {
     zupPath: string | undefined
     zupVersion: string | undefined
@@ -155,14 +146,12 @@ export async function resolveTool(
     // A cached entry is not trusted because it is cached. A half-written cache
     // directory, a disk that filled mid-write, or a concurrent job sharing a cache
     // all produce a file of the right name and the wrong bytes.
-    const verified = await verifyFile(executable, dependencies.releases, asset.name, dependencies)
-    if (verified) {
+    if (await verifyFile(executable, dependencies.releases, asset.name, dependencies)) {
       dependencies.log.info(`zup ${version} is cached (${arch})`)
       return { path: executable, version, source: 'cache', identity }
     }
     dependencies.log.warning(
-      `the cached zup ${version} for ${arch} did not match its published digest; ` +
-        'downloading it again',
+      `the cached zup ${version} for ${arch} did not match its published digest; downloading it again`,
     )
   }
 
@@ -192,25 +181,29 @@ export async function resolveTool(
       'The download was incomplete, so nothing was run and nothing was cached. Retry the job.',
     )
   }
-  assertVerified(downloaded.bytes, release, dependencies, asset.name)
+  assertVerified(downloaded.bytes, release, dependencies.log, asset.name)
 
-  const staging = await stagingDirectory(version, identity, dependencies)
-  const downloaded_path = dependencies.filesystem.join(staging, asset.file)
-  await dependencies.filesystem.writeBytes(downloaded_path, downloaded.bytes)
+  const staging = dependencies.filesystem.join(
+    os.tmpdir(),
+    `zup-tool-${version}-${identity.platform}-${identity.arch}`,
+  )
+  await dependencies.filesystem.ensureDirectory(staging)
+  const downloadedPath = dependencies.filesystem.join(staging, asset.file)
+  await dependencies.filesystem.writeBytes(downloadedPath, downloaded.bytes)
   // Verified again after the write, because the write is what can truncate: a full
   // disk produces a short file, and only a check afterwards knows the staged bytes
   // are what the release published.
-  const staged = await readBytes(downloaded_path, dependencies.filesystem)
+  const staged = await readBytes(downloadedPath, dependencies.filesystem)
   if (staged === undefined) {
     throw new ToolError(
       `zup ${version} was downloaded and verified but could not be written to ${staging}.`,
       'This is a runner problem rather than a zup problem. Check for a full disk and retry.',
     )
   }
-  assertVerified(staged, release, dependencies, asset.name)
+  assertVerified(staged, release, dependencies.log, asset.name)
 
   const directory = await dependencies.cache.cacheFile(
-    downloaded_path,
+    downloadedPath,
     asset.file,
     cacheVersion,
     arch,
@@ -224,14 +217,14 @@ export async function resolveTool(
 /**
  * Compare bytes against a published identity, failing closed.
  *
- * Both checks are unconditional when the value is present. A size check alone
- * accepts a same-length substitution; a digest check alone accepts truncated bytes on
- * a filesystem that reports the wrong length.
+ * Every check runs when the value is present. A size check alone accepts a
+ * same-length substitution; a digest check alone accepts truncated bytes on a
+ * filesystem that reports the wrong length.
  */
 export function assertVerified(
   bytes: Uint8Array,
   release: ReleaseAsset,
-  dependencies: Pick<ToolDependencies, 'log'>,
+  log: Log,
   label: string,
 ): void {
   if (bytes.byteLength !== release.size) {
@@ -255,7 +248,7 @@ export function assertVerified(
       'Two independent records disagree, so nothing was run and nothing was cached.',
     )
   }
-  dependencies.log.debug(`${label} verified: ${digest}`)
+  log.debug(`${label} verified: ${digest}`)
 }
 
 /** The SHA-256 of some bytes, lowercase hex. */
@@ -298,23 +291,7 @@ async function readBytes(target: string, filesystem: FileSystem): Promise<Uint8A
   }
 }
 
-async function stagingDirectory(
-  version: string,
-  identity: RunnerIdentity,
-  dependencies: Pick<ToolDependencies, 'filesystem'>,
-): Promise<string> {
-  const root = dependencies.filesystem.join(
-    os.tmpdir(),
-    `zup-tool-${version}-${identity.platform}-${identity.arch}`,
-  )
-  await dependencies.filesystem.ensureDirectory(root)
-  return root
-}
-
 /** The path the action puts on `PATH` for the rest of the job. */
 export function toolDirectory(tool: ResolvedTool, filesystem: FileSystem): string {
   return path.dirname(filesystem.resolve(tool.path))
 }
-
-/** The error a runner that cannot be supported produces, re-exported for tests. */
-export { UnsupportedRunnerError }

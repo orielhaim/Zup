@@ -1,35 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-
-import type { Inputs } from '../src/inputs.js'
 import { checkSafety } from '../src/security.js'
 import { attestationRequested } from '../src/workflow.js'
-
-function inputs(overrides: Partial<Inputs> = {}): Inputs {
-  return {
-    operation: 'build',
-    projectPath: '/w',
-    zupVersion: undefined,
-    zupPath: undefined,
-    releaseDir: 'dist',
-    targets: [],
-    artifacts: [],
-    token: { value: undefined, absent: 'none' },
-    repo: undefined,
-    tag: undefined,
-    draft: false,
-    prerelease: false,
-    dryRun: false,
-    uploadWorkflowArtifacts: false,
-    workflowArtifactName: undefined,
-    artifactRetentionDays: undefined,
-    attest: false,
-    attestPaths: [],
-    allowUnsafePublish: false,
-    args: [],
-    receipt: undefined,
-    ...overrides,
-  }
-}
+import { inputs } from './fixtures.js'
 
 describe('dangerous triggers', () => {
   it('refuses to publish on pull_request_target', () => {

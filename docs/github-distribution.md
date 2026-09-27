@@ -44,14 +44,13 @@ zup-publish              ReleasePlan, HostLimits, classify(), naming, receipts
 | runtime trust | `zup-runtime`, `zup-acquire` | what a client believes, and why |
 
 `zup-core`, `zup-plan`, `zup-runtime`, `zup-transaction`, and artifact semantics
-contain no GitHub concept at all. Neither does `zup-publish`: it has a
+contain no GitHub concept at all, and neither does `zup-publish`: it has a
 `ReleasePlan`, host limits, and an asset classifier, and it could be pointed at
 GitLab, SourceForge, or an S3 bucket with no change to anything above it. There is
 no `if tauri` or `if electron` in the GitHub publisher, and there is no `if
-github` in the acquisition engine.
-
-`zup-publish-github` depends on `zup-manifest` for configuration types. The
-manifest knows no provider; the provider reads the manifest.
+github` in the acquisition engine. `zup-publish-github` depends on `zup-manifest`
+for configuration types; the manifest knows no provider, and the provider reads
+the manifest.
 
 ## The release plan
 
@@ -104,8 +103,8 @@ The tag is derived from the version. The asset list comes from
 Discovery prefers `origin`, then `push`, then `fetch`, and reduces every common
 remote form (`git@host:owner/name.git`, `https://host/owner/name`,
 `ssh://git@host/owner/name`) to the same three strings. A non-GitHub remote is not
-a candidate. Several GitHub remotes and no `origin` is an actionable refusal.
-An Enterprise hostname is preserved, so `git.acme.internal:acme/acme` stays on that
+a candidate. Several GitHub remotes and no `origin` is an actionable refusal. An
+Enterprise hostname is preserved, so `git.acme.internal:acme/acme` stays on that
 installation.
 
 ### Credentials
@@ -116,24 +115,18 @@ rather than at a later "you should not do that". Never printed, never logged,
 never in a receipt. The type that holds a token stores it in a
 `secrecy::SecretString`: `Debug` prints `[REDACTED]`, `Display` is not
 implemented, and the value is only reachable through an `expose_secret` call that
-reads like the dangerous thing it is.
-
-That last point is why the dependency exists rather than a hand-written `Debug`
-impl. A hand-written impl is correct until somebody derives `Debug` on a struct
-that holds a token, at which point it prints the value and nothing in the type
-system objects. `SecretString` cannot be derived into anything that reveals it.
-The `Authorization` header is still built by hand from `expose()` and is still
-marked sensitive on the wire - redacting a `Debug` impl does nothing about a
-proxy log.
+reads like the dangerous thing it is. A hand-written `Debug` impl would be correct
+until somebody derives `Debug` on a struct that holds a token, at which point it
+prints the value and nothing in the type system objects; `SecretString` cannot be
+derived into anything that reveals it. The `Authorization` header is still built
+by hand from `expose()` and is still marked sensitive on the wire, because
+redacting a `Debug` impl does nothing about a proxy log.
 
 A dry run in a workflow that holds a job-scoped token gets that token in exactly
-one process's environment. `docs/action.md` covers how the GitHub action scopes
-it, which matters because a build may run arbitrary project build scripts.
-
-A dry run with no credential prints the plan and says publication was not
-attempted. That is deliberate: "would this work" includes "could this
-authenticate", and a dry run that cannot answer that should say so rather than
-fail.
+one process's environment; `docs/action.md` covers how the action scopes it, which
+matters because a build may run arbitrary project build scripts. A dry run with no
+credential prints the plan and says publication was not attempted, because
+"would this work" includes "could this authenticate".
 
 ### What a publication does
 
@@ -149,9 +142,9 @@ verify every remote asset       name, size, sha256 digest, state
 publish the draft, once
 ```
 
-The draft is the point. A failed upload leaves a draft with eleven of twelve
-files on it, which is a state a rerun finishes rather than a state to throw away.
-The release becomes public in exactly one call, after every file has been proved
+The draft is the point: a failed upload leaves a draft with eleven of twelve files
+on it, which is a state a rerun finishes rather than a state to throw away. The
+release becomes public in exactly one call, after every file has been proved
 against the digest the local build computed.
 
 Idempotence, precisely:
@@ -185,13 +178,11 @@ is `generated`, `file`, `text`, or `none`.
 | total release size | none | a 400 GiB release is allowed and is nobody's problem |
 | bandwidth quota | none | throughput is throttled, not refused |
 
-`zup publish github --dry-run` runs the whole preflight and mutates nothing. A
-release that cannot be published is refused before a draft exists, rather than
-after eleven gigabytes have been uploaded to one.
-
-A transport package is packed to a 1536 MiB ceiling rather than 2 GiB, because a
-package exactly at the limit has no room for a host that rounds or appends a
-trailer.
+`zup publish github --dry-run` runs the whole preflight and mutates nothing, so a
+release that cannot be published is refused before a draft exists rather than
+after eleven gigabytes have been uploaded to one. A transport package is packed to
+a 1536 MiB ceiling rather than 2 GiB, because a package exactly at the limit has no
+room for a host that rounds or appends a trailer.
 
 ### Receipts
 
@@ -205,11 +196,11 @@ when a release needs to be found again.
 GitHub's immutable releases are **designed for**, and the provider reports what
 the host says. `immutable_releases` is `None` on a server too old to have the
 field, and "not reported" is never rendered as "not enabled". zup does not enable
-the setting for a project; the answer is Settings → Releases, because a provider
+the setting for a project — the answer is Settings → Releases, because a provider
 silently changing a repository's settings is a worse surprise than a documented
-click. What zup guarantees instead is that it never mutates a published release:
-once public, those bytes are what somebody downloaded, and the publisher refuses
-any action on them.
+click — and guarantees instead that it never mutates a published release: once
+public, those bytes are what somebody downloaded, and the publisher refuses any
+action on them.
 
 ## Reading it back
 
@@ -223,12 +214,10 @@ repository = "acme/acme"
 
 ### Packages, not blob paths
 
-A release should read like a release page. A project with nine thousand content
-objects must not turn that into nine thousand assets — and must not, because the
-per-release limit is a thousand and a repository whose graph has become a list of
-hexadecimal filenames has stopped being a graph.
-
-So content travels as **one package per variant**:
+A project with nine thousand content objects must not turn that into nine thousand
+assets — and must not, because the per-release limit is a thousand and a
+repository whose graph has become a list of hexadecimal filenames has stopped
+being a graph. So content travels as **one package per variant**:
 
 ```text
 offset 0   "ZUPGPKG\0"  8 bytes magic
@@ -247,25 +236,23 @@ makes moving a project from GitHub-only distribution to a real CDN a configurati
 change rather than a content migration.
 
 The header is a header because sharding needs somewhere to say where the shards
-are, and the first shard is where the answer belongs. A sharded package's
-descriptor is readable from shard 0 alone, which is what lets a client open a
-package by fetching one small file rather than a directory listing. Piece 0
-therefore begins at byte 0 and holds the header, the index, and whatever frames
-fit, so the pieces tile the whole package with no gap.
+are: piece 0 begins at byte 0 and holds the header, the index, and whatever frames
+fit, so a sharded package's descriptor is readable from shard 0 alone and the
+pieces tile the package with no gap.
 
 ### A locator, not a trust anchor
 
 `zup-package-win-x64.json` says *where* the bytes are: the package's name, its
 digest, its length, and its pieces. It does **not** decide what is installed.
 Every blob inside the package is verified against a digest from the release's own
-authenticated content catalog before it is published into the cache, so a
-tampered descriptor can cause a wrong-blob attempt and a wasted download — both
-caught — and cannot cause unverified content to be installed.
+authenticated content catalog before it is published into the cache, so a tampered
+descriptor can cause a wrong-blob attempt and a wasted download — both caught — and
+cannot cause unverified content to be installed.
 
-The descriptor is still worth publishing, for one reason: when a project *does*
-sign its release through TUF, it is one more small named thing to put in the
-signed targets, and sharding cannot work without somewhere authenticated to
-record the shard map.
+The descriptor is still worth publishing for one reason: when a project *does* sign
+its release through TUF, it is one more small named thing to put in the signed
+targets, and sharding cannot work without somewhere authenticated to record the
+shard map.
 
 ### Two release references
 
@@ -276,12 +263,11 @@ Latest   https://github.com/owner/repo/releases/latest/download/<asset>
 
 A pinned reference is an identity: it names one release and resolves to the same
 bytes forever. A version-pinned thin installer must use it, because a bootstrapper
-that can silently become a later release is a bootstrapper that will.
-
-`latest` is a *channel*, and it is the one place zup uses GitHub's own opinion
-about which release is newest. It cannot express `beta`, `nightly`, or `canary`,
-and zup does not pretend otherwise. Complex channels stay on the generic TUF path,
-where a channel is a signed pointer rather than a redirect.
+that can silently become a later release is a bootstrapper that will. `latest` is
+a *channel*, and it is the one place zup uses GitHub's own opinion about which
+release is newest. It cannot express `beta`, `nightly`, or `canary`, and zup does
+not pretend otherwise; complex channels stay on the generic TUF path, where a
+channel is a signed pointer rather than a redirect.
 
 The redirect is transport, never trust. A signed URL with an expiry in it is a
 fetch target for one transfer; caching it as an address would make a temporary
@@ -301,20 +287,19 @@ broken install for some users on the day it stops. So range is probed:
 
 The third row is the interesting one. A host that disagrees about what byte *n* is
 is a host whose bytes cannot be trusted at all, and reading the wrong bytes is
-worse than reading all of them. Once that has been seen, the host is not asked
-again: a misaligned range is a property of the host, not of one unlucky frame.
-
-All three outcomes settle the question for the rest of the source's life, and
-`Metrics` counts which happened, so `zup doctor` can say whether a project is
-actually range-accelerated or quietly downloading whole packages.
+worse than reading all of them. Once that has been seen the host is not asked
+again, and `Metrics` counts which of the three outcomes happened, so `zup doctor`
+can say whether a project is actually range-accelerated or quietly downloading
+whole packages.
 
 ### Resume
 
-A frame is streamed into the cache chunk by chunk, at the cache's resume offset.
-Reading a response whole first would mean a connection that drops at ninety
-percent of a ninety-megabyte blob costs all ninety megabytes, because nothing
-reached disk. So an interrupted transfer leaves a partial, and the next attempt
-asks for exactly the bytes the cache does not have.
+A frame is streamed into the cache chunk by chunk, at the cache's resume offset, so
+an interrupted transfer leaves a partial and the next attempt asks for exactly the
+bytes the cache does not have. Reading a response whole first would mean a
+connection that drops at ninety percent of a ninety-megabyte blob costs all ninety
+megabytes, because nothing reached disk. `docs/online-acquisition.md` has the
+resume algorithm and the cache model.
 
 ## `zup ci github`
 
@@ -341,15 +326,11 @@ plan  →  build (matrix)  →  compose  →  attest  →  publish
 - runners are the current native labels, including `windows-11-arm`; a target with
   no native runner is marked cross-compiled rather than given a lie
 - each phase calls the official zup action, which installs a released zup rather
-  than compiling one. That is not brevity: `cargo build -p zup` only ever worked
-  inside the zup repository, so the generated file was correct for exactly one
-  project
+  than compiling one
 - every *third-party* action uses the ref `github-actions.lock.json` tracks, and
   `check` fails a committed workflow that drifts off it
 - the publish credential is an action input to one step, not a step-level `env:`
-  on several. `zup build` may run Tauri, Electron, Cargo build scripts and npm
-  scripts, and a token in that environment is a token handed to whatever the
-  project's build does
+  on several. `docs/action.md` covers the security model that follows from it.
 - attestation uses `actions/attest`. `actions/attest-build-provenance` is now only
   a wrapper on top of it
 - permissions are least-privilege at the top and narrower per job: only `publish`
@@ -372,10 +353,9 @@ CI dependencies — are marked as such, so a project is not told to pin a Rust c
 its pipeline does not have. That is enough for CI to fail on drift without parsing
 prose.
 
-The generated workflow is **optional**. `docs/action.md` covers the other way to
-release: writing the phases yourself with repeated invocations of the action. The
-two are equally valid, and which one a project wants is a decision about how much
-of the pipeline it wants to own.
+The generated workflow is **optional**; `docs/action.md` covers the other way to
+release. The two are equally valid, and which one a project wants is a decision
+about how much of the pipeline it wants to own.
 
 ## Enterprise
 
@@ -390,8 +370,8 @@ One hostname, three bases, three different services:
 Uploads are a separate service with a separate rate limit, which is why an
 implementation that shares one base with the API cannot read the upload budget
 off an API response. `GITHUB_API_URL` and `GITHUB_SERVER_URL` are honoured when
-set. Features a given server version may not have — immutable releases above all —
-are feature-detected and reported as "not reported".
+set, and features a given server version may not have — immutable releases above
+all — are feature-detected and reported as "not reported".
 
 ## What this is deliberately not
 
@@ -403,7 +383,7 @@ are feature-detected and reported as "not reported".
   publish both copies, because each package is a separate asset on a host with no
   cross-asset storage. What deduplicates is the *asset count*, and that is the
   thing that breaks.
-- **Not a replacement for a CDN.** See below.
+- **Not a replacement for a CDN.** See [Limitations](#limitations).
 
 ## Limitations
 

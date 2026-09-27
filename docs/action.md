@@ -10,57 +10,35 @@ That is the whole thing. The action installs the zup CLI, verifies it, runs the
 phase you asked for, and reports the result as annotations, a job summary and
 typed outputs.
 
+`action.yml` declares every input and output with its default. The ones with
+behaviour worth knowing about are covered below.
+
 ## What it is, and what it is not
 
 The action is an **orchestration and reporting layer**. Every decision about what
-to build, how to compose it, what to attest and how to publish a release is made
-by the Rust CLI, and the action's job is to make the CLI pleasant to call from a
-workflow.
+to build, what to attest and how to publish a release is made by the Rust CLI.
 
-```text
-you write          the action does                       the CLI decides
-─────────────────────────────────────────────────────────────────────────────
-operation: build   install + verify zup, run it,         how a target builds,
-                   parse one JSON envelope,               what an artifact is,
-                   annotate, summarise                    what is worth attesting
-```
-
-Three things it deliberately does not do:
-
-- **It is not a second GitHub publisher.** Creating a release, uploading an asset,
-  resuming a draft and verifying a remote SHA-256 are `zup publish github`, with
-  fifty-two tests against a host that misbehaves. An action that reimplemented
-  them would be a second publisher with a second set of bugs.
-- **It is not framework-aware.** No Tauri, Electron or Flutter logic. When a
-  future adapter produces `latest.json`, a `.sig`, a `latest.yml` or a
-  `.blockmap`, they appear in the release manifest and the action publishes and
-  attests them without a line changing.
+- **It is not a second GitHub publisher.** Creating a release, uploading an
+  asset, resuming a draft and verifying a remote SHA-256 are `zup publish
+  github`; see [GitHub distribution](github-distribution.md). An action that
+  reimplemented them would be a second publisher with a second set of bugs.
+- **It is not framework-aware.** No Tauri, Electron or Flutter logic. When an
+  adapter produces `latest.json`, a `.sig`, a `latest.yml` or a `.blockmap`, they
+  appear in the release manifest and the action publishes and attests them
+  without a line changing.
 - **It does not parse human output.** It runs `zup --format json` and reads one
-  versioned envelope. The same envelope is what a future Tauri adapter, an
-  Electron adapter, or a CI system that is not GitHub would read.
+  versioned envelope, which is also what a CI system that is not GitHub reads.
 
 ## Why a JavaScript action
 
-Four options were considered. The decision is recorded here so it does not need
-revisiting casually.
+JavaScript on `node24` is the GitHub-native model, and `action.yml` with
+`runs.using: node24` is the shape the runner, the Marketplace and dependabot all
+understand. A Rust action would ship six compiled binaries whose only job is to
+download one more binary, and the `@actions/*` packages *are* the API: inputs,
+outputs, masking, annotations, job summaries, the tool cache and artifact
+uploads are all toolkit functions.
 
-| option | verdict |
-| --- | --- |
-| `actions-rs` 0.1.1 | Rejected. The organisation was archived in October 2023 and its actions run on a Node version GitHub no longer supports. A release pipeline is the worst place to depend on it. |
-| `ghactions` 0.20 | Rejected. It is maintained, and that is the strongest argument for it. But a Rust action is distributed as a compiled binary per platform, so the project would ship six binaries whose only job is to download one more binary. |
-| **JavaScript/TypeScript** | **Chosen.** The GitHub-native model is cross-platform, Marketplace and self-hosted-runner behaviour is well understood, and `node24` is the current runtime. |
-| composite / Docker | Rejected. A composite action cannot express a package manager, a cache, or a binary verification. A Docker action needs a container per architecture and adds a layer between the runner and the tool. |
-
-Cross-cutting, the deciding arguments: the action's entire job is to install a
-native `zup`, so a native action that only installs a native binary is a native
-binary with fewer features. The `@actions/*` packages *are* the API — inputs,
-outputs, log groups, masking, annotations, job summaries, the tool cache and
-artifact uploads are all toolkit functions, and reimplementing them means
-reimplementing a workflow runtime. And `action.yml` with `runs.using: node24` is
-the shape the runner, the Marketplace and dependabot all understand.
-
-Dependencies are pinned to exact versions with a committed `bun.lock`, verified
-against the npm registry at implementation time rather than copied from here:
+Dependencies are pinned to exact versions in a committed `action/bun.lock`:
 
 | package | version | why |
 | --- | --- | --- |
@@ -87,27 +65,19 @@ Bun  ── installs, tests, bundles ──▶  action/dist/index.js  ── run
 
 Three gates keep the two runtimes from blurring:
 
-**1. `Bun` is not in scope for the action's source.** `tsconfig.json` — the one
-covering `action/src` — sets `"types": ["node"]` and nothing else, so a
-`Bun.file` or `Bun.spawn` in shipped code is a **compile error** rather than a
-review comment. The tests get Bun's globals through a separate
-`tsconfig.test.json`, because they run under Bun. That is why there are two
-tsconfigs rather than one.
-
-**2. The bundle is checked for Bun APIs anyway.** Type checking does not cover a
-transitive dependency that reaches for `Bun.something` at import time.
-`scripts/verify-runtime.mjs` fails on any `Bun.*` in the artifact.
-
-**3. The bundle is executed under Node.** `bun build --target=node` produces Node
-code and `bun test` proves the logic, but a bundle Bun accepts and Node cannot
-load is a green CI run and a broken release in somebody else's workflow. So
-`verify-runtime.mjs` *runs the built artifact as a child process* and inspects
-what it wrote.
-
-`bun build` replaced esbuild. Against this dependency tree it bundles all of it —
-1 221 modules, including the Sigstore/protobuf stack — in about 120 ms with no
-shims and no configuration. The one thing it does *not* do is emit a chunk graph,
-discussed under [Performance](#performance).
+1. **Bun is not in scope for the action's source.** `tsconfig.json` — the one
+   covering `action/src` — sets `"types": ["node"]` and nothing else, so a
+   `Bun.file` or `Bun.spawn` in shipped code is a **compile error** rather than a
+   review comment. The tests get Bun's globals through a separate
+   `tsconfig.test.json`, which is why there are two tsconfigs rather than one.
+2. **The bundle is checked for Bun APIs anyway.** Type checking does not cover a
+   transitive dependency that reaches for `Bun.something` at import time.
+   `scripts/verify-runtime.mjs` fails on any `Bun.*` in the artifact.
+3. **The bundle is executed under Node.** `bun build --target=node` produces Node
+   code and `bun test` proves the logic, but a bundle Bun accepts and Node cannot
+   load is a green CI run and a broken release in somebody else's workflow. So
+   `verify-runtime.mjs` *runs the built artifact as a child process* and inspects
+   what it wrote.
 
 > **A `bun build` trap.** On Bun 1.4.2, `outfile` is accepted and **ignored**: the
 > artifact lands at `./main.js` rather than the path `action.yml` names, and every
@@ -120,39 +90,23 @@ discussed under [Performance](#performance).
 the action and the CLI ship from one commit and a released action defaults to the
 exact zup version it was built against.
 
-The action has its own tag namespace, `action-v*`, because `v1` alone would put two
-unrelated meanings on one prefix.
-
-```text
-action-v1     a movable tag at the current action
-```
-
-One tag, not a version ladder. Nothing outside this repository consumes the action
-yet, so there is no compatibility to promise and no reason to spend a major on a
-breaking input or output change. When somebody does depend on it, the tag is the
-place to start versioning; until then a second tag would be bookkeeping for a
-promise nobody asked for.
-
-The action is not published. Its tag exists so a workflow can name it, not so a
+The action has its own tag namespace, `action-v*`, because `v1` alone would put
+two unrelated meanings on one prefix. It is one movable tag, not a version
+ladder: nothing outside this repository consumes the action yet, so there is no
+compatibility to promise. The tag exists so a workflow can name it, not so a
 release exists.
 
 ## The generated workflow is optional
 
-There are now two equally valid ways to release, and this milestone is the reason
-the second one exists.
-
-**Guided.** `zup ci github generate` writes a complete pipeline: plan, build
-matrix, compose, attest, publish. Use it when you want a working release and do
-not want to think about the architecture.
-
-**Composable.** Write the steps yourself with repeated invocations of this action.
-Use it when you want to control the matrix, the runner per target, or the order of
-the phases.
+There are two equally valid ways to release. `zup ci github generate` writes a
+complete pipeline — plan, build matrix, compose, attest, publish — for a project
+that wants a working release without designing the architecture. Writing the
+steps yourself with repeated invocations of this action is for a project that
+wants to own the matrix, the runner per target, or the order of the phases.
 
 The generated file calls this action once per phase rather than collapsing the
-pipeline into one step. A release pipeline is the file a project most needs to
-audit, and one job per phase keeps `plan → build → compose → attest → publish`
-readable in the diff.
+pipeline into one step, because one job per phase keeps `plan → build → compose →
+attest → publish` readable in the diff.
 
 ## Operations
 
@@ -379,11 +333,10 @@ is not in a zup build by default. The tests assert the allowlist structurally, n
 by grepping a log line.
 
 The token is also never passed as a CLI argument — arguments are visible in a
-process listing and in `ps` output on a shared runner.
-
-It is registered with `core.setSecret` before anything can print it, and the
-action's own log redacts every registered secret from every message it writes:
-annotations, outputs, the job summary and failures.
+process listing and in `ps` output on a shared runner. It is registered with
+`core.setSecret` before anything can print it, and the action's own log redacts
+every registered secret from every message it writes: annotations, outputs, the
+job summary and failures.
 
 ### Dangerous triggers
 
@@ -417,8 +370,6 @@ refused outright when the checkout came from a fork, because that is a decision
 about a specific stranger's branch rather than about a configuration.
 
 ### Permissions
-
-A build needs nothing.
 
 | operation | permissions |
 | --- | --- |
@@ -542,11 +493,9 @@ spend artifact storage without being asked.
 A single already-compressed output — a `.exe`, a `.zup` transport package, a
 `.tar.zst` — is uploaded **without a zip**, using the direct artifact support
 GitHub added in 2026. Zipping a 237 MiB installer spends CPU and storage to make
-it larger. Note that the service then names the artifact after the file rather
-than after `workflow-artifact-name`; the log says so when that happens, because a
-matrix that needs to distinguish two artifacts must give the *files* distinct
-names.
-
+it larger. The service then names the artifact after the file rather than after
+`workflow-artifact-name`; the log says so when that happens, because a matrix
+that needs to distinguish two artifacts must give the *files* distinct names.
 `@actions/artifact` is loaded through a dynamic import, so a workflow that never
 uploads never parses the artifact service's Twirp client.
 
@@ -576,7 +525,7 @@ discovered as a mysterious failure.
 
 For a runner whose architecture zup does not publish for, build zup from source
 and pass `zup-path`. That is the same input the repository's own action tests use,
-and it is the reason a bootstrap dependency on a published release does not exist.
+and it is why testing the action does not require having released it.
 
 ## Maintaining the action
 
@@ -598,18 +547,9 @@ direction — an input nothing reads, or a read input that is not declared — a
 also fails if the default zup version in `workflow.ts` has drifted from the
 workspace version.
 
-### Local development
-
-`@github/local-action` runs the action on a workstation. It emulates a subset of
-the toolkit, so it is a smoke test rather than a substitute: the unit tests are
-the real coverage, and they need no runner and no network.
-
-```bash
-cd action
-bun run local
-```
-
-### What CI checks
+`bun run local` uses `@github/local-action`, which emulates a subset of the
+toolkit. It is a smoke test rather than a substitute: the unit tests are the real
+coverage, and they need no runner and no network.
 
 `action.yml` runs three jobs. `check` is the gate:
 
@@ -624,18 +564,22 @@ bun run metadata           # action.yml matches the implementation
 node scripts/verify-runtime.mjs    # the bundle, under Node 24
 ```
 
-The last line is the one that cannot be skipped and is also the one most likely
-to be deleted by somebody who does not know what it is for. It executes the built
-artifact as a child process and asserts that it is a single ESM file, contains no
-`Bun.*` API, bakes in no absolute path from the build machine, resolves its
-`zup-path` input, and writes a job summary. Each of those checks was verified to
-fire by breaking the bundle deliberately.
+The last line executes the built artifact as a child process and asserts that it
+is a single ESM file, contains no `Bun.*` API, bakes in no absolute path from the
+build machine, resolves its `zup-path` input, and writes a job summary. It cannot
+be skipped.
 
-### Updating the action's own GitHub Action dependencies
+`e2e` then invokes the action as `uses: ./` on `ubuntu-latest`, `windows-latest`,
+`macos-15`, `ubuntu-24.04-arm` and `windows-11-arm`, against a locally built zup
+through `zup-path`, covering setup, build, outputs, a project path containing a
+space, the job summary, and a failing zup failing the step. `tool-bootstrap` is
+opt-in because it needs a published zup release and reaches the network.
+
+### GitHub Action dependency pins
 
 The repository's workflows use version refs — `actions/checkout@v7` — and
-`github-actions.lock.json` tracks what each ref resolves to. Dependabot advances the
-refs; the lock records the answer.
+`github-actions.lock.json` tracks what each ref resolves to. Dependabot advances
+the refs; the lock records the answer.
 
 ```bash
 cargo xtask github-action-pins check             # offline; runs in CI
@@ -644,95 +588,40 @@ cargo xtask github-action-pins refresh           # advance series, re-record com
 ```
 
 `check` runs in every CI job, is offline by default, and fails the build. It
-verifies lock syntax, that every recorded commit is a full lowercase SHA, that every
-action a generated workflow needs is present, and that every `uses:` in a committed
-workflow is the ref the lock tracks. A workflow bumped to `v8` by hand in one file
-while the lock still says `v7` is drift, and it is caught here rather than six months
-later.
+verifies lock syntax, that every recorded commit is a full lowercase SHA, that
+every action a generated workflow needs is present, and that every `uses:` in a
+committed workflow is the ref the lock tracks. A workflow bumped to `v8` by hand
+in one file while the lock still says `v7` is drift, and it is caught here rather
+than six months later.
 
 `--online` answers the two questions a version ref cannot:
 
 - Is a **newer major series** published? (`@v7` while `v8` exists.)
-- **Does this ref still point where it did?** A tag can be moved, and a moved tag is
-  invisible in a diff. The lock's recorded commit is the only thing that makes the
-  difference between "unchanged" and "somebody moved a tag" visible. `check --online`
-  reports a moved *tag*; a moved *branch* channel such as `dtolnay/rust-toolchain@stable`
-  is the channel working as designed and is not reported, because a report that fires
-  every week trains people to ignore it.
+- **Does this ref still point where it did?** A tag can be moved, and a moved tag
+  is invisible in a diff. A moved *tag* is reported; a moved *branch* channel such
+  as `dtolnay/rust-toolchain@stable` is the channel working as designed and is
+  not, because a report that fires every week trains people to ignore it.
 
 `refresh` reaches GitHub, advances every tracked series to the newest major, and
-re-records the commit each ref resolves to. It never runs inside a build: a ref that
-moved under a developer who was only regenerating a matrix is a supply-chain change
-they did not make. Resolution uses `git ls-remote`, so it needs no token, works
-against a mirror, and adds no HTTP client to a tool that otherwise has none.
+re-records the commit each ref resolves to. It never runs inside a build: a ref
+that moved under a developer who was only regenerating a matrix is a supply-chain
+change they did not make. Resolution uses `git ls-remote`, so it needs no token,
+works against a mirror, and adds no HTTP client to a tool that otherwise has none.
 
-This finding is not hypothetical. `Swatinem/rust-cache@v2` had moved between the
-lock being written and `--online` being run, and the check reported it. A workflow
-reading `@v2` was running a different commit than the one that had been reviewed.
-
-`zup ci github check --format json` reports the same refs, with the commit each
-resolved to and the `checkedAt` date, and marks which ones a *generated* workflow
-uses — so a project is not told to track `Swatinem/rust-cache`, which is zup's own CI
-and not its pipeline's.
+`zup ci github check --format json` reports the same pins as part of a larger
+report; see [GitHub distribution](github-distribution.md).
 
 Dependabot opens the pull requests that keep `action/bun.lock` and the
 repository's workflows current. It does not touch generated workflow fixtures, so
 a bot cannot fight the generator.
 
-## Migration note
+## The bundle
 
-Workflows generated by the previous milestone used:
-
-- `cargo build --release -p zup --all-features --bin zup` in every job, which only
-  ever worked inside the zup repository itself;
-- `dtolnay/rust-toolchain` and `Swatinem/rust-cache` in a consumer's pipeline,
-  which the generated file did not need;
-- `actions/checkout@v5`, `actions/upload-artifact@v4` and
-  `actions/download-artifact@v5` as floating tags;
-- `actions/attest-build-provenance`, which is now only a wrapper on top of
-  `actions/attest`;
-- `GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` as a step-level `env:`, which put
-  the credential in the environment of the job it shared.
-
-Re-run the generator and review the diff:
-
-```bash
-zup ci github generate --force
-```
-
-The phase structure, the least-privilege permissions, the native runner labels and
-`cancel-in-progress: false` are all unchanged. What changes is that each phase calls
-the action, no job compiles zup, every third-party action sits on the ref the lock
-tracks, the attestation phase uses `actions/attest`, and the credential is an input
-to one step rather than an environment variable on several.
-
-## Performance
-
-Measured on this repository, Node 24.15.0, Windows.
-
-| | |
-| --- | --- |
-| action startup, median of 10 | **70 ms** |
-| bare `node -e 0` on the same machine, median of 10 | 42 ms |
-| **overhead the action adds** | **~28 ms** |
-| bundle size | 4.4 MiB, one file |
-| `bun build` wall time | ~120 ms |
-| `bun test` wall time (143 tests) | ~145 ms |
-
-~28 ms is the number that matters, and it is small enough not to be worth
-optimising further: a build that takes four minutes does not notice, and the
-alternative — hand-rolling inputs, annotations and the tool cache — would cost
-more in maintenance than it saves in milliseconds.
-
-### Why 4.4 MiB in one file
-
-The bundle is a single file rather than a file plus lazily-loaded chunks, and it
-is roughly 1.6× larger than a split build would be. Sigstore (807 KiB) and the
-artifact service's Twirp client (958 KiB) are reachable only when a workflow sets
-`attest: true` or `upload-workflow-artifacts: true`, and code splitting would keep
-them out of the parse path of a build that does neither.
-
-The trade is deliberate:
+`action/dist/index.js` is one 4.4 MiB file rather than a file plus lazily-loaded
+chunks. Sigstore (807 KiB) and the artifact service's Twirp client (958 KiB) are
+reachable only when a workflow sets `attest: true` or
+`upload-workflow-artifacts: true`, and code splitting would keep them out of the
+parse path of a build that does neither. The trade is deliberate:
 
 - **A single file cannot half-exist.** A chunk graph has content-hashed names, so
   one missing file is an `ERR_MODULE_NOT_FOUND` on a runner, after a green build,
@@ -740,32 +629,20 @@ The trade is deliberate:
   contains exactly one file for the same reason.
 - **A single file is reviewable.** The bundle is committed. A graph of
   content-hashed chunks is a diff nobody reads.
-- **Parsing 4.4 MiB costs about 28 ms**, inside the noise of any real build. The
-  split would save a fraction of that and cost reviewability.
+- **Parsing 4.4 MiB is cheap** next to any real build. The split would save a
+  fraction of that and cost reviewability.
 
 If startup ever matters — a matrix of 200 short jobs, say — the split is a
 one-line change to `scripts/build.mjs` plus a loop in `verify-runtime.mjs`.
 
-**Not yet measured:** the cold download and the warm tool-cache resolution. Both
-need a published zup release, and there is not one yet. The opt-in
-`tool-bootstrap` job is where those numbers belong the day there is.
-
 ## Limitations
 
 - **A published zup release is required for the download path.** The
-  repository's own action tests use `zup-path` with a locally built zup, so testing
-  the action does not require having released it. The opt-in `tool-bootstrap` job
-  covers the real path once a release exists.
-- **Inputs and outputs change freely.** Nothing depends on them yet, and the
-  `action-v*` namespace keeps them off the CLI's tag prefix.
-- **The bundle is one 4.4 MiB file.** A deliberate trade for reviewability and for
-  a build that cannot half-exist. See [Performance](#performance).
-- **`@actions/attest` carries an unfixable advisory.** `actions/attest` v4 is the
-  current GitHub guidance and this is the supported way to reach it; the
-  alternative is reimplementing Sigstore and OIDC, which is strictly worse.
+  repository's own action tests use `zup-path` with a locally built zup, and the
+  opt-in `tool-bootstrap` job covers the real path once a release exists.
 - **`operation: release` runs in one job.** A multi-job pipeline is a
-  hand-written workflow; the generated one shows how, and the action is
-  composable into it.
+  hand-written workflow or the generated one; the action is composable into
+  either.
 - **Attestations need a plan that supports them.** A requested attestation that
   fails on a plan without attestation support is an error, because a release that
   looks attested and is not is worse than one that failed.

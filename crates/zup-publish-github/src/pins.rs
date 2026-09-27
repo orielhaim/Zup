@@ -1,22 +1,12 @@
 //! The GitHub Actions zup's own workflows depend on, and how that set stays current.
 //!
-//! Workflows read `actions/checkout@v7`, not a full commit SHA: that is the
-//! convention the ecosystem uses, the thing dependabot advances, and the thing a
-//! reviewer recognises without a lookup.
+//! Workflows read a moving ref (`actions/checkout@v7`) rather than a full SHA, so a
+//! moved tag is invisible in a diff. `github-actions.lock.json` records the commit
+//! each ref resolved to and the date it was checked; `check --online` reports a ref
+//! that now points elsewhere.
 //!
-//! The cost is that a tag can move, and a moved tag is invisible in a diff. So
-//! `github-actions.lock.json` records, per ref, the commit it resolved to and the
-//! date it was checked, and `cargo xtask github-action-pins check --online` reports
-//! a ref that now points somewhere else. That is the lock's real job; one that only
-//! stored refs would be a list rather than a check. It also enumerates the action
-//! set, so a workflow pulling in an unlisted third-party action is reported, and
-//! `refresh` advances a series in one place instead of a developer typing a new tag
-//! into four files.
-//!
-//! The lock is compiled in, so `zup ci github generate` reads it without touching
-//! the filesystem and stays byte-reproducible: regenerating a matrix never moves a
-//! ref. A third-party marketplace action in a release pipeline is a dependency the
-//! project did not choose, so every entry here has to justify itself in review.
+//! The lock is compiled in so `zup ci github generate` stays byte-reproducible and
+//! never touches the filesystem.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,9 +15,8 @@ use serde::{Deserialize, Serialize};
 
 /// The lock format this build understands.
 ///
-/// Bumped to 2 when `version` stopped being a commit SHA and became a ref, which
-/// is a different field with a different meaning. `check` refuses a lock it does
-/// not understand rather than reading a `version` that meant something else.
+/// `check` refuses a lock it does not understand rather than reading a field that
+/// meant something else.
 pub const LOCK_SCHEMA: u32 = 2;
 
 /// The lock file's path, relative to the repository root.
@@ -38,15 +27,14 @@ const LOCK_JSON: &str = include_str!("../../../github-actions.lock.json");
 
 /// The actions zup's workflows use but a project's generated workflow does not.
 ///
-/// Reported as "known to zup but not referenced" rather than as errors: the zup
-/// repository's own CI needs toolchain actions a consumer's release pipeline has no
-/// reason to pull in.
+/// Reported as "known to zup but not referenced" rather than as errors: zup's own CI
+/// needs toolchain actions a consumer's release pipeline has no reason to pull in.
 const INFRASTRUCTURE: &[&str] = &[
     "actions/setup-node",
     "dtolnay/rust-toolchain",
     "Swatinem/rust-cache",
     "taiki-e/install-action",
-    // The action's toolchain: Bun builds and tests the action, Node 24 runs it.
+    // The action's own toolchain: Bun builds and tests it, Node 24 runs it.
     "oven-sh/setup-bun",
 ];
 
@@ -67,16 +55,12 @@ pub struct ActionPin {
     /// `owner/name`.
     pub repository: String,
     /// The ref a workflow uses after `@`: a major series like `v7`, or a moving
-    /// channel like `stable`.
-    ///
-    /// Stored verbatim rather than normalised, because the ref is what appears in a
-    /// workflow and a lock that renders differently from what it tracks is a lock
-    /// somebody has to translate in their head.
+    /// channel like `stable`. Stored verbatim, because the ref is what appears in a
+    /// workflow.
     pub version: String,
-    /// The commit this ref resolved to on `checked_at`.
-    ///
-    /// A record, not a constraint: its job is to make a moved tag visible, which is
-    /// the one failure mode a version ref cannot report on its own.
+    /// The commit this ref resolved to on `checked_at`: a record, not a constraint.
+    /// Its job is to make a moved tag visible, which a version ref cannot report on
+    /// its own.
     pub sha: String,
     /// When the ref was last resolved against upstream.
     pub checked_at: String,
@@ -122,16 +106,12 @@ pub fn lock() -> PinLock {
 }
 
 /// The raw lock text, so `refresh` can preserve the `$comment` and key order a
-/// human chose rather than reserializing the file into something else.
+/// human chose.
 pub fn lock_json() -> &'static str {
     LOCK_JSON
 }
 
 /// The pin for one action, or why there is none.
-///
-/// A `Result` rather than a panic: the previous table's `pin()` panicked, so a
-/// generator naming a new action crashed with a message about a `const` table
-/// rather than about a lock file somebody has to edit.
 pub fn pin(repository: &str) -> Result<ActionPin, PinError> {
     pins()
         .iter()
@@ -157,8 +137,8 @@ pub enum PinError {
 
 /// The lock file's shape.
 ///
-/// `$comment` is allowed and ignored: the file needs to explain itself to whoever
-/// opens it next, and `$comment` is the one conventional non-hack place for that.
+/// `$comment` is allowed and ignored: it is the one conventional non-hack place for
+/// the file to explain itself to whoever edits it next.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinLock {
@@ -203,9 +183,9 @@ pub struct LockedAction {
     pub sha: String,
     /// When the ref was last resolved against upstream, as `YYYY-MM-DD`.
     ///
-    /// `checkedAt` rather than `checked_at` because the file is read by humans and
-    /// by `jq` as often as by this crate, and camelCase is what the rest of the JSON
-    /// zup writes uses.
+    /// `checkedAt` rather than `checked_at` because the file is read by humans and by
+    /// `jq` as often as by this crate, and camelCase is what the rest of the JSON zup
+    /// writes uses.
     #[serde(rename = "checkedAt")]
     pub checked_at: String,
 }
@@ -254,8 +234,8 @@ mod tests {
         assert_eq!(pin.uses(), "actions/checkout@v7");
         assert_eq!(pin.version, "v7");
         assert_eq!(pin.uses(), format!("{}@{}", pin.repository, pin.version));
-        // No trailing comment: the version is in the ref, so a second copy of it
-        // beside the ref is a second thing that can disagree.
+        // The version is already in the ref; a second copy beside it is a second
+        // thing that can disagree.
         assert!(!pin.uses().contains('#'));
     }
 
@@ -275,8 +255,8 @@ mod tests {
 
     #[test]
     fn a_channel_is_not_a_series() {
-        // `stable` has no version to compare against and `v7.0.1` is a fixed
-        // release rather than something that moves. Only a bare `v<n>` is a series.
+        // Only a bare `v<n>` is a series: `stable` has no version to compare against
+        // and `v7.0.1` is a fixed release rather than something that moves.
         for version in ["stable", "nightly", "v7.0.1", "main", "v"] {
             let pin = ActionPin {
                 repository: "example/action".to_owned(),

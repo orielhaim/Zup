@@ -1,14 +1,12 @@
 /**
  * `GITHUB_STEP_SUMMARY`, and the numbers a developer reads afterwards.
  *
- * A log is a stream; a summary is a record. Somebody looking at a release six
- * months later reads the summary and does not read the log.
+ * A log is a stream; a summary is a record. Somebody looking at a release six months
+ * later reads the summary and does not read the log.
  *
  * The raw JSON is deliberately absent — a summary that dumps the machine envelope is
  * why people stop opening summaries. Two tables and a status line carry everything,
- * and `release-manifest` is an output for the cases that need the document. No
- * timestamps either: they make snapshot tests brittle and nobody has wondered what
- * minute a build finished.
+ * and `release-manifest` is an output for the cases that need the document.
  */
 
 import type { OperationResult } from './result.js'

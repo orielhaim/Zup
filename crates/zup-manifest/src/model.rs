@@ -346,6 +346,11 @@ pub struct GithubWorkflow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<String>,
     /// The zup action the generated pipeline calls, as `owner/repo@ref`.
+    ///
+    /// Defaults to a floating major ref, because that is what an action ref is
+    /// for: a project writes it once and dependabot keeps it current. A project
+    /// that wants the release pipeline pinned to an immutable ref names one here
+    /// instead, and the generated file shows exactly what it will run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
 }
