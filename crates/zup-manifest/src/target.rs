@@ -7,7 +7,7 @@ use zup_core::{
 };
 
 use crate::error::ManifestError;
-use crate::model::{Manifest, Targeted};
+use crate::model::{ArtifactKind, Manifest, Targeted};
 
 /// A kind of declaration that can carry a `targets` filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub enum ResourceKind {
     Service,
     Protocol,
     FileAssociation,
+    Artifact,
 }
 
 impl ResourceKind {
@@ -36,6 +37,7 @@ impl ResourceKind {
             Self::Service => "service",
             Self::Protocol => "protocol",
             Self::FileAssociation => "file association",
+            Self::Artifact => "artifact",
         }
     }
 }
@@ -52,6 +54,64 @@ pub(crate) fn validate_target_matrix(manifest: &Manifest) -> Result<(), Manifest
             src: None,
             span: None,
         });
+    }
+    Ok(())
+}
+
+/// Reject an artifact declaration that could not be composed.
+///
+/// An artifact is refused here, at authoring time, rather than at build time,
+/// because a project that declares an impossible artifact is a mistake in the
+/// manifest and not a problem a user should meet on their first build.
+pub(crate) fn validate_artifacts(manifest: &Manifest) -> Result<(), ManifestError> {
+    for (id, artifact) in &manifest.build.artifacts {
+        if artifact.targets.is_empty() {
+            return Err(ManifestError::EmptyArtifact {
+                artifact: id.to_string(),
+                src: None,
+                span: None,
+            });
+        }
+        for profile in &artifact.targets {
+            if !manifest.build.targets.contains_key(profile) {
+                return Err(ManifestError::UnknownTargetProfileReference {
+                    resource: ResourceKind::Artifact,
+                    profile: profile.to_string(),
+                    src: None,
+                    span: None,
+                });
+            }
+        }
+        if artifact.kind == ArtifactKind::Single && artifact.targets.len() > 1 {
+            return Err(ManifestError::ArtifactTargetCount {
+                artifact: id.to_string(),
+                count: artifact.targets.len(),
+                src: None,
+                span: None,
+            });
+        }
+        if let Some(channel) = &artifact.channel
+            && channel.trim().is_empty()
+        {
+            return Err(ManifestError::EmptyArtifactChannel {
+                artifact: id.to_string(),
+                src: None,
+                span: None,
+            });
+        }
+        if let Some(output) = &artifact.output
+            && (output.is_empty()
+                || output.contains('/')
+                || output.contains('\\')
+                || output.contains(':'))
+        {
+            return Err(ManifestError::ArtifactOutput {
+                artifact: id.to_string(),
+                output: output.clone(),
+                src: None,
+                span: None,
+            });
+        }
     }
     Ok(())
 }
@@ -221,6 +281,7 @@ fn resolve_selection(
 ) -> Result<BTreeSet<TargetProfileId>, ManifestError> {
     validate_target_matrix(manifest)?;
     validate_target_references(manifest)?;
+    validate_artifacts(manifest)?;
 
     let mut canonical_targets = BTreeMap::<TargetTriple, &TargetProfileId>::new();
     for (profile, config) in &manifest.build.targets {

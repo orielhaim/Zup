@@ -1,0 +1,24 @@
+[package]
+name = "zup-dispatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tiny launcher that selects and starts a distribution variant"
+
+[[bin]]
+name = "zup-dispatch"
+path = "src/main.rs"
+
+[[bin]]
+name = "zup-dispatch-console"
+path = "src/console.rs"
+
+[dependencies]
+windows-link.workspace = true
+zup-artifact.workspace = true
+zup-core.workspace = true
+zup-windows.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

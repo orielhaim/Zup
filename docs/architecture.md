@@ -1,11 +1,17 @@
 # Architecture
 
-Zup compiles a declarative manifest into one portable package, then adapts
-that package to a concrete machine. Every stage is platform-neutral until the
-Windows adapter, and the boundary between them is checked by
+Zup compiles a declarative manifest into one portable package, composes that
+package into a distribution artifact, then adapts the artifact to a concrete
+machine. Every stage is platform-neutral until the Windows adapter, and the
+boundary between them is checked by
 `cargo xtask verify-portable-boundaries`.
 
+The measurements and the decisions behind the output side are in
+[the artifact graph report](artifact-graph.md).
+
 ## Pipeline
+
+The output side is one chain, and each link is a distinct type:
 
 ```text
 zup.toml
@@ -17,7 +23,33 @@ ResolvedTargetConfig (one per selected profile)
 zup_core::Installer                        normalized, target-bound
   │  zup-build: materialize                build inventory
   ▼
-zup_build::BuildPlan / TargetBuildPlan     real files: size, SHA-256, destination
+zup_build::TargetBuildPlan                 real files: size, SHA-256, destination
+  │  zup-artifact: DistributionVariant::resolve
+  ▼
+DistributionVariant                        one resolved native target: content,
+                                          runtime, requirements, trust
+  │  zup-artifact: ArtifactComposer        shared store, index, variant manifests
+  ▼
+ArtifactGraph                              the content-addressed descriptor graph
+  │  backend: compose_universal_executable
+  ▼
+DistributionArtifact                       the file a user downloads
+```
+
+`DistributionVariant` and `DistributionArtifact` are different things and are
+not interchangeable. A variant is one machine's worth of work, built locally,
+cached, and executable on its own. An artifact is one file, possibly carrying
+several variants, composed after every variant it needs exists. Keeping them
+apart is what lets variants be built in parallel on different machines and
+artifacts be composed wherever the outputs meet.
+
+On the install side the chain continues:
+
+```text
+DistributionArtifact
+  │  backend: stage_variant                selected variant only
+  ▼
+Portable package                           schema 1, one target
   │  zup-plan: plan                        semantic planning
   ▼
 zup_plan::InstallPlan                      scope, components, resources, privileges
@@ -38,6 +70,80 @@ zup_runtime::InstallOutcome                commit, rollback, reboot, cancel
 Each arrow is a typed hand-off. A stage cannot read the previous stage's
 inputs from the filesystem, and no stage below the adapter imports a Windows
 crate.
+
+### The artifact graph
+
+`zup-artifact` owns the whole model and is portable. A graph is a
+content-addressed descriptor set, modelled on OCI's, with four rules:
+
+- **Deterministic.** Blobs are packed into a table in ascending digest order and
+  split into fixed-size segments, so the same content always produces the same
+  table and the same byte layout. Canonical JSON is the only accepted encoding;
+  a document that is merely *valid* JSON is refused.
+- **Bounds-checked.** Every index, table, manifest, and metadata document has a
+  declared size limit, and a reader allocates from a declared count rather than
+  from a length field in the data. A corrupt or hostile artifact cannot make a
+  reader allocate.
+- **Content-addressed.** Every descriptor names a SHA-256 digest and a size.
+  A reader verifies a blob before exposing it, so a store cannot be laundered
+  into content that merely happens to parse.
+- **Forward-versioned and fail-closed.** An index carries a required-feature
+  bitmask. A reader that does not understand a required feature refuses the
+  artifact rather than installing a subset of it.
+
+Selection is driven by the index, never by a file name. `zup-artifact::select`
+scores every candidate the index names and returns a typed answer — a
+`CandidateVariant`, a `Compatibility`, a `SelectionScore` — rather than a
+boolean. Native beats emulated; a tie is a refusal, not a coin flip; and a
+variant that requires a machine component the host lacks is not offered as an
+emulated fallback, because emulation cannot provide it.
+
+OCI is used as an *adapter* only. `zup-artifact::oci` maps the same graph onto
+`oci-spec`'s index and manifest types, and `export_oci_layout` writes a local
+`oci-layout` directory for a consumer that already speaks OCI. Nothing in the
+installer path depends on it, and no OCI client library is linked.
+
+### The universal Windows artifact
+
+`zup-windows` turns a composed graph into one PE file:
+
+```text
+Acme-Windows-Setup.exe
+    dispatcher              a launcher, not an installer
+    resource 1              the artifact index
+    resource 2              the content store table
+    resources 3..           one variant manifest per variant
+    resources ..            one native runtime per variant
+    resources ..            the content store, one region per segment
+```
+
+The layout is fixed and total, and `UniversalLayout` owns the identifier
+arithmetic, so a reader knows which identifier holds what without consulting
+the index first. Everything lives inside Authenticode-hashed image sections,
+because resources are written before the image is signed; there is no trailing
+overlay, so a signature covers the whole artifact.
+
+The dispatcher is a launcher and nothing else. It inspects the host, validates
+the index, selects a variant, verifies and materializes it into a per-user,
+SID-bound content store, starts the variant's own native runtime, and forwards
+its exit code. It holds no lifecycle authority: no registry, no services, no
+elevation, no prerequisites. Every privileged operation happens inside the
+selected native runtime, in its own architecture, which is what lets the
+dispatcher be small enough to run under an emulation layer on a machine whose
+native variant is something else.
+
+`zup-pe` holds the PE header and resource primitives the dispatcher and the
+composer share, so there is one implementation of the certificate table and the
+resource directory. `zup-windows::bundle_packager` delegates to it.
+
+The dispatcher is built for **32-bit x86**. Windows runs 32-bit x86 everywhere,
+and 64-bit only where the operating system is 64-bit, so the narrowest variant
+in an artifact decides how wide a dispatcher may be: a host that can run the
+narrowest variant must be able to start the dispatcher first. Composition
+enforces this rather than trusting the build step, and refuses a dispatcher
+wider than the narrowest included variant. `scripts/build-dispatcher.ps1`
+produces the images and installs them beside the `zup` executable, which is
+where `zup build` and the composition tests look for a template.
 
 ### Authoring
 
@@ -70,6 +176,13 @@ source = { directory = "dist/x64" }
 target = "aarch64-pc-windows-msvc"
 source = { directory = "dist/arm64" }
 frontend = "headless"
+
+[build.artifacts.windows]
+kind = "universal"
+mode = "offline"
+targets = ["windows-x64", "windows-arm64"]
+channel = "stable"
+output = "Acme-Windows-Setup.exe"
 
 [install]
 scope = "either"
@@ -111,6 +224,21 @@ when profiles are written as `[build.targets.<profile>]` dotted keys. Every
 authoring surface; the parser rejects every other key, so a manifest cannot
 carry an option the engine does not implement.
 
+`[build.artifacts.<id>]` is optional and declares a file this project
+publishes:
+
+| Key | Meaning |
+| --- | --- |
+| `kind` | `universal` (all listed targets) or `single` (exactly one) |
+| `mode` | `offline` (content in the file) or `thin` (content fetched) |
+| `targets` | Profiles to include. Empty means every selected target. |
+| `channel` | Release channel this artifact follows. Absent means an exact version. |
+| `output` | File name. Absent derives one from the app name. |
+
+A project that declares no artifacts builds one installer per selected target,
+which is the simplest thing that works and the behaviour before artifacts
+existed. Declaring artifacts changes what `zup build` produces, nothing else.
+
 ### Target resolution and canonical target identity
 
 A **target profile** is a friendly name; a **target triple** is the canonical
@@ -135,11 +263,13 @@ ordered by profile name, so a build is reproducible.
 | Output path | name derived from the app name | explicit `--output` |
 
 `--runtime` and `--output` are positional against the selected targets: one of
-each per target, in selection order. A single selected target may omit
-`--runtime` and use the template found next to the `zup` executable. Missing,
-duplicated, or miscounted inputs are reported per target, so one run shows
-every problem instead of the first. `zup doctor` reports the same resolution
-read-only, as readiness checks.
+each per target, in the manifest's own target order, which is ordered by profile
+name. A miscounted flag names the profiles in that order rather than leaving the
+reader to guess which template goes with which target. A single selected target
+may omit `--runtime` and use the template found next to the `zup` executable.
+Missing, duplicated, or miscounted inputs are reported per target, so one run
+shows every problem instead of the first. `zup doctor` reports the same
+resolution read-only, as readiness checks.
 
 ### Profile resource filters
 
@@ -239,7 +369,8 @@ Authoring commands share the target selection and override rules above.
 
 | Command | Purpose |
 | --- | --- |
-| `zup build` | Produce a self-contained installer executable |
+| `zup build` | Produce installers or composed distribution artifacts |
+| `zup artifact inspect` | Describe what a built artifact contains and how it verifies |
 | `zup init` | Write a small, editable `zup.toml` and its source directory |
 | `zup check` | Validate a manifest and its build inputs |
 | `zup doctor` | Report build readiness for the selected targets |
@@ -259,7 +390,31 @@ Authoring commands share the target selection and override rules above.
 --frontend <gui|console|headless>
 --force
 --target <PROFILE_OR_TARGET>   repeatable
+--artifact <ARTIFACT>          repeatable, conflicts with --universal
+--universal                    compose every selected target into one file
+--dispatcher <PATH>            the launcher an artifact is composed into
+--release-manifest <PATH>      release description, or `none`; [default: dist/zup-release.json]
 ```
+
+`--target` and `--artifact` answer different questions and are not synonyms.
+`--target` names a native variant to build or debug, and produces one ordinary
+installer per named target. `--artifact` names a file a user downloads, and
+produces the composed graph. `--universal` is the shorthand for "compose every
+selected target into one file" and is refused alongside `--artifact`.
+
+`--dispatcher` names the launcher template a composed artifact is written into.
+The template must be unsigned, must present the launcher experience the
+artifact's variants agreed on, and must be no wider than the narrowest machine
+among them. When the flag is absent, `zup build` looks for `zup-dispatch.exe`
+or `zup-dispatch-console.exe` beside itself.
+
+`zup artifact inspect <ARTIFACT> [--format <human|json>]` reads a composed
+artifact with the same parser the dispatcher and the runtime use, and verifies
+every content digest it reports. The JSON report is versioned
+(`report_version: 1`) and states the artifact's kind, mode, pin, launcher
+subsystem, its variants, what composition cost and saved, and what could be
+proven about trust: Authenticode presence, index validity, content digests, and
+variant completeness.
 
 `zup check` takes `--manifest`, `--source`, `--install-directory`, and
 `--target`. `zup plan` takes `--manifest`, `--target`, `--scope`, `--state-root`,
@@ -271,7 +426,10 @@ exactly one target, so a multi-profile manifest must name one with `--target`.
 `--format <human|json>`. It reports one row per check per profile, for the
 canonical target, manifest compile, source payload, plugin engine, update root,
 frontend, runtime template, runtime target, runtime subsystem, build backend,
-target lowering, and output parent. The JSON report is versioned
+target lowering, output parent, and composition. The composition row reports
+what the selected targets would cost as separate installers and what one
+composed artifact would store once, so the value of a universal artifact is
+visible before anyone builds one. The JSON report is versioned
 (`version: 1`) and carries `profile`, `target`, `kind`, `status`, `message`,
 and `path` per check, so a consumer reads `status` and `path` without parsing
 prose.
@@ -301,13 +459,15 @@ cargo xtask emit-portable-matrix
 
 | Matrix | Host | Contents |
 | --- | --- | --- |
-| `portable-core` | any | `zup-core`, `zup-manifest`, `zup-build`, `zup-plan`, `zup-platform`, `zup-exec`, `zup-transaction`, `zup-bootstrap`, `zup-bundle`, `zup-protocol`, `zup-runtime`, `zup-presentation`, `zup-update`, `zup-plugin-contract`, `zup-plugin-build`, `zup-plugin-runtime` |
+| `portable-core` | any | `zup-core`, `zup-manifest`, `zup-build`, `zup-plan`, `zup-platform`, `zup-exec`, `zup-transaction`, `zup-bootstrap`, `zup-bundle`, `zup-artifact`, `zup-protocol`, `zup-runtime`, `zup-presentation`, `zup-update`, `zup-plugin-contract`, `zup-plugin-build`, `zup-plugin-runtime` |
 | `portable-tests` | any | `zup-xtask` |
-| `windows-only` | Windows | `zup-windows`, `zup`, `zup-ui` |
+| `windows-only` | Windows | `zup-pe`, `zup-windows`, `zup-dispatch`, `zup`, `zup-ui` |
 
 `zup` is the composition CLI. It is Windows-only because it links the Windows
 adapter to answer `zup plan` and to run the lifecycle, not because the manifest
-model or the build pipeline needs a Windows host.
+model or the build pipeline needs a Windows host. `zup-artifact` and `zup-pe`
+are on the opposite sides of that line from each other, which is the point:
+the artifact model is portable and the PE primitives are not.
 
 `cargo xtask verify-portable-boundaries` fails when a portable crate:
 
@@ -340,7 +500,10 @@ Adding a crate means adding it to exactly one matrix.
 SHA-256-protected JSON index for one target, and Zstandard-compressed
 content-addressed blobs. `Package::open` verifies the index and every blob
 before exposing payload, plugin, or prerequisite data. The same bytes are
-readable on any host without an executable.
+readable on any host without an executable. `BundleWriter::write_plan` writes a
+package from an already-compressed blob set, which is how one variant is
+materialized out of a shared multi-gigabyte store without decompressing and
+recompressing anything.
 
 `zup-windows` adapts that package to a PE. The index becomes resource 1 and
 each compressed blob becomes the following resource; identifiers are assigned
@@ -348,6 +511,30 @@ at embed time and are not part of the package schema. `zup build` also rejects
 a runtime whose PE subsystem or template name does not match the selected
 frontend, and refuses to embed into an already signed executable. Sign the
 finished artifact, because Authenticode covers the embedded package.
+
+`AutoPayloadSource` reads its payload from one of two places: the package
+embedded in the running executable, or a `variant.zup` sidecar beside a bare
+`Setup.exe`. The sidecar is how a native runtime finds its content after the
+dispatcher has staged it.
+
+## Staging and what survives an install
+
+`stage_variant` materializes one selected variant into a per-user, SID-bound
+content store and writes three files: the variant's native runtime, its package,
+and the artifact index. It creates files and returns the digests it proved. It
+opens nothing privileged, reads no registry, and touches no lifecycle state.
+
+The store is per-user and SID-bound, never a machine-wide location, because the
+dispatcher that writes it has no elevation and must not need any. Its
+directories are verified to be real directories and not reparse points before
+anything is written through them, and each records the digest of its own
+identity so a substituted directory is detected rather than trusted.
+
+After an install the machine keeps the **selected variant's** maintenance state
+and nothing else. The full universal artifact is not retained: a machine that
+installed the x64 variant has no copy of the ARM64 one, and `stage_variant`
+streams the selected variant's blobs out of the shared store so that is true by
+construction rather than by cleanup.
 
 ## Runtime backend seam
 
@@ -395,6 +582,9 @@ change is expected without a version bump.
 | --- | --- | --- |
 | `zup.toml` `schema` | `zup_manifest::SCHEMA_VERSION` | 1 |
 | Package index and blobs | `zup_bundle::PACKAGE_SCHEMA` | 1 |
+| Artifact index and variant manifests | `ARTIFACT_INDEX_SCHEMA` | 1 |
+| Content store table | `BLOB_TABLE_SCHEMA` | 1 |
+| Release description | `RELEASE_SCHEMA` | 1 |
 | Process protocol frame | `zup_protocol::PROTOCOL_VERSION` | 1 |
 | Plugin API | `PLUGIN_API_VERSION` | 1.0.0, AOT format 1, Wasmtime 49.0.0 |
 | Install ledger | `zup_exec::INSTALL_LEDGER_SCHEMA` | 1 |
@@ -403,6 +593,7 @@ change is expected without a version bump.
 | Bootstrap plan and state | `BOOTSTRAP_PLAN_SCHEMA`, `BOOTSTRAP_STATE_SCHEMA` | 1 |
 | Automation protocol | `zup_presentation::AUTOMATION_PROTOCOL_VERSION` | 1 |
 | Doctor report | `zup::doctor::REPORT_VERSION` | 1 |
+| Artifact inspection report | `zup::inspect_artifact::REPORT_VERSION` | 1 |
 
 Each loader compares the stored version before deserializing, and a mismatch is
 an error.
@@ -415,13 +606,20 @@ Two jobs: `windows` on `windows-latest` and `ubuntu (portable)` on
 cache.
 
 The Windows job runs, in order: `cargo fmt --all --check`, `cargo clippy
---workspace --all-features --all-targets -- -D warnings`, `cargo nextest run
---workspace --all-features`, `cargo test --workspace --all-features --doc`,
-`cargo machete`, `git diff --check`, `cargo xtask verify-portable-boundaries`,
-a `zup schema --output schema/zup.schema.json` step that fails when the
+--workspace --all-features --all-targets -- -D warnings`,
+`scripts/build-dispatcher.ps1`, `cargo nextest run --workspace --all-features`,
+`cargo test --workspace --all-features --doc`, `cargo machete`,
+`git diff --check`, `cargo xtask verify-portable-boundaries`, a
+`zup schema --output schema/zup.schema.json` step that fails when the
 checked-in schema differs from the generated one, and
 `scripts/verify-frontend-features.ps1`, which proves the three frontend
 templates build with the intended dependency graphs and PE subsystems.
+
+The dispatcher is a required input to the composition tests, not something
+`cargo test` builds: it is a separate package with a deliberately small
+dependency closure, which is the wrong trade for a 128 MB installer and the
+right one for a launcher whose size is a design constraint. A test that needs a
+dispatcher says so rather than passing without composing anything.
 
 The Ubuntu job emits both portable matrices, then verifies the portable stack
 natively on Linux:
@@ -447,10 +645,19 @@ non-Windows target is refused at the boundary on any host.
 ## Current status
 
 The Windows backend is implemented: `zup build` produces a self-contained
-installer for every Windows target, and the runtime installs, updates, repairs,
-and uninstalls through the transaction engine and the authenticated worker.
+installer for every Windows target, or one universal offline installer carrying
+several of them, and the runtime installs, updates, repairs, and uninstalls
+through the transaction engine and the authenticated worker.
+
+Composition is complete for the offline mode. A thin artifact — one that
+carries the index and a launcher and fetches content — is not yet produced;
+`[build.artifacts]` accepts `mode = "thin"` and a `channel`, and composition
+records both, but nothing fills a thin store yet. `zup-update` still resolves
+updates from the release description's variant list rather than from a
+content-addressed fetch.
 
 The portable stack is not a claim about Linux support. It is the property that
-the semantic model, the build inventory, planning, the transaction engine, the
-package format, plugins, the runtime session, and the protocol build and test
-natively on Linux today, in CI, so the Windows adapter stays an adapter.
+the semantic model, the build inventory, the artifact graph, planning, the
+transaction engine, the package format, plugins, the runtime session, and the
+protocol build and test natively on Linux today, in CI, so the Windows adapter
+stays an adapter.

@@ -2,7 +2,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -16,39 +16,36 @@ use zup_bundle::{
 use zup_core::{
     Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, TargetTriple, hash_reader,
 };
+use zup_pe::{
+    MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument,
+};
 
-const RESOURCE_TYPE_RCDATA: usize = 10;
-const RESOURCE_ID_INDEX: usize = 1;
-const RESOURCE_ID_BLOB_START: usize = 2;
 const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
 const WINDOWS_ARM64_TARGET: &str = "aarch64-pc-windows-msvc";
-const PE_SUBSYSTEM_OFFSET: u64 = 68;
-const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = PE_SUBSYSTEM_OFFSET + 2;
-const IMAGE_SUBSYSTEM_CUI: u16 = 3;
-const IMAGE_SUBSYSTEM_GUI: u16 = 2;
-const MAX_RESOURCE_SIZE: u64 = u32::MAX as u64;
 
 /// Errors produced by the Windows package adapter.
 #[derive(Debug, Error)]
 pub enum BundleError {
     #[error(transparent)]
     Package(#[from] PackageError),
+    #[error(transparent)]
+    Portable(PeError),
     #[error("bundle I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("bundle is truncated, corrupt, or unsupported")]
     Invalid,
     #[error("executable has no embedded package index")]
     MissingResource,
+    #[error("bare runtime has no content store beside it at `{path}`")]
+    MissingSidecar { path: String },
+    #[error("`{path}` is a universal artifact; run it to install the variant this host needs")]
+    UniversalArtifact { path: String },
     #[error("package data is {size} bytes; the Windows resource limit is {limit} bytes")]
     ResourceTooLarge { size: u64, limit: u64 },
     #[error("package has {count} blobs; the Windows resource identifier limit is {limit}")]
     TooManyBlobs { count: usize, limit: usize },
     #[error("cannot allocate {size} bytes while processing executable resources")]
     ResourceAllocation { size: u64 },
-    #[error("PE resource API failed: {0}")]
-    ResourceApi(u32),
-    #[error("PE resource APIs are available only on Windows")]
-    ResourcesUnavailable,
     #[error("runtime already has an Authenticode certificate table; embed before signing")]
     RuntimeAlreadySigned,
     #[error("runtime frontend is {found:?}; expected {expected:?}")]
@@ -66,6 +63,23 @@ impl BundleError {
     }
 }
 
+impl From<PeError> for BundleError {
+    fn from(error: PeError) -> Self {
+        match error {
+            PeError::MissingResource(_) => Self::MissingResource,
+            PeError::Invalid => Self::Invalid,
+            other => Self::Portable(other),
+        }
+    }
+}
+
+/// Read one embedded resource, mapping a missing resource to the adapter's own
+/// answer so a program without a package and a program with a broken one are
+/// told apart.
+fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
+    zup_pe::read_resource(executable, id).map_err(BundleError::from)
+}
+
 /// A package embedded in a Windows executable.
 #[derive(Debug, Clone)]
 pub struct EmbeddedBundle {
@@ -78,10 +92,10 @@ impl EmbeddedBundle {
         let executable = path.as_ref().to_path_buf();
         let index = read_resource(&executable, RESOURCE_ID_INDEX)?;
         let index_info = Package::parse_index(&index)?;
-        if index_info.blob_count() > u16::MAX as usize - 1 {
+        if index_info.blob_count() > zup_pe::MAX_RESOURCE_ID {
             return Err(BundleError::TooManyBlobs {
                 count: index_info.blob_count(),
-                limit: u16::MAX as usize - 1,
+                limit: zup_pe::MAX_RESOURCE_ID,
             });
         }
         let mut blobs = Vec::new();
@@ -255,6 +269,13 @@ impl PayloadSource for EmbeddedPayloadSource {
 }
 
 /// Selects directory, standalone-package, or embedded-executable payload data.
+///
+/// A native runtime's content may live in its own resources, in a standalone
+/// package file, or in a **sidecar store** beside the executable. The sidecar is
+/// what a selected universal variant installs as, and what an installed
+/// maintenance copy reads from after the original artifact is gone. Which one is
+/// in play is decided here and is invisible above: the lifecycle planner only
+/// ever asks for a portable path, a digest, and a length.
 pub enum AutoPayloadSource {
     Portable(PortableAutoPayloadSource),
     Embedded(EmbeddedPayloadSource),
@@ -272,12 +293,44 @@ impl AutoPayloadSource {
         }
         match PortableAutoPayloadSource::from_path(&path) {
             Ok(source) => Ok(Self::Portable(source)),
-            Err(_package_error) if looks_like_pe(&path) => {
-                let bundle = EmbeddedBundle::open(&path)?;
-                Ok(Self::Embedded(bundle.payload_source()))
-            }
+            Err(_package_error) if looks_like_pe(&path) => match EmbeddedBundle::open(&path) {
+                Ok(bundle) => Ok(Self::Embedded(bundle.payload_source())),
+                // An image that carries a universal artifact is not a payload
+                // root; it is something to run.
+                Err(error) if error.is_missing_resource() => {
+                    if is_universal_artifact(&path) {
+                        return Err(BundleError::UniversalArtifact {
+                            path: path.display().to_string(),
+                        });
+                    }
+                    // An image with no package of its own is a bare native
+                    // runtime, whose content is the sidecar store the
+                    // installation persisted beside it.
+                    Self::from_sidecar(&path)
+                }
+                // An image that does carry something zup wrote but cannot read is
+                // a defect, not a sidecar case.
+                Err(error) => Err(error),
+            },
             Err(package_error) => Err(BundleError::Package(package_error)),
         }
+    }
+
+    /// Read the sidecar store beside `executable`, if there is one.
+    ///
+    /// A missing sidecar beside a bare runtime is a real refusal: the runtime has
+    /// no content and no way to get any.
+    fn from_sidecar(executable: &Path) -> Result<Self, BundleError> {
+        let sidecar = sidecar_package_path(executable);
+        if !sidecar.is_file() {
+            return Err(BundleError::MissingSidecar {
+                path: sidecar.display().to_string(),
+            });
+        }
+        let package = Package::open(&sidecar)?;
+        Ok(Self::Portable(PortableAutoPayloadSource::Package(
+            package.payload_source(),
+        )))
     }
 
     pub fn from_paths(
@@ -289,6 +342,26 @@ impl AutoPayloadSource {
             base,
             payload_overlay_root,
         )))
+    }
+}
+
+/// The sidecar package path beside an executable.
+pub fn sidecar_package_path(executable: &Path) -> PathBuf {
+    executable
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(crate::content_store::MAINTENANCE_PACKAGE_NAME)
+}
+
+/// Whether an image is a universal artifact rather than a payload root.
+///
+/// The two are told apart by their first resource, which is a package index in
+/// one case and an artifact index in the other. A single-target artifact stays a
+/// payload root, so this is a narrow question with a narrow answer.
+fn is_universal_artifact(executable: &Path) -> bool {
+    match zup_pe::read_resource(executable, RESOURCE_ID_INDEX) {
+        Ok(bytes) => zup_artifact::ArtifactIndex::parse(&bytes).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -370,12 +443,7 @@ fn is_plugin_path(path: &RelativePath) -> bool {
 }
 
 fn looks_like_pe(path: &Path) -> bool {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic).is_ok() && &magic == b"MZ"
+    zup_pe::looks_like_pe(path)
 }
 
 /// Build an installer executable containing a package index and its blobs.
@@ -412,10 +480,9 @@ pub fn embed_bundle_file(
 }
 
 pub fn read_pe_target(path: &Path) -> Result<TargetTriple, BundleError> {
-    let machine = read_pe_header(path)?.machine;
-    let target = match machine {
-        0x8664 => WINDOWS_X64_TARGET,
-        0xaa64 => WINDOWS_ARM64_TARGET,
+    let target = match zup_pe::read_pe_header(path)?.machine {
+        zup_pe::Machine::Amd64 => WINDOWS_X64_TARGET,
+        zup_pe::Machine::Arm64 => WINDOWS_ARM64_TARGET,
         _ => return Err(BundleError::Invalid),
     };
     TargetTriple::parse(target).map_err(|_| BundleError::Invalid)
@@ -441,10 +508,10 @@ pub enum PeSubsystem {
 }
 
 pub fn read_pe_subsystem(path: &Path) -> Result<PeSubsystem, BundleError> {
-    match read_pe_header(path)?.subsystem {
-        IMAGE_SUBSYSTEM_CUI => Ok(PeSubsystem::Console),
-        IMAGE_SUBSYSTEM_GUI => Ok(PeSubsystem::Gui),
-        _ => Err(BundleError::Invalid),
+    match zup_pe::read_pe_header(path)?.subsystem {
+        zup_pe::Subsystem::Console => Ok(PeSubsystem::Console),
+        zup_pe::Subsystem::Gui => Ok(PeSubsystem::Gui),
+        zup_pe::Subsystem::Other(_) => Err(BundleError::Invalid),
     }
 }
 
@@ -467,120 +534,16 @@ pub fn validate_pe_frontend(path: &Path, expected: Frontend) -> Result<(), Bundl
     Ok(())
 }
 
-struct PeHeader {
-    machine: u16,
-    subsystem: u16,
-    security_offset: u64,
-}
-
-fn read_pe_header(path: &Path) -> Result<PeHeader, BundleError> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    if len < 0x40 {
-        return Err(BundleError::Invalid);
-    }
-    let mut dos = [0u8; 0x40];
-    file.read_exact(&mut dos)?;
-    if &dos[..2] != b"MZ" {
-        return Err(BundleError::Invalid);
-    }
-    let pe = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
-    if pe < 0x40 || pe.checked_add(24).is_none_or(|end| end > len) {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(pe))?;
-    let mut signature = [0u8; 4];
-    file.read_exact(&mut signature)?;
-    if &signature != b"PE\0\0" {
-        return Err(BundleError::Invalid);
-    }
-    let mut coff = [0u8; 20];
-    file.read_exact(&mut coff)?;
-    let machine = u16::from_le_bytes(coff[..2].try_into().unwrap());
-    let section_count = u16::from_le_bytes(coff[2..4].try_into().unwrap());
-    let optional_offset = pe + 24;
-    let optional_len = u16::from_le_bytes(coff[16..18].try_into().unwrap()) as u64;
-    let optional_end = optional_offset
-        .checked_add(optional_len)
-        .ok_or(BundleError::Invalid)?;
-    if optional_len < PE_MIN_OPTIONAL_HEADER_SIZE || optional_end > len || section_count == 0 {
-        return Err(BundleError::Invalid);
-    }
-    file.seek(SeekFrom::Start(optional_offset))?;
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic)?;
-    let data_directory_offset = match u16::from_le_bytes(magic) {
-        0x10b => 96,
-        0x20b => 112,
-        _ => return Err(BundleError::Invalid),
-    };
-    let security_offset = optional_offset
-        .checked_add(data_directory_offset)
-        .and_then(|offset| offset.checked_add(8 * 4))
-        .ok_or(BundleError::Invalid)?;
-    if security_offset
-        .checked_add(8)
-        .is_none_or(|end| end > optional_end)
-    {
-        return Err(BundleError::Invalid);
-    }
-    let subsystem_offset = optional_offset
-        .checked_add(PE_SUBSYSTEM_OFFSET)
-        .ok_or(BundleError::Invalid)?;
-    file.seek(SeekFrom::Start(subsystem_offset))?;
-    let mut subsystem = [0u8; 2];
-    file.read_exact(&mut subsystem)?;
-    let section_end = optional_end
-        .checked_add(
-            u64::from(section_count)
-                .checked_mul(40)
-                .ok_or(BundleError::Invalid)?,
-        )
-        .ok_or(BundleError::Invalid)?;
-    if section_end > len {
-        return Err(BundleError::Invalid);
-    }
-    Ok(PeHeader {
-        machine,
-        subsystem: u16::from_le_bytes(subsystem),
-        security_offset,
-    })
-}
-
 fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
-    let header = read_pe_header(path)?;
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(header.security_offset))?;
-    let mut certificate = [0u8; 8];
-    file.read_exact(&mut certificate)?;
-    if certificate != [0; 8] {
+    if zup_pe::is_signed(path)? {
         return Err(BundleError::RuntimeAlreadySigned);
     }
     Ok(())
 }
 
-#[cfg(windows)]
-fn embed_bundle_resource(
-    executable: &Path,
-    output: &Path,
-    package_path: &Path,
-) -> Result<(), BundleError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_link::link;
-
-    type Handle = *mut core::ffi::c_void;
-    type Bool = i32;
-    type Dword = u32;
-
-    link!("kernel32.dll" "system" fn BeginUpdateResourceW(filename: *const u16, delete_existing: Bool) -> Handle);
-    link!("kernel32.dll" "system" fn UpdateResourceW(update: Handle, resource_type: *const u16, name: *const u16, language: u16, data: *const core::ffi::c_void, size: Dword) -> Bool);
-    link!("kernel32.dll" "system" fn EndUpdateResourceW(update: Handle, discard: Bool) -> Bool);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-
-    if output.exists() || output == executable {
-        return Err(BundleError::Invalid);
-    }
-    let package = Package::open_unverified(package_path)?;
+/// The resource documents a portable package occupies: the index, then one
+/// resource per compressed blob.
+fn package_documents(package: &Package) -> Result<Vec<ResourceDocument>, BundleError> {
     let index = package.index_bytes()?;
     if index.len() as u64 > MAX_RESOURCE_SIZE {
         return Err(BundleError::ResourceTooLarge {
@@ -588,142 +551,41 @@ fn embed_bundle_resource(
             limit: MAX_RESOURCE_SIZE,
         });
     }
-    if package.blob_count() > u16::MAX as usize - 1 {
+    if package.blob_count() > zup_pe::MAX_RESOURCE_ID {
         return Err(BundleError::TooManyBlobs {
             count: package.blob_count(),
-            limit: u16::MAX as usize - 1,
+            limit: zup_pe::MAX_RESOURCE_ID,
         });
     }
+    let mut documents = Vec::with_capacity(package.blob_count() + 1);
+    documents.push(ResourceDocument {
+        id: RESOURCE_ID_INDEX,
+        bytes: index,
+    });
     for index in 0..package.blob_count() {
-        let size = package.index_info().compressed_size(index).unwrap_or(0);
-        if size > MAX_RESOURCE_SIZE {
+        if package.index_info().compressed_size(index).unwrap_or(0) > MAX_RESOURCE_SIZE {
             return Err(BundleError::ResourceTooLarge {
-                size,
+                size: package.index_info().compressed_size(index).unwrap_or(0),
                 limit: MAX_RESOURCE_SIZE,
             });
         }
+        documents.push(ResourceDocument {
+            id: index + RESOURCE_ID_BLOB_START,
+            bytes: package.compressed_blob(index)?,
+        });
     }
-    std::fs::copy(executable, output)?;
-    let wide: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
-    let update = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
-    if update.is_null() {
-        let _ = std::fs::remove_file(output);
-        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
-    }
-    let apply = |id: usize, data: &[u8]| -> Result<(), u32> {
-        let size = u32::try_from(data.len()).map_err(|_| 87u32)?;
-        let ok = unsafe {
-            UpdateResourceW(
-                update,
-                RESOURCE_TYPE_RCDATA as *const u16,
-                id as *const u16,
-                0,
-                data.as_ptr().cast(),
-                size,
-            )
-        };
-        if ok == 0 {
-            Err(unsafe { GetLastError() })
-        } else {
-            Ok(())
-        }
-    };
-    let result = (|| {
-        apply(RESOURCE_ID_INDEX, &index).map_err(BundleError::ResourceApi)?;
-        for index in 0..package.blob_count() {
-            let blob = package.compressed_blob(index)?;
-            apply(index + RESOURCE_ID_BLOB_START, &blob).map_err(BundleError::ResourceApi)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        unsafe {
-            EndUpdateResourceW(update, 1);
-        }
-        let _ = std::fs::remove_file(output);
-        return Err(error);
-    }
-    if unsafe { EndUpdateResourceW(update, 0) } == 0 {
-        let error = unsafe { GetLastError() };
-        let _ = std::fs::remove_file(output);
-        return Err(BundleError::ResourceApi(error));
-    }
-    Ok(())
+    Ok(documents)
 }
 
-#[cfg(not(windows))]
 fn embed_bundle_resource(
-    _executable: &Path,
-    _output: &Path,
-    _package_path: &Path,
+    executable: &Path,
+    output: &Path,
+    package_path: &Path,
 ) -> Result<(), BundleError> {
-    Err(BundleError::ResourcesUnavailable)
-}
-
-#[cfg(windows)]
-fn read_resource(path: &Path, resource_id: usize) -> Result<Vec<u8>, BundleError> {
-    use std::{os::windows::ffi::OsStrExt, ptr};
-    use windows_link::link;
-
-    type Handle = *mut core::ffi::c_void;
-    type Dword = u32;
-
-    link!("kernel32.dll" "system" fn LoadLibraryExW(filename: *const u16, file: Handle, flags: Dword) -> Handle);
-    link!("kernel32.dll" "system" fn FindResourceW(module: Handle, name: *const u16, resource_type: *const u16) -> Handle);
-    link!("kernel32.dll" "system" fn LoadResource(module: Handle, resource: Handle) -> Handle);
-    link!("kernel32.dll" "system" fn SizeofResource(module: Handle, resource: Handle) -> Dword);
-    link!("kernel32.dll" "system" fn LockResource(resource: Handle) -> *const core::ffi::c_void);
-    link!("kernel32.dll" "system" fn FreeLibrary(module: Handle) -> i32);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let module = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), 0x0000_0002) };
-    if module.is_null() {
-        return Err(BundleError::ResourceApi(unsafe { GetLastError() }));
-    }
-    let resource = unsafe {
-        FindResourceW(
-            module,
-            resource_id as *const u16,
-            RESOURCE_TYPE_RCDATA as *const u16,
-        )
-    };
-    let result = if resource.is_null() {
-        Err(BundleError::MissingResource)
-    } else {
-        let size = unsafe { SizeofResource(module, resource) } as usize;
-        if size == 0 {
-            Err(BundleError::Invalid)
-        } else {
-            let loaded = unsafe { LoadResource(module, resource) };
-            let data = if loaded.is_null() {
-                ptr::null()
-            } else {
-                unsafe { LockResource(loaded) }
-            };
-            if data.is_null() {
-                Err(BundleError::ResourceApi(unsafe { GetLastError() }))
-            } else {
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(size)
-                    .map_err(|_| BundleError::ResourceAllocation { size: size as u64 })?;
-                bytes.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(data.cast::<u8>(), size)
-                });
-                Ok(bytes)
-            }
-        }
-    };
-    unsafe {
-        FreeLibrary(module);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn read_resource(_path: &Path, _resource_id: usize) -> Result<Vec<u8>, BundleError> {
-    Err(BundleError::ResourcesUnavailable)
+    let package = Package::open_unverified(package_path)?;
+    let documents = package_documents(&package)?;
+    zup_pe::write_resources(executable, output, &documents)?;
+    Ok(())
 }
 
 #[cfg(test)]

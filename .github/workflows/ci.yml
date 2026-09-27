@@ -44,6 +44,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
+      # The dispatcher is a required input to the composition tests, and its own
+      # build step is what keeps it out of the default test build.
+      - name: Dispatcher
+        shell: pwsh
+        run: ./scripts/build-dispatcher.ps1
+
       - name: Tests
         run: cargo nextest run --workspace --all-features
 

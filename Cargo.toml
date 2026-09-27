@@ -27,9 +27,12 @@ target-lexicon = { version = "0.13", features = ["std"] }
 
 # Workspace crates
 zup-core = { path = "crates/zup-core" }
+zup-pe = { path = "crates/zup-pe" }
+zup-dispatch = { path = "crates/zup-dispatch" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
+zup-artifact = { path = "crates/zup-artifact" }
 zup-plan = { path = "crates/zup-plan" }
 zup-platform = { path = "crates/zup-platform" }
 zup-exec = { path = "crates/zup-exec" }
@@ -43,6 +46,7 @@ zup-update = { path = "crates/zup-update" }
 zup-plugin-contract = { path = "crates/zup-plugin-contract" }
 zup-plugin-build = { path = "crates/zup-plugin-build" }
 zup-plugin-runtime = { path = "crates/zup-plugin-runtime" }
+zup-xtask = { path = "crates/zup-xtask" }
 
 # Graph / transactions
 petgraph = "0.8"
@@ -76,6 +80,7 @@ serde_spanned = "1.1"
 serde_ignored = "0.1"
 
 # Test
+criterion = "0.8"
 rstest = "0.27"
 tempfile = "3"
 

@@ -7,9 +7,11 @@ mod bindings;
 mod bootstrap_fs;
 mod bundle_packager;
 mod cmdline;
+mod content_store;
 mod durable;
 mod file_executor;
 mod fs_bindings;
+mod host;
 mod inspect;
 mod integration;
 mod known_folders;
@@ -33,6 +35,7 @@ mod source_policy;
 mod transaction_payload;
 mod transport;
 mod transport_bindings;
+mod universal;
 mod worker;
 mod worker_rt;
 
@@ -40,11 +43,17 @@ pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system
 pub use bundle_packager::{
     AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
     PeSubsystem, build_self_contained_executable, embed_bundle_file, read_pe_frontend,
-    read_pe_subsystem, read_pe_target, validate_embedded_bundle_target, validate_pe_frontend,
+    read_pe_subsystem, read_pe_target, sidecar_package_path, validate_embedded_bundle_target,
+    validate_pe_frontend,
 };
 pub use cmdline::{
     command_spec, command_spec_from_command_line, commands_match, format_command_line,
     parse_command_line, quote_arg, split_command_line,
+};
+pub use content_store::{
+    CONTENT_STORE_DIRECTORY, ContentStoreError, ContentStoreIdentity, MAINTENANCE_EXECUTABLE_NAME,
+    MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, content_store_base, ensure_directory,
+    maintenance_directory, remove_store, validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{
     DurableError, InstallationLock, copy_new_durable, create_durable, move_durable, volume_root,
@@ -54,6 +63,10 @@ pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
     ReplaceFileReceipt, StageFileReceipt, WindowsFileExecutor, WindowsFileExecutorError,
     apply_node, reconcile_node, transaction_receipt, verify_installed_file,
+};
+pub use host::{
+    HostError, MachineSupport, NativeMachine, ProcessMachines, emulated_architectures,
+    host_execution, host_version, machine_support, native_machine, process_machines,
 };
 pub use inspect::{InspectError, inspect_files, inspect_target, inspect_target_with};
 pub use integration::{
@@ -105,6 +118,11 @@ pub use transport::launch_worker_for_test;
 pub use transport::{
     ProcessHandle, TransportError, UserSid, is_process_elevated, launch_elevated_worker, pipe_name,
     pipe_path, verify_client_pid, verify_server_pid, wait_for_process_exit,
+};
+pub use universal::{
+    PeSegments, Selection, StagedVariant, UniversalArtifact, UniversalError, UniversalLayout,
+    compose_universal_executable, read_variant_manifest, stage_variant, staged_descriptor,
+    verify_selected_variant,
 };
 pub use worker::{
     WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,

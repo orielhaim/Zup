@@ -40,6 +40,7 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-transaction",
     "zup-bootstrap",
     "zup-bundle",
+    "zup-artifact",
     "zup-protocol",
     "zup-runtime",
     "zup-presentation",
@@ -54,8 +55,9 @@ pub const PORTABLE_CORE: &[&str] = &[
 pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 
 /// Crates that require a Windows build host: the Windows adapter, the
-/// composition CLI, and the native frontend.
-pub const WINDOWS_ONLY: &[&str] = &["zup-windows", "zup", "zup-ui"];
+/// composition CLI, the native frontend, and the small dispatcher a universal
+/// artifact starts through.
+pub const WINDOWS_ONLY: &[&str] = &["zup-pe", "zup-windows", "zup-dispatch", "zup", "zup-ui"];
 
 pub const MATRICES: &[Matrix] = &[
     Matrix {

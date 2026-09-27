@@ -25,6 +25,19 @@
 //! targets = ["windows-x64"]
 //! ```
 //!
+//! A project that publishes more than one architecture declares the artifact
+//! that carries them under `[build.artifacts.<id>]`:
+//!
+//! ```toml
+//! [build.artifacts.windows]
+//! kind = "universal"
+//! mode = "offline"
+//! targets = ["windows-x64", "windows-arm64"]
+//! ```
+//!
+//! Declaring artifacts is optional. A project that declares none builds one
+//! installer per selected target, which is the simplest thing that works.
+//!
 //! Missing or empty resource `targets` lists apply to every declared profile.
 //! Everything in this crate is pure and deterministic. Parsing, selection, and
 //! compilation never touch the filesystem.
@@ -41,7 +54,10 @@ mod target;
 
 pub use compile::{compile, parse_and_compile, parse_and_compile_named};
 pub use error::ManifestError;
-pub use model::{Build, Manifest, SCHEMA_VERSION, Targeted, Updates};
+pub use model::{
+    ArtifactId, ArtifactKind, ArtifactMode, ArtifactProfile, Build, Manifest, SCHEMA_VERSION,
+    Targeted, Updates,
+};
 pub use parse::{parse, parse_named};
 pub use plugin::Plugin;
 pub use schema::{schema, schema_json};

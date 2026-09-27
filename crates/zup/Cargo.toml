@@ -64,9 +64,11 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
 zup-windows.workspace = true
+zup-pe.workspace = true
 zup-build = { workspace = true, optional = true }
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
+zup-artifact.workspace = true
 zup-plugin-build = { workspace = true, optional = true }
 zup-plugin-contract.workspace = true
 zup-plugin-runtime.workspace = true
@@ -85,6 +87,7 @@ console = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 uuid.workspace = true
 semver.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -93,8 +96,10 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
 wat = "1"
 windows-registry.workspace = true
 wit-component = { version = "=0.259.0", features = ["dummy-module"] }
 wit-parser = "=0.259.0"
+zup-xtask.workspace = true

@@ -167,6 +167,7 @@ fn valid_minimal_manifest() {
                         install: None,
                     },
                 )]),
+                artifacts: BTreeMap::new(),
             },
             prerequisites: Vec::new(),
             install: Install {

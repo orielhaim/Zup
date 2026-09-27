@@ -337,7 +337,7 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
             let stderr = flat(&output.stderr);
             assert!(
                 stderr.contains(&format!(
-                    "selected 2 targets but received 1 {noun}; provide one {flag} per target"
+                    "selected 2 targets (alpha, beta) but received 1 {noun}; provide one {flag} per target, in that order"
                 )),
                 "{command} {flag}: {stderr}"
             );

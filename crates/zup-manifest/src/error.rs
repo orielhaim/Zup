@@ -68,6 +68,66 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
+    /// A declared artifact names no targets.
+    #[error("artifact `{artifact}` includes no target profile")]
+    #[diagnostic(
+        code(zup_manifest::empty_artifact),
+        help("list the profiles this artifact carries under `targets`")
+    )]
+    EmptyArtifact {
+        artifact: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("artifact includes no target profile")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A single-target artifact names more than one target.
+    #[error("artifact `{artifact}` is `kind = \"single\"` but includes {count} target profiles")]
+    #[diagnostic(
+        code(zup_manifest::artifact_target_count),
+        help(
+            "a single-target artifact carries exactly one profile, or use `kind = \"universal\"`"
+        )
+    )]
+    ArtifactTargetCount {
+        artifact: String,
+        count: usize,
+        #[source_code]
+        src: Option<Src>,
+        #[label("a single-target artifact carries one profile")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A declared artifact names an empty channel.
+    #[error("artifact `{artifact}` declares an empty channel")]
+    #[diagnostic(
+        code(zup_manifest::empty_artifact_channel),
+        help("name the release channel the artifact follows, or remove it to pin a version")
+    )]
+    EmptyArtifactChannel {
+        artifact: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("channel is empty")]
+        span: Option<SourceSpan>,
+    },
+
+    /// A declared artifact names an output that is not a file name.
+    #[error("artifact `{artifact}` declares output `{output}`, which is not a file name")]
+    #[diagnostic(
+        code(zup_manifest::artifact_output),
+        help("give a bare file name; the build places it beside the manifest")
+    )]
+    ArtifactOutput {
+        artifact: String,
+        output: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("output is not a bare file name")]
+        span: Option<SourceSpan>,
+    },
+
     /// A target selector matches neither a profile name nor a configured target.
     #[error("unknown target selector `{selector}`")]
     #[diagnostic(
@@ -360,6 +420,46 @@ impl ManifestError {
                 span: span.or(inferred),
                 src: existing.or(src),
             },
+            Self::EmptyArtifact {
+                artifact,
+                span,
+                src: existing,
+            } => Self::EmptyArtifact {
+                artifact,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::ArtifactTargetCount {
+                artifact,
+                count,
+                span,
+                src: existing,
+            } => Self::ArtifactTargetCount {
+                artifact,
+                count,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::EmptyArtifactChannel {
+                artifact,
+                span,
+                src: existing,
+            } => Self::EmptyArtifactChannel {
+                artifact,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
+            Self::ArtifactOutput {
+                artifact,
+                output,
+                span,
+                src: existing,
+            } => Self::ArtifactOutput {
+                artifact,
+                output,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
             Self::UnknownTargetSelector {
                 selector,
                 available,
@@ -554,6 +654,14 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
         ManifestError::UnknownTargetProfileReference { profile, .. } => source
             .find(profile.as_str())
             .map(|start| source_span(start..start + profile.len())),
+        ManifestError::EmptyArtifact { .. } => {
+            table_span(source, "build.artifacts").or_else(|| table_span(source, "build"))
+        }
+        ManifestError::ArtifactTargetCount { .. } => table_span(source, "targets"),
+        ManifestError::EmptyArtifactChannel { .. } => value_span(source, "channel"),
+        ManifestError::ArtifactOutput { output, .. } => source
+            .find(output.as_str())
+            .map(|start| source_span(start..start + output.len())),
         ManifestError::UnknownTargetSelector { .. } => None,
         ManifestError::DuplicateTarget { profile, .. }
         | ManifestError::InvalidResolvedTargetConfig { profile, .. } => source

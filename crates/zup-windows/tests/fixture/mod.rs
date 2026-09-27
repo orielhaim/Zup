@@ -1,0 +1,201 @@
+//! A two-architecture fixture for the Windows artifact tests.
+
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+use zup_artifact::{DistributionVariant, MediaType};
+use zup_core::{
+    App, AppId, Component, FileMapping, Frontend, Install, InstallDirectory, InstallScope,
+    NonEmptyString, TargetProfileId, TargetTriple, Template, UpdateConfig,
+};
+
+/// The application the fixture installs.
+pub fn app() -> App {
+    App {
+        id: AppId::new("com.acme.desktop").unwrap(),
+        name: NonEmptyString::new("Acme").unwrap(),
+        version: semver::Version::parse("1.4.0").unwrap(),
+        publisher: Some(NonEmptyString::new("Acme Inc.").unwrap()),
+        main: Some(Template::parse("${install}/bin/Acme.exe").unwrap()),
+        description: None,
+    }
+}
+
+fn install() -> Install {
+    Install {
+        scope: InstallScope::Either,
+        directory: InstallDirectory {
+            user: Some(Template::parse("${location.programs}/Acme").unwrap()),
+            machine: Some(Template::parse("${location.programs}/Acme").unwrap()),
+        },
+        allow_directory_override: true,
+    }
+}
+
+fn updates() -> UpdateConfig {
+    UpdateConfig {
+        repository: "https://releases.acme.test/acme".to_owned(),
+        channel: "stable".to_owned(),
+        trusted_root: b"zup trusted root bytes".to_vec(),
+    }
+}
+
+fn filler(seed: &str, tag: u64) -> String {
+    let mut out = String::new();
+    while out.len() < 8192 {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(tag.to_le_bytes());
+        hasher.update(out.as_bytes());
+        out.push_str(&zup_core::Sha256Digest::from_bytes(hasher.finalize().into()).to_hex());
+    }
+    out.truncate(8192);
+    out
+}
+
+const SHARED: &[(&str, &str)] = &[
+    ("assets/logo.png", "the same pixels on every machine"),
+    (
+        "assets/strings.json",
+        "the same translations on every machine",
+    ),
+    (
+        "runtime/framework.dat",
+        "the same managed runtime on every machine",
+    ),
+];
+
+/// Two resolved variants over one shared content set.
+pub struct Fixture {
+    /// The variants, in the order the composer receives them.
+    pub variants: Vec<DistributionVariant>,
+    /// Kept alive so the materialized source files outlive the variants.
+    #[allow(dead_code)]
+    root: tempfile::TempDir,
+}
+
+impl Fixture {
+    /// Build every variant, materializing their bytes under a temporary root.
+    ///
+    /// The 32-bit one is here because it is the one that decides how wide a
+    /// dispatcher may be: an artifact that serves it must be startable on
+    /// 32-bit Windows.
+    pub fn new() -> Self {
+        let root = tempfile::tempdir().expect("fixture root");
+        let variants = vec![
+            build(&root, "windows-x86", "i686-pc-windows-msvc", 3),
+            build(&root, "windows-x64", "x86_64-pc-windows-msvc", 1),
+            build(&root, "windows-arm64", "aarch64-pc-windows-msvc", 2),
+        ];
+        Self { variants, root }
+    }
+
+    /// Keep the source root alive for as long as the fixture is.
+    #[allow(dead_code)]
+    pub fn root(&self) -> &Path {
+        self.root.path()
+    }
+}
+
+fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> DistributionVariant {
+    let root = root.path().join(profile);
+    std::fs::create_dir_all(&root).expect("target root");
+    let resolved = zup_core::ResolvedTargetConfig {
+        profile: TargetProfileId::new(profile).unwrap(),
+        target: TargetTriple::parse(target).unwrap(),
+        source: zup_core::Source::new(root.clone()).unwrap(),
+        frontend: Frontend::Console,
+        install: install(),
+    };
+
+    let mut files: Vec<(String, String, PathBuf)> = SHARED
+        .iter()
+        .map(|(name, seed)| {
+            (
+                (*name).to_owned(),
+                filler(seed, 0),
+                root.join("shared").join(name),
+            )
+        })
+        .collect();
+    for name in ["bin/Acme.exe", "bin/acme-agent.exe"] {
+        files.push((
+            name.to_owned(),
+            filler(name, tag),
+            root.join("own").join(name),
+        ));
+    }
+
+    let mut resolved_files = Vec::new();
+    let mut total = 0u64;
+    for (name, content, path) in &files {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("file parent");
+        }
+        std::fs::write(path, content).expect("fixture file");
+        let size = content.len() as u64;
+        total += size;
+        resolved_files.push(zup_build::ResolvedFile {
+            source: path.clone(),
+            source_relative: zup_core::RelativePath::new(name.as_str()).unwrap(),
+            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            size,
+            sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
+            component: None,
+            condition: None,
+        });
+    }
+
+    let mut installer_files: Vec<FileMapping> = resolved_files
+        .iter()
+        .map(|file| FileMapping {
+            source: "embedded".to_owned(),
+            destination: file.destination.clone(),
+            component: None,
+            when: None,
+            allow_empty: false,
+        })
+        .collect();
+    installer_files.sort_by(|left, right| {
+        left.destination
+            .to_string()
+            .cmp(&right.destination.to_string())
+    });
+
+    let plan = zup_build::TargetBuildPlan {
+        installer: zup_core::Installer {
+            app: app(),
+            target: resolved.target.clone(),
+            frontend: Frontend::Console,
+            ui: None,
+            updates: Some(updates()),
+            install: install(),
+            prerequisites: Vec::new(),
+            components: vec![Component {
+                id: zup_core::ComponentId::new("core").unwrap(),
+                name: NonEmptyString::new("Application").unwrap(),
+                description: None,
+                required: true,
+                default: true,
+                requires: Vec::new(),
+            }],
+            plugins: Vec::new(),
+            files: installer_files,
+            launchers: Vec::new(),
+            path: Vec::new(),
+            services: Vec::new(),
+            protocols: Vec::new(),
+            file_associations: Vec::new(),
+        },
+        prerequisites: Vec::new(),
+        plugins: Vec::new(),
+        files: resolved_files,
+        total_size: total,
+        prerequisite_size: 0,
+    };
+
+    let mut runtime = filler("runtime-image", 0).into_bytes();
+    runtime.extend_from_slice(target.as_bytes());
+    DistributionVariant::resolve(&resolved, &plan, &[], Some((MediaType::RUNTIME, runtime)))
+        .expect("the variant resolves")
+}

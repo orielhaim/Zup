@@ -68,6 +68,7 @@ portable-core: crates that build and test on a non-Windows host
   zup-transaction
   zup-bootstrap
   zup-bundle
+  zup-artifact
   zup-protocol
   zup-runtime
   zup-presentation
@@ -78,7 +79,9 @@ portable-core: crates that build and test on a non-Windows host
 portable-tests: portable crates that verify the stack instead of shipping in an installer
   zup-xtask
 windows-only: crates that require a Windows build host
+  zup-pe
   zup-windows
+  zup-dispatch
   zup
   zup-ui
 ";
@@ -110,7 +113,7 @@ fn the_matrix_view_lists_every_package_in_declaration_order() {
 fn one_matrix_can_be_selected() {
     assert_eq!(
         stdout(&["emit-portable-matrix", "--matrix", "windows-only"]),
-        "windows-only: crates that require a Windows build host\n  zup-windows\n  zup\n  zup-ui\n"
+        "windows-only: crates that require a Windows build host\n  zup-pe\n  zup-windows\n  zup-dispatch\n  zup\n  zup-ui\n"
     );
     assert_eq!(
         stdout(&["emit-portable-matrix", "--matrix", "portable-tests"]),
@@ -131,7 +134,7 @@ fn a_repeated_matrix_selector_keeps_the_requested_order() {
         "portable-tests: portable crates that verify the stack instead of shipping in an installer\n  zup-xtask\n\
          portable-core: crates that build and test on a non-Windows host\n  zup-core\n  zup-manifest\n  \
          zup-build\n  zup-plan\n  zup-platform\n  zup-exec\n  zup-transaction\n  zup-bootstrap\n  \
-         zup-bundle\n  zup-protocol\n  zup-runtime\n  zup-presentation\n  zup-update\n  \
+         zup-bundle\n  zup-artifact\n  zup-protocol\n  zup-runtime\n  zup-presentation\n  zup-update\n  \
          zup-plugin-contract\n  zup-plugin-build\n  zup-plugin-runtime\n"
     );
 }
@@ -147,9 +150,9 @@ fn cargo_args_format_emits_package_flags_for_one_matrix() {
             "cargo-args"
         ]),
         "-p zup-core -p zup-manifest -p zup-build -p zup-plan -p zup-platform -p zup-exec \
-         -p zup-transaction -p zup-bootstrap -p zup-bundle -p zup-protocol -p zup-runtime \
-         -p zup-presentation -p zup-update -p zup-plugin-contract -p zup-plugin-build \
-         -p zup-plugin-runtime\n"
+         -p zup-transaction -p zup-bootstrap -p zup-bundle -p zup-artifact -p zup-protocol \
+         -p zup-runtime -p zup-presentation -p zup-update -p zup-plugin-contract \
+         -p zup-plugin-build -p zup-plugin-runtime\n"
     );
 }
 

@@ -59,6 +59,11 @@ pub enum PackageError {
     Allocation { size: u64 },
     #[error("package payload verification failed for {0}")]
     Payload(String),
+    #[error("package is missing {media_type} {digest}")]
+    Missing {
+        media_type: &'static str,
+        digest: String,
+    },
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
     TargetMismatch {
         expected: TargetTriple,
@@ -1150,6 +1155,96 @@ impl BundleWriter {
         out.extend_from_slice(&meta);
         out.extend_from_slice(&compressed);
         Ok(out)
+    }
+
+    /// Write a package for one variant from a shared content store.
+    ///
+    /// The caller supplies blobs that are already Zstandard-compressed and
+    /// already digest-verified, which is what lets a selected variant be
+    /// materialized out of an artifact that stores many variants' content once.
+    /// `Package::open` re-verifies every blob, so handing over compressed bytes
+    /// moves no trust: it only avoids compressing the same content twice.
+    ///
+    /// Every digest the plan references must be present, and nothing else is
+    /// written, so the resulting package contains exactly one variant's content.
+    pub fn write_plan(
+        plan: &PortableBuildPlan,
+        compressed: &std::collections::BTreeMap<Sha256Digest, Vec<u8>>,
+        output: &Path,
+    ) -> Result<u64, PackageError> {
+        let mut required: Vec<(Sha256Digest, u64)> = Vec::new();
+        for entry in &plan.entries {
+            required.push((entry.blob, entry.size));
+        }
+        for artifact in &plan.prerequisite_artifacts {
+            required.push((artifact.blob, artifact.size));
+        }
+        for artifact in &plan.plugins {
+            required.push((artifact.blob, artifact.aot_size));
+        }
+        required.sort_unstable();
+        required.dedup();
+        for (digest, size) in &required {
+            let Some(bytes) = compressed.get(digest) else {
+                return Err(PackageError::Missing {
+                    media_type: "content blob",
+                    digest: digest.to_hex(),
+                });
+            };
+            if *size == 0 || bytes.is_empty() || bytes.len() as u64 > *size {
+                return Err(PackageError::Invalid);
+            }
+        }
+        let mut installer = plan.installer.clone();
+        for mapping in &mut installer.files {
+            mapping.source = "embedded".to_owned();
+        }
+        let mut blobs = Vec::with_capacity(required.len());
+        let mut offset = 0u64;
+        for (digest, size) in &required {
+            let bytes = compressed[digest].len() as u64;
+            blobs.push(BlobIndex {
+                digest: *digest,
+                offset,
+                compressed_size: bytes,
+                size: *size,
+            });
+            offset = offset.checked_add(bytes).ok_or(PackageError::Invalid)?;
+        }
+        let metadata = Metadata {
+            schema: PACKAGE_SCHEMA,
+            required_features: 0,
+            plan: PortableBuildPlan {
+                installer,
+                entries: plan.entries.clone(),
+                prerequisite_artifacts: plan.prerequisite_artifacts.clone(),
+                plugins: plan.plugins.clone(),
+                total_size: plan.total_size,
+            },
+            blobs,
+        };
+        let meta = serde_json::to_vec(&metadata)?;
+        if meta.len() as u64 > MAX_METADATA {
+            return Err(PackageError::MetadataTooLarge {
+                size: meta.len() as u64,
+                limit: MAX_METADATA,
+            });
+        }
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)?;
+        out.write_all(b"ZUPBNDL\0")?;
+        out.write_all(&PACKAGE_SCHEMA.to_le_bytes())?;
+        out.write_all(&0u64.to_le_bytes())?;
+        out.write_all(&(meta.len() as u64).to_le_bytes())?;
+        out.write_all(&Sha256::digest(&meta))?;
+        out.write_all(&meta)?;
+        for (digest, _) in &required {
+            out.write_all(&compressed[digest])?;
+        }
+        out.sync_all()?;
+        Ok(out.metadata()?.len())
     }
 
     /// Stream unique source files through Zstandard into a spool directory,

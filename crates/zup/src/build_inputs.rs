@@ -188,9 +188,24 @@ fn inspect_build_inputs(
 
 /// The diagnostic for a repeatable per-target flag that does not line up with
 /// the selected targets. One value per target, or none at all.
-pub fn cardinality_problem(targets: usize, received: usize, noun: &str, flag: &str) -> String {
+///
+/// The order matters and is not obvious: it is the manifest's own target order,
+/// so the message names the profiles rather than leaving the user to guess which
+/// template goes with which target.
+pub fn cardinality_problem(
+    targets: &[ResolvedTargetConfig],
+    received: usize,
+    noun: &str,
+    flag: &str,
+) -> String {
+    let names = targets
+        .iter()
+        .map(|target| target.profile.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "selected {targets} targets but received {received} {noun}; provide one {flag} per target"
+        "selected {} targets ({names}) but received {received} {noun}; provide one {flag} per target, in that order",
+        targets.len()
     )
 }
 
@@ -204,12 +219,12 @@ pub fn align_per_target<'a, T>(
     noun: &str,
     flag: &str,
     supplied: &'a [T],
-    targets: usize,
+    targets: &[ResolvedTargetConfig],
 ) -> miette::Result<Option<&'a [T]>> {
     if supplied.is_empty() {
         return Ok(None);
     }
-    if supplied.len() != targets {
+    if supplied.len() != targets.len() {
         return Err(miette::miette!(
             "{}",
             cardinality_problem(targets, supplied.len(), noun, flag)
@@ -264,7 +279,7 @@ fn resolve_runtime_slots(
         if mismatched {
             problems.push(InputProblem::new(
                 InputSubject::Runtime,
-                cardinality_problem(targets.len(), supplied.len(), "runtimes", "--runtime"),
+                cardinality_problem(targets, supplied.len(), "runtimes", "--runtime"),
                 None,
             ));
         }
@@ -324,7 +339,7 @@ fn resolve_output_slots(
         if mismatched {
             problems.push(InputProblem::new(
                 InputSubject::Output,
-                cardinality_problem(targets.len(), supplied.len(), "outputs", "--output"),
+                cardinality_problem(targets, supplied.len(), "outputs", "--output"),
                 None,
             ));
         }
@@ -697,7 +712,7 @@ mod tests {
             assert_eq!(problems[0].subject, InputSubject::Runtime);
             assert_eq!(
                 problems[0].message,
-                "selected 2 targets but received 1 runtimes; provide one --runtime per target"
+                "selected 2 targets (alpha, beta) but received 1 runtimes; provide one --runtime per target, in that order"
             );
         }
         assert_eq!(
@@ -709,14 +724,15 @@ mod tests {
 
     #[test]
     fn every_repeatable_per_target_flag_uses_one_alignment_message() {
+        let targets = vec![target_config("alpha"), target_config("beta")];
         let empty: [&str; 0] = [];
         assert!(
-            align_per_target("runtimes", "--runtime", &empty, 2)
+            align_per_target("runtimes", "--runtime", &empty, &targets)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            align_per_target("runtimes", "--runtime", &["a", "b"], 2)
+            align_per_target("runtimes", "--runtime", &["a", "b"], &targets)
                 .unwrap()
                 .map(<[&str]>::len),
             Some(2)
@@ -727,19 +743,24 @@ mod tests {
             ("sources", "--source"),
             ("install directories", "--install-directory"),
         ] {
-            let error = align_per_target(noun, flag, &["one"], 2)
+            let error = align_per_target(noun, flag, &["one"], &targets)
                 .unwrap_err()
                 .to_string();
             assert_eq!(
                 error,
-                format!("selected 2 targets but received 1 {noun}; provide one {flag} per target")
+                format!(
+                    "selected 2 targets (alpha, beta) but received 1 {noun}; provide one {flag} per target, in that order"
+                )
             );
-            let surplus = align_per_target(noun, flag, &["one", "two", "three"], 2)
+            let surplus = align_per_target(noun, flag, &["one", "two", "three"], &targets)
                 .unwrap_err()
                 .to_string();
             assert_eq!(
                 surplus,
-                format!("selected 2 targets but received 3 {noun}; provide one {flag} per target")
+                format!(
+                    "selected 2 targets (alpha, beta) but received 3 {noun}; provide one {flag} per target, in that order"
+                ),
+                "the profiles are named because the order is not obvious"
             );
         }
     }

@@ -23,9 +23,13 @@ use zup_presentation::{AutomationEvent, AutomationResult, OutputFormat, ProcessO
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest};
 
 #[cfg(feature = "build")]
+mod artifacts;
+#[cfg(feature = "build")]
 mod build_inputs;
 #[cfg(feature = "build")]
 pub mod doctor;
+#[cfg(feature = "build")]
+mod inspect_artifact;
 
 /// Process entry point for the internal worker mode.
 #[derive(Debug, Parser)]
@@ -45,6 +49,9 @@ enum Commands {
     /// Build a signed-ready installer package.
     #[cfg(feature = "build")]
     Build(BuildCommand),
+    #[cfg(feature = "build")]
+    /// Inspect a distribution artifact.
+    Artifact(ArtifactCommand),
     /// Create a small, editable zup.toml project.
     #[cfg(feature = "build")]
     Init(InitCommand),
@@ -341,6 +348,25 @@ struct BuildCommand {
     force: bool,
     #[arg(long, value_name = "PROFILE_OR_TARGET")]
     target: Vec<String>,
+    /// Build one declared distribution artifact, repeatable.
+    ///
+    /// Semantically distinct from `--target`: `--target` names a native variant
+    /// to build or debug, `--artifact` names a file a user downloads.
+    #[arg(long, value_name = "ARTIFACT", conflicts_with = "universal")]
+    artifact: Vec<String>,
+    /// Compose one universal artifact from every selected target.
+    ///
+    /// Refuses rather than guessing when the selected targets cannot form one
+    /// artifact.
+    #[arg(long, conflicts_with = "artifact")]
+    universal: bool,
+    /// The dispatcher template a universal artifact is composed into, repeatable.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    dispatcher: Vec<PathBuf>,
+    /// Where to write the machine-readable release description, or `none` to
+    /// skip it. Defaults to `dist/zup-release.json` beside the manifest.
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    release_manifest: Option<String>,
 }
 
 #[cfg(feature = "build")]
@@ -353,6 +379,10 @@ default_manifest!(BuildCommand {
     frontend: None,
     force: false,
     target: Vec::new(),
+    artifact: Vec::new(),
+    universal: false,
+    dispatcher: Vec::new(),
+    release_manifest: None,
 });
 
 #[cfg(feature = "build")]
@@ -393,6 +423,40 @@ default_manifest!(InitCommand {
     force: false,
     non_interactive: false,
 });
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct ArtifactCommand {
+    #[command(subcommand)]
+    command: ArtifactSubcommand,
+}
+
+/// What to do with an artifact.
+#[cfg(feature = "build")]
+#[derive(Debug, Subcommand)]
+enum ArtifactSubcommand {
+    /// Describe what a built artifact contains and how it verifies.
+    Inspect(ArtifactInspectCommand),
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct ArtifactInspectCommand {
+    /// The artifact to inspect.
+    #[arg(value_name = "ARTIFACT", value_hint = ValueHint::FilePath)]
+    artifact: PathBuf,
+    /// Readable text or the versioned JSON report.
+    #[arg(long, value_enum, default_value = "human")]
+    format: ArtifactFormatArg,
+}
+
+#[cfg(feature = "build")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum ArtifactFormatArg {
+    #[default]
+    Human,
+    Json,
+}
 
 #[cfg(feature = "build")]
 #[derive(Debug, Args)]
@@ -523,6 +587,10 @@ fn run_command(cli: Cli, runtime_frontend: Option<Frontend>) -> miette::Result<(
     match cli.command {
         #[cfg(feature = "build")]
         Some(Commands::Build(args)) => run_build(args)?,
+        #[cfg(feature = "build")]
+        Some(Commands::Artifact(args)) => match args.command {
+            ArtifactSubcommand::Inspect(args) => run_artifact_inspect(args)?,
+        },
         #[cfg(feature = "build")]
         Some(Commands::Init(args)) => run_init(args)?,
         #[cfg(feature = "build")]
@@ -822,8 +890,8 @@ fn replace_output(staging: &Path, output: &Path) -> miette::Result<()> {
 #[cfg(feature = "build")]
 fn run_build(args: BuildCommand) -> miette::Result<()> {
     let overrides = TargetOverrideArgs {
-        source: args.source,
-        install_directory: args.install_directory,
+        source: args.source.clone(),
+        install_directory: args.install_directory.clone(),
         frontend: args.frontend.map(Frontend::from),
     };
     let selected = select_project(&args.manifest, &args.target, &overrides, false)?;
@@ -837,6 +905,120 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
     for config in targets {
         build_inputs::check_target_lowering(&loaded.build, config)?;
     }
+
+    // `--target` names a native variant, `--artifact` names a file a user
+    // downloads, and they are different questions. A run that names a target
+    // builds that target's own installer; a run that names artifacts composes
+    // them; a run that names neither builds the project's declared artifacts, or
+    // one installer per target when it declares none.
+    let intent = build_intent(&args, &loaded.manifest)?;
+    let interactive = std::io::stdout().is_terminal();
+    match intent {
+        BuildIntent::Variants => run_build_variants(&args, &loaded, interactive),
+        BuildIntent::Artifacts(profiles) => {
+            run_build_artifacts(&args, &loaded, &profiles, interactive)
+        }
+    }
+}
+
+/// What a build run was asked to produce.
+enum BuildIntent {
+    /// One installer per selected target.
+    Variants,
+    /// Composed artifacts, in the order they were requested.
+    Artifacts(Vec<artifacts::ArtifactProfile>),
+}
+
+/// Decide what a build run produces.
+#[cfg(feature = "build")]
+fn build_intent(
+    args: &BuildCommand,
+    manifest: &zup_manifest::Manifest,
+) -> miette::Result<BuildIntent> {
+    if !args.artifact.is_empty() {
+        let mut profiles = Vec::with_capacity(args.artifact.len());
+        for id in &args.artifact {
+            let profile = manifest.build.artifacts.get(id.as_str()).ok_or_else(|| {
+                let available: Vec<&str> = manifest
+                    .build
+                    .artifacts
+                    .keys()
+                    .map(|key| key.as_str())
+                    .collect();
+                miette::miette!(
+                    "unknown artifact `{id}`; declared artifacts are {}",
+                    if available.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        available.join(", ")
+                    }
+                )
+            })?;
+            profiles.push(artifacts::ArtifactProfile {
+                kind: kind_of(profile.kind),
+                mode: mode_of(profile.mode),
+                targets: profile.targets.clone(),
+                channel: profile.channel.clone(),
+                output: profile.output.clone(),
+            });
+        }
+        return Ok(BuildIntent::Artifacts(profiles));
+    }
+    if args.universal {
+        return Ok(BuildIntent::Artifacts(vec![artifacts::ArtifactProfile {
+            kind: zup_artifact::ArtifactKind::Universal,
+            mode: zup_artifact::ArtifactMode::Offline,
+            targets: Vec::new(),
+            channel: None,
+            output: None,
+        }]));
+    }
+    if !args.target.is_empty() {
+        return Ok(BuildIntent::Variants);
+    }
+    if manifest.build.artifacts.is_empty() {
+        return Ok(BuildIntent::Variants);
+    }
+    Ok(BuildIntent::Artifacts(
+        manifest
+            .build
+            .artifacts
+            .values()
+            .map(|profile| artifacts::ArtifactProfile {
+                kind: kind_of(profile.kind),
+                mode: mode_of(profile.mode),
+                targets: profile.targets.clone(),
+                channel: profile.channel.clone(),
+                output: profile.output.clone(),
+            })
+            .collect(),
+    ))
+}
+
+#[cfg(feature = "build")]
+fn kind_of(kind: zup_manifest::ArtifactKind) -> zup_artifact::ArtifactKind {
+    match kind {
+        zup_manifest::ArtifactKind::Universal => zup_artifact::ArtifactKind::Universal,
+        zup_manifest::ArtifactKind::Single => zup_artifact::ArtifactKind::Single,
+    }
+}
+
+#[cfg(feature = "build")]
+fn mode_of(mode: zup_manifest::ArtifactMode) -> zup_artifact::ArtifactMode {
+    match mode {
+        zup_manifest::ArtifactMode::Offline => zup_artifact::ArtifactMode::Offline,
+        zup_manifest::ArtifactMode::Thin => zup_artifact::ArtifactMode::Thin,
+    }
+}
+
+/// Build one self-contained installer per selected target.
+#[cfg(feature = "build")]
+fn run_build_variants(
+    args: &BuildCommand,
+    loaded: &LoadedProject,
+    interactive: bool,
+) -> miette::Result<()> {
+    let targets = &loaded.selected_targets;
     let inputs = build_inputs::resolve_build_inputs(
         build_inputs::InputMode::Enforce,
         build_inputs::Overwrite::from(args.force),
@@ -861,7 +1043,6 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
         .map(|slot| slot.path.clone())
         .collect::<Vec<_>>();
 
-    let interactive = std::io::stdout().is_terminal();
     if interactive {
         println!("→ Validating manifest");
         println!("→ Materializing payload");
@@ -895,36 +1076,14 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
     if interactive {
         println!("→ Compiling plugins");
     }
+    let mut release = artifacts::release_manifest(&loaded.manifest.app);
     for ((target_plan, config, runtime, plugin_artifacts), output) in prepared.iter().zip(&outputs)
     {
+        let relative = release_relative(&outputs, output)?;
         if interactive {
             println!("→ Compressing and embedding {}", config.profile);
         }
-        // The backend never writes over an existing file, so `--force` writes
-        // beside the destination and moves the finished artifact into place.
-        ensure_output_parent(output)?;
-        let staging = if args.force && output.exists() {
-            Some(staging_output(output)?)
-        } else {
-            None
-        };
-        let written = match &staging {
-            Some(staging) => staging.as_path(),
-            None => output.as_path(),
-        };
-        let (size, _) = zup_windows::build_self_contained_executable(
-            runtime,
-            written,
-            target_plan,
-            plugin_artifacts,
-        )
-        .map_err(|error| miette::miette!("installer output: {error}"))?;
-        if let Some(staging) = staging
-            && let Err(error) = replace_output(&staging, output)
-        {
-            let _ = std::fs::remove_file(&staging);
-            return Err(error);
-        }
+        let size = write_single_target(args, target_plan, runtime, plugin_artifacts, output)?;
         let payload_bytes: u64 = target_plan.files.iter().map(|file| file.size).sum();
         let updates = target_plan
             .installer
@@ -932,6 +1091,13 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
             .as_ref()
             .map(|updates| updates.channel.as_str())
             .unwrap_or("not configured");
+        release
+            .add_artifact(
+                &single_target_index(config, target_plan, output),
+                &relative,
+                zup_artifact::Measured::single(digest_of(output)?, size, payload_bytes),
+            )
+            .map_err(|error| miette::miette!("release description: {error}"))?;
         println!(
             "Built {} {} ({})",
             target_plan.installer.app.name, target_plan.installer.app.version, config.profile
@@ -948,10 +1114,503 @@ fn run_build(args: BuildCommand) -> miette::Result<()> {
         println!("  Plugins     {}", plugin_artifacts.len());
         println!("  Updates     {updates}");
     }
+    finish_build(args, loaded, &outputs, release, interactive)
+}
+
+/// The index a single-target installer reports, which is a one-variant offline
+/// artifact: the same model, described without a dispatcher.
+#[cfg(feature = "build")]
+fn single_target_index(
+    config: &zup_manifest::ResolvedTargetConfig,
+    plan: &zup_build::TargetBuildPlan,
+    output: &std::path::Path,
+) -> zup_artifact::ArtifactIndex {
+    let file_name = output
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Setup.exe".to_owned());
+    zup_artifact::ArtifactIndex {
+        schema: zup_artifact::ARTIFACT_SCHEMA,
+        required_features: zup_artifact::FEATURE_SHARED_CAS,
+        media_type: zup_artifact::MediaType::Index,
+        artifact: zup_artifact::ArtifactDescriptor {
+            id: config.profile.to_string(),
+            kind: zup_artifact::ArtifactKind::Single,
+            mode: zup_artifact::ArtifactMode::Offline,
+            pin: zup_artifact::ArtifactPin::Pinned {
+                version: plan.installer.app.version.clone(),
+            },
+            application: plan.installer.app.clone(),
+            launcher: zup_artifact::LauncherStrategy::HostSelectedContainer,
+            subsystem: artifacts::subsystem_of(config.frontend),
+            output: file_name,
+        },
+        tables: zup_artifact::ArtifactTables {
+            blobs: zup_artifact::Descriptor {
+                media_type: zup_artifact::MediaType::BLOB_TABLE,
+                digest: zup_artifact::Descriptor::of(zup_artifact::MediaType::BLOB_TABLE, &[])
+                    .digest,
+                size: 0,
+            },
+        },
+        variants: vec![zup_artifact::VariantDescriptor {
+            id: config.profile.to_string(),
+            target: config.target.clone(),
+            platform: zup_artifact::Platform::from_triple(&config.target),
+            frontend: config.frontend,
+            manifest: zup_artifact::Descriptor {
+                media_type: zup_artifact::MediaType::VARIANT_MANIFEST,
+                digest: zup_artifact::Descriptor::of(
+                    zup_artifact::MediaType::VARIANT_MANIFEST,
+                    &[],
+                )
+                .digest,
+                size: 0,
+            },
+            requirements: zup_artifact::VariantRequirements::default(),
+            runtime: None,
+            content: zup_artifact::VariantDescriptorContent {
+                logical_size: plan.total_size,
+                blob_count: plan.files.len() as u64,
+                unique_blob_count: plan.files.len() as u64,
+                file_count: plan.files.len() as u64,
+                prerequisite_count: plan.prerequisites.len() as u64,
+                plugin_count: plan.plugins.len() as u64,
+            },
+            logical_size: plan.total_size,
+        }],
+    }
+}
+
+#[cfg(feature = "build")]
+fn write_single_target(
+    args: &BuildCommand,
+    plan: &zup_build::TargetBuildPlan,
+    runtime: &std::path::Path,
+    plugin_artifacts: &[zup_bundle::CompiledPluginArtifact],
+    output: &std::path::Path,
+) -> miette::Result<u64> {
+    ensure_output_parent(output)?;
+    let staging = if args.force && output.exists() {
+        Some(staging_output(output)?)
+    } else {
+        None
+    };
+    let written = match &staging {
+        Some(staging) => staging.as_path(),
+        None => output,
+    };
+    let (size, _) =
+        zup_windows::build_self_contained_executable(runtime, written, plan, plugin_artifacts)
+            .map_err(|error| miette::miette!("installer output: {error}"))?;
+    if let Some(staging) = staging
+        && let Err(error) = replace_output(&staging, output)
+    {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
+    }
+    Ok(size)
+}
+
+/// Build the composed artifacts a run asked for.
+#[cfg(feature = "build")]
+fn run_build_artifacts(
+    args: &BuildCommand,
+    loaded: &LoadedProject,
+    profiles: &[artifacts::ArtifactProfile],
+    interactive: bool,
+) -> miette::Result<()> {
+    let app = &loaded.manifest.app;
+    let app_name = build_inputs::sanitized_file_stem(app.name.as_str(), app.id.as_str());
+    // One runtime template per selected target, in the manifest's own order.
+    // Every artifact in this build reads the same slots, so a wrong count is a
+    // wrong count for all of them rather than for the first one that fails.
+    let runtimes = build_inputs::align_per_target(
+        "runtimes",
+        "--runtime",
+        &args.runtime,
+        &loaded.selected_targets,
+    )?
+    .unwrap_or(&[]);
+    if args.dispatcher.len() > 1 {
+        return Err(miette::miette!(
+            "received {} dispatchers; every artifact in one build is composed into the same launcher",
+            args.dispatcher.len()
+        ));
+    }
+    let mut variant_index: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for (index, config) in loaded.selected_targets.iter().enumerate() {
+        variant_index.insert(config.profile.to_string(), index);
+    }
+    let mut variants = Vec::with_capacity(loaded.selected_targets.len());
+    for (index, (config, plan)) in loaded
+        .selected_targets
+        .iter()
+        .zip(&loaded.build.targets)
+        .enumerate()
+    {
+        let runtime = resolve_runtime(runtimes, config, index)?;
+        let resolved = zup_artifact::DistributionVariant::resolve(config, plan, &[], runtime)
+            .map_err(|error| miette::miette!("variant `{}`: {error}", config.profile))?;
+        variants.push(resolved);
+    }
+
+    if interactive {
+        println!("→ Validating manifest");
+        println!("→ Materializing payload");
+    }
+
+    let mut jobs = Vec::with_capacity(profiles.len());
+    for (index, profile) in profiles.iter().enumerate() {
+        let id = declared_id(args, index, profile);
+        let selected: Vec<String> = if profile.targets.is_empty() {
+            loaded
+                .selected_targets
+                .iter()
+                .map(|config| config.profile.to_string())
+                .collect()
+        } else {
+            profile
+                .targets
+                .iter()
+                .map(|target| target.to_string())
+                .collect()
+        };
+        let mut indices = Vec::with_capacity(selected.len());
+        for name in &selected {
+            let found = variant_index.get(name).copied().ok_or_else(|| {
+                miette::miette!(
+                    "artifact `{id}` includes `{name}`, which is not among the selected targets"
+                )
+            })?;
+            indices.push(found);
+        }
+        if profile.kind == zup_artifact::ArtifactKind::Single && indices.len() > 1 {
+            return Err(miette::miette!(
+                "artifact `{id}` is a single-target artifact but includes {} targets",
+                indices.len()
+            ));
+        }
+        let file_name = profile.file_name(&app_name, &app.version);
+        jobs.push((id, profile, indices, file_name));
+    }
+
+    let named = jobs
+        .iter()
+        .map(|(id, _, _, file_name)| (id.clone(), file_name.clone()))
+        .collect::<Vec<_>>();
+    let outputs = artifacts::resolve_outputs(&args.output, &named, &loaded.manifest_path)?;
+
+    let mut release = artifacts::release_manifest(app);
+    for ((id, profile, indices, _), output) in jobs.iter().zip(&outputs) {
+        let relative = release_relative(&outputs, output)?;
+        let composed: Vec<&zup_artifact::DistributionVariant> =
+            indices.iter().map(|index| &variants[*index]).collect();
+        if interactive {
+            println!("→ Composing artifact {id}");
+        }
+        let request = profile.request(id, output_name(output), app);
+        let graph = artifacts::compose(request, &composed)
+            .map_err(|error| miette::miette!("artifact `{id}`: {error}"))?;
+        let dispatcher = resolve_dispatcher(args, profile, &composed, output)?;
+        ensure_output_parent(output)?;
+        let staging = if args.force && output.exists() {
+            Some(staging_output(output)?)
+        } else {
+            None
+        };
+        let written = match &staging {
+            Some(staging) => staging.as_path(),
+            None => output.as_path(),
+        };
+        zup_windows::compose_universal_executable(&dispatcher, written, &graph)
+            .map_err(|error| miette::miette!("artifact `{id}`: {error}"))?;
+        if let Some(staging) = staging
+            && let Err(error) = replace_output(&staging, output)
+        {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error);
+        }
+        let size = std::fs::metadata(output)
+            .map(|meta| meta.len())
+            .map_err(|error| miette::miette!("artifact output: {error}"))?;
+        let savings = graph.savings();
+        release
+            .add_artifact(
+                graph.index(),
+                &relative,
+                zup_artifact::Measured::composed(
+                    digest_of(output)?,
+                    size,
+                    graph.table().stored_size(),
+                    graph.table().logical_size(),
+                    savings.unique_blob_count,
+                    savings.standalone_size,
+                    savings.shared_size,
+                ),
+            )
+            .map_err(|error| miette::miette!("release description: {error}"))?;
+        println!("Built {} {} ({id})", app.name, app.version);
+        println!("  Kind        {}", capitalize(profile.kind.as_str()));
+        println!("  Mode        {}", capitalize(profile.mode.as_str()));
+        println!("  Installer   {}", output.display());
+        println!("  Size        {}", zup_presentation::format_bytes(size));
+        println!(
+            "  Variants    {}",
+            profile_subsystem_text(profile, &composed)
+        );
+        println!(
+            "  Content     {} unique blobs · {} stored · {} logical",
+            savings.unique_blob_count,
+            zup_presentation::format_bytes(graph.table().stored_size()),
+            zup_presentation::format_bytes(savings.standalone_size),
+        );
+        println!(
+            "  Shared      {} of {} ({:.0}%)",
+            zup_presentation::format_bytes(savings.shared_size),
+            zup_presentation::format_bytes(savings.standalone_size),
+            percent(savings.shared_size, savings.standalone_size),
+        );
+    }
+    finish_build(args, loaded, &outputs, release, interactive)
+}
+#[cfg(feature = "build")]
+fn declared_id(args: &BuildCommand, index: usize, profile: &artifacts::ArtifactProfile) -> String {
+    args.artifact
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| profile.file_name("artifact", &semver::Version::new(0, 0, 0)))
+}
+
+#[cfg(feature = "build")]
+fn output_name(output: &std::path::Path) -> String {
+    output
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Setup.exe".to_owned())
+}
+
+#[cfg(feature = "build")]
+fn profile_subsystem_text(
+    profile: &artifacts::ArtifactProfile,
+    composed: &[&zup_artifact::DistributionVariant],
+) -> String {
+    let names = composed
+        .iter()
+        .map(|variant| format!("{} {}", variant.target(), variant.frontend()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = profile;
+    names
+}
+
+#[cfg(feature = "build")]
+fn percent(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        (part as f64 / whole as f64) * 100.0
+    }
+}
+
+/// Start a lowercase vocabulary word with a capital, for a summary line that
+/// reads as a sentence rather than as a serialized value.
+#[cfg(feature = "build")]
+fn capitalize(value: &str) -> String {
+    let mut characters = value.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The runtime template a variant contributes to a universal artifact.
+///
+/// An offline universal artifact must be able to execute the variant it selects,
+/// so every included variant needs its native runtime template. The template is
+/// checked exactly as a single-target build checks it: same frontend, same
+/// machine. A universal artifact that accepted a template the ordinary build
+/// refuses would install something the user did not ask for, quietly, on a
+/// machine that happens to be able to run it.
+#[cfg(feature = "build")]
+fn resolve_runtime(
+    runtimes: &[std::path::PathBuf],
+    config: &zup_manifest::ResolvedTargetConfig,
+    index: usize,
+) -> miette::Result<Option<(zup_artifact::MediaType, Vec<u8>)>> {
+    let path = match runtimes.get(index) {
+        Some(supplied) => supplied.clone(),
+        None => build_inputs::discover_runtime(config.frontend).map_err(|error| {
+            miette::miette!(
+                "no runtime template for `{}` was found: {error}; pass --runtime <path>",
+                config.profile
+            )
+        })?,
+    };
+    build_inputs::validate_runtime_template(&path, config.frontend)?;
+    let runtime_target = zup_windows::read_pe_target(&path)
+        .map_err(|error| miette::miette!("runtime template `{}`: {error}", path.display()))?;
+    if runtime_target != config.target {
+        return Err(miette::miette!(
+            "runtime `{}` is {runtime_target}, but target `{}` needs a matching template",
+            path.display(),
+            config.target
+        ));
+    }
+    zup_windows::validate_pe_frontend(&path, config.frontend)
+        .map_err(|error| miette::miette!("runtime template `{}`: {error}", path.display()))?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| miette::miette!("runtime template `{}`: {error}", path.display()))?;
+    Ok(Some((zup_artifact::MediaType::RUNTIME, bytes)))
+}
+
+/// The dispatcher template one composed artifact is built into.
+#[cfg(feature = "build")]
+fn resolve_dispatcher(
+    args: &BuildCommand,
+    profile: &artifacts::ArtifactProfile,
+    composed: &[&zup_artifact::DistributionVariant],
+    output: &std::path::Path,
+) -> miette::Result<std::path::PathBuf> {
+    let name = profile.dispatcher_name(composed);
+    if let Some(supplied) = args.dispatcher.first() {
+        let found = zup_windows::read_pe_subsystem(supplied)
+            .map_err(|error| miette::miette!("dispatcher template: {error}"))?;
+        let expected = profile.subsystem(composed);
+        let matches = matches!(
+            (expected, found),
+            (
+                zup_artifact::LauncherSubsystem::Gui,
+                zup_windows::PeSubsystem::Gui
+            ) | (
+                zup_artifact::LauncherSubsystem::Console,
+                zup_windows::PeSubsystem::Console
+            )
+        );
+        if !matches {
+            return Err(miette::miette!(
+                "dispatcher `{}` is a {found:?} program but the artifact needs a {expected} launcher",
+                supplied.display()
+            ));
+        }
+        return Ok(supplied.clone());
+    }
+    if let Some(found) = artifacts::discover_dispatcher(name) {
+        return Ok(found);
+    }
+    Err(miette::miette!(
+        "no `{name}` dispatcher template was found; build the dispatcher or pass --dispatcher <path> (composing {})",
+        output.display()
+    ))
+}
+
+/// Describe a built artifact.
+#[cfg(feature = "build")]
+fn run_artifact_inspect(args: ArtifactInspectCommand) -> miette::Result<()> {
+    let report =
+        inspect_artifact::inspect(&args.artifact).map_err(|error| miette::miette!("{error}"))?;
+    match args.format {
+        ArtifactFormatArg::Human => print!("{}", report.human()),
+        ArtifactFormatArg::Json => {
+            let text = serde_json::to_string_pretty(&report)
+                .map_err(|error| miette::miette!("{error}"))?;
+            println!("{text}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "build")]
+fn finish_build(
+    args: &BuildCommand,
+    loaded: &LoadedProject,
+    outputs: &[std::path::PathBuf],
+    release: zup_artifact::ReleaseManifest,
+    interactive: bool,
+) -> miette::Result<()> {
+    if let Some(destination) = args
+        .release_manifest
+        .as_deref()
+        .filter(|destination| *destination != "none")
+    {
+        // The description lives in the release root, which is the directory
+        // its artifacts are written beside.
+        let root = release_root(loaded, outputs)?;
+        let path = root.join(destination);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| miette::miette!("release description: {error}"))?;
+        }
+        let bytes = release
+            .encode()
+            .map_err(|error| miette::miette!("release description: {error}"))?;
+        std::fs::write(&path, bytes)
+            .map_err(|error| miette::miette!("release description: {error}"))?;
+        if interactive {
+            println!("→ Wrote {}", path.display());
+        }
+    }
     if interactive {
         println!("\n✓ Ready to sign");
     }
     Ok(())
+}
+
+/// A release has one root: the directory its artifacts are written beside. Paths
+/// in the release description are therefore file names, and an output that does
+/// not share a directory with the others is refused rather than described with a
+/// build-machine path.
+#[cfg(feature = "build")]
+fn release_relative(
+    outputs: &[std::path::PathBuf],
+    output: &std::path::Path,
+) -> miette::Result<String> {
+    let parent = output.parent().unwrap_or_else(|| std::path::Path::new("."));
+    for other in outputs {
+        let other_parent = other.parent().unwrap_or_else(|| std::path::Path::new("."));
+        if other_parent != parent {
+            return Err(miette::miette!(
+                "a release description describes one directory, but `{}` and `{}` are in different ones",
+                output.display(),
+                other.display()
+            ));
+        }
+    }
+    Ok(output_name(output))
+}
+
+/// The directory a build's artifacts are written beside, which is where its
+/// release description belongs.
+#[cfg(feature = "build")]
+fn release_root(
+    loaded: &LoadedProject,
+    outputs: &[std::path::PathBuf],
+) -> miette::Result<std::path::PathBuf> {
+    match outputs.split_first() {
+        Some((first, rest)) => {
+            let parent = first.parent().unwrap_or_else(|| std::path::Path::new("."));
+            if rest.iter().any(|other| other.parent() != Some(parent)) {
+                return Err(miette::miette!(
+                    "a release description describes one directory; pass --release-manifest none to skip it"
+                ));
+            }
+            Ok(parent.to_path_buf())
+        }
+        None => Ok(loaded
+            .manifest_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf()),
+    }
+}
+
+#[cfg(feature = "build")]
+fn digest_of(path: &std::path::Path) -> miette::Result<zup_core::Sha256Digest> {
+    let file = std::fs::File::open(path).map_err(|error| miette::miette!("{error}"))?;
+    let (size, digest) = zup_core::hash_reader(file).map_err(|error| miette::miette!("{error}"))?;
+    let _ = size;
+    Ok(digest)
 }
 
 #[cfg(feature = "build")]
@@ -1175,13 +1834,13 @@ impl TargetOverrideArgs {
         &self,
         selected: &[zup_manifest::ResolvedTargetConfig],
     ) -> miette::Result<zup_manifest::TargetOverrideSet> {
-        let targets = selected.len();
-        let sources = build_inputs::align_per_target("sources", "--source", &self.source, targets)?;
+        let sources =
+            build_inputs::align_per_target("sources", "--source", &self.source, selected)?;
         let directories = build_inputs::align_per_target(
             "install directories",
             "--install-directory",
             &self.install_directory,
-            targets,
+            selected,
         )?;
         let mut overrides = zup_manifest::TargetOverrideSet::default();
         for (index, config) in selected.iter().enumerate() {
@@ -1464,6 +2123,7 @@ fn run_check(args: CheckCommand) -> miette::Result<()> {
         build_inputs::check_backend_support(config)?;
     }
     let loaded = materialize_project(selected)?;
+    let mut variants = Vec::with_capacity(loaded.selected_targets.len());
     for (config, target_plan) in loaded.selected_targets.iter().zip(&loaded.build.targets) {
         build_inputs::check_target_lowering(&loaded.build, config)?;
         if !target_plan.installer.plugins.is_empty() {
@@ -1485,8 +2145,62 @@ fn run_check(args: CheckCommand) -> miette::Result<()> {
         println!("  Components  {}", target_plan.installer.components.len());
         println!("  Files       {}", target_plan.files.len());
         println!("  Plugins     {}", target_plan.installer.plugins.len());
+        let variant = zup_artifact::DistributionVariant::resolve(config, target_plan, &[], None)
+            .map_err(|error| miette::miette!("variant `{}`: {error}", config.profile))?;
+        variants.push(variant);
     }
+    report_composition(&loaded, &variants);
     Ok(())
+}
+
+/// Say whether the selected targets can be one artifact, and what it would save.
+///
+/// Composition is refused loudly rather than suggested quietly, because a project
+/// that silently ships two installers where one would do has a problem nobody
+/// was told about.
+#[cfg(feature = "build")]
+fn report_composition(loaded: &LoadedProject, variants: &[zup_artifact::DistributionVariant]) {
+    if variants.len() < 2 {
+        return;
+    }
+    let borrowed = variants.iter().collect::<Vec<_>>();
+    let names = loaded
+        .selected_targets
+        .iter()
+        .map(|config| config.profile.to_string())
+        .collect::<Vec<_>>()
+        .join("\n              ");
+    match zup_artifact::check_compatibility(&borrowed) {
+        Err(incompatible) => {
+            println!("\n✗ {} cannot be composed", names.replace('\n', ", "));
+            println!("  {}", incompatible.reason.dimension().as_str());
+            println!("  {}", incompatible.reason.detail());
+            println!("  Build them separately with `zup build --target <profile>`");
+        }
+        Ok(()) => match artifacts::composition_report(&borrowed) {
+            Ok(savings) => {
+                println!("\n✓ Can be composed as one Windows universal installer");
+                println!("\n  Estimated:");
+                println!(
+                    "    standalone total    {}",
+                    zup_presentation::format_bytes(savings.standalone_size)
+                );
+                println!(
+                    "    unique content      {}",
+                    zup_presentation::format_bytes(savings.standalone_size - savings.shared_size)
+                );
+                println!(
+                    "    shared content      {} ({} blobs)",
+                    zup_presentation::format_bytes(savings.shared_size),
+                    savings.unique_blob_count
+                );
+            }
+            Err(refusal) => {
+                println!("\n✗ cannot be composed ({})", refusal.dimension.as_str());
+                println!("  {}", refusal.message);
+            }
+        },
+    }
 }
 
 #[cfg(feature = "build")]

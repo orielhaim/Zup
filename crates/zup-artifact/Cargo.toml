@@ -1,0 +1,39 @@
+[package]
+name = "zup-artifact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-neutral distribution artifact graph for zup"
+
+[dependencies]
+oci-spec = { version = "0.10", default-features = false, features = [
+  "distribution",
+  "image",
+] }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+zup-bundle.workspace = true
+zup-build.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+oci-spec = { version = "0.10", default-features = false, features = [
+  "distribution",
+  "image",
+] }
+rstest.workspace = true
+zup-build.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-plugin-contract.workspace = true
+
+[[bench]]
+name = "composition"
+harness = false
