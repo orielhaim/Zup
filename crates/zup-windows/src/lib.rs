@@ -3,6 +3,7 @@
 //! Prefers focused `windows-*` crates over the `windows` umbrella crate.
 //! Generated Win32 bindings stay private to this crate.
 
+mod acquired;
 mod bindings;
 mod bootstrap_fs;
 mod bundle_packager;
@@ -21,6 +22,7 @@ mod payload_overlay;
 mod pipe;
 mod planning;
 mod prerequisites;
+mod process;
 mod registry;
 mod resolve;
 mod restart_manager;
@@ -39,12 +41,16 @@ mod universal;
 mod worker;
 mod worker_rt;
 
+pub use acquired::{
+    AcquiredBundle, AcquiredRelease, HandoffRejection, VerifiedHandoff, accept_handoff, open_cache,
+    own_digest, subsystem, verify, write_handoff,
+};
 pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
 pub use bundle_packager::{
     AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
-    PeSubsystem, build_self_contained_executable, embed_bundle_file, read_pe_frontend,
-    read_pe_subsystem, read_pe_target, sidecar_package_path, validate_embedded_bundle_target,
-    validate_pe_frontend,
+    PeSubsystem, build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
+    plan_only_runtime_bytes, read_pe_frontend, read_pe_subsystem, read_pe_target,
+    sidecar_package_path, validate_embedded_bundle_target, validate_pe_frontend,
 };
 pub use cmdline::{
     command_spec, command_spec_from_command_line, commands_match, format_command_line,
@@ -74,7 +80,7 @@ pub use integration::{
     notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
 };
 pub use known_folders::WindowsInstallLocationResolver;
-pub use ledger::{InstallLedgerStore, LedgerError};
+pub use ledger::{InstallLedgerStore, LedgerError, ReleaseRecord};
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
     windows_target_path_identity,
@@ -93,6 +99,10 @@ pub use planning::{WindowsPlanError, plan_target_lifecycle, plan_target_lifecycl
 pub use prerequisites::{
     WindowsPrerequisiteDetector, WindowsPrerequisiteProvider, package_requirements,
     runtime_requirements,
+};
+pub use process::{
+    ChildProcess, HandOff, LaunchError, LaunchRequest, Launcher, WindowsLauncher, launch,
+    quote_argument,
 };
 pub use registry::{RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader};
 pub use resolve::{TargetResolveError, WindowsTargetContext, resolve_target};
@@ -131,4 +141,5 @@ pub use worker::{
 pub use worker_rt::run_worker;
 #[cfg(feature = "test-launcher")]
 pub use worker_rt::run_worker_for_test;
+pub use zup_bundle::AcquiredPayloadSource;
 pub use zup_transaction::FilePrecondition;

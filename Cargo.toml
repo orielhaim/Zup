@@ -11,9 +11,23 @@ repository = "https://github.com/orielhaim/zup"
 description = "A programmable application installer for the modern desktop"
 
 [workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+
 # Shared foundation
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.23"
 zstd = "0.14"
 thiserror = "2"
 tracing = "0.1"
@@ -32,6 +46,8 @@ zup-dispatch = { path = "crates/zup-dispatch" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
+zup-acquire = { path = "crates/zup-acquire" }
+zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }
 zup-plan = { path = "crates/zup-plan" }
 zup-platform = { path = "crates/zup-platform" }
@@ -85,7 +101,18 @@ rstest = "0.27"
 tempfile = "3"
 
 # Verified remote artifacts
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "stream",
+  "http2",
+] }
+# Retry with exponential backoff and jitter. `backon` supplies the curve; what
+# counts as retryable and when to move to another origin stays zup's policy.
+backon = { version = "1.6", default-features = false, features = [
+  "std",
+  "tokio",
+  "tokio-sleep",
+] }
 
 # Focused Windows crates (prefer these over the `windows` umbrella crate)
 windows-link = "0.100"

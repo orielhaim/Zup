@@ -75,6 +75,7 @@ mod select;
 mod store;
 mod table;
 mod variant;
+mod web;
 
 pub mod oci;
 
@@ -114,3 +115,4 @@ pub use variant::{
     VARIANT_MANIFEST_SCHEMA, VariantDescriptor, VariantDescriptorContent, VariantManifest,
     VariantRequirements, VariantSources,
 };
+pub use web::{ReleaseFile, WebExport, WebTree, export_web_tree, export_web_tree_with};

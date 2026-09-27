@@ -86,6 +86,7 @@ fn request() -> RuntimeRequest {
         state_root: PathBuf::new(),
         work_root: PathBuf::new(),
         recovery_id: None,
+        release: None,
         bootstrap: None,
     }
 }

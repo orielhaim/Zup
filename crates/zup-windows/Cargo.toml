@@ -36,6 +36,7 @@ zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
 zup-platform.workspace = true
+zup-acquire.workspace = true
 zup-artifact.workspace = true
 zup-pe.workspace = true
 zstd.workspace = true

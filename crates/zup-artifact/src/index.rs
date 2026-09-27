@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use zup_acquire::{OnlineTrust, ReleasePin};
 use zup_core::{App, Sha256Digest, TargetTriple};
 
 use crate::compat::LauncherSubsystem;
@@ -179,12 +180,72 @@ pub struct ArtifactDescriptor {
     pub subsystem: LauncherSubsystem,
     /// Filename the build writes, without a directory.
     pub output: String,
+    /// Where the release graph lives and which root vouches for it.
+    ///
+    /// A thin artifact cannot be small unless it already knows this, so it is
+    /// the one thing a thin index carries beyond the graph itself. An offline
+    /// artifact leaves it `None` and never looks at a network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<OnlineTrust>,
 }
 
 impl ArtifactDescriptor {
     /// Whether the artifact is labelled with an exact version.
     pub fn is_version_labelled(&self) -> bool {
         matches!(self.pin, ArtifactPin::Pinned { .. })
+    }
+
+    /// Whether this artifact can install with no network.
+    ///
+    /// The answer is about the artifact, not about the host: a thin artifact
+    /// with a `--source` seed and a warm cache may not need one, and an offline
+    /// artifact never will.
+    pub const fn is_offline(&self) -> bool {
+        matches!(self.mode, ArtifactMode::Offline)
+    }
+
+    /// Reject a descriptor whose own claims disagree.
+    ///
+    /// A thin artifact with no trust block cannot resolve anything, and an
+    /// offline artifact carrying one is a sign a build wired the wrong request —
+    /// neither is worth discovering on a user's machine.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match (&self.mode, &self.trust) {
+            (ArtifactMode::Offline, Some(_)) => {
+                Err("an offline artifact carries no online trust block")
+            }
+            (ArtifactMode::Thin, None) => Err("a thin artifact embeds no trust block"),
+            (ArtifactMode::Thin, Some(trust)) => {
+                if !trust.channel.is_empty() && self.application.id != trust.app_id {
+                    return Err("a trust block names a different application");
+                }
+                match (&self.pin, &trust.pin) {
+                    (ArtifactPin::Pinned { .. }, ReleasePin::Channel { .. }) => {
+                        Err("a version-labelled artifact needs a pinned trust block")
+                    }
+                    (ArtifactPin::Channel { .. }, ReleasePin::Version { .. }) => {
+                        Err("a channel artifact needs an unpinned trust block")
+                    }
+                    (ArtifactPin::Pinned { version }, ReleasePin::Version { version: pinned }) => {
+                        if version.to_string() != *pinned {
+                            return Err(
+                                "a version-labelled artifact and its trust block disagree on the version",
+                            );
+                        }
+                        Ok(())
+                    }
+                    (ArtifactPin::Channel { channel }, ReleasePin::Channel { channel: pinned }) => {
+                        if channel != pinned {
+                            return Err(
+                                "a channel artifact and its trust block disagree on the channel",
+                            );
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            (ArtifactMode::Offline, None) => Ok(()),
+        }
     }
 }
 

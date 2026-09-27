@@ -28,6 +28,21 @@ use zup_plugin_contract::{
 
 /// Current portable package schema.
 pub const PACKAGE_SCHEMA: u32 = 1;
+
+/// A package that carries its plan but not its payload.
+///
+/// This is the **thin runtime**: a native maintenance runtime that knows exactly
+/// what it would install and holds none of the bytes, because the bytes come
+/// from a verified content-addressed cache the release graph authenticated. It
+/// is what makes a thin installer's runtime a few megabytes instead of the whole
+/// application, and it is what lets one engine serve an offline artifact (which
+/// carries its payload) and an online one (which does not).
+///
+/// The flag is load-bearing rather than cosmetic. Without it a reader has to
+/// assume every named digest is present, and with it a reader that finds no blob
+/// index knows it must be handed a source — there is no in-between state in
+/// which a plan claims content the package does not have.
+pub const PACKAGE_FEATURE_EXTERNAL_PAYLOAD: u64 = 1 << 0;
 const HEADER_LEN: u64 = 60;
 const MAX_METADATA: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
@@ -381,6 +396,60 @@ impl Package {
         &self.metadata.plan
     }
 
+    /// Whether this package names content it does not carry.
+    ///
+    /// A plan-only package is a thin runtime: it can plan, and it must be handed
+    /// a content source. `Package::payload_source` on one of these is a bug, so
+    /// it returns `None` rather than a source that would always miss.
+    pub const fn is_plan_only(&self) -> bool {
+        self.metadata.required_features & PACKAGE_FEATURE_EXTERNAL_PAYLOAD != 0
+    }
+
+    /// Every digest this package's plan can need, in ascending order.
+    ///
+    /// This is what an acquisition engine schedules: the exact content set for
+    /// this variant, before any component selection narrows it.
+    pub fn required_digests(&self) -> Vec<Sha256Digest> {
+        let mut digests: Vec<Sha256Digest> = self
+            .metadata
+            .plan
+            .entries
+            .iter()
+            .map(|entry| entry.blob)
+            .chain(
+                self.metadata
+                    .plan
+                    .prerequisite_artifacts
+                    .iter()
+                    .map(|artifact| artifact.blob),
+            )
+            .chain(
+                self.metadata
+                    .plan
+                    .plugins
+                    .iter()
+                    .map(|artifact| artifact.blob),
+            )
+            .collect();
+        digests.sort_unstable();
+        digests.dedup();
+        digests
+    }
+
+    /// The digest each payload path resolves to, as the plan declares it.
+    ///
+    /// A content source is asked for a path, a digest, and a length, so this is
+    /// the map it needs and nothing more: the caller already holds the digest the
+    /// plan authenticated, so this cannot be used to substitute content.
+    pub fn payload_index(&self) -> BTreeMap<RelativePath, Sha256Digest> {
+        self.metadata
+            .plan
+            .entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.blob))
+            .collect()
+    }
+
     pub fn build_plan(&self) -> Result<BuildPlan, PackageError> {
         let files = self
             .metadata
@@ -694,18 +763,18 @@ fn parse_metadata(
         return Err(PackageError::Invalid);
     }
     let features = u64::from_le_bytes(header[12..20].try_into().unwrap());
+    let external = features & PACKAGE_FEATURE_EXTERNAL_PAYLOAD != 0;
+    if features & !PACKAGE_FEATURE_EXTERNAL_PAYLOAD != 0 {
+        return Err(PackageError::Invalid);
+    }
     let meta_len = u64::from_le_bytes(header[20..28].try_into().unwrap());
     let index_size = HEADER_LEN
         .checked_add(meta_len)
         .ok_or(PackageError::Invalid)?;
-    if features != 0 || meta_len > MAX_METADATA {
-        return Err(if meta_len > MAX_METADATA {
-            PackageError::MetadataTooLarge {
-                size: meta_len,
-                limit: MAX_METADATA,
-            }
-        } else {
-            PackageError::Invalid
+    if meta_len > MAX_METADATA {
+        return Err(PackageError::MetadataTooLarge {
+            size: meta_len,
+            limit: MAX_METADATA,
         });
     }
     if package_len.is_some_and(|length| index_size > length) {
@@ -719,7 +788,7 @@ fn parse_metadata(
     }
     let metadata: Metadata = serde_json::from_slice(&bytes)?;
     if metadata.schema != PACKAGE_SCHEMA
-        || metadata.required_features != 0
+        || metadata.required_features != features
         || metadata.plan.entries.len() > MAX_ENTRIES
         || metadata.plan.prerequisite_artifacts.len() > MAX_PREREQUISITES
         || metadata.plan.plugins.len() > MAX_PLUGIN_ARTIFACTS
@@ -869,27 +938,44 @@ fn parse_metadata(
 
     let mut referenced = BTreeSet::new();
     for entry in &metadata.plan.entries {
-        if entry.blob != entry.sha256 || by_digest.get(&entry.blob) != Some(&entry.size) {
+        if entry.blob != entry.sha256 {
+            return Err(PackageError::Invalid);
+        }
+        // A plan-only package names content it does not hold, so there is
+        // nothing to check the size against here. What proves those bytes is the
+        // release graph, and what proves them again at install time is the
+        // content source's own digest check.
+        if !external && by_digest.get(&entry.blob) != Some(&entry.size) {
             return Err(PackageError::Invalid);
         }
         referenced.insert(entry.blob);
     }
     for artifact in &metadata.plan.prerequisite_artifacts {
-        if artifact.blob != artifact.sha256 || by_digest.get(&artifact.blob) != Some(&artifact.size)
-        {
+        if artifact.blob != artifact.sha256 {
+            return Err(PackageError::Invalid);
+        }
+        if !external && by_digest.get(&artifact.blob) != Some(&artifact.size) {
             return Err(PackageError::Invalid);
         }
         referenced.insert(artifact.blob);
     }
     for artifact in &metadata.plan.plugins {
-        if artifact.blob != artifact.aot_sha256
-            || by_digest.get(&artifact.blob) != Some(&artifact.aot_size)
-        {
+        if artifact.blob != artifact.aot_sha256 {
+            return Err(PackageError::Invalid);
+        }
+        if !external && by_digest.get(&artifact.blob) != Some(&artifact.aot_size) {
             return Err(PackageError::Invalid);
         }
         referenced.insert(artifact.blob);
     }
-    if referenced.len() != metadata.blobs.len() {
+    // An external-payload package carries no blob index at all. A partial one —
+    // some content in the plan, some outside it — is the state that would let a
+    // reader believe it has a self-contained copy of something it does not.
+    if external {
+        if !metadata.blobs.is_empty() {
+            return Err(PackageError::Invalid);
+        }
+    } else if referenced.len() != metadata.blobs.len() {
         return Err(PackageError::Invalid);
     }
     Ok((metadata, index_size))
@@ -1031,6 +1117,24 @@ fn canonical_prerequisites(
 #[derive(Debug)]
 pub struct BundleWriter;
 
+/// Read a build-machine source and prove it is what the plan says it is.
+///
+/// Returns the size and digest it found, so a caller that has already trusted
+/// the plan still cannot publish a plan whose files are missing or changed.
+fn verify_source(
+    source: &Path,
+    expected_size: u64,
+    expected_digest: Sha256Digest,
+) -> Result<(u64, Sha256Digest), PackageError> {
+    let bytes =
+        std::fs::read(source).map_err(|_| PackageError::Payload(source.display().to_string()))?;
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
+    if bytes.len() as u64 != expected_size || digest != expected_digest {
+        return Err(PackageError::Payload(source.display().to_string()));
+    }
+    Ok((bytes.len() as u64, digest))
+}
+
 impl BundleWriter {
     /// Produce deterministic package bytes. Each unique digest is compressed
     /// once and all blob offsets are relative to the data region.
@@ -1154,6 +1258,132 @@ impl BundleWriter {
         out.extend_from_slice(&Sha256::digest(&meta));
         out.extend_from_slice(&meta);
         out.extend_from_slice(&compressed);
+        Ok(out)
+    }
+
+    /// Produce a package that carries its plan and none of its payload.
+    ///
+    /// This is the thin runtime image. The plan is canonical and complete — the
+    /// application identity, the component definitions, the file destinations,
+    /// the prerequisites, the plugin bindings — so the runtime can plan and
+    /// execute a lifecycle with no manifest and no other architecture's bytes.
+    /// The content itself is named by digest and comes from a verified cache.
+    ///
+    /// Nothing is read from the build machine except to *prove* the plan: each
+    /// declared file is checked against its own size and digest, so a plan whose
+    /// files do not exist is refused here rather than at install time.
+    pub fn encode_plan_only(
+        plan: &TargetBuildPlan,
+        artifacts: &[CompiledPluginArtifact],
+    ) -> Result<Vec<u8>, PackageError> {
+        let artifacts = canonical_artifacts(plan, artifacts)?;
+        let mut installer = plan.installer.clone();
+        for mapping in &mut installer.files {
+            mapping.source = "embedded".to_owned();
+        }
+        let mut entries = Vec::with_capacity(plan.files.len());
+        for file in &plan.files {
+            let (size, digest) = verify_source(&file.source, file.size, file.sha256)?;
+            entries.push(PayloadEntry {
+                path: file.source_relative.clone(),
+                destination: file.destination.clone(),
+                size,
+                sha256: file.sha256,
+                blob: digest,
+                component: file.component.clone(),
+                condition: file.condition.clone(),
+            });
+        }
+        let prerequisite_artifacts = canonical_prerequisites(plan)?;
+        for prerequisite in &plan.prerequisites {
+            verify_source(&prerequisite.source, prerequisite.size, prerequisite.sha256)?;
+        }
+        entries.sort_by(|a, b| {
+            a.destination
+                .to_string()
+                .cmp(&b.destination.to_string())
+                .then(a.path.cmp(&b.path))
+        });
+        let total_size = entries
+            .iter()
+            .try_fold(0u64, |sum, entry| sum.checked_add(entry.size))
+            .ok_or(PackageError::Invalid)?;
+        if entries.len() > MAX_ENTRIES {
+            return Err(PackageError::TooManyBlobs {
+                count: entries.len(),
+                limit: MAX_ENTRIES,
+            });
+        }
+        let portable_plan = PortableBuildPlan {
+            installer,
+            entries,
+            prerequisite_artifacts,
+            plugins: artifacts
+                .into_iter()
+                .map(|artifact| artifact.metadata)
+                .collect(),
+            total_size,
+        };
+        let metadata = Metadata {
+            schema: PACKAGE_SCHEMA,
+            required_features: PACKAGE_FEATURE_EXTERNAL_PAYLOAD,
+            plan: portable_plan,
+            blobs: Vec::new(),
+        };
+        let meta = serde_json::to_vec(&metadata)?;
+        if meta.len() as u64 > MAX_METADATA {
+            return Err(PackageError::MetadataTooLarge {
+                size: meta.len() as u64,
+                limit: MAX_METADATA,
+            });
+        }
+        let mut out = Vec::with_capacity(HEADER_LEN as usize + meta.len());
+        out.extend_from_slice(b"ZUPBNDL\0");
+        out.extend_from_slice(&PACKAGE_SCHEMA.to_le_bytes());
+        out.extend_from_slice(&PACKAGE_FEATURE_EXTERNAL_PAYLOAD.to_le_bytes());
+        out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        out.extend_from_slice(&Sha256::digest(&meta));
+        out.extend_from_slice(&meta);
+        Ok(out)
+    }
+
+    /// Re-wrap a canonical plan as a plan-only package.
+    ///
+    /// This is what a runtime does at install time: it has the plan the release
+    /// authenticated, and it needs a `Package` so the content source can be
+    /// addressed by path and digest. It proves nothing and copies nothing — the
+    /// plan is already canonical, and the digests it names are the keys the
+    /// verified cache is addressed by. `artifacts` is only the plugin *metadata*,
+    /// whose AOT bytes come from the cache rather than from here.
+    pub fn encode_plan_only_plan(
+        plan: &PortableBuildPlan,
+        artifacts: &[PluginArtifact],
+    ) -> Result<Vec<u8>, PackageError> {
+        let mut metadata = Metadata {
+            schema: PACKAGE_SCHEMA,
+            required_features: PACKAGE_FEATURE_EXTERNAL_PAYLOAD,
+            plan: plan.clone(),
+            blobs: Vec::new(),
+        };
+        metadata.plan.plugins = artifacts.to_vec();
+        metadata
+            .plan
+            .plugins
+            .sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        let meta = serde_json::to_vec(&metadata)?;
+        if meta.len() as u64 > MAX_METADATA {
+            return Err(PackageError::MetadataTooLarge {
+                size: meta.len() as u64,
+                limit: MAX_METADATA,
+            });
+        }
+        let mut out = Vec::with_capacity(HEADER_LEN as usize + meta.len());
+        out.extend_from_slice(b"ZUPBNDL\0");
+        out.extend_from_slice(&PACKAGE_SCHEMA.to_le_bytes());
+        out.extend_from_slice(&PACKAGE_FEATURE_EXTERNAL_PAYLOAD.to_le_bytes());
+        out.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        out.extend_from_slice(&Sha256::digest(&meta));
+        out.extend_from_slice(&meta);
         Ok(out)
     }
 

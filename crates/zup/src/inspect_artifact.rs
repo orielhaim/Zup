@@ -123,7 +123,15 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
             exclusive_size = exclusive_size.saturating_add(size);
         }
     }
-    store.verify_all()?;
+    // Every content digest an artifact *carries* is verified, so a report never
+    // describes content the artifact cannot produce. A thin artifact carries
+    // none: its table names every digest the release will serve, and those are
+    // authenticated by the release rather than by this file, so the report says
+    // `named` rather than pretending to have checked bytes it does not have.
+    let carries_content = index.artifact.mode.carries_content();
+    if carries_content {
+        store.verify_all()?;
+    }
 
     let variants = index
         .variants
@@ -169,7 +177,11 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
         trust: InspectedTrust {
             authenticode: authenticode.to_owned(),
             index: "valid".to_owned(),
-            content_digests: "valid".to_owned(),
+            content_digests: if carries_content {
+                "valid".to_owned()
+            } else {
+                "named".to_owned()
+            },
             variants: "valid".to_owned(),
         },
     })

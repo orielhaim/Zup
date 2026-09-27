@@ -14,11 +14,29 @@ path = "src/main.rs"
 name = "zup-dispatch-console"
 path = "src/console.rs"
 
+[features]
+default = []
+# The online path. This is what turns a thin artifact from a description into a
+# working installer, and it is the only thing the feature adds: a TUF client, an
+# HTTP transport, and the acquisition engine. A dispatcher built without it
+# still runs every offline artifact, and refuses a thin one with a clear reason
+# rather than pretending.
+online = ["dep:serde_json", "dep:tokio", "dep:zup-acquire", "dep:zup-update"]
+
 [dependencies]
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "fs", "macros", "io-util"] }
 windows-link.workspace = true
+zup-acquire = { workspace = true, optional = true }
 zup-artifact.workspace = true
 zup-core.workspace = true
+zup-update = { workspace = true, optional = true }
 zup-windows.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
+zstd.workspace = true
+zup-acquire.workspace = true
+zup-artifact.workspace = true
+zup-xtask.workspace = true

@@ -100,6 +100,13 @@ pub struct ExecuteTransaction {
     pub work_root: String,
     /// Resume this durable transaction instead of beginning another one.
     pub recovery_id: Option<uuid::Uuid>,
+    /// The exact release graph being installed, for the worker to record.
+    ///
+    /// The worker publishes the ledger, so the identity has to reach it. It is
+    /// an `Option` because a development run has none, and an absent identity is
+    /// recorded as absent rather than invented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<zup_core::ReleaseIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -258,13 +258,19 @@ impl UniversalArtifact {
         let index = zup_artifact::ArtifactIndex::parse(&index_bytes)?;
         let layout = UniversalLayout::new(index.variants.len(), 0);
         let table_bytes = zup_pe::read_resource(&executable, layout.table())?;
+        // A thin artifact names each variant's runtime so a client knows what the
+        // graph will hand it, but it does not carry one — the runtime is the
+        // thing the artifact exists to fetch, and embedding it would make the
+        // installer the application. An offline artifact carries it, because it
+        // has to be able to execute what it holds.
+        let carries_runtimes = index.artifact.mode.carries_content();
         let mut metadata = MetadataSet::new();
         for (position, variant) in index.variants.iter().enumerate() {
             metadata.insert(
                 &variant.manifest,
                 read_metadata(&executable, layout.manifest(position))?,
             )?;
-            if let Some(runtime) = variant.runtime {
+            if carries_runtimes && let Some(runtime) = variant.runtime {
                 metadata.insert(
                     &runtime,
                     read_metadata(&executable, layout.runtime(position))?,

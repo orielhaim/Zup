@@ -40,6 +40,8 @@ pub struct ArtifactRequest {
     pub pin: ArtifactPin,
     pub launcher: LauncherStrategy,
     pub output: String,
+    /// Where the release graph lives, for a thin artifact.
+    pub trust: Option<zup_acquire::OnlineTrust>,
 }
 
 impl ArtifactRequest {
@@ -58,6 +60,39 @@ impl ArtifactRequest {
             },
             launcher: LauncherStrategy::EmbeddedDispatcher,
             output: output.into(),
+            trust: None,
+        }
+    }
+
+    /// A thin artifact that authenticates `trust` and fetches the rest.
+    ///
+    /// The two thin artifacts differ only in `trust.pin`, and that is the whole
+    /// difference a user sees: a version-labelled installer always resolves the
+    /// graph it was built for, and a channel installer resolves whatever the
+    /// channel currently says.
+    pub fn thin_online(
+        id: impl Into<String>,
+        application: &zup_core::App,
+        trust: zup_acquire::OnlineTrust,
+        output: impl Into<String>,
+    ) -> Self {
+        let pin = match &trust.pin {
+            zup_acquire::ReleasePin::Version { version } => ArtifactPin::Pinned {
+                version: semver::Version::parse(version)
+                    .unwrap_or_else(|_| application.version.clone()),
+            },
+            zup_acquire::ReleasePin::Channel { channel } => ArtifactPin::Channel {
+                channel: channel.clone(),
+            },
+        };
+        Self {
+            id: id.into(),
+            kind: ArtifactKind::Universal,
+            mode: ArtifactMode::Thin,
+            pin,
+            launcher: LauncherStrategy::EmbeddedDispatcher,
+            output: output.into(),
+            trust: Some(trust),
         }
     }
 }
@@ -334,8 +369,15 @@ impl ArtifactComposer {
                 logical_size: variant.logical_size(),
             };
             content.insert(variant.id().to_owned(), set);
+            // A thin artifact names each variant's runtime but does not carry it.
+            // The bytes come from the release graph, which is the whole reason a
+            // thin installer is thin: it would be absurd to embed the installer
+            // inside the thing whose job is to fetch the installer. The offline
+            // case is the opposite, and the reason an offline artifact must be
+            // able to execute what it holds.
             let runtime = match (self.request.mode, variant.runtime()) {
-                (_, Some(runtime)) => {
+                (ArtifactMode::Thin, Some(runtime)) => Some(*runtime),
+                (ArtifactMode::Offline, Some(runtime)) => {
                     let bytes = self.runtime_bytes(variant)?;
                     runtimes.push(ComposedRuntime {
                         id: variant.id().to_owned(),
@@ -397,6 +439,7 @@ impl ArtifactComposer {
                 launcher: self.request.launcher,
                 subsystem: ordered[0].subsystem(),
                 output: self.request.output.clone(),
+                trust: self.request.trust.clone(),
             },
             tables: ArtifactTables {
                 blobs: Descriptor::of(MediaType::BLOB_TABLE, &table.encode()?),

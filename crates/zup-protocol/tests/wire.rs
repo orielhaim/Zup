@@ -106,6 +106,7 @@ fn plan_hash_binding_message_roundtrips_with_overlay() {
         state_root: r"C:\state".into(),
         work_root: r"C:\work".into(),
         recovery_id: None,
+        release: None,
     };
     let envelope = WireEnvelope {
         version: PROTOCOL_VERSION,

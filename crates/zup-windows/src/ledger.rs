@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zup_core::ReleaseIdentity;
 use zup_core::{AppId, ResourceKey, SelectedScope};
 use zup_exec::{INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource};
 use zup_platform::TargetPath;
@@ -41,6 +42,22 @@ pub enum LedgerError {
 
 pub struct InstallLedgerStore {
     root: PathBuf,
+}
+
+/// What a committing transaction knows about the release graph it came from.
+///
+/// Three cases, not two. Collapsing "no graph" into "keep the old one" would
+/// leave a development run claiming a release it never touched, and collapsing
+/// "keep the old one" into "no graph" would erase a real identity the first time
+/// the machine replayed its journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseRecord<'a> {
+    /// Record this authenticated graph.
+    Identity(&'a ReleaseIdentity),
+    /// This transaction was not produced from a release graph.
+    None,
+    /// This is a replay of an already-committed transaction.
+    Preserve,
 }
 
 impl InstallLedgerStore {
@@ -143,7 +160,7 @@ impl InstallLedgerStore {
         for record in committed {
             let id = record.transaction_id.as_uuid();
             if latest.is_none_or(|previous| id > previous) {
-                self.publish_committed(&record, scope)?;
+                self.publish_committed(&record, scope, ReleaseRecord::Preserve)?;
                 latest = Some(id);
             } else {
                 cleanup_committed_files(&record)?;
@@ -294,10 +311,16 @@ impl InstallLedgerStore {
         Ok(())
     }
 
+    /// Publish a committed transaction as the installation's ownership state.
+    ///
+    /// `release` says what this transaction knows about the graph it came from.
+    /// The three cases are genuinely different and conflating any two of them
+    /// would make the ledger lie.
     pub fn publish_committed(
         &self,
         record: &TransactionRecord,
         scope: SelectedScope,
+        release: ReleaseRecord<'_>,
     ) -> Result<InstallLedger, LedgerError> {
         if record.phase != TransactionPhase::Committed {
             return Err(LedgerError::Uncommitted);
@@ -359,6 +382,15 @@ impl InstallLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
+        // The identity follows the transaction, not the ledger. A replay keeps
+        // whatever the first commit recorded, because the journal cannot supply
+        // it; a development run clears it, because claiming a graph it did not
+        // come from would make a later repair restore the wrong bytes.
+        ledger.release = match release {
+            ReleaseRecord::Identity(identity) => Some(identity.clone()),
+            ReleaseRecord::None => None,
+            ReleaseRecord::Preserve => ledger.release,
+        };
         let retired_ledger_keys = retired_ledger_keys(&record.plan)?;
         for node in &record.plan.nodes {
             let key = match &node.kind {

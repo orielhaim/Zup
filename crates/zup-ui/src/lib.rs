@@ -2028,6 +2028,7 @@ mod windows_smoke {
             state_root: root.join("state"),
             work_root: root.join("work"),
             recovery_id: None,
+            release: None,
             bootstrap: None,
         };
         let backend = zup_windows::WindowsRuntimeBackend::from_path(payload, None).unwrap();

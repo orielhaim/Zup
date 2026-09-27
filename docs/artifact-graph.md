@@ -111,6 +111,31 @@ index. Everything is inside Authenticode-hashed image sections, because
 resources are written before the image is signed; there is no trailing overlay,
 so a signature covers the whole artifact.
 
+### A thin artifact's resources are a strict subset
+
+A thin artifact uses the same identifiers but writes fewer of them, and the reason
+is not an optimisation - it is that the runtime is the thing it exists to fetch:
+
+```text
+resource 1              the artifact index
+resource 2              the content store table
+resources 3..           one variant manifest per variant
+                        no native runtime: the index names one, the artifact
+                            does not carry it
+                        no content store: the table is detached
+```
+
+`UniversalLayout` owns the identifier arithmetic either way, so a reader knows
+what each identifier holds without consulting the index, and `UniversalArtifact`
+reads a runtime resource only when the artifact's mode says it carries one. A
+thin artifact whose index names a runtime is not a contradiction: the name is what
+the graph will hand over, and the graph is what has to authenticate it.
+
+Embedding the runtime in a thin artifact would make it a slow offline installer
+wearing a different name. The offline case is the opposite, and the reason an
+offline artifact must be able to execute what it holds.
+
+
 ### The dispatcher
 
 `zup-dispatch` is a launcher and nothing else: inspect the host, validate the
@@ -129,8 +154,9 @@ first. The measured consequence:
 
 | Dispatcher | Size |
 | --- | --- |
-| `i686-pc-windows-msvc` | **977,920 bytes** |
-| `x86_64-pc-windows-msvc` | 1,175,040 bytes |
+| `i686-pc-windows-msvc`, offline | **940,544 bytes** |
+| `i686-pc-windows-msvc`, online (a thin installer's launcher) | **4,060,672 bytes** |
+| `x86_64-pc-windows-msvc`, offline | 1,175,040 bytes |
 
 i686 is both the only shape that is correct for every variant set a project
 might publish, and 17% smaller. `compose_universal_executable` refuses a
@@ -291,9 +317,12 @@ names a file a user downloads. `--universal` is the shorthand for "compose
 every selected target into one file" and is refused alongside `--artifact`.
 
 `zup artifact inspect <ARTIFACT> [--format <human|json>]` reads a built artifact
-with the same parser the dispatcher and the runtime use and verifies every
-content digest it reports, so a report never describes content the artifact
-cannot produce. The JSON report is versioned (`report_version: 1`).
+with the same parser the dispatcher and the runtime use, and verifies every
+content digest it **carries**, so a report never describes content the artifact
+cannot produce. For a thin artifact it carries none, and the report says so:
+`content digests  named` rather than `valid`, because those digests are
+authenticated by the release rather than by that file. The JSON report is
+versioned (`report_version: 1`).
 
 A release description is written to `dist/zup-release.json`. Its paths are file
 names relative to the outputs' shared parent, and an output that does not share
@@ -341,11 +370,22 @@ load-bearing for canonical identity. The host side keeps its typed
 
 ## What is not done
 
-- **Thin artifacts.** `[build.artifacts]` accepts `mode = "thin"` and a
-  `channel`, and composition records both, but nothing fills a thin store.
-  `zup-update` still resolves updates from the release description's variant
-  list rather than from a content-addressed fetch, and there is no TUF-authenticated
-  index → variant manifest → digest-addressed blob path yet.
+- **The online acquisition path is not yet wired into the updater.** The engine,
+  the transport, the release graph, the verified cache, the web-tree export, and
+  `zup publish stage` are built and tested end to end, and `docs/updates.md`
+  documents the workflow they implement. `zup-update` still resolves updates
+  from a channel descriptor and launches a downloaded Setup.exe rather than
+  driving the acquisition engine, so the update path does not yet benefit from
+  unchanged content costing zero bytes. `docs/online-acquisition.md` records the
+  measured cost of the graph path and what remains to be connected.
+- **The thin bootstrapper has not gained its online path.** `mode = "thin"` and
+  a `channel` are recorded by composition, and a thin artifact stages correctly
+  through `zup publish stage`, but the dispatcher does not yet resolve a release
+  and launch a verified native runtime. The trust boundary it must keep is
+  specified in `docs/online-acquisition.md`.
 - **A cross-build cache.** The measurement above is what a build cache would
   need to be worth building.
-- **The dispatcher size trade.** Recorded above as unresolved.
+- **The dispatcher size trade.** Recorded above as unresolved, and unchanged by
+  this milestone: the online path adds a TUF client and an HTTP stack to a
+  launcher that is currently 978 KB, and that cost has not been measured against
+  a two-process alternative.

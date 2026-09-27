@@ -17,7 +17,7 @@ mod plan;
 
 pub use ledger::{
     ExtensionState, FileAssociationState, INSTALL_LEDGER_SCHEMA, InstallLedger, LauncherState,
-    OwnedResource, ProtocolState, ServiceState,
+    OwnedResource, ProtocolState, ServiceState, owned_content_digests,
 };
 pub use lifecycle::{LifecycleAction, LifecycleError, plan_lifecycle};
 pub use observe::{

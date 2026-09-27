@@ -1,0 +1,36 @@
+[package]
+name = "zup-acquire-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP transport for the zup content acquisition engine"
+
+[dependencies]
+backon.workspace = true
+futures-util = "0.3"
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "rt",
+  "sync",
+  "time",
+] }
+url = "2"
+zup-acquire.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+zup-acquire.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "time",
+] }
+zstd.workspace = true

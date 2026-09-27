@@ -28,6 +28,14 @@ use crate::{
     cleanup_payload_overlay, payload_overlay_base_root, verify_payload_overlay,
 };
 
+/// What to record about the release graph a committing request came from.
+fn record_release(request: &RuntimeRequest) -> crate::ReleaseRecord<'_> {
+    match &request.release {
+        Some(identity) => crate::ReleaseRecord::Identity(identity),
+        None => crate::ReleaseRecord::None,
+    }
+}
+
 /// Windows execution policy for temporary payload overlays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayPolicy {
@@ -143,6 +151,26 @@ impl WindowsRuntimeBackend {
             verify_payload_overlay(base, &identity, overlay).map_err(|error| error.to_string())?;
         }
         Self::from_path(payload_root, overlay).map_err(|error| error.to_string())
+    }
+
+    /// A backend whose payload is a verified content cache.
+    ///
+    /// This is the online and graph-update path: the content came from a release
+    /// graph rather than from an image, and the executor reads it by digest. The
+    /// executor's own precondition checks are unchanged, so a blob that does not
+    /// hash to what the plan names fails at the file operation rather than
+    /// producing a file.
+    pub fn from_acquired(
+        payload: std::sync::Arc<crate::AcquiredPayloadSource>,
+        payload_root: impl Into<PathBuf>,
+    ) -> Result<Self, BundleError> {
+        let payload_root = payload_root.into();
+        Ok(Self {
+            payload,
+            payload_root,
+            payload_overlay_root: None,
+            retain_on_blocked: false,
+        })
     }
 
     pub fn from_bundle(
@@ -1068,6 +1096,7 @@ async fn run_elevated_worker(
                 state_root: request.state_root.display().to_string(),
                 work_root: request.work_root.display().to_string(),
                 recovery_id: request.recovery_id.map(|id| id.as_uuid()),
+                release: request.release.clone(),
             }),
         })
         .await
@@ -1387,9 +1416,11 @@ fn execute_local_blocking_with_events_inner(
 
     match coordinator.execute(record, &mut executor) {
         Ok((record, TransactionOutcome::Committed)) => {
-            match InstallLedgerStore::new(&request.state_root)
-                .publish_committed(&record, request.scope)
-            {
+            match InstallLedgerStore::new(&request.state_root).publish_committed(
+                &record,
+                request.scope,
+                record_release(&request),
+            ) {
                 Ok(_) => {
                     crate::notify_committed_path_change(&record);
                     InstallOutcome::Committed

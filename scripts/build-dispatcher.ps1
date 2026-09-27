@@ -16,24 +16,50 @@ try {
     $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = "z"
     $env:CARGO_PROFILE_RELEASE_PANIC = "abort"
     $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = 1
-    cargo build -p zup-dispatch --target $target --release --bins
-    cargo build -p zup-dispatch --target $target --bins
+
+    # Each flavour is built and installed before the next one starts, because they
+    # share an output path and the second build would otherwise overwrite the
+    # first. Both are installed beside the `zup` executable, which is where
+    # `zup build` looks for a template and where the tests look for one.
+    #
+    # The machine is in the installed name: `cargo build` writes the unsuffixed
+    # name for the host, and a host image silently replacing the x86 one would
+    # make every composition test fail on a width rule instead of on what it
+    # tests. The flavour is in the name for the same reason — an online image and
+    # an offline one differ by three megabytes, and a test that measured the
+    # wrong one would report a number nobody could reproduce.
+    $flavours = @(
+        @{ Feature = "";         Suffix = "" },
+        @{ Feature = "online";  Suffix = "-online" }
+    )
+    $binaries = @("zup-dispatch", "zup-dispatch-console")
+
+    function Install-Images([string]$profile, [string]$suffix) {
+        $destination = "target/$profile"
+        foreach ($name in $binaries) {
+            $built = "target/$target/$profile/$name.exe"
+            $item = Get-Item -LiteralPath $built
+            $installed = "$name$suffix-$target.exe"
+            Copy-Item -LiteralPath $built -Destination "$destination/$installed" -Force
+            "{0,-8} {1,-28} {2,12:N0} bytes" -f $profile, $installed, $item.Length
+        }
+    }
+
+    foreach ($flavour in $flavours) {
+        $features = @()
+        if ($flavour.Feature) {
+            $features = @("--features", $flavour.Feature)
+        }
+        cargo build -p zup-dispatch --target $target @features --release --bins
+        Install-Images "release" $flavour.Suffix
+        cargo build -p zup-dispatch --target $target @features --bins
+        Install-Images "debug" $flavour.Suffix
+    }
+
     Remove-Item Env:CARGO_PROFILE_RELEASE_LTO
     Remove-Item Env:CARGO_PROFILE_RELEASE_OPT_LEVEL
     Remove-Item Env:CARGO_PROFILE_RELEASE_PANIC
     Remove-Item Env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS
-
-    # Both profiles are installed beside the `zup` executable, which is where
-    # `zup build` looks for a template and where the tests look for one.
-    foreach ($profile in @("debug", "release")) {
-        $destination = "target/$profile"
-        foreach ($name in @("zup-dispatch", "zup-dispatch-console")) {
-            $built = "target/$target/$profile/$name.exe"
-            $item = Get-Item -LiteralPath $built
-            Copy-Item -LiteralPath $built -Destination "$destination/$name.exe" -Force
-            "{0} {1} {2:N0} bytes" -f $profile, $item.Name, $item.Length
-        }
-    }
 }
 finally {
     Pop-Location

@@ -87,6 +87,19 @@ pub async fn run_worker_for_test(
     run_worker_inner(bootstrap, cancel, false).await
 }
 
+/// What to record about the release graph an elevated transaction came from.
+///
+/// The parent sends it because the parent is the process that authenticated the
+/// graph; the worker publishes the ledger, so the identity has to arrive with the
+/// plan. An absent identity is recorded as absent, which is what a development
+/// run deserves.
+fn release_record(release: &Option<zup_core::ReleaseIdentity>) -> crate::ReleaseRecord<'_> {
+    match release {
+        Some(identity) => crate::ReleaseRecord::Identity(identity),
+        None => crate::ReleaseRecord::None,
+    }
+}
+
 async fn run_worker_inner(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
@@ -426,7 +439,9 @@ async fn run_worker_inner(
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
             } else {
-                ledgers.publish_committed(&r, scope).map(|_| ())
+                ledgers
+                    .publish_committed(&r, scope, release_record(&exec.release))
+                    .map(|_| ())
             };
             publication.map_err(|e| {
                 WorkerError::Transaction(format!(

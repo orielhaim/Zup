@@ -10,12 +10,14 @@
 
 mod condition;
 mod digest;
+mod encoding;
 mod ids;
 mod installer;
 mod location;
 mod model;
 mod path;
 mod prerequisite;
+mod release;
 mod resource_key;
 mod target;
 mod template;
@@ -23,6 +25,7 @@ mod value;
 
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_reader};
+pub use encoding::{base64_decode, base64_encode};
 pub use ids::{
     AppId, BackendResourceId, ComponentId, FileAssociationId, NonEmptyString, PluginId,
     ProtocolScheme, ServiceId,
@@ -42,10 +45,12 @@ pub use prerequisite::{
     PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
     PrerequisiteRequirement, Runtime, RuntimeRequirementId,
 };
+pub use release::{IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseIdentity};
 pub use resource_key::ResourceKey;
 pub use target::{
     ResolvedTargetConfig, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
-    TargetParseError, TargetProfile, TargetProfileId, TargetTriple,
+    TargetParseError, TargetProfile, TargetProfileId, TargetTriple, host_architecture,
+    host_operating_system,
 };
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
 pub use value::ValueError;

@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod acquisition;
+
+pub use acquisition::{AcquisitionThread, acquisition_thread, automation_events, progress_line};
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 

@@ -23,8 +23,13 @@ use zup_artifact::{
 use zup_core::TargetProfileId;
 
 /// The dispatcher template file names, beside the `zup` executable.
-pub const DISPATCHER_GUI: &str = "zup-dispatch.exe";
-pub const DISPATCHER_CONSOLE: &str = "zup-dispatch-console.exe";
+///
+/// The machine is part of the name because `cargo build` writes the unsuffixed
+/// name for the host: a build that found a host image here would compose a
+/// universal artifact whose launcher is too wide to run on the machines the
+/// artifact exists to serve.
+pub const DISPATCHER_GUI: &str = "zup-dispatch-i686.exe";
+pub const DISPATCHER_CONSOLE: &str = "zup-dispatch-console-i686.exe";
 
 /// One artifact a project declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +97,7 @@ impl ArtifactProfile {
             pin,
             launcher: LauncherStrategy::EmbeddedDispatcher,
             output,
+            trust: None,
         }
     }
 

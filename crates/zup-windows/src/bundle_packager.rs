@@ -469,6 +469,59 @@ pub fn build_self_contained_executable(
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
 
+/// Build a **thin** native runtime: the plan, and none of the content.
+///
+/// This is the executable a thin installer fetches and hands control to. It
+/// knows exactly what it would install — application identity, components, file
+/// destinations, prerequisites, plugin bindings — so it can plan and execute a
+/// lifecycle with no manifest, and it holds none of the bytes, because the bytes
+/// come from a verified content-addressed cache the release graph
+/// authenticated.
+///
+/// The alternative — embedding the payload — is what an offline artifact does,
+/// and it makes the runtime the entire application. Which is the reason a thin
+/// installer built that way would not be thin.
+pub fn build_plan_only_executable(
+    executable: &Path,
+    output: &Path,
+    plan: &TargetBuildPlan,
+    artifacts: &[CompiledPluginArtifact],
+) -> Result<(u64, u64), BundleError> {
+    let (bytes, package_size) = plan_only_runtime_bytes(executable, plan, artifacts)?;
+    std::fs::write(output, &bytes)?;
+    Ok((bytes.len() as u64, package_size))
+}
+
+/// The plan-only runtime image, as bytes.
+///
+/// The bytes are the useful shape for a publisher: the image is content a
+/// release graph names, so it has to exist as bytes before anything writes a
+/// file, and a caller that wrote a temporary file first would have two
+/// processes racing over one name.
+pub fn plan_only_runtime_bytes(
+    executable: &Path,
+    plan: &TargetBuildPlan,
+    artifacts: &[CompiledPluginArtifact],
+) -> Result<(Vec<u8>, u64), BundleError> {
+    let runtime_target = read_pe_target(executable)?;
+    if runtime_target != plan.installer.target {
+        return Err(BundleError::TargetMismatch {
+            expected: plan.installer.target.clone(),
+            found: runtime_target,
+        });
+    }
+    validate_pe_frontend(executable, plan.installer.frontend)?;
+    validate_unsigned_pe(executable)?;
+    let package = BundleWriter::encode_plan_only(plan, artifacts)?;
+    let package_size = package.len() as u64;
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("runtime.zup");
+    std::fs::write(&path, &package)?;
+    let out = temporary.path().join("runtime.exe");
+    embed_bundle_file(executable, &out, &path)?;
+    Ok((std::fs::read(&out)?, package_size))
+}
+
 /// Embed a prebuilt portable package in an executable.
 pub fn embed_bundle_file(
     executable: &Path,

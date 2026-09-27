@@ -68,6 +68,7 @@ zup-pe.workspace = true
 zup-build = { workspace = true, optional = true }
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
+zup-acquire.workspace = true
 zup-artifact.workspace = true
 zup-plugin-build = { workspace = true, optional = true }
 zup-plugin-contract.workspace = true
@@ -98,6 +99,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 sha2.workspace = true
 tempfile.workspace = true
+zstd.workspace = true
 wat = "1"
 windows-registry.workspace = true
 wit-component = { version = "=0.259.0", features = ["dummy-module"] }

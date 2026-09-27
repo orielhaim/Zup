@@ -60,3 +60,18 @@ fn show(message: &str) {
 
 #[cfg(not(windows))]
 fn show(_message: &str) {}
+
+/// What this launcher accepts.
+///
+/// Printed on `--help` and nowhere else. Two options, both of them locations:
+/// a state root and a local source tree. There is no option that names a
+/// release, a digest, or a URL, because nothing this program does would be
+/// safer for it.
+pub fn print_usage() {
+    println!("zup installer launcher");
+    println!();
+    println!("  --state-root <dir>   where this machine records its installations");
+    println!("  --source <dir>       a local release tree to read before the network");
+    println!("  --output jsonl       report progress as JSONL on stdout");
+    println!("  --help               this text");
+}

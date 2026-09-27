@@ -291,9 +291,24 @@ fn a_universal_build_writes_one_file_containing_every_selected_target() {
             .iter()
             .map(|path| fs::metadata(path).unwrap().len())
             .sum::<u64>();
+    // The comparison is between the two shapes' *content*, so the launcher's one
+    // time cost is subtracted from the composed side. A universal artifact needs
+    // one dispatcher and two standalone installers need none, so including it
+    // would measure the launcher rather than the composition — and the launcher is
+    // the same file in both cases once the second variant exists.
+    let launcher = fs::metadata(console_dispatcher()).unwrap().len();
+    let content = file.saturating_sub(launcher);
     assert!(
-        file < two_installers,
-        "composing two variants costs less than shipping two installers: {file} vs {two_installers}"
+        content < two_installers,
+        "composing two variants stores less content than shipping two installers: \
+         {content} bytes of content and a {launcher}-byte launcher, \
+         against {two_installers} bytes of installers"
+    );
+    // And the sharing is the reason: the same two assets on two machines cost
+    // roughly half of two whole copies, not the whole of both.
+    assert!(
+        content * 2 < two_installers * 3 / 2,
+        "shared content is stored once: {content} against {two_installers}"
     );
 }
 

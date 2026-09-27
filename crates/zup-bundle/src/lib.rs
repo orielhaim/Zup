@@ -6,13 +6,15 @@
 //! contains one target plan; multi-target containers are not part of this
 //! format.
 
+mod acquired;
 mod format;
 mod payload;
 
+pub use acquired::{AcquiredPayloadSource, refuse_self_verified};
 pub use format::{
-    BundleWriter, CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PACKAGE_SCHEMA, Package,
-    PackageError, PackageIndex, PackagePayloadSource, PayloadEntry, PluginArtifact,
-    PortableBuildPlan, PrerequisiteArtifact,
+    BundleWriter, CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES,
+    PACKAGE_FEATURE_EXTERNAL_PAYLOAD, PACKAGE_SCHEMA, Package, PackageError, PackageIndex,
+    PackagePayloadSource, PayloadEntry, PluginArtifact, PortableBuildPlan, PrerequisiteArtifact,
 };
 pub use payload::{
     AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,

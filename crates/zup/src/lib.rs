@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use clap::CommandFactory;
 use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use std::io::IsTerminal;
+use zup_acquire::{CachePolicy, ProgressSink};
 use zup_bootstrap::{
     BootstrapId, BootstrapKey, BootstrapOperation, BootstrapPlan, BootstrapState,
     BootstrapStateStore, BoundBootstrapPlan, Quarantine,
@@ -15,12 +16,13 @@ use zup_bootstrap::{
 #[cfg(feature = "build")]
 use zup_core::TargetOverrides;
 use zup_core::{
-    AppId, ComponentId, Frontend, RelativePath, ResourceKey, SelectedScope, TargetTriple,
+    AppId, ComponentId, Frontend, RelativePath, ResourceKey, SelectedScope, Sha256Digest,
     hash_reader,
 };
 use zup_exec::LifecycleAction;
 use zup_presentation::{AutomationEvent, AutomationResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest};
+use zup_update::{ComponentSelection, TrustContext};
 
 #[cfg(feature = "build")]
 mod artifacts;
@@ -28,6 +30,8 @@ mod artifacts;
 mod build_inputs;
 #[cfg(feature = "build")]
 pub mod doctor;
+mod graph;
+mod handoff;
 #[cfg(feature = "build")]
 mod inspect_artifact;
 
@@ -52,6 +56,9 @@ enum Commands {
     #[cfg(feature = "build")]
     /// Inspect a distribution artifact.
     Artifact(ArtifactCommand),
+    #[cfg(feature = "build")]
+    /// Stage the immutable web tree a static origin serves.
+    Publish(PublishCommand),
     /// Create a small, editable zup.toml project.
     #[cfg(feature = "build")]
     Init(InitCommand),
@@ -102,6 +109,9 @@ enum Commands {
 struct UpdateCommand {
     #[command(subcommand)]
     command: Option<UpdateCommands>,
+    /// A local release tree to read before the network.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    source: Option<PathBuf>,
     #[arg(long, value_enum)]
     scope: Option<ScopeArg>,
     #[arg(long)]
@@ -252,6 +262,23 @@ struct ManifestCommand {
     yes: bool,
     #[arg(long = "component")]
     component: Vec<String>,
+    /// Read payload from a verified content cache rather than from this image.
+    ///
+    /// This is how a thin bootstrapper hands over: it resolved an authenticated
+    /// release, filled a cache, and verified the runtime it is now running as.
+    /// The cache is a location, not an authority — every blob still has to hash
+    /// to a digest the authenticated release named.
+    #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
+    acquired: Option<PathBuf>,
+    /// The handoff document a bootstrapper wrote, naming the release to install.
+    #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+    handoff: Option<PathBuf>,
+    /// The digest of `handoff`, as the launcher computed it.
+    #[arg(long, hide = true)]
+    handoff_digest: Option<String>,
+    /// A local release tree to read before the network.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    source: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -439,6 +466,86 @@ enum ArtifactSubcommand {
     Inspect(ArtifactInspectCommand),
 }
 
+/// What to do with a release.
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct PublishCommand {
+    #[command(subcommand)]
+    command: PublishSubcommand,
+}
+
+/// The publishing steps zup performs.
+///
+/// Signing is not one of them. Keys live outside zup and the TUF metadata is
+/// produced by `tuftool`, so a release is staged as a directory of files and
+/// signed by the tool that already knows how to sign a TUF repository.
+#[cfg(feature = "build")]
+#[derive(Debug, Subcommand)]
+enum PublishSubcommand {
+    /// Write the immutable web tree a static origin serves.
+    Stage(PublishStageCommand),
+}
+
+/// Stage everything a static origin serves and a TUF repository signs.
+#[cfg(feature = "build")]
+#[derive(Debug, Args)]
+struct PublishStageCommand {
+    #[arg(long, default_value = DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
+    manifest: PathBuf,
+    /// The directory the web tree is written to.
+    #[arg(long, default_value = "dist/web", value_hint = ValueHint::DirPath)]
+    output: PathBuf,
+    /// The channel the staged release answers to.
+    #[arg(long, default_value = "stable")]
+    channel: String,
+    /// Build source directory for each selected target, relative to the project.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    source: Vec<PathBuf>,
+    /// Native runtime template for each selected target, in manifest order.
+    ///
+    /// This is a *bare* runtime — a `zup-setup-*` binary with no package of its
+    /// own. A staged release embeds the plan into a copy of it, which is what
+    /// makes the runtime a few megabytes instead of the whole application.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    runtime: Vec<PathBuf>,
+    /// Build the two thin installers as well as the web tree.
+    ///
+    /// A version-labelled one always installs the release it was built for; a
+    /// channel one installs whatever the channel currently resolves to. They are
+    /// different files because they make different promises.
+    #[arg(long)]
+    thin: bool,
+    /// The dispatcher template the thin installers are built from.
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    dispatcher: Option<PathBuf>,
+    /// Where the thin installers are written.
+    ///
+    /// They are not part of the web tree: the tree is what a static origin
+    /// serves, and an installer is what a person downloads. So they default to
+    /// the directory beside it and a publisher who wants them served alongside
+    /// the graph says so.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    thin_output: Option<PathBuf>,
+    /// The URL a published client reads the release graph from.
+    ///
+    /// Embedded in the thin installers, so it has to be the address the clients
+    /// will use, not the path this build happens to write to. Defaults to the
+    /// staged tree as a `file:` URL, which is right for a local origin and
+    /// obviously wrong for a real one.
+    #[arg(long, value_hint = ValueHint::Url)]
+    repository: Option<String>,
+    /// Default install directory the installer will use, for each selected target.
+    #[arg(long, alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
+    install_directory: Vec<PathBuf>,
+    #[arg(long, value_enum)]
+    frontend: Option<FrontendArg>,
+    #[arg(long, value_name = "PROFILE_OR_TARGET")]
+    target: Vec<String>,
+    /// Finished installers to record as downloadable files, repeatable.
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    download: Vec<PathBuf>,
+}
+
 #[cfg(feature = "build")]
 #[derive(Debug, Args)]
 struct ArtifactInspectCommand {
@@ -590,6 +697,11 @@ fn run_command(cli: Cli, runtime_frontend: Option<Frontend>) -> miette::Result<(
         #[cfg(feature = "build")]
         Some(Commands::Artifact(args)) => match args.command {
             ArtifactSubcommand::Inspect(args) => run_artifact_inspect(args)?,
+        },
+        #[cfg(feature = "build")]
+        #[cfg(feature = "build")]
+        Some(Commands::Publish(args)) => match args.command {
+            PublishSubcommand::Stage(args) => run_publish_stage(args)?,
         },
         #[cfg(feature = "build")]
         Some(Commands::Init(args)) => run_init(args)?,
@@ -929,6 +1041,303 @@ enum BuildIntent {
     Artifacts(Vec<artifacts::ArtifactProfile>),
 }
 
+/// Write the immutable web tree a static origin serves and a TUF repository
+/// signs.
+///
+/// The point of this command is that a developer does not reconstruct the
+/// artifact graph by hand. `zup build` has already worked out what content
+/// exists, what is shared, and what each variant needs; this takes the same
+/// answer and lays it out as a directory a plain file server can host:
+///
+/// ```text
+/// <output>/blobs/sha256/…           one compressed object per unique digest
+/// <output>/releases/<channel>.json  the release descriptor
+/// <output>/releases/<channel>/…     the catalog and one manifest per variant
+/// <output>/tuf-input/…             the same documents, for tuftool
+/// ```
+///
+/// Nothing is signed here. `tuftool` reads `tuf-input`, and the signed metadata
+/// plus this tree are what a static origin serves.
+#[cfg(feature = "build")]
+fn run_publish_stage(args: PublishStageCommand) -> miette::Result<()> {
+    let overrides = TargetOverrideArgs {
+        source: args.source.clone(),
+        install_directory: args.install_directory.clone(),
+        frontend: args.frontend.map(Frontend::from),
+    };
+    let selected = select_project(&args.manifest, &args.target, &overrides, false)?;
+    for config in &selected.selected_targets {
+        build_inputs::check_backend_support(config)?;
+    }
+    let loaded = materialize_project(selected)?;
+    for config in &loaded.selected_targets {
+        build_inputs::check_target_lowering(&loaded.build, config)?;
+    }
+    let runtimes = build_inputs::align_per_target(
+        "runtimes",
+        "--runtime",
+        &args.runtime,
+        &loaded.selected_targets,
+    )?
+    .unwrap_or(&[]);
+
+    let interactive = std::io::stdout().is_terminal();
+    // A thin release's runtime is not the template: it is the template with this
+    // target's plan compiled into it and none of the content. That is what makes
+    // it a few megabytes instead of the whole application, and it is why a thin
+    // installer that embedded it would be a slow offline installer wearing a
+    // different name.
+    let thin = args.thin;
+    let mut variants = Vec::with_capacity(loaded.selected_targets.len());
+    for (index, (config, plan)) in loaded
+        .selected_targets
+        .iter()
+        .zip(&loaded.build.targets)
+        .enumerate()
+    {
+        let runtime = if thin {
+            let template = runtimes
+                .get(index)
+                .cloned()
+                .or_else(|| build_inputs::discover_runtime(config.frontend).ok())
+                .ok_or_else(|| {
+                    miette::miette!(
+                        "no runtime template for `{}` was found; pass --runtime <path>",
+                        config.profile
+                    )
+                })?;
+            let image = build_plan_only_runtime(&template, config, plan)?;
+            Some((zup_artifact::MediaType::RUNTIME, image))
+        } else {
+            resolve_runtime(runtimes, config, index)?
+        };
+        variants.push(
+            zup_artifact::DistributionVariant::resolve(config, plan, &[], runtime)
+                .map_err(|error| miette::miette!("variant `{}`: {error}", config.profile))?,
+        );
+    }
+    if interactive {
+        println!("→ Composing the release graph");
+    }
+
+    // One graph for the whole release. The web layout is variant-oriented, not
+    // artifact-oriented: the offline installer is a claim in the release rather
+    // than a container the content is trapped inside.
+    let request = zup_artifact::ArtifactRequest::universal_offline(
+        format!("{}-web", loaded.manifest.app.id.as_str()),
+        &loaded.manifest.app,
+        "release",
+    );
+    let borrowed: Vec<&zup_artifact::DistributionVariant> = variants.iter().collect();
+    let graph = artifacts::compose(request, &borrowed)
+        .map_err(|error| miette::miette!("release graph: {error}"))?;
+
+    let downloads = args
+        .download
+        .iter()
+        .map(|path| {
+            let size = std::fs::metadata(path)
+                .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?
+                .len();
+            Ok(zup_artifact::ReleaseFile {
+                path: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| miette::miette!("`{}` has no file name", path.display()))?
+                    .to_owned(),
+                digest: digest_of(path)?,
+                size,
+                kind: zup_acquire::ReleaseDownloadKind::OfflineInstaller,
+                variant: None,
+            })
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+
+    let channel = zup_artifact::WebExport::new(&args.channel)
+        .map_err(|error| miette::miette!("channel: {error}"))?;
+    let tree = zup_artifact::export_web_tree_with(&graph, &channel, &args.output, &downloads)
+        .map_err(|error| miette::miette!("staging the web tree: {error}"))?;
+
+    println!(
+        "Staged {} {} ({})",
+        loaded.manifest.app.name, loaded.manifest.app.version, args.channel
+    );
+    println!("  Tree        {}", tree.root.display());
+    println!(
+        "  Content     {} objects · {}",
+        tree.blob_count,
+        zup_presentation::format_bytes(tree.blob_bytes)
+    );
+    println!("  Variants    {}", tree.variant_count);
+    println!("  Release     {}", tree.release_digest);
+    println!(
+        "  TUF targets {} in {}/tuf-input",
+        tree.tuf_targets.len(),
+        tree.root.display()
+    );
+    println!();
+    println!("Publish the tree as static files, then sign the release graph:");
+    println!("  tuftool update --root <trusted-root> --key <signing-key> \\");
+    println!("    --add-targets {}/tuf-input \\", tree.root.display());
+    println!("    --targets-expires 'in 3 weeks' --snapshot-expires 'in 3 weeks' \\");
+    println!("    --timestamp-expires 'in 1 week' --outdir <repository>");
+
+    if thin {
+        stage_thin_installers(&args, &loaded, &borrowed, &tree.root)?;
+    }
+    Ok(())
+}
+
+/// Build the native runtime a thin release serves.
+///
+/// It is the bare template with this target's plan compiled in and none of the
+/// content, so the image is a few megabytes and knows exactly what it would
+/// install. The plan is *proved* here — every declared file is read and checked
+/// against its own size and digest — so a plan whose files do not exist is
+/// refused at publish time rather than at install time on a user's machine.
+#[cfg(feature = "build")]
+fn build_plan_only_runtime(
+    template: &std::path::Path,
+    config: &zup_manifest::ResolvedTargetConfig,
+    plan: &zup_build::TargetBuildPlan,
+) -> miette::Result<Vec<u8>> {
+    build_inputs::validate_runtime_template(template, config.frontend)?;
+    zup_windows::plan_only_runtime_bytes(template, plan, &[])
+        .map(|(bytes, _)| bytes)
+        .map_err(|error| miette::miette!("building the thin runtime: {error}"))
+}
+
+/// Write the two thin installers.
+///
+/// They differ in exactly one byte of intent: which document they authenticate.
+/// A version-labelled installer always installs the release it was built for,
+/// because it reads an immutable version-addressed name. A channel installer
+/// installs whatever the channel currently says, because it reads the pointer.
+/// Everything else about them is identical, which is the point: they are one
+/// artifact with two promises, not two artifacts.
+#[cfg(feature = "build")]
+fn stage_thin_installers(
+    args: &PublishStageCommand,
+    loaded: &LoadedProject,
+    variants: &[&zup_artifact::DistributionVariant],
+    tree: &std::path::Path,
+) -> miette::Result<()> {
+    let Some(dispatcher) = &args.dispatcher else {
+        return Err(miette::miette!(
+            "--thin needs --dispatcher <path>; the thin installers are the dispatcher plus a trust block"
+        ));
+    };
+    // The trusted root is a build input, already read and validated when the
+    // project was materialized, and it is inlined rather than shipped beside the
+    // installer. A root is a few kilobytes of signed JSON, and inlining it is what
+    // lets a sub-megabyte launcher be a complete trust anchor rather than a
+    // download that has to be trusted before it can be checked.
+    let updates = loaded
+        .build
+        .targets
+        .first()
+        .and_then(|target| target.installer.updates.as_ref())
+        .ok_or_else(|| {
+            miette::miette!(
+                "a thin release needs `[updates]` in the manifest: it is where the repository, the channel, and the trusted root come from"
+            )
+        })?;
+    let repository = args.repository.clone().unwrap_or_else(|| {
+        let absolute = std::fs::canonicalize(tree).unwrap_or_else(|_| tree.to_path_buf());
+        let rendered = absolute.display().to_string().replace('\\', "/");
+        format!("file:///{}", rendered.trim_start_matches('/'))
+    });
+    // The channel a thin installer reads and the channel this release is staged
+    // into are the same string, and a build that let them differ would publish a
+    // launcher pointing at a document nobody signed. The manifest's channel is
+    // what the application itself will check updates against, so the staged
+    // channel has to be it.
+    if !updates.channel.is_empty() && updates.channel != args.channel {
+        return Err(miette::miette!(
+            "`--channel {}` does not match the manifest's `[updates] channel {}`; a thin \
+             installer and the release it installs would read different documents",
+            args.channel,
+            updates.channel
+        ));
+    }
+    let app_id = loaded.manifest.app.id.clone();
+    let output = args.thin_output.clone().unwrap_or_else(|| {
+        args.output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    });
+    std::fs::create_dir_all(&output)
+        .map_err(|error| miette::miette!("`{}`: {error}", output.display()))?;
+    let name: String = loaded
+        .manifest
+        .app
+        .name
+        .as_str()
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '/')
+        .collect();
+
+    let mut written: Vec<(&str, PathBuf)> = Vec::new();
+    for (label, pin) in [
+        (
+            "version",
+            zup_acquire::ReleasePin::Version {
+                version: loaded.manifest.app.version.to_string(),
+            },
+        ),
+        (
+            "channel",
+            zup_acquire::ReleasePin::Channel {
+                channel: args.channel.clone(),
+            },
+        ),
+    ] {
+        let trust = zup_acquire::OnlineTrust::new(
+            app_id.clone(),
+            &args.channel,
+            &repository,
+            &updates.trusted_root,
+            pin,
+        );
+        let request = zup_artifact::ArtifactRequest::thin_online(
+            format!("{app_id}-{label}"),
+            &loaded.manifest.app,
+            trust,
+            format!("{name}-Setup-{label}.exe"),
+        );
+        let graph = artifacts::compose(request, variants)
+            .map_err(|error| miette::miette!("thin artifact graph: {error}"))?;
+        let file = output.join(&graph.index().artifact.output);
+        zup_windows::compose_universal_executable(dispatcher, &file, &graph)
+            .map_err(|error| miette::miette!("`{}`: {error}", file.display()))?;
+        written.push((label, file));
+    }
+
+    println!();
+    println!("Thin installers");
+    for (label, file) in &written {
+        let size = std::fs::metadata(file).map(|item| item.len()).unwrap_or(0);
+        println!(
+            "  {label:<8} {} · {}",
+            file.display(),
+            zup_presentation::format_bytes(size)
+        );
+    }
+    println!();
+    println!("The two differ only in which document they authenticate:");
+    println!(
+        "  version  releases/{}/versions/{}.json — the release it was built for",
+        args.channel, loaded.manifest.app.version
+    );
+    println!(
+        "  channel  releases/{}.json — whatever the channel currently says",
+        args.channel
+    );
+    Ok(())
+}
+
 /// Decide what a build run produces.
 #[cfg(feature = "build")]
 fn build_intent(
@@ -1144,6 +1553,7 @@ fn single_target_index(
             launcher: zup_artifact::LauncherStrategy::HostSelectedContainer,
             subsystem: artifacts::subsystem_of(config.frontend),
             output: file_name,
+            trust: None,
         },
         tables: zup_artifact::ArtifactTables {
             blobs: zup_artifact::Descriptor {
@@ -2086,7 +2496,7 @@ fn prepare_bootstrap(
                     .build()
                     .map_err(|error| miette::miette!("download runtime: {error}"))?;
                 runtime
-                    .block_on(zup_update::download_pinned(
+                    .block_on(zup_update::fetch_pinned(
                         url,
                         *sha256,
                         *size,
@@ -2554,6 +2964,7 @@ where
             work_root: state_root.join("work"),
             state_root,
             recovery_id: None,
+            release: None,
             bootstrap: None,
         };
         let backend = zup_windows::WindowsRuntimeBackend::from_path(payload_root, None)
@@ -2671,6 +3082,7 @@ where
         state_root,
         work_root,
         recovery_id: None,
+        release: None,
         bootstrap,
     };
     Ok(PreparedRuntime {
@@ -3087,7 +3499,71 @@ fn run_manifest_transition_with_policy(
     policy: ExecutionPolicy,
 ) -> miette::Result<()> {
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
+    // A handoff arrives before anything else, because it is what says which
+    // release this process is installing. A handoff that does not verify is a
+    // refusal here rather than a surprise three phases later.
+    if let Some(handoff_path) = &args.handoff {
+        let cache_root = args.acquired.clone().ok_or_else(|| {
+            miette::miette!(
+                "--handoff was given without --acquired, so there is no verified content"
+            )
+        })?;
+        let accepted = handoff::accept(
+            &executable,
+            &cache_root,
+            handoff_path,
+            args.handoff_digest.as_deref(),
+        )
+        .map_err(|error| {
+            // The guarantee is stated rather than implied: every one of these
+            // checks runs before the transaction engine is asked for a plan.
+            debug_assert!(error.left_machine_unchanged());
+            miette::miette!("{error}")
+        })?;
+        // The bootstrapper's progress is the runtime's starting point, not a new
+        // one: the bytes it already fetched are in this cache and are still here.
+        let resume = accepted.session.resume_line();
+        if args.output == OutputArg::Human && !resume.is_empty() {
+            eprintln!("{resume}");
+        }
+        // The handoff says which lifecycle this is, and it agrees with the verb
+        // the user typed. A disagreement means one of the two processes is not
+        // the one that thinks it is, which is worth a refusal.
+        let expected = match accepted.mode {
+            zup_acquire::HandoffMode::Install => LifecycleAction::Install,
+            zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
+            zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
+            zup_acquire::HandoffMode::Repair => LifecycleAction::Repair { force_files: false },
+        };
+        if expected != action {
+            return Err(miette::miette!(
+                "the launcher handed over a `{}` handoff but `{}` was requested",
+                accepted.mode.verb(),
+                lifecycle_action_name(action)
+            ));
+        }
+        return run_acquired_transition(
+            graph::Request {
+                action: Some(action),
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+                install_directory: args.install_directory.clone(),
+                scope: Some(accepted.scope),
+            },
+            &accepted.acquired,
+            args.output.into(),
+            policy,
+        );
+    }
     match zup_windows::EmbeddedBundle::open(&executable) {
+        Ok(bundle) if bundle.package().is_plan_only() => {
+            // A thin runtime: it holds its plan and none of the content, because
+            // the content came from — and comes again from — a release graph.
+            // Every lifecycle it runs is therefore a graph lifecycle, including
+            // the first one, and the closure is computed by the same code that
+            // computed it for the bootstrapper.
+            run_graph_transition(action, &args, &bundle, policy)
+        }
         Ok(bundle) => {
             let build = embedded_target_plan(&bundle)?;
             let scope = if build.installer.install.scope == zup_core::InstallScope::Machine {
@@ -3109,10 +3585,190 @@ fn run_manifest_transition_with_policy(
             )
         }
         Err(error) if error.is_missing_resource() => {
+            // No package at all: a bare `zup`, which is either a developer's
+            // tool working from a `zup.toml` or a runtime whose plan went
+            // missing. Only the first can be served, and saying so is better
+            // than inventing a source.
             run_manifest_source_transition(action, args, policy)
         }
         Err(error) => Err(miette::miette!("installer package: {error}")),
     }
+}
+
+/// Run a lifecycle for a thin runtime, against the release graph.
+///
+/// The embedded package is the runtime's own copy of the plan, and it is the only
+/// thing a runtime-only process knows: there is no manifest beside it and no
+/// source directory. The update configuration embedded in that plan is where the
+/// repository, the channel, and the trusted root come from — which is the point
+/// of inlining them: a machine that lost the installer file can still repair
+/// itself, because the identity of what it installed travels with it.
+///
+/// A repair narrows the closure to the resources the ledger says drifted, so a
+/// one-file repair costs one file. Every other lifecycle takes the whole
+/// selection. Both are the same code; only the closure differs.
+#[cfg(feature = "build")]
+fn run_graph_transition(
+    action: LifecycleAction,
+    args: &ManifestCommand,
+    bundle: &zup_windows::EmbeddedBundle,
+    policy: ExecutionPolicy,
+) -> miette::Result<()> {
+    let build = embedded_target_plan(bundle)?;
+    let installer = &build.installer;
+    let config = installer.updates.as_ref().ok_or_else(|| {
+        miette::miette!(
+            "this runtime carries a plan but no `[updates]` configuration, so there is no \
+             release graph to acquire from"
+        )
+    })?;
+    let scope = if installer.install.scope == zup_core::InstallScope::Machine {
+        SelectedScope::Machine
+    } else {
+        SelectedScope::from(args.scope)
+    };
+    let state_root = choose_state_root(args.state_root.clone(), scope)?;
+    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
+        .load(&installer.app.id, scope)
+        .map_err(|error| miette::miette!("installation ledger: {error}"))?;
+
+    // A repair is only meaningful against a committed installation, and a
+    // committed installation from a graph records which graph. An installation
+    // with no identity was made from a manifest, and repairing it through the
+    // graph would fetch a different release's bytes.
+    if let Some(identity) = ledger
+        .as_ref()
+        .and_then(zup_exec::InstallLedger::release_identity)
+    {
+        if identity.app_id != installer.app.id {
+            return Err(miette::miette!(
+                "the installation in {scope} is `{}` and this runtime installs `{}`",
+                identity.app_id,
+                installer.app.id
+            ));
+        }
+    } else if matches!(action, LifecycleAction::Repair { .. }) {
+        return Err(miette::miette!(
+            "this installation has no release identity, so there is no authenticated source \
+             to repair it from; re-run it from its installer"
+        ));
+    }
+
+    // The cache lives beside the state, and the state a machine-scope install
+    // uses for content is the per-user one: a shared cache would need an
+    // authority the acquisition engine has no business holding.
+    let content_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
+        default_state_root(SelectedScope::User)?
+    } else {
+        state_root.clone()
+    };
+    let context = TrustContext::from_update_config(config, installer.app.id.clone(), content_root);
+    let seeds: Vec<PathBuf> = args.source.iter().cloned().collect();
+    let (sink, receiver) = ProgressSink::channel(256);
+    let emitter = match args.output {
+        OutputArg::Jsonl => Some(zup_presentation::acquisition_thread(receiver)),
+        _ => None,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|error| miette::miette!("acquisition runtime: {error}"))?;
+
+    let acquired = runtime
+        .block_on(graph::acquire(
+            context,
+            ComponentSelection::All,
+            None,
+            &seeds,
+            sink,
+        ))
+        .map_err(|error| {
+            debug_assert!(error.left_machine_unchanged());
+            miette::miette!("release acquisition: {error}")
+        })?;
+    drop(emitter);
+
+    // A repair restores what the machine owns. The ledger holds each owned
+    // resource's digest, so the closure is the intersection of what drifted and
+    // what the release carries — which is also the ownership check, because a
+    // digest in neither cannot be asked for.
+    if let LifecycleAction::Repair { force_files } = action {
+        let drifted = drifted_digests(&state_root, installer, scope, force_files)?;
+        if drifted.is_empty() {
+            return Ok(());
+        }
+        let manifest = &acquired.manifest;
+        let plan = graph::repair_closure(&acquired.resolved, manifest, &drifted)
+            .map_err(|error| miette::miette!("repair closure: {error}"))?;
+        let narrowed = graph::Acquired { plan, ..acquired };
+        return run_acquired_transition(
+            graph::Request {
+                scope: Some(scope),
+                ..graph::Request::new(action)
+            },
+            &narrowed,
+            args.output.into(),
+            policy,
+        );
+    }
+
+    if let Some(installed) = ledger
+        .as_ref()
+        .and_then(zup_exec::InstallLedger::release_identity)
+        && installed.same_release(&acquired.identity())
+    {
+        return match args.output {
+            OutputArg::Jsonl => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&AutomationEvent::Completed {
+                        outcome: ProcessOutcome::Success,
+                    })
+                    .map_err(|error| miette::miette!("output: {error}"))?
+                );
+                Ok(())
+            }
+            _ => {
+                println!("up to date ({})", acquired.resolved.descriptor.version);
+                Ok(())
+            }
+        };
+    }
+
+    let verb = match action {
+        LifecycleAction::Install => LifecycleAction::Upgrade,
+        other => other,
+    };
+    run_acquired_transition(
+        graph::Request {
+            scope: Some(scope),
+            ..graph::Request::new(verb).components(&args.enable, &args.disable)
+        },
+        &acquired,
+        args.output.into(),
+        policy,
+    )
+}
+
+/// The digests behind owned resources the machine no longer has correct.
+///
+/// An owned resource with no file on disk, or one whose file hashes to something
+/// else, is drift. The answer is a set of digests, not a decision: whether a
+/// drifted file is restored or the operation is refused is the executor's call,
+/// and this only says what the machine is missing.
+#[cfg(feature = "build")]
+fn drifted_digests(
+    state_root: &Path,
+    installer: &zup_manifest::Installer,
+    scope: SelectedScope,
+    _force_files: bool,
+) -> miette::Result<std::collections::BTreeSet<zup_core::Sha256Digest>> {
+    let ledger = zup_windows::InstallLedgerStore::new(state_root)
+        .load(&installer.app.id, scope)
+        .map_err(|error| miette::miette!("installation ledger: {error}"))?
+        .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
+    Ok(zup_exec::owned_content_digests(&ledger))
 }
 
 #[cfg(feature = "build")]
@@ -3224,6 +3880,7 @@ fn run_manifest_source_transition(
         state_root,
         work_root,
         recovery_id: None,
+        release: None,
         bootstrap,
     };
     let backend = zup_windows::WindowsRuntimeBackend::from_path(payload_root, None)
@@ -3250,67 +3907,21 @@ fn run_manifest_source_transition(
     ))
 }
 
-fn validate_downloaded_update(
-    path: &Path,
-    expected_app_id: &AppId,
-    expected_version: &semver::Version,
-    expected_target: &TargetTriple,
-    expected_frontend: Frontend,
-    scope: SelectedScope,
-) -> miette::Result<()> {
-    let target = zup_windows::read_pe_target(path)
-        .map_err(|error| miette::miette!("downloaded update target: {error}"))?;
-    if target != *expected_target {
-        return Err(miette::miette!(
-            "downloaded update target `{target}` does not match `{expected_target}`"
-        ));
-    }
-    zup_windows::validate_pe_frontend(path, expected_frontend)
-        .map_err(|error| miette::miette!("downloaded update frontend: {error}"))?;
-    let bundle = zup_windows::EmbeddedBundle::open(path)
-        .map_err(|error| miette::miette!("downloaded update package: {error}"))?;
-    let build = embedded_target_plan(&bundle)?;
-    let installer = &build.installer;
-    if &installer.target != expected_target {
-        return Err(miette::miette!(
-            "downloaded update package target `{}` does not match `{expected_target}`",
-            installer.target
-        ));
-    }
-    if &installer.app.id != expected_app_id {
-        return Err(miette::miette!(
-            "downloaded update application `{}` does not match `{}`",
-            installer.app.id,
-            expected_app_id
-        ));
-    }
-    if &installer.app.version != expected_version {
-        return Err(miette::miette!(
-            "downloaded update version `{}` does not match `{expected_version}`",
-            installer.app.version
-        ));
-    }
-    if installer.frontend != expected_frontend {
-        return Err(miette::miette!(
-            "downloaded update frontend is {}, expected {expected_frontend}",
-            installer.frontend
-        ));
-    }
-    let scope_allowed = match scope {
-        SelectedScope::User => installer.install.scope.allows_user(),
-        SelectedScope::Machine => installer.install.scope.allows_machine(),
-    };
-    if !scope_allowed {
-        return Err(miette::miette!(
-            "downloaded update does not support the {scope} scope"
-        ));
-    }
-    Ok(())
-}
-
+/// The graph-driven update, which is the only update path.
+///
+/// The old path downloaded a complete `Setup.exe` and launched it, which meant
+/// every update moved the whole release on every machine even when five files had
+/// changed. This one resolves the release graph, selects the variant this machine
+/// already runs, computes the closure the new release needs, and moves only what
+/// the verified cache does not already hold.
+///
+/// The offline installer is still published, because enterprise and disconnected
+/// installs want one file. It is a claim in the graph rather than a second
+/// package representation, and this path never needs it.
 fn run_update(args: UpdateCommand) -> miette::Result<()> {
     let output: OutputFormat = args.output.into();
-    let machine_install = output != OutputFormat::Human && args.command.is_none();
+    let check_only = args.command.is_some();
+    let machine_install = output != OutputFormat::Human && !check_only;
     let executable = zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
     let bundle = zup_windows::EmbeddedBundle::open(&executable).map_err(|e| {
         miette::miette!("update configuration requires an installed zup package: {e}")
@@ -3329,7 +3940,8 @@ fn run_update(args: UpdateCommand) -> miette::Result<()> {
             .unwrap_or(SelectedScope::User)
     };
     let mut state_root = choose_state_root(args.state_root.clone(), scope)?;
-    let mut ledger = zup_windows::InstallLedgerStore::new(&state_root)
+    let store = zup_windows::InstallLedgerStore::new(&state_root);
+    let mut ledger = store
         .load(&installer.app.id, scope)
         .map_err(|e| miette::miette!("installation ledger: {e}"))?;
     if ledger.is_none()
@@ -3339,22 +3951,22 @@ fn run_update(args: UpdateCommand) -> miette::Result<()> {
     {
         scope = SelectedScope::Machine;
         state_root = choose_state_root(None, scope)?;
-        ledger = zup_windows::InstallLedgerStore::new(&state_root)
+        ledger = store
             .load(&installer.app.id, scope)
             .map_err(|e| miette::miette!("installation ledger: {e}"))?;
     }
     let ledger =
         ledger.ok_or_else(|| miette::miette!("installation not found in selected scope"))?;
+
+    // A machine-scope install keeps its content cache in the user's profile: a
+    // per-machine cache would need an authority the acquisition engine has no
+    // business holding, and the content is identical either way.
     let update_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
         default_state_root(SelectedScope::User)?
     } else {
         state_root.clone()
     };
-    let client = zup_update::Client::new(config, installer.app.id.as_str(), &update_root);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| miette::miette!("update runtime: {e}"))?;
+
     if output == OutputFormat::Jsonl && !machine_install {
         println!(
             "{}",
@@ -3368,211 +3980,488 @@ fn run_update(args: UpdateCommand) -> miette::Result<()> {
         println!(
             "{}",
             serde_json::to_string(&AutomationEvent::Phase {
-                state: "checking".into(),
+                state: "resolving".into(),
             })
             .map_err(|error| miette::miette!("output: {error}"))?
         );
     } else if output == OutputFormat::Human && std::io::stderr().is_terminal() {
         eprintln!("Checking for updates…");
     }
-    let result = runtime
-        .block_on(client.check(&ledger.version))
-        .map_err(|e| miette::miette!("update check: {e}"))?;
-    match result {
-        zup_update::CheckResult::UpToDate { current } => match output {
-            OutputFormat::Human => println!("up to date ({current})"),
-            OutputFormat::Json => {
-                let mut result = AutomationResult::new(
-                    ProcessOutcome::Success,
-                    installer.app.id.as_str(),
-                    current.to_string(),
-                );
-                result.scope = Some(scope);
+
+    let installed = ledger.release_identity().cloned();
+    let (sink, _receiver) = ProgressSink::channel(256);
+    let context =
+        TrustContext::from_update_config(config, installer.app.id.clone(), update_root.clone());
+    let mut resolver = zup_update::ReleaseResolver::new(
+        context,
+        zup_acquire::HostProfile::native(),
+        zup_acquire::CachePolicy::Auto,
+        sink.clone(),
+    )
+    .map_err(|error| miette::miette!("update resolver: {error}"))?;
+    if let Some(source) = &args.source {
+        resolver = resolver.with_seed("local source", source.clone());
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| miette::miette!("update runtime: {e}"))?;
+
+    let resolved = runtime
+        .block_on(resolver.resolve())
+        .map_err(|error| miette::miette!("update check: {error}"))?;
+
+    // Up to date is decided on digests where both sides have one, and on the
+    // version otherwise. A rebuild of the same version is not an update, because
+    // the lifecycle would refuse it as a same-version upgrade anyway.
+    // Up to date is decided on digests where both sides have one, and on the
+    // version otherwise. A rebuild of the same version is not an update, because
+    // the lifecycle would refuse it as a same-version upgrade anyway.
+    if let Some(installed) = &installed
+        && installed.release == resolved.descriptor.release_digest
+        && installed.catalog == resolved.descriptor.catalog.digest
+    {
+        return report_up_to_date(
+            output,
+            installer.app.id.as_str(),
+            ledger.version.to_string(),
+            scope,
+            machine_install,
+        );
+    }
+    if !graph::is_newer(
+        installed
+            .as_ref()
+            .unwrap_or(&placeholder_identity(&ledger, installer.app.id.clone())),
+        &resolved.descriptor.version,
+    ) && installed.is_some()
+    {
+        return report_up_to_date(
+            output,
+            installer.app.id.as_str(),
+            ledger.version.to_string(),
+            scope,
+            machine_install,
+        );
+    }
+
+    if check_only {
+        return report_update_available(
+            output,
+            installer.app.id.as_str(),
+            ledger.version.to_string(),
+            resolved.descriptor.version.clone(),
+            scope,
+        );
+    }
+
+    should_confirm(&args, output)?;
+    if output == OutputFormat::Human {
+        println!(
+            "update available: {} → {}",
+            ledger.version, resolved.descriptor.version
+        );
+        if std::io::stderr().is_terminal() {
+            eprintln!("Acquiring the update…");
+        }
+    }
+
+    let acquired = runtime
+        .block_on(graph::acquire_closure(
+            &resolver,
+            resolved,
+            ComponentSelection::All,
+        ))
+        .map_err(|error| {
+            debug_assert!(error.left_machine_unchanged());
+            miette::miette!("update acquisition: {error}")
+        })?;
+    if output == OutputFormat::Human {
+        eprintln!("  {}", acquired.estimate());
+    }
+    let policy = if args.non_interactive || output != OutputFormat::Human {
+        ExecutionPolicy::NonInteractive
+    } else {
+        ExecutionPolicy::Interactive
+    };
+    run_acquired_transition(
+        graph::Request {
+            scope: Some(scope),
+            ..graph::Request::new(LifecycleAction::Upgrade)
+        },
+        &acquired,
+        output,
+        policy,
+    )
+}
+
+/// A stand-in identity for an installation that has none, so the version
+/// comparison still has something to compare against.
+fn placeholder_identity(
+    ledger: &zup_exec::InstallLedger,
+    app_id: AppId,
+) -> zup_core::ReleaseIdentity {
+    zup_core::ReleaseIdentity {
+        app_id,
+        release: Sha256Digest::from_bytes([0; 32]),
+        catalog: Sha256Digest::from_bytes([0; 32]),
+        variant: String::new(),
+        manifest: Sha256Digest::from_bytes([0; 32]),
+        runtime: None,
+        version: ledger.version.to_string(),
+        target: ledger.target.clone(),
+        channel: String::new(),
+        pinned: false,
+        trust_anchor: Sha256Digest::from_bytes([0; 32]),
+        frontend: String::new(),
+        components: Vec::new(),
+    }
+}
+
+fn report_up_to_date(
+    output: OutputFormat,
+    application: &str,
+    version: String,
+    scope: SelectedScope,
+    machine_install: bool,
+) -> miette::Result<()> {
+    match output {
+        OutputFormat::Human => println!("up to date ({version})"),
+        OutputFormat::Json => {
+            let mut result = AutomationResult::new(ProcessOutcome::Success, application, version);
+            result.scope = Some(scope);
+            println!(
+                "{}",
+                result
+                    .to_json()
+                    .map_err(|error| miette::miette!("output: {error}"))?
+            );
+        }
+        OutputFormat::Jsonl => {
+            if machine_install {
                 println!(
                     "{}",
-                    result
-                        .to_json()
-                        .map_err(|error| miette::miette!("output: {error}"))?
-                );
-            }
-            OutputFormat::Jsonl => {
-                if machine_install {
-                    let started = AutomationEvent::started(
-                        installer.app.id.as_str(),
-                        current.to_string(),
-                        "update",
-                    );
-                    println!(
-                        "{}",
-                        serde_json::to_string(&started)
-                            .map_err(|error| miette::miette!("output: {error}"))?
-                    );
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string(&AutomationEvent::Completed {
-                        outcome: ProcessOutcome::Success,
-                    })
+                    serde_json::to_string(&AutomationEvent::started(
+                        application,
+                        version,
+                        "update"
+                    ))
                     .map_err(|error| miette::miette!("output: {error}"))?
                 );
             }
-        },
-        zup_update::CheckResult::UpdateAvailable {
-            current,
-            available,
-            target,
-        } => {
-            let should_install = args.command.is_none();
-            if should_install
-                && effective_frontend() == Frontend::Console
-                && !args.non_interactive
-                && !args.yes
-                && output == OutputFormat::Human
-                && std::io::stdin().is_terminal()
-                && std::io::stdout().is_terminal()
-                && std::io::stderr().is_terminal()
-            {
-                #[cfg(feature = "console")]
-                {
-                    cliclack::set_theme(ZupTheme);
-                    let confirmed = cliclack::confirm(format!("Install update {available}?"))
-                        .initial_value(true)
-                        .interact()
-                        .map_err(|error| miette::miette!("prompt: {error}"))?;
-                    if !confirmed {
-                        let _ = cliclack::outro_cancel("Cancelled");
-                        return Err(miette::miette!("cancelled"));
-                    }
-                }
-                #[cfg(not(feature = "console"))]
-                return Err(miette::miette!(
-                    "confirmation is unavailable in this runtime"
-                ));
-            }
-            if output == OutputFormat::Human {
-                println!("update available: {current} → {available}");
-            }
-            let mut installed = false;
-            if should_install {
-                let downloaded = update_root
-                    .join("updates")
-                    .join("downloads")
-                    .join(format!("Setup-{}.exe", uuid::Uuid::now_v7()));
-                if output == OutputFormat::Human && std::io::stderr().is_terminal() {
-                    eprintln!("Downloading and verifying update…");
-                }
-                runtime
-                    .block_on(client.download(&target, &downloaded))
-                    .map_err(|e| miette::miette!("verified update download: {e}"))?;
-                validate_downloaded_update(
-                    &downloaded,
-                    &installer.app.id,
-                    &available,
-                    &installer.target,
-                    installer.frontend,
-                    scope,
-                )?;
-                let mut command = std::process::Command::new(&downloaded);
-                command
-                    .arg("upgrade")
-                    .arg("--scope")
-                    .arg(scope.to_string())
-                    .arg("--state-root")
-                    .arg(&state_root)
-                    .arg("--yes");
-                if output == OutputFormat::Human && effective_frontend() == Frontend::Gui {
-                    command.arg("--ui");
-                }
-                if effective_frontend() == Frontend::Headless
-                    || args.non_interactive
-                    || output != OutputFormat::Human
-                {
-                    command.arg("--non-interactive");
-                }
-                if output != OutputFormat::Human {
-                    command.arg("--output").arg(match output {
-                        OutputFormat::Human => "human",
-                        OutputFormat::Json => "json",
-                        OutputFormat::Jsonl => "jsonl",
-                    });
-                }
-                if output == OutputFormat::Human {
-                    let status = command
-                        .status()
-                        .map_err(|e| miette::miette!("start verified update: {e}"))?;
-                    if !status.success() {
-                        return Err(miette::miette!("verified update exited with {status}"));
-                    }
-                    installed = true;
-                } else {
-                    use std::io::Write;
-                    use std::process::Stdio;
-                    let child = command
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                        .map_err(|e| miette::miette!("start verified update: {e}"))?;
-                    let child_output = child
-                        .wait_with_output()
-                        .map_err(|e| miette::miette!("wait for verified update: {e}"))?;
-                    let has_output = !child_output.stdout.is_empty();
-                    std::io::stdout()
-                        .write_all(&child_output.stdout)
-                        .map_err(|e| miette::miette!("write update output: {e}"))?;
-                    std::io::stderr()
-                        .write_all(&child_output.stderr)
-                        .map_err(|e| miette::miette!("write update diagnostics: {e}"))?;
-                    if !child_output.status.success() {
-                        if has_output {
-                            OUTPUT_FAILURE_EMITTED.store(true, Ordering::SeqCst);
-                        }
-                        return Err(miette::miette!(
-                            "verified update exited with {}: {}",
-                            child_output.status,
-                            String::from_utf8_lossy(&child_output.stderr).trim()
-                        ));
-                    }
-                    return Ok(());
-                }
-            }
-            match output {
-                OutputFormat::Human => {
-                    if installed {
-                        println!("update installed: {available}");
-                    }
-                }
-                OutputFormat::Json => {
-                    let mut result = AutomationResult::new(
-                        ProcessOutcome::Success,
-                        installer.app.id.as_str(),
-                        available.to_string(),
-                    );
-                    result.scope = Some(scope);
-                    result.message = Some(if installed {
-                        format!("updated from {current}")
-                    } else {
-                        format!("update available from {current}")
-                    });
-                    println!(
-                        "{}",
-                        result
-                            .to_json()
-                            .map_err(|error| miette::miette!("output: {error}"))?
-                    );
-                }
-                OutputFormat::Jsonl => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&AutomationEvent::Completed {
-                            outcome: ProcessOutcome::Success,
-                        })
-                        .map_err(|error| miette::miette!("output: {error}"))?
-                    );
-                }
-            }
+            println!(
+                "{}",
+                serde_json::to_string(&AutomationEvent::Completed {
+                    outcome: ProcessOutcome::Success,
+                })
+                .map_err(|error| miette::miette!("output: {error}"))?
+            );
         }
     }
     Ok(())
+}
+
+fn report_update_available(
+    output: OutputFormat,
+    application: &str,
+    current: String,
+    available: String,
+    scope: SelectedScope,
+) -> miette::Result<()> {
+    match output {
+        OutputFormat::Human => println!("update available: {current} → {available}"),
+        OutputFormat::Json => {
+            let mut result =
+                AutomationResult::new(ProcessOutcome::Success, application, available.clone());
+            result.scope = Some(scope);
+            result.message = Some(format!("update available from {current}"));
+            println!(
+                "{}",
+                result
+                    .to_json()
+                    .map_err(|error| miette::miette!("output: {error}"))?
+            );
+        }
+        OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string(&AutomationEvent::Phase {
+                    state: "available".into(),
+                })
+                .map_err(|error| miette::miette!("output: {error}"))?
+            );
+            println!(
+                "{}",
+                serde_json::to_string(&AutomationEvent::Completed {
+                    outcome: ProcessOutcome::Success,
+                })
+                .map_err(|error| miette::miette!("output: {error}"))?
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether to ask before installing.
+fn should_confirm(args: &UpdateCommand, output: OutputFormat) -> miette::Result<bool> {
+    if args.yes || args.non_interactive || output != OutputFormat::Human {
+        return Ok(false);
+    }
+    #[cfg(feature = "console")]
+    {
+        if effective_frontend() == Frontend::Console
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+        {
+            cliclack::set_theme(ZupTheme);
+            let confirmed = cliclack::confirm("Install this update?")
+                .initial_value(true)
+                .interact()
+                .map_err(|error| miette::miette!("prompt: {error}"))?;
+            if !confirmed {
+                let _ = cliclack::outro_cancel("Cancelled");
+                return Err(miette::miette!("cancelled"));
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Plan and run one lifecycle against an acquired graph.
+///
+/// This is the only place a resolved graph turns into a machine change, and it
+/// hands the transaction engine the one thing it needs: a `PortableBuildPlan`
+/// whose payload the executor reads out of the verified cache. Everything above
+/// this line is content and identity; everything below is the existing lifecycle,
+/// unchanged.
+fn run_acquired_transition(
+    request: graph::Request,
+    acquired: &graph::Acquired,
+    output: OutputFormat,
+    policy: ExecutionPolicy,
+) -> miette::Result<()> {
+    let graph::Request {
+        action,
+        enable,
+        disable,
+        install_directory,
+        scope,
+    } = request;
+    let action =
+        action.ok_or_else(|| miette::miette!("a graph transition needs a lifecycle verb"))?;
+    let enable = enable.as_slice();
+    let disable = disable.as_slice();
+    let install_directory = install_directory.as_deref();
+    let build = zup_bundle::Package::from_bytes(
+        zup_bundle::BundleWriter::encode_plan_only_plan(
+            &acquired.manifest.plan,
+            &acquired.manifest.plan.plugins,
+        )
+        .map_err(|error| miette::miette!("graph plan: {error}"))?,
+    )
+    .and_then(|package| package.build_plan())
+    .map_err(|error| miette::miette!("graph plan: {error}"))?;
+    let build = build
+        .targets
+        .into_iter()
+        .next()
+        .ok_or_else(|| miette::miette!("the release plan names no target"))?;
+    let installer = &build.installer;
+
+    // A handoff states the scope, and it is stated rather than derived because
+    // the bootstrapper resolved the same plan and reached the same answer. With
+    // no handoff, a plan that allows either scope goes to the user's profile on a
+    // fresh install, because that needs no elevation.
+    let scope = match scope {
+        Some(scope) => scope,
+        None if installer.install.scope == zup_core::InstallScope::Machine => {
+            SelectedScope::Machine
+        }
+        None if installer.install.scope == zup_core::InstallScope::User => SelectedScope::User,
+        None => {
+            let committed = zup_windows::InstallLedgerStore::new(acquired.cache.root())
+                .load(&installer.app.id, SelectedScope::Machine)
+                .ok()
+                .flatten();
+            if committed.is_some() {
+                SelectedScope::Machine
+            } else {
+                SelectedScope::User
+            }
+        }
+    };
+    if installer.install.scope == zup_core::InstallScope::Machine && scope != SelectedScope::Machine
+    {
+        return Err(miette::miette!(
+            "this application installs machine-wide, not into the {} scope",
+            scope
+        ));
+    }
+
+    let state_root = choose_state_root(Some(acquired.cache.root().to_path_buf()), scope)?;
+    let prior =
+        match zup_windows::InstallLedgerStore::new(&state_root).load(&installer.app.id, scope) {
+            Ok(prior) => prior,
+            Err(error) => return Err(miette::miette!("installation ledger: {error}")),
+        };
+
+    if matches!(action, LifecycleAction::Install) && prior.is_some() {
+        return Err(miette::miette!(
+            "{} is already installed; run `zup update` instead",
+            installer.app.name
+        ));
+    }
+    if !matches!(action, LifecycleAction::Install) && prior.is_none() {
+        return Err(miette::miette!("installation not found in selected scope"));
+    }
+    if let Some(installed) = prior
+        .as_ref()
+        .and_then(zup_exec::InstallLedger::release_identity)
+        && installed.variant != acquired.resolved.variant.id
+    {
+        // The installed machine runs a different variant than the graph offers.
+        // Installing it anyway would replace a working installation with another
+        // architecture's payload under the same identity.
+        return Err(miette::miette!(
+            "this installation runs variant `{}` and the release offers `{}`",
+            installed.variant,
+            acquired.resolved.variant.id
+        ));
+    }
+
+    let install = plan_from_graph(
+        &build,
+        action,
+        enable,
+        disable,
+        install_directory,
+        &prior,
+        scope,
+    )?;
+    let identity = acquired.identity();
+    let payload = graph::payload_source(acquired).map_err(|error| {
+        debug_assert!(error.left_machine_unchanged());
+        miette::miette!("content source: {error}")
+    })?;
+    let work_root = state_root.join("work");
+    let target =
+        zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
+            .map_err(|error| miette::miette!("target: {error}"))?;
+    let execution = zup_windows::plan_target_lifecycle_with_frontend(
+        action,
+        &installer.app.id,
+        scope,
+        Some(&target),
+        &state_root,
+        installer.frontend,
+    )
+    .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
+    let bootstrap = prepare_bootstrap(&build, &install, &state_root, scope, None)?;
+    let request = RuntimeRequest {
+        target: target.target.clone(),
+        app_id: installer.app.id.clone(),
+        app_version: target.app.version.clone(),
+        scope,
+        transaction_plan: execution,
+        state_root,
+        work_root,
+        recovery_id: None,
+        bootstrap,
+        release: Some(identity.clone()),
+    };
+    let backend = zup_windows::WindowsRuntimeBackend::from_acquired(
+        std::sync::Arc::new(payload),
+        acquired.cache.root().to_path_buf(),
+    )
+    .map_err(|error| miette::miette!("content source: {error}"))?;
+    let prepared = PreparedRuntime {
+        request,
+        backend: std::sync::Arc::new(backend),
+    };
+
+    if output == OutputFormat::Human {
+        let summary = acquired.summary();
+        if summary.cached_bytes > 0 {
+            eprintln!("  {summary}");
+        }
+    }
+    let result = if output == OutputFormat::Human {
+        execute_with_policy(prepared, policy)
+    } else {
+        execute_frontend(prepared, output, action)
+    };
+    // The retention record is written only after a commit, so a failed install
+    // never leaves a machine believing it has content it does not.
+    if result.is_ok() {
+        let _ = acquired.record_retention(CachePolicy::Auto);
+    }
+    result
+}
+
+/// Plan an install from a graph, honouring the component rules a lifecycle
+/// already had.
+fn plan_from_graph(
+    build: &zup_build::TargetBuildPlan,
+    action: LifecycleAction,
+    enable: &[String],
+    disable: &[String],
+    install_directory: Option<&Path>,
+    prior: &Option<zup_exec::InstallLedger>,
+    scope: SelectedScope,
+) -> miette::Result<zup_plan::InstallPlan> {
+    let installer = &build.installer;
+    let allow_directory_override = installer.install.allow_directory_override;
+    if matches!(action, LifecycleAction::Repair { .. })
+        && (install_directory.is_some() || !enable.is_empty() || !disable.is_empty())
+    {
+        return Err(miette::miette!(
+            "repair uses the committed component selection and install location"
+        ));
+    }
+    let mut request = zup_plan::PlanRequest::new(installer.target.clone(), scope);
+    request.install_directory = if matches!(action, LifecycleAction::Repair { .. }) {
+        allow_directory_override
+            .then(|| persisted_install_directory(prior.as_ref()))
+            .flatten()
+    } else {
+        choose_install_directory(install_directory, prior.as_ref(), allow_directory_override)?
+    };
+    if matches!(
+        action,
+        LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
+    ) {
+        let previous = prior
+            .as_ref()
+            .ok_or_else(|| miette::miette!("installation not found"))?;
+        for component in &installer.components {
+            if previous.selected_components.contains(&component.id) {
+                request.components.enable.insert(component.id.clone());
+            } else if !component.required {
+                request.components.disable.insert(component.id.clone());
+            }
+        }
+    }
+    for raw in enable {
+        let id =
+            ComponentId::new(raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        request.components.disable.remove(&id);
+        request.components.enable.insert(id);
+    }
+    for raw in disable {
+        let id =
+            ComponentId::new(raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        request.components.enable.remove(&id);
+        request.components.disable.insert(id);
+    }
+    zup_plan::plan(
+        &zup_build::BuildPlan {
+            targets: vec![build.clone()],
+        },
+        &request,
+    )
+    .map_err(|error| miette::miette!("plan: {error}"))
 }
 
 fn resolve_uninstall_scope(
@@ -3779,6 +4668,7 @@ fn run_uninstall(args: UninstallCommand) -> miette::Result<()> {
         state_root: state_root.clone(),
         work_root,
         recovery_id: None,
+        release: None,
         bootstrap: None,
     };
     let backend = zup_windows::WindowsRuntimeBackend::from_path(payload_root, None)
@@ -3934,7 +4824,7 @@ fn run_recover(args: RecoverCommand) -> miette::Result<()> {
     .map_err(|error| miette::miette!("payload recovery: {error}"))?;
     let request = RuntimeRequest {
         target,
-        app_id: record.app_id,
+        app_id: record.app_id.clone(),
         app_version: record.app_version,
         scope: record.scope,
         transaction_plan: record.plan.clone(),
@@ -3942,6 +4832,7 @@ fn run_recover(args: RecoverCommand) -> miette::Result<()> {
         work_root,
         recovery_id: Some(id),
         bootstrap: None,
+        release: None,
     };
     let prepared = PreparedRuntime {
         request,
@@ -5172,79 +6063,78 @@ fn installed_components(
     Ok(ledger.selected_components)
 }
 
+/// The GUI's update path, which is the graph path with a progress line.
+///
+/// It acquires exactly what changed and then runs the same lifecycle, so a window
+/// and a terminal install the same bytes — and a window does not cost the machine
+/// a second copy of the application.
 #[cfg(feature = "gui")]
 fn update_from_ui(
     executable: &Path,
     scope: SelectedScope,
     mut status: impl FnMut(&str),
 ) -> Result<Option<(String, String)>, String> {
-    let bundle = zup_windows::EmbeddedBundle::open(executable).map_err(|e| e.to_string())?;
+    let bundle =
+        zup_windows::EmbeddedBundle::open(executable).map_err(|error| error.to_string())?;
     let build = embedded_target_plan(&bundle).map_err(|error| error.to_string())?;
     let installer = &build.installer;
     let config = installer
         .updates
         .as_ref()
         .ok_or_else(|| "Updates are not configured for this application".to_owned())?;
-    let state = choose_state_root(None, scope).map_err(|e| e.to_string())?;
+    let state = choose_state_root(None, scope).map_err(|error| error.to_string())?;
     let ledger = zup_windows::InstallLedgerStore::new(&state)
         .load(&installer.app.id, scope)
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
         .ok_or_else(|| "Installation not found".to_owned())?;
     let update_root = if scope == SelectedScope::Machine {
-        default_state_root(SelectedScope::User).map_err(|e| e.to_string())?
+        default_state_root(SelectedScope::User).map_err(|error| error.to_string())?
     } else {
         state.clone()
     };
-    let client = zup_update::Client::new(config, installer.app.id.as_str(), &update_root);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let context = TrustContext::from_update_config(config, installer.app.id.clone(), update_root);
+    let (sink, receiver) = ProgressSink::channel(64);
+    let emitter = zup_presentation::acquisition_thread(receiver);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+
     status("Checking for updates…");
-    match runtime
-        .block_on(client.check(&ledger.version))
-        .map_err(|e| e.to_string())?
+    let acquired = runtime
+        .block_on(graph::acquire(
+            context,
+            ComponentSelection::All,
+            None,
+            &[],
+            sink,
+        ))
+        .map_err(|error| error.to_string())?;
+    let available = acquired.resolved.descriptor.version.clone();
+    if let Some(installed) = ledger.release_identity()
+        && installed.release == acquired.resolved.descriptor.release_digest
     {
-        zup_update::CheckResult::UpToDate { current: _ } => {
-            status("Up to date");
-            Ok(None)
-        }
-        zup_update::CheckResult::UpdateAvailable {
-            current,
-            available,
-            target,
-        } => {
-            let destination = update_root
-                .join("updates")
-                .join("downloads")
-                .join(format!("Setup-{}.exe", uuid::Uuid::now_v7()));
-            status("Downloading update…");
-            runtime
-                .block_on(client.download(&target, &destination))
-                .map_err(|e| e.to_string())?;
-            status("Verifying update…");
-            validate_downloaded_update(
-                &destination,
-                &installer.app.id,
-                &available,
-                &installer.target,
-                installer.frontend,
-                scope,
-            )
-            .map_err(|error| error.to_string())?;
-            status("Ready to install");
-            std::process::Command::new(destination)
-                .arg("upgrade")
-                .arg("--scope")
-                .arg(scope.to_string())
-                .arg("--state-root")
-                .arg(&state)
-                .arg("--ui")
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            Ok(Some((current.to_string(), available.to_string())))
-        }
+        drop(emitter);
+        status("Up to date");
+        return Ok(None);
     }
+    let estimate = acquired.estimate();
+    status(&format!("Downloading {}", estimate));
+    // The window and the console install the same bytes, so a graph update is
+    // the only path there is — including from the maintenance surface's own UI.
+    run_acquired_transition(
+        graph::Request {
+            scope: Some(scope),
+            ..graph::Request::new(LifecycleAction::Upgrade)
+        },
+        &acquired,
+        OutputFormat::Human,
+        ExecutionPolicy::Interactive,
+    )
+    .map_err(|error| error.to_string())?;
+    let _ = emitter;
+    Ok(Some((ledger.version.to_string(), available)))
 }
 
 /// Hidden elevated/unelevated worker entry.

@@ -13,9 +13,12 @@ serde_json.workspace = true
 sha2.workspace = true
 zstd.workspace = true
 tempfile.workspace = true
+zup-acquire.workspace = true
 zup-core.workspace = true
 zup-build.workspace = true
 zup-plugin-contract.workspace = true
 
 [dev-dependencies]
 zup-manifest.workspace = true
+zstd.workspace = true
+sha2.workspace = true

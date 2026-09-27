@@ -291,6 +291,7 @@ fn execute_before_auth_rejected() {
             state_root: r"C:\state".into(),
             work_root: r"C:\work".into(),
             recovery_id: None,
+            release: None,
         }),
     };
     assert!(matches!(
@@ -335,6 +336,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
                 state_root: r"C:\state".into(),
                 work_root: r"C:\work".into(),
                 recovery_id: None,
+                release: None,
             }),
         })
         .unwrap_err();
@@ -384,6 +386,7 @@ fn second_execute_rejected() {
             state_root: r"C:\state".into(),
             work_root: r"C:\work".into(),
             recovery_id: None,
+            release: None,
         }),
     };
     assert!(matches!(

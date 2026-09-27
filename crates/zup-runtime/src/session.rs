@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use zup_bootstrap::BoundBootstrapPlan;
 use zup_bundle::PayloadSource;
-use zup_core::{AppId, SelectedScope, TargetTriple};
+use zup_core::{AppId, ReleaseIdentity, SelectedScope, TargetTriple};
 use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, TransactionId, TransactionPlan, TransactionStore,
 };
@@ -72,6 +72,12 @@ pub struct RuntimeRequest {
     pub work_root: PathBuf,
     pub recovery_id: Option<TransactionId>,
     pub bootstrap: Option<BootstrapRequest>,
+    /// The exact release graph this request installs.
+    ///
+    /// Recorded on commit, so a later update, repair, or recovery acts on
+    /// digests rather than on a version number. `None` for a development run
+    /// from a manifest, which has no authenticated graph behind it.
+    pub release: Option<ReleaseIdentity>,
 }
 
 /// Prerequisite work associated with a request.

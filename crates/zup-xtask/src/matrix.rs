@@ -40,6 +40,8 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-transaction",
     "zup-bootstrap",
     "zup-bundle",
+    "zup-acquire",
+    "zup-acquire-http",
     "zup-artifact",
     "zup-protocol",
     "zup-runtime",

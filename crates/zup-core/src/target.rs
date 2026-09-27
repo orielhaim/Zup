@@ -190,6 +190,21 @@ impl TargetTriple {
     }
 }
 
+/// The architecture this process runs as, in canonical triple spelling.
+///
+/// This is the *process* architecture, not the machine's. A 32-bit program on a
+/// 64-bit Windows machine reports `x86`, which is correct for choosing what to
+/// run: it must pick a variant it can execute directly rather than one it would
+/// need a 64-bit host to start.
+pub fn host_architecture() -> String {
+    target_lexicon::Architecture::host().to_string()
+}
+
+/// The operating system this process runs on, in canonical triple spelling.
+pub fn host_operating_system() -> String {
+    target_lexicon::OperatingSystem::host().to_string()
+}
+
 impl PartialOrd for TargetTriple {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

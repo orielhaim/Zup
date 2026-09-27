@@ -7,9 +7,11 @@ repository.workspace = true
 description = "Platform-independent installer engine primitives for zup"
 
 [dependencies]
+base64.workspace = true
 semver.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 target-lexicon.workspace = true
 thiserror.workspace = true

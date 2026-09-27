@@ -54,6 +54,7 @@ async fn execute_with_test_worker(
     state_root: &Path,
     work_root: &Path,
     recovery_id: Option<uuid::Uuid>,
+    release: None,
     payload_overlay_root: Option<&Path>,
 ) -> String {
     let plan = if let Some(id) = recovery_id {

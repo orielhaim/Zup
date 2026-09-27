@@ -70,6 +70,7 @@ fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRunt
         state_root,
         work_root: root.path().join("work"),
         recovery_id: None,
+        release: None,
         bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
@@ -206,6 +207,7 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         recovery_id: None,
+        release: None,
         bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
@@ -309,6 +311,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         recovery_id: None,
+        release: None,
         bootstrap: None,
     };
     let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
@@ -338,6 +341,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         recovery_id: None,
+        release: None,
         bootstrap: None,
     };
     let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
