@@ -16,9 +16,9 @@ use zup_manifest::Manifest;
 use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
-use crate::plan::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
-use crate::source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
+use zup_core::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
+use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
 
 /// Materialize selected target sources with [`PortableSourceFilePolicy`].
 ///

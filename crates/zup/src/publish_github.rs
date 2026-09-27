@@ -41,17 +41,6 @@ use zup_publish_github::{
     PublishConfig, PublishRequest, RepositorySpec, WorkflowPolicy, find_git_config, publish,
 };
 
-/// Everything one publish invocation needs, resolved from the manifest.
-#[derive(Debug)]
-pub struct Resolved {
-    pub config: PublishConfig,
-    pub repository: GithubRepository,
-    pub how: String,
-    pub plan: ReleasePlan,
-    /// Where each product's bytes are, on this machine.
-    pub sources: BTreeMap<String, PathBuf>,
-}
-
 /// Read the release manifest, or say what to run first.
 fn read_release(release_dir: &Path) -> miette::Result<zup_artifact::ReleaseManifest> {
     let path = release_dir.join(zup_artifact::RELEASE_MANIFEST_NAME);

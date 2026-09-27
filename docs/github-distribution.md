@@ -70,8 +70,9 @@ bytes is refused at plan validation rather than resolved by a race.
 
 `ProductClass` is the distinction that decides refusal from sharding:
 
-- **user-facing** over the host's per-asset limit is a **refusal**. A `Setup.exe`
-  that arrives as pieces is not the installer that was signed.
+- **user-facing** over the host's per-asset limit is a **refusal**. An
+  `Acme-Windows-Setup.exe` that arrives as pieces is not the installer that was
+  signed.
 - **transport** over the limit is a **sharding decision**, because a transport
   package is an internal object the acquisition engine reads and no person ever
   sees it split.

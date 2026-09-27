@@ -27,12 +27,21 @@ use crate::build_inputs::{self, BackendSupport, BuildInputs};
 /// tell two report documents apart before it reads them.
 pub const REPORT_VERSION: u32 = 1;
 
-/// Report build readiness without writing anything.
+/// The remedy `doctor` names when a toolchain component is unusable.
+///
+/// Not a Cargo command. A developer who installed `zup` does not have a
+/// workspace, and telling them to run `cargo build` in one would be advice that
+/// only works inside this repository.
+const TOOLCHAIN_HINT: &str = "Build the zup toolchain for this version and stage it beside \
+                             `zup`, or point zup at one with `zup --toolchain <dir>`";
+
+/// Build readiness without writing anything.
 #[derive(Debug, Args)]
 pub struct DoctorCommand {
     #[arg(long, default_value = crate::DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
     pub manifest: PathBuf,
-    /// Runtime template for each selected target; discovered for a single target.
+    /// Runtime template for each selected target; discovered from the toolchain
+    /// when absent.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub runtime: Vec<PathBuf>,
     /// Installer output for each selected target; derived when omitted.
@@ -120,12 +129,12 @@ pub enum CheckKind {
     UpdateRoot,
     /// The frontend this profile resolves to.
     Frontend,
-    /// Runtime template existence and template identity.
+    /// The manifest, and the toolchain to resolve templates from, agree on one
+    /// check: the descriptor beside the component, and the component's own header.
+    /// They are one check because a build refuses a component that fails either,
+    /// and a report that split them would show a green row for a file the build
+    /// would not use.
     RuntimeTemplate,
-    /// The runtime PE machine against the canonical target.
-    RuntimeTarget,
-    /// The runtime PE subsystem against the resolved frontend.
-    RuntimeSubsystem,
     /// Backend support for the target on this build host.
     BuildBackend,
     /// Windows target lowering for every install scope.
@@ -144,8 +153,6 @@ impl CheckKind {
             Self::UpdateRoot => "updates",
             Self::Frontend => "frontend",
             Self::RuntimeTemplate => "runtime",
-            Self::RuntimeTarget => "runtime target",
-            Self::RuntimeSubsystem => "subsystem",
             Self::BuildBackend => "backend",
             Self::TargetLowering => "lowering",
             Self::OutputParent => "output",
@@ -261,12 +268,12 @@ const fn status_glyph(status: CheckStatus) -> &'static str {
 
 /// Render a build-machine path for a report, without the Windows verbatim prefix.
 fn display(path: &Path) -> String {
-    crate::target_path_text(path)
+    crate::plain_path(path)
 }
 
-/// Run `zup doctor`: print the report, then fail when a required check failed.
-pub fn run(args: DoctorCommand) -> miette::Result<()> {
-    let report = inspect(&args)?;
+/// Report whether this project is ready to build.
+pub fn run(args: DoctorCommand, toolchain_root: Option<PathBuf>) -> miette::Result<()> {
+    let report = inspect(&args, &crate::resolver(toolchain_root))?;
     if args.format.is_json() {
         let json = serde_json::to_string_pretty(&report)
             .map_err(|error| miette::miette!("report: {error}"))?;
@@ -277,8 +284,9 @@ pub fn run(args: DoctorCommand) -> miette::Result<()> {
     if report.is_ready() {
         return Ok(());
     }
-    // The report already described the failure; keep stdout free of a second envelope.
-    crate::OUTPUT_FAILURE_EMITTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The report above is the output. The error carries only the count, and the
+    // exit code carries the verdict, so a consumer of `--format json` gets one
+    // document rather than a document and a second envelope.
     Err(miette::miette!(
         "build readiness: {} check(s) failed across {} target(s)",
         report.failures(),
@@ -333,24 +341,34 @@ struct Inspection<'a> {
     inputs: &'a BuildInputs,
 }
 
-fn inspect(args: &DoctorCommand) -> miette::Result<DoctorReport> {
-    let overrides = crate::TargetOverrideArgs {
+fn inspect(
+    args: &DoctorCommand,
+    resolver: &crate::ToolchainResolver,
+) -> miette::Result<DoctorReport> {
+    let overrides = crate::project::TargetOverrideArgs {
         source: args.source.clone(),
         install_directory: args.install_directory.clone(),
         frontend: args.frontend.map(zup_core::Frontend::from),
     };
-    let selected = crate::select_project(&args.manifest, &args.target, &overrides, false)?;
+    let selected = crate::project::select_project(&args.manifest, &args.target, &overrides, false)?;
     let manifest_path = selected.manifest_path.clone();
     let manifest_name = selected.manifest_name.clone();
-    let inputs = build_inputs::resolve_build_inputs(
+    let runtimes = build_inputs::resolve_runtimes(
+        build_inputs::InputMode::Preflight,
+        resolver,
+        &args.runtime,
+        &selected.selected_targets,
+    )?;
+    let outputs = build_inputs::resolve_outputs(
         build_inputs::InputMode::Preflight,
         build_inputs::Overwrite::Refuse,
-        &args.runtime,
         &args.output,
         &manifest_path,
         &selected.manifest.app,
         &selected.selected_targets,
+        &runtimes,
     )?;
+    let inputs = build_inputs::BuildInputs { runtimes, outputs };
     let project = zup_build::project_root(&manifest_path);
     let inspection = Inspection {
         manifest: &selected.manifest,
@@ -522,6 +540,23 @@ impl TargetChecks<'_> {
 
     fn skip(&mut self, kind: CheckKind, message: impl Into<String>, path: Option<&Path>) {
         self.record(kind, CheckStatus::Skip, message, path);
+    }
+
+    /// Fold a remedy into the check's message.
+    ///
+    /// A check that says what is wrong and not what to do about it makes the
+    /// reader go and look up a Cargo command, and the whole point of `doctor` is
+    /// that the reader does not have to.
+    fn hint(&mut self, kind: CheckKind, remedy: &str) {
+        if let Some(check) = self
+            .checks
+            .iter_mut()
+            .rev()
+            .find(|check| check.kind == kind)
+        {
+            check.message.push_str(". ");
+            check.message.push_str(remedy);
+        }
     }
 
     fn record(
@@ -711,99 +746,62 @@ impl TargetChecks<'_> {
         );
     }
 
-    /// Template existence and identity for the resolved runtime.
+    /// The runtime's toolchain descriptor, and the header that has to agree with it.
+    ///
+    /// A file name is not a compatibility check, and this is where that is
+    /// enforced. The descriptor names the zup release, the target, and the
+    /// frontend the bytes were produced for; the bytes have to hash to the digest
+    /// it recorded; and the machine and subsystem in the file's own header have to
+    /// say the same thing. A template left over from another zup release, built
+    /// for another machine, or built for another presentation fails here rather
+    /// than producing an installer that cannot read its own plan.
     fn runtime_template(&mut self, runtime: &Path) {
-        let frontend = self.config.frontend;
-        if !runtime.is_file() {
-            self.fail(
-                CheckKind::RuntimeTemplate,
-                format!("runtime template `{}` is not a file", display(runtime)),
-                Some(runtime),
-            );
-            return;
-        }
-        match build_inputs::validate_runtime_template(runtime, frontend) {
-            Ok(()) => {
-                let discovered = if self.inputs.runtimes[self.index].discovered {
-                    " (discovered next to this executable)"
-                } else {
-                    ""
-                };
+        let component = crate::toolchain::runtime_for(&self.config.target, self.config.frontend);
+        match zup_toolchain::read(runtime, &component, crate::ZUP_VERSION) {
+            Ok(descriptor) => {
+                let source = self.inputs.runtimes[self.index]
+                    .source
+                    .map(|source| format!(" (from the {})", source.as_str()))
+                    .unwrap_or_default();
                 self.pass(
                     CheckKind::RuntimeTemplate,
-                    format!("runtime template matches the {frontend} frontend{discovered}"),
+                    format!(
+                        "runtime template is a zup {} {} component for {}{source}",
+                        descriptor.zup_version,
+                        descriptor.frontend.as_deref().unwrap_or("runtime"),
+                        self.config.target
+                    ),
                     Some(runtime),
                 );
             }
-            Err(error) => self.fail(CheckKind::RuntimeTemplate, error.to_string(), Some(runtime)),
-        }
-    }
-
-    /// The runtime PE machine against the canonical target.
-    fn runtime_target(&mut self, runtime: &Path) {
-        match zup_windows::read_pe_target(runtime) {
-            Ok(found) if found != self.config.target => self.fail(
-                CheckKind::RuntimeTarget,
-                format!(
-                    "runtime target `{found}` does not match target `{}`",
-                    self.config.target
-                ),
-                Some(runtime),
-            ),
-            Ok(found) => self.pass(
-                CheckKind::RuntimeTarget,
-                format!("runtime target matches `{found}`"),
-                Some(runtime),
-            ),
-            Err(error) => self.fail(
-                CheckKind::RuntimeTarget,
-                format!("runtime target could not be read: {error}"),
-                Some(runtime),
-            ),
-        }
-    }
-
-    /// The runtime PE subsystem against the resolved frontend.
-    fn runtime_subsystem(&mut self, runtime: &Path) {
-        let frontend = self.config.frontend;
-        let expected = build_inputs::expected_subsystem(frontend);
-        match zup_windows::read_pe_subsystem(runtime) {
-            Ok(found) if found != expected => self.fail(
-                CheckKind::RuntimeSubsystem,
-                format!(
-                    "runtime subsystem is {:?} but the {frontend} frontend requires {expected:?}",
-                    found
-                ),
-                Some(runtime),
-            ),
-            Ok(found) => self.pass(
-                CheckKind::RuntimeSubsystem,
-                format!("runtime subsystem is {found:?} for the {frontend} frontend"),
-                Some(runtime),
-            ),
-            Err(error) => self.fail(
-                CheckKind::RuntimeSubsystem,
-                format!("runtime subsystem could not be read: {error}"),
-                Some(runtime),
-            ),
-        }
-    }
-
-    /// The runtime checks, or a skip for each when no runtime was resolved.
-    fn runtime(&mut self) {
-        let Some(runtime) = self.inputs.runtimes[self.index].path.clone() else {
-            for kind in [
-                CheckKind::RuntimeTemplate,
-                CheckKind::RuntimeTarget,
-                CheckKind::RuntimeSubsystem,
-            ] {
-                self.skip(kind, "not evaluated: no runtime was resolved", None);
+            Err(error) => {
+                self.fail(CheckKind::RuntimeTemplate, error.to_string(), Some(runtime));
+                self.hint(CheckKind::RuntimeTemplate, TOOLCHAIN_HINT);
             }
+        }
+    }
+
+    /// The runtime check, or nothing when resolution already reported the refusal.
+    ///
+    /// Two rows for one problem would make a report a reader has to reconcile, and
+    /// the second would be a green row for a file the build would not use.
+    fn runtime(&mut self) {
+        if self
+            .inputs
+            .problems_for(self.index)
+            .any(|problem| problem.subject == build_inputs::InputSubject::Runtime)
+        {
+            return;
+        }
+        let Some(runtime) = self.inputs.runtimes[self.index].path.clone() else {
+            self.skip(
+                CheckKind::RuntimeTemplate,
+                "not evaluated: no runtime was resolved",
+                None,
+            );
             return;
         };
         self.runtime_template(&runtime);
-        self.runtime_target(&runtime);
-        self.runtime_subsystem(&runtime);
     }
 
     fn backend(&mut self) {

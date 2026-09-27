@@ -135,7 +135,6 @@ Embedding the runtime in a thin artifact would make it a slow offline installer
 wearing a different name. The offline case is the opposite, and the reason an
 offline artifact must be able to execute what it holds.
 
-
 ### The dispatcher
 
 `zup-dispatch` is a launcher and nothing else: inspect the host, validate the
@@ -154,14 +153,13 @@ first. The measured consequence:
 
 | Dispatcher | Size |
 | --- | --- |
-| `i686-pc-windows-msvc`, offline | **940,544 bytes** |
-| `i686-pc-windows-msvc`, online (a thin installer's launcher) | **4,060,672 bytes** |
-| `x86_64-pc-windows-msvc`, offline | 1,175,040 bytes |
+| `i686-pc-windows-msvc`, offline | **938,496 bytes** |
+| `i686-pc-windows-msvc`, online (a thin installer's launcher) | **4,071,936 bytes** |
 
-i686 is both the only shape that is correct for every variant set a project
-might publish, and 17% smaller. `compose_universal_executable` refuses a
-dispatcher wider than the narrowest included variant, so this is a rule and not
-a convention.
+i686 is the only shape that is correct for every variant set a project might
+publish, and it is the smallest of the three machines.
+`compose_universal_executable` refuses a dispatcher wider than the narrowest
+included variant, so this is a rule and not a convention.
 
 The dispatcher links `zup-windows` to share one implementation of the
 security-identity query, which pulls the wasmtime closure in through
@@ -374,7 +372,7 @@ load-bearing for canonical identity. The host side keeps its typed
   the transport, the release graph, the verified cache, the web-tree export, and
   `zup publish stage` are built and tested end to end, and `docs/updates.md`
   documents the workflow they implement. `zup-update` still resolves updates
-  from a channel descriptor and launches a downloaded Setup.exe rather than
+  from a channel descriptor and launches a downloaded `maintenance.exe` rather than
   driving the acquisition engine, so the update path does not yet benefit from
   unchanged content costing zero bytes. `docs/online-acquisition.md` records the
   measured cost of the graph path and what remains to be connected.

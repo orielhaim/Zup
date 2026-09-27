@@ -16,7 +16,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_build::{BuildPlan, MAX_PLUGIN_SOURCE_BYTES, ResolvedPrerequisite, TargetBuildPlan};
+use zup_core::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
+
+/// The largest a plugin module may be, at build time and in a bundle.
+///
+/// A limit on the format, not on a phase: the runtime never compiles a plugin,
+/// but it does have to refuse a bundle claiming a module larger than any build
+/// could have produced, because such a bundle is not one this writer wrote.
+pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 use zup_core::{
     ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
     RelativePath, Sha256Digest, TargetTriple, Template, hash_reader,
@@ -457,7 +464,7 @@ impl Package {
             .entries
             .iter()
             .map(|entry| {
-                Ok(zup_build::ResolvedFile {
+                Ok(ResolvedFile {
                     source: PathBuf::new(),
                     source_relative: entry.path.clone(),
                     destination: entry.destination.clone(),
@@ -473,7 +480,7 @@ impl Package {
             .plan
             .prerequisite_artifacts
             .iter()
-            .map(|artifact| zup_build::ResolvedPrerequisite {
+            .map(|artifact| ResolvedPrerequisite {
                 id: artifact.prerequisite_id.clone(),
                 source: PathBuf::new(),
                 source_relative: artifact.path.clone(),

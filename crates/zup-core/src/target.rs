@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use target_lexicon::{Architecture, OperatingSystem, ParseError, Triple};
@@ -29,8 +30,9 @@ pub enum TargetParseError {
 }
 
 /// Stable, human-readable identity for a target profile.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct TargetProfileId(String);
 
 impl TargetProfileId {
@@ -99,7 +101,8 @@ impl<'de> Deserialize<'de> for TargetProfileId {
 }
 
 /// Build payload declared for one target profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TargetProfile {
     pub target: TargetTriple,
@@ -129,7 +132,8 @@ pub struct TargetOverrides {
 }
 
 /// One selected target profile with authoring overrides resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedTargetConfig {
     pub profile: TargetProfileId,
@@ -139,8 +143,9 @@ pub struct ResolvedTargetConfig {
     pub install: Install,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct TargetTriple {
     canonical: String,
 }

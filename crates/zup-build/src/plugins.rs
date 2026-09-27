@@ -6,7 +6,7 @@ use zup_core::{Installer, MAX_PLUGIN_ARTIFACTS, RelativePath, hash_reader};
 use zup_manifest::Plugin;
 
 use crate::error::BuildError;
-use crate::plan::ResolvedPlugin;
+use zup_core::ResolvedPlugin;
 
 pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 

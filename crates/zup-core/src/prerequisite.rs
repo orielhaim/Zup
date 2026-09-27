@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
@@ -19,10 +20,9 @@ pub const MAX_PREREQUISITE_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_RUNTIME_REQUIREMENT_ID_BYTES: usize = 128;
 pub const MAX_INSTALLED_PACKAGE_ID_BYTES: usize = 256;
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct PrerequisiteId(String);
 
 impl PrerequisiteId {
@@ -82,7 +82,8 @@ impl TryFrom<String> for PrerequisiteId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PrerequisiteArchitecture {
     X86,
@@ -111,10 +112,9 @@ impl PrerequisiteArchitecture {
 /// `provider.toolchain.v14`. Portable crates validate its shape but never
 /// interpret it; the platform backend owns the meaning of each id it
 /// publishes, and only the backend may attach a meaning to a segment.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct RuntimeRequirementId(String);
 
 impl RuntimeRequirementId {
@@ -167,12 +167,13 @@ impl TryFrom<&str> for RuntimeRequirementId {
 }
 
 /// A runtime that must be present, optionally within a version range.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Runtime {
     pub id: RuntimeRequirementId,
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub version: Option<VersionReq>,
 }
 
@@ -180,10 +181,9 @@ pub struct Runtime {
 ///
 /// Portable crates validate the shape only; the platform backend decides which
 /// identifiers it can answer and what they mean.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct InstalledPackageId(String);
 
 impl InstalledPackageId {
@@ -233,22 +233,24 @@ impl TryFrom<&str> for InstalledPackageId {
 }
 
 /// An installed package that must be present, optionally within a version range.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InstalledPackage {
     pub id: InstalledPackageId,
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub version: Option<VersionReq>,
 }
 
 /// A file that must exist, optionally with a matching file version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileVersion {
     pub path: Template,
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub version: Option<VersionReq>,
 }
 
@@ -257,7 +259,8 @@ pub struct FileVersion {
 /// Every variant names a fact the target system can be asked about. Detection
 /// mechanics, package formats, and registry layout belong to the platform
 /// provider, not to this model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrerequisiteRequirement {
     Runtime(Runtime),
@@ -275,19 +278,20 @@ impl PrerequisiteRequirement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PrerequisitePackage {
     Embedded {
-        #[schemars(with = "String")]
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
         path: RelativePath,
-        #[schemars(with = "String")]
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
         sha256: Sha256Digest,
         size: u64,
     },
     Remote {
         url: String,
-        #[schemars(with = "String")]
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
         sha256: Sha256Digest,
         #[serde(default)]
         size: Option<u64>,
@@ -321,7 +325,8 @@ impl PrerequisitePackage {
 ///
 /// The provider owns the command line it builds; the manifest only supplies
 /// extra arguments, the accepted exit codes, and the privilege it needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PrerequisiteInstaller {
     #[serde(default)]
@@ -357,7 +362,8 @@ fn default_system_privilege() -> Privilege {
     Privilege::System
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Prerequisite {
     pub id: PrerequisiteId,

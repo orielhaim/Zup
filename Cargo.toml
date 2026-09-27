@@ -2,6 +2,7 @@
 resolver = "3"
 members = ["crates/*"]
 exclude = ["crates/zup-ui-gpui"]
+default-members = ["crates/zup"]
 
 [workspace.package]
 version = "0.0.1"
@@ -45,6 +46,8 @@ futures-util = "0.3"
 zup-core = { path = "crates/zup-core" }
 zup-pe = { path = "crates/zup-pe" }
 zup-dispatch = { path = "crates/zup-dispatch" }
+zup-installer = { path = "crates/zup-installer" }
+zup-toolchain = { path = "crates/zup-toolchain" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }

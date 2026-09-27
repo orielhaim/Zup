@@ -1,14 +1,23 @@
-//! Deterministic resolved-file inventory and build plan.
+//! The resolved inventory of one target, and of a whole build.
+//!
+//! These types are the contract between the two halves of the system. The build
+//! plane produces them by walking a source tree; the runtime consumes them out of
+//! an installer package without ever seeing the tree they came from. That is why
+//! they live beside the domain model rather than in `zup-build`: a struct that
+//! both halves must name cannot live in either one's crate without the other
+//! depending on it.
+//!
+//! Everything here is data. Nothing reads a file, resolves a pattern, or compiles
+//! a manifest.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use zup_core::{
-    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, TargetTriple,
-    Template,
-};
 
-use crate::digest::Sha256Digest;
+use crate::{
+    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, Sha256Digest,
+    TargetTriple, Template,
+};
 
 /// One materialized source file.
 ///
@@ -32,6 +41,7 @@ pub struct ResolvedFile {
     pub condition: Option<Condition>,
 }
 
+/// A prerequisite package that was found and hashed at build time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPrerequisite {
     pub id: PrerequisiteId,
@@ -41,6 +51,7 @@ pub struct ResolvedPrerequisite {
     pub sha256: Sha256Digest,
 }
 
+/// A plugin module that was found and hashed at build time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPlugin {
     pub id: PluginId,

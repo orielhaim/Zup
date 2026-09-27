@@ -1,0 +1,33 @@
+# Test-run settings that reflect what these tests actually do.
+#
+# Most of this workspace's tests are pure and finish in milliseconds. A few are
+# not: they compose a real installer out of a 39 MB runtime template, persist it,
+# run a transaction against the real Windows APIs, and copy it again for the
+# maintenance copy. On a loaded machine — or one with a real-time scanner
+# watching the file writes — one of those takes a minute rather than a second,
+# and nextest's default 20-second kill turns a slow pass into a red build.
+
+[profile.default]
+# Slow is not failed. `slow-timeout` only changes the label a test gets in the
+# output, which is the point: a slow test should say so, not disappear.
+slow-timeout = { period = "60s" }
+
+# The runtime's integration tests. They run real installers, which means real
+# copies, real registry writes, and a real Restart Manager query, and several of
+# them in parallel will contend for the same disk. A generous kill means a
+# contended run takes longer instead of failing.
+[[profile.default.overrides]]
+filter = 'package(zup-installer) and test(/^frontends::|^lifecycle::|^generated_files::/)'
+slow-timeout = "180s"
+
+# The composition and thin-release tests do the same thing from the build side.
+[[profile.default.overrides]]
+filter = 'test(/^artifact_build::|^build_installer::|^thin_publish::/)'
+slow-timeout = "180s"
+
+# A measurement test, not a correctness test. These assert relationships between
+# two timings on one machine, so a loaded runner can invert them; they are given
+# room to settle rather than being killed mid-measurement.
+[[profile.default.overrides]]
+filter = 'test(/measurements/)'
+slow-timeout = "120s"

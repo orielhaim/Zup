@@ -44,11 +44,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      # The dispatcher is a required input to the composition tests, and its own
-      # build step is what keeps it out of the default test build.
-      - name: Dispatcher
-        shell: pwsh
-        run: ./scripts/build-dispatcher.ps1
+      # A build composes a real installer, so the composition and runtime tests
+      # need real components. `cargo xtask toolchain build` produces all seven —
+      # three runtime templates and four launchers — and stages them beside `zup`
+      # with the descriptors the toolchain resolver checks. Debug is the profile
+      # `cargo test` runs in, and the resolver searches beside the test binary.
+      - name: Toolchain
+        run: cargo xtask toolchain build
 
       - name: Tests
         run: cargo nextest run --workspace --all-features
@@ -70,10 +72,14 @@ jobs:
 
       - name: Published schema
         run: |
-          cargo run -p zup --all-features --bin zup -- schema --output schema/zup.schema.json
+          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json
 
-      - name: Frontend feature graphs
+      # The whole reason the developer CLI and the installer runtime are two
+      # packages: a role must be a package, not a Cargo feature. This checks that
+      # each runtime frontend builds alone, that no frontend can reach the build
+      # plane, and that the developer CLI is the only installable binary.
+      - name: Role boundaries
         shell: pwsh
         run: ./scripts/verify-frontend-features.ps1
 

@@ -1,4 +1,4 @@
-#![cfg(all(feature = "build", windows))]
+#![cfg(windows)]
 
 //! The CLI materializes sources with the Windows source policy, so a
 //! prerequisite reached through a directory junction is refused in production

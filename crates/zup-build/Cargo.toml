@@ -9,13 +9,13 @@ description = "Filesystem materialization and deterministic build planning for z
 [dependencies]
 globset.workspace = true
 miette.workspace = true
-serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
 zup-core.workspace = true
 zup-manifest.workspace = true
+zup-platform.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

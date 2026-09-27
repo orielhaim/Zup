@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -14,12 +15,13 @@ use crate::template::Template;
 use crate::value::ValueError;
 
 /// Application identity and display metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct App {
     pub id: AppId,
     pub name: NonEmptyString,
-    #[schemars(with = "String")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub version: Version,
     #[serde(default)]
     pub publisher: Option<NonEmptyString>,
@@ -29,7 +31,8 @@ pub struct App {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UiBranding {
     #[serde(default, alias = "icon")]
@@ -44,7 +47,8 @@ pub struct UiBranding {
     pub legal_text: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum UiTheme {
     #[default]
@@ -53,7 +57,8 @@ pub enum UiTheme {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Frontend {
     #[default]
@@ -83,7 +88,8 @@ impl std::fmt::Display for Frontend {
 }
 
 /// Installation scope and destination templates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Install {
     pub scope: InstallScope,
@@ -98,7 +104,8 @@ pub struct Install {
 }
 
 /// Scope an installer may target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstallScope {
     User,
@@ -129,7 +136,8 @@ impl std::fmt::Display for InstallScope {
 }
 
 /// Unresolved install-root templates by scope.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InstallDirectory {
     #[serde(default)]
@@ -139,7 +147,8 @@ pub struct InstallDirectory {
 }
 
 /// A selectable application component.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Component {
     pub id: ComponentId,
@@ -158,7 +167,8 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PluginBinding {
     pub id: PluginId,
@@ -169,7 +179,8 @@ pub struct PluginBinding {
 }
 
 /// Declarative file mapping. Patterns are not expanded here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileMapping {
     pub source: String,
@@ -184,9 +195,8 @@ pub struct FileMapping {
 }
 
 /// Portable application launcher location.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum LauncherLocation {
     Menu,
@@ -203,7 +213,8 @@ impl std::fmt::Display for LauncherLocation {
 }
 
 /// High-level application launcher intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Launcher {
     pub location: LauncherLocation,
@@ -220,7 +231,8 @@ pub struct Launcher {
 }
 
 /// A logical search-path entry to add to the install scope that owns it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
     pub value: Template,
@@ -231,7 +243,8 @@ pub struct PathEntry {
 }
 
 /// Platform-neutral service start policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceStart {
     Automatic,
@@ -240,7 +253,8 @@ pub enum ServiceStart {
 }
 
 /// Platform-neutral service intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub id: ServiceId,
@@ -258,7 +272,8 @@ pub struct Service {
 }
 
 /// URI-scheme launch capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Protocol {
     pub scheme: ProtocolScheme,
@@ -270,7 +285,8 @@ pub struct Protocol {
 }
 
 /// File extension registration intent. Does not set default handlers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileAssociation {
     pub extension: FileExtension,
@@ -283,8 +299,9 @@ pub struct FileAssociation {
 }
 
 /// A bare file extension such as `.acme`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct FileExtension(String);
 
 impl FileExtension {
@@ -334,9 +351,8 @@ impl<'de> Deserialize<'de> for FileExtension {
 /// This names *who* must perform an operation, never *how* the host obtains
 /// that authority. Elevation, impersonation, and policy prompts are platform
 /// concerns resolved by a platform runtime, not by this value.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Privilege {
     /// The signed-in user is enough.
@@ -346,7 +362,8 @@ pub enum Privilege {
 }
 
 /// Payload source for the installer (build-time, not install-time).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Source {
     pub directory: PathBuf,
 }

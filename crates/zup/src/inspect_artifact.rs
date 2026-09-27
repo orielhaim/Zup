@@ -99,6 +99,21 @@ pub enum InspectError {
 ///
 /// Every content digest is verified, so a report never describes content the
 /// artifact cannot actually produce.
+/// Describe a built artifact, in the format the caller asked for.
+pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<()> {
+    let report = inspect(&args.artifact).map_err(|error| miette::miette!("{error}"))?;
+    match args.format {
+        crate::cli::FormatArg::Human => print!("{}", report.human()),
+        crate::cli::FormatArg::Json => {
+            let text = serde_json::to_string_pretty(&report)
+                .map_err(|error| miette::miette!("{error}"))?;
+            println!("{text}");
+        }
+    }
+    Ok(())
+}
+
+/// Read one artifact and describe it.
 pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
     let artifact = UniversalArtifact::open(path)?;
     let index = artifact.index();

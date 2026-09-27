@@ -11096,9 +11096,6 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "clap_complete",
- "cliclack",
- "console",
- "indicatif",
  "inquire",
  "miette",
  "semver",
@@ -11108,37 +11105,27 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "toml_edit 0.25.15+spec-1.1.0",
- "uuid",
  "wat",
- "windows 0.62.2",
  "windows-registry 0.100.0",
  "wit-component 0.259.0",
  "wit-parser 0.259.0",
  "zstd",
  "zup-acquire",
  "zup-artifact",
- "zup-bootstrap",
  "zup-build",
- "zup-bundle",
  "zup-core",
  "zup-distribute-github",
  "zup-exec",
  "zup-manifest",
  "zup-pe",
  "zup-plan",
- "zup-platform",
  "zup-plugin-build",
  "zup-plugin-contract",
- "zup-plugin-runtime",
  "zup-presentation",
  "zup-publish",
  "zup-publish-github",
- "zup-runtime",
- "zup-transaction",
- "zup-ui",
- "zup-update",
+ "zup-toolchain",
  "zup-windows",
  "zup-xtask",
 ]
@@ -11221,7 +11208,6 @@ dependencies = [
  "globset",
  "miette",
  "rstest",
- "serde",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
@@ -11229,6 +11215,7 @@ dependencies = [
  "walkdir",
  "zup-core",
  "zup-manifest",
+ "zup-platform",
 ]
 
 [[package]]
@@ -11312,6 +11299,46 @@ dependencies = [
  "tracing",
  "zup-core",
  "zup-platform",
+]
+
+[[package]]
+name = "zup-installer"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "cliclack",
+ "console",
+ "indicatif",
+ "miette",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "wat",
+ "windows 0.62.2",
+ "windows-registry 0.100.0",
+ "wit-component 0.259.0",
+ "wit-parser 0.259.0",
+ "zup-acquire",
+ "zup-artifact",
+ "zup-bootstrap",
+ "zup-bundle",
+ "zup-core",
+ "zup-exec",
+ "zup-plan",
+ "zup-platform",
+ "zup-plugin-contract",
+ "zup-plugin-runtime",
+ "zup-presentation",
+ "zup-runtime",
+ "zup-toolchain",
+ "zup-transaction",
+ "zup-ui",
+ "zup-update",
+ "zup-windows",
 ]
 
 [[package]]
@@ -11497,6 +11524,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-toolchain"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zup-core",
+]
+
+[[package]]
 name = "zup-transaction"
 version = "0.0.1"
 dependencies = [
@@ -11603,7 +11642,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "zup-core",
  "zup-publish-github",
+ "zup-toolchain",
 ]
 
 [[package]]

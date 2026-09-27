@@ -38,7 +38,7 @@ channel = "stable"
 root = "update-root.json"
 ```
 
-`root` is read while building and its bytes are embedded in the installer package. The built installer and the committed maintenance `Setup.exe` retain the same repository, channel, and trusted root. At runtime, the configured repository URL is the directory containing `metadata/` and `releases/`.
+`root` is read while building and its bytes are embedded in the installer package. The built installer and the persisted `maintenance.exe` retain the same repository, channel, and trusted root. At runtime, the configured repository URL is the directory containing `metadata/` and `releases/`.
 
 ## Stage and publish
 
@@ -46,9 +46,12 @@ root = "update-root.json"
 zup build
 zup publish stage --channel stable --output dist/web --download dist/Acme-Windows-Setup.exe
 zup publish stage --thin --channel stable --output dist/web `
-  --dispatcher target/release/zup-dispatch-online-i686-pc-windows-msvc.exe `
   --repository https://updates.example.com/acme
 ```
+
+The launcher is not named on the command line: `cargo xtask toolchain build`
+stages it beside `zup`, and the resolver finds the online flavour there.
+`--dispatcher` is the escape hatch for a path outside the staged toolchain.
 
 `zup publish stage` composes the same artifact graph `zup build` does and writes
 the complete immutable web tree:
@@ -110,9 +113,9 @@ it reads an immutable name that nothing rewrites. A channel installer installs
 whatever the channel currently says. Everything else about them is identical.
 
 `--dispatcher` is the launcher the thin installers are built from, and it must be
-the **online** dispatcher. A thin installer is that launcher plus an index and a
-trust block - a few kilobytes over 3.87 MiB, for a release of any size. A
-dispatcher built without the `online` feature refuses a thin artifact with a clear
+the **online** launcher. A thin installer is that launcher plus an index and a
+trust block - a few kilobytes over 3.88 MiB, for a release of any size. A
+launcher built without the `online` feature refuses a thin artifact with a clear
 reason rather than pretending, so the mistake is visible immediately.
 
 `--repository` is the URL a published client reads, and it is embedded. It has to
@@ -166,11 +169,12 @@ For smoke checks, `tuftool download --root <trusted-root> --metadata-url <repo>/
 
 ## What the client does
 
-`Setup.exe update check` reads the signed channel target and reports the current
-release. `Setup.exe update` resolves the release graph, selects the variant this
-machine already runs, compares the required digests against its verified cache,
-downloads only the missing blobs, and runs the ordinary upgrade lifecycle against
-them. It does not download a new `Setup.exe`.
+`update check` reads the signed channel target and reports the current release.
+`update` resolves the release graph, selects the variant this machine already
+runs, compares the required digests against its verified cache, downloads only
+the missing blobs, and runs the ordinary upgrade lifecycle against them. A
+person runs either from the persisted `maintenance.exe`, or from a newly
+downloaded `Acme-Setup.exe`; neither downloads a new installer.
 
 Both accept `--scope`, `--state-root`, `--output`, `--non-interactive`, and
 `--yes`; `--scope` takes `user`, `machine`, or `either`, and `--output` takes
@@ -231,9 +235,10 @@ graph. That package is the runtime's whole identity, and it is where the
 `[updates]` configuration travels, so a machine that has lost its installer file
 can still repair itself.
 
-So `Setup.exe repair`, `Setup.exe modify`, and a second `Setup.exe install` on a
-graph installation all take the same path the bootstrapper took, and the embedded
-plan is checked against the graph before anything is touched. If the installation
+So `maintenance.exe repair`, `maintenance.exe modify`, and a second
+`maintenance.exe install` on a graph installation all take the same path the
+bootstrapper took, and the embedded plan is checked against the graph before
+anything is touched. If the installation
 in a given scope belongs to a different application, or has no release identity
 at all, the operation says so rather than fetching a different release's bytes.
 

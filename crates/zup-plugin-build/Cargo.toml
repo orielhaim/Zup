@@ -9,12 +9,12 @@ description = "Ahead-of-time plugin compilation for zup"
 [dependencies]
 sha2.workspace = true
 thiserror.workspace = true
-zup-build.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 
 [dev-dependencies]
+zup-build.workspace = true
 tempfile.workspace = true
 zup-manifest.workspace = true
 wat = "1"

@@ -18,6 +18,7 @@ mod integration;
 mod known_folders;
 mod ledger;
 mod lowering;
+mod machine_state;
 mod payload_overlay;
 mod pipe;
 mod planning;
@@ -84,6 +85,10 @@ pub use ledger::{InstallLedgerStore, LedgerError, ReleaseRecord};
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
     windows_target_path_identity,
+};
+pub use machine_state::{
+    MachineStateError, default_state_root, ensure_state_root, is_maintenance_executable,
+    maintenance_destination, plain_path_text, resolve_state_root,
 };
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,

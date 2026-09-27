@@ -7,7 +7,7 @@
 //!
 //! The split is deliberate. `DistributionVariant` holds the portable content
 //! graph plus the build-machine inputs it was produced from, exactly as
-//! `zup_build::ResolvedFile` holds a source path beside its portable identity.
+//! `zup_core::ResolvedFile` holds a source path beside its portable identity.
 //! Nothing build-machine-specific is ever serialized.
 
 use std::collections::BTreeMap;
@@ -234,7 +234,7 @@ impl DistributionVariant {
     /// to be executable without anything else present.
     pub fn resolve(
         config: &zup_core::ResolvedTargetConfig,
-        plan: &zup_build::TargetBuildPlan,
+        plan: &zup_core::TargetBuildPlan,
         plugins: &[CompiledPluginArtifact],
         runtime: Option<(MediaType, Vec<u8>)>,
     ) -> Result<Self, ArtifactError> {

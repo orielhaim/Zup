@@ -1,9 +1,12 @@
 //! Constrained boolean conditions over selected components.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 
+#[cfg(feature = "schema")]
+use std::borrow::Cow;
+
+#[cfg(feature = "schema")]
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -159,6 +162,7 @@ impl Serialize for Condition {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for Condition {
     fn schema_name() -> Cow<'static, str> {
         "Condition".into()

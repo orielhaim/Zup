@@ -2,12 +2,17 @@
 //!
 //! This crate owns the normalized Installer IR and the core domain types
 //! used to describe installation intent: identifiers, templates, conditions,
-//! components, and resource collections.
+//! components, and resource collections. It also owns the resolved inventory —
+//! `BuildPlan` and `TargetBuildPlan` — because the build plane produces those and
+//! the runtime consumes them, and a type both halves must name cannot live in
+//! either half's crate.
 //!
-//! It has no knowledge of `zup.toml` or any authoring format.
+//! It has no knowledge of `zup.toml` or any authoring format, and nothing in it
+//! reads a file.
 
 #![forbid(unsafe_code)]
 
+mod build_plan;
 mod condition;
 mod digest;
 mod encoding;
@@ -23,6 +28,9 @@ mod target;
 mod template;
 mod value;
 
+pub use build_plan::{
+    BuildPlan, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite, TargetBuildPlan,
+};
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};
 pub use encoding::{base64_decode, base64_encode};

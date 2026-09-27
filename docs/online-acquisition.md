@@ -198,7 +198,6 @@ code and to keep a console attached - never a correctness one. A bootstrapper th
 is killed mid-install leaves an installation that is either committed or
 recoverable, which is the guarantee the offline artifact has always had.
 
-
 ## The acquisition state machine
 
 ```text
@@ -456,7 +455,6 @@ The offline installer is still published, because enterprise and disconnected
 installs want one file. It is a *claim* in the release graph, not a separate
 package representation, and the updater never needs it.
 
-
 ## Frontend flow
 
 ```text
@@ -549,9 +547,9 @@ From `cargo test -p zup-dispatch --features online --test measurements
 
 | Measurement | Value |
 | --- | --- |
-| Thin bootstrapper (i686, release) | **4,060,672 B** |
-| The online stack costs | **3,120,128 B** over a 940,544 B launcher |
-| Composed thin installer, 249.7 MiB release | **3,504,128 B**, launcher + 16 KiB |
+| Thin bootstrapper (i686, release) | **4,071,936 B** |
+| The online stack costs | **3,132,440 B** over a 938,496 B launcher |
+| Composed thin installer, 249.7 MiB release | **launcher + 16 KiB** |
 | Warm cache, 8 objects | **0 bytes** |
 | Catalog for 41 objects | **5,885 B**, 0.055% of the content it describes |
 | Handoff document | **634 B** |
@@ -572,25 +570,24 @@ measurement. It is a byte count, and it is exact.
 
 ### Thin bootstrapper size
 
-**Measured.** `scripts/build-dispatcher.ps1` builds both flavours of the
-dispatcher from one source tree, one target (`i686-pc-windows-msvc`, because a
-universal artifact's launcher has to start on the narrowest machine any variant
-can serve), and one profile, and installs them side by side under names that
-carry the flavour. The difference between the two files is exactly what the
-online path costs.
+**Measured.** `cargo xtask toolchain build [--profile <name>]` builds both
+flavours of the launcher from one source tree, one target
+(`i686-pc-windows-msvc`, because a universal artifact's launcher has to start on
+the narrowest machine any variant can serve), and one profile, and stages them
+side by side under names that carry the flavour. The difference between the two
+images is exactly what the online path costs.
 
 | Image | Size |
 | --- | --- |
-| Offline launcher (a universal artifact's launcher) | **940,544 B** (918 KiB) |
-| Online launcher (a thin installer's launcher) | **4,060,672 B** (3.87 MiB) |
-| The online stack: TUF client, HTTP transport, acquisition engine | **3,120,128 B** (2.98 MiB) |
+| Offline launcher (a universal artifact's launcher) | **0.90 MiB** |
+| Online launcher (a thin installer's launcher) | **3.88 MiB** |
+| The online stack: TUF client, HTTP transport, acquisition engine | **2.98 MiB** |
 
-So a thin installer is **3.87 MiB plus a few kilobytes of trust block** — measured
-at 3,504,128 B for a real composed artifact against a 3,487,744 B launcher,
-carrying a release whose declared content is 249.7 MiB. The launcher itself is
-under a quarter of the online image, which is why the two images are one image
-rather than two products: the online path is the launcher plus a network stack,
-not a second implementation of the launcher.
+So a thin installer is **3.88 MiB plus a few kilobytes of trust block**, carrying
+a release whose declared content is 249.7 MiB. The offline launcher is under a
+quarter of the online image, which is why the two images are one image rather
+than two products: the online path is the launcher plus a network stack, not a
+second implementation of the launcher.
 
 The test asserts the whole file stays under 8 MiB
 (`a_thin_bootstrapper_is_the_launcher_plus_the_online_stack`). That is a hard
@@ -600,7 +597,7 @@ in the field.
 
 **Why one process.** The two-process alternative — a small launcher that starts a
 resolver which starts the runtime — needs the *same* TUF, HTTP, and acquisition
-stack, *plus* the 940 KB launcher, so it is strictly larger. It would also add a
+stack, *plus* the 0.90 MiB launcher, so it is strictly larger. It would also add a
 second process, a second Authenticode surface, and a second download/verify/launch
 hop, and a second security boundary for no size saving. The measurement retires
 this as a judgement call: the numbers now say one process.
@@ -668,7 +665,6 @@ The grace period is a different window from the policy, and the two are not
 conflated: inside the grace nothing is collectable at all, even under
 `temporary` (`the_grace_protects_a_second_operation_and_is_not_the_policy`), because
 a second operation running right now may hold a reference no sweep can see.
-
 
 ## Future work
 

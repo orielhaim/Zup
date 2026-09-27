@@ -83,27 +83,30 @@ The last command must show a root world with `export zup:plugin/planner@1.0.0;` 
 
 ## Build an installer
 
-The default `zup` package is runtime-only. Build the compiler-enabled CLI explicitly when authoring an installer:
+The plugin compiler is in the developer CLI; the runtime templates are in `zup-installer`. Build both, then let the toolchain command stage the runtime beside `zup`:
 
 ```text
-cargo build -p zup --features build --bin zup
-cargo build -p zup --no-default-features --features build,headless --bin zup-setup-headless
+cargo build -p zup --bin zup
+cargo build -p zup-installer --no-default-features --features headless --bin zup-setup-headless
+cargo xtask toolchain build
 ```
 
-Run the first command's `zup` binary with the manifest, the runtime template, and
-the plugin path already written in the manifest. `zup build` resolves and hashes
-the source, rejects a core module, validates zero imports and the exact planner
-export and signature, AOT-compiles the component, verifies the AOT output, and
-embeds it with its target, WIT, engine, size, and digest metadata. A runtime
-built without the `build` feature is safe for production and does not include
-the plugin compiler; see [installer frontends](frontends.md) for why the runtime
-template currently has to be built with it. The runtime template is named for
-the frontend the manifest resolves to, so `--frontend headless` needs
-`zup-setup-headless`, not the `zup-setup` launcher.
+`zup build` resolves and hashes the source, rejects a core module, validates
+zero imports and the exact planner export and signature, AOT-compiles the
+component, verifies the AOT output, and embeds it with its target, WIT, engine,
+size, and digest metadata. The plugin path is already written in the manifest,
+and the runtime template comes from the toolchain beside `zup` rather than from
+`--runtime`.
+
+`zup-installer`'s three features — `gui`, `console`, `headless` — select the
+frontend its binaries provide, and the runtime carries no plugin compiler at
+all. The template is named for the frontend the manifest resolves to, so
+`--frontend headless` needs `zup-setup-headless` built from `zup-installer`, not
+a launcher. See [installer frontends](frontends.md).
 
 ## Runtime and safety
 
-The installer runtime loads only the verified AOT component embedded in the bundle and uses the Wasmtime runtime with Component Model support only. It does not provide WASI, environment, clock, filesystem, network, randomness, UI, or other host imports. Source-manifest lifecycle mode does not JIT an active plugin; use an embedded package built by `zup build`.
+The installer runtime loads only the verified AOT component embedded in the bundle and uses the Wasmtime runtime with Component Model support only. It does not provide WASI, environment, clock, filesystem, network, randomness, UI, or other host imports, and it never JITs a plugin: an AOT component is the only thing it can load.
 
 AOT bytes are native-code artifacts and are trusted only to the same extent as the containing Setup package; bundle hashes detect corruption, while release authenticity comes from Authenticode/TUF. Bundle self-hashes do not prove publisher provenance.
 

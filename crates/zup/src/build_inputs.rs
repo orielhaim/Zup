@@ -5,6 +5,11 @@
 //! report describes the inputs `zup build` will actually use instead of
 //! re-deriving names and re-implementing the checks.
 //!
+//! The runtime template is resolved here, through the toolchain resolver, because
+//! "which template goes with this target" and "is that template usable" are one
+//! question. A readiness report that asked for a different answer from the build
+//! it is reporting on would be a report about something else.
+//!
 //! [`InputMode::Enforce`] fails on the first problem so `zup build` writes
 //! nothing. [`InputMode::Preflight`] records every problem against its target
 //! so `zup doctor` can report all of them in one pass.
@@ -12,10 +17,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{
-    App, Frontend, ResolvedTargetConfig, SelectedScope, TargetOperatingSystem, TargetTriple,
-};
-use zup_windows::PeSubsystem;
+use zup_core::{App, ResolvedTargetConfig, SelectedScope, TargetOperatingSystem, TargetTriple};
+
+use crate::toolchain::{ToolchainResolver, ToolchainSource};
 
 /// How strictly shared input resolution reports a problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +77,8 @@ impl InputProblem {
 pub struct RuntimeSlot {
     /// `None` when no runtime could be assigned to this target.
     pub path: Option<PathBuf>,
-    /// True when the runtime was discovered next to this executable.
-    pub discovered: bool,
+    /// Where the resolved component came from, when one was resolved.
+    pub source: Option<ToolchainSource>,
     pub problems: Vec<InputProblem>,
 }
 
@@ -95,19 +99,6 @@ pub struct BuildInputs {
 }
 
 impl BuildInputs {
-    /// The first problem in target order, runtime before output.
-    pub fn first_problem(&self) -> Option<&InputProblem> {
-        self.problems().next()
-    }
-
-    /// Every problem, in target order and runtime before output.
-    pub fn problems(&self) -> impl Iterator<Item = &InputProblem> {
-        self.runtimes
-            .iter()
-            .flat_map(|slot| slot.problems.iter())
-            .chain(self.outputs.iter().flat_map(|slot| slot.problems.iter()))
-    }
-
     /// Problems recorded for one target.
     pub fn problems_for(&self, index: usize) -> impl Iterator<Item = &InputProblem> {
         self.runtimes
@@ -123,36 +114,72 @@ impl BuildInputs {
     }
 }
 
-/// Resolve the runtime and output inputs for every selected target.
+/// Resolve the runtime template for every selected target.
 ///
-/// `Enforce` returns the first problem as an error. `Preflight` returns every
-/// slot with its problems attached, so the caller can report all of them.
-pub fn resolve_build_inputs(
+/// `Enforce` returns the first problem as an error, so `zup build` writes
+/// nothing. `Preflight` returns every slot with its problems attached, so
+/// `zup doctor` can report all of them in one pass.
+///
+/// Outputs are resolved separately because a caller that composes artifacts has
+/// one output per *artifact* rather than one per target, and a per-target
+/// alignment rule would be the wrong rule for one. The runtime slots are the same
+/// either way, and are the part that decides whether a build can happen at all.
+pub fn resolve_runtimes(
     mode: InputMode,
-    overwrite: Overwrite,
-    runtimes: &[PathBuf],
-    outputs: &[PathBuf],
-    manifest_path: &Path,
-    app: &App,
+    resolver: &ToolchainResolver,
+    supplied: &[PathBuf],
     targets: &[ResolvedTargetConfig],
-) -> miette::Result<BuildInputs> {
-    let inputs = inspect_build_inputs(overwrite, runtimes, outputs, manifest_path, app, targets);
-    if let (InputMode::Enforce, Some(problem)) = (mode, inputs.first_problem()) {
+) -> miette::Result<Vec<RuntimeSlot>> {
+    let slots = resolve_runtime_slots(resolver, supplied, targets);
+    if let (InputMode::Enforce, Some(problem)) = (mode, first_problem(&slots, &[])) {
         return Err(miette::miette!("{}", problem.message));
     }
-    Ok(inputs)
+    Ok(slots)
 }
 
-/// Total input resolution: every problem is recorded, none are raised.
-fn inspect_build_inputs(
+/// Resolve one output per selected target, with every problem attached to its own
+/// slot.
+///
+/// `runtimes` is the already-resolved runtime list, because an output that is
+/// also a selected template is a mistake a build would otherwise discover by
+/// writing over its own input.
+pub fn resolve_outputs(
+    mode: InputMode,
     overwrite: Overwrite,
-    runtimes: &[PathBuf],
+    supplied: &[PathBuf],
+    manifest_path: &Path,
+    app: &App,
+    targets: &[ResolvedTargetConfig],
+    runtimes: &[RuntimeSlot],
+) -> miette::Result<Vec<OutputSlot>> {
+    let slots = inspect_output_slots(overwrite, supplied, manifest_path, app, targets, runtimes);
+    if let (InputMode::Enforce, Some(problem)) = (mode, first_problem(&[], &slots)) {
+        return Err(miette::miette!("{}", problem.message));
+    }
+    Ok(slots)
+}
+
+/// The first problem, runtimes before outputs.
+fn first_problem<'a>(
+    runtimes: &'a [RuntimeSlot],
+    outputs: &'a [OutputSlot],
+) -> Option<&'a InputProblem> {
+    runtimes
+        .iter()
+        .flat_map(|slot| slot.problems.iter())
+        .chain(outputs.iter().flat_map(|slot| slot.problems.iter()))
+        .next()
+}
+
+/// One output per selected target, with every problem attached to its own slot.
+fn inspect_output_slots(
+    overwrite: Overwrite,
     outputs: &[PathBuf],
     manifest_path: &Path,
     app: &App,
     targets: &[ResolvedTargetConfig],
-) -> BuildInputs {
-    let runtimes = resolve_runtime_slots(runtimes, targets);
+    runtimes: &[RuntimeSlot],
+) -> Vec<OutputSlot> {
     let mut outputs = resolve_output_slots(outputs, manifest_path, app, targets);
     let resolved_runtimes = runtimes
         .iter()
@@ -183,7 +210,7 @@ fn inspect_build_inputs(
             ));
         }
     }
-    BuildInputs { runtimes, outputs }
+    outputs
 }
 
 /// The diagnostic for a repeatable per-target flag that does not line up with
@@ -233,45 +260,19 @@ pub fn align_per_target<'a, T>(
     Ok(Some(supplied))
 }
 
+/// One runtime template per selected target, from an explicit path or the
+/// toolchain resolver.
+///
+/// An explicit path is a per-target override, and it is checked exactly like a
+/// resolved one: a component that was not produced by this zup release, or is
+/// for another machine or frontend, is refused here rather than composed into an
+/// installer.
 fn resolve_runtime_slots(
+    resolver: &ToolchainResolver,
     supplied: &[PathBuf],
     targets: &[ResolvedTargetConfig],
 ) -> Vec<RuntimeSlot> {
-    if supplied.is_empty() {
-        if targets.len() != 1 {
-            return vec![
-                RuntimeSlot {
-                    path: None,
-                    discovered: false,
-                    problems: vec![InputProblem::new(
-                        InputSubject::Runtime,
-                        "multiple targets require one explicit --runtime for each selected target"
-                            .to_owned(),
-                        None,
-                    )],
-                };
-                targets.len()
-            ];
-        }
-        return match discover_runtime(targets[0].frontend) {
-            Ok(path) => vec![RuntimeSlot {
-                path: Some(path),
-                discovered: true,
-                problems: Vec::new(),
-            }],
-            Err(error) => vec![RuntimeSlot {
-                path: None,
-                discovered: true,
-                problems: vec![InputProblem::new(
-                    InputSubject::Runtime,
-                    error.to_string(),
-                    None,
-                )],
-            }],
-        };
-    }
-
-    let mismatched = supplied.len() != targets.len();
+    let mismatched = !supplied.is_empty() && supplied.len() != targets.len();
     let mut seen = BTreeMap::<PathBuf, usize>::new();
     let mut slots = Vec::with_capacity(targets.len());
     for index in 0..targets.len() {
@@ -283,42 +284,41 @@ fn resolve_runtime_slots(
                 None,
             ));
         }
-        let Some(requested) = supplied.get(index) else {
-            slots.push(RuntimeSlot {
-                path: None,
-                discovered: false,
-                problems,
-            });
-            continue;
-        };
-        let path = match requested.canonicalize() {
-            Ok(path) => {
-                if seen.insert(path.clone(), index).is_some() {
+        let component =
+            crate::toolchain::runtime_for(&targets[index].target, targets[index].frontend);
+        match resolver.resolve(&component, supplied.get(index).map(|path| path.as_path())) {
+            Ok(resolved) => {
+                if let Some(previous) = seen.insert(resolved.path.clone(), index)
+                    && previous != index
+                {
                     problems.push(InputProblem::new(
                         InputSubject::Runtime,
                         format!(
                             "runtime `{}` was supplied for more than one target",
-                            path.display()
+                            resolved.path.display()
                         ),
-                        Some(path.clone()),
+                        Some(resolved.path.clone()),
                     ));
                 }
-                Some(path)
+                slots.push(RuntimeSlot {
+                    path: Some(resolved.path),
+                    source: Some(resolved.source),
+                    problems,
+                });
             }
             Err(error) => {
                 problems.push(InputProblem::new(
                     InputSubject::Runtime,
-                    format!("runtime {}: {error}", index + 1),
-                    Some(requested.clone()),
+                    crate::toolchain::missing_component_message(&component, &error),
+                    supplied.get(index).cloned(),
                 ));
-                None
+                slots.push(RuntimeSlot {
+                    path: None,
+                    source: None,
+                    problems,
+                });
             }
-        };
-        slots.push(RuntimeSlot {
-            path,
-            discovered: false,
-            problems,
-        });
+        }
     }
     slots
 }
@@ -398,68 +398,6 @@ fn derived_output_path(
     }
     used.insert(normalized_path(&candidate), ());
     candidate
-}
-
-/// The runtime template file name for one installer frontend.
-pub fn runtime_template_name(frontend: Frontend) -> &'static str {
-    match frontend {
-        Frontend::Gui => "zup-setup-gui",
-        Frontend::Console => "zup-setup-console",
-        Frontend::Headless => "zup-setup-headless",
-    }
-}
-
-/// The PE subsystem an installer runtime must declare for one frontend.
-pub fn expected_subsystem(frontend: Frontend) -> PeSubsystem {
-    match frontend {
-        Frontend::Gui => PeSubsystem::Gui,
-        Frontend::Console | Frontend::Headless => PeSubsystem::Console,
-    }
-}
-
-/// Whether a runtime executable is the template for `frontend`.
-pub fn validate_runtime_template(path: &Path, frontend: Frontend) -> miette::Result<()> {
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    let expected = runtime_template_name(frontend);
-    let gui_alias = frontend == Frontend::Gui && stem == "zup-setup";
-    if stem == expected || gui_alias {
-        Ok(())
-    } else {
-        Err(miette::miette!(
-            "runtime `{}` is not the {frontend} template",
-            path.display()
-        ))
-    }
-}
-
-/// Find the runtime template for one frontend next to this executable.
-pub fn discover_runtime(frontend: Frontend) -> miette::Result<PathBuf> {
-    let current =
-        zup_windows::current_exe().map_err(|error| miette::miette!("runtime: {error}"))?;
-    let name = runtime_template_name(frontend);
-    let name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_owned()
-    };
-    let mut setup = current.with_file_name(&name);
-    if frontend == Frontend::Gui && !setup.exists() {
-        setup = current.with_file_name(if cfg!(windows) {
-            "zup-setup.exe"
-        } else {
-            "zup-setup"
-        });
-    }
-    setup.canonicalize().map_err(|error| {
-        miette::miette!(
-            "{frontend:?} runtime `{}` is unavailable next to `{}` ({error}); build the selected runtime template or pass --runtime",
-            setup.display(),
-            current.display()
-        )
-    })
 }
 
 /// The default target triple for a new manifest on this build host.
@@ -621,6 +559,7 @@ pub fn normalized_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zup_core::Frontend;
 
     #[test]
     fn backend_boundary_is_explicit_for_every_target_class() {
@@ -656,69 +595,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_template_names_match_the_frontend_contract() {
-        assert_eq!(runtime_template_name(Frontend::Gui), "zup-setup-gui");
-        assert_eq!(expected_subsystem(Frontend::Gui), PeSubsystem::Gui);
-        for frontend in [Frontend::Console, Frontend::Headless] {
-            assert_eq!(expected_subsystem(frontend), PeSubsystem::Console);
-            assert!(
-                validate_runtime_template(Path::new(runtime_template_name(frontend)), frontend)
-                    .is_ok()
-            );
-        }
-        assert!(
-            validate_runtime_template(Path::new("zup-setup-headless"), Frontend::Console).is_err()
-        );
-        assert!(
-            validate_runtime_template(Path::new("zup-setup"), Frontend::Gui).is_ok(),
-            "the GUI alias stays a valid GUI template"
-        );
+    /// A resolver that finds nothing, so a test is about the shape of a problem
+    /// rather than about whichever toolchain the machine happens to have staged.
+    fn empty_resolver() -> ToolchainResolver {
+        ToolchainResolver::new(
+            "0.0.0-test".to_owned(),
+            PathBuf::from("C:/nowhere/zup.exe"),
+            PathBuf::from("C:/nowhere/state"),
+        )
     }
 
     #[test]
-    fn preflight_collects_cardinality_problems_for_every_target() {
+    fn a_target_with_no_resolvable_component_reports_the_refusal_and_enforces_it() {
         let targets = vec![target_config("alpha"), target_config("beta")];
-        let manifest = Path::new("/tmp/project/zup.toml");
-        let inputs = inspect_build_inputs(Overwrite::Refuse, &[], &[], manifest, &app(), &targets);
-        assert_eq!(inputs.runtimes.len(), 2);
-        for slot in &inputs.runtimes {
+        let resolver = empty_resolver();
+        // Neither slot got a component, so neither silently takes the other's, and
+        // each says why: the component a build would have asked for is not on this
+        // machine. An absent `--runtime` is the resolver's question, not a count,
+        // so there is nothing else to report.
+        let slots = resolve_runtimes(InputMode::Preflight, &resolver, &[], &targets)
+            .expect("preflight reports rather than raises");
+        assert_eq!(slots.len(), 2);
+        for slot in &slots {
             assert!(slot.path.is_none());
-            assert_eq!(slot.problems.len(), 1);
+            assert_eq!(slot.problems.len(), 1, "{:?}", slot.problems);
             assert!(
-                slot.problems[0].message.contains("multiple targets"),
+                slot.problems[0]
+                    .message
+                    .contains("cargo xtask toolchain build"),
                 "{}",
                 slot.problems[0].message
             );
         }
-        let enforced = resolve_build_inputs(
-            InputMode::Enforce,
-            Overwrite::Refuse,
-            &[],
-            &[],
-            manifest,
-            &app(),
-            &targets,
-        );
-        let error = enforced.unwrap_err().to_string();
-        assert!(error.contains("multiple targets"), "{error}");
+        let error = resolve_runtimes(InputMode::Enforce, &resolver, &[], &targets)
+            .expect_err("a build refuses to start without a component")
+            .to_string();
+        assert!(error.contains("cargo xtask toolchain build"), "{error}");
+    }
 
-        let one = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("does-not-exist.exe");
-        let short =
-            inspect_build_inputs(Overwrite::Refuse, &[one], &[], manifest, &app(), &targets);
-        for index in 0..2 {
-            let problems = short.problems_for(index).collect::<Vec<_>>();
-            assert!(!problems.is_empty(), "target {index} has no problem");
-            assert_eq!(problems[0].subject, InputSubject::Runtime);
+    /// One value for two targets names the profiles, and names the path it reached.
+    #[test]
+    fn a_short_runtime_list_names_the_profiles_it_was_given_against() {
+        let targets = vec![target_config("alpha"), target_config("beta")];
+        let one = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("one-component.exe");
+        let slots = resolve_runtimes(
+            InputMode::Preflight,
+            &empty_resolver(),
+            std::slice::from_ref(&one),
+            &targets,
+        )
+        .expect("preflight reports rather than raises");
+        for (index, slot) in slots.iter().enumerate() {
+            assert_eq!(slot.problems.len(), 2, "target {index}: {slot:?}");
             assert_eq!(
-                problems[0].message,
+                slot.problems[0].message,
                 "selected 2 targets (alpha, beta) but received 1 runtimes; provide one --runtime per target, in that order"
             );
+            // The path is only on the slot the path reached: the second target was
+            // given nothing, so the message it gets is about the toolchain, not
+            // about a file.
+            if index == 0 {
+                assert_eq!(slot.problems[1].path.as_deref(), Some(one.as_path()));
+            } else {
+                assert!(slot.problems[1].path.is_none());
+            }
         }
-        assert_eq!(
-            short.problems_for(0).count(),
-            2,
-            "the unresolved path is reported next to the cardinality problem"
+    }
+
+    /// An empty `--runtime` is not a count of zero. It is the toolchain resolver
+    /// being asked, which is the ordinary way a build finds its templates.
+    #[test]
+    fn an_absent_runtime_flag_is_not_a_cardinality_problem() {
+        let targets = vec![target_config("alpha")];
+        let slots = resolve_runtimes(InputMode::Preflight, &empty_resolver(), &[], &targets)
+            .expect("preflight reports rather than raises");
+        assert!(
+            slots[0]
+                .problems
+                .iter()
+                .all(|problem| !problem.message.contains("--runtime per target")),
+            "an absent flag is the resolver's question, not a count: {:?}",
+            slots[0].problems
         );
     }
 
@@ -769,9 +726,8 @@ mod tests {
     fn derived_output_names_are_distinct_per_target() {
         let targets = vec![target_config("alpha"), target_config("beta")];
         let manifest = Path::new("/tmp/project/zup.toml");
-        let inputs = inspect_build_inputs(Overwrite::Refuse, &[], &[], manifest, &app(), &targets);
-        let names = inputs
-            .outputs
+        let outputs = inspect_output_slots(Overwrite::Refuse, &[], manifest, &app(), &targets, &[]);
+        let names = outputs
             .iter()
             .map(|slot| slot.path.display().to_string())
             .collect::<Vec<_>>();
@@ -782,12 +738,12 @@ mod tests {
                 "/tmp/project\\Doctor App-Setup-beta.exe"
             ]
         );
-        assert!(inputs.outputs.iter().all(|slot| slot.derived));
+        assert!(outputs.iter().all(|slot| slot.derived));
 
         let single =
-            inspect_build_inputs(Overwrite::Refuse, &[], &[], manifest, &app(), &targets[..1]);
+            inspect_output_slots(Overwrite::Refuse, &[], manifest, &app(), &targets[..1], &[]);
         assert_eq!(
-            single.outputs[0].path.display().to_string(),
+            single[0].path.display().to_string(),
             "/tmp/project\\Doctor App-Setup.exe"
         );
     }
@@ -799,15 +755,15 @@ mod tests {
         let output = existing.path().to_path_buf();
         let targets = [target_config("alpha")];
 
-        let refused = inspect_build_inputs(
+        let refused = inspect_output_slots(
             Overwrite::Refuse,
-            &[],
             std::slice::from_ref(&output),
             manifest,
             &app(),
             &targets,
+            &[],
         );
-        let problem = refused.outputs[0]
+        let problem = refused[0]
             .problems
             .iter()
             .find(|problem| problem.message.contains("already exists"))
@@ -818,18 +774,18 @@ mod tests {
             problem.message
         );
 
-        let forced = inspect_build_inputs(
+        let forced = inspect_output_slots(
             Overwrite::Force,
-            &[],
             std::slice::from_ref(&output),
             manifest,
             &app(),
             &targets,
+            &[],
         );
         assert!(
-            forced.outputs[0].problems.is_empty(),
+            forced[0].problems.is_empty(),
             "--force permits replacing an existing output: {:?}",
-            forced.outputs[0].problems
+            forced[0].problems
         );
     }
 

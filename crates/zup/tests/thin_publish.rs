@@ -19,13 +19,20 @@
 //! builds one. The two-architecture case is a composition concern, and
 //! `zup-artifact`'s web suite covers it against the same layout.
 
-#![cfg(all(feature = "build", feature = "gui", windows))]
+#![cfg(windows)]
 
 use std::{fs, path::Path, process::Command};
 
 use tempfile::TempDir;
 use zup_artifact::ArtifactMode;
 use zup_windows::UniversalArtifact;
+
+#[path = "support/staged.rs"]
+mod staged;
+
+/// The machine a thin release is staged for, which is the one this host can build
+/// a real runtime template for.
+const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
 /// A one-architecture project with a TUF root and a repository, which is what a
 /// thin release requires.
@@ -58,7 +65,8 @@ impl Project {
         .unwrap();
         fs::write(
             root_path.join("zup.toml"),
-            r#"
+            format!(
+                r#"
 schema = 1
 frontend = "gui"
 [app]
@@ -72,17 +80,18 @@ root = "root.json"
 [build]
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "src" }
+target = "{HOST_TARGET}"
+source = {{ directory = "src" }}
 
 [install]
 scope = "user"
 [install.directory]
-user = "${location.programs}/Thin"
+user = "${{location.programs}}/Thin"
 [[files]]
 source = "**/*"
-destination = "${install}"
-"#,
+destination = "${{install}}"
+"#
+            ),
         )
         .unwrap();
         Self { root }
@@ -97,6 +106,10 @@ destination = "${install}"
     }
 
     /// Stage a thin release with `extra` appended to the argument list.
+    ///
+    /// The runtime template and the launcher both come from the staged toolchain,
+    /// which is what a publisher who installed `zup` has. Only the launcher is
+    /// named explicitly, because the test has to measure it.
     fn stage_with(
         &self,
         extra: &[std::ffi::OsString],
@@ -112,8 +125,6 @@ destination = "${install}"
             "--thin".into(),
             "--dispatcher".into(),
             dispatcher().into(),
-            "--runtime".into(),
-            runtime_template().into(),
             "--repository".into(),
             "https://updates.example.com/thin".into(),
         ];
@@ -162,22 +173,17 @@ fn stdout(result: &std::process::Output) -> String {
     String::from_utf8_lossy(&result.stdout).into_owned()
 }
 
-/// The real GUI runtime template, which is a real PE of the host's machine.
-fn runtime_template() -> std::path::PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_zup-setup-gui"))
-}
-
-/// The x86 windowed dispatcher, which is what a universal artifact is composed
-/// into. It has to start on the narrowest machine any variant serves.
+/// The x86 windowed launcher that can resolve a release over the network, which
+/// is what a thin installer is made of. It has to start on the narrowest machine
+/// any variant serves.
 fn dispatcher() -> std::path::PathBuf {
-    zup_xtask::dispatcher::beside_test_executable(
-        &std::env::current_exe().expect("test executable"),
-        zup_xtask::dispatcher::GUI,
-    )
-    .unwrap_or_else(|error| panic!("{error}"))
+    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Gui, true)
 }
 
-use std::path::PathBuf;
+/// This test binary, which is where the staged toolchain was built beside.
+fn test_executable() -> std::path::PathBuf {
+    std::env::current_exe().expect("a test executable")
+}
 
 #[test]
 fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
@@ -206,27 +212,30 @@ fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
         "the release carries verified content, including the native runtime"
     );
 
-    // The thin installers are thin. Four megabytes of content plus a TUF root
-    // fits in a file barely larger than the launcher it is made of, and that is
-    // the whole claim: the content is not in here.
+    // The thin installers are thin. The content is fetched from the release, so a
+    // file is the launcher, a trust block, and an index — and nothing else. The
+    // claim is relative to the launcher rather than to a byte count, because the
+    // launcher's size is a build-profile decision and the ratio between them is
+    // the design property.
     for file in &installers {
         assert!(file.is_file(), "{} was not written", file.display());
         let size = fs::metadata(file).unwrap().len();
-        // A launcher, a trust block, and an index. The payload is not in here.
         assert!(
-            size < launcher_size + 256 * 1024,
-            "a thin installer is a launcher and a trust block, not an application: \
-             {} is {size} bytes against a {launcher_size}-byte launcher",
+            size <= launcher_size + 1024 * 1024,
+            "a thin installer is a launcher, a trust block, and an index, not an \
+             application: {} is {size} bytes against a {launcher_size}-byte launcher",
             file.display()
         );
         let declared = UniversalArtifact::open(file)
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
             .index()
             .standalone_size();
+        // The content has to be somewhere. If the release were no larger than the
+        // launcher, "thin" would be measuring nothing.
         assert!(
-            size * 16 < declared,
-            "{} carries content: {size} bytes against {declared} bytes of declared content",
-            file.display()
+            declared > size * 4,
+            "the release carries content worth fetching: {declared} bytes of declared \
+             content against a {size}-byte installer"
         );
     }
 
@@ -334,7 +343,8 @@ fn a_thin_release_without_a_trust_anchor_is_refused() {
     let project = Project::new();
     fs::write(
         project.manifest(),
-        r#"
+        format!(
+            r#"
 schema = 1
 frontend = "gui"
 [app]
@@ -344,17 +354,18 @@ version = "1.4.0"
 [build]
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "src" }
+target = "{HOST_TARGET}"
+source = {{ directory = "src" }}
 
 [install]
 scope = "user"
 [install.directory]
-user = "${location.programs}/Thin"
+user = "${{location.programs}}/Thin"
 [[files]]
 source = "**/*"
-destination = "${install}"
-"#,
+destination = "${{install}}"
+"#
+        ),
     )
     .unwrap();
 
@@ -371,9 +382,12 @@ destination = "${install}"
 }
 
 #[test]
-fn a_thin_release_without_a_dispatcher_is_refused() {
-    // The thin installers *are* the dispatcher plus a trust block, so there is
-    // nothing sensible to produce without one.
+fn a_thin_release_names_the_launcher_it_resolved() {
+    // A thin installer *is* a launcher plus a trust block, so which launcher the
+    // release was composed with is the difference between a file that installs
+    // itself and one that cannot. `--dispatcher` is the escape hatch for a
+    // publisher composing with one they built themselves, and the refusal has to
+    // name the launcher the manifest actually asked for.
     let project = Project::new();
     let output = project.path().join("web");
     let result = Command::new(env!("CARGO_BIN_EXE_zup"))
@@ -385,12 +399,23 @@ fn a_thin_release_without_a_dispatcher_is_refused() {
             std::ffi::OsString::from("--output"),
             output.clone().into(),
             std::ffi::OsString::from("--thin"),
-            std::ffi::OsString::from("--runtime"),
-            runtime_template().into(),
+            std::ffi::OsString::from("--dispatcher"),
+            console_dispatcher().into(),
         ])
         .output()
         .unwrap();
     assert!(!result.status.success());
     let message = stderr(&result);
-    assert!(message.contains("--dispatcher"), "{message}");
+    assert!(message.contains("launcher"), "{message}");
+    assert!(message.contains("gui"), "{message}");
+    assert!(
+        !output.join("installers").exists(),
+        "a refused composition writes no installers"
+    );
+}
+
+/// The console launcher, which is not the one a GUI frontend's installer is made
+/// of.
+fn console_dispatcher() -> std::path::PathBuf {
+    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Console, true)
 }

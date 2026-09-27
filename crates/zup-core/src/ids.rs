@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -10,8 +11,9 @@ use crate::value::ValueError;
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-        #[schemars(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+        #[cfg_attr(feature = "schema", schemars(transparent))]
         pub struct $name(String);
 
         impl $name {
@@ -84,8 +86,9 @@ id_type!(
     "component id"
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct PluginId(String);
 
 impl PluginId {
@@ -168,8 +171,9 @@ id_type!(
 );
 
 /// URI scheme such as `acme` in `acme://`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct ProtocolScheme(String);
 
 impl ProtocolScheme {
@@ -239,8 +243,9 @@ impl<'de> Deserialize<'de> for ProtocolScheme {
 }
 
 /// Non-empty display name or label.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct NonEmptyString(String);
 
 impl NonEmptyString {

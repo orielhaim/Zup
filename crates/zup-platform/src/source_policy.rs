@@ -5,9 +5,11 @@
 //! What counts as a link is a property of the host filesystem: `std::fs`
 //! reports a link by each platform's own rules, while a Windows host also has
 //! reparse points that redirect a read without presenting as a symlink.
-//! [`SourceFilePolicy`] is the seam, [`PortableSourceFilePolicy`] is the
-//! `std::fs` baseline, and a Windows build injects the `zup-windows` adapter
-//! that sees both.
+//!
+//! The trait lives here, in the platform layer, rather than in the crate that
+//! materializes. The materializer and the host adapter are two different halves
+//! of the same decision, and putting the question next to the platform's other
+//! questions is what lets a host answer it without depending on the build plane.
 
 use std::path::Path;
 
@@ -29,7 +31,7 @@ pub trait SourceFilePolicy: Send + Sync {
 /// This is the portable default for a caller with no host adapter, not a
 /// hardened build policy. `std::fs` decides what a link is by each platform's own
 /// rules and stops there, so a host with a wider notion of indirection injects
-/// the `zup-windows` adapter, which refuses every Windows reparse point.
+/// its own adapter, which refuses every reparse point it can see.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PortableSourceFilePolicy;
 

@@ -29,10 +29,17 @@ xtask github-action-pins refresh [--root <dir>] [--add <owner/name>]...
     are pinned here too, because a runner that installs a different Bun produces
     a bundle nobody can reproduce.
 
+xtask toolchain build [--profile <name>]
+    Build the runtime templates and dispatchers this repository produces, and
+    stage them beside `zup` with the descriptors the toolchain resolver checks.
+    Run it once per profile; a contributor running `cargo test` or `cargo run`
+    needs the debug profile, which is the default.
+
 options:
     --root <dir>         workspace to inspect (default: this repository)
     --online             reach GitHub to report newer releases
     --add <owner/name>   add an action to the lock before refreshing
+    --profile <name>     cargo profile to build and stage beside (default: dev)
 
 exit codes:
     0  clean
@@ -41,7 +48,14 @@ exit codes:
 ";
 
 /// Every option this tool understands.
-const OPTIONS: &[&str] = &["--root", "--matrix", "--format", "--online", "--add"];
+const OPTIONS: &[&str] = &[
+    "--root",
+    "--matrix",
+    "--format",
+    "--online",
+    "--add",
+    "--profile",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Format {
@@ -57,6 +71,7 @@ struct Options {
     format: Format,
     online: bool,
     add: Vec<String>,
+    profile: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -82,6 +97,7 @@ fn run() -> Result<ExitCode, String> {
         "emit-portable-matrix" => emit(&mut arguments),
         "verify-portable-boundaries" => verify(&mut arguments),
         "github-action-pins" => action_pins(&mut arguments),
+        "toolchain" => stage_toolchain(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }
 }
@@ -162,6 +178,35 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
     Ok(ExitCode::from(1))
 }
 
+/// Build the local toolchain a contributor's `zup build` composes from.
+fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let Some(subcommand) = arguments.next() else {
+        return Err("toolchain needs `build`\n\n".to_owned() + USAGE);
+    };
+    if subcommand != "build" {
+        return Err(format!(
+            "unknown toolchain subcommand `{subcommand}`\n\n{USAGE}"
+        ));
+    }
+    let options = parse(arguments, "toolchain build", &["--root", "--profile"])?;
+    let root = options
+        .root
+        .unwrap_or_else(zup_xtask::toolchain::repository_root);
+    let version = zup_xtask::toolchain::version()?;
+    let profile = options.profile.unwrap_or_else(|| "dev".to_owned());
+    println!("Building the zup {version} toolchain ({profile})");
+    let written = zup_xtask::toolchain::build(&root, &profile)?;
+    let staged = zup_xtask::toolchain::staging_directory(&root, &profile, &version);
+    println!();
+    println!(
+        "Staged {} components in {}",
+        written.len(),
+        staged.display()
+    );
+    println!("`zup build` will find them without being told where they are.");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn select(names: &[String]) -> Result<Vec<&'static Matrix>, String> {
     if names.is_empty() {
         return Ok(matrix::MATRICES.iter().collect());
@@ -224,6 +269,7 @@ fn parse(
             "--root" => options.root = Some(PathBuf::from(value)),
             "--matrix" => options.matrices.push(value),
             "--add" => options.add.push(value),
+            "--profile" => options.profile = Some(value),
             "--format" => {
                 options.format = match value.as_str() {
                     "text" => Format::Text,

@@ -35,7 +35,13 @@ const IDENTITY_DOMAIN: &[u8] = b"zup/content-store/identity/v1\0";
 const APP_DOMAIN: &[u8] = b"zup/content-store/app/v1\0";
 
 /// The file name of an installed maintenance executable.
-pub const MAINTENANCE_EXECUTABLE_NAME: &str = "Setup.exe";
+///
+/// Not `Setup.exe`. The file a person downloads is an installation medium named
+/// for the application; the file an installation persists beside the application
+/// is the runtime that maintains it, and it is named for that role. The two are
+/// the same bytes with different jobs, and Apps & Features, the restart manager,
+/// and the recovery path all address the persisted one by this name.
+pub const MAINTENANCE_EXECUTABLE_NAME: &str = "maintenance.exe";
 /// The file name of the selected variant's content package, beside the
 /// maintenance executable.
 pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";

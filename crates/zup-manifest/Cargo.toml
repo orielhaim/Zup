@@ -22,7 +22,9 @@ serde_spanned.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true
-zup-core.workspace = true
+# The manifest crate is the only place a zup.toml JSON Schema is produced, so it
+# is the only place that turns the domain model's schema derivation on.
+zup-core = { workspace = true, features = ["schema"] }
 
 [dev-dependencies]
 rstest.workspace = true

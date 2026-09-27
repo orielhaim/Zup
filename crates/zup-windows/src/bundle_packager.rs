@@ -7,12 +7,12 @@ use std::{
 };
 
 use thiserror::Error;
-use zup_build::TargetBuildPlan;
 use zup_bundle::{
     AutoPayloadSource as PortableAutoPayloadSource, BundleWriter, CompiledPluginArtifact,
     DirectoryPayloadSource, Package, PackageError, PackagePayloadSource, PayloadError,
     PayloadReader, PayloadSource,
 };
+use zup_core::TargetBuildPlan;
 use zup_core::{
     Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, TargetTriple, hash_reader,
 };
@@ -158,7 +158,7 @@ impl EmbeddedBundle {
         &self.package.plan().installer.target
     }
 
-    pub fn build_plan(&self) -> Result<zup_build::BuildPlan, BundleError> {
+    pub fn build_plan(&self) -> Result<zup_core::BuildPlan, BundleError> {
         Ok(self.package.build_plan()?)
     }
 

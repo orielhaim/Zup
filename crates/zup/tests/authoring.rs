@@ -1,5 +1,3 @@
-#![cfg(feature = "build")]
-
 use std::fs;
 use std::process::Command;
 

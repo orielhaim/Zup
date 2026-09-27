@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Tiny launcher that selects and starts a distribution variant"
+# Never a tool a user installs: this package exists to produce zup-owned build
+# artifacts, and `cargo install` putting one on a PATH would make an internal
+# component a product with no review in between.
+publish = false
 
 [[bin]]
 name = "zup-dispatch"
@@ -25,7 +29,14 @@ online = ["dep:serde_json", "dep:tokio", "dep:zup-acquire", "dep:zup-update"]
 
 [dependencies]
 serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "fs", "macros", "io-util"] }
+tokio = { workspace = true, optional = true, features = [
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "fs",
+  "macros",
+  "io-util",
+] }
 windows-link.workspace = true
 zup-acquire = { workspace = true, optional = true }
 zup-artifact.workspace = true

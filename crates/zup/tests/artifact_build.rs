@@ -6,7 +6,7 @@
 //! touches: the flags, the file that appears, the report that describes it, and
 //! the refusal when a composition cannot be honest.
 
-#![cfg(all(feature = "build", windows))]
+#![cfg(windows)]
 
 use std::{
     fs,
@@ -17,29 +17,22 @@ use std::{
 use tempfile::TempDir;
 use zup_windows::UniversalArtifact;
 
+#[path = "support/staged.rs"]
+mod staged;
+#[path = "support/toolchain_fixture.rs"]
+mod toolchain_fixture;
+
 /// A runtime template the build accepts for one machine.
 ///
 /// The real thing is a compiled `zup-setup` image, one per target, named for the
 /// frontend it implements. A test only needs an image the name, machine, and
-/// subsystem checks can read, and the runtime is embedded as bytes rather than
-/// executed, so a header that names the right machine and subsystem is the whole
-/// contract. One directory per target, because the name is part of the contract.
-fn runtime_template(root: &Path, profile: &str, machine: u16) -> PathBuf {
-    const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
-    let mut bytes = vec![0u8; 0x178];
-    bytes[..2].copy_from_slice(b"MZ");
-    bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-    bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
-    bytes[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
-    bytes[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
-    bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
-    bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
-    bytes[0x9c..0x9e].copy_from_slice(&IMAGE_SUBSYSTEM_WINDOWS_CUI.to_le_bytes());
-    let directory = root.join(format!("templates/{profile}"));
-    fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("zup-setup-console.exe");
-    fs::write(&path, &bytes).unwrap();
-    path
+/// subsystem checks can read, and a universal artifact stores a variant's runtime
+/// as bytes rather than writing into it, so a header that names the right machine
+/// and subsystem is the whole contract. One directory per target, because the name
+/// is part of the contract.
+fn runtime_template(root: &Path, profile: &str, target: &str) -> PathBuf {
+    toolchain_fixture::runtime(target, zup_core::Frontend::Console)
+        .write(&root.join(format!("templates/{profile}")))
 }
 
 const X64: &str = "x86_64-pc-windows-msvc";
@@ -113,8 +106,8 @@ destination = "${install}"
         )
         .unwrap();
         let runtimes = vec![
-            runtime_template(root_path, "arm64", 0xaa64),
-            runtime_template(root_path, "x64", 0x8664),
+            runtime_template(root_path, "arm64", ARM64),
+            runtime_template(root_path, "x64", X64),
         ];
         Self { root, runtimes }
     }
@@ -218,18 +211,19 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// A dispatcher image by name, from the build step that installs it.
-fn dispatcher(name: &str) -> PathBuf {
-    zup_xtask::dispatcher::beside_test_executable(
-        &std::env::current_exe().expect("test executable"),
-        name,
-    )
-    .unwrap_or_else(|error| panic!("{error}"))
+/// A real launcher image from the staged toolchain.
+fn dispatcher(name: zup_toolchain::Subsystem, online: bool) -> PathBuf {
+    staged::dispatcher(&test_executable(), name, online)
 }
 
 /// The console dispatcher, which is what a console artifact is composed into.
 fn console_dispatcher() -> PathBuf {
-    dispatcher(zup_xtask::dispatcher::CONSOLE)
+    dispatcher(zup_toolchain::Subsystem::Console, false)
+}
+
+/// This test binary, which is where the staged toolchain was built beside.
+fn test_executable() -> PathBuf {
+    std::env::current_exe().expect("a test executable")
 }
 
 /// `--universal` on two architectures: one file, two variants, shared content
@@ -425,7 +419,6 @@ fn a_release_description_names_files_rather_than_build_paths() {
 /// declares nothing still gets today's behaviour: one ordinary installer per
 /// selected target, composed by writing resources into a real runtime image.
 #[test]
-#[cfg(feature = "console")]
 fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() {
     let project = Project::new();
     let output = project.path().join("Setup.exe");
@@ -435,8 +428,6 @@ fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() 
         project.manifest().as_os_str(),
         "--target".as_ref(),
         "x64".as_ref(),
-        "--runtime".as_ref(),
-        Path::new(env!("CARGO_BIN_EXE_zup-setup-console")).as_os_str(),
         "--output".as_ref(),
         output.as_os_str(),
         "--force".as_ref(),
@@ -513,7 +504,8 @@ fn an_unknown_artifact_name_lists_the_declared_ones() {
 fn a_dispatcher_for_the_wrong_launcher_experience_is_refused() {
     let project = Project::new();
     let output = project.path().join("Universal-Windows-Setup.exe");
-    let result = project.build_universal(&output, &dispatcher(zup_xtask::dispatcher::GUI));
+    let result =
+        project.build_universal(&output, &dispatcher(zup_toolchain::Subsystem::Gui, false));
     assert!(!result.status.success());
     let message = stderr(&result);
     assert!(message.contains("launcher"), "{message}");
@@ -544,7 +536,7 @@ fn a_runtime_template_for_the_wrong_machine_is_refused() {
     assert!(message.contains(ARM64), "{message}");
     assert!(message.contains(X64), "{message}");
     assert!(
-        message.contains("does not match"),
+        message.contains("was wanted"),
         "the refusal names both machines: {message}"
     );
 }
@@ -554,11 +546,8 @@ fn a_runtime_template_for_the_wrong_machine_is_refused() {
 #[test]
 fn a_runtime_template_for_the_wrong_frontend_is_refused_by_both_paths() {
     let project = Project::new();
-    let headless = project.path().join("templates/headless");
-    fs::create_dir_all(&headless).unwrap();
-    let bytes = fs::read(&project.runtimes[1]).unwrap();
-    let template = headless.join("zup-setup-headless.exe");
-    fs::write(&template, &bytes).unwrap();
+    let template = toolchain_fixture::runtime(X64, zup_core::Frontend::Headless)
+        .write(&project.path().join("templates/headless"));
 
     let single = project.path().join("Single.exe");
     let result = zup(&[
@@ -577,7 +566,7 @@ fn a_runtime_template_for_the_wrong_frontend_is_refused_by_both_paths() {
     ]);
     assert!(!result.status.success());
     let message = stderr(&result);
-    assert!(message.contains("not the console template"), "{message}");
+    assert!(message.contains("was wanted"), "{message}");
 
     let universal = project.path().join("Universal-Windows-Setup.exe");
     let args: Vec<std::ffi::OsString> = [
@@ -608,7 +597,7 @@ fn a_runtime_template_for_the_wrong_frontend_is_refused_by_both_paths() {
     assert!(!result.status.success());
     let message = stderr(&result);
     assert!(
-        message.contains("not the console template"),
+        message.contains("was wanted"),
         "a universal artifact refuses the template a single-target build refuses: {message}"
     );
 }

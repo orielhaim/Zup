@@ -140,7 +140,6 @@ fn generate(args: CiGithubGenerateCommand) -> miette::Result<()> {
             println!("{} is current", path.display());
             return Ok(());
         }
-        crate::OUTPUT_FAILURE_EMITTED.store(true, std::sync::atomic::Ordering::SeqCst);
         return Err(miette::miette!(
             "{} does not match the generator; run `zup ci github generate` and review the diff",
             path.display()
@@ -236,7 +235,6 @@ fn check(args: CiGithubCheckCommand) -> miette::Result<()> {
         print!("{}", report.human());
     }
     if !report.current {
-        crate::OUTPUT_FAILURE_EMITTED.store(true, std::sync::atomic::Ordering::SeqCst);
         return Err(miette::miette!("{}", report.detail));
     }
     Ok(())

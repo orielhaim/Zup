@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Windows backend for zup"
+# Never a tool a user installs: this package exists to produce zup-owned build
+# artifacts, and `cargo install` putting one on a PATH would make an internal
+# component a product with no review in between.
+publish = false
 
 [features]
 test-launcher = []
@@ -20,7 +24,14 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = [
+  "net",
+  "io-util",
+  "time",
+  "sync",
+  "macros",
+  "rt-multi-thread",
+] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing.workspace = true
 uuid.workspace = true
@@ -30,7 +41,6 @@ windows-result.workspace = true
 lnks.workspace = true
 windows-service.workspace = true
 zup-bootstrap.workspace = true
-zup-build.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
@@ -62,6 +72,7 @@ windows-bindgen.workspace = true
 ignored = ["windows-bindgen"]
 
 [dev-dependencies]
+zup-build.workspace = true
 serde_json.workspace = true
 zup-manifest.workspace = true
 zup-plugin-contract.workspace = true

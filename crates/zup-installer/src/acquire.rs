@@ -51,7 +51,7 @@ use zup_update::{
 pub enum GraphError {
     #[error("the release graph could not be used: {0}")]
     Release(#[from] zup_update::UpdateError),
-    #[error("the variant manifest is not one this build understands: {0}")]
+    #[error("the variant manifest is not one this runtime understands: {0}")]
     Manifest(String),
     #[error("acquisition: {0}")]
     Acquire(#[from] zup_acquire::AcquireError),
@@ -174,10 +174,10 @@ impl Acquired {
 
 /// What a caller wants done with a resolved graph.
 ///
-/// The four operations differ in the lifecycle verb and in which component set
-/// is asked for; the closure, the cache, the barrier, and the identity are the
-/// same work. Naming the difference is what keeps one code path honest: there is
-/// no second downloader to drift.
+/// The four operations differ in the lifecycle verb and in which component set is
+/// asked for; the closure, the cache, the barrier, and the identity are the same
+/// work. Naming the difference is what keeps one code path honest: there is no
+/// second downloader to drift.
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     /// The lifecycle verb. `None` lets the plan's own scope decide, which is what

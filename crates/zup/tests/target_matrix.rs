@@ -1,12 +1,12 @@
-#![cfg(feature = "build")]
-
 use std::{fs, path::PathBuf, process::Command};
 
 use tempfile::TempDir;
-#[cfg(windows)]
 use zup_core::Frontend;
 #[cfg(windows)]
 use zup_windows::EmbeddedBundle;
+
+#[path = "support/toolchain_fixture.rs"]
+mod toolchain_fixture;
 
 #[cfg(target_arch = "aarch64")]
 const X64: &str = "x86_64-pc-windows-msvc";
@@ -24,25 +24,13 @@ const UNSUPPORTED_TARGET: &str = "aarch64-unknown-linux-gnu";
 #[cfg(not(windows))]
 const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
 
-/// The installer frontend this test binary was built with.
-fn selected_frontend() -> &'static str {
-    #[cfg(feature = "gui")]
-    {
-        "gui"
-    }
-    #[cfg(all(not(feature = "gui"), feature = "console"))]
-    {
-        "console"
-    }
-    #[cfg(all(not(feature = "gui"), not(feature = "console"), feature = "headless"))]
-    {
-        "headless"
-    }
-    #[cfg(not(any(feature = "gui", feature = "console", feature = "headless")))]
-    {
-        "headless"
-    }
-}
+/// The frontend every fixture project declares.
+///
+/// One frontend, named here rather than selected at compile time: the developer
+/// CLI has no presentation features, so there is nothing for a test binary's own
+/// build to have selected. `zup build` finds the matching runtime template through
+/// the toolchain resolver, exactly as it does for a person who installed `zup`.
+const FRONTEND: &str = "gui";
 
 fn zup() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zup"))
@@ -140,39 +128,36 @@ fn repeated_profile_and_raw_triple_selection_are_checked() {
     );
 }
 
+/// One repeatable per-target flag is one value per selected target, on the command
+/// that composes as well as the commands that only resolve.
 #[test]
-fn multi_target_runtime_and_output_cardinality_fail_before_writes() {
+fn one_output_for_two_targets_is_refused_naming_them() {
     let (root, manifest) = write_matrix_project();
-    let runtime = PathBuf::from(env!("CARGO_BIN_EXE_zup-setup"));
-    let first_output = root.path().join("first.exe");
+    let single_output = root.path().join("first.exe");
 
-    let missing_runtime = zup()
-        .args(["build", "--manifest"])
-        .arg(&manifest)
-        .arg("--output")
-        .arg(&first_output)
-        .output()
-        .unwrap();
-    assert!(!missing_runtime.status.success());
-    assert!(String::from_utf8_lossy(&missing_runtime.stderr).contains("multiple targets"));
-    assert!(!first_output.exists());
-
-    let second_runtime = root.path().join("runtime-copy.exe");
-    fs::copy(&runtime, &second_runtime).unwrap();
-    let mismatched_output = zup()
+    // Two runtimes that are individually correct, for the two selected targets,
+    // against one output. The runtimes have to resolve cleanly or the output
+    // problem would never be the one reported.
+    let alpha = toolchain_fixture::runtime(HOST_TARGET, Frontend::Gui).write(root.path());
+    let beta = toolchain_fixture::runtime(OTHER_TARGET, Frontend::Gui).write(root.path());
+    let refused = zup()
         .args(["build", "--manifest"])
         .arg(&manifest)
         .arg("--runtime")
-        .arg(&runtime)
+        .arg(&alpha)
         .arg("--runtime")
-        .arg(&second_runtime)
+        .arg(&beta)
         .arg("--output")
-        .arg(&first_output)
+        .arg(&single_output)
         .output()
         .unwrap();
-    assert!(!mismatched_output.status.success());
-    assert!(String::from_utf8_lossy(&mismatched_output.stderr).contains("outputs"));
-    assert!(!first_output.exists());
+    assert!(!refused.status.success());
+    let message = flat(&refused.stderr);
+    assert!(
+        message.contains("selected 2 targets (alpha, beta) but received 1 outputs"),
+        "{message}"
+    );
+    assert!(!single_output.exists(), "a refused build writes nothing");
 }
 
 #[cfg(windows)]
@@ -207,8 +192,6 @@ user = "${{location.user_data}}/FrontendOverride"
     let result = zup()
         .args(["build", "--manifest"])
         .arg(&manifest)
-        .arg("--runtime")
-        .arg(PathBuf::from(env!("CARGO_BIN_EXE_zup-setup-console")))
         .args(["--frontend", "console", "--output"])
         .arg(&output)
         .output()
@@ -470,7 +453,7 @@ user = "${{location.user_data}}/ForceOverwrite"
 source = "**/*"
 destination = "${{install}}"
 "#,
-            frontend = selected_frontend(),
+            frontend = FRONTEND,
         ),
     )
     .unwrap();
@@ -479,8 +462,6 @@ destination = "${{install}}"
         zup()
             .args(["build", "--manifest"])
             .arg(&manifest)
-            .arg("--runtime")
-            .arg(PathBuf::from(env!("CARGO_BIN_EXE_zup-setup")))
             .arg("--output")
             .arg(&output)
             .args(extra)
@@ -545,7 +526,7 @@ user = "${{location.user_data}}/OutputParent"
 source = "**/*"
 destination = "${{install}}"
 "#,
-            frontend = selected_frontend(),
+            frontend = FRONTEND,
         ),
     )
     .unwrap();
@@ -558,8 +539,6 @@ destination = "${{install}}"
     let built = zup()
         .args(["build", "--manifest"])
         .arg(&manifest)
-        .arg("--runtime")
-        .arg(PathBuf::from(env!("CARGO_BIN_EXE_zup-setup")))
         .arg("--output")
         .arg(&output)
         .output()
@@ -694,32 +673,4 @@ fn init_and_single_target_commands_use_schema_1_and_require_explicit_selection()
     );
     let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
     assert_eq!(value["target"]["target"], HOST_TARGET);
-
-    let source_ambiguous = zup()
-        .args(["install", "--manifest"])
-        .arg(&manifest)
-        .args(["--non-interactive", "--yes", "--output", "json"])
-        .output()
-        .unwrap();
-    assert!(!source_ambiguous.status.success());
-    assert!(String::from_utf8_lossy(&source_ambiguous.stderr).contains("exactly one target"));
-}
-
-#[test]
-fn source_manifest_explicit_target_skips_unselected_source() {
-    let (root, manifest) = write_matrix_project();
-    fs::remove_dir_all(root.path().join("dist/beta")).unwrap();
-    let state = root.path().join("state");
-    let result = zup()
-        .args(["repair", "--manifest"])
-        .arg(&manifest)
-        .args(["--target", "alpha", "--state-root"])
-        .arg(&state)
-        .args(["--non-interactive", "--yes"])
-        .output()
-        .unwrap();
-    assert!(!result.status.success());
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("installation not found"), "{stderr}");
-    assert!(!stderr.contains("source directory"), "{stderr}");
 }

@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+#[cfg(feature = "schema")]
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -278,6 +279,7 @@ impl Serialize for Template {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for Template {
     fn schema_name() -> Cow<'static, str> {
         "Template".into()

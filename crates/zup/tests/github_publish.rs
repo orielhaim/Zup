@@ -17,8 +17,6 @@
 //! 4. **A token has nowhere to live.** The manifest has no field for one, so a
 //!    project that tries to commit one is stopped at the parse.
 
-#![cfg(feature = "build")]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

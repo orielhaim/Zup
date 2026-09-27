@@ -22,14 +22,19 @@ use zup_artifact::{
 };
 use zup_core::TargetProfileId;
 
-/// The dispatcher template file names, beside the `zup` executable.
-///
-/// The machine is part of the name because `cargo build` writes the unsuffixed
-/// name for the host: a build that found a host image here would compose a
-/// universal artifact whose launcher is too wide to run on the machines the
-/// artifact exists to serve.
-pub const DISPATCHER_GUI: &str = "zup-dispatch-i686.exe";
-pub const DISPATCHER_CONSOLE: &str = "zup-dispatch-console-i686.exe";
+fn kind_of(kind: zup_manifest::ArtifactKind) -> ArtifactKind {
+    match kind {
+        zup_manifest::ArtifactKind::Universal => ArtifactKind::Universal,
+        zup_manifest::ArtifactKind::Single => ArtifactKind::Single,
+    }
+}
+
+fn mode_of(mode: zup_manifest::ArtifactMode) -> ArtifactMode {
+    match mode {
+        zup_manifest::ArtifactMode::Offline => ArtifactMode::Offline,
+        zup_manifest::ArtifactMode::Thin => ArtifactMode::Thin,
+    }
+}
 
 /// One artifact a project declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +54,29 @@ pub struct ArtifactProfile {
 }
 
 impl ArtifactProfile {
+    /// A profile a project declared in its manifest.
+    pub fn from_declared(profile: &zup_manifest::ArtifactProfile) -> Self {
+        Self {
+            kind: kind_of(profile.kind),
+            mode: mode_of(profile.mode),
+            targets: profile.targets.clone(),
+            channel: profile.channel.clone(),
+            output: profile.output.clone(),
+        }
+    }
+
+    /// The profile `zup build --universal` names, which is one universal offline
+    /// artifact over every selected target.
+    pub fn universal() -> Self {
+        Self {
+            kind: ArtifactKind::Universal,
+            mode: ArtifactMode::Offline,
+            targets: Vec::new(),
+            channel: None,
+            output: None,
+        }
+    }
+
     /// The launcher subsystem this artifact's variants must agree on.
     pub fn subsystem(&self, variants: &[&DistributionVariant]) -> zup_artifact::LauncherSubsystem {
         variants
@@ -101,12 +129,16 @@ impl ArtifactProfile {
         }
     }
 
-    /// The dispatcher template this artifact's launcher experience needs.
-    pub fn dispatcher_name(&self, variants: &[&DistributionVariant]) -> &'static str {
-        match self.subsystem(variants) {
-            zup_artifact::LauncherSubsystem::Gui => DISPATCHER_GUI,
-            zup_artifact::LauncherSubsystem::Console => DISPATCHER_CONSOLE,
-        }
+    /// Whether this artifact's launcher has to reach the network before it can
+    /// start a runtime.
+    ///
+    /// A thin artifact carries no content; its launcher resolves a release graph
+    /// and acquires the runtime from it. An offline artifact already contains the
+    /// runtime, so its launcher only has to pick one. Composing a thin artifact
+    /// from a launcher that cannot fetch would produce an installer that refuses
+    /// to install itself, on a user's machine, with no build-time symptom.
+    pub fn needs_online(&self) -> bool {
+        self.mode == ArtifactMode::Thin
     }
 }
 
@@ -199,17 +231,6 @@ pub fn compose(
     variants: &[&DistributionVariant],
 ) -> Result<ArtifactGraph, ArtifactError> {
     ArtifactComposer::new(request, variants)?.compose(variants)
-}
-
-/// Find a dispatcher template beside an executable, or beside the running one.
-pub fn discover_dispatcher(name: &str) -> Option<PathBuf> {
-    let mut path = std::env::current_exe().ok()?;
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    let candidate = path.join(name);
-    candidate.is_file().then_some(candidate)
 }
 
 /// The launcher subsystem a frontend's installer experience needs.

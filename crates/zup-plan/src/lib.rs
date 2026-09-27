@@ -35,5 +35,4 @@ pub use resources::{
     PlannedProtocol, PlannedService,
 };
 pub use select::select_components;
-pub use zup_build::{BuildPlan, TargetBuildPlan};
-pub use zup_core::{PluginBinding, PluginId, ResourceKey};
+pub use zup_core::{BuildPlan, PluginBinding, PluginId, ResourceKey, TargetBuildPlan};

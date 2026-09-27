@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracing::{info, info_span};
-use zup_build::{BuildPlan, TargetBuildPlan};
+use zup_core::{BuildPlan, TargetBuildPlan};
 use zup_core::{
     ComponentId, Condition, InstallScope, PluginBinding, PluginId, Privilege, ResourceKey,
 };

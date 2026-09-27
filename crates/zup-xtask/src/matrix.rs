@@ -54,6 +54,10 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-plugin-contract",
     "zup-plugin-build",
     "zup-plugin-runtime",
+    // The toolchain compatibility contract. Portable because the repository's own
+    // tooling writes these descriptors on a host that cannot run — or even
+    // compile — the components they describe.
+    "zup-toolchain",
 ];
 
 /// Portable crates that verify the stack instead of shipping inside an
@@ -61,9 +65,16 @@ pub const PORTABLE_CORE: &[&str] = &[
 pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 
 /// Crates that require a Windows build host: the Windows adapter, the
-/// composition CLI, the native frontend, and the small dispatcher a universal
-/// artifact starts through.
-pub const WINDOWS_ONLY: &[&str] = &["zup-pe", "zup-windows", "zup-dispatch", "zup", "zup-ui"];
+/// composition CLI, the runtime an installer embeds, the native frontends, and
+/// the small dispatcher a universal artifact starts through.
+pub const WINDOWS_ONLY: &[&str] = &[
+    "zup-pe",
+    "zup-windows",
+    "zup-dispatch",
+    "zup",
+    "zup-installer",
+    "zup-ui",
+];
 
 pub const MATRICES: &[Matrix] = &[
     Matrix {

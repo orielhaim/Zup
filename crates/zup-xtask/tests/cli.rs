@@ -57,39 +57,16 @@ fn complete_workspace() -> TempDir {
     root
 }
 
-const ALL_MATRICES: &str = "\
-portable-core: crates that build and test on a non-Windows host
-  zup-core
-  zup-manifest
-  zup-build
-  zup-plan
-  zup-platform
-  zup-exec
-  zup-transaction
-  zup-bootstrap
-  zup-bundle
-  zup-acquire
-  zup-acquire-http
-  zup-artifact
-  zup-publish
-  zup-publish-github
-  zup-distribute-github
-  zup-protocol
-  zup-runtime
-  zup-presentation
-  zup-update
-  zup-plugin-contract
-  zup-plugin-build
-  zup-plugin-runtime
-portable-tests: portable crates that verify the stack instead of shipping in an installer
-  zup-xtask
-windows-only: crates that require a Windows build host
-  zup-pe
-  zup-windows
-  zup-dispatch
-  zup
-  zup-ui
-";
+/// The rendered view of one matrix, as the library renders it.
+///
+/// Derived rather than pasted, because a pasted copy of the matrix is a second
+/// place to update every time a package is added — and the two copies are what
+/// this test would then be asserting against each other. What is under test here
+/// is the command line: selection, ordering, and format. The matrix's *contents*
+/// are pinned by the boundary rules, which fail on a member no matrix names.
+fn view(name: &str) -> String {
+    matrix::render(&[matrix::matrix(name).expect("a known matrix")])
+}
 
 #[test]
 fn no_arguments_prints_usage() {
@@ -150,20 +127,22 @@ fn the_pin_check_passes_on_a_workspace_with_no_workflows() {
 }
 
 #[test]
-fn the_matrix_view_lists_every_package_in_declaration_order() {
-    assert_eq!(stdout(&["emit-portable-matrix"]), ALL_MATRICES);
+fn the_matrix_view_lists_every_matrix_in_declaration_order() {
+    assert_eq!(
+        stdout(&["emit-portable-matrix"]),
+        matrix::render(&matrix::MATRICES.iter().collect::<Vec<_>>())
+    );
 }
 
 #[test]
 fn one_matrix_can_be_selected() {
-    assert_eq!(
-        stdout(&["emit-portable-matrix", "--matrix", "windows-only"]),
-        "windows-only: crates that require a Windows build host\n  zup-pe\n  zup-windows\n  zup-dispatch\n  zup\n  zup-ui\n"
-    );
-    assert_eq!(
-        stdout(&["emit-portable-matrix", "--matrix", "portable-tests"]),
-        "portable-tests: portable crates that verify the stack instead of shipping in an installer\n  zup-xtask\n"
-    );
+    for name in matrix::names() {
+        assert_eq!(
+            stdout(&["emit-portable-matrix", "--matrix", name]),
+            view(name),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -176,18 +155,13 @@ fn a_repeated_matrix_selector_keeps_the_requested_order() {
             "--matrix",
             "portable-core"
         ]),
-        "portable-tests: portable crates that verify the stack instead of shipping in an installer\n  zup-xtask\n\
-         portable-core: crates that build and test on a non-Windows host\n  zup-core\n  zup-manifest\n  \
-         zup-build\n  zup-plan\n  zup-platform\n  zup-exec\n  zup-transaction\n  zup-bootstrap\n  \
-         zup-bundle\n  zup-acquire\n  zup-acquire-http\n  zup-artifact\n  zup-publish\n  \
-         zup-publish-github\n  zup-distribute-github\n  zup-protocol\n  zup-runtime\n  \
-         zup-presentation\n  zup-update\n  \
-         zup-plugin-contract\n  zup-plugin-build\n  zup-plugin-runtime\n"
+        format!("{}{}", view("portable-tests"), view("portable-core"))
     );
 }
 
 #[test]
 fn cargo_args_format_emits_package_flags_for_one_matrix() {
+    let core = matrix::matrix("portable-core").expect("a known matrix");
     assert_eq!(
         stdout(&[
             "emit-portable-matrix",
@@ -196,11 +170,7 @@ fn cargo_args_format_emits_package_flags_for_one_matrix() {
             "--format",
             "cargo-args"
         ]),
-        "-p zup-core -p zup-manifest -p zup-build -p zup-plan -p zup-platform -p zup-exec \
-         -p zup-transaction -p zup-bootstrap -p zup-bundle -p zup-acquire -p zup-acquire-http \
-         -p zup-artifact -p zup-publish -p zup-publish-github -p zup-distribute-github -p zup-protocol \
-         -p zup-runtime -p zup-presentation -p zup-update -p zup-plugin-contract \
-         -p zup-plugin-build -p zup-plugin-runtime\n"
+        format!("{}\n", matrix::render_cargo_args(core))
     );
 }
 

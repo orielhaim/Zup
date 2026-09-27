@@ -44,7 +44,7 @@ pub const ONLINE_CONSOLE: &str = "zup-dispatch-console-online";
 /// Why a dispatcher template is not where it should be.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "the {name} dispatcher is not in {directory}; run scripts/build-dispatcher.ps1 and try again"
+    "the {name} dispatcher is not in {directory}; run `cargo xtask toolchain build` and try again"
 )]
 pub struct Missing {
     pub name: String,

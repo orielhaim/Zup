@@ -10,7 +10,7 @@
 use std::io;
 use std::path::Path;
 
-use zup_build::SourceFilePolicy;
+use zup_platform::SourceFilePolicy;
 
 use crate::fs_bindings;
 

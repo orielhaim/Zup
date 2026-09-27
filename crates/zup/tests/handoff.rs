@@ -16,7 +16,7 @@
 //! The runtime identity is a real file on disk and the release is a real signed
 //! document tree, so nothing here is a stand-in for the thing it measures.
 
-#![cfg(all(feature = "build", feature = "gui", windows))]
+#![cfg(windows)]
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -324,6 +324,13 @@ fn accepting_a_handoff_is_cheap_enough_not_to_be_what_a_user_waits_on() {
     let read = started.elapsed();
 
     let started = Instant::now();
+    let baseline = zup_core::hash_reader(
+        std::fs::File::open(&fixture.runtime).expect("the runtime is readable"),
+    )
+    .expect("the runtime hashes");
+    let once = started.elapsed();
+
+    let started = Instant::now();
     let verified = zup_windows::verify(&fixture.runtime, &fixture.cache, &accepted)
         .unwrap_or_else(|error| panic!("the runtime is the one the release names: {error}"));
     let proved = started.elapsed();
@@ -343,6 +350,11 @@ fn accepting_a_handoff_is_cheap_enough_not_to_be_what_a_user_waits_on() {
         proved.as_secs_f64() * 1000.0,
         runtime_bytes / (1024.0 * 1024.0)
     );
+    println!(
+        "  one plain pass    {:>12.2} ms  ({} as a ratio)",
+        once.as_secs_f64() * 1000.0,
+        proved.as_secs_f64() / once.as_secs_f64().max(f64::MIN_POSITIVE)
+    );
     println!("  content verified  {:>12} objects", fixture.content.len());
 
     // The window appears after this, so it is the whole of what a user waits for
@@ -351,12 +363,15 @@ fn accepting_a_handoff_is_cheap_enough_not_to_be_what_a_user_waits_on() {
         read < std::time::Duration::from_millis(50),
         "reading a handoff is a bounded document, not something to wait on: {read:?}"
     );
-    // A rate rather than a total, because the total belongs to the size of the
-    // image. Anything slower than a plain sequential read means the image is
-    // being hashed more than once.
+    // The claim is that the image is hashed once, so it is measured against a
+    // single plain pass over the same file on the same machine. An absolute
+    // rate would be a claim about the disk; a ratio is a claim about the code,
+    // and a second pass through the image would roughly double it.
+    let ratio = proved.as_secs_f64() / once.as_secs_f64().max(f64::MIN_POSITIVE);
     assert!(
-        rate > 64.0,
-        "proving an image should read it once, at disk or memory speed: {rate:.0} MiB/s"
+        ratio < 4.0,
+        "proving an image should cost about one pass over it, not several: \
+         {proved:?} against {once:?} for one hash of {runtime_bytes} bytes ({ratio:.1}x)"
     );
     assert!(
         bytes < 4096,
@@ -367,6 +382,10 @@ fn accepting_a_handoff_is_cheap_enough_not_to_be_what_a_user_waits_on() {
     assert_eq!(
         verified.release.release_digest,
         fixture.release.release_digest
+    );
+    assert_eq!(
+        verified.handoff.runtime, baseline.1,
+        "the image the release names is the one on disk"
     );
 }
 

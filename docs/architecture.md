@@ -72,7 +72,7 @@ crate.
 
 `docs/artifact-graph.md` owns the artifact graph itself: the four rules its
 readers enforce, how a variant is selected, the resource layout of the universal
-Windows artifact, the dispatcher, and what a machine keeps after an install.
+Windows artifact, the launcher, and what a machine keeps after an install.
 
 ## Authoring
 
@@ -339,7 +339,7 @@ Authoring commands share the target selection and override rules above.
 ```text
 --manifest <MANIFEST>          [default: zup.toml]
 --output <OUTPUT>              repeatable
---runtime <RUNTIME>            repeatable
+--runtime <RUNTIME>            repeatable, hidden
 --source <SOURCE>              repeatable
 --install-directory <PATH>     repeatable, alias --install-dir
 --frontend <gui|console|headless>
@@ -347,7 +347,7 @@ Authoring commands share the target selection and override rules above.
 --target <PROFILE_OR_TARGET>   repeatable
 --artifact <ARTIFACT>          repeatable, conflicts with --universal
 --universal                    compose every selected target into one file
---dispatcher <PATH>            the launcher an artifact is composed into
+--dispatcher <PATH>            launcher component, hidden; resolved when absent
 --release-manifest <PATH>      release description, or `none`; [default: dist/zup-release.json]
 ```
 
@@ -357,16 +357,32 @@ installer per named target. `--artifact` names a file a user downloads, and
 produces the composed graph. `--universal` is the shorthand for "compose every
 selected target into one file" and is refused alongside `--artifact`.
 
-`--dispatcher` names the launcher template a composed artifact is written into.
-The template must be unsigned, must present the launcher experience the
-artifact's variants agreed on, and must be no wider than the narrowest machine
-among them. When the flag is absent, `zup build` looks for `zup-dispatch.exe` or
-`zup-dispatch-console.exe` beside itself. `scripts/build-dispatcher.ps1` produces
-the images and installs them beside the `zup` executable, which is where
-`zup build` and the composition tests look for a template.
+`--dispatcher` names a launcher component to compose into instead of the one
+resolution finds. The component must be unsigned, must present the launcher
+experience the artifact's variants agreed on, and must be no wider than the
+narrowest machine among them. When the flag is absent, the toolchain resolver
+finds the launcher the same way it finds a runtime template.
+
+The runtime template and the launcher are zup's own binaries, so asking every
+project author to compile them before their first build is a tax on the ordinary
+path to an installer. Instead the build asks for a semantic component and the
+resolver finds the bytes: an explicit `--runtime` or `--dispatcher` path, then an
+explicit toolchain root from `--toolchain` or `ZUP_TOOLCHAIN`, then the installed
+cache for this exact zup version, then a toolchain staged beside the executable.
+There is no network step, and a resolved component is checked against its
+descriptor and its own PE header before it is used, so a template from another
+zup release, machine, or presentation is refused rather than embedded.
+
+```text
+cargo xtask toolchain build [--profile dev|release]
+```
+
+builds the three runtime templates and four launchers, writes a
+`.zup-toolchain.json` descriptor beside each, and stages them in
+`target/<profile>/toolchain/<version>/`. The default profile is `dev`.
 
 `zup artifact inspect <ARTIFACT> [--format <human|json>]` reads a composed
-artifact with the same parser the dispatcher and the runtime use, and verifies
+artifact with the same parser the launcher and the runtime use, and verifies
 every content digest it reports. The JSON report is versioned
 (`report_version: 1`) and states the artifact's kind, mode, pin, launcher
 subsystem, its variants, what composition cost and saved, and what could be
@@ -374,21 +390,20 @@ proven about trust: Authenticode presence, index validity, content digests, and
 variant completeness.
 
 `zup check` takes `--manifest`, `--source`, `--install-directory`, and
-`--target`. `zup plan` takes `--manifest`, `--target`, `--scope`, `--state-root`,
-`--enable`, `--disable`, `--install-directory`, and `--json`; it requires exactly
-one target, so a multi-profile manifest must name one with `--target`.
+`--target`. `zup plan` takes `--manifest`, `--target`, `--source`,
+`--install-directory` (alias `--install-dir`), `--frontend`, `--scope`,
+`--state-root`, `--enable`, `--disable`, and `--json`; it requires exactly one
+target, so a multi-profile manifest must name one with `--target`.
 
 `zup doctor` takes `--manifest`, `--runtime`, `--output`, `--source`,
 `--install-directory`, `--frontend`, `--target`, and `--format <human|json>`. It
-reports one row per check per profile, for the canonical target, manifest
-compile, source payload, plugin engine, update root, frontend, runtime template,
-runtime target, runtime subsystem, build backend, target lowering, output parent,
-and composition. The composition row reports what the selected targets would cost
-as separate installers and what one composed artifact would store once, so the
-value of a universal artifact is visible before anyone builds one. The JSON
-report is versioned (`version: 1`) and carries `profile`, `target`, `kind`,
-`status`, `message`, and `path` per check, so a consumer reads `status` and
-`path` without parsing prose.
+resolves runtimes through the toolchain resolver and reports one row per check
+per profile: `target`, `compile`, `payload`, `plugins`, `updates`, `frontend`,
+`runtime`, `backend`, `lowering`, and `output`. The `runtime` row is one check
+because a build refuses a component that fails any part of it, and it names the
+source the component was resolved from. The JSON report is versioned
+(`version: 1`) and carries `profile`, `target`, `kind`, `status`, `message`, and
+`path` per check, so a consumer reads `status` and `path` without parsing prose.
 
 `zup schema --output schema/zup.schema.json` regenerates the published JSON
 Schema; CI fails when the checked-in file differs from what the code emits.
@@ -398,15 +413,32 @@ the transport packages a release host holds. `zup publish github` and
 `zup ci github generate` / `zup ci github check` are documented in
 [GitHub distribution](github-distribution.md).
 
-`zup build` embeds a runtime template executable, so a frontend runtime has to
-exist before the build runs. The `zup` library compiles only with the `build`
-feature today, which means a template is built with `build` enabled; see
-[installer frontends](frontends.md).
+The installer runtime's public verbs are `install`, `modify`, `repair`, `update`,
+and `uninstall`. They take `--output <human|json|jsonl>` and a small set of
+scope, state, and component options, and they live in `zup-installer`, not in
+`zup`. `upgrade` and `recover` exist as hidden `__upgrade` and `__recover`, and
+`__worker` and `__uninstall_runner` are the process boundaries a parent spawns.
+See [installer frontends](frontends.md) for the output formats and exit codes.
 
-Lifecycle commands (`install`, `upgrade`, `modify`, `repair`, `uninstall`,
-`update`, `recover`) take `--output <human|json|jsonl>` and a small set of
-scope, state, and component options. See
-[installer frontends](frontends.md) for the output formats and exit codes.
+### The developer CLI and the installer runtime are separate packages
+
+They are two packages because a role must be a package and not a Cargo feature. A
+feature is a compile-time switch inside one binary; a role is a different product
+with a different dependency graph, a different lifecycle, and a different
+consumer. `zup` is the developer's authoring and distribution surface, and it has
+no Cargo features at all, so `cargo run -p zup -- --help` and
+`cargo install --path crates/zup` need no flag to produce the CLI. The only
+features in the repository belong to the runtime in `zup-installer`: `gui`,
+`console`, and `headless`, which produce `zup-setup-gui`, `zup-setup-console`, and
+`zup-setup-headless`.
+
+The boundary is the point, so it is checked rather than asserted.
+`scripts/verify-frontend-features.ps1` proves each runtime frontend builds alone,
+that no Cargo feature selects a role, and that `zup-installer` cannot reach
+`zup-build`, `zup-manifest`, `zup-plugin-build`, `zup-publish`, `zup-xtask`, or
+`zup` at all. It also proves `zup` is the only installable binary: every other
+package is `publish = false`. The presentations themselves are in
+[installer frontends](frontends.md).
 
 ## Portable crates and the Windows adapter
 
@@ -422,13 +454,13 @@ cargo xtask emit-portable-matrix
 | --- | --- | --- |
 | `portable-core` | any | `zup-core`, `zup-manifest`, `zup-build`, `zup-plan`, `zup-platform`, `zup-exec`, `zup-transaction`, `zup-bootstrap`, `zup-bundle`, `zup-artifact`, `zup-protocol`, `zup-runtime`, `zup-presentation`, `zup-update`, `zup-plugin-contract`, `zup-plugin-build`, `zup-plugin-runtime` |
 | `portable-tests` | any | `zup-xtask` |
-| `windows-only` | Windows | `zup-pe`, `zup-windows`, `zup-dispatch`, `zup`, `zup-ui` |
+| `windows-only` | Windows | `zup-pe`, `zup-windows`, `zup-dispatch`, `zup`, `zup-installer`, `zup-ui` |
 
-`zup` is the composition CLI. It is Windows-only because it links the Windows
-adapter to answer `zup plan` and to run the lifecycle, not because the manifest
-model or the build pipeline needs a Windows host. `zup-artifact` and `zup-pe`
-are on the opposite sides of that line from each other, which is the point: the
-artifact model is portable and the PE primitives are not.
+`zup` and `zup-installer` are Windows-only because they link the Windows adapter
+to answer `zup plan` and to run the lifecycle, not because the manifest model or
+the build pipeline needs a Windows host. `zup-artifact` and `zup-pe` are on the
+opposite sides of that line from each other, which is the point: the artifact
+model is portable and the PE primitives are not.
 
 `cargo xtask verify-portable-boundaries` fails when a portable crate:
 
@@ -467,7 +499,7 @@ shared multi-gigabyte store without decompressing and recompressing anything.
 `zup-windows` adapts that package to a PE. The index becomes resource 1 and
 each compressed blob becomes the following resource; identifiers are assigned at
 embed time and are not part of the package schema. `zup-pe` holds the PE header
-and resource primitives the dispatcher and the composer share, so there is one
+and resource primitives the launcher and the composer share, so there is one
 implementation of the certificate table and the resource directory, and
 `zup-windows::bundle_packager` delegates to it. `zup build` also rejects a runtime
 whose PE subsystem or template name does not match the selected frontend, and
@@ -477,13 +509,13 @@ because Authenticode covers the embedded package.
 `AutoPayloadSource` reads its payload from one of two places: the package
 embedded in the running executable, or a `variant.zup` sidecar beside a bare
 `Setup.exe`. The sidecar is how a native runtime finds its content after the
-dispatcher has staged it.
+launcher has staged it.
 
 `stage_variant` materializes one selected variant into a per-user, SID-bound
 content store and writes three files: the variant's native runtime, its package,
 and the artifact index. It creates files and returns the digests it proved; it
 opens nothing privileged, reads no registry, and touches no lifecycle state. The
-store is per-user and never machine-wide, because the dispatcher that writes it
+store is per-user and never machine-wide, because the launcher that writes it
 has no elevation and must not need any. Its directories are verified to be real
 directories and not reparse points before anything is written through them, and
 each records the digest of its own identity so a substituted directory is detected
@@ -524,20 +556,21 @@ Three workflows, all with `contents: read` and `persist-credentials: false`.
 
 The Windows job runs, in order: `cargo fmt --all --check`, `cargo clippy
 --workspace --all-features --all-targets -- -D warnings`,
-`scripts/build-dispatcher.ps1`, `cargo nextest run --workspace --all-features`,
+`cargo xtask toolchain build`, `cargo nextest run --workspace --all-features`,
 `cargo test --workspace --all-features --doc`, `cargo machete`,
 `git diff --check`, `cargo xtask verify-portable-boundaries`,
 `cargo xtask github-action-pins check`, a
 `zup schema --output schema/zup.schema.json` step that fails when the
 checked-in schema differs from the generated one, and
 `scripts/verify-frontend-features.ps1`, which proves the three frontend
-templates build with the intended dependency graphs and PE subsystems.
+templates build with the intended dependency graphs and PE subsystems, that `zup`
+declares no Cargo features, and that `zup` is the only installable binary.
 
-The dispatcher is a required input to the composition tests, not something
+The toolchain is a required input to the composition tests, not something
 `cargo test` builds: it is a separate package with a deliberately small
 dependency closure, which is the wrong trade for a 128 MB installer and the right
 one for a launcher whose size is a design constraint. A test that needs a
-dispatcher says so rather than passing without composing anything.
+launcher says so rather than passing without composing anything.
 
 The Ubuntu job emits both portable matrices, then verifies the portable stack
 natively on Linux:
