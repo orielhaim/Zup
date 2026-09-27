@@ -110,10 +110,25 @@ installation.
 
 ### Credentials
 
-`GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`. Never in `zup.toml` — the
+`GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`. Never in `zup.toml` - the
 schema has no field for one, so a project that tries is stopped at the parse
 rather than at a later "you should not do that". Never printed, never logged,
-never in a receipt. The type that holds a token redacts itself in `Debug`.
+never in a receipt. The type that holds a token stores it in a
+`secrecy::SecretString`: `Debug` prints `[REDACTED]`, `Display` is not
+implemented, and the value is only reachable through an `expose_secret` call that
+reads like the dangerous thing it is.
+
+That last point is why the dependency exists rather than a hand-written `Debug`
+impl. A hand-written impl is correct until somebody derives `Debug` on a struct
+that holds a token, at which point it prints the value and nothing in the type
+system objects. `SecretString` cannot be derived into anything that reveals it.
+The `Authorization` header is still built by hand from `expose()` and is still
+marked sensitive on the wire - redacting a `Debug` impl does nothing about a
+proxy log.
+
+A dry run in a workflow that holds a job-scoped token gets that token in exactly
+one process's environment. `docs/action.md` covers how the GitHub action scopes
+it, which matters because a build may run arbitrary project build scripts.
 
 A dry run with no credential prints the plan and says publication was not
 attempted. That is deliberate: "would this work" includes "could this
@@ -308,11 +323,12 @@ zup ci github generate      write .github/workflows/release.yml
 zup ci github check         say whether the committed workflow is current
 ```
 
-A committed file, not an action. Both read the same manifest and produce the same
-bytes, which is what makes `check` meaningful: it can differ from the file on disk
-only when the generator or the manifest changed, which is a change somebody made
-on purpose. `generate` will not overwrite a file that differs without `--force`,
-because a generated workflow nobody reviews is just a workflow nobody read.
+A committed file, and a readable pipeline. Both read the same manifest and
+produce the same bytes, which is what makes `check` meaningful: it can differ
+from the file on disk only when the generator or the manifest changed, which is a
+change somebody made on purpose. `generate` will not overwrite a file that
+differs without `--force`, because a generated workflow nobody reviews is just a
+workflow nobody read.
 
 The generated pipeline has explicit phases:
 
@@ -324,7 +340,18 @@ plan  →  build (matrix)  →  compose  →  attest  →  publish
   targets in YAML and keeps the two in sync
 - runners are the current native labels, including `windows-11-arm`; a target with
   no native runner is marked cross-compiled rather than given a lie
-- every action is pinned to a commit SHA, from one table in the generator
+- each phase calls the official zup action, which installs a released zup rather
+  than compiling one. That is not brevity: `cargo build -p zup` only ever worked
+  inside the zup repository, so the generated file was correct for exactly one
+  project
+- every *third-party* action uses the ref `github-actions.lock.json` tracks, and
+  `check` fails a committed workflow that drifts off it
+- the publish credential is an action input to one step, not a step-level `env:`
+  on several. `zup build` may run Tauri, Electron, Cargo build scripts and npm
+  scripts, and a token in that environment is a token handed to whatever the
+  project's build does
+- attestation uses `actions/attest`. `actions/attest-build-provenance` is now only
+  a wrapper on top of it
 - permissions are least-privilege at the top and narrower per job: only `publish`
   can write to the repository
 - `cancel-in-progress: false`, because cancelling a half-published release is
@@ -333,10 +360,22 @@ plan  →  build (matrix)  →  compose  →  attest  →  publish
   secrets are three clicks on a setting and reimplementing them in zup would be a
   worse version of the same thing
 
+The action ref is a floating major by default and a project can name an exact one
+under `[publish.github.workflow] action`. The generated file always shows exactly
+what it will run.
+
 `check --format json` reports the workflow path, whether it is current, the
 derived tag, every target with its runner and whether it is native, the
-attestation and signing settings, and every pinned action with its SHA. That is
-enough for CI to fail on drift without parsing prose.
+attestation and signing settings, and every pinned action with its SHA and the
+date it was last resolved. Actions a generated workflow does not use — zup's own
+CI dependencies — are marked as such, so a project is not told to pin a Rust cache
+its pipeline does not have. That is enough for CI to fail on drift without parsing
+prose.
+
+The generated workflow is **optional**. `docs/action.md` covers the other way to
+release: writing the phases yourself with repeated invocations of the action. The
+two are equally valid, and which one a project wants is a decision about how much
+of the pipeline it wants to own.
 
 ## Enterprise
 

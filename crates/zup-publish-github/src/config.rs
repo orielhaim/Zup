@@ -278,6 +278,9 @@ fn workflow_policy(workflow: Option<&GithubWorkflow>) -> Result<WorkflowPolicy, 
     if let Some(receipt) = &workflow.receipt {
         policy.receipt = receipt.clone();
     }
+    if let Some(action) = &workflow.action {
+        policy.action = action.clone();
+    }
     policy.runner_overrides = workflow.runners.clone();
     Ok(policy)
 }

@@ -215,12 +215,15 @@ fn check(args: CiGithubCheckCommand) -> miette::Result<()> {
         attestations: config.workflow.attestations,
         environment: config.workflow.environment.clone(),
         signing: config.workflow.signing.is_some(),
-        actions: zup_publish_github::PINS
+        actions: zup_publish_github::pins()
             .iter()
             .map(|pin| Action {
-                repository: pin.repository.to_owned(),
-                version: pin.version.to_owned(),
-                sha: pin.sha.to_owned(),
+                repository: pin.repository.clone(),
+                version: pin.version.clone(),
+                sha: pin.sha.clone(),
+                checked_at: pin.checked_at.clone(),
+                in_generated_workflow: zup_publish_github::generated_actions()
+                    .contains(&pin.repository.as_str()),
             })
             .collect(),
     };
@@ -241,13 +244,24 @@ fn check(args: CiGithubCheckCommand) -> miette::Result<()> {
 /// Version of the `zup ci github check` report shape.
 const REPORT_VERSION: u32 = 1;
 
-/// One pinned action the generated workflow depends on.
+/// One action the generated workflow depends on.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 struct Action {
     repository: String,
+    /// The ref a workflow uses after `@`, e.g. `v7`.
     version: String,
+    /// The commit that ref resolved to on `checked_at`.
+    ///
+    /// A record, not a constraint. A version ref can move; this is what makes
+    /// that visible instead of silent.
     sha: String,
+    /// When the ref was last resolved against upstream.
+    checked_at: String,
+    /// Whether this action is one a generated workflow uses, or one only zup's own
+    /// CI needs. A project reading this report should not be told to track
+    /// `Swatinem/rust-cache` when its pipeline does not use it.
+    in_generated_workflow: bool,
 }
 
 /// One target the generated matrix builds.
@@ -311,11 +325,23 @@ impl Report {
             ));
         }
         out.push('\n');
-        out.push_str("Pinned actions\n");
-        for action in &self.actions {
+        // Only the actions this project's workflow actually uses. Listing
+        // `Swatinem/rust-cache` next to `actions/checkout` would tell a project
+        // to pin a dependency its pipeline does not have.
+        let used: Vec<&Action> = self
+            .actions
+            .iter()
+            .filter(|action| action.in_generated_workflow)
+            .collect();
+        out.push_str("Action refs\n");
+        for action in &used {
+            // The ref first, then the commit it resolved to. The ref is what the
+            // workflow runs; the commit is what the ref pointed at when zup last
+            // looked, so a tag that has since moved is visible as a disagreement
+            // between the two columns.
             out.push_str(&format!(
-                "  {:<32} {:<10} {}\n",
-                action.repository, action.version, action.sha
+                "  {:<32} {:<10} {}  (checked {})\n",
+                action.repository, action.version, action.sha, action.checked_at
             ));
         }
         out.push('\n');

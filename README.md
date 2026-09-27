@@ -131,13 +131,41 @@ resources. The adapter assigns those resource identifiers at embed time; they
 are not part of the portable package schema. Sign the completed executable
 after `zup build` so the signature covers the embedded package.
 
+## Releasing with GitHub Actions
+
+```yaml
+permissions:
+  contents: write
+
+steps:
+  - uses: actions/checkout@v7
+  - uses: orielhaim/zup@action-v1
+    with:
+      operation: release
+```
+
+The action installs a verified zup CLI, runs the phase you asked for, and reports
+the result as annotations, a job summary and typed outputs. The publishing token
+is present only in the environment of `zup publish github` — never in a build,
+which may run Tauri, Electron, Cargo build scripts and npm scripts.
+
+For the whole pipeline instead of one step, `zup ci github generate` writes a
+readable `plan → build → compose → attest → publish` workflow that calls the same
+action once per phase. See [the zup GitHub Action](docs/action.md) for inputs,
+outputs, the security model, permissions, attestation, workflow artifacts, GitHub
+Enterprise, self-hosted runners, and the release/versioning model — and
+[GitHub Releases as a distribution host](docs/github-distribution.md) for the
+release format itself.
+
 ## Repository tasks
 
-The package matrices are single-sourced in `zup-xtask`:
+The package matrices and the GitHub Action refs are single-sourced in `zup-xtask`:
 
 ```text
 cargo xtask emit-portable-matrix
 cargo xtask verify-portable-boundaries
+cargo xtask github-action-pins check
+cargo xtask github-action-pins refresh
 ```
 
 `verify-portable-boundaries` fails when a portable crate depends on a
@@ -145,3 +173,27 @@ Windows-only crate, declares a Windows-only platform table, names a Windows API,
 branches on `cfg(windows)` in production code, reintroduces a
 Windows-specific identifier, or spells a Windows concept inside a string
 literal.
+
+`github-action-pins check` validates `github-actions.lock.json` — the ref each
+third-party action uses, the commit it resolved to, and the date that was checked
+— and fails when a committed workflow uses a `uses:` the lock does not track. It
+is offline and runs in every CI job; `--online` additionally reports a newer major
+series or a ref that no longer points where the lock recorded.
+`cargo xtask github-action-pins refresh` reaches GitHub, advances the series and
+re-records the commits. It never runs inside a build.
+
+The action itself is developed in [`action/`](action) with Bun as the toolchain
+and Node 24 as the runtime, with a committed bundle that CI proves matches its
+source and runs under Node:
+
+```bash
+cd action
+bun install --frozen-lockfile
+bun run check          # typecheck, lint, test, bundle, metadata, Node 24 run
+bun run check:dist     # the committed bundle is current
+```
+
+Bun installs, tests and bundles; `action/dist/index.js` runs on GitHub's Node 24
+runtime. Nothing in `action/src` may use a `Bun.*` API — that is a compile error,
+because the source's `tsconfig.json` declares `"types": ["node"]` and nothing
+else.

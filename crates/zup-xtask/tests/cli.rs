@@ -100,13 +100,53 @@ fn no_arguments_prints_usage() {
 }
 
 #[test]
-fn help_lists_both_commands_and_the_exit_codes() {
+fn help_lists_every_command_and_the_exit_codes() {
     let help = stdout(&["help"]);
     assert!(help.contains("emit-portable-matrix"), "{help}");
     assert!(help.contains("verify-portable-boundaries"), "{help}");
+    assert!(help.contains("github-action-pins check"), "{help}");
+    assert!(help.contains("github-action-pins refresh"), "{help}");
     assert!(help.contains("0  clean"), "{help}");
-    assert!(help.contains("1  boundary violations"), "{help}");
+    assert!(help.contains("1  problems found"), "{help}");
     assert!(help.contains("2  usage or unreadable workspace"), "{help}");
+}
+
+#[test]
+fn the_pin_check_reports_a_broken_lock_rather_than_passing() {
+    // A `check` that cannot fail is a `check` nobody reads. The fixture has a
+    // workflow whose `uses:` does not match the lock, which is the failure this
+    // command exists to catch.
+    let fixture = tempfile::tempdir().expect("a temporary workspace");
+    let workflows = fixture.path().join(".github").join("workflows");
+    std::fs::create_dir_all(&workflows).expect("a directory");
+    std::fs::write(
+        workflows.join("release.yml"),
+        "jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v5\n",
+    )
+    .expect("a workflow");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["github-action-pins", "check", "--root"])
+        .arg(fixture.path())
+        .output()
+        .expect("xtask runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("actions/checkout"), "{stderr}");
+    assert!(stderr.contains("does not match the lock"), "{stderr}");
+}
+
+#[test]
+fn the_pin_check_passes_on_a_workspace_with_no_workflows() {
+    // A repository that has not generated a workflow yet is not a failure.
+    let fixture = tempfile::tempdir().expect("a temporary workspace");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["github-action-pins", "check", "--root"])
+        .arg(fixture.path())
+        .output()
+        .expect("xtask runs");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("tracked"));
 }
 
 #[test]

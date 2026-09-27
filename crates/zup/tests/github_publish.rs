@@ -247,19 +247,59 @@ repository = "acme/acme"
         );
     }
 
-    // Every action is a commit SHA. A version range is not a pin, and a workflow
-    // that depends on one is a workflow nobody reviewed.
+    // Every action names a ref the workflow actually uses, plus the commit that
+    // ref resolved to. The ref is what GitHub resolves; the commit is the record
+    // that makes a moved tag visible instead of silent.
     let actions = report["actions"].as_array().expect("actions");
     assert!(!actions.is_empty(), "the workflow depends on some actions");
     for action in actions {
         let sha = action["sha"].as_str().expect("a sha");
-        assert_eq!(sha.len(), 40, "`{action}` is pinned to a commit");
+        assert_eq!(sha.len(), 40, "`{action}` records a resolved commit");
         assert!(
             sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "`{action}` is a sha"
         );
-        assert!(!action["version"].as_str().expect("a version").is_empty());
+        let version = action["version"].as_str().expect("a version");
+        assert!(!version.is_empty(), "`{action}` names a ref");
+        assert!(
+            !version
+                .chars()
+                .any(|c| c.is_whitespace() || c == '#' || c == '/'),
+            "`{version}` is a ref a workflow can spell"
+        );
+        // A ref nobody has looked at is one nobody reviewed, so the report says
+        // when each was last resolved against upstream.
+        let checked = action["checked_at"].as_str().expect("a date");
+        assert_eq!(checked.len(), 10, "`{action}` records when it was checked");
+        assert!(
+            action["in_generated_workflow"].is_boolean(),
+            "`{action}` says whether this pipeline uses it"
+        );
     }
+
+    // The report distinguishes what *this* workflow uses from what zup's own CI
+    // uses. A project reading "actions/checkout, Swatinem/rust-cache" as its own
+    // dependencies would reasonably conclude its pipeline needs a Rust cache.
+    let used: Vec<&str> = actions
+        .iter()
+        .filter(|action| action["in_generated_workflow"] == serde_json::json!(true))
+        .map(|action| action["repository"].as_str().expect("a repository"))
+        .collect();
+    for expected in [
+        "actions/checkout",
+        "actions/upload-artifact",
+        "actions/download-artifact",
+        "actions/attest",
+    ] {
+        assert!(
+            used.contains(&expected),
+            "{expected} is missing from {used:?}"
+        );
+    }
+    assert!(
+        !used.contains(&"Swatinem/rust-cache"),
+        "the Rust cache is zup's own CI, not this pipeline's"
+    );
 
     // The human form carries the same facts, because that is the form a person
     // reads in a terminal.
@@ -268,8 +308,84 @@ repository = "acme/acme"
     let text = stdout(&human);
     assert!(text.contains("current"), "{text}");
     assert!(text.contains("v1.4.0"), "{text}");
-    assert!(text.contains("Pinned actions"), "{text}");
+    assert!(text.contains("Action refs"), "{text}");
     assert!(text.contains("Target matrix"), "{text}");
+    assert!(
+        text.contains("checked "),
+        "the report says when a ref was resolved"
+    );
+    assert!(
+        !text.contains("Swatinem/rust-cache"),
+        "the human form must not list zup's own CI dependencies:\n{text}"
+    );
+}
+
+#[test]
+fn the_generated_workflow_uses_the_zup_action_once_per_phase() {
+    let project = Project::new(
+        r#"
+[distribution]
+host = "github"
+
+[publish.github]
+repository = "acme/acme"
+"#,
+    );
+    assert!(ci(&project, &["generate"]).status.success());
+    let text = fs::read_to_string(project.workflow()).expect("a workflow");
+
+    for operation in ["build", "compose", "attest", "publish"] {
+        assert!(
+            text.contains(&format!("operation: {operation}")),
+            "no `{operation}` phase in\n{text}"
+        );
+    }
+    // The pipeline stays readable: one job per phase, and the architecture is
+    // still visible in the file.
+    for job in [
+        "  plan:",
+        "  build:",
+        "  compose:",
+        "  attest:",
+        "  publish:",
+    ] {
+        assert!(text.contains(job), "no `{job}` job in\n{text}");
+    }
+    // The old shape compiled zup from source in every job, which only ever
+    // worked inside the zup repository.
+    assert!(!text.contains("cargo build"), "{text}");
+    assert!(!text.contains("dtolnay/rust-toolchain"), "{text}");
+    // The credential is an action input, scoped to the step that publishes.
+    assert!(
+        text.contains("github-token: ${{ secrets.GITHUB_TOKEN }}"),
+        "{text}"
+    );
+    assert!(!text.contains("GITHUB_TOKEN: ${{ secrets"), "{text}");
+    // `attest-build-provenance` is a wrapper on top of `actions/attest` now.
+    assert!(!text.contains("attest-build-provenance"), "{text}");
+}
+
+#[test]
+fn the_zup_action_ref_is_the_projects_to_choose() {
+    let project = Project::new(
+        r#"
+[distribution]
+host = "github"
+
+[publish.github]
+repository = "acme/acme"
+
+[publish.github.workflow]
+action = "acme/fork-of-zup@action-v1"
+"#,
+    );
+    assert!(ci(&project, &["generate"]).status.success());
+    let text = fs::read_to_string(project.workflow()).expect("a workflow");
+    assert!(text.contains("uses: acme/fork-of-zup@action-v1"), "{text}");
+    assert!(
+        !text.contains("orielhaim/zup@"),
+        "the default is still present"
+    );
 }
 
 #[test]

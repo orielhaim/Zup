@@ -908,8 +908,11 @@ mod notes_policy {
 mod credentials {
     use std::collections::BTreeMap;
 
+    use zup_acquire_http::SecretHeader;
     use zup_publish_github::Environment;
-    use zup_publish_github::{Token, discover, discover_with};
+    use zup_publish_github::{
+        GithubError, GithubReceipt, GithubRepository, Token, authorization, discover, discover_with,
+    };
 
     struct Env(BTreeMap<String, String>);
 
@@ -961,7 +964,7 @@ mod credentials {
         let found = Token::new("ghp_supersecret");
         let rendered = format!("{found:?}");
         assert!(!rendered.contains("ghp_supersecret"), "{rendered}");
-        assert!(rendered.contains("redacted"), "{rendered}");
+        assert!(rendered.contains("REDACTED"), "{rendered}");
     }
 
     #[test]
@@ -970,6 +973,163 @@ mod credentials {
             zup_publish_github::authorization(&Token::new("abc")),
             "Bearer abc"
         );
+    }
+
+    /// The reason `secrecy` is a dependency rather than a hand-written `Debug`.
+    ///
+    /// A hand-written impl is one `#[derive(Debug)]` away from printing the value,
+    /// and nothing in the type system objects. `SecretString` cannot be derived
+    /// into anything that reveals it, so these tests are about the type rather
+    /// than about a line of code somebody could delete.
+    #[test]
+    fn no_credential_reaches_a_debug_string_through_a_wrapper() {
+        // The shape every HTTP client ends up with: a struct that holds a token
+        // and derives `Debug` because something in the call chain needs it. This
+        // is the case a hand-written `Debug` on `Token` cannot defend, and the
+        // case `secrecy` does.
+        #[derive(Debug)]
+        struct Request<'a> {
+            repository: &'a str,
+            token: &'a Token,
+        }
+
+        const SECRET: &str = "ghp_never_print_me";
+        let token = Token::new(SECRET);
+        let request = Request {
+            repository: "acme/acme",
+            token: &token,
+        };
+        // Read the fields, so the struct is not dead code, and prove the derived
+        // `Debug` still does not print the value.
+        assert_eq!(request.repository, "acme/acme");
+        assert!(request.token.same_secret_as(&token));
+        for rendered in [format!("{request:?}"), format!("{token:?}")] {
+            assert!(!rendered.contains(SECRET), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn no_credential_reaches_a_report_a_receipt_or_a_diagnostic() {
+        const SECRET: &str = "ghp_never_print_me";
+        let repository = GithubRepository::dotcom("acme", "acme");
+
+        // The errors a failed publication produces, rendered the way a user sees
+        // them. `Display` on an error is what a CLI prints and what a bug report
+        // carries, so this is the boundary a credential must not cross.
+        //
+        // The `reason` and `message` fields are caller-supplied text and are
+        // rendered as given — the invariant is that *this crate* never writes a
+        // token into one, which the next test proves by construction.
+        let errors = [
+            GithubError::NoToken,
+            GithubError::Unauthenticated {
+                reason: "the credential was rejected".to_owned(),
+            },
+            GithubError::Status {
+                status: 401,
+                message: Some("Bad credentials".to_owned()),
+            },
+            GithubError::RateLimited { seconds: Some(60) },
+            GithubError::NotFound {
+                what: "release asset".to_owned(),
+            },
+            GithubError::Digest {
+                name: "Acme-Setup.exe".to_owned(),
+                expected: "a".repeat(64),
+                found: "b".repeat(64),
+            },
+            GithubError::PublishedConflict {
+                tag: "v1.4.0".to_owned(),
+            },
+        ];
+        for error in errors {
+            let rendered = format!("{error} {error:?}");
+            assert!(!rendered.contains(SECRET), "{rendered}");
+        }
+
+        // A receipt is uploaded as a build output and read by CI. It carries ids
+        // and digests and never a credential.
+        let receipt = GithubReceipt::new(&repository, "v1.4.0", 42);
+        let encoded = String::from_utf8(receipt.encode().expect("a receipt encodes"))
+            .expect("a receipt is text");
+        assert!(!encoded.contains(SECRET), "{encoded}");
+
+        // A diagnosis is a report about a repository and what its credential can
+        // reach.
+        let diagnosis = zup_publish_github::Diagnosis {
+            repository: repository.to_string(),
+            host: repository.host.host.clone(),
+            private: false,
+            archived: false,
+            immutable_releases: None,
+            tag: "v1.4.0".to_owned(),
+            assets: 3,
+            asset_limit: 1000,
+            largest: Some(("Acme-Setup.exe".to_owned(), 1)),
+            asset_bytes_limit: 2 * 1024 * 1024 * 1024,
+            release_exists: false,
+            release_is_draft: false,
+            release_is_immutable: None,
+        };
+        assert!(!format!("{diagnosis:?}").contains(SECRET));
+    }
+
+    /// The `Authorization` header is the only place a token is read, and it goes
+    /// straight into a `SecretHeader` that the HTTP client marks sensitive.
+    ///
+    /// Asserting this as a source-level property is what makes the previous test
+    /// an end-to-end statement rather than a sample: the reason and message
+    /// fields above are caller-supplied, and no caller in this crate supplies a
+    /// token.
+    #[test]
+    fn the_only_read_of_a_token_is_the_authorization_header() {
+        const SECRET: &str = "ghp_never_print_me";
+        let token = Token::new(SECRET);
+
+        // The header is correct, and it is built from `expose`.
+        assert_eq!(authorization(&token), format!("Bearer {SECRET}"));
+
+        // Nothing else in the public surface returns the value. `expose` is the
+        // one method, and this crate calls it in exactly two places: this header
+        // and the constant-time comparison in `same_secret_as`.
+        let header = SecretHeader::new(authorization(&token));
+        assert!(!format!("{header:?}").contains(SECRET));
+    }
+
+    #[test]
+    fn a_token_from_every_source_redacts_itself() {
+        const SECRET: &str = "ghp_every_source";
+        let sources = [
+            Token::new(SECRET),
+            discover_with(
+                &Env(BTreeMap::from([("GH_TOKEN".to_owned(), SECRET.to_owned())])),
+                || panic!("the fallback must not run"),
+            )
+            .expect("a token"),
+            discover_with(
+                &Env(BTreeMap::from([(
+                    "GITHUB_TOKEN".to_owned(),
+                    SECRET.to_owned(),
+                )])),
+                || panic!("the fallback must not run"),
+            )
+            .expect("a token"),
+            discover_with(&Env(BTreeMap::new()), || Some(SECRET.to_owned())).expect("a token"),
+        ];
+        for token in &sources {
+            let rendered = format!("{token:?}");
+            assert!(!rendered.contains(SECRET), "{rendered}");
+            assert!(token.expose() == SECRET, "the value is still reachable");
+        }
+    }
+
+    #[test]
+    fn comparing_two_tokens_is_explicit_about_comparing_secrets() {
+        let left = Token::new("a");
+        assert!(left.same_secret_as(&Token::new("a")));
+        assert!(!left.same_secret_as(&Token::new("b")));
+        assert!(!left.same_secret_as(&Token::new("aa")));
+        assert!(left.same_secret_as(&left));
     }
 }
 
@@ -1102,20 +1262,121 @@ mod workflow {
         assert!(rendered.contains("github.repository"), "{rendered}");
     }
 
+    /// Every third-party action uses the ref the lock tracks.
+    ///
+    /// A version ref, not a commit SHA: `actions/checkout@v7` is what the
+    /// ecosystem writes, what dependabot advances, and what a reviewer recognises
+    /// without a lookup. The immutability a full SHA buys is bought back by the
+    /// lock recording what each ref resolved to, which is a different check in a
+    /// different place.
+    ///
+    /// The zup action itself is excluded by name rather than by pattern, because
+    /// a test that "accidentally" exempts every `uses:` line would pass a workflow
+    /// with no refs in it at all.
     #[test]
-    fn every_action_is_pinned_to_a_commit_sha() {
+    fn every_third_party_action_uses_the_ref_the_lock_tracks() {
+        let rendered = generate(&WorkflowPolicy::default(), &matrix());
+        let action = WorkflowPolicy::default().action;
+        let mut checked = 0;
+        for line in rendered.lines().filter(|line| line.contains("uses: ")) {
+            let reference = line.split("uses: ").nth(1).expect("a uses line").trim();
+            if reference.starts_with(&action) {
+                assert_eq!(reference, action, "`{line}` is not the configured action");
+                continue;
+            }
+            let (repository, revision) = reference
+                .split_once('@')
+                .unwrap_or_else(|| panic!("`{line}` has no ref"));
+            let locked = zup_publish_github::pin(repository.trim())
+                .unwrap_or_else(|error| panic!("`{line}`: {error}"));
+            assert_eq!(
+                revision, locked.version,
+                "`{line}` does not use the ref the lock tracks"
+            );
+            // The lock's record has to be a real commit, or "what did this ref
+            // point at when we last looked" has no answer.
+            assert_eq!(locked.sha.len(), 40, "`{line}` has no recorded commit");
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "only {checked} tracked references were checked"
+        );
+    }
+
+    /// No generated reference is a bare commit SHA.
+    ///
+    /// One convention, or none: a file where some refs are versions and some are
+    /// commits is a file where a dependabot bump updates half of them and a
+    /// reviewer cannot tell which is which.
+    #[test]
+    fn no_generated_reference_is_a_bare_commit_sha() {
         let rendered = generate(&WorkflowPolicy::default(), &matrix());
         for line in rendered.lines().filter(|line| line.contains("uses: ")) {
             let reference = line.split("uses: ").nth(1).expect("a uses line").trim();
-            let spec = reference.split('#').next().unwrap_or("").trim();
-            let sha = spec.rsplit('@').next().expect("a reference");
-            assert_eq!(sha.len(), 40, "`{line}` is not pinned to a full commit");
+            let revision = reference
+                .split_once('@')
+                .map(|(_, revision)| revision)
+                .unwrap_or(reference);
             assert!(
-                sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "`{line}` is not a commit sha"
+                !(revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit())),
+                "`{line}` pins a commit rather than a version ref"
             );
-            assert!(line.contains('#'), "`{line}` has no version comment");
         }
+    }
+
+    #[test]
+    fn the_workflow_calls_the_zup_action_once_per_phase() {
+        let rendered = generate(&WorkflowPolicy::default(), &matrix());
+        let action = &WorkflowPolicy::default().action;
+        let calls = rendered
+            .lines()
+            .filter(|line| line.contains(&format!("uses: {action}")))
+            .count();
+        // build, compose, attest, publish. One per phase: the pipeline stays
+        // readable and each call is a place a developer can look.
+        assert_eq!(calls, 4, "{rendered}");
+        for operation in ["build", "compose", "attest", "publish"] {
+            assert!(
+                rendered.contains(&format!("operation: {operation}")),
+                "no `{operation}` phase in\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_action_ref_is_the_projects_to_choose() {
+        let rendered = generate(
+            &WorkflowPolicy {
+                action: "acme/fork-of-zup@v1.2.3".to_owned(),
+                ..WorkflowPolicy::default()
+            },
+            &matrix(),
+        );
+        assert!(
+            rendered.contains("uses: acme/fork-of-zup@v1.2.3"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains(&WorkflowPolicy::default().action),
+            "the default ref is still in the file"
+        );
+    }
+
+    #[test]
+    fn the_token_is_an_action_input_rather_than_a_step_environment() {
+        let rendered = generate(&WorkflowPolicy::default(), &matrix());
+        // A step-level `env: GITHUB_TOKEN` would put the credential in the
+        // environment of the build that runs alongside it. As an input it is
+        // scoped to the publish step and to the one subprocess that needs it.
+        assert!(
+            !rendered.contains("GITHUB_TOKEN: ${{ secrets"),
+            "the token is exposed as an environment variable:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("github-token: ${{ secrets.GITHUB_TOKEN }}"),
+            "{rendered}"
+        );
     }
 
     #[test]

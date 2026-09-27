@@ -1,2 +1,13 @@
 /target
 /examples/plugins/configure/target/
+
+# The action's dependencies are installed from `action/bun.lock` by
+# `bun install --frozen-lockfile` in CI and never at run time: the runner executes
+# `action/dist/index.js`, which has every dependency inlined.
+/action/node_modules/
+
+# Everything an action build produces that is not the bundle. `action/dist` is
+# deliberately *not* here — it is the artifact GitHub runs, and `npm run
+# check:dist` proves it matches `action/src`.
+/action/.cache/
+/action/coverage/

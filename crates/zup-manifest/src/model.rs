@@ -345,4 +345,7 @@ pub struct GithubWorkflow {
     /// Where the publisher writes its receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<String>,
+    /// The zup action the generated pipeline calls, as `owner/repo@ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }

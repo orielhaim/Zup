@@ -1,18 +1,26 @@
 //! Generating `.github/workflows/release.yml`.
 //!
-//! # A committed file, not a marketplace action
+//! # A committed file, and a readable pipeline
 //!
 //! `zup ci github generate` writes a YAML file a developer can read, review, and
-//! edit. It is not hidden behind a zup action, and it is not generated at run
-//! time inside someone else's CI. Three reasons:
+//! edit. It is not hidden behind a runtime generator inside someone else's CI,
+//! because a release pipeline is the thing a project most needs to audit: "what
+//! does your release do?" has to have an answer that is a file in the repository,
+//! and a generator trusted with the release is trusted by a version range nobody
+//! reviewed. The phases are already explicit, so the file keeps one job per phase
+//! and the zup action appears inside them rather than replacing the pipeline.
 //!
-//! - A release pipeline is the thing a project most needs to audit. "What does
-//!   your release do?" has to have an answer that is a file in the repository.
-//! - An action that generates a release pipeline is an action that has to be
-//!   trusted with the release, and it is trusted by a version range nobody
-//!   reviewed.
-//! - The phases here are already explicit — build, compose, sign, attest,
-//!   publish — and an indirection can only hide them.
+//! # The zup action, and what it is not
+//!
+//! The generated workflow calls the official zup action to install and run the
+//! CLI, because a consumer project does not have a zup workspace checked out.
+//! `cargo build -p zup` only ever worked inside the zup repository itself, so a
+//! generated file using it was correct for exactly one project. An action that
+//! installs a released zup is correct for all of them.
+//!
+//! What the action must never become is a way to collapse the pipeline: it is
+//! invoked once per phase, the phases stay visible, and the release architecture
+//! is still readable in the diff.
 //!
 //! # What is generated and what is chosen
 //!
@@ -20,90 +28,29 @@
 //! developer should not have to enumerate them in YAML and keep the two in sync.
 //! Everything else is a decision a project makes and the generator only reflects:
 //! whether to sign, whether to attest, which environment to gate publication
-//! behind.
+//! behind, and which zup action ref the pipeline calls.
 //!
 //! # Reproducibility
 //!
-//! [`generate`] is a pure function of its inputs, byte for byte. That is what
-//! makes `zup ci github check` meaningful: it re-derives the file and compares,
-//! and the only reason it can differ is that the generator or the manifest
-//! changed — which is a change somebody made on purpose. The action pins live in
-//! one table, so a pin update is one edit and one commit.
+//! [`generate`] is a pure function of its inputs, byte for byte, so
+//! `zup ci github check` is meaningful: it re-derives the file and compares, and
+//! the only reason it can differ is that the generator, the manifest, or the
+//! action ref lock changed — a change somebody made on purpose. The lock lives in
+//! `github-actions.lock.json` and is compiled in, so regenerating a matrix offline
+//! can never move a ref.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::pins::{PinError, pin};
 use crate::runner::{Runner, cross_runner, native_runner};
 
-/// A first-party action, pinned to the commit it names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ActionPin {
-    /// `owner/name`.
-    pub repository: &'static str,
-    /// The friendly version a human reads in the comment.
-    pub version: &'static str,
-    /// The full commit SHA the workflow uses.
-    pub sha: &'static str,
-}
-
-impl ActionPin {
-    /// The `uses:` line, with the version in a trailing comment.
-    pub fn uses(&self) -> String {
-        format!("{}@{} # {}", self.repository, self.sha, self.version)
-    }
-}
-
-/// The known-good action pins, in one table.
+/// The action ref a generated workflow uses when the project names none.
 ///
-/// Every entry is `actions/*`, `github/*`, or a toolchain action that installs
-/// Rust and nothing else. A generated release workflow that pulls in a
-/// marketplace action is a supply-chain dependency nobody chose, and pinning is
-/// the minimum rather than the goal.
-pub const PINS: &[ActionPin] = &[
-    ActionPin {
-        repository: "actions/checkout",
-        version: "v5",
-        sha: "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
-    },
-    ActionPin {
-        repository: "actions/upload-artifact",
-        version: "v4",
-        sha: "ea165f8d65b6e75b540449e92b4886f43607fa02",
-    },
-    ActionPin {
-        repository: "actions/download-artifact",
-        version: "v5",
-        sha: "634f93cb2916e3fdff6788551b99b062d0335ce0",
-    },
-    ActionPin {
-        repository: "actions/attest-build-provenance",
-        version: "v4",
-        sha: "4d101475d8b20a2381f78447822ac1eab6504dd8",
-    },
-    ActionPin {
-        repository: "actions/attest",
-        version: "v4",
-        sha: "1e69f48acb82d1966a394da916b4c1698aa569d6",
-    },
-    ActionPin {
-        repository: "dtolnay/rust-toolchain",
-        version: "stable",
-        sha: "6bed0761d98439e5a578e2877258200ad565ba87",
-    },
-    ActionPin {
-        repository: "Swatinem/rust-cache",
-        version: "v2",
-        sha: "6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
-    },
-];
-
-/// The pin for one action.
-pub fn pin(repository: &str) -> ActionPin {
-    PINS.iter()
-        .find(|pin| pin.repository == repository)
-        .copied()
-        .unwrap_or_else(|| panic!("{repository} is not in the action pin table"))
-}
+/// A floating tag rather than a version, so a project writes `zup@action-v1` once
+/// and picks up action fixes without a dependabot pull request. A project that
+/// wants an immutable pipeline sets `[publish.github.workflow] action`.
+pub const DEFAULT_ACTION: &str = "orielhaim/zup@action-v1";
 
 /// The generated file's path, relative to the repository root.
 pub const WORKFLOW_PATH: &str = ".github/workflows/release.yml";
@@ -177,6 +124,12 @@ pub struct WorkflowPolicy {
     pub release_dir: String,
     /// The path the publisher writes its receipt to.
     pub receipt: String,
+    /// The zup action ref the generated pipeline calls, as `owner/repo@ref`.
+    ///
+    /// The action installs a released zup rather than compiling one, which is the
+    /// only thing that works in a project that is not the zup repository. A
+    /// project that wants an immutable pipeline names an exact ref here.
+    pub action: String,
 }
 
 impl Default for WorkflowPolicy {
@@ -192,6 +145,7 @@ impl Default for WorkflowPolicy {
             runner_overrides: BTreeMap::new(),
             release_dir: "dist".to_owned(),
             receipt: "dist/github-publish.json".to_owned(),
+            action: DEFAULT_ACTION.to_owned(),
         }
     }
 }
@@ -217,6 +171,19 @@ const GENERATED_HEADER: &str = "\
 # Generated by `zup ci github generate`. Edit `zup.toml`, not this file.
 # `zup ci github check` fails when the two disagree.
 ";
+
+/// The `uses:` line for a third-party action, as `github-actions.lock.json`
+/// tracks it. A release pipeline is the one file in a project where "which
+/// version of that action am I trusting with my signing key" deserves an answer a
+/// reviewer can read without a lookup.
+fn uses(repository: &str) -> String {
+    match pin(repository) {
+        Ok(action) => action.uses(),
+        Err(PinError::Unknown { .. }) => {
+            panic!("{repository} is not in the action pin lock; see github-actions.lock.json")
+        }
+    }
+}
 
 /// Render `.github/workflows/release.yml`.
 pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
@@ -269,33 +236,31 @@ fn plan(_policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
     out.push_str("    permissions:\n      contents: read\n");
     out.push_str("    outputs:\n");
     out.push_str("      profiles: ${{ steps.plan.outputs.profiles }}\n");
-    out.push_str("      version: ${{ steps.plan.outputs.version }}\n");
     out.push_str("    steps:\n");
     step(
         out,
         "Checkout",
-        &pin("actions/checkout").uses(),
+        &uses("actions/checkout"),
         &["fetch-depth: '0'"],
     );
-    step(
-        out,
-        "Toolchain",
-        &pin("dtolnay/rust-toolchain").uses(),
-        &["components: rustfmt, clippy"],
-    );
-    // The plan is resolved here rather than enumerated in YAML, so the matrix
-    // below and the manifest cannot drift apart.
+    // The plan is resolved by the CLI rather than enumerated in YAML, so the
+    // matrix below and the manifest cannot drift apart. It runs before the
+    // matrix on purpose: a stale workflow should cost one runner-second, not
+    // eleven minutes of cross-compilation.
+    //
+    // `profiles` is the one thing a hand-written job downstream might want, and
+    // the only declared output — an output nobody writes is worse than none,
+    // because it resolves to an empty string in the job that reads it.
     out.push_str("      - name: Resolve the plan\n        run: |\n");
-    out.push_str("          cargo build --release -p zup --all-features --bin zup\n");
-    out.push_str("          zup ci github check --format json > plan.json\n");
-    let profile_list = targets
-        .iter()
-        .map(|target| target.profile.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
+    out.push_str("          zup ci github check --format json\n");
     let _ = writeln!(
         out,
-        "          echo \"profiles={profile_list}\" >> \"$GITHUB_OUTPUT\""
+        "          echo \"profiles={profile_list}\" >> \"$GITHUB_OUTPUT\"",
+        profile_list = targets
+            .iter()
+            .map(|target| target.profile.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     out.push('\n');
 }
@@ -328,46 +293,22 @@ fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
     step(
         out,
         "Checkout",
-        &pin("actions/checkout").uses(),
+        &uses("actions/checkout"),
         &["persist-credentials: false"],
     );
-    step(
-        out,
-        "Toolchain",
-        &pin("dtolnay/rust-toolchain").uses(),
-        &["components: rustfmt, clippy"],
-    );
-    step(
-        out,
-        "Cache",
-        &pin("Swatinem/rust-cache").uses(),
-        &["key: ${{ matrix.target }}"],
-    );
-    // Each build job produces one target's native output and nothing else. It
-    // does not upload to the release: a matrix of jobs racing to mutate one
-    // release is how a partially published release happens.
-    out.push_str("      - name: Build variant\n        run: |\n");
-    out.push_str("          cargo build --release -p zup --all-features --bin zup\n");
+    // Each build job produces one target's native output and nothing else. It does
+    // not upload to the release: a matrix of jobs racing to mutate one release is
+    // how a partially published release happens. It hands the variant to the
+    // compose job as a workflow artifact instead, which is immutable and scoped to
+    // the run.
+    //
+    // `--target` takes the profile name, which is what the developer writes in
+    // `zup.toml`, rather than the triple the matrix also carries.
     let _ = writeln!(
         out,
-        "          zup build --target ${{{{ matrix.profile }}}} \\",
-    );
-    let _ = writeln!(
-        out,
-        "            --output {release}/variants/${{{{ matrix.profile }}}} \\",
+        "      - name: Build variant\n        uses: {}\n        with:\n          operation: build\n          target: ${{{{ matrix.profile }}}}\n          release-dir: {release}/variants/${{{{ matrix.profile }}}}\n          upload-workflow-artifacts: true\n          workflow-artifact-name: variant-${{{{ matrix.profile }}}}\n          artifact-retention-days: 7",
+        policy.action,
         release = policy.release_dir
-    );
-    let _ = writeln!(
-        out,
-        "            --release-manifest {release}/variants/${{{{ matrix.profile }}}}/{manifest}",
-        release = policy.release_dir,
-        manifest = zup_artifact::RELEASE_MANIFEST_NAME
-    );
-    let _ = writeln!(
-        out,
-        "      - name: Upload variant\n        uses: {}\n        with:\n          name: variant-${{{{ matrix.profile }}}}\n          path: {}/variants/${{{{ matrix.profile }}}}/\n          if-no-files-found: error\n          retention-days: 7",
-        pin("actions/upload-artifact").uses(),
-        policy.release_dir
     );
     out.push('\n');
 }
@@ -382,25 +323,13 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     step(
         out,
         "Checkout",
-        &pin("actions/checkout").uses(),
+        &uses("actions/checkout"),
         &["persist-credentials: false"],
-    );
-    step(
-        out,
-        "Toolchain",
-        &pin("dtolnay/rust-toolchain").uses(),
-        &["components: rustfmt, clippy"],
-    );
-    step(
-        out,
-        "Cache",
-        &pin("Swatinem/rust-cache").uses(),
-        &["key: compose"],
     );
     let _ = writeln!(
         out,
         "      - name: Collect variants\n        uses: {}\n        with:\n          pattern: variant-*\n          path: {}/variants\n          merge-multiple: true",
-        pin("actions/download-artifact").uses(),
+        uses("actions/download-artifact"),
         policy.release_dir
     );
     // Every `dist/` file except each variant's own release description, which the
@@ -414,17 +343,10 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
             zup_artifact::RELEASE_MANIFEST_NAME
         ));
     }
-    out.push_str("      - name: Compose release\n        run: |\n");
-    out.push_str("          cargo build --release -p zup --all-features --bin zup\n");
     let _ = writeln!(
         out,
-        "          zup publish stage --manifest zup.toml --output {release}/web \\",
-        release = policy.release_dir
-    );
-    let _ = writeln!(
-        out,
-        "            --packages {release}/packages --release-dir {release}",
-        release = policy.release_dir
+        "      - name: Compose release\n        uses: {}\n        with:\n          operation: compose\n          release-dir: {}\n          upload-workflow-artifacts: true\n          workflow-artifact-name: compose",
+        policy.action, policy.release_dir
     );
     // The inputs are declared so the path filter is visible in the file rather
     // than implied by what happens to be on disk.
@@ -456,34 +378,35 @@ fn attest(policy: &WorkflowPolicy, out: &mut String) {
     step(
         out,
         "Checkout",
-        &pin("actions/checkout").uses(),
+        &uses("actions/checkout"),
         &["persist-credentials: false"],
     );
     step(
         out,
         "Collect release",
-        &pin("actions/download-artifact").uses(),
+        &uses("actions/download-artifact"),
         &["pattern: compose", "path: dist"],
     );
     // Only what a project says is worth attesting, plus the manifest that names
-    // the hashes. Attesting every icon and every small metadata file would produce
-    // an attestation store nobody reads, and guessing which files a user runs
-    // would be a portable crate assuming a platform's answer.
-    let mut subjects = String::new();
-    for path in &policy.attest_paths {
-        let _ = writeln!(subjects, "            {}/{}", policy.release_dir, path);
-    }
+    // the hashes. Attesting every icon would produce an attestation store nobody
+    // reads, and guessing which files a user runs would be a portable crate
+    // assuming a platform's answer.
+    //
+    // `attest: true` rather than an `actions/attest` step, so the subject list
+    // comes from the release manifest rather than a glob a human wrote: the action
+    // attests the final bytes of exactly the artifacts the manifest names, which is
+    // what makes an attestation mean something.
     let _ = writeln!(
-        subjects,
-        "            {}/{}",
-        policy.release_dir,
-        zup_artifact::RELEASE_MANIFEST_NAME
-    );
-    let _ = write!(
         out,
-        "      - name: Attest provenance\n        uses: {}\n        with:\n          subject-path: |\n{subjects}",
-        pin("actions/attest-build-provenance").uses()
+        "      - name: Attest provenance\n        uses: {}\n        with:\n          operation: attest\n          release-dir: {}",
+        policy.action, policy.release_dir
     );
+    if !policy.attest_paths.is_empty() {
+        let _ = writeln!(out, "          attest-paths: |");
+        for path in &policy.attest_paths {
+            let _ = writeln!(out, "            {path}");
+        }
+    }
     out.push('\n');
 }
 
@@ -507,51 +430,28 @@ fn publish(policy: &WorkflowPolicy, attestations: bool, out: &mut String) {
     step(
         out,
         "Checkout",
-        &pin("actions/checkout").uses(),
+        &uses("actions/checkout"),
         &["persist-credentials: false"],
-    );
-    step(
-        out,
-        "Toolchain",
-        &pin("dtolnay/rust-toolchain").uses(),
-        &["components: rustfmt, clippy"],
-    );
-    step(
-        out,
-        "Cache",
-        &pin("Swatinem/rust-cache").uses(),
-        &["key: publish"],
     );
     let _ = writeln!(
         out,
         "      - name: Collect release\n        uses: {}\n        with:\n          pattern: compose\n          path: dist",
-        pin("actions/download-artifact").uses()
+        uses("actions/download-artifact")
     );
     // One call owns the whole publication: create-or-resume the draft, upload
     // what is missing, verify every remote digest, and publish once. A matrix of
     // publish jobs would race, and a partially published release is the one
     // outcome this whole sequence exists to prevent.
-    out.push_str("      - name: Publish release\n        env:\n");
-    out.push_str("          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n");
-    out.push_str("        run: |\n");
-    out.push_str("          cargo build --release -p zup --all-features --bin zup\n");
-    out.push_str("          zup publish github \\\n");
-    out.push_str("            --manifest zup.toml \\\n");
-    let _ = writeln!(out, "            --release-dir {} \\", policy.release_dir);
-    let _ = writeln!(out, "            --web {}/web \\", policy.release_dir);
+    //
+    // The token is an *input* rather than a step-level `env:`, which is the whole
+    // security design: a build may run Tauri, Electron, Cargo build scripts and npm
+    // scripts, and a token in that environment is a token in every one of them.
+    // The action gives the build no token at all and exposes it only to the
+    // `zup publish github` process.
     let _ = writeln!(
         out,
-        "            --packages {}/packages \\",
-        policy.release_dir
-    );
-    let _ = writeln!(out, "            --receipt {} \\", policy.receipt);
-    out.push_str(
-        "            --format json ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}\n",
-    );
-    let _ = writeln!(
-        out,
-        "      - name: Summary\n        if: always()\n        run: cat {receipt} || true",
-        receipt = policy.receipt
+        "      - name: Publish release\n        uses: {}\n        with:\n          operation: publish\n          release-dir: {}\n          receipt: {}\n          github-token: ${{{{ secrets.GITHUB_TOKEN }}}}\n          dry-run: ${{{{ github.event.inputs.dry_run == 'true' }}}}",
+        policy.action, policy.release_dir, policy.receipt
     );
 }
 

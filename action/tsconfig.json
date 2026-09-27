@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    // `node` and nothing else, deliberately.
+    //
+    // This is the guard that makes "the action does not use Bun APIs" a
+    // compile error rather than a code-review convention: `Bun` is not in
+    // scope here, so `Bun.file(...)` in `src/` does not type-check. The tests
+    // get Bun's types through `tsconfig.test.json`; the shipped code never sees
+    // them. The artifact runs on GitHub's Node 24 runtime, and nothing about
+    // that is negotiable at the source level.
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts"]
+}

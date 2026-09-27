@@ -1,0 +1,36 @@
+{
+  "name": "zup-action",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The official zup GitHub Action: install the zup CLI, run its build, compose, attest and publish phases, and report results",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "bun run scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "biome": "biome check .",
+    "test": "bun test",
+    "metadata": "node scripts/check-metadata.mjs",
+    "verify:runtime": "node scripts/verify-runtime.mjs",
+    "local": "local-action . src/main.ts",
+    "check": "bun run typecheck && bun run biome && bun test && bun run build && bun run metadata && bun run verify:runtime",
+    "check:dist": "bun run build && git diff --exit-code -- action/dist"
+  },
+  "dependencies": {
+    "@actions/artifact": "6.2.1",
+    "@actions/attest": "3.2.0",
+    "@actions/core": "3.0.1",
+    "@actions/exec": "3.0.0",
+    "@actions/io": "3.0.2",
+    "@actions/tool-cache": "4.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@github/local-action": "7.0.1",
+    "@types/bun": "1.4.2",
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2"
+  }
+}

@@ -613,16 +613,17 @@ an error.
 
 ## Continuous integration
 
-Two jobs: `windows` on `windows-latest` and `ubuntu (portable)` on
-`ubuntu-latest`. Both run with `contents: read` and
-`persist-credentials: false`, and neither writes outside the runner's build
-cache.
+Three workflows, all with `contents: read` and `persist-credentials: false`.
+
+`ci.yml` has two jobs: `windows` on `windows-latest` and `ubuntu (portable)` on
+`ubuntu-latest`. Neither writes outside the runner's build cache.
 
 The Windows job runs, in order: `cargo fmt --all --check`, `cargo clippy
 --workspace --all-features --all-targets -- -D warnings`,
 `scripts/build-dispatcher.ps1`, `cargo nextest run --workspace --all-features`,
 `cargo test --workspace --all-features --doc`, `cargo machete`,
-`git diff --check`, `cargo xtask verify-portable-boundaries`, a
+`git diff --check`, `cargo xtask verify-portable-boundaries`,
+`cargo xtask github-action-pins check`, a
 `zup schema --output schema/zup.schema.json` step that fails when the
 checked-in schema differs from the generated one, and
 `scripts/verify-frontend-features.ps1`, which proves the three frontend
@@ -655,6 +656,31 @@ natively on a non-Windows host. It is not evidence of a Linux backend, because
 no crate lowers a plan to Linux system integration. A manifest naming a
 non-Windows target is refused at the boundary on any host.
 
+`action.yml` covers the GitHub Action itself, and is where the pin-lock gate
+lives. It uses two runtimes on purpose: **Bun** installs, tests and bundles the
+action, and **Node 24** runs the result, because Node 24 is what the runner
+provides.
+
+- `check` — `bun install --frozen-lockfile`, type checking under two tsconfigs
+  (the shipped source with no Bun types in scope, the tests with them), `biome
+  check`, `bun test`, the bundle build, `git diff --exit-code -- action/dist`, a
+  metadata check that `action.yml` and the implementation declare the same inputs
+  and outputs, and `node scripts/verify-runtime.mjs`, which *executes* the built
+  bundle as a child process.
+- `e2e` — the action invoked as `uses: ./` on `ubuntu-latest`, `windows-latest`,
+  `macos-15`, `ubuntu-24.04-arm` and `windows-11-arm`, against a locally built
+  `zup` supplied through `zup-path` so testing the action does not require having
+  released it. It covers setup, build, outputs, a project path containing a
+  space, the job summary, and a failing zup failing the step.
+- `tool-bootstrap` — opt-in, because it needs a published zup release and reaches
+  the network.
+
+Two of those steps exist because the toolchain and the runtime are different
+programs. `git diff --exit-code` on `action/dist` catches a stale bundle, and
+`verify-runtime.mjs` catches the case Bun and Node disagree — a bundle Bun is
+happy with and Node cannot load is a green CI run and a broken release in
+somebody else's workflow.
+
 ## Current status
 
 The Windows backend is implemented: `zup build` produces a self-contained
@@ -662,8 +688,8 @@ installer for every Windows target, or one universal offline installer carrying
 several of them, and the runtime installs, updates, repairs, and uninstalls
 through the transaction engine and the authenticated worker.
 
-Composition is complete for the offline mode. A thin artifact — one that
-carries the index and a launcher and fetches content — is not yet produced;
+Composition is complete for the offline mode. A thin artifact - one that
+carries the index and a launcher and fetches content - is not yet produced;
 `[build.artifacts]` accepts `mode = "thin"` and a `channel`, and composition
 records both, but nothing fills a thin store yet. `zup-update` still resolves
 updates from the release description's variant list rather than from a

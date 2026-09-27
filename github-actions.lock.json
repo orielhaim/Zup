@@ -1,0 +1,69 @@
+{
+  "schema": 2,
+  "$comment": [
+    "The GitHub Actions zup's own workflows depend on, tracked by release series.",
+    "",
+    "`version` is the exact ref a workflow uses after `@`: a major series like",
+    "`v7`, or a moving channel like `stable`. Workflows read these refs rather",
+    "than full commit SHAs, so the file is readable and dependabot can advance",
+    "them, and so the ref a project writes is the ref the ecosystem uses.",
+    "",
+    "`sha` is what that ref resolved to on `checkedAt`. It is a record, not a",
+    "constraint: its job is to make a *moved tag* visible. A ref that pointed at a",
+    "different commit than the one recorded here is the one failure mode a",
+    "version ref cannot show you on its own, so it is checked.",
+    "",
+    "Read with `cargo xtask github-action-pins check`, updated with",
+    "`cargo xtask github-action-pins refresh`. `zup build` and",
+    "`zup ci github generate` never touch this file: generating a workflow is",
+    "offline and byte-reproducible, and a pin that moved under a developer who",
+    "was only regenerating a matrix is a supply-chain change they did not make."
+  ],
+  "actions": {
+    "Swatinem/rust-cache": {
+      "version": "v2",
+      "sha": "49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c",
+      "checkedAt": "2026-09-27"
+    },
+    "actions/attest": {
+      "version": "v4",
+      "sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+      "checkedAt": "2026-09-27"
+    },
+    "actions/checkout": {
+      "version": "v7",
+      "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "checkedAt": "2026-09-27"
+    },
+    "actions/download-artifact": {
+      "version": "v8",
+      "sha": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+      "checkedAt": "2026-09-27"
+    },
+    "actions/setup-node": {
+      "version": "v7",
+      "sha": "820762786026740c76f36085b0efc47a31fe5020",
+      "checkedAt": "2026-09-27"
+    },
+    "actions/upload-artifact": {
+      "version": "v7",
+      "sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "checkedAt": "2026-09-27"
+    },
+    "dtolnay/rust-toolchain": {
+      "version": "stable",
+      "sha": "6bed0761d98439e5a578e2877258200ad565ba87",
+      "checkedAt": "2026-09-27"
+    },
+    "oven-sh/setup-bun": {
+      "version": "v2",
+      "sha": "0c5077e51419868618aeaa5fe8019c62421857d6",
+      "checkedAt": "2026-09-27"
+    },
+    "taiki-e/install-action": {
+      "version": "v2",
+      "sha": "4cef1412cce204788f482e778a0b9187f9626a29",
+      "checkedAt": "2026-09-27"
+    }
+  }
+}

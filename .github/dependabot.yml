@@ -1,0 +1,87 @@
+# Dependency updates for zup.
+#
+# Three ecosystems, three reasons. None of them is "keep things current" for its
+# own sake: a GitHub Action that pins a two-major-old `actions/checkout` is running
+# unmaintained code in a release pipeline, and an npm dependency in a file GitHub
+# executes without an install step is the same problem with more moving parts.
+version: 2
+
+updates:
+  # The action's own dependencies. `action/bun.lock` is committed and installed
+  # with `bun install --frozen-lockfile`, so a bump is a lockfile diff a reviewer
+  # can read.
+  - package-ecosystem: npm
+    directory: /action
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'action(deps)'
+    labels:
+      - dependencies
+    groups:
+      # One pull request for the toolkit rather than seven, because they move
+      # together and a partial toolkit upgrade is a broken one.
+      github-toolkit:
+        patterns:
+          - '@actions/*'
+      # Toolchain churn, reviewed as a unit. TypeScript and Biome move often and
+      # a partial upgrade of the two is its own small problem.
+      dev-toolchain:
+        patterns:
+          - 'typescript'
+          - '@biomejs/*'
+          - '@types/*'
+    ignore:
+      # The example plugin is a separate workspace with its own lockfile and its
+      # own release cadence.
+      - dependency-name: wit-bindgen
+
+  # Every workflow in this repository, including the ones a project's generated
+  # release workflow is checked against. Dependabot opens a pull request; the pin
+  # lock is what makes that pull request a *reviewed* change rather than a merge.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: 'ci(actions)'
+    labels:
+      - dependencies
+    groups:
+      actions-checkout:
+        patterns:
+          - 'actions/checkout'
+      artifact-actions:
+        patterns:
+          - 'actions/upload-artifact'
+          - 'actions/download-artifact'
+      rust-toolchain:
+        patterns:
+          - 'dtolnay/rust-toolchain'
+          - 'Swatinem/rust-cache'
+          - 'taiki-e/install-action'
+      # The action's own toolchain. Bun builds it; Node 24 runs it. Bumped
+      # together, because a Bun that bundles differently from the one CI pinned
+      # produces a `check:dist` failure nobody can explain.
+      action-toolchain:
+        patterns:
+          - 'oven-sh/setup-bun'
+          - 'actions/setup-node'
+
+  # The example plugin, which is a Rust project of its own.
+  - package-ecosystem: cargo
+    directory: /examples/plugins/configure
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'example(deps)'
+    labels:
+      - dependencies

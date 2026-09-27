@@ -22,7 +22,7 @@ jobs:
     name: windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -65,6 +65,9 @@ jobs:
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries
 
+      - name: Action refs
+        run: cargo xtask github-action-pins check
+
       - name: Published schema
         run: |
           cargo run -p zup --all-features --bin zup -- schema --output schema/zup.schema.json
@@ -78,7 +81,7 @@ jobs:
     name: ubuntu (portable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 

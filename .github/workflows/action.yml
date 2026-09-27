@@ -1,0 +1,256 @@
+name: action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# `contents: read` is the ceiling for this workflow. It typechecks, lints, tests
+# and builds an action; it never publishes, never creates a release, and never
+# needs a token it was not granted.
+permissions:
+  contents: read
+
+concurrency:
+  group: action-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every step installs from the lockfile. A drifting `bun.lock` is how a
+  # transitive dependency changes underneath a release pipeline.
+  BUN_CONFIG_FROZEN_LOCKFILE: 'true'
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: action
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Two runtimes, on purpose.
+      #
+      # Bun builds and tests the action. Node 24 *runs* it, because that is the
+      # runtime GitHub uses. The step below that pins Node's major version is the
+      # one that matters: a bundle Bun is happy with and Node cannot load is a
+      # green CI run and a broken release in somebody else's workflow.
+      - name: Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # `bun install --frozen-lockfile` rather than `npm ci`: the lockfile is
+      # `bun.lock`, and a resolution that changed without the lockfile changing
+      # is exactly the drift this gate exists to catch.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint and format
+        run: bun run biome
+
+      - name: Unit tests
+        run: bun test
+
+      - name: Bundle
+        run: bun run build
+
+      # The reason this workflow exists. `action/dist` is checked in, because
+      # GitHub runs an action from the repository without installing anything, so
+      # a stale bundle is a released action running code that no longer matches
+      # its source. This step is the only thing standing between that and main.
+      - name: Dist is current
+        run: |
+          git diff --exit-code -- action/dist
+          echo "the checked-in bundle matches action/src"
+
+      - name: Metadata
+        run: bun run metadata
+
+      # The bundle, under Node. Not under Bun — that is the whole point. It
+      # proves the artifact is a single ESM file, contains no `Bun.*` API, bakes
+      # in no build-machine path, and actually runs to completion.
+      - name: The bundle runs on Node 24
+        run: |
+          echo "node $(node --version)"
+          node scripts/verify-runtime.mjs
+
+  e2e:
+    name: e2e (${{ matrix.runner }})
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The three hosted runners a project is most likely to use, plus the two
+        # ARM64 hosted runners where a Windows path, a `.exe` extension and an
+        # architecture-normalisation bug would show up.
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-15
+          - ubuntu-24.04-arm
+          - windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The action under test, from this repository. No release exists yet, and
+      # requiring one would make the action's own tests depend on the action
+      # having been published.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve the platform
+        id: platform
+        shell: bash
+        run: |
+          case "${RUNNER_OS}" in
+            Windows) ext=.exe; sep='\\' ;;
+            *) ext=; sep=/ ;;
+          esac
+          echo "ext=$ext" >> "$GITHUB_OUTPUT"
+          echo "sep=$sep" >> "$GITHUB_OUTPUT"
+          echo "runner=${RUNNER_OS}/${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+
+      # A stub, not a zup build. The e2e job proves the *action*: that it reads
+      # inputs, resolves an explicit tool, runs a command, produces outputs and a
+      # summary, and fails cleanly. A real build belongs in a project that has one.
+      - name: Write the stub zup
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/stub"
+          cat > "$RUNNER_TEMP/stub/zup${{ steps.platform.outputs.ext }}" <<'STUB'
+          #!/usr/bin/env bash
+          # A stand-in for the zup CLI, so this workflow tests the action rather
+          # than a cross-compiled build. It emits exactly the envelope the action
+          # parses, and refuses to pretend it did anything else.
+          set -euo pipefail
+          command="${1:-}"
+          case "$command" in
+            --version|version)
+              echo "zup 0.0.1-stub"
+              ;;
+            build|compose)
+              echo "zup: $command (stub)" >&2
+              echo '{"schema":1,"operation":"build","success":true,"appVersion":"1.4.0",'
+              echo '"targets":["windows-x64"],"artifacts":[{"path":"Acme-Setup.exe",'
+              echo '"digest":"0000000000000000000000000000000000000000000000000000000000000000",'
+              echo '"size":1024,"kind":"installer","mode":"standalone"}],'
+              echo '"releaseManifest":"dist/zup-release.json","diagnostics":[]}'
+              ;;
+            *)
+              echo "stub zup: unknown command \`$command\`" >&2
+              exit 64
+              ;;
+          esac
+          STUB
+          chmod +x "$RUNNER_TEMP/stub/zup${{ steps.platform.outputs.ext }}"
+
+      - name: Setup
+        id: setup
+        uses: ./
+        with:
+          operation: setup
+          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+
+      - name: The stub is on PATH
+        shell: bash
+        run: zup --version
+
+      - name: Build
+        id: build
+        uses: ./
+        with:
+          operation: build
+          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+
+      - name: Outputs
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.build.outputs.app-version }}
+          ZUP_PATH: ${{ steps.build.outputs.zup-path }}
+          ARTIFACTS: ${{ steps.build.outputs.artifact-paths }}
+        run: |
+          set -euo pipefail
+          test -n "$ZUP_PATH"
+          test "$APP_VERSION" = "1.4.0"
+          echo "$ARTIFACTS" | grep -q 'Acme-Setup.exe'
+          echo "outputs are correct"
+
+      # A path with a space in it, which is where a shell-based implementation
+      # breaks and an argv-based one does not.
+      - name: A project path with a space
+        id: spaced
+        uses: ./
+        with:
+          operation: build
+          project-path: ${{ runner.temp }}/my project
+          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+
+      - name: A summary was written
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$GITHUB_STEP_SUMMARY"
+          grep -q 'zup' "$GITHUB_STEP_SUMMARY"
+          echo "the job summary has content"
+
+      # A failing command has to fail the step, with a message a developer can
+      # act on, rather than a stack trace.
+      - name: A failing zup fails the step
+        id: failure
+        continue-on-error: true
+        uses: ./
+        with:
+          operation: publish
+          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+
+      - name: The failure was reported
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.failure.outcome }}" = "failure"
+
+  tool-bootstrap:
+    # Opt-in, and separate, because it needs a published zup release to exist and
+    # reaches the network. The e2e job above covers the action itself; this covers
+    # the one path a `zup-path` stub cannot.
+    name: tool bootstrap
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve the newest published zup
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install from the release
+        id: setup
+        uses: ./
+        with:
+          operation: setup
+          zup-version: ${{ steps.release.outputs.version }}
+
+      - name: It runs
+        shell: bash
+        run: zup --version

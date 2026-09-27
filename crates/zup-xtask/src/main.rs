@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use zup_xtask::boundary;
 use zup_xtask::matrix::{self, Matrix};
+use zup_xtask::pins;
 
 const USAGE: &str = "\
 xtask emit-portable-matrix [--matrix <name>]... [--format <text|cargo-args>]
@@ -16,17 +17,31 @@ xtask verify-portable-boundaries [--root <dir>]
     Windows-specific identifier, or spells a Windows concept in a string
     literal.
 
+xtask github-action-pins check [--root <dir>] [--online]
+    Check github-actions.lock.json: syntax, version and SHA agreement, that
+    every action a generated workflow needs is present, and that no committed
+    workflow uses a `uses:` the lock does not name. Offline unless --online,
+    which additionally reports newer stable releases.
+
+xtask github-action-pins refresh [--root <dir>] [--add <owner/name>]...
+    Resolve each pinned action's newest stable release through GitHub and
+    rewrite the lock. Never runs inside a build. Bun and the action's toolchain
+    are pinned here too, because a runner that installs a different Bun produces
+    a bundle nobody can reproduce.
+
 options:
-    --root <dir>     workspace to inspect (default: this repository)
+    --root <dir>         workspace to inspect (default: this repository)
+    --online             reach GitHub to report newer releases
+    --add <owner/name>   add an action to the lock before refreshing
 
 exit codes:
     0  clean
-    1  boundary violations
+    1  problems found
     2  usage or unreadable workspace
 ";
 
 /// Every option this tool understands.
-const OPTIONS: &[&str] = &["--root", "--matrix", "--format"];
+const OPTIONS: &[&str] = &["--root", "--matrix", "--format", "--online", "--add"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Format {
@@ -40,6 +55,8 @@ struct Options {
     root: Option<PathBuf>,
     matrices: Vec<String>,
     format: Format,
+    online: bool,
+    add: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -64,6 +81,7 @@ fn run() -> Result<ExitCode, String> {
         }
         "emit-portable-matrix" => emit(&mut arguments),
         "verify-portable-boundaries" => verify(&mut arguments),
+        "github-action-pins" => action_pins(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }
 }
@@ -103,6 +121,47 @@ fn verify(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, Stri
     Ok(ExitCode::from(1))
 }
 
+fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let Some(subcommand) = arguments.next() else {
+        return Err("github-action-pins needs `check` or `refresh`\n\n".to_owned() + USAGE);
+    };
+    let allowed: &[&str] = match subcommand.as_str() {
+        "check" => &["--root", "--online"],
+        "refresh" => &["--root", "--add"],
+        unknown => {
+            return Err(format!(
+                "unknown github-action-pins subcommand `{unknown}`\n\n{USAGE}"
+            ));
+        }
+    };
+    let options = parse(
+        arguments,
+        &format!("github-action-pins {subcommand}"),
+        allowed,
+    )?;
+    let root = match options.root {
+        Some(root) => root,
+        None => repository_root(),
+    };
+
+    let report = match subcommand.as_str() {
+        "refresh" => pins::refresh(&root, &options.add).map_err(|error| error.to_string())?,
+        _ => pins::check(&root, options.online),
+    };
+
+    // Problems go to stderr, because that is where a failing build's diagnostics
+    // are read, and because a caller piping stdout to a file should not have a
+    // list of failures silently written into it.
+    if report.is_clean() {
+        print!("{}", pins::render_report(&report));
+        println!("github-action-pins: {}", report.detail);
+        return Ok(ExitCode::SUCCESS);
+    }
+    eprint!("{}", pins::render_report(&report));
+    eprintln!("github-action-pins: {}", report.detail);
+    Ok(ExitCode::from(1))
+}
+
 fn select(names: &[String]) -> Result<Vec<&'static Matrix>, String> {
     if names.is_empty() {
         return Ok(matrix::MATRICES.iter().collect());
@@ -119,6 +178,13 @@ fn select(names: &[String]) -> Result<Vec<&'static Matrix>, String> {
         })
         .collect()
 }
+
+/// The options that are flags rather than value-taking.
+///
+/// A flag must not consume the next argument: `--check --online` and
+/// `--check --root .` differ only in where the flag sits, and a parser that
+/// cannot tell them apart will eventually read a directory as a boolean.
+const FLAGS: &[&str] = &["--online"];
 
 fn parse(
     arguments: &mut impl Iterator<Item = String>,
@@ -139,6 +205,15 @@ fn parse(
             };
             return Err(complaint);
         }
+        if FLAGS.contains(&flag.as_str()) {
+            if let Some(value) = inline
+                && value != "true"
+            {
+                return Err(format!("`{flag}` is a flag and takes no value"));
+            }
+            options.online = true;
+            continue;
+        }
         let value = match inline {
             Some(inline) => inline,
             None => arguments
@@ -148,6 +223,7 @@ fn parse(
         match flag.as_str() {
             "--root" => options.root = Some(PathBuf::from(value)),
             "--matrix" => options.matrices.push(value),
+            "--add" => options.add.push(value),
             "--format" => {
                 options.format = match value.as_str() {
                     "text" => Format::Text,

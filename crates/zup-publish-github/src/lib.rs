@@ -48,7 +48,10 @@
 //! is never written to `zup.toml`, never embedded in a release, never printed,
 //! and never stored in a receipt. A token that reached a committed manifest would
 //! reach every fork of the project, which is why the manifest has no field for
-//! one and the type that holds a token redacts itself in `Debug`.
+//! one and the type that holds a token stores it in a [`secrecy::SecretString`] —
+//! `Debug` prints `[REDACTED]`, `Display` does not exist, and the value is only
+//! reachable through an `expose_secret` call that reads like the dangerous thing
+//! it is.
 //!
 //! # Enterprise
 //!
@@ -67,6 +70,7 @@ mod endpoint;
 mod error;
 mod limits;
 mod notes;
+mod pins;
 mod publish;
 mod receipt;
 mod repository;
@@ -83,6 +87,10 @@ pub use error::GithubError;
 pub use limits::{LIMITS, MAX_ASSET_BYTES, MAX_ASSETS, PACKAGE_SHARD_BYTES, accepts, limit_text};
 pub use notes::compose as notes_compose;
 pub use notes::{DownloadRow, NotesPolicy, download_section};
+pub use pins::{
+    ActionPin, LOCK_PATH, LOCK_SCHEMA, LockedAction, PinError, PinLock, generated_actions,
+    infrastructure_actions, lock, lock_json, pin, pins,
+};
 pub use publish::{CreateRelease, PublishRequest, compose_notes, publish};
 pub use receipt::{GithubAsset, GithubReceipt, RECEIPT_SCHEMA};
 pub use repository::{
@@ -95,8 +103,7 @@ pub use runner::{
 };
 pub use token::{Token, authorization, discover, discover_with, supplied};
 pub use workflow::{
-    ActionPin, Freshness, MatrixTarget, PINS, Signing, WORKFLOW_PATH, WorkflowPolicy, check,
-    generate,
+    Freshness, MatrixTarget, Signing, WORKFLOW_PATH, WorkflowPolicy, check, generate,
 };
 
 /// The provider name a report and a receipt use.

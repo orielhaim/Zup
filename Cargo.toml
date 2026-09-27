@@ -111,6 +111,9 @@ reqwest = { version = "0.13", default-features = false, features = [
   "stream",
   "http2",
 ] }
+secrecy = "0.10"
+git-url-parse = "0.6"
+
 # Retry with exponential backoff and jitter. `backon` supplies the curve; what
 # counts as retryable and when to move to another origin stays zup's policy.
 backon = { version = "1.6", default-features = false, features = [

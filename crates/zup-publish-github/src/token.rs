@@ -8,10 +8,10 @@
 //! `gh auth token` ┘   only if the environment had nothing
 //! ```
 //!
-//! `gh auth token` is a subprocess and therefore a last resort: it is a
-//! convenience for a developer who has already authenticated `gh`, and it is
-//! skipped entirely when an environment token exists so that a CI job is never
-//! slowed by a process spawn or surprised by an interactive helper.
+//! `gh auth token` is a subprocess and therefore a last resort: a convenience for
+//! a developer who has already authenticated `gh`, skipped entirely when an
+//! environment token exists so a CI job is never slowed by a process spawn or
+//! surprised by an interactive helper.
 //!
 //! # Where a token is never
 //!
@@ -19,22 +19,37 @@
 //! `Debug` output, a log line, a retry message, or a panic.
 //!
 //! Those are not stylistic rules. A manifest is committed and a receipt is
-//! uploaded as a build output; a token in either one is a credential that reaches
-//! every fork, every mirror, and every issue somebody pastes a diagnostic into.
-//! The type that holds one redacts itself in `Debug` precisely so that a
-//! developer who reaches for `{:?}` while debugging a failed upload does not
-//! write the token to their terminal, their shell history, or a pasted log.
+//! uploaded as a build output; a token in either one reaches every fork, every
+//! mirror, and every issue somebody pastes a diagnostic into.
+//!
+//! # Why `secrecy`
+//!
+//! A hand-written `Debug` impl is one derive away from not working:
+//! `#[derive(Debug)]` on any struct holding a `Token` prints the value, and
+//! nothing in the type system objects. `SecretString` makes that impossible — its
+//! `Debug` prints `[REDACTED]`, it has no `Display`, and the only way out is
+//! [`ExposeSecret::expose_secret`]. It has no dependencies of its own.
+//!
+//! Redacting `Debug` says nothing about the wire, so the `Authorization` header is
+//! still built by hand and still marked sensitive.
 
 use std::fmt;
 use std::process::Command;
+
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::GithubError;
 use crate::repository::Environment;
 
 /// A credential that must not reach a diagnostic.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The value lives in a [`SecretString`], so leaking it is not a matter of
+/// remembering to be careful: the value is reachable only through
+/// [`expose`](Token::expose), which reads like the dangerous thing it is at every
+/// call site.
+#[derive(Clone)]
 pub struct Token {
-    value: String,
+    value: SecretString,
     source: Source,
 }
 
@@ -46,14 +61,17 @@ impl Token {
     /// redaction, not the acquisition, is what this type is for.
     pub fn new(value: impl Into<String>) -> Self {
         Self {
-            value: value.into(),
+            value: SecretString::from(value.into()),
             source: Source::Supplied,
         }
     }
 
     /// The value, for a request builder.
+    ///
+    /// Named after the unsafe thing it is: every call site is a place a token
+    /// could reach a log.
     pub fn expose(&self) -> &str {
-        &self.value
+        self.value.expose_secret()
     }
 
     /// Where this token came from.
@@ -78,13 +96,34 @@ enum Source {
     Supplied,
 }
 
+/// A credential that redacts itself, adding the one fact worth knowing while
+/// debugging a failed upload: where it came from.
 impl fmt::Debug for Token {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "Token(<redacted>, from {})",
+            "Token({:?}, from {})",
+            self.value,
             self.source.as_str()
         )
+    }
+}
+
+/// Deliberately not `PartialEq`: two tokens comparing equal exactly when their
+/// secrets match is a convenience that would let a test assert on a credential it
+/// is trying to keep out of output.
+impl Token {
+    /// Whether two tokens hold the same value. Constant-time, because a timing
+    /// side channel on a secret is still a leak.
+    pub fn same_secret_as(&self, other: &Self) -> bool {
+        let (left, right) = (self.expose().as_bytes(), other.expose().as_bytes());
+        if left.len() != right.len() {
+            return false;
+        }
+        left.iter()
+            .zip(right)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
     }
 }
 
@@ -116,14 +155,14 @@ pub fn discover_with(
     for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Some(value) = non_empty(environ, name) {
             return Ok(Token {
-                value,
+                value: SecretString::from(value),
                 source: Source::Environment,
             });
         }
     }
     match fallback() {
         Some(value) => Ok(Token {
-            value,
+            value: SecretString::from(value),
             source: Source::Gh,
         }),
         None => Err(GithubError::NoToken),

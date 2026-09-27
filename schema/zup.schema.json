@@ -1038,6 +1038,13 @@
             "string",
             "null"
           ]
+        },
+        "action": {
+          "description": "The zup action the generated pipeline calls, as `owner/repo@ref`.\n\nDefaults to a floating major ref, because that is what an action ref is\nfor: a project writes it once and dependabot keeps it current. A project\nthat wants the release pipeline pinned to an immutable ref names one here\ninstead, and the generated file shows exactly what it will run.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

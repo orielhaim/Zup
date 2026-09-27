@@ -2830,6 +2830,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-url-parse"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8df306e4dfc91752e89b74c88ee876c8518890600f82255254828f9192dd003c"
+dependencies = [
+ "getset",
+ "nom 8.0.0",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7240,6 +7252,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11437,8 +11458,11 @@ dependencies = [
 name = "zup-publish-github"
 version = "0.0.1"
 dependencies = [
+ "git-url-parse",
  "reqwest",
  "rstest",
+ "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -11575,9 +11599,12 @@ dependencies = [
 name = "zup-xtask"
 version = "0.0.1"
 dependencies = [
+ "semver",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
+ "zup-publish-github",
 ]
 
 [[package]]

@@ -1,0 +1,8 @@
+{
+  "//": "The tests run under Bun, so they get Bun's globals and `bun:test`. `src/` deliberately does not: see the note in tsconfig.json.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "bun"]
+  },
+  "include": ["tests/**/*.ts"]
+}

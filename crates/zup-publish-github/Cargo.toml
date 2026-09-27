@@ -7,7 +7,10 @@ repository.workspace = true
 description = "GitHub Releases as a zup release provider"
 
 [dependencies]
+git-url-parse.workspace = true
 reqwest.workspace = true
+secrecy.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -32,4 +35,5 @@ rstest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+zup-acquire-http.workspace = true
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

@@ -9,16 +9,25 @@
 //!    `owner/name` for the repository the workflow is running in. That is the
 //!    authoritative answer in CI and it is right there, so it is preferred over
 //!    anything on disk.
-//! 3. **The Git remote.** Read out of `.git/config`.
+//! 3. **The Git remote.** Asked of Git itself.
 //!
-//! # Why `.git/config` and not a Git library
+//! # Why `git remote get-url` rather than reading `.git/config`
 //!
-//! Because there is nothing to ask. A remote URL is one line of INI in a file
-//! that is on disk, in a documented format, and `libgit2` would add a native
-//! dependency, a vendored OpenSSL decision, and forty megabytes to read a value
-//! a regular expression can read. If zup ever needs history, blame, or a
-//! signature over a commit, that is when a Git library is worth its cost — and it
-//! is not this code's problem today.
+//! Because Git already knows how to answer this and knows more than a parser
+//! does. A remote URL can come from an `include` in a global config, a
+//! `url.<base>.insteadOf` rewrite, a conditional include that applies only inside a
+//! worktree, or the `.git` *file* a linked worktree uses to point at the real
+//! directory. Git resolves all four. An INI reader resolves none of them and gets
+//! the right answer for the wrong reason on the ones it does handle — which is
+//! worse than failing, because a release published to `owner/repo` instead of a
+//! fork is a mistake that does not announce itself.
+//!
+//! So Git is asked first, and the URL it prints is parsed by `git-url-parse`,
+//! which knows all three dialects Git writes. The `.git/config` reader stays as a
+//! fallback for one real case: the project is on disk and there is no `git`
+//! binary — a release built from an extracted source archive, a container image
+//! assembled without Git. There the developer gets the local remote rather than a
+//! refusal.
 //!
 //! # Why it refuses rather than guesses
 //!
@@ -30,6 +39,9 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use git_url_parse::GitUrl;
 
 use crate::endpoint::{GITHUB_COM, GithubHost};
 use crate::error::GithubError;
@@ -254,14 +266,17 @@ pub fn install_from_environ(environ: &dyn Environment) -> Option<GithubHost> {
 }
 
 /// Choose a repository from the Git remotes in `working_directory`.
+///
+/// Git is asked first and the config is the fallback; see the module
+/// documentation for why that order.
 pub fn resolve_from_remotes(
     _environ: &dyn Environment,
     working_directory: &Path,
 ) -> Result<Resolved, GithubError> {
-    let Some(config) = read_git_config(working_directory) else {
-        return Err(GithubError::NoRepository);
-    };
-    let remotes = parse_remotes(&config);
+    let mut remotes = git_remotes(working_directory);
+    if remotes.is_empty() {
+        remotes = config_remotes(working_directory);
+    }
     if remotes.is_empty() {
         return Err(GithubError::NoRepository);
     }
@@ -301,43 +316,93 @@ fn build(remote: String, path: &str, discovery: Discovery) -> Result<Resolved, G
     })
 }
 
+/// Every remote Git itself reports for `working_directory`.
+///
+/// `git remote -v` is asked for the fetch URL, and `git remote get-url` supplies
+/// the resolved value for the `origin` the convention prefers. An empty result is
+/// not an error: no Git, not a repository, and no `git` on `PATH` all look the
+/// same, and the caller falls back to the config reader.
+fn git_remotes(working_directory: &Path) -> Vec<(String, String)> {
+    let Some(directory) = git_root(working_directory) else {
+        return Vec::new();
+    };
+    let Ok(output) = Command::new("git")
+        .args(["-C", &directory.to_string_lossy(), "remote", "-v"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(listed) = String::from_utf8(output.stdout) else {
+        return Vec::new();
+    };
+    let mut remotes: Vec<(String, String)> = Vec::new();
+    for line in listed.lines() {
+        // `origin\thttps://github.com/owner/repo.git (fetch)`
+        let Some((name, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let url = rest.split_whitespace().next().unwrap_or_default();
+        if url.is_empty() || url == "." {
+            // A local path remote is not a GitHub repository.
+            continue;
+        }
+        if !remotes.iter().any(|(existing, _)| existing == name) {
+            remotes.push((name.to_owned(), url.to_owned()));
+        }
+    }
+    remotes
+}
+
+/// The directory to pass to `git -C`.
+///
+/// A repository root, or the working directory as given — `git -C` inside a
+/// subdirectory still reports that repository's remotes, so the marker scan is an
+/// optimisation rather than a requirement.
+fn git_root(working_directory: &Path) -> Option<PathBuf> {
+    Some(
+        find_git_config(working_directory)
+            .and_then(|marker| marker.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| working_directory.to_path_buf()),
+    )
+}
+
+/// Every remote in the `.git/config` under `working_directory`.
+///
+/// The fallback for a machine with no `git` binary. See the module documentation
+/// for why this is not the primary path.
+fn config_remotes(working_directory: &Path) -> Vec<(String, String)> {
+    read_git_config(working_directory)
+        .map(|config| parse_remotes(&config))
+        .unwrap_or_default()
+}
+
 /// The GitHub parts of a Git remote URL.
 ///
 /// The three shapes Git writes are an HTTPS URL, an SCP-style `user@host:path`,
-/// and an `ssh://` URL. All three reduce to the same three strings, and anything
-/// that is not a GitHub-shaped host is not a candidate at all.
+/// and an `ssh://` URL. `git-url-parse` reduces all three to the same three
+/// strings, and it does so correctly for the awkward cases: a port on an SSH
+/// remote, a percent-encoded path, a `file://` remote that is not a repository at
+/// all. Anything that is not a GitHub-shaped host is not a candidate.
 pub fn parse_remote_url(url: &str) -> Option<(String, String, String)> {
     let url = url.trim();
     if url.is_empty() {
         return None;
     }
-    let (host, path) = if let Some(rest) = url.strip_prefix("ssh://") {
-        // `ssh://git@github.com/owner/repo.git`
-        let rest = rest.strip_prefix("git@").unwrap_or(rest);
-        let (host, path) = rest.split_once('/')?;
-        (host.to_owned(), path.to_owned())
-    } else if url.contains("://") {
-        let parsed = url::Url::parse(url).ok()?;
-        (
-            parsed.host_str()?.to_owned(),
-            parsed.path().trim_start_matches('/').to_owned(),
-        )
-    } else if let Some((authority, path)) = url.split_once(':') {
-        // `git@github.com:owner/repo.git`
-        let host = authority
-            .rsplit_once('@')
-            .map_or(authority, |(_, host)| host);
-        (host.to_owned(), path.to_owned())
-    } else {
-        return None;
-    };
+    let parsed = GitUrl::parse(url).ok()?;
+    let host = parsed.host()?;
+    let path = parsed.path();
     let path = path.trim_start_matches('/').trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let (owner, name) = path.split_once('/')?;
     if owner.is_empty() || name.is_empty() || name.contains('/') {
         return None;
     }
-    if !is_github_host(&host) {
+    if !is_github_host(host) {
         return None;
     }
     Some((host.to_ascii_lowercase(), owner.to_owned(), name.to_owned()))
