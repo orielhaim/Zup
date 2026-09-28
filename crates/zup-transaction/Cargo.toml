@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Transaction graph, durable journal, and recovery engine for zup"
+description = "Transaction graph, durable record, and recovery engine for zup"
 
 [dependencies]
-fs-transaction.workspace = true
+atomic-write-file.workspace = true
 jiff.workspace = true
 miette.workspace = true
 petgraph.workspace = true
@@ -22,5 +22,4 @@ zup-core.workspace = true
 zup-platform.workspace = true
 
 [dev-dependencies]
-fs-transaction.workspace = true
 tempfile.workspace = true

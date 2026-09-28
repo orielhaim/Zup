@@ -320,10 +320,6 @@ pub enum CorruptReason {
     InvalidPlan,
     #[error("invalid operation receipt")]
     InvalidReceipt,
-    #[error("duplicate operation id")]
-    DuplicateOperationId,
-    #[error("invalid dependency")]
-    InvalidDependency,
     #[error("invalid node state")]
     NodeStateMismatch,
     #[error("invalid transaction phase")]
@@ -366,8 +362,4 @@ pub enum StoreError {
     #[error("journal serialization failed: {0}")]
     #[diagnostic(code(zup_transaction::serialize))]
     Serialize(#[source] serde_json::Error),
-
-    #[error("journal persistence failed: {0}")]
-    #[diagnostic(code(zup_transaction::persistence))]
-    Persistence(String),
 }

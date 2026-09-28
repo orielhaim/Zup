@@ -168,18 +168,14 @@ old state or the new one. What is claimed, and what is not:
 
 | Property | Claimed | By |
 | --- | --- | --- |
-| A reader sees the whole record or the previous one | yes | temp file plus rename |
-| A killed process leaves a consistent tree | yes | by construction |
+| A reader sees the whole record or the previous one | yes | `atomic-write-file`: flushed temp sibling renamed over `transaction.json` |
+| A killed process leaves a consistent record | yes | by construction; a stray hidden temp file is never read |
 | The record's bytes are on the medium before anything points at them | yes | the temp file is flushed before the rename |
-| The directory entry is durable | **no** | Windows cannot open a directory for `FlushFileBuffers` |
-| A multi-op change survives a power cut | **no** | the store applies one op per change set, so it never journals |
+| The directory entry is durable | Unix only | Windows cannot open a directory for `FlushFileBuffers` |
 
-That last row is an obligation rather than an accident, and it is checked.
-`a_store_write_leaves_no_journal_to_recover` asserts that no journal exists after
-a create and a swap and that `recover` finds nothing. A change set that grew to
-several ops would start writing a journal, and the store would then owe a
-recovery pass it does not perform — so the test fails and says so instead of the
-gap being discovered on a user's machine.
+Each record is a full snapshot, so one atomic replace is the whole write; there
+is no multi-file change to roll forward. Writers serialize on
+`transaction.lock`, and the revision check runs under that lock.
 
 ## Supply chain
 

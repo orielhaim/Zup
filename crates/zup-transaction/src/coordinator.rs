@@ -82,7 +82,7 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
                 Ok((record, TransactionOutcome::Committed))
             }
             Err(error) => {
-                if is_store_error(&error) {
+                if matches!(error, TransactionError::Store(_)) {
                     // The journal is the authority and it could not be
                     // written, so this attempt is over. Rolling back from a
                     // record the store never accepted would only compound it.
@@ -138,7 +138,7 @@ where
                 Ok((record, TransactionOutcome::Committed))
             }
             Err(error) => {
-                if is_store_error(&error) {
+                if matches!(error, TransactionError::Store(_)) {
                     return Err(error);
                 }
                 warn!(transaction_id = %record.transaction_id, error = %error, "recovery failed");
@@ -181,11 +181,6 @@ where
         return Ok(TransactionOutcome::RecoveryRequired);
     }
     rollback_after_failure(store, record, executor)
-}
-
-/// A journal write that did not land, not an executor failure.
-fn is_store_error(error: &TransactionError) -> bool {
-    matches!(error, TransactionError::Store(_))
 }
 
 /// Walk the plan in execution order, crossing every barrier and verifying
