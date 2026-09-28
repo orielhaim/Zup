@@ -113,9 +113,19 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
 
     // A thin artifact has no bytes of its own beyond the index, so there is
     // nothing to select from locally. The release graph decides.
+    //
+    // The scope comes from the artifact's own trust block rather than from a
+    // constant here. A thin artifact carries no variant manifest, so the scope the
+    // application's plan declares has nowhere else to travel — and a launcher
+    // that defaulted it would install a `machine`-scoped application into the
+    // user's profile and call it a success.
     #[cfg(feature = "online")]
     if index.artifact.mode == zup_artifact::ArtifactMode::Thin {
-        let scope = zup_core::SelectedScope::User;
+        let Some(trust) = index.artifact.trust.as_ref() else {
+            return Outcome::Refused {
+                detail: "a thin artifact must carry a trust block".to_owned(),
+            };
+        };
         return online::run(
             index,
             &online::BootstrapRequest {
@@ -123,7 +133,7 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
                 state_root: options.state_root.clone(),
                 machine_readable: options.machine_readable,
             },
-            scope,
+            trust.scope.selected(),
             is_gui(),
         );
     }

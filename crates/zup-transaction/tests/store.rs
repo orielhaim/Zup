@@ -29,6 +29,55 @@ fn record() -> TransactionRecord {
     )
 }
 
+/// The store never leaves a journal behind, and that is the reason it has no
+/// recovery pass.
+///
+/// This is a checked fact rather than a comment, because the question keeps being
+/// asked: `fs_transaction` ships a `recover` entry point and this store never
+/// calls it, which reads like a missing crash-recovery path. It is not. The store
+/// applies **one** op per change set, and `fs_transaction` documents that a set
+/// of one is already indivisible — `write_atomic` is all-or-nothing by
+/// construction — and so skips the journal rather than write, flush and delete a
+/// second file to restate a promise the single op already carries. A change set
+/// that grew to several ops would start writing a journal, and then this store
+/// *would* owe a recovery pass.
+///
+/// So the test asserts both halves: no journal exists after a create and a swap,
+/// and `recover` confirms there is nothing to roll forward. If someone makes a
+/// change set of several ops, the first assertion fails and names the obligation.
+#[test]
+fn a_store_write_leaves_no_journal_to_recover() {
+    use fs_transaction::exec::block_on;
+    use fs_transaction::fs::StdFs;
+    use fs_transaction::journal::{Journal, Recovered};
+
+    let (dir, store) = store();
+    let mut record = record();
+    store.create(&record).expect("create");
+    record.revision = 1;
+    store
+        .compare_and_swap(0, &record)
+        .expect("a compare-and-swap");
+
+    let journal = Journal::default().path_in(dir.path());
+    assert!(
+        !journal.exists(),
+        "`{}` exists after two single-op writes; the store owes a recovery pass it does not \
+         perform",
+        journal.display()
+    );
+    // `StdFs` rather than the store's own `JournalFs`, because the question here is
+    // whether a journal *exists*, and that does not depend on which reader looks.
+    // The store's reader is exercised by every other test in this file.
+    let recovered = block_on(Journal::default().recover(&StdFs, dir.path()))
+        .expect("recovering a store that never journaled");
+    assert_eq!(
+        recovered,
+        Recovered::Nothing,
+        "recovery found something a two-write store never journaled"
+    );
+}
+
 /// The plan's mutating nodes, which a caller may move to `Running` in any order.
 fn mutating_nodes(record: &TransactionRecord) -> Vec<OperationId> {
     record

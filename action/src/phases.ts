@@ -7,21 +7,33 @@
  * publisher with a second set of bugs, against a host that misbehaves.
  *
  * ```text
- * build → compose → sign (the project's own step) → digest → attest → publish
+ * build -> compose -> sign (the project's own step) -> finalize -> attest -> publish
  * ```
  *
- * Attestation before signing would attest bytes that no longer exist; publishing
- * before attesting would put out a release and then try to attach provenance to it.
+ * Each boundary is there because of one specific way the order can be wrong:
+ *
+ * - **sign after finalize** records pre-signature digests, so the release
+ *   description describes bytes that do not exist.
+ * - **attest before signing** attests a file that signing is about to change.
+ * - **publish before verifying** puts out a release and then discovers nobody
+ *   signed it.
+ *
+ * `finalize` closes the first two. It reads the signing plan, checks every
+ * signature, and rewrites the release description with the identity that will
+ * actually be published.
  */
 
 import type { Inputs } from './inputs.js'
 import type { OperationResult } from './result.js'
 
 /** The zup operations this action can invoke. */
-export type Phase = 'build' | 'compose' | 'attest' | 'publish'
+export type Phase = 'build' | 'compose' | 'finalize' | 'attest' | 'publish'
 
 /** The release manifest file name zup writes. */
 export const RELEASE_MANIFEST_NAME = 'zup-release.json'
+
+/** The signing plan file name zup writes beside the release manifest. */
+export const SIGNING_PLAN_NAME = 'zup-signing.json'
 
 /**
  * Which zup commands a workflow `operation` expands to.
@@ -35,12 +47,14 @@ export function phasesFor(operation: string): Phase[] {
       return ['build']
     case 'compose':
       return ['compose']
+    case 'finalize':
+      return ['finalize']
     case 'attest':
       return ['attest']
     case 'publish':
       return ['publish']
     case 'release':
-      return ['build', 'compose', 'attest', 'publish']
+      return ['build', 'compose', 'finalize', 'attest', 'publish']
     default:
       return []
   }
@@ -86,6 +100,16 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
       ]
       if (inputs.dryRun) {
         args.push('--dry-run')
+      }
+      return args
+    }
+    case 'finalize': {
+      const args = ['sign', 'verify', '--release-dir', inputs.releaseDir]
+      if (inputs.allowUnsigned) {
+        args.push('--allow-unsigned')
+      }
+      if (inputs.onlineRevocation) {
+        args.push('--online-revocation')
       }
       return args
     }
@@ -136,6 +160,11 @@ export function releaseManifestPath(releaseDir: string): string {
   return `${releaseDir}/${RELEASE_MANIFEST_NAME}`
 }
 
+/** The signing plan path, relative to the project. */
+export function signingPlanPath(releaseDir: string): string {
+  return `${releaseDir}/${SIGNING_PLAN_NAME}`
+}
+
 /** Whether a phase is the one that needs the publish credential. */
 export function needsToken(phase: Phase): boolean {
   return phase === 'publish'
@@ -143,7 +172,7 @@ export function needsToken(phase: Phase): boolean {
 
 /** Whether a phase produces a release directory worth uploading. */
 export function producesArtifacts(phase: Phase): boolean {
-  return phase === 'build' || phase === 'compose'
+  return phase === 'build' || phase === 'compose' || phase === 'finalize'
 }
 
 /** Merge two results of one `release` run into the one that is reported. */
@@ -157,21 +186,29 @@ export function mergeResults(
     if (result === undefined) {
       continue
     }
-    merged =
-      merged === undefined
-        ? { ...result, operation: 'release' }
-        : {
-            ...result,
-            operation: 'release',
-            success: merged.success && result.success,
-            targets: [...new Set([...merged.targets, ...result.targets])],
-            artifacts: [...merged.artifacts, ...result.artifacts],
-            diagnostics: [...merged.diagnostics, ...result.diagnostics],
-            releaseManifest: result.releaseManifest ?? merged.releaseManifest,
-            appVersion: result.appVersion ?? merged.appVersion,
-            release: result.release ?? merged.release,
-            summary: result.summary ?? merged.summary,
-          }
+    if (merged === undefined) {
+      merged = { ...result, operation: 'release' }
+      continue
+    }
+    // Bound to a `const` so the narrowing survives into the callbacks below: a
+    // `let` is not narrowed inside a closure, and the artifact merge is two
+    // closures.
+    const previous = merged
+    merged = {
+      ...previous,
+      operation: 'release',
+      success: previous.success && result.success,
+      targets: [...new Set([...previous.targets, ...result.targets])],
+      artifacts: [
+        ...new Map(previous.artifacts.map((a) => [a.path, a])).values(),
+        ...result.artifacts.filter((a) => !previous.artifacts.some((b) => b.path === a.path)),
+      ],
+      diagnostics: [...previous.diagnostics, ...result.diagnostics],
+      releaseManifest: result.releaseManifest ?? previous.releaseManifest,
+      appVersion: result.appVersion ?? previous.appVersion,
+      release: result.release ?? previous.release,
+      summary: result.summary ?? previous.summary,
+    }
   }
   return merged
 }

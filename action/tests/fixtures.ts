@@ -27,6 +27,8 @@ export function inputs(overrides: Partial<Inputs> = {}): Inputs {
     attest: false,
     attestPaths: [],
     allowUnsafePublish: false,
+    allowUnsigned: false,
+    onlineRevocation: false,
     args: [],
     receipt: undefined,
     ...overrides,

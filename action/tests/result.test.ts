@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { parseResult, RESULT_SCHEMA, ResultFormatError } from '../src/result.js'
+import { coversBytes, parseResult, RESULT_SCHEMA, ResultFormatError } from '../src/result.js'
 
 /** A well-formed build result, as zup emits it. */
 function buildResult(overrides: Record<string, unknown> = {}): string {
@@ -17,7 +17,10 @@ function buildResult(overrides: Record<string, unknown> = {}): string {
         size: 248_512_896,
         kind: 'installer',
         mode: 'standalone',
-        signature: 'signed',
+        evidence: [
+          { fact: 'signature_covers_bytes', value: 'sha256' },
+          { fact: 'publisher', value: 'CN=Acme' },
+        ],
       },
     ],
     releaseManifest: 'dist/zup-release.json',
@@ -36,7 +39,47 @@ describe('parseResult', () => {
     expect(result.targets).toEqual(['windows-x64', 'windows-arm64'])
     expect(result.artifacts[0]?.path).toBe('Acme-Windows-Setup.exe')
     expect(result.artifacts[0]?.size).toBe(248_512_896)
+    expect(result.artifacts[0]?.evidence).toEqual([
+      { fact: 'signature_covers_bytes', value: 'sha256' },
+      { fact: 'publisher', value: 'CN=Acme' },
+    ])
+    expect(coversBytes(result.artifacts[0]?.evidence)).toBe(true)
     expect(result.releaseManifest).toBe('dist/zup-release.json')
+  })
+
+  it('reports an artifact with no evidence as unsigned rather than absent', () => {
+    // A finalized release with no signature is a real release. The envelope says
+    // so with an empty list; it does not drop the field, because "no evidence"
+    // and "we did not look" are different.
+    const result = parseResult(
+      buildResult({
+        artifacts: [
+          { path: 'Acme-Windows-Setup.exe', digest: 'a'.repeat(64), size: 1, evidence: [] },
+          { path: 'Acme-Windows-x64.zup', digest: 'b'.repeat(64), size: 2 },
+        ],
+      }),
+      'build',
+    )
+    expect(result.artifacts[0]?.evidence).toEqual([])
+    expect(coversBytes(result.artifacts[0]?.evidence)).toBe(false)
+    expect(result.artifacts[1]?.evidence).toEqual([])
+  })
+
+  it('drops a half-written evidence entry rather than inventing a value', () => {
+    const result = parseResult(
+      buildResult({
+        artifacts: [
+          {
+            path: 'Acme-Windows-Setup.exe',
+            digest: 'a'.repeat(64),
+            size: 1,
+            evidence: [{ fact: 'publisher' }, { fact: 'publisher', value: 'CN=Acme' }, 'nonsense'],
+          },
+        ],
+      }),
+      'build',
+    )
+    expect(result.artifacts[0]?.evidence).toEqual([{ fact: 'publisher', value: 'CN=Acme' }])
   })
 
   it('reads a publish result with a release', () => {

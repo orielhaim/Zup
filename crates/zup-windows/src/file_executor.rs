@@ -566,7 +566,19 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             hasher.update(&buf[..n]);
             written = written.saturating_add(n as u64);
         }
-        out.flush().ok();
+        // Flushed, not just written. A staged payload is what a later commit
+        // barrier moves into the install location, and a power cut between the
+        // write and the rename would otherwise leave a destination holding bytes
+        // that were never on the medium — an installed file that hashes to
+        // nothing anybody can reproduce. The size and digest are checked right
+        // after, so the file is also known to be complete before it is published.
+        out.sync_all().map_err(|source| {
+            let _ = fs::remove_file(&staged);
+            WindowsFileExecutorError::Io {
+                path: staged.display().to_string(),
+                source,
+            }
+        })?;
         drop(out);
 
         if written != size {
@@ -708,9 +720,19 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 source,
             })?;
         }
-        fs::copy(dest, &backup).map_err(|source| WindowsFileExecutorError::Io {
-            path: backup.display().to_string(),
-            source,
+        // The backup is the *only* copy of what was there: rollback restores it,
+        // and if the machine loses power after the new file is published, this is
+        // what decides whether the installation can go back. A plain `fs::copy`
+        // leaves that copy in the write cache, so it is flushed before anything
+        // is replaced.
+        crate::durable::copy_new_durable(dest, &backup).map_err(|source| {
+            WindowsFileExecutorError::Io {
+                path: backup.display().to_string(),
+                source: match source {
+                    crate::durable::DurableError::Io { source, .. } => source,
+                    other => std::io::Error::other(other.to_string()),
+                },
+            }
         })?;
 
         let volume = crate::durable::volume_root(dest)?;

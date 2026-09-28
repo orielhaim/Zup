@@ -92,6 +92,28 @@ pub fn build_plan(
     tag: &TagIntent,
     limits: &HostLimits,
 ) -> miette::Result<ReleasePlan> {
+    // A release is finalized when every artifact's published identity is a
+    // measurement of the bytes that will actually go out. An unfinalized
+    // description still carries pre-sign digests, and publishing it would put a
+    // manifest on the internet that no download can satisfy — a release nobody
+    // can verify, published by a tool that could have said no.
+    //
+    // This is a refusal and not a warning because a published release is not a
+    // retry target: the tag is public and the bytes behind it are already what
+    // somebody may have downloaded.
+    if !release.is_finalized() {
+        let unfinalized = release.unfinalized();
+        return Err(miette::miette!(
+            "this release has not been signed and finalized: {} still carry pre-signature \
+             digests. Sign the files in `{}` and run `zup sign verify` before publishing.",
+            if unfinalized.len() == 1 {
+                format!("`{}` does", unfinalized[0])
+            } else {
+                format!("{} do", unfinalized.join("`, `"))
+            },
+            zup_signing::SIGNING_PLAN_NAME
+        ));
+    }
     let release_dir = staged.release_dir.as_path();
     let web = staged.web.as_deref();
     let packages = staged.packages.as_deref();
@@ -107,12 +129,38 @@ pub fn build_plan(
 
     for artifact in &release.artifacts {
         let path = join_release(release_dir, &artifact.path)?;
+        // Both numbers come from the file, and the manifest is checked against
+        // them rather than trusted. Reading the digest fresh and the size from the
+        // manifest would be the worst of both: a correct digest beside a stale
+        // size is a plan that preflights against one file and uploads another.
+        let (size, digest) = measure(&path)?;
+        let expected = release.published_digest(artifact);
+        if digest != expected || size != release.published_size(artifact) {
+            let (which, expected_digest, expected_size) = match &artifact.finalized {
+                Some(finalized) => (
+                    "the finalized release description",
+                    *finalized.digest(),
+                    finalized.size(),
+                ),
+                None => (
+                    "the release description",
+                    artifact.built.digest,
+                    artifact.built.size,
+                ),
+            };
+            return Err(miette::miette!(
+                "`{}` is sha256:{} at {size} bytes, and {which} says sha256:{expected_digest} at \
+                 {expected_size} bytes",
+                path.display(),
+                digest.to_hex()
+            ));
+        }
         let product = ReleaseProduct::new(
             asset_name(&artifact.path)?,
             ProductRole::Install,
             ProductClass::UserFacing,
-            digest_of(&path)?,
-            artifact.size,
+            digest,
+            size,
         )
         .with_media_type(media_type_for(&artifact.path))
         .serving(std::iter::once(artifact.id.clone()));
@@ -592,6 +640,18 @@ fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
     zup_core::hash_reader(std::io::BufReader::new(file))
         .map(|(_, digest)| digest)
+        .map_err(|error| miette::miette!("`{}`: {error}", path.display()))
+}
+
+/// A file's own size and digest, measured together.
+///
+/// Together because a release plan that pairs a digest from one read with a size
+/// from another describes a file that never existed, and the check above is only
+/// meaningful because both numbers come from the same bytes.
+fn measure(path: &Path) -> miette::Result<(u64, zup_core::Sha256Digest)> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+    zup_core::hash_reader(std::io::BufReader::new(file))
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))
 }
 

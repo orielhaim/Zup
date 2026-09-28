@@ -48,6 +48,8 @@ pub enum UniversalError {
     Bundle(#[from] crate::BundleError),
     #[error(transparent)]
     Durable(#[from] crate::durable::DurableError),
+    #[error("image resources: {0}")]
+    Resources(#[from] crate::pe_resources::ResourceError),
     #[error("universal artifact I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error(
@@ -70,6 +72,12 @@ pub enum UniversalError {
     },
     #[error("artifact `{id}` has no variant this host can run")]
     UnsupportedHost { id: String },
+    #[error("artifact `{id}` does not carry the named variant")]
+    UnknownVariant { id: String },
+    #[error(
+        "a thin artifact embeds no runtime bytes; its runtime is fetched and verified by digest"
+    )]
+    ThinRuntime,
 }
 
 impl UniversalError {
@@ -201,7 +209,7 @@ pub fn compose_universal_executable(
             bytes: range,
         });
     }
-    zup_pe::write_resources(dispatcher, output, &documents)?;
+    crate::pe_resources::write_resources(dispatcher, output, &documents)?;
     Ok(layout)
 }
 
@@ -254,10 +262,10 @@ impl UniversalArtifact {
     /// Open a universal artifact, validating its index, table, and layout.
     pub fn open(executable: impl AsRef<Path>) -> Result<Self, UniversalError> {
         let executable = executable.as_ref().to_path_buf();
-        let index_bytes = zup_pe::read_resource(&executable, RESOURCE_ID_INDEX)?;
+        let index_bytes = crate::pe_resources::read_resource(&executable, RESOURCE_ID_INDEX)?;
         let index = zup_artifact::ArtifactIndex::parse(&index_bytes)?;
         let layout = UniversalLayout::new(index.variants.len(), 0);
-        let table_bytes = zup_pe::read_resource(&executable, layout.table())?;
+        let table_bytes = crate::pe_resources::read_resource(&executable, layout.table())?;
         // A thin artifact names each variant's runtime so a client knows what the
         // graph will hand it, but it does not carry one — the runtime is the
         // thing the artifact exists to fetch, and embedding it would make the
@@ -319,10 +327,39 @@ impl UniversalArtifact {
             emulated: compatibility == zup_artifact::Compatibility::Emulated,
         })
     }
+
+    /// The native runtime bytes this artifact embeds for `variant`.
+    ///
+    /// This is the file that becomes `maintenance.exe` on a user's machine, the
+    /// elevated worker, and the uninstall runner. A release pipeline needs to read
+    /// it for one reason: to prove that the bytes it embedded are the bytes it
+    /// signed, since the outer artifact's Authenticode signature covers these as
+    /// resource data and does not travel with the extracted file.
+    ///
+    /// A thin artifact has no embedded runtime by construction, and says so
+    /// rather than returning an empty vector a caller might mistake for one.
+    pub fn embedded_runtime(&self, variant: &str) -> Result<Vec<u8>, UniversalError> {
+        if !self.index().artifact.mode.carries_content() {
+            return Err(UniversalError::ThinRuntime);
+        }
+        let position = self
+            .index()
+            .variant_ids()
+            .iter()
+            .position(|id| *id == variant)
+            .ok_or_else(|| UniversalError::UnknownVariant {
+                id: variant.to_owned(),
+            })?;
+        let layout = UniversalLayout::new(self.index().variants.len(), 0);
+        Ok(crate::pe_resources::read_resource(
+            &self.executable,
+            layout.runtime(position),
+        )?)
+    }
 }
 
 fn read_metadata(executable: &Path, id: usize) -> Result<Vec<u8>, UniversalError> {
-    Ok(zup_pe::read_resource(executable, id)?)
+    Ok(crate::pe_resources::read_resource(executable, id)?)
 }
 
 /// The variant a host selected, with how it will be executed.
@@ -349,11 +386,12 @@ pub struct PeSegments {
 impl SegmentReader for PeSegments {
     fn read_range(&self, segment: u16, offset: u64, len: u64) -> Result<Vec<u8>, ArtifactError> {
         let id = self.first + usize::from(segment);
-        let bytes =
-            zup_pe::read_resource(&self.executable, id).map_err(|_| ArtifactError::Missing {
+        let bytes = crate::pe_resources::read_resource(&self.executable, id).map_err(|_| {
+            ArtifactError::Missing {
                 media_type: MediaType::BLOB.label(),
                 digest: format!("segment {segment}"),
-            })?;
+            }
+        })?;
         let start = usize::try_from(offset).map_err(|_| ArtifactError::Invalid)?;
         let end = start
             .checked_add(usize::try_from(len).map_err(|_| ArtifactError::Invalid)?)

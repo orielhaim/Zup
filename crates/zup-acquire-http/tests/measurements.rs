@@ -295,7 +295,7 @@ fn a_bounded_pool_overlaps_transfers() {
     let content = blobs(16, 256 * 1024);
     let sequential_cache = temp_cache();
     let started = Instant::now();
-    run(AcquisitionSession::new(
+    let sequential_outcome = run(AcquisitionSession::new(
         plan_for(&content),
         Arc::clone(&sequential_cache.inner),
         SchedulerConfig::sequential(),
@@ -305,12 +305,13 @@ fn a_bounded_pool_overlaps_transfers() {
         never(),
         &ProgressSink::discard(),
     ))
-    .expect("the sequential run is satisfied");
+    .expect("the sequential run is satisfied")
+    .enter();
     let sequential = started.elapsed();
 
     let parallel_cache = temp_cache();
     let started = Instant::now();
-    run(AcquisitionSession::new(
+    let parallel_outcome = run(AcquisitionSession::new(
         plan_for(&content),
         Arc::clone(&parallel_cache.inner),
         SchedulerConfig::default(),
@@ -320,7 +321,8 @@ fn a_bounded_pool_overlaps_transfers() {
         never(),
         &ProgressSink::discard(),
     ))
-    .expect("the parallel run is satisfied");
+    .expect("the parallel run is satisfied")
+    .enter();
     let parallel = started.elapsed();
 
     println!("\nscheduler, {} objects", content.len());
@@ -330,10 +332,37 @@ fn a_bounded_pool_overlaps_transfers() {
         "  ratio           {:.2}×",
         sequential.as_secs_f64() / parallel.as_secs_f64().max(f64::MIN_POSITIVE)
     );
-    // The relationship is what matters and it is not timing-dependent: the
-    // parallel pool must finish in no more wall-clock time than the sequential
-    // one, and it never waits on a lock, so it is never worse.
-    assert!(parallel <= sequential + std::time::Duration::from_millis(250));
+
+    // The claim, asserted structurally rather than by the clock.
+    //
+    // An earlier version of this test asserted that the parallel run finished no
+    // later than the sequential one. Over a *synchronous in-memory* source there
+    // is nothing to overlap: both runs decompress on one thread, and the only
+    // thing the timing measured was how busy the machine happened to be. On a
+    // loaded runner that inverts, and the fix is not a longer timeout — it is
+    // asking the question the design can actually answer.
+    assert!(
+        SchedulerConfig::default().per_origin > 1,
+        "the default pool is supposed to hold more than one transfer"
+    );
+    assert_eq!(
+        SchedulerConfig::sequential().per_origin,
+        1,
+        "the baseline is one transfer, or it is not a baseline"
+    );
+    assert!(
+        SchedulerConfig::default().total >= SchedulerConfig::default().per_origin,
+        "the global bound cannot be tighter than the per-origin one"
+    );
+
+    // And the property a user can see: whichever pool ran it, every object arrived
+    // verified and the estimate matched the outcome. Concurrency that drops or
+    // corrupts a transfer is worse than no concurrency at all.
+    for outcome in [&sequential_outcome, &parallel_outcome] {
+        assert_eq!(outcome.items.len(), content.len());
+        let wire: u64 = outcome.items.iter().map(|blob| blob.wire_size).sum();
+        assert_eq!(outcome.estimate.download_bytes, wire);
+    }
 }
 
 #[test]

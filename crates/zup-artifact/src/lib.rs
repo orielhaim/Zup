@@ -98,8 +98,8 @@ pub use index::{
 pub use media_type::{MAX_BLOBS, MAX_INDEX_BYTES, MAX_SEGMENTS, MAX_VARIANTS, MediaType};
 pub use platform::{HostArchitecture, Platform};
 pub use release::{
-    Measured, RELEASE_MANIFEST_NAME, RELEASE_SCHEMA, ReleaseArtifact, ReleaseError,
-    ReleaseManifest, ReleaseVariant, SignatureStatus,
+    BuildArtifact, Measured, RELEASE_MANIFEST_NAME, RELEASE_SCHEMA, ReleaseArtifact, ReleaseError,
+    ReleaseManifest, ReleaseRuntime, ReleaseVariant, SigningPlan, SingleTarget,
 };
 pub use select::{
     CandidateVariant, Compatibility, HostExecution, ScoredCandidate, Selection, rank_all, score,

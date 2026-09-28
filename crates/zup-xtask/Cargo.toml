@@ -17,11 +17,10 @@ path = "src/main.rs"
 [dependencies]
 semver.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+zup-artifact.workspace = true
 zup-core.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

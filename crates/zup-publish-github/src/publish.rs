@@ -295,15 +295,53 @@ pub async fn publish(
                 reason: error.to_string(),
             })?;
         }
-        std::fs::write(path, bytes).map_err(|error| GithubError::Io {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })?;
+        // The receipt is what a re-run reads to decide whether the release is
+        // already published, so a torn write is a publisher that cannot resume:
+        // written atomically and flushed, like every other durable document here.
+        write_receipt(path, &bytes)?;
         report.phase("Receipt");
         report.ok(path.display().to_string());
     }
     report.receipt(receipt.to_publish_receipt());
     Ok(report.finish())
+}
+
+/// Write the receipt where a crash cannot leave half of one.
+///
+/// A temp sibling, a flush, and a rename. Not because a receipt is precious — it
+/// is a report — but because a half-written receipt is *worse* than none: a
+/// re-run parses it to decide whether the release is already published, and a
+/// truncated one either refuses a resumable draft or, read loosely, claims the
+/// release went live when it did not.
+fn write_receipt(path: &Path, bytes: &[u8]) -> Result<(), GithubError> {
+    let mut temporary = path.to_path_buf();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "github-publish.json".to_owned());
+    temporary.set_file_name(format!(".{name}.partial"));
+    let _ = std::fs::remove_file(&temporary);
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(GithubError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        });
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(GithubError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Check the plan's own claims and the host's limits, before anything is written.

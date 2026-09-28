@@ -139,7 +139,7 @@ impl ToolchainResolver {
             });
         }
         let mut searched = Vec::new();
-        for (root, source) in self.candidates() {
+        for (root, source) in self.roots() {
             let path = root.join(zup_toolchain::file_name(component, EXECUTABLE_SUFFIX));
             searched.push(path.display().to_string());
             if !path.is_file() {
@@ -163,7 +163,11 @@ impl ToolchainResolver {
     }
 
     /// The roots to search, in precedence order.
-    fn candidates(&self) -> Vec<(PathBuf, ToolchainSource)> {
+    ///
+    /// Public because it is the whole answer to "where could this build have got
+    /// a component from", and a report that has to re-derive the list is a
+    /// report that can disagree with the resolver it is reporting on.
+    pub fn roots(&self) -> Vec<(PathBuf, ToolchainSource)> {
         let mut candidates = Vec::new();
         if let Some(root) = &self.override_root {
             candidates.push((root.clone(), ToolchainSource::Root));
@@ -248,6 +252,41 @@ pub fn runtime_for(target: &zup_core::TargetTriple, frontend: Frontend) -> Toolc
     }
 }
 
+/// The directory the cache for one zup version lives in.
+///
+/// Derived here rather than spelled at each use, because the resolver searches it
+/// and `zup toolchain install` writes it, and a stager that wrote
+/// `toolchain/0.1.0` while the resolver looked in `toolchains/0.1.0` would produce
+/// an install that succeeds and a build that still finds nothing.
+pub fn cache_directory(state_root: &Path, version: &str) -> PathBuf {
+    state_root.join(CACHE_DIRECTORY).join(version)
+}
+
+/// The zup versions with a cache, other than the one named, in name order.
+///
+/// The cache is keyed by version and versions accumulate, so this is what
+/// `zup toolchain clean` removes. Sorted rather than discovery order, because a
+/// report listing the same three versions in a different order each run reads as
+/// three different sets.
+pub fn other_cached_versions(state_root: &Path, keep: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(state_root.join(CACHE_DIRECTORY)) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name != keep)
+        .collect();
+    versions.sort();
+    versions
+}
+
+/// [`other_cached_versions`] for this executable's own version.
+pub fn other_cached_versions_for_self(state_root: &Path) -> Vec<String> {
+    other_cached_versions(state_root, crate::ZUP_VERSION)
+}
+
 /// The component one artifact's launcher experience needs.
 ///
 /// `online` is asked for only by a thin artifact. A thin artifact's launcher
@@ -320,11 +359,8 @@ mod tests {
         let executable = PathBuf::from("C:/bin/zup.exe");
         let resolver = ToolchainResolver::new("0.1.0".into(), executable.clone(), state.clone())
             .with_root(Some(root.clone()));
-        let sources: Vec<ToolchainSource> = resolver
-            .candidates()
-            .iter()
-            .map(|(_, source)| *source)
-            .collect();
+        let sources: Vec<ToolchainSource> =
+            resolver.roots().iter().map(|(_, source)| *source).collect();
         assert_eq!(
             sources,
             vec![
@@ -335,9 +371,9 @@ mod tests {
             ],
             "an explicit root wins, then the pinned cache, then a staged toolchain"
         );
-        assert_eq!(resolver.candidates()[0].0, root);
+        assert_eq!(resolver.roots()[0].0, root);
         assert_eq!(
-            resolver.candidates()[1].0,
+            resolver.roots()[1].0,
             state.join("toolchain").join("0.1.0"),
             "the cache is keyed by the exact zup version, so a pinned build is reproducible"
         );
@@ -354,7 +390,7 @@ mod tests {
         );
         assert!(
             resolver
-                .candidates()
+                .roots()
                 .iter()
                 .all(|(_, source)| *source != ToolchainSource::Root),
             "without ZUP_TOOLCHAIN there is no explicit root"
@@ -368,7 +404,7 @@ mod tests {
             PathBuf::from("C:/target/debug/deps/zup.exe"),
             PathBuf::from("C:/state"),
         );
-        let staged = resolver.candidates();
+        let staged = resolver.roots();
         let last = staged.last().expect("a staged candidate").0.clone();
         assert_eq!(last, PathBuf::from("C:/target/debug/toolchain"));
     }
@@ -392,6 +428,68 @@ mod tests {
         assert!(
             !message.contains("https://"),
             "an offline build must not be told to fetch from the network"
+        );
+    }
+
+    /// Resolution is a closed list derived from two inputs, and nothing else.
+    ///
+    /// The property that matters: a `zup` that lives outside a source checkout
+    /// cannot find a component inside one, so a person's build never quietly
+    /// composes an installer out of a developer's `target/` directory. Asserted
+    /// as the exact list rather than as "nothing under the checkout", because a
+    /// list is a claim a change has to update and a filter is a claim nothing
+    /// checks: a resolver that grew a `%PATH%` arm or a "look in the current
+    /// directory" arm would still pass a filter.
+    #[test]
+    fn a_resolver_outside_a_checkout_only_ever_looks_in_the_two_places_it_was_given() {
+        // `crates/zup`, `crates`, then the repository root.
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the repository root")
+            .to_path_buf();
+        let outside = std::env::temp_dir().join("zup-not-in-a-checkout");
+        let resolver = ToolchainResolver::new(
+            "0.1.0".into(),
+            outside.join("bin").join("zup.exe"),
+            outside.join("state"),
+        );
+        assert_eq!(
+            resolver.roots(),
+            vec![
+                (
+                    outside.join("state").join(CACHE_DIRECTORY).join("0.1.0"),
+                    ToolchainSource::Cache
+                ),
+                (
+                    outside.join("bin").join(STAGED_DIRECTORY).join("0.1.0"),
+                    ToolchainSource::Staged
+                ),
+                (
+                    outside.join("bin").join(STAGED_DIRECTORY),
+                    ToolchainSource::Staged
+                ),
+            ],
+            "a pinned cache, then a staged directory beside the executable"
+        );
+        for (root, _) in resolver.roots() {
+            assert!(
+                !root.starts_with(&repository),
+                "{} is inside the checkout at {}",
+                root.display(),
+                repository.display()
+            );
+        }
+        // And the working directory is not one of them. A toolchain that turned
+        // up beside the project being built would be a different component on
+        // every machine that happened to be in the same folder.
+        let current = std::env::current_dir().expect("a working directory");
+        assert!(
+            !resolver
+                .roots()
+                .iter()
+                .any(|(root, _)| root.starts_with(&current)),
+            "resolution must not depend on where the process is standing"
         );
     }
 }

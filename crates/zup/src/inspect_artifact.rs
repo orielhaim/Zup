@@ -69,10 +69,20 @@ pub struct InspectedContent {
 }
 
 /// What can be proven about an artifact's trust.
+///
+/// Each field is one *question*, and the words in it are the answer to that
+/// question and no other. "The Authenticode digest matches" and "Windows trusts
+/// this publisher" are different facts about different authorities, and a report
+/// that collapsed them into one word would be claiming the second from evidence
+/// for the first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InspectedTrust {
-    /// Whether the image carries an Authenticode signature.
+    /// Whether the image carries an Authenticode structure, and whether its
+    /// embedded digest covers these bytes.
+    ///
+    /// Structural: read from the certificate table and the image digest, on any
+    /// platform.
     pub authenticode: String,
     /// Whether the index parses and agrees with the content beside it.
     pub index: String,
@@ -164,11 +174,7 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
         })
         .collect();
 
-    let authenticode = if zup_pe::is_signed(path)? {
-        "signed"
-    } else {
-        "unsigned"
-    };
+    let authenticode = authenticode(path);
     let file_size = std::fs::metadata(path)?.len();
     Ok(Inspection {
         report_version: REPORT_VERSION,
@@ -200,6 +206,36 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
             variants: "valid".to_owned(),
         },
     })
+}
+
+/// What the image's Authenticode structure says, in words.
+///
+/// This is a *structural* answer, and the wording is chosen so a reader cannot
+/// take it for a trust answer. The certificate table's presence and the image
+/// digest are properties of the bytes; whether Windows trusts the chain is
+/// `zup sign verify`'s question, which asks the platform. So this reports
+/// "digest matches" and never "signed" — a word that would be read as a claim
+/// about a trust store this command never consulted.
+fn authenticode(path: &std::path::Path) -> String {
+    let signature = match zup_pe::embedded_signature(path) {
+        Ok(Some(signature)) => signature,
+        Ok(None) => return "no certificate table".to_owned(),
+        // A table that declares a signature and does not contain one is a
+        // malformed file, and saying "unsigned" here would be the one answer
+        // nobody should be able to hear about it.
+        Err(_) => return "certificate table is malformed".to_owned(),
+    };
+    match zup_pe::image_digest(path) {
+        Err(_) => "certificate table present, image digest unreadable".to_owned(),
+        Ok(digest) if signature.digest.matches(&digest) => {
+            format!("digest matches ({})", signature.digest.algorithm.as_str())
+        }
+        Ok(_) => format!(
+            "DIGEST DOES NOT MATCH ({} over {})",
+            signature.digest.algorithm.as_str(),
+            signature.digest.to_hex()
+        ),
+    }
 }
 
 impl Inspection {

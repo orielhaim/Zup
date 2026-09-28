@@ -92,7 +92,7 @@ pub use plan::{AcquisitionEstimate, AcquisitionItem, AcquisitionPlan, format_byt
 pub use progress::{AcquisitionEvent, AcquisitionPhase, AcquisitionProgress};
 pub use release::{
     DocumentRef, OnlineTrust, RELEASE_SCHEMA, ReleaseDescriptor, ReleaseDownload,
-    ReleaseDownloadKind, ReleasePin, ReleaseRequirements, ReleaseVariant,
+    ReleaseDownloadKind, ReleasePin, ReleaseRequirements, ReleaseVariant, ThinScope,
 };
 pub use retention::{
     DEFAULT_GRACE, MAX_RETENTION_BYTES, RETENTION_FILE, RETENTION_SCHEMA, RetentionReport,

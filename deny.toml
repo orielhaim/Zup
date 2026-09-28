@@ -1,0 +1,121 @@
+# Release supply-chain policy.
+#
+# This file states what zup is willing to ship and why. It is deliberately
+# opinionated about the things that are security properties and deliberately
+# permissive about the things that are not, because a policy that fails on
+# ordinary crates gets ignored, and an ignored policy is worse than none: it
+# looks like a gate and gates nothing.
+#
+# The one blocking advisory gate in this repository is `cargo deny check
+# advisories`. There is deliberately no `cargo audit` in CI: two scanners
+# reporting the same RustSec database in two formats is one gate wearing two
+# hats, and the second one is the one a reviewer stops reading.
+#
+# Read with: cargo deny check
+# Update exceptions with a reason, a scope, and a review date. An exception with
+# no reason is not an exception, it is a hole with a comment.
+
+[graph]
+# The target the released Windows binaries are built for. Cross-compiling to
+# Linux pulls in a second, parallel dependency graph (nix, smithay, wayland) that
+# the released artifacts never contain, and failing on it would be refusing a
+# tree zup does not ship.
+targets = [
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "aarch64-pc-windows-msvc" },
+]
+all-features = true
+
+[advisories]
+version = 2
+# Nothing is ignored. An entry in the ignore list below is an unreviewed hole,
+# and a hole that is allowed to exist quietly is how a vulnerable crate reaches
+# a release years later.
+ignore = []
+# Yanked versions are refused: a yanked crate is one its author asked people to
+# stop using, and a lockfile that still names it is a lockfile nobody is
+# maintaining.
+yanked = "deny"
+# A vulnerability in a crate that is never compiled into a shipped artifact is
+# still a vulnerability in something somebody will `cargo install`, so the
+# default is to refuse and the exceptions are reviewed one at a time.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# Permissive and attribution-preserving licences, which is what a project that
+# itself ships under `MIT OR Apache-2.0` can accept without a legal review per
+# dependency. Copyleft is absent because nothing in the graph is copyleft; if a
+# future dependency is, this list is the place to argue about it, not the
+# release pipeline.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "bzip2-1.0.6",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "0BSD",
+  "BSL-1.0",
+  "CC0-1.0",
+  "MIT-0",
+  "MPL-2.0",
+]
+# The confidence that a licence was read from the crate's own metadata rather
+# than guessed at. `deny` means a crate with no licence field is a refusal, which
+# is the correct answer for something about to be linked into a shipped binary.
+confidence-threshold = 0.93
+# Every file in the workspace is `publish = false` except `zup`, and `zup` is
+# `MIT OR Apache-2.0`. Anything else is a crate that reached the workspace by an
+# accident.
+unused-allowed-license = "deny"
+
+[bans]
+# Duplicates are reported, not refused, and this is a deliberate choice worth
+# arguing about.
+#
+# The graph has 49 duplicate versions today and every one of them is forced by an
+# upstream crate that zup does not control: the `windows*` family spans three
+# incompatible major generations because `windows-service`, `windows-registry`
+# and the `windows` umbrella each pin their own; `sha2` 0.10 and 0.11 are both
+# present because wasmtime's cranelift predates the 0.11 release; `bitflags` 1 and
+# 2, `itertools` 0.13 and 0.14, and the `zune-*` image codecs come from the same
+# kind of split.
+#
+# A `deny` here with 49 `skip` entries is a gate that tests its own exception
+# list. Every new duplicate would need an entry with a paragraph of prose, and the
+# entries would stop being read — which is how a policy becomes decorative. So
+# duplicates are a reported signal, and the *gate* that matters is elsewhere:
+# `cargo xtask verify-dependency-graph` fails when a workspace crate depends on
+# two versions of the same external crate, or appears in a graph it must not be
+# in. That catches the accident a duplicate almost always represents — a
+# dependency added to the wrong package — and it is a gate zup can actually keep.
+multiple-versions = "warn"
+# `x.workspace = true` is not a version wildcard, but cargo-deny reads one as
+# one. In this workspace every dependency is declared once at the top of
+# `Cargo.toml` with a real version requirement and inherited everywhere else,
+# which is the opposite of a wildcard: there is exactly one place a version can
+# be loosened, and it is a file a reviewer reads. Denying the form that every
+# line in the tree uses would mean denying the practice that produces the
+# guarantee.
+wildcards = "allow"
+allow-wildcard-paths = false
+
+[sources]
+# crates.io and nothing else. An unknown registry is a whole second index with
+# its own compromise, its own keys, and its own removal policy; a git source is
+# an unpinned revision unless somebody remembered to pin it.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# A git source is refused outright rather than merely required to be pinned,
+# because zup has no git dependency and "pin it properly" is the answer to a
+# problem this repository does not have.
+allow-git = []
+
+# The SBOM is produced by cargo cyclonedx in the release-candidate job, not by
+# cargo-deny. It describes zup's own binaries; it is never an SBOM for an
+# application zup packaged, and nothing in this file pretends otherwise.

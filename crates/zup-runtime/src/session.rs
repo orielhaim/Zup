@@ -112,6 +112,20 @@ pub enum InstallOutcome {
     RolledBack,
     Cancelled,
     RecoveryRequired,
+    /// Another operation holds this installation's lock.
+    ///
+    /// A distinct state rather than a failure string, because "wait, then try
+    /// again" is the correct response and only a caller that can tell this apart
+    /// from a real failure can do that. The GUI turns it into a retry button, a
+    /// headless run into a stable exit code, and a second unattended process into
+    /// a queued job rather than a red build.
+    ///
+    /// It carries what was running, never where the lock lives: the lock file is
+    /// an implementation detail of the state root, and a message about it sends
+    /// people looking in the wrong place.
+    Busy {
+        operation: &'static str,
+    },
     Failed(String),
 }
 
@@ -425,6 +439,15 @@ fn emit_terminal(
                 message: "recovery required".into(),
             });
         }
+        Ok(InstallOutcome::Busy { operation }) => {
+            // A typed kind, not a free-text failure: an automation reading
+            // `kind` can tell "somebody else is installing" from "this
+            // installation is broken" without matching on an English sentence.
+            let _ = events.send(RuntimeEvent::Failed {
+                kind: "installation_busy".into(),
+                message: format!("{operation} is already running for this installation"),
+            });
+        }
         Ok(InstallOutcome::Failed(message)) => {
             let _ = events.send(RuntimeEvent::Failed {
                 kind: "transaction".into(),
@@ -437,6 +460,12 @@ fn emit_terminal(
             });
             let _ = events.send(RuntimeEvent::Completed {
                 outcome: "cancelled".into(),
+            });
+        }
+        Err(SessionError::InstallationBusy) => {
+            let _ = events.send(RuntimeEvent::Failed {
+                kind: "installation_busy".into(),
+                message: "another maintenance operation is running for this installation".into(),
             });
         }
         Err(error) => {

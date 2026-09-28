@@ -892,6 +892,14 @@ pub enum ProcessOutcome {
     VerificationFailure,
     RecoveryRequired,
     RebootRequired,
+    /// Another operation holds this installation's lock.
+    ///
+    /// Its own code, because a scheduled retry has to be able to tell "somebody
+    /// else is installing this right now" from "this installation is broken" —
+    /// the first is not a failure of anything and the second is. Collapsing them
+    /// into `1` is how a second unattended installer turns a five-second wait
+    /// into an alert.
+    InstallationBusy,
     Failure,
 }
 
@@ -905,11 +913,19 @@ impl ProcessOutcome {
             Self::AuthorizationRequired => 5,
             Self::VerificationFailure => 6,
             Self::RecoveryRequired => 7,
+            Self::InstallationBusy => 8,
             Self::RebootRequired => 3010,
             Self::Failure => 1,
         }
     }
 
+    /// Classify an outcome from its message.
+    ///
+    /// A last resort, used where a typed value has already been flattened into a
+    /// `miette` report. Everywhere a typed outcome or a typed event kind is
+    /// available the caller uses that instead — this function reads English, and
+    /// reading English is how "another operation is running" becomes a failure
+    /// with code 1 and an alert at three in the morning.
     pub fn from_message(message: &str) -> Self {
         let normalized = message.to_ascii_lowercase();
         if normalized.contains("cancelled")
@@ -930,6 +946,15 @@ impl ProcessOutcome {
             Self::RebootRequired
         } else if normalized.contains("recovery") || normalized.contains("journal") {
             Self::RecoveryRequired
+        } else if normalized.contains("busy")
+            || normalized.contains("already running")
+            || normalized.contains("another operation")
+        {
+            // Before the ownership and verification branches: a message about
+            // another operation in progress frequently mentions the very files
+            // that are locked, and classifying it as an ownership conflict would
+            // tell a user to repair an installation that is perfectly healthy.
+            Self::InstallationBusy
         } else if normalized.contains("drift")
             || normalized.contains("ownership")
             || normalized.contains("occupied")

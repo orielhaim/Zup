@@ -20,11 +20,12 @@ describe('phasesFor', () => {
     expect(phasesFor('publish')).toEqual(['publish'])
   })
 
-  it('orders release as build, compose, attest, publish', () => {
-    // The order is the contract: attesting before signing would attest bytes that
+  it('orders release as build, compose, finalize, attest, publish', () => {
+    // The order is the contract: finalizing before signing would record
+    // pre-signature digests, attesting before finalizing would attest bytes that
     // no longer exist, and publishing before attesting would release something
     // with no provenance.
-    expect(phasesFor('release')).toEqual(['build', 'compose', 'attest', 'publish'])
+    expect(phasesFor('release')).toEqual(['build', 'compose', 'finalize', 'attest', 'publish'])
   })
 
   it('runs no phases for an operation it does not know', () => {
@@ -163,7 +164,7 @@ describe('phase properties', () => {
   })
 
   it('marks the phases that produce an uploadable release directory', () => {
-    expect(phasesFor('release').filter(producesArtifacts)).toEqual(['build', 'compose'])
+    expect(phasesFor('release').filter(producesArtifacts)).toEqual(['build', 'compose', 'finalize'])
   })
 
   it('names the release manifest under the release directory', () => {

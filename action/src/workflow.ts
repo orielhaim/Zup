@@ -33,7 +33,7 @@ import {
 } from './phases.js'
 import { UnsupportedRunnerError } from './platform.js'
 import type { GithubContext, Log } from './ports.js'
-import { type OperationResult, parseResult, ResultFormatError } from './result.js'
+import { coversBytes, type OperationResult, parseResult, ResultFormatError } from './result.js'
 import {
   checkoutIsFromFork,
   context,
@@ -303,15 +303,30 @@ async function runPhase(
   runner: SpawnRunner,
   filesystem: NodeFileSystem,
 ): Promise<OperationResult | undefined> {
-  if (phase === 'attest') {
+  // `finalize` runs `zup sign verify` and then *reads* the result, rather than
+  // parsing a report the command prints. The release description is the document
+  // that says which bytes will be published, and it is the one every later phase
+  // acts on, so reading it here means the summary reports the identities a
+  // downloader will actually get rather than a transcript of the verification.
+  if (phase === 'attest' || phase === 'finalize') {
+    if (phase === 'finalize') {
+      const outcome = await runZup(phase, inputs, tool, log, github, runner)
+      if (outcome.code !== 0) {
+        throw new CommandFailure(phase, outcome.code, outcome.stderr)
+      }
+    }
     const manifest = await readReleaseManifest(inputs, filesystem)
     const artifacts = manifestArtifacts(manifest.document)
+    const unsigned = artifacts.filter((artifact) => !coversBytes(artifact.evidence))
     log.info(
-      `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in the release manifest`,
+      `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in the release manifest` +
+        (unsigned.length > 0
+          ? `, ${unsigned.length} with no signature: ${unsigned.map((a) => a.path).join(', ')}`
+          : ''),
     )
     return {
       schema: 1,
-      operation: 'attest',
+      operation: phase,
       success: true,
       appVersion: manifest.document.application.version,
       targets: manifest.document.variants.map((variant) => variant.target),
@@ -321,24 +336,35 @@ async function runPhase(
     }
   }
 
+  const outcome = await runZup(phase, inputs, tool, log, github, runner)
+  if (outcome.code !== 0) {
+    throw new CommandFailure(phase, outcome.code, outcome.stderr)
+  }
+  return parseResult(outcome.stdout, phase)
+}
+
+/** Run one phase's zup command. */
+async function runZup(
+  phase: Phase,
+  inputs: Inputs,
+  tool: ResolvedTool,
+  log: Log,
+  github: GithubContext,
+  runner: SpawnRunner,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const args = argumentsFor(phase, inputs)
   log.debug(`zup ${args.join(' ')}`)
 
   // Streaming is right for a build: a developer watching a compile wants to see it
   // compile. The structured result still comes back on stdout, because
   // `getExecOutput` streams and captures the same run.
-  const outcome = await runner.run({
+  return runner.run({
     program: tool.path,
     args,
     cwd: inputs.projectPath,
     env: buildEnvironment(phase, inputs, github),
     stream: true,
   })
-
-  if (outcome.code !== 0) {
-    throw new CommandFailure(phase, outcome.code, outcome.stderr)
-  }
-  return parseResult(outcome.stdout, phase)
 }
 
 /**
@@ -550,6 +576,8 @@ function titleFor(phase: Phase): string {
       return 'Build'
     case 'compose':
       return 'Compose'
+    case 'finalize':
+      return 'Finalize'
     case 'attest':
       return 'Attest'
     case 'publish':

@@ -8,41 +8,62 @@ import {
   parseManifest,
   shouldUploadDirect,
 } from '../src/artifacts.js'
+import type { SigningEvidence } from '../src/result.js'
+import { coversBytes } from '../src/result.js'
 
-/** A manifest as `zup build --release-manifest` writes it. */
+/** What a platform adapter hands over once it has verified a signature. */
+const SIGNED: SigningEvidence[] = [
+  { fact: 'signature_covers_bytes', value: 'sha256' },
+  { fact: 'platform_trust_accepted', value: 'windows' },
+  { fact: 'publisher', value: 'CN=Acme' },
+  { fact: 'certificate', value: '0011AABB' },
+  { fact: 'timestamp', value: 'rfc3161' },
+]
+
+/** A manifest as `zup build --release-manifest` and `zup sign verify` write it. */
 const MANIFEST: ReleaseManifestDocument = {
   schema: 1,
   application: { id: 'com.acme.app', name: 'Acme', version: '1.4.0' },
   root: '.',
   variants: [
-    { id: 'x64', target: 'x86_64-pc-windows-msvc', platform: 'windows', frontend: 'gui' },
+    {
+      id: 'x64',
+      target: 'x86_64-pc-windows-msvc',
+      platform: 'windows',
+      frontend: 'gui',
+      runtime: { digest: '9'.repeat(64), evidence: SIGNED },
+    },
     { id: 'arm64', target: 'aarch64-pc-windows-msvc', platform: 'windows', frontend: 'gui' },
   ],
   artifacts: [
     {
       id: 'installer-x64',
-      kind: 'installer',
-      mode: 'standalone',
+      kind: 'single',
+      mode: 'offline',
       path: 'Acme-Windows-x64-Setup.exe',
-      digest: 'a'.repeat(64),
-      size: 248_512_896,
-      signature: { status: 'signed', subject: 'Acme' },
+      // Signing appends a certificate table, so the built identity and the
+      // published one are different files for every signed artifact.
+      built: { digest: 'a'.repeat(64), size: 248_512_896 },
+      finalized: { digest: 'b'.repeat(64), size: 249_123_456, evidence: SIGNED },
     },
     {
       id: 'universal',
-      kind: 'installer',
-      mode: 'composed',
+      kind: 'universal',
+      mode: 'offline',
       path: 'Acme-Windows-Setup.exe',
-      digest: 'b'.repeat(64),
-      size: 259_522_560,
+      built: { digest: 'c'.repeat(64), size: 259_522_560 },
+      finalized: { digest: 'd'.repeat(64), size: 260_112_640, evidence: SIGNED },
     },
     {
       id: 'transport-x64',
       kind: 'package',
-      mode: 'transport',
+      mode: 'offline',
       path: 'Acme-Windows-x64.zup',
-      digest: 'c'.repeat(64),
-      size: 104_857_600,
+      built: { digest: 'f'.repeat(64), size: 104_857_600 },
+      // Finalized with no signature: a real published identity, and nothing in
+      // it that says who produced it. `finalized` and `signed` are different
+      // questions, and this artifact answers the first and not the second.
+      finalized: { digest: '0'.repeat(64), size: 104_857_600, evidence: [] },
     },
   ],
 }
@@ -73,6 +94,17 @@ describe('parseManifest', () => {
       parseManifest(JSON.stringify({ ...MANIFEST, artifacts: undefined }), path),
     ).toThrow(/no `artifacts`/u)
   })
+
+  it('refuses a manifest with an artifact that was never finalized', () => {
+    // Attesting the built digest would attest a file nobody downloads: signing
+    // appends a certificate table, so those bytes are not the ones released.
+    const unfinalized = MANIFEST.artifacts.map((artifact, index) =>
+      index === 2 ? { ...artifact, finalized: undefined } : artifact,
+    )
+    expect(() =>
+      parseManifest(JSON.stringify({ ...MANIFEST, artifacts: unfinalized }), path),
+    ).toThrow(/no `finalized` identity for .*Acme-Windows-x64\.zup/u)
+  })
 })
 
 describe('manifestArtifacts', () => {
@@ -83,16 +115,35 @@ describe('manifestArtifacts', () => {
       'Acme-Windows-Setup.exe',
       'Acme-Windows-x64.zup',
     ])
-    expect(artifacts[0]?.signature).toBe('signed')
-    expect(artifacts[1]?.signature).toBeUndefined()
+    // The published identity, not the built one.
+    expect(artifacts[0]?.digest).toBe('b'.repeat(64))
+    expect(artifacts[0]?.size).toBe(249_123_456)
+    expect(coversBytes(artifacts[0]?.evidence)).toBe(true)
+    // A finalized release with no signature is not a signed one, and the
+    // envelope says so rather than leaving the field out.
+    expect(artifacts[2]?.digest).toBe('0'.repeat(64))
+    expect(artifacts[2]?.evidence).toEqual([])
+    expect(coversBytes(artifacts[2]?.evidence)).toBe(false)
   })
 })
 
-/** The io the subject walk needs, in a form a test controls. */
+/**
+ * The io the subject walk needs, in a form a test controls.
+ *
+ * `ON_DISK` is what the files actually hash to, and it is mutable so a test can
+ * substitute bytes for bytes that were published.
+ */
+const ON_DISK: Record<string, string> = {
+  'Acme-Windows-x64-Setup.exe': 'b'.repeat(64),
+  'Acme-Windows-Setup.exe': 'd'.repeat(64),
+  'Acme-Windows-x64.zup': '0'.repeat(64),
+}
+
 const io = {
   resolve: (...segments: string[]): string => segments.join('/'),
   exists: async (target: string): Promise<boolean> => target.includes('present'),
-  digest: async (): Promise<string> => 'd'.repeat(64),
+  digest: async (target: string): Promise<string> =>
+    ON_DISK[target.slice(target.lastIndexOf('/') + 1)] ?? 'e'.repeat(64),
 }
 
 describe('attestSubjects', () => {
@@ -106,12 +157,27 @@ describe('attestSubjects', () => {
     ])
   })
 
-  it('carries the digest the manifest recorded, not a re-derived one', async () => {
-    // Attesting a different value than the one that was published would attest
-    // nothing, so the manifest is read rather than recomputed.
+  it('carries the published digest, not the built one', async () => {
+    // The built digest names pre-signature bytes, and attesting those would
+    // attach provenance to a file that no downloader ever receives.
     const subjects = await attestSubjects(path, MANIFEST, 'dist', [], io)
     const installer = subjects.find((entry) => entry.name.endsWith('Acme-Windows-Setup.exe'))
-    expect(installer?.digest).toBe('b'.repeat(64))
+    expect(installer?.digest).toBe('d'.repeat(64))
+  })
+
+  it('refuses a file that changed after the release was finalized', async () => {
+    // Re-derived rather than read. Attaching provenance to bytes the release
+    // does not claim is the failure attestation exists to prevent, so this is a
+    // refusal and not a warning.
+    const published = ON_DISK['Acme-Windows-Setup.exe'] as string
+    ON_DISK['Acme-Windows-Setup.exe'] = '7'.repeat(64)
+    try {
+      await expect(attestSubjects(path, MANIFEST, 'dist', [], io)).rejects.toThrow(
+        /changed after `zup sign verify` ran/u,
+      )
+    } finally {
+      ON_DISK['Acme-Windows-Setup.exe'] = published
+    }
   })
 
   it('is sorted, so a summary and a test see the same order', async () => {

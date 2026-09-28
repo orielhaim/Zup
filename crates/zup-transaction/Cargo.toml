@@ -22,4 +22,5 @@ zup-core.workspace = true
 zup-platform.workspace = true
 
 [dev-dependencies]
+fs-transaction.workspace = true
 tempfile.workspace = true

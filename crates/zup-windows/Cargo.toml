@@ -53,6 +53,7 @@ zstd.workspace = true
 semver.workspace = true
 zup-protocol.workspace = true
 zup-runtime.workspace = true
+zup-signing.workspace = true
 zup-transaction.workspace = true
 tempfile.workspace = true
 
@@ -72,6 +73,7 @@ windows-bindgen.workspace = true
 ignored = ["windows-bindgen"]
 
 [dev-dependencies]
+proptest.workspace = true
 zup-build.workspace = true
 serde_json.workspace = true
 zup-manifest.workspace = true

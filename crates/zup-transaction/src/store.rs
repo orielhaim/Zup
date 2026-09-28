@@ -2,6 +2,26 @@
 //!
 //! `fs_transaction` is used **only** for journal persistence — never for
 //! application payload mutation.
+//!
+//! # Why this store has no recovery pass
+//!
+//! `fs_transaction` ships a `recover` entry point and nothing here calls it,
+//! which reads like a missing crash-recovery path. It is not one, and the reason
+//! is worth stating because it is an obligation rather than an accident.
+//!
+//! Every apply this store performs is a change set of **one** op. `fs_transaction`
+//! documents that a set of one is already indivisible — a `write_atomic` is
+//! all-or-nothing by construction, and a lone rename or unlink is atomic by the
+//! filesystem's own guarantee — so it skips the journal rather than write, flush
+//! and then delete a second file to restate a promise the single op already
+//! carries. Nothing is journaled, so there is nothing to recover.
+//!
+//! That is a constraint, not a freedom. **A change set of several ops would start
+//! writing a journal, and this store would then owe a recovery pass it does not
+//! perform.** `tests/store.rs::a_store_write_leaves_no_journal_to_recover` asserts
+//! both halves — no journal exists after a create and a swap, and `recover`
+//! confirms there is nothing to roll forward — so a change set that grows fails
+//! there and names the obligation instead of being discovered on a user's machine.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -88,6 +108,16 @@ pub struct FilesystemTransactionStore {
 impl FilesystemTransactionStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    /// The state root this store writes under.
+    ///
+    /// Exposed because a test that wants to read a durable record — or copy the
+    /// store to observe one — needs to name the same root, and inventing a second
+    /// spelling of it is how a test ends up reading a different directory than the
+    /// one under test.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     fn journal_dir(&self, id: &TransactionId) -> PathBuf {

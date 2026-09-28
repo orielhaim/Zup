@@ -263,33 +263,102 @@ pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
 /// Single-writer installation lock (cooperating processes only).
 ///
 /// Uses `std::fs::File::try_lock` so two sessions in one process also exclude
-/// each other. This is coordination, not a security boundary.
+/// each other. This is coordination, not a security boundary: it stops two
+/// lifecycle operations from mutating one installation's ledger and work
+/// directory at the same time, and it says nothing about an adversary.
+///
+/// # What the identity is, and what it deliberately is not
+///
+/// The key is `(application, scope)`. Two installs of different applications do
+/// not block each other, and a user-scope and a machine-scope install of the same
+/// application do not either — they are different installations with different
+/// ledgers, different install directories, and different uninstall entries, and
+/// serialising them would make an unrelated second install wait for no reason.
+///
+/// It is *not* keyed by target or by version. Those are properties of one
+/// operation, not of the installation, and a key that changed as a plan changed
+/// would let two operations hold "the" lock for the same installation at once.
+///
+/// A crash releases the lock through the OS's handle lifetime, so there is no
+/// stale-PID cleanup to get wrong and no window where a dead process's lock
+/// outlives it.
+#[derive(Debug)]
 pub struct InstallationLock {
     file: std::fs::File,
     key: String,
 }
 
+/// What one installation's lock is for.
+///
+/// A value rather than two format strings, because the key is written in four
+/// places — a parent session, an elevated worker, a bootstrap phase, and an
+/// uninstall — and four spellings of one lock key is four chances for a parent
+/// and its worker to disagree about which installation they are serializing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockScope {
+    /// A lifecycle operation on an installed application.
+    Lifecycle,
+    /// A prerequisite bootstrap, which happens before an application exists.
+    Bootstrap,
+}
+
+impl LockScope {
+    /// The prefix that keeps a bootstrap lock from being mistaken for a
+    /// lifecycle one on the same installation.
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "zup-install",
+            Self::Bootstrap => "zup-bootstrap",
+        }
+    }
+}
+
 impl InstallationLock {
-    /// Lock identity derives from stable installation identity (AppId + scope).
+    /// Lock identity for one installation.
     pub fn lock_key(app_id: &str, scope: &str) -> String {
         format!("zup-install-{}-{}", sanitize(app_id), sanitize(scope))
     }
 
-    /// Try to acquire; `Ok(None)` means another session holds the lock.
+    /// The lock for one installation and one kind of operation.
+    ///
+    /// This is the only place a lifecycle lock key is spelled, and the reason the
+    /// bootstrap and transaction paths can be checked against each other: a parent
+    /// and the worker it elevates call this with the same arguments and get the
+    /// same file, on the same volume, whether or not either of them knows the
+    /// other's existence.
+    pub fn key_for(app_id: &str, scope: &str, kind: LockScope) -> String {
+        match kind {
+            LockScope::Lifecycle => Self::lock_key(app_id, scope),
+            LockScope::Bootstrap => {
+                format!("{}-{}-{}", kind.prefix(), sanitize(app_id), sanitize(scope))
+            }
+        }
+    }
+
+    /// The scope token a `SelectedScope` contributes to the key.
+    pub fn scope_token(scope: &str) -> String {
+        sanitize(scope)
+    }
+
+    /// Try to acquire the named lock; `Ok(None)` means another session holds it.
+    ///
+    /// The error names the state root rather than the lock file. The root is a
+    /// directory a user can find; the file inside it is an implementation detail,
+    /// and a message about an implementation detail sends people looking in the
+    /// wrong place.
     pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, DurableError> {
         std::fs::create_dir_all(state_root).map_err(|source| DurableError::Io {
             path: state_root.display().to_string(),
             source,
         })?;
-        let path = state_root.join(format!("{key}.lock"));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&path)
+            .open(state_root.join(format!("{key}.lock")))
             .map_err(|source| DurableError::Io {
-                path: path.display().to_string(),
+                path: state_root.display().to_string(),
                 source,
             })?;
         match file.try_lock() {
@@ -323,6 +392,7 @@ impl InstallationLock {
         Ok(())
     }
 
+    /// The key this lock was taken under.
     pub fn key(&self) -> &str {
         &self.key
     }

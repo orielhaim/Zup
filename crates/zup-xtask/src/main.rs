@@ -35,11 +35,31 @@ xtask toolchain build [--profile <name>]
     Run it once per profile; a contributor running `cargo test` or `cargo run`
     needs the debug profile, which is the default.
 
+xtask toolchain package [--profile <name>] [--out <dir>]
+    Assemble one directory that is a complete zup release: `zup`, the toolchain
+    for this exact version, and `zup-toolchain.json` naming every file with its
+    digest. Unzip it and `zup build` works; there is no second download.
+
+xtask release clean-room [--material <dir>] [--work <dir>]
+    Prove the released zup works from outside this repository. Verifies the
+    release index, creates an empty project directory with a scrubbed
+    environment, and runs `zup init`, `check`, `doctor` and `build` using only
+    the release material. Asserts the artifact is a real Portable Executable and
+    that nothing in the release description names the machine that built it.
+
+xtask verify-dependency-graph [--root <dir>]
+    Refuse a dependency graph that grew by accident. Fails when a workspace
+    package reaches two versions of one external crate, and when development
+    tooling has reached the graph of a binary that ships to users.
+
 options:
     --root <dir>         workspace to inspect (default: this repository)
     --online             reach GitHub to report newer releases
     --add <owner/name>   add an action to the lock before refreshing
     --profile <name>     cargo profile to build and stage beside (default: dev)
+    --out <dir>          where to write the packaged release
+    --material <dir>     release material to test (default: target/release-material/<version>)
+    --work <dir>         an empty directory to run in (default: a fresh temp directory)
 
 exit codes:
     0  clean
@@ -55,6 +75,9 @@ const OPTIONS: &[&str] = &[
     "--online",
     "--add",
     "--profile",
+    "--out",
+    "--material",
+    "--work",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +95,9 @@ struct Options {
     online: bool,
     add: Vec<String>,
     profile: Option<String>,
+    out: Option<PathBuf>,
+    material: Option<PathBuf>,
+    work: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -98,6 +124,8 @@ fn run() -> Result<ExitCode, String> {
         "verify-portable-boundaries" => verify(&mut arguments),
         "github-action-pins" => action_pins(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
+        "verify-dependency-graph" => dependency_graph(&mut arguments),
+        "release" => release(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }
 }
@@ -178,22 +206,50 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
     Ok(ExitCode::from(1))
 }
 
-/// Build the local toolchain a contributor's `zup build` composes from.
+/// Build the local toolchain a contributor's `zup build` composes from, or
+/// assemble it into a directory a developer can unzip and use.
 fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
-        return Err("toolchain needs `build`\n\n".to_owned() + USAGE);
+        return Err("toolchain needs `build` or `package`\n\n".to_owned() + USAGE);
     };
-    if subcommand != "build" {
-        return Err(format!(
-            "unknown toolchain subcommand `{subcommand}`\n\n{USAGE}"
-        ));
-    }
-    let options = parse(arguments, "toolchain build", &["--root", "--profile"])?;
+    let allowed: &[&str] = match subcommand.as_str() {
+        "build" => &["--root", "--profile"],
+        "package" => &["--root", "--profile", "--out"],
+        unknown => {
+            return Err(format!(
+                "unknown toolchain subcommand `{unknown}`\n\n{USAGE}"
+            ));
+        }
+    };
+    let options = parse(arguments, &format!("toolchain {subcommand}"), allowed)?;
     let root = options
         .root
         .unwrap_or_else(zup_xtask::toolchain::repository_root);
     let version = zup_xtask::toolchain::version()?;
     let profile = options.profile.unwrap_or_else(|| "dev".to_owned());
+
+    if subcommand == "package" {
+        let out = options
+            .out
+            .unwrap_or_else(|| root.join("target").join("release-material").join(&version));
+        println!("Packaging the zup {version} release ({profile})");
+        let written = zup_xtask::toolchain::package(&root, &profile, &out)?;
+        let components = std::fs::read_dir(written.join("toolchain").join(&version))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_file())
+                    .count()
+            })
+            .unwrap_or(0);
+        println!();
+        println!("Release material in {}", written.display());
+        println!("  zup + {components} toolchain files");
+        println!("  {}", zup_xtask::toolchain::RELEASE_INDEX_NAME);
+        println!("\nUnzip it anywhere and run `zup build`: there is nothing else to install.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
     println!("Building the zup {version} toolchain ({profile})");
     let written = zup_xtask::toolchain::build(&root, &profile)?;
     let staged = zup_xtask::toolchain::staging_directory(&root, &profile, &version);
@@ -204,6 +260,73 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
         staged.display()
     );
     println!("`zup build` will find them without being told where they are.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Refuse a dependency graph that grew by accident.
+fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let options = parse(arguments, "verify-dependency-graph", &["--root"])?;
+    let root = match options.root {
+        Some(root) => root,
+        None => repository_root(),
+    };
+    let findings = zup_xtask::graph::check(&root)?;
+    if findings.is_clean() {
+        println!("verify-dependency-graph: clean");
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Every finding is printed, not a count. A count tells a reviewer that
+    // something is wrong; the offending edge is what they can act on.
+    for duplicate in &findings.duplicates {
+        eprintln!("xtask: {duplicate}");
+    }
+    for intrusion in &findings.intrusions {
+        eprintln!("xtask: {intrusion}");
+    }
+    eprintln!(
+        "xtask: {} finding(s)",
+        findings.duplicates.len() + findings.intrusions.len()
+    );
+    Ok(ExitCode::from(1))
+}
+
+/// Prove a packaged release works from outside this repository.
+fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let Some(subcommand) = arguments.next() else {
+        return Err("release needs `clean-room`\n\n".to_owned() + USAGE);
+    };
+    let allowed: &[&str] = match subcommand.as_str() {
+        "clean-room" => &["--root", "--material", "--work"],
+        unknown => return Err(format!("unknown release subcommand `{unknown}`\n\n{USAGE}")),
+    };
+    let options = parse(arguments, &format!("release {subcommand}"), allowed)?;
+    let root = options
+        .root
+        .unwrap_or_else(zup_xtask::toolchain::repository_root);
+    let version = zup_xtask::toolchain::version()?;
+    let material = options
+        .material
+        .unwrap_or_else(|| root.join("target").join("release-material").join(&version));
+    // A fresh directory every run: the assertion that matters is that the
+    // project starts with nothing in it, and reusing one would test whatever the
+    // last run left behind.
+    let work = options
+        .work
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("zup-clean-room-{version}")));
+    if work.exists() {
+        std::fs::remove_dir_all(&work).map_err(|error| format!("{}: {error}", work.display()))?;
+    }
+    println!("Clean-room run");
+    println!("  material  {}", material.display());
+    println!("  work      {}", work.display());
+    let outcome = zup_xtask::cleanroom::run(&material, &work)?;
+    println!();
+    println!("  {}", outcome.readiness);
+    println!("  artifact          {}", outcome.artifact.display());
+    println!("  release           {}", outcome.release.display());
+    println!();
+    println!("zup init, check, doctor and build all work with no checkout, no target/,");
+    println!("no staged runtime and no xtask — only the release material.");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -270,6 +393,9 @@ fn parse(
             "--matrix" => options.matrices.push(value),
             "--add" => options.add.push(value),
             "--profile" => options.profile = Some(value),
+            "--out" => options.out = Some(PathBuf::from(value)),
+            "--material" => options.material = Some(PathBuf::from(value)),
+            "--work" => options.work = Some(PathBuf::from(value)),
             "--format" => {
                 options.format = match value.as_str() {
                     "text" => Format::Text,

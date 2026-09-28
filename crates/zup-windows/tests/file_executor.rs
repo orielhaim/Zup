@@ -9,8 +9,8 @@ use zup_transaction::{
     FileDelta, FilePrecondition, OperationId, TransactionInput, compile_transaction,
 };
 use zup_windows::{
-    InstallationLock, NullProgress, WindowsFileExecutor, apply_node, create_durable, move_durable,
-    reconcile_node, to_host_path, volume_root, write_durable,
+    InstallationLock, LockScope, NullProgress, WindowsFileExecutor, apply_node, create_durable,
+    move_durable, reconcile_node, to_host_path, volume_root, write_durable,
 };
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
@@ -280,6 +280,95 @@ fn installation_lock_exclusive() {
     drop(first);
     let third = InstallationLock::try_acquire(dir.path(), &key).unwrap();
     assert!(third.is_some(), "lock released on drop");
+}
+
+/// The lock's identity is the installation, not the operation or the machine
+/// layout. Everything here is a case where getting it wrong means either two
+/// processes mutating one ledger, or two unrelated installs refusing to run at
+/// the same time.
+#[test]
+fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
+    let acme = InstallationLock::lock_key("com.acme.desktop", "user");
+    let other = InstallationLock::lock_key("com.other.desktop", "user");
+    let machine = InstallationLock::lock_key("com.acme.desktop", "machine");
+    assert_ne!(acme, other, "two applications are two installations");
+    assert_ne!(
+        acme, machine,
+        "a user install and a machine install are separate installations with \
+         separate ledgers, separate directories and separate uninstall entries"
+    );
+
+    // A bootstrap and a transaction on the same installation are the same
+    // authority, but a parent that is staging prerequisites and a worker that is
+    // installing files are different moments of one operation, and the key has
+    // to say so without the two ever colliding.
+    let bootstrap = InstallationLock::key_for("com.acme.desktop", "user", LockScope::Bootstrap);
+    let lifecycle = InstallationLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle);
+    assert_eq!(
+        lifecycle, acme,
+        "one spelling of the lifecycle key, not two"
+    );
+    assert_ne!(
+        bootstrap, lifecycle,
+        "a bootstrap and a transaction must not hold the same lock"
+    );
+    assert!(
+        bootstrap.starts_with("zup-bootstrap-"),
+        "a bootstrap key says so, because a parent and a worker read each other's: {bootstrap}"
+    );
+    assert!(
+        InstallationLock::key_for("com.other.desktop", "user", LockScope::Bootstrap) != bootstrap,
+        "two applications are two installations, bootstrap phase included"
+    );
+
+    // The key has to survive a character an application id may legally contain
+    // but a file name may not.
+    let awkward = InstallationLock::lock_key("com.acme.desktop/../../etc", "user");
+    assert!(!awkward.contains('/'), "{awkward}");
+    assert!(!awkward.contains(".."), "{awkward}");
+}
+
+/// The refusal names the state root, not the lock file.
+///
+/// A message containing `%LOCALAPPDATA%\zup\zup-install-com_acme_desktop-user.lock`
+/// sends a user to look at a file that means nothing to them; the directory it
+/// lives in is the thing they can act on.
+#[test]
+fn a_lock_refusal_names_a_directory_and_not_an_implementation_detail() {
+    let dir = TempDir::new().unwrap();
+    // A directory where the lock file goes: opening it cannot succeed, and the
+    // message has to be about the directory a user can look at.
+    let key = InstallationLock::lock_key("com.acme.desktop", "machine");
+    std::fs::create_dir(dir.path().join(format!("{key}.lock"))).unwrap();
+    let error = InstallationLock::try_acquire(dir.path(), &key).expect_err("not a file");
+    let message = error.to_string();
+    assert!(!message.contains(".lock"), "{message}");
+    assert!(
+        message.contains(&dir.path().display().to_string()),
+        "{message}"
+    );
+}
+
+/// An uninstalled installation leaves no lock behind, and a reinstall starts
+/// clean. This is the residue a repeat-lifecycle test would otherwise leave
+/// behind for the next run to trip over.
+#[test]
+fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
+    let dir = TempDir::new().unwrap();
+    let key = InstallationLock::lock_key("com.acme.desktop", "user");
+    let held = InstallationLock::try_acquire(dir.path(), &key)
+        .unwrap()
+        .expect("first lock");
+    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
+    assert!(
+        dir.path().join(format!("{key}.lock")).exists(),
+        "a held lock's marker is not somebody else's to delete"
+    );
+    drop(held);
+    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
+    assert!(!dir.path().join(format!("{key}.lock")).exists());
+    // And removing again is not an error: uninstall is idempotent.
+    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
 }
 
 #[test]

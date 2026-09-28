@@ -694,12 +694,20 @@ async fn run_elevated_bootstrap(
                         });
                     }
                     zup_protocol::Message::Failed(failed)
-                        if cancel_sent && failed.kind == "cancelled" =>
+                        if cancel_sent && failed.kind == zup_protocol::failure::CANCELLED =>
                     {
                         return Err(SessionError::Cancelled);
                     }
                     zup_protocol::Message::Failed(failed) => {
-                        return Err(SessionError::Prerequisite(failed.message));
+                        return Err(match failed.kind.as_str() {
+                            zup_protocol::failure::INSTALLATION_BUSY => {
+                                SessionError::InstallationBusy
+                            }
+                            zup_protocol::failure::AUTHENTICATION => {
+                                SessionError::Protocol(failed.message)
+                            }
+                            _ => SessionError::Prerequisite(failed.message),
+                        });
                     }
                     zup_protocol::Message::Progress(progress) => {
                         let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
@@ -1143,7 +1151,30 @@ async fn run_elevated_worker(
                     };
                     return Ok(outcome);
                 }
-                zup_protocol::Message::Failed(failed) => return Err(SessionError::Transaction(failed.message)),
+                zup_protocol::Message::Failed(failed) => {
+                    // The kind, not the message, is what the caller acts on. A
+                    // busy installation becomes a typed state the frontends can
+                    // offer to retry, rather than a sentence somebody has to read
+                    // and classify. An unrecognized kind is a protocol failure,
+                    // never a default: a newer worker talking to an older parent
+                    // has to be refused rather than reported as a broken install.
+                    return Err(match failed.kind.as_str() {
+                        zup_protocol::failure::INSTALLATION_BUSY => {
+                            SessionError::InstallationBusy
+                        }
+                        zup_protocol::failure::AUTHENTICATION => {
+                            SessionError::Protocol(failed.message)
+                        }
+                        kind if zup_protocol::FAILURE_KINDS.contains(&kind) => {
+                            SessionError::Transaction(failed.message)
+                        }
+                        other => {
+                            return Err(SessionError::Protocol(format!(
+                                "the worker reported an unknown failure kind `{other}`"
+                            )));
+                        }
+                    });
+                }
                 _ => return Err(SessionError::Protocol("unexpected worker message".into())),
                 }
             }
@@ -1316,7 +1347,14 @@ fn execute_local_blocking_with_events_inner(
     );
     let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
         Ok(Some(lock)) => lock,
-        Ok(None) => return InstallOutcome::Failed("installation busy".into()),
+        // A typed state, not a failure string: a caller that can see this is one
+        // more of the same operation can wait for the other to finish, and the
+        // headless exit code says so.
+        Ok(None) => {
+            return InstallOutcome::Busy {
+                operation: "another maintenance operation",
+            };
+        }
         Err(e) => return InstallOutcome::Failed(e.to_string()),
     };
 

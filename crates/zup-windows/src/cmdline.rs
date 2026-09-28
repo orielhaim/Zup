@@ -17,12 +17,18 @@ pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
 }
 
 /// Quote a single argument according to Windows command-line conventions.
+///
+/// The set of characters that force quoting is *every* character
+/// `split_command_line` would treat as a separator, which is `char::is_whitespace`
+/// plus the quote itself. Quoting more than the platform strictly requires is
+/// always safe — `CommandLineToArgvW` accepts quotes anywhere — while quoting
+/// less is not, and a hardcoded list of "the whitespace characters" is a list
+/// somebody enumerated rather than one the reader agreed to. A carriage return, a
+/// form feed, or a non-breaking space is whitespace to `split_command_line` and
+/// was not to an earlier version of this function, so an argument containing one
+/// formatted unquoted and parsed back as two.
 pub fn quote_arg(arg: &str) -> String {
-    if !arg.is_empty()
-        && !arg
-            .chars()
-            .any(|c| c == ' ' || c == '\t' || c == '\n' || c == '\u{0b}' || c == '"')
-    {
+    if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"') {
         return arg.to_owned();
     }
 

@@ -20,6 +20,7 @@ mod ledger;
 mod lowering;
 mod machine_state;
 mod payload_overlay;
+mod pe_resources;
 mod pipe;
 mod planning;
 mod prerequisites;
@@ -34,6 +35,7 @@ mod services;
 mod shell_link;
 mod shortcut_name;
 mod shortcuts;
+pub mod signing;
 mod source_policy;
 mod transaction_payload;
 mod transport;
@@ -63,8 +65,8 @@ pub use content_store::{
     maintenance_directory, remove_store, validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{
-    DurableError, InstallationLock, copy_new_durable, create_durable, move_durable, volume_root,
-    write_durable,
+    DurableError, InstallationLock, LockScope, copy_new_durable, create_durable, move_durable,
+    volume_root, write_durable,
 };
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
@@ -96,6 +98,7 @@ pub use payload_overlay::{
     is_plugin_payload_path, materialize_payload_overlay, payload_overlay_base_root,
     validate_payload_overlay_base, verify_payload_overlay,
 };
+pub use pe_resources::{ResourceError, read_resource, write_resources};
 pub use pipe::{
     ClientReader, ClientWriter, HELLO_TIMEOUT, PipeError, PipeSecurity, PipeServer, ServerReader,
     ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,

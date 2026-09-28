@@ -324,7 +324,10 @@ fn inspect_describes_the_built_artifact_in_text_and_json() {
     );
     assert!(text.contains("x86_64-pc-windows-msvc"), "{text}");
     assert!(text.contains("aarch64-pc-windows-msvc"), "{text}");
-    assert!(text.contains("Authenticode             unsigned"), "{text}");
+    assert!(
+        text.contains("Authenticode             no certificate table"),
+        "{text}"
+    );
     assert!(text.contains("content digests          valid"), "{text}");
 
     let json = zup(&[
@@ -343,7 +346,10 @@ fn inspect_describes_the_built_artifact_in_text_and_json() {
     assert_eq!(report["subsystem"], "console");
     assert_eq!(report["application"], "Universal");
     assert_eq!(report["application_version"], "1.4.0");
-    assert_eq!(report["trust"]["authenticode"], "unsigned");
+    assert_eq!(
+        report["trust"]["authenticode"], "no certificate table",
+        "a structural answer, not a trust answer: a linker emits no certificate table"
+    );
     assert_eq!(report["trust"]["content_digests"], "valid");
     assert_eq!(report["variants"].as_array().unwrap().len(), 2);
     // Every blob is either needed by more than one variant or by exactly one, so
@@ -399,13 +405,31 @@ fn a_release_description_names_files_rather_than_build_paths() {
     assert_eq!(entry["kind"], "universal");
     assert_eq!(entry["mode"], "offline");
     assert_eq!(entry["subsystem"], "console");
-    assert_eq!(entry["size"], fs::metadata(&output).unwrap().len());
+    // The pre-signature identity. A build produces unsigned bytes, so this is what
+    // `zup sign verify` starts from and what a finalized release replaces; the
+    // absence of a `finalized` block is the release saying it has not been signed.
     assert_eq!(
-        entry["digest"].as_str().unwrap().len(),
+        entry["built"]["size"].as_u64(),
+        Some(fs::metadata(&output).unwrap().len())
+    );
+    assert_eq!(
+        entry["built"]["digest"].as_str().unwrap().len(),
         64,
         "a content digest, so a publisher can verify what it shipped"
     );
+    assert!(
+        entry.get("finalized").is_none(),
+        "a build does not finalize a release; `zup sign verify` does"
+    );
     assert_eq!(entry["variants"].as_array().unwrap().len(), 2);
+    // Every variant names the runtime it embeds, because that runtime is a
+    // separate executable on a user's machine.
+    for variant in variants {
+        assert!(
+            variant["runtime"]["digest"].as_str().unwrap().len() == 64,
+            "a variant must name the runtime bytes it embeds: {variant}"
+        );
+    }
     // No build-machine path survives into a published description.
     assert!(
         !text.contains(&project.path().display().to_string()),

@@ -61,8 +61,26 @@ impl BlobTable {
     /// Packing is deterministic: entries are visited in ascending digest order
     /// and a new segment starts only when the next blob would not fit, so the
     /// same content always produces the same table and the same byte layout.
+    ///
+    /// Repeats are collapsed, because a table names every *unique* blob and a
+    /// duplicate is one object stored twice — and because `validate` refuses a
+    /// table that names a digest twice, so a `pack` that kept them would hand
+    /// back something its own `parse` rejects. Two entries for one digest that
+    /// disagree about size are a different mistake and are refused rather than
+    /// silently resolved: which of the two a reader should fetch is not a question
+    /// this function can answer.
     pub fn pack(mut entries: Vec<BlobEntry>) -> Result<Self, ArtifactError> {
         entries.sort_by_key(|entry| entry.digest);
+        entries.dedup_by(|left, right| {
+            left.digest == right.digest
+                && left.size == right.size
+                && left.compressed_size == right.compressed_size
+        });
+        for pair in entries.windows(2) {
+            if pair[0].digest == pair[1].digest {
+                return Err(ArtifactError::Invalid);
+            }
+        }
         if entries.len() > MAX_BLOBS {
             return Err(ArtifactError::TooManyBlobs {
                 count: entries.len(),
@@ -280,6 +298,30 @@ mod tests {
         assert_eq!(table.segments, 0);
         table.validate().unwrap();
         assert_eq!(table.stored_size(), 8);
+    }
+
+    /// A payload with two identical files produces two plan entries with one
+    /// digest, and `pack` used to keep both — handing back a table its own
+    /// `parse` refuses. A pack that cannot be re-read is not a pack.
+    #[test]
+    fn one_digest_stored_twice_is_one_entry() {
+        let table = BlobTable::pack(vec![entry(1, 4), entry(1, 4), entry(2, 4)]).unwrap();
+        assert_eq!(table.blobs.len(), 2);
+        table.validate().unwrap();
+        let encoded = table.encode().unwrap();
+        assert_eq!(BlobTable::parse(&encoded).unwrap(), table);
+    }
+
+    /// Two entries for one digest that disagree are a different mistake, and
+    /// picking one of them would be guessing which bytes a reader should fetch.
+    #[test]
+    fn one_digest_described_two_ways_is_refused() {
+        let mut disagreeing = entry(1, 4);
+        disagreeing.size = 99;
+        assert!(matches!(
+            BlobTable::pack(vec![entry(1, 4), disagreeing]),
+            Err(ArtifactError::Invalid)
+        ));
     }
 
     #[test]

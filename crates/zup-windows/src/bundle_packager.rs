@@ -46,6 +46,8 @@ pub enum BundleError {
     TooManyBlobs { count: usize, limit: usize },
     #[error("cannot allocate {size} bytes while processing executable resources")]
     ResourceAllocation { size: u64 },
+    #[error("image resources: {0}")]
+    Resource(String),
     #[error("runtime already has an Authenticode certificate table; embed before signing")]
     RuntimeAlreadySigned,
     #[error("runtime frontend is {found:?}; expected {expected:?}")]
@@ -66,7 +68,6 @@ impl BundleError {
 impl From<PeError> for BundleError {
     fn from(error: PeError) -> Self {
         match error {
-            PeError::MissingResource(_) => Self::MissingResource,
             PeError::Invalid => Self::Invalid,
             other => Self::Portable(other),
         }
@@ -77,7 +78,11 @@ impl From<PeError> for BundleError {
 /// answer so a program without a package and a program with a broken one are
 /// told apart.
 fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
-    zup_pe::read_resource(executable, id).map_err(BundleError::from)
+    crate::pe_resources::read_resource(executable, id).map_err(|error| match error {
+        crate::pe_resources::ResourceError::Absent(_) => BundleError::MissingResource,
+        crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
+        other => BundleError::Resource(other.to_string()),
+    })
 }
 
 /// A package embedded in a Windows executable.
@@ -359,7 +364,7 @@ pub fn sidecar_package_path(executable: &Path) -> PathBuf {
 /// one case and an artifact index in the other. A single-target artifact stays a
 /// payload root, so this is a narrow question with a narrow answer.
 fn is_universal_artifact(executable: &Path) -> bool {
-    match zup_pe::read_resource(executable, RESOURCE_ID_INDEX) {
+    match crate::pe_resources::read_resource(executable, RESOURCE_ID_INDEX) {
         Ok(bytes) => zup_artifact::ArtifactIndex::parse(&bytes).is_ok(),
         Err(_) => false,
     }
@@ -637,7 +642,12 @@ fn embed_bundle_resource(
 ) -> Result<(), BundleError> {
     let package = Package::open_unverified(package_path)?;
     let documents = package_documents(&package)?;
-    zup_pe::write_resources(executable, output, &documents)?;
+    crate::pe_resources::write_resources(executable, output, &documents).map_err(|error| {
+        match error {
+            crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
+            other => BundleError::Resource(other.to_string()),
+        }
+    })?;
     Ok(())
 }
 

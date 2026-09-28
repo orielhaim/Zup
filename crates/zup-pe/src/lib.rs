@@ -12,13 +12,48 @@
 //!
 //! A build-time inspector answers a different question — what format and machine
 //! an arbitrary template is — and belongs in `zup-build`, which is portable.
+//!
+//! # What this crate is and is not allowed to know
+//!
+//! A PE is a file format, and Authenticode is part of it: an image may carry a
+//! certificate table holding a PKCS#7 blob, and the digest that blob claims over
+//! the image is computed by a rule the format specifies. [`authenticode`] reads
+//! and computes both, on every platform, because both are properties of the
+//! bytes.
+//!
+//! Whether *Windows* trusts the chain, whether the publisher matches a project's
+//! policy, whether a timestamp is acceptable, and whether a file is safe to run
+//! are not properties of the bytes. They are answers from a machine's trust
+//! store, and they live in the Windows adapter, which is the only place that can
+//! ask. The line is drawn deliberately: this crate will tell you a signature
+//! covers these bytes, and it will refuse to tell you anybody should install it.
+//!
+//! The PE parsing itself is delegated where a maintained implementation exists.
+//! [`authenticode`] uses `google/authenticode-rs` for the certificate table, the
+//! `WIN_CERTIFICATE` walk and the image digest, and this crate contributes the
+//! image layout those routines read: the header is parsed here, once, and
+//! everything that needs a section range or a data directory asks for it.
+//!
+//! The header is read **without loading the file**, because a universal artifact
+//! is measured in gigabytes and `is_signed` is asked about one every time
+//! anything composes. Only [`authenticode::image_digest`] needs the whole image,
+//! and only because the digest rule reads sections in an order the file is not
+//! laid out in.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::Path;
 
 use thiserror::Error;
-use windows_link::link;
+
+pub mod authenticode;
+
+pub use authenticode::{
+    Certificate, DigestAlgorithm, EmbeddedSignature, SignatureDigest, SigningCertificate,
+    authenticode_digest, certificates, embedded_signature, image_digest, signature_blob,
+    signing_certificate,
+};
 
 /// The resource type every zup container stores its documents under.
 pub const RESOURCE_TYPE_RCDATA: u16 = 10;
@@ -78,56 +113,110 @@ pub enum Subsystem {
     Other(u16),
 }
 
+/// The offsets a PE image's layout is made of.
+///
+/// Every field is a file offset, which is the thing the format specification is
+/// explicit about and the thing a reader gets wrong: the Certificate Table data
+/// directory holds a **file offset, not an RVA**, because the table is not
+/// mapped into memory and is not part of any section. Everything else in a PE
+/// directory is an RVA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Layout {
+    /// `SizeOfHeaders`: the end of the header region, and the first byte hashed
+    /// after the three excluded fields below.
+    after_header: usize,
+    /// The `CheckSum` field itself, which the Authenticode digest excludes.
+    check_sum: usize,
+    /// The byte after `CheckSum`.
+    after_check_sum: usize,
+    /// The Security data directory entry itself, which the digest also excludes:
+    /// it names the certificate table, and hashing it would make the digest
+    /// depend on the very signature being computed.
+    security_data_dir: usize,
+    /// The byte after that entry.
+    after_security_data_dir: usize,
+    /// Each section's raw data range, in the order the section table lists them.
+    /// The digest sorts these by start offset before hashing, because the file
+    /// order and the load order are not the same order.
+    sections: Vec<Range<usize>>,
+    /// The certificate table's file range, or `None` when the directory is zeroed.
+    certificate_table: Option<Range<usize>>,
+}
+
 /// The parts of a PE header zup reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeHeader {
     pub machine: Machine,
     pub subsystem: Subsystem,
     raw_machine: u16,
     raw_subsystem: u16,
-    security_offset: u64,
+    layout: Layout,
 }
 
 impl PeHeader {
-    /// Whether the image already carries an Authenticode certificate table.
-    pub fn is_signed(&self, file: &mut File) -> Result<bool, PeError> {
-        file.seek(SeekFrom::Start(self.security_offset))?;
-        let mut certificate = [0u8; 8];
-        file.read_exact(&mut certificate)?;
-        Ok(certificate != [0; 8])
+    /// Whether the image already carries a certificate table.
+    ///
+    /// A structural fact, read from the data directory and nothing more: it says
+    /// the image was *given* a signature, not that the signature is intact. A
+    /// table that does not parse is still a table, and composition must refuse
+    /// to write resources over either.
+    pub fn is_signed(&self) -> bool {
+        self.layout.certificate_table.is_some()
+    }
+
+    /// The certificate table's file range, if the image has one.
+    pub fn certificate_table(&self) -> Option<Range<usize>> {
+        self.layout.certificate_table.clone()
     }
 }
 
-/// Failures produced by the PE reader and writer.
+/// Failures produced by the PE reader.
 #[derive(Debug, Error)]
 pub enum PeError {
     #[error("PE I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("image is truncated, corrupt, or not a Portable Executable")]
     Invalid,
-    #[error("executable has no resource {0}")]
-    MissingResource(usize),
     #[error("resource data is {size} bytes; the limit is {limit} bytes")]
     ResourceTooLarge { size: u64, limit: u64 },
     #[error("container would use {count} resources; the limit is {limit}")]
     TooManyResources { count: usize, limit: usize },
-    #[error("resource API failed with error {0}")]
-    ResourceApi(u32),
-    #[error("resource APIs are available only on Windows")]
-    ResourcesUnavailable,
-    #[error("cannot allocate {size} bytes while processing image resources")]
-    Allocation { size: u64 },
 }
 
+/// The smallest optional header zup can read anything from: the `SizeOfHeaders`,
+/// `CheckSum` and `Subsystem` fields end at byte 70, and the last four bytes
+/// after them are the start of the data directories.
+const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = 70;
+/// Offsets inside the optional header. These are the same for PE32 and PE32+:
+/// the two layouts differ only below `SectionAlignment`, and a PE32+ image
+/// replaces `{BaseOfData, ImageBase}` with a 64-bit `ImageBase`, which is
+/// exactly as wide, so every field from `SectionAlignment` on lands at the same
+/// offset in both.
+const PE_SIZE_OF_HEADERS_OFFSET: u64 = 60;
+const PE_CHECKSUM_OFFSET: u64 = 64;
 const PE_SUBSYSTEM_OFFSET: u64 = 68;
-const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = PE_SUBSYSTEM_OFFSET + 2;
+/// The Certificate Table is data directory entry 4.
+const PE_SECURITY_DIRECTORY_INDEX: u64 = 4;
+const PE_DATA_DIRECTORY_SIZE: u64 = 8;
+const PE_SECTION_HEADER_SIZE: u64 = 40;
+const PE_SECTION_POINTER_TO_RAW_DATA: u64 = 20;
+const PE_SECTION_SIZE_OF_RAW_DATA: u64 = 16;
 const IMAGE_SUBSYSTEM_GUI: u16 = 2;
 const IMAGE_SUBSYSTEM_CUI: u16 = 3;
 
 /// Read the header fields zup needs from an image.
+///
+/// Seeks rather than slurps: the header is a few hundred bytes at a fixed set of
+/// offsets, and the only reason to read more of the file is a caller that asks
+/// [`PeHeader::read_resource`] for one.
 pub fn read_pe_header(path: &Path) -> Result<PeHeader, PeError> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
+    read_header(&mut file, len)
+}
+
+fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, PeError> {
+    let file = source;
     if len < 0x40 {
         return Err(PeError::Invalid);
     }
@@ -158,38 +247,93 @@ pub fn read_pe_header(path: &Path) -> Result<PeHeader, PeError> {
     if optional_len < PE_MIN_OPTIONAL_HEADER_SIZE || optional_end > len || section_count == 0 {
         return Err(PeError::Invalid);
     }
+    let mut optional = vec![0u8; optional_len as usize];
     file.seek(SeekFrom::Start(optional_offset))?;
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic)?;
-    let data_directory_offset = match u16::from_le_bytes(magic) {
+    file.read_exact(&mut optional)?;
+    let data_directory_offset: u64 = match u16::from_le_bytes(optional[..2].try_into().unwrap()) {
         0x10b => 96,
         0x20b => 112,
         _ => return Err(PeError::Invalid),
     };
-    let security_offset = optional_offset
-        .checked_add(data_directory_offset)
-        .and_then(|offset| offset.checked_add(8 * 4))
+    let field = |at: u64| -> Result<u32, PeError> {
+        let end = at.checked_add(4).ok_or(PeError::Invalid)?;
+        let bytes = optional
+            .get(at as usize..end as usize)
+            .ok_or(PeError::Invalid)?;
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    };
+    let security_offset = data_directory_offset
+        .checked_add(PE_SECURITY_DIRECTORY_INDEX * PE_DATA_DIRECTORY_SIZE)
         .ok_or(PeError::Invalid)?;
     if security_offset
-        .checked_add(8)
+        .checked_add(2 * PE_DATA_DIRECTORY_SIZE)
         .is_none_or(|end| end > optional_end)
     {
         return Err(PeError::Invalid);
     }
-    file.seek(SeekFrom::Start(optional_offset + PE_SUBSYSTEM_OFFSET))?;
-    let mut subsystem = [0u8; 2];
-    file.read_exact(&mut subsystem)?;
-    let raw_subsystem = u16::from_le_bytes(subsystem);
-    let section_end = optional_end
+    let check_sum = optional_offset + PE_CHECKSUM_OFFSET;
+    let security_data_dir = optional_offset + security_offset;
+    let raw_subsystem = u16::from_le_bytes(
+        optional[PE_SUBSYSTEM_OFFSET as usize..PE_SUBSYSTEM_OFFSET as usize + 2]
+            .try_into()
+            .unwrap(),
+    );
+
+    // The certificate table's directory entry is `{ u32 address; u32 size }` — the
+    // size sits 4 bytes after the address, because both are 32-bit fields even
+    // though the *stride* between directory entries is 8. And the address is a
+    // file offset, not an RVA: the table is not mapped into memory and is not
+    // part of any section. A zeroed entry is how an unsigned image says so.
+    let certificate_address = field(security_offset)? as u64;
+    let certificate_size = field(security_offset + 4)? as u64;
+
+    let certificate_table = if certificate_address == 0 || certificate_size == 0 {
+        None
+    } else {
+        let end = certificate_address
+            .checked_add(certificate_size)
+            .ok_or(PeError::Invalid)?;
+        Some(certificate_address as usize..end as usize)
+    };
+
+    let section_table = optional_end;
+    let section_end = section_table
         .checked_add(
             u64::from(section_count)
-                .checked_mul(40)
+                .checked_mul(PE_SECTION_HEADER_SIZE)
                 .ok_or(PeError::Invalid)?,
         )
         .ok_or(PeError::Invalid)?;
     if section_end > len {
         return Err(PeError::Invalid);
     }
+    let mut sections = Vec::with_capacity(usize::from(section_count));
+    for index in 0..u64::from(section_count) {
+        let at = section_table + index * PE_SECTION_HEADER_SIZE;
+        let mut header = [0u8; PE_SECTION_HEADER_SIZE as usize];
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut header)?;
+        let size = u32::from_le_bytes(
+            header[PE_SECTION_SIZE_OF_RAW_DATA as usize..PE_SECTION_SIZE_OF_RAW_DATA as usize + 4]
+                .try_into()
+                .unwrap(),
+        ) as u64;
+        let start = u32::from_le_bytes(
+            header[PE_SECTION_POINTER_TO_RAW_DATA as usize
+                ..PE_SECTION_POINTER_TO_RAW_DATA as usize + 4]
+                .try_into()
+                .unwrap(),
+        ) as u64;
+        // A section with no raw bytes is a section that is not in the file, and
+        // a raw range that runs past the end is a truncated image. Both are
+        // refused here so the digest has ranges it can hash.
+        let end = start.checked_add(size).ok_or(PeError::Invalid)?;
+        if end > len {
+            return Err(PeError::Invalid);
+        }
+        sections.push(start as usize..end as usize);
+    }
+
     Ok(PeHeader {
         machine: match raw_machine {
             0x014c => Machine::I386,
@@ -204,7 +348,18 @@ pub fn read_pe_header(path: &Path) -> Result<PeHeader, PeError> {
         },
         raw_machine,
         raw_subsystem,
-        security_offset,
+        layout: Layout {
+            after_header: field(PE_SIZE_OF_HEADERS_OFFSET)? as usize,
+            check_sum: check_sum as usize,
+            after_check_sum: (check_sum + 4) as usize,
+            security_data_dir: security_data_dir as usize,
+            // Exactly one directory entry is skipped, not the rest of the
+            // directory: the specification excludes the Certificate Table entry
+            // and resumes at the next byte, so the header after it is hashed.
+            after_security_data_dir: (security_data_dir + PE_DATA_DIRECTORY_SIZE) as usize,
+            sections,
+            certificate_table,
+        },
     })
 }
 
@@ -218,10 +373,14 @@ pub const fn raw_subsystem(header: &PeHeader) -> u16 {
     header.raw_subsystem
 }
 
-/// Whether an image is already signed, which composition must refuse to change.
+/// Whether an image's certificate table directory is populated, which is what
+/// composition must refuse to write over.
+///
+/// Seeks, reads eight bytes, and answers. A universal artifact is measured in
+/// gigabytes and this is asked about one every time anything is composed, so it
+/// cannot be a question that loads the file.
 pub fn is_signed(path: &Path) -> Result<bool, PeError> {
-    let header = read_pe_header(path)?;
-    header.is_signed(&mut File::open(path)?)
+    Ok(read_pe_header(path)?.is_signed())
 }
 
 /// Whether an image starts with a DOS signature.
@@ -263,141 +422,91 @@ pub fn check_documents(documents: &[ResourceDocument], first_id: usize) -> Resul
     Ok(())
 }
 
-/// Write `documents` into a copy of `executable` at `output`.
+/// A whole image in memory, and the layout needed to hash it.
 ///
-/// The copy happens first and the resources are applied to the copy, so a
-/// failure part-way through never leaves a half-written artifact. Signing happens
-/// after this returns, because Authenticode covers the embedded resources.
-#[cfg(windows)]
-pub fn write_resources(
-    executable: &Path,
-    output: &Path,
-    documents: &[ResourceDocument],
-) -> Result<(), PeError> {
-    use std::os::windows::ffi::OsStrExt;
-
-    type Handle = *mut core::ffi::c_void;
-    type Bool = i32;
-    type Dword = u32;
-
-    link!("kernel32.dll" "system" fn BeginUpdateResourceW(filename: *const u16, delete_existing: Bool) -> Handle);
-    link!("kernel32.dll" "system" fn UpdateResourceW(update: Handle, resource_type: *const u16, name: *const u16, language: u16, data: *const core::ffi::c_void, size: Dword) -> Bool);
-    link!("kernel32.dll" "system" fn EndUpdateResourceW(update: Handle, discard: Bool) -> Bool);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-
-    check_documents(documents, RESOURCE_ID_INDEX)?;
-    if output.exists() || output == executable {
-        return Err(PeError::Invalid);
-    }
-    std::fs::copy(executable, output)?;
-    let wide: Vec<u16> = output.as_os_str().encode_wide().chain(Some(0)).collect();
-    let update = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
-    if update.is_null() {
-        let _ = std::fs::remove_file(output);
-        return Err(PeError::ResourceApi(unsafe { GetLastError() }));
-    }
-    let result = (|| {
-        for document in documents {
-            let size = u32::try_from(document.bytes.len()).map_err(|_| 87u32)?;
-            let ok = unsafe {
-                UpdateResourceW(
-                    update,
-                    RESOURCE_TYPE_RCDATA as *const u16,
-                    document.id as *const u16,
-                    0,
-                    document.bytes.as_ptr().cast(),
-                    size,
-                )
-            };
-            if ok == 0 {
-                return Err(unsafe { GetLastError() });
-            }
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        unsafe {
-            EndUpdateResourceW(update, 1);
-        }
-        let _ = std::fs::remove_file(output);
-        return Err(PeError::ResourceApi(error));
-    }
-    if unsafe { EndUpdateResourceW(update, 0) } == 0 {
-        let error = unsafe { GetLastError() };
-        let _ = std::fs::remove_file(output);
-        return Err(PeError::ResourceApi(error));
-    }
-    Ok(())
+/// The digest rule reads the header, then the sections in ascending file order,
+/// then the remainder of the file up to the certificate table. That is three
+/// disjoint regions, and the only way to hand them to a routine that takes one
+/// slice is to have the file. So this type is the price of the digest, and it is
+/// only built by callers that asked for the digest.
+pub struct Image {
+    bytes: Vec<u8>,
+    header: PeHeader,
 }
 
-#[cfg(not(windows))]
-pub fn write_resources(
-    _executable: &Path,
-    _output: &Path,
-    _documents: &[ResourceDocument],
-) -> Result<(), PeError> {
-    Err(PeError::ResourcesUnavailable)
+impl Image {
+    /// Load an image.
+    ///
+    /// The whole file. A universal artifact is measured in gigabytes, so a
+    /// caller that only needs to know *whether* a certificate table exists
+    /// should use [`read_pe_header`] or [`is_signed`] instead.
+    pub fn read(path: &Path) -> Result<Self, PeError> {
+        let mut bytes = Vec::new();
+        File::open(path)?.read_to_end(&mut bytes)?;
+        Self::from_bytes(bytes)
+    }
+
+    /// Interpret bytes already in memory as an image.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, PeError> {
+        let len = bytes.len() as u64;
+        let header = read_header(&mut std::io::Cursor::new(bytes.as_slice()), len)?;
+        Ok(Self { bytes, header })
+    }
+
+    /// The image's header.
+    pub fn header(&self) -> &PeHeader {
+        &self.header
+    }
+
+    /// The image's bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
-/// Read one resource document out of an image.
-#[cfg(windows)]
-pub fn read_resource(path: &Path, id: usize) -> Result<Vec<u8>, PeError> {
-    use std::{os::windows::ffi::OsStrExt, ptr};
-
-    type Handle = *mut core::ffi::c_void;
-    type Dword = u32;
-
-    link!("kernel32.dll" "system" fn LoadLibraryExW(filename: *const u16, file: Handle, flags: Dword) -> Handle);
-    link!("kernel32.dll" "system" fn FindResourceW(module: Handle, name: *const u16, resource_type: *const u16) -> Handle);
-    link!("kernel32.dll" "system" fn LoadResource(module: Handle, resource: Handle) -> Handle);
-    link!("kernel32.dll" "system" fn SizeofResource(module: Handle, resource: Handle) -> Dword);
-    link!("kernel32.dll" "system" fn LockResource(resource: Handle) -> *const core::ffi::c_void);
-    link!("kernel32.dll" "system" fn FreeLibrary(module: Handle) -> i32);
-    link!("kernel32.dll" "system" fn GetLastError() -> Dword);
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let module = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), 0x0000_0002) };
-    if module.is_null() {
-        return Err(PeError::ResourceApi(unsafe { GetLastError() }));
+impl authenticode::PeTrait for Image {
+    fn data(&self) -> &[u8] {
+        &self.bytes
     }
-    let resource =
-        unsafe { FindResourceW(module, id as *const u16, RESOURCE_TYPE_RCDATA as *const u16) };
-    let result = if resource.is_null() {
-        Err(PeError::MissingResource(id))
-    } else {
-        let size = unsafe { SizeofResource(module, resource) } as usize;
-        if size == 0 {
-            Err(PeError::Invalid)
-        } else {
-            let loaded = unsafe { LoadResource(module, resource) };
-            let data = if loaded.is_null() {
-                ptr::null()
-            } else {
-                unsafe { LockResource(loaded) }
-            };
-            if data.is_null() {
-                Err(PeError::ResourceApi(unsafe { GetLastError() }))
-            } else {
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(size)
-                    .map_err(|_| PeError::Allocation { size: size as u64 })?;
-                bytes.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(data.cast::<u8>(), size)
-                });
-                Ok(bytes)
-            }
+
+    fn num_sections(&self) -> usize {
+        self.header.layout.sections.len()
+    }
+
+    fn section_data_range(
+        &self,
+        index: usize,
+    ) -> Result<Range<usize>, authenticode::PeOffsetError> {
+        // The `authenticode` trait indexes sections from 1, matching the
+        // specification's numbering; the layout is a 0-based vector.
+        self.header
+            .layout
+            .sections
+            .get(index.checked_sub(1).ok_or(authenticode::PeOffsetError)?)
+            .cloned()
+            .ok_or(authenticode::PeOffsetError)
+    }
+
+    fn certificate_table_range(&self) -> Result<Option<Range<usize>>, authenticode::PeOffsetError> {
+        Ok(self.header.layout.certificate_table.clone())
+    }
+
+    fn offsets(&self) -> Result<authenticode::PeOffsets, authenticode::PeOffsetError> {
+        let layout = &self.header.layout;
+        if layout.after_header > self.bytes.len()
+            || layout.check_sum > layout.after_check_sum
+            || layout.security_data_dir > layout.after_security_data_dir
+        {
+            return Err(authenticode::PeOffsetError);
         }
-    };
-    unsafe {
-        FreeLibrary(module);
+        Ok(authenticode::PeOffsets {
+            check_sum: layout.check_sum,
+            after_check_sum: layout.after_check_sum,
+            security_data_dir: layout.security_data_dir,
+            after_security_data_dir: layout.after_security_data_dir,
+            after_header: layout.after_header,
+        })
     }
-    result
-}
-
-#[cfg(not(windows))]
-pub fn read_resource(_path: &Path, id: usize) -> Result<Vec<u8>, PeError> {
-    Err(PeError::ResourcesUnavailable)
 }
 
 #[cfg(test)]
@@ -445,6 +554,37 @@ mod tests {
     fn an_unsigned_image_reports_itself_as_unsigned() {
         let (_dir, path) = write(&image(2), "gui.exe");
         assert!(!is_signed(&path).unwrap());
+        assert!(!read_pe_header(&path).unwrap().is_signed());
+        assert_eq!(read_pe_header(&path).unwrap().certificate_table(), None);
+    }
+
+    /// The Certificate Table data directory is the one directory whose address
+    /// is a **file offset** rather than an RVA, because the table is not mapped
+    /// into memory. Reading it as an RVA would look for the signature somewhere
+    /// inside a section and find nothing.
+    ///
+    /// The table here is placed past the end of every section, which is where a
+    /// signer puts it, and the address is chosen so that reading it as an RVA
+    /// would land in the middle of the image rather than at the table.
+    #[test]
+    fn the_certificate_table_directory_is_read_as_a_file_offset() {
+        const OPTIONAL: usize = 0x58;
+        const SECTION: usize = OPTIONAL + 240;
+        const DATA_DIRECTORY: usize = OPTIONAL + 112 + 4 * 8;
+        let mut bytes = image(2);
+        // `SizeOfHeaders` and one section of raw data at 0x200.
+        bytes[OPTIONAL + 60..OPTIONAL + 64].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[SECTION + 20..SECTION + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[SECTION + 16..SECTION + 20].copy_from_slice(&16u32.to_le_bytes());
+        bytes.resize(0x200, 0);
+        bytes.extend_from_slice(&[0xcc; 16]);
+        bytes[DATA_DIRECTORY..DATA_DIRECTORY + 4].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[DATA_DIRECTORY + 4..DATA_DIRECTORY + 8].copy_from_slice(&16u32.to_le_bytes());
+
+        let (_dir, path) = write(&bytes, "signed.exe");
+        let header = read_pe_header(&path).unwrap();
+        assert!(header.is_signed());
+        assert_eq!(header.certificate_table(), Some(0x200..0x210));
     }
 
     #[test]
@@ -454,6 +594,18 @@ mod tests {
         assert!(!looks_like_pe(&path));
 
         let (_dir, path) = write(&image(2)[..0x50], "short.exe");
+        assert!(matches!(read_pe_header(&path), Err(PeError::Invalid)));
+    }
+
+    /// A section header that claims raw bytes past the end of the file is a
+    /// truncated image, and the digest has ranges it can hash or it has nothing.
+    #[test]
+    fn a_section_that_runs_past_the_end_of_the_file_is_rejected() {
+        const SECTION: usize = 0x58 + 240;
+        let mut bytes = image(2);
+        bytes[SECTION + 20..SECTION + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        bytes[SECTION + 16..SECTION + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+        let (_dir, path) = write(&bytes, "overrun.exe");
         assert!(matches!(read_pe_header(&path), Err(PeError::Invalid)));
     }
 

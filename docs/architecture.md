@@ -348,7 +348,8 @@ Authoring commands share the target selection and override rules above.
 --artifact <ARTIFACT>          repeatable, conflicts with --universal
 --universal                    compose every selected target into one file
 --dispatcher <PATH>            launcher component, hidden; resolved when absent
---release-manifest <PATH>      release description, or `none`; [default: dist/zup-release.json]
+--signing-subject <SUBJECT>     publisher every signable must match
+--release-manifest <PATH>      release description, or `none`; [default: zup-release.json]
 ```
 
 `--target` and `--artifact` answer different questions and are not synonyms.
@@ -366,20 +367,53 @@ finds the launcher the same way it finds a runtime template.
 The runtime template and the launcher are zup's own binaries, so asking every
 project author to compile them before their first build is a tax on the ordinary
 path to an installer. Instead the build asks for a semantic component and the
-resolver finds the bytes: an explicit `--runtime` or `--dispatcher` path, then an
-explicit toolchain root from `--toolchain` or `ZUP_TOOLCHAIN`, then the installed
-cache for this exact zup version, then a toolchain staged beside the executable.
-There is no network step, and a resolved component is checked against its
-descriptor and its own PE header before it is used, so a template from another
-zup release, machine, or presentation is refused rather than embedded.
+resolver finds the bytes, in a fixed precedence with first match: an explicit
+`--runtime` or `--dispatcher` path, then an explicit toolchain root from
+`--toolchain` or `ZUP_TOOLCHAIN`, then the installed cache for this exact zup
+version, then a toolchain staged beside the executable.
 
 ```text
 cargo xtask toolchain build [--profile dev|release]
+cargo xtask toolchain package [--profile dev|release] [--out <dir>]
 ```
 
 builds the three runtime templates and four launchers, writes a
 `.zup-toolchain.json` descriptor beside each, and stages them in
 `target/<profile>/toolchain/<version>/`. The default profile is `dev`.
+
+`package` assembles the release: `zup.exe`, the same component directory, and a
+`zup-toolchain.json` naming every file with its digest. It verifies the result
+before returning, so a packaged release that reports success is one whose index
+was read back and every file in it hashed. Unzip it anywhere and `zup build`
+works — the resolver already searches `<exe dir>/toolchain/<version>`, which is
+exactly where the components land.
+
+The resolver has four arms and three of them are somebody's decision: an explicit
+`--runtime`/`--dispatcher` path, an explicit root from `--toolchain` or
+`ZUP_TOOLCHAIN`, and a toolchain staged beside the executable. The fourth is the
+**cache** — the installed toolchain for this exact zup version — and
+`zup toolchain install|status|clean` is its producer:
+
+```text
+zup toolchain install <RELEASE> [--state-root <dir>] [--format <human|json>]
+zup toolchain status           [--state-root <dir>] [--format <human|json>]
+zup toolchain clean            [--state-root <dir>] [--all] [--dry-run]
+```
+
+`install` takes a release directory, refuses one from another zup version,
+verifies every named file and every descriptor cross-check, copies, and then
+verifies the cache by resolving out of it the way a build will. `status` reports
+the seven components a host needs and which arm answered each. `clean` removes
+every cached version *except* this one's, because a machine can have two zup
+releases on it and one deleting the other's components breaks it.
+
+There is no network step in any of this, and a resolved component is checked
+against its descriptor and its own PE header before it is used, so a template
+from another zup release, machine, or presentation is refused rather than
+embedded. The clean-room run proves the whole arrangement from outside the
+repository: `cargo xtask release clean-room` verifies the release index, creates
+an empty project directory with a scrubbed environment, and requires every
+component to report `staged` and a path inside the release it was handed.
 
 `zup artifact inspect <ARTIFACT> [--format <human|json>]` reads a composed
 artifact with the same parser the launcher and the runtime use, and verifies
@@ -450,17 +484,29 @@ member:
 cargo xtask emit-portable-matrix
 ```
 
-| Matrix | Host | Contents |
-| --- | --- | --- |
-| `portable-core` | any | `zup-core`, `zup-manifest`, `zup-build`, `zup-plan`, `zup-platform`, `zup-exec`, `zup-transaction`, `zup-bootstrap`, `zup-bundle`, `zup-artifact`, `zup-protocol`, `zup-runtime`, `zup-presentation`, `zup-update`, `zup-plugin-contract`, `zup-plugin-build`, `zup-plugin-runtime` |
-| `portable-tests` | any | `zup-xtask` |
-| `windows-only` | Windows | `zup-pe`, `zup-windows`, `zup-dispatch`, `zup`, `zup-installer`, `zup-ui` |
+| Matrix | Host | Vocabulary | Contents |
+| --- | --- | --- | --- |
+| `portable-core` | any | domain | `zup-core`, `zup-manifest`, `zup-build`, `zup-plan`, `zup-platform`, `zup-exec`, `zup-transaction`, `zup-bootstrap`, `zup-bundle`, `zup-acquire`, `zup-acquire-http`, `zup-artifact`, `zup-publish`, `zup-publish-github`, `zup-distribute-github`, `zup-protocol`, `zup-runtime`, `zup-presentation`, `zup-update`, `zup-plugin-contract`, `zup-plugin-build`, `zup-plugin-runtime`, `zup-toolchain`, `zup-signing` |
+| `portable-file-format` | any | file format | `zup-pe` |
+| `portable-tests` | any | domain | `zup-xtask` |
+| `windows-only` | Windows | domain | `zup-windows`, `zup-dispatch`, `zup`, `zup-installer`, `zup-ui` |
 
 `zup` and `zup-installer` are Windows-only because they link the Windows adapter
 to answer `zup plan` and to run the lifecycle, not because the manifest model or
-the build pipeline needs a Windows host. `zup-artifact` and `zup-pe` are on the
-opposite sides of that line from each other, which is the point: the artifact
-model is portable and the PE primitives are not.
+the build pipeline needs a Windows host.
+
+`zup-signing` is portable because a description of a release is the same on every
+platform. It knows nothing about Authenticode, `codesign`, a certificate store or
+a TSA, and holds no key: `zup sign prepare` writes down what needs a signature and
+in what order, the project's signer signs, and `zup sign verify` proves the result
+and records the identity that will be published.
+
+`zup-pe` is in its own matrix because of *vocabulary*, not portability. A PE
+image, a resource table and an Authenticode digest are facts about bytes, and
+reading them is the same work on every host — so `zup-pe` builds and tests on
+Linux. But its domain is a Windows file format, and a PE parser that cannot say
+`RCDATA` is not a PE parser, in the same way that a portable crate can say
+`TargetOperatingSystem::Windows` because that is a target lexicon's own constant.
 
 `cargo xtask verify-portable-boundaries` fails when a portable crate:
 
@@ -472,6 +518,14 @@ model is portable and the PE primitives are not.
   `target_family` predicate in production source;
 - reintroduces a Windows-specific identifier such as `Registry`, `CLSID`,
   `ServiceControlManager`, `OpenSCManager`, `KnownFolder`, or `UninstallEntry`.
+
+The last two rules are the vocabulary ones, and they apply to a `domain` matrix
+only. A `file-format` matrix is held to all five structural rules and neither
+vocabulary rule, because the concept *is* its subject rather than a leak into its
+model. The classification is read from the same matrix every other command reads,
+so a package does not acquire the relaxation by a line written next to the code
+it silences, and a package no matrix claims gets the strict rules rather than
+none.
 
 String literals are a separate rule and a separate pass: a concept spelled in a
 literal is matched in its decoded form, case-insensitively, so `registry` in a
@@ -549,16 +603,18 @@ an error.
 
 ## Continuous integration
 
-Three workflows, all with `contents: read` and `persist-credentials: false`.
+Two workflows, all jobs `contents: read` and `persist-credentials: false`.
 
-`ci.yml` has two jobs: `windows` on `windows-latest` and `ubuntu (portable)` on
-`ubuntu-latest`. Neither writes outside the runner's build cache.
+`ci.yml` has four jobs: `windows` on `windows-latest`, `clean room` and
+`release size` on `windows-latest`, and `ubuntu (portable)` on `ubuntu-latest`.
+None writes outside the runner's build cache.
 
 The Windows job runs, in order: `cargo fmt --all --check`, `cargo clippy
 --workspace --all-features --all-targets -- -D warnings`,
 `cargo xtask toolchain build`, `cargo nextest run --workspace --all-features`,
 `cargo test --workspace --all-features --doc`, `cargo machete`,
-`git diff --check`, `cargo xtask verify-portable-boundaries`,
+`cargo deny check`, `cargo xtask verify-dependency-graph`, `git diff --check`,
+`cargo xtask verify-portable-boundaries`,
 `cargo xtask github-action-pins check`, a
 `zup schema --output schema/zup.schema.json` step that fails when the
 checked-in schema differs from the generated one, and
@@ -566,13 +622,33 @@ checked-in schema differs from the generated one, and
 templates build with the intended dependency graphs and PE subsystems, that `zup`
 declares no Cargo features, and that `zup` is the only installable binary.
 
+`cargo deny check` is the written policy; `verify-dependency-graph` is the gate
+that holds the line. `deny` can only see one resolved version per crate, so a
+workspace that reached two versions of one dependency is invisible to it, and so
+is development tooling reaching a binary that ships. Both are checked here, and
+findings print the offending path rather than a count.
+
 The toolchain is a required input to the composition tests, not something
 `cargo test` builds: it is a separate package with a deliberately small
 dependency closure, which is the wrong trade for a 128 MB installer and the right
 one for a launcher whose size is a design constraint. A test that needs a
 launcher says so rather than passing without composing anything.
 
-The Ubuntu job emits both portable matrices, then verifies the portable stack
+The clean-room job runs `cargo xtask toolchain build`,
+`cargo xtask toolchain package`, and `cargo xtask release clean-room`. It is a
+separate job rather than a step in `windows` because that job has a populated
+`target/` and a staged toolchain in it, and a run there can only prove what the
+repository already proves. This one is the product's own acceptance test: does
+`zup build` work with no checkout, no `target/`, no staged runtime, and no
+`xtask`?
+
+The release-size job builds the toolchain with `--profile release` and then runs
+the bootstrapper budget with `--run-ignored`. A size claim is a claim about a
+release image; measured on a debug build it is a claim about debuginfo. The test
+is `#[ignore]`d in the default run and requested explicitly here, so it stays
+checked on every PR rather than being quietly dropped.
+
+The Ubuntu job emits all three portable matrices, then verifies the portable stack
 natively on Linux:
 
 ```text
@@ -586,15 +662,22 @@ cargo machete
 git diff --check
 ```
 
-`$PORTABLE` is the `-p` argument list of `portable-core` plus `portable-tests`.
-The Linux job proves one thing: the portable stack compiles and its tests pass
-natively on a non-Windows host. It is not evidence of a Linux backend, because no
-crate lowers a plan to Linux system integration, and a manifest naming a
-non-Windows target is refused at the boundary on any host.
+`$PORTABLE` is the `-p` argument list of `portable-core`, `portable-file-format`
+and `portable-tests`. The Linux job proves one thing: the portable stack compiles
+and its tests pass natively on a non-Windows host. It is not evidence of a Linux
+backend, because no crate lowers a plan to Linux system integration, and a
+manifest naming a non-Windows target is refused at the boundary on any host.
 
 `action.yml` covers the GitHub Action itself, including the pin-lock gate, the
 Bun/Node toolchain split, and the three jobs it runs; see
 [the zup GitHub Action](action.md).
+
+Every CI job is triggered by a push or a pull request. There is no scheduled job:
+a check that runs on a cadence and not on a change is a check whose failure
+nobody is waiting for, and anything worth running on a cadence belongs in the
+suite that runs on every commit. The format properties that a fuzzer used to
+supplement now live in the crates that own the formats; see
+[properties](hardening.md#properties-live-in-the-crate-that-owns-the-format).
 
 ## Current status
 
@@ -616,3 +699,21 @@ the semantic model, the build inventory, the artifact graph, planning, the
 transaction engine, the package format, plugins, the runtime session, and the
 protocol build and test natively on Linux today, in CI, so the Windows adapter
 stays an adapter.
+
+## See also
+
+- [signing.md](signing.md) — `prepare`/`verify`, the double-signing order for
+  universal artifacts, and why zup holds no key.
+- [security.md](security.md) — what zup trusts, what it refuses, and where the
+  boundaries are.
+- [hardening.md](hardening.md) — what the repository does to keep itself from
+  being the weakest link, and why each measure exists.
+- [artifact-graph.md](artifact-graph.md) — the graph itself.
+- [online-acquisition.md](online-acquisition.md) — thin artifacts and the
+  acquisition engine.
+- [frontends.md](frontends.md) — the three installer presentations.
+- [action.md](action.md) — the GitHub Action.
+- [github-distribution.md](github-distribution.md) — releases as a host.
+- [plugins.md](plugins.md) — authoring and the Wasm component runtime.
+- [updates.md](updates.md) — the update channel model.
+- [rfc1.md](rfc1.md) — the original design record.

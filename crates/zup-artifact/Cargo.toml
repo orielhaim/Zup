@@ -21,6 +21,7 @@ zstd.workspace = true
 zup-acquire.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
+zup-signing.workspace = true
 
 [dev-dependencies]
 zup-build.workspace = true
@@ -32,6 +33,7 @@ oci-spec = { version = "0.10", default-features = false, features = [
 ] }
 rstest.workspace = true
 zup-acquire.workspace = true
+proptest.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-plugin-contract.workspace = true

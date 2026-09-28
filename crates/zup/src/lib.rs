@@ -27,7 +27,9 @@ mod packages;
 mod project;
 mod publish;
 mod publish_github;
+mod signing;
 mod toolchain;
+pub mod toolchain_cli;
 
 use std::path::{Path, PathBuf};
 

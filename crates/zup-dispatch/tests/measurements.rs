@@ -145,7 +145,25 @@ fn launcher(name: &str) -> PathBuf {
         .unwrap_or_else(|error| panic!("{error}"))
 }
 
+/// The size budget for a thin bootstrapper.
+///
+/// Ignored by the default run, and requested explicitly by the release-candidate
+/// job:
+///
+/// ```text
+/// cargo xtask toolchain build --profile release
+/// cargo nextest run --run-ignored -E 'test(a_thin_bootstrapper)'
+/// ```
+///
+/// It is deferred rather than weakened. A debug launcher reports a number about
+/// debuginfo rather than about the design, so the measurement is only true of a
+/// release image; producing one is a full release build of this package, which is
+/// minutes whose only product is a measurement. And run without that image the
+/// test still **fails**, naming the command that produces one, rather than
+/// skipping — a size budget that quietly stops being checked is worse than one
+/// that is checked twice a month.
 #[test]
+#[ignore = "needs a release-profile toolchain; see the doc comment"]
 fn a_thin_bootstrapper_is_the_launcher_plus_the_online_stack() {
     let offline = std::fs::metadata(launcher(zup_xtask::dispatcher::GUI))
         .expect("the offline launcher is installed")

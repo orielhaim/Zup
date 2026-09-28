@@ -25,8 +25,10 @@ fn the_developer_surface_is_authoring_and_distribution() {
         "plan",
         "build",
         "artifact",
+        "sign",
         "publish",
         "ci",
+        "toolchain",
         "schema",
         "fmt",
         "completions",
@@ -62,6 +64,40 @@ fn the_developer_cli_has_no_application_lifecycle() {
              CLI:\n{help}"
         );
     }
+}
+
+/// …including in `zup toolchain`, which has its own subcommand list.
+///
+/// Worth its own assertion because `zup toolchain install` puts the word
+/// "install" on a command line, and a check that only ever looked at the top
+/// level would pass on a surface that had grown an installer verb one level down.
+#[test]
+fn no_subcommand_anywhere_offers_an_application_lifecycle() {
+    let mut queue = vec![command()];
+    let mut seen = 0;
+    while let Some(mut command) = queue.pop() {
+        seen += 1;
+        for sub in command.get_subcommands_mut() {
+            let help = sub.render_long_help().to_string();
+            for verb in [
+                "upgrade",
+                "update",
+                "modify",
+                "repair",
+                "uninstall",
+                "recover",
+                "__worker",
+            ] {
+                assert!(
+                    !contains_command(&help, verb),
+                    "`{} {verb}` is an application lifecycle or runtime verb:\n{help}",
+                    sub.get_name()
+                );
+            }
+            queue.push(sub.clone());
+        }
+    }
+    assert!(seen > 10, "the whole surface was walked: {seen} commands");
 }
 
 /// Process boundaries belong to the runtime, not to the tool that built it.

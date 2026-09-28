@@ -40,6 +40,7 @@ zup-plugin-contract.workspace = true
 zup-presentation.workspace = true
 zup-publish.workspace = true
 zup-publish-github.workspace = true
+zup-signing.workspace = true
 zup-toolchain.workspace = true
 zup-windows.workspace = true
 

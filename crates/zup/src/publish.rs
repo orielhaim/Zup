@@ -20,6 +20,8 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use zup_core::InstallScope;
+
 use crate::cli::{GithubFormatArg, PublishGithubCommand, PublishStageCommand};
 use crate::project::{self, LoadedProject};
 use crate::toolchain::{self, ToolchainResolver};
@@ -256,6 +258,23 @@ fn stage_thin_installers(
         .filter(|character| !character.is_whitespace() && *character != '/')
         .collect();
 
+    // A thin artifact carries no variant manifest, so the scope the application
+    // declares has nowhere else to travel — the launcher reads it from the trust
+    // block. `either` is refused rather than defaulted: a bootstrapper a person
+    // double-clicked cannot ask them, and silently choosing one is how a
+    // per-machine application ends up in a user's profile.
+    let scope = match loaded.manifest.install.scope {
+        InstallScope::User => zup_acquire::ThinScope::User,
+        InstallScope::Machine => zup_acquire::ThinScope::Machine,
+        InstallScope::Either => {
+            return Err(miette::miette!(
+                "a thin installer cannot be built for `install.scope = \"either\"`: a user \
+                 double-clicking it has no way to choose. Set the scope to `user` or `machine`, \
+                 or publish an offline installer."
+            ));
+        }
+    };
+
     let mut written: Vec<(&str, PathBuf)> = Vec::new();
     for (label, pin) in [
         (
@@ -277,7 +296,8 @@ fn stage_thin_installers(
             &repository,
             &updates.trusted_root,
             pin,
-        );
+        )
+        .with_scope(scope);
         let request = zup_artifact::ArtifactRequest::thin_online(
             format!("{app_id}-{label}"),
             &loaded.manifest.app,
@@ -480,11 +500,11 @@ fn compose_release(release_dir: &Path, app: &zup_core::App) -> miette::Result<()
                         path.display()
                     )
                 })?;
-            if size != artifact.size {
+            if size != artifact.built.size {
                 return Err(miette::miette!(
                     "`{}` is {size} bytes and the release description says {}",
                     path.display(),
-                    artifact.size
+                    artifact.built.size
                 ));
             }
             composed
@@ -503,7 +523,7 @@ fn compose_release(release_dir: &Path, app: &zup_core::App) -> miette::Result<()
     let bytes = composed
         .encode()
         .map_err(|error| miette::miette!("composing the release description: {error}"))?;
-    std::fs::write(&path, &bytes)
+    zup_windows::write_durable(&path, &bytes)
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
     println!();
     println!(

@@ -20,11 +20,14 @@ use zup_transaction::{
 
 use crate::FilePrecondition;
 use crate::durable::InstallationLock;
+use crate::durable::LockScope;
 use crate::file_executor::{NullProgress, WindowsFileExecutor, apply_node};
 use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
     verify_payload_overlay,
 };
+use zup_protocol::failure;
+
 use crate::pipe::{ClientReader, ClientWriter, PipeError, frame_client};
 use crate::transport::{UserSid, verify_server_pid};
 use crate::worker::{WorkerBootstrap, WorkerError, plan_hash_hex};
@@ -460,19 +463,23 @@ async fn run_worker_inner(
             (r.transaction_id.as_uuid(), "recovery_required".to_owned())
         }
         Err(e) => {
-            // Send Failed then exit.
+            // Send Failed then exit. The `kind` is the part a parent acts on, and
+            // "somebody else is installing this" is a different action from
+            // "this installation failed", so it gets its own kind rather than
+            // arriving as prose.
+            let message = e.to_string();
             let _ = send_and_close(
                 writer,
                 bootstrap.session_id,
                 outgoing,
                 Message::Failed(zup_protocol::Failed {
-                    kind: "transaction".into(),
-                    message: e.to_string(),
+                    kind: failure::TRANSACTION.to_owned(),
+                    message: message.clone(),
                 }),
             )
             .await;
             let _ = reader_task.await;
-            return Err(WorkerError::Transaction(e.to_string()));
+            return Err(WorkerError::Transaction(message));
         }
     };
     drop(_lock);
@@ -583,11 +590,32 @@ async fn run_bootstrap_worker(
     state
         .validate(&bound.plan)
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    let lock_key =
-        InstallationLock::lock_key(&format!("bootstrap-{}", exec.bootstrap_id), &exec.scope);
-    let _lock = InstallationLock::try_acquire(&state_root, &lock_key)
-        .map_err(|error| WorkerError::Transaction(error.to_string()))?
-        .ok_or_else(|| WorkerError::Transaction("bootstrap is busy".into()))?;
+    // Keyed by application and scope, not by bootstrap id: two sessions
+    // bootstrapping the same installation are the same operation, and an id in
+    // the key would let them both proceed.
+    let lock_key = InstallationLock::key_for(&exec.app_id, &exec.scope, LockScope::Bootstrap);
+    let _lock = match InstallationLock::try_acquire(&state_root, &lock_key) {
+        Ok(Some(lock)) => lock,
+        // A bootstrap that cannot be taken is reported as the typed failure it
+        // is, so the parent's wire `kind` survives and the frontends can offer a
+        // retry rather than a red dialog.
+        Ok(None) => {
+            let _ = send_and_close(
+                writer,
+                bootstrap.session_id,
+                outgoing,
+                Message::Failed(zup_protocol::Failed {
+                    kind: failure::INSTALLATION_BUSY.to_owned(),
+                    message: "another operation is running for this installation".to_owned(),
+                }),
+            )
+            .await;
+            return Err(WorkerError::Busy);
+        }
+        Err(error) => {
+            return Err(WorkerError::Transaction(error.to_string()));
+        }
+    };
     writer
         .send(&WireEnvelope {
             version: PROTOCOL_VERSION,
@@ -680,7 +708,7 @@ async fn run_bootstrap_worker(
                 session_id: bootstrap.session_id,
                 sequence: outgoing,
                 message: Message::Failed(zup_protocol::Failed {
-                    kind: "cancelled".into(),
+                    kind: failure::CANCELLED.into(),
                     message: "bootstrap cancelled".into(),
                 }),
             })
@@ -708,7 +736,7 @@ async fn run_bootstrap_worker(
                 session_id: bootstrap.session_id,
                 sequence: outgoing,
                 message: Message::Failed(zup_protocol::Failed {
-                    kind: "prerequisite".into(),
+                    kind: failure::TRANSACTION.into(),
                     message: error.to_string(),
                 }),
             })

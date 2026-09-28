@@ -10,6 +10,7 @@
 //! toolchain resolver for the template each target needs, and a contributor
 //! working inside this repository stages a local toolchain with one command.
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
@@ -144,7 +145,6 @@ fn build_variants(
 
     if interactive {
         println!("→ Validating manifest");
-        println!("→ Materializing payload");
     }
     let mut prepared = Vec::with_capacity(targets.len());
     for ((config, target_plan), runtime) in targets.iter().zip(&loaded.build.targets).zip(&runtimes)
@@ -155,6 +155,7 @@ fn build_variants(
         prepared.push((target_plan, config, runtime, plugin_artifacts));
     }
     if interactive {
+        println!("→ Materializing payload");
         println!("→ Compiling plugins");
     }
 
@@ -178,8 +179,12 @@ fn build_variants(
         let payload_bytes: u64 = target_plan.files.iter().map(|file| file.size).sum();
         report_single(target_plan, config, output, size, plugin_artifacts.len());
         release
-            .add_artifact(
-                &single_target_index(config, target_plan, output),
+            .add_single_target(
+                &single_target(
+                    config,
+                    target_plan,
+                    crate::artifacts::subsystem_of(config.frontend),
+                ),
                 &relative,
                 zup_artifact::Measured::single(digest_of(output)?, size, payload_bytes),
             )
@@ -223,64 +228,27 @@ fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
     project::digest_of(path)
 }
 
-/// The index a single-target installer reports, which is a one-variant offline
-/// artifact: the same model, described without a dispatcher.
-fn single_target_index(
+/// What a per-target installer reports in the release description.
+///
+/// Deliberately smaller than the `ArtifactIndex` a composed artifact carries: a
+/// per-target build has no graph, no dispatcher, and no shared store, so the only
+/// things a reader needs are which machine it is for, what it presents, and how
+/// big its plan is.
+fn single_target(
     config: &ResolvedTargetConfig,
     plan: &zup_build::TargetBuildPlan,
-    output: &Path,
-) -> zup_artifact::ArtifactIndex {
-    zup_artifact::ArtifactIndex {
-        schema: zup_artifact::ARTIFACT_SCHEMA,
-        required_features: zup_artifact::FEATURE_SHARED_CAS,
-        media_type: zup_artifact::MediaType::Index,
-        artifact: zup_artifact::ArtifactDescriptor {
-            id: config.profile.to_string(),
-            kind: zup_artifact::ArtifactKind::Single,
-            mode: zup_artifact::ArtifactMode::Offline,
-            pin: zup_artifact::ArtifactPin::Pinned {
-                version: plan.installer.app.version.clone(),
-            },
-            application: plan.installer.app.clone(),
-            launcher: zup_artifact::LauncherStrategy::HostSelectedContainer,
-            subsystem: crate::artifacts::subsystem_of(config.frontend),
-            output: output_name(output),
-            trust: None,
-        },
-        tables: zup_artifact::ArtifactTables {
-            blobs: zup_artifact::Descriptor {
-                media_type: zup_artifact::MediaType::BLOB_TABLE,
-                digest: zup_artifact::Descriptor::of(zup_artifact::MediaType::BLOB_TABLE, &[])
-                    .digest,
-                size: 0,
-            },
-        },
-        variants: vec![zup_artifact::VariantDescriptor {
-            id: config.profile.to_string(),
-            target: config.target.clone(),
-            platform: zup_artifact::Platform::from_triple(&config.target),
-            frontend: config.frontend,
-            manifest: zup_artifact::Descriptor {
-                media_type: zup_artifact::MediaType::VARIANT_MANIFEST,
-                digest: zup_artifact::Descriptor::of(
-                    zup_artifact::MediaType::VARIANT_MANIFEST,
-                    &[],
-                )
-                .digest,
-                size: 0,
-            },
-            requirements: zup_artifact::VariantRequirements::default(),
-            runtime: None,
-            content: zup_artifact::VariantDescriptorContent {
-                logical_size: plan.total_size,
-                blob_count: plan.files.len() as u64,
-                unique_blob_count: plan.files.len() as u64,
-                file_count: plan.files.len() as u64,
-                prerequisite_count: plan.prerequisites.len() as u64,
-                plugin_count: plan.plugins.len() as u64,
-            },
-            logical_size: plan.total_size,
-        }],
+    subsystem: zup_artifact::LauncherSubsystem,
+) -> zup_artifact::SingleTarget {
+    zup_artifact::SingleTarget {
+        id: config.profile.to_string(),
+        version: plan.installer.app.version.clone(),
+        target: config.target.clone(),
+        platform: zup_artifact::Platform::from_triple(&config.target),
+        frontend: config.frontend,
+        subsystem,
+        file_count: plan.files.len() as u64,
+        prerequisite_count: plan.prerequisites.len() as u64,
+        plugin_count: plan.plugins.len() as u64,
     }
 }
 
@@ -313,7 +281,6 @@ fn build_artifacts(
         println!("→ Validating manifest");
         println!("→ Materializing payload");
     }
-
     let mut variant_index = std::collections::BTreeMap::new();
     for (index, config) in loaded.selected_targets.iter().enumerate() {
         variant_index.insert(config.profile.to_string(), index);
@@ -592,7 +559,18 @@ fn release_root(loaded: &LoadedProject, outputs: &[PathBuf]) -> miette::Result<P
     }
 }
 
-/// Write the release description, and say the build is ready to sign.
+/// Write the release description and the signing plan, and say what remains.
+///
+/// Two documents, because they answer two different questions and are read at
+/// two different times. `zup-release.json` says what the build produced and is
+/// what a publisher reads; `zup-signing.json` says what an external signer has to
+/// touch, in what order, and is what a signing step reads. Collapsing them would
+/// mean the release description carries a credential-free signing instruction
+/// that a build cannot act on, or that a publisher is free to ignore.
+///
+/// Neither is written with a bare `write`: both are documents a later step parses
+/// and trusts, so they are published atomically and flushed, exactly like the
+/// ledger a running installer relies on.
 fn finish(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -600,30 +578,136 @@ fn finish(
     release: zup_artifact::ReleaseManifest,
     interactive: bool,
 ) -> miette::Result<()> {
-    if let Some(destination) = args
-        .release_manifest
-        .as_deref()
-        .filter(|destination| *destination != "none")
-    {
-        // The description lives in the release root, which is the directory its
-        // artifacts are written beside.
-        let root = release_root(loaded, outputs)?;
-        let path = root.join(destination);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| miette::miette!("release description: {error}"))?;
-        }
-        let bytes = release
-            .encode()
-            .map_err(|error| miette::miette!("release description: {error}"))?;
-        std::fs::write(&path, bytes)
-            .map_err(|error| miette::miette!("release description: {error}"))?;
-        if interactive {
-            println!("→ Wrote {}", path.display());
-        }
+    // `none` is the one value that is a name rather than a path, and it is how a
+    // project opts out of producing a release it does not intend to publish.
+    if args.release_manifest == "none" {
+        return Ok(());
     }
+    let destination = args.release_manifest.as_str();
+    // The description lives in the release root, which is the directory its
+    // artifacts are written beside.
+    let root = release_root(loaded, outputs)?;
+    let path = root.join(destination);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| miette::miette!("release description: {error}"))?;
+    }
+    let bytes = release
+        .encode()
+        .map_err(|error| miette::miette!("release description: {error}"))?;
+    zup_windows::write_durable(&path, &bytes)
+        .map_err(|error| miette::miette!("release description: {error}"))?;
+
+    let plan = signing_plan(&release, &root, args.signing_subject.as_deref())?;
+    let plan_path = path.with_file_name(zup_signing::SIGNING_PLAN_NAME);
+    zup_windows::write_durable(
+        &plan_path,
+        &plan
+            .encode()
+            .map_err(|error| miette::miette!("signing plan: {error}"))?,
+    )
+    .map_err(|error| miette::miette!("signing plan: {error}"))?;
+
     if interactive {
-        println!("\n✓ Ready to sign");
+        println!("→ Wrote {}", path.display());
+        println!("→ Wrote {}", plan_path.display());
+        println!(
+            "\n{} to sign:\n",
+            match (plan.pre_compose().count(), plan.post_compose().count()) {
+                (0, 0) => "Nothing".to_owned(),
+                (0, post) => format!("{post} file(s)"),
+                (pre, 0) => format!("{pre} file(s)"),
+                (pre, post) => format!("{pre} native runtime(s), then {post} artifact(s)"),
+            }
+        );
+        for step in &plan.steps {
+            println!("  {:<14} {}", step.role.as_str(), step.subject.path);
+        }
+        println!("\nSign them, then run `zup sign verify` to finalize the release.");
     }
     Ok(())
+}
+
+/// Derive the signing plan from what the build composed.
+///
+/// The plan is *derived* rather than accumulated, so it cannot disagree with the
+/// release description it is written beside. The interesting part is which files
+/// land in the pre-compose set: a single-target installer is its own runtime, so
+/// it is one post-compose file; a composed artifact embeds a runtime that is
+/// extracted and executed separately, so the runtime it was composed from is a
+/// pre-compose file of its own.
+fn signing_plan(
+    release: &zup_artifact::ReleaseManifest,
+    root: &Path,
+    subject: Option<&str>,
+) -> miette::Result<zup_signing::SigningPlan> {
+    let mut requirement = zup_signing::SigningRequirement::production();
+    if let Some(subject) = subject {
+        requirement = requirement.signed_by(subject);
+    }
+    let mut plan = zup_signing::SigningPlan::new(&release.application, requirement);
+
+    // Pre-compose: every runtime an artifact embeds, named by the file it was
+    // composed from. A build does not copy the runtime into the release root — the
+    // toolchain owns those bytes and a release pipeline stages the *signed* copy
+    // there before composing — so the path recorded is the one verification will
+    // look at, and it is written by whatever signed it.
+    for (variant, _carriers) in embedded_by_variant(release) {
+        let path = format!("runtime/{variant}.exe");
+        let file = root.join(&path);
+        plan.push(zup_signing::SigningStep::new(
+            zup_signing::SigningRole::NativeRuntime,
+            zup_signing::SigningStage::PreCompose,
+            zup_signing::SigningReason::VariantRuntime {
+                variant: variant.clone(),
+            },
+            zup_signing::SigningSubject {
+                path,
+                digest: crate::project::digest_of(&file)
+                    .unwrap_or(zup_core::Sha256Digest::from_bytes([0; 32])),
+                size: std::fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0),
+                variants: vec![variant],
+            },
+        ))
+        .map_err(|error| miette::miette!("signing plan: {error}"))?;
+    }
+
+    for artifact in &release.artifacts {
+        plan.push(zup_signing::SigningStep::new(
+            zup_signing::SigningRole::OuterArtifact,
+            zup_signing::SigningStage::PostCompose,
+            zup_signing::SigningReason::Installer {
+                artifact: artifact.id.clone(),
+            },
+            zup_signing::SigningSubject {
+                path: artifact.path.clone(),
+                digest: artifact.built.digest,
+                size: artifact.built.size,
+                variants: artifact.variants.clone(),
+            },
+        ))
+        .map_err(|error| miette::miette!("signing plan: {error}"))?;
+    }
+    Ok(plan)
+}
+
+/// The variants a release's universal artifacts embed, as `runtime/<variant>.exe`.
+///
+/// Only universal artifacts embed a runtime, because only a universal artifact is
+/// built around a dispatcher: the dispatcher is the base image, and each variant's
+/// runtime is a resource inside it. A single-target installer *is* its runtime.
+fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, Vec<String>)> {
+    let mut by_variant: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for artifact in &release.artifacts {
+        if artifact.kind != zup_artifact::ArtifactKind::Universal {
+            continue;
+        }
+        for variant in &artifact.variants {
+            by_variant
+                .entry(variant.clone())
+                .or_default()
+                .push(artifact.id.clone());
+        }
+    }
+    by_variant.into_iter().collect()
 }

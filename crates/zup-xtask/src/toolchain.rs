@@ -26,6 +26,10 @@ pub const INSTALLER_PACKAGE: &str = "zup-installer";
 /// The package that produces the dispatchers.
 pub const DISPATCHER_PACKAGE: &str = "zup-dispatch";
 
+/// The package that produces the developer CLI, and the only binary a person
+/// installs.
+pub const CLI_PACKAGE: &str = "zup";
+
 /// The three runtime templates, as `(feature, frontend)`.
 pub const FRONTENDS: &[(&str, &str)] = &[
     ("gui", "zup-setup-gui"),
@@ -45,6 +49,14 @@ pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch-console", "console"),
     ("online", "zup-dispatch-console", "console"),
 ];
+
+/// The directory a staged toolchain lives in, under a profile directory.
+///
+/// One constant because the developer-side resolver, the staging step, and the
+/// test harnesses all have to agree on it, and three independent spellings of the
+/// same path is how every composition test ends up reporting a missing template
+/// that is not actually missing.
+pub const STAGED_DIRECTORY: &str = "toolchain";
 
 /// The suffix the machine staging a toolchain writes executables with, which is
 /// part of the name a component is stored under.
@@ -182,7 +194,7 @@ const LAUNCHER_PROFILE: &[(&str, &str)] = &[
 /// disappears the next time anybody runs a release build.
 pub fn staging_directory(root: &Path, profile: &str, version: &str) -> PathBuf {
     target_directory(root, profile)
-        .join("toolchain")
+        .join(STAGED_DIRECTORY)
         .join(version)
 }
 
@@ -259,6 +271,136 @@ fn component_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// The index file name a release carries.
+///
+/// Re-exported from the contract crate rather than spelled here: the packaging
+/// step writes it, the clean room reads it, and `zup toolchain install` reads it
+/// to populate a cache. Three spellings of one file name is a release that
+/// verifies against nothing.
+pub use zup_toolchain::RELEASE_INDEX_NAME;
+
+/// Assemble one directory that is a complete, self-describing zup release.
+///
+/// The shape is the whole design:
+///
+/// ```text
+/// <out>/
+///   zup.exe                       the developer CLI
+///   toolchain/<version>/…         the three runtime templates and four launchers,
+///                                 each with the descriptor beside it
+///   zup-toolchain.json            the index: every file, with its digest
+/// ```
+///
+/// A developer unzips this and runs `zup build`. There is no second download, no
+/// six manual steps, and nothing to install: the resolver already searches
+/// `<exe_dir>/toolchain/<version>`, which is exactly where this puts the
+/// components, so a release *is* the thing a build consumes.
+///
+/// Everything is copied out of the profile's staging directory rather than built
+/// again, so packaging is a file operation and cannot disagree with a build that
+/// already happened.
+pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String> {
+    let version = version()?;
+    let staged = staging_directory(root, profile, &version);
+    if !staged.is_dir() {
+        return Err(format!(
+            "there is no {} toolchain in {}; run `cargo xtask toolchain build --profile {profile}` first",
+            profile,
+            staged.display()
+        ));
+    }
+    std::fs::create_dir_all(out).map_err(|error| format!("{}: {error}", out.display()))?;
+
+    // The CLI, built for the same profile as the components it composes with.
+    cargo(
+        root,
+        &[
+            "build",
+            "-p",
+            CLI_PACKAGE,
+            "--bin",
+            CLI_PACKAGE,
+            "--profile",
+            profile,
+        ],
+    )?;
+    let built = target_directory(root, profile).join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"));
+    copy(
+        &built,
+        &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
+    )?;
+
+    // Every staged file, under its own name, in the versioned directory the
+    // resolver looks in. Descriptors are indexed too: a descriptor is a
+    // component's claim about itself, and an index that proved the executable
+    // without proving the claim would be asserting half of what the release
+    // ships.
+    let mut components = Vec::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&staged)
+        .map_err(|error| format!("{}: {error}", staged.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    entries.sort();
+    for entry in entries {
+        let name = component_name(&entry);
+        let relative = format!("{STAGED_DIRECTORY}/{version}/{name}");
+        let destination = out.join(&relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        copy(&entry, &destination)?;
+        components.push(
+            zup_toolchain::ReleaseFile::of(&relative, &destination)
+                .map_err(|error| format!("describe `{relative}`: {error}"))?,
+        );
+    }
+    components.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let mut index = zup_toolchain::ToolchainRelease::new(version.clone(), machine_target());
+    index.cli = zup_toolchain::ReleaseFile::of(
+        &format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"),
+        &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
+    )
+    .map_err(|error| format!("describe the CLI: {error}"))?;
+    index.components = components;
+
+    // The index is written last and then read back, so what this reports is what
+    // the directory actually holds rather than what the copies were supposed to.
+    let index_path = out.join(RELEASE_INDEX_NAME);
+    std::fs::write(&index_path, index.encode())
+        .map_err(|error| format!("{}: {error}", index_path.display()))?;
+    index.verify(out).map_err(|error| {
+        format!(
+            "the release at {} is not self-consistent: {error}",
+            out.display()
+        )
+    })?;
+    Ok(out.to_path_buf())
+}
+
+/// The target a release's components are built for.
+///
+/// A release is one build on one machine, so this is the machine that built it
+/// rather than the machine that happens to be unpacking it. A developer on
+/// another machine downloads the other release.
+pub fn machine_target() -> String {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64-pc-windows-msvc".to_owned()
+    } else {
+        "x86_64-pc-windows-msvc".to_owned()
+    }
+}
+
+fn copy(from: &Path, to: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(to);
+    std::fs::copy(from, to)
+        .map_err(|error| format!("`{}` -> `{}`: {error}", from.display(), to.display()))?;
+    Ok(())
 }
 
 fn cargo(root: &Path, args: &[&str]) -> Result<(), String> {
@@ -386,5 +528,47 @@ mod tests {
             zup_toolchain::file_name(&offline, EXECUTABLE_SUFFIX),
             zup_toolchain::file_name(&online, EXECUTABLE_SUFFIX)
         );
+    }
+
+    /// The stager and the contract must agree on what a host needs.
+    ///
+    /// `FRONTENDS` and `DISPATCHERS` say which cargo invocation produces each
+    /// component; `zup_toolchain::host_components` says which components that is.
+    /// They are two lists because one is a build plan and the other is a
+    /// contract, and they are checked against each other here because a build
+    /// that stages six of the seven components succeeds at staging and fails at
+    /// the first composition that needs the seventh.
+    #[test]
+    fn the_stager_produces_exactly_the_components_the_contract_names() {
+        let target = zup_core::TargetTriple::parse(machine_suffix())
+            .expect("the host's own target triple is valid");
+        let wanted: Vec<String> = zup_toolchain::host_components(&target)
+            .iter()
+            .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
+            .collect();
+
+        let mut staged: Vec<String> = FRONTENDS
+            .iter()
+            .map(|(feature, _)| {
+                zup_toolchain::file_name(&runtime_component(feature), EXECUTABLE_SUFFIX)
+            })
+            .chain(DISPATCHERS.iter().map(|(feature, _, subsystem)| {
+                zup_toolchain::file_name(
+                    &zup_toolchain::ToolchainComponent::Dispatcher {
+                        subsystem: if *subsystem == "gui" {
+                            zup_toolchain::Subsystem::Gui
+                        } else {
+                            zup_toolchain::Subsystem::Console
+                        },
+                        online: !feature.is_empty(),
+                    },
+                    EXECUTABLE_SUFFIX,
+                )
+            }))
+            .collect();
+        staged.sort();
+        let mut wanted = wanted;
+        wanted.sort();
+        assert_eq!(staged, wanted);
     }
 }

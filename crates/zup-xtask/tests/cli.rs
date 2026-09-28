@@ -200,7 +200,12 @@ fn an_unknown_matrix_is_a_usage_error_naming_the_known_matrices() {
     assert_eq!(code(&output), 2);
     let message = stderr(&["emit-portable-matrix", "--matrix", "portable-everything"]);
     assert!(message.contains("portable-everything"), "{message}");
-    for known in ["portable-core", "portable-tests", "windows-only"] {
+    for known in [
+        "portable-core",
+        "portable-file-format",
+        "portable-tests",
+        "windows-only",
+    ] {
         assert!(message.contains(known), "{message}");
     }
 }

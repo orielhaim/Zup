@@ -13,28 +13,47 @@
  *
  * The manifest is always attested too. It names every other digest, so an
  * attestation of anything without an attestation of it is a chain with a missing link.
+ *
+ * **A manifest that is not finalized is refused, not read.** An artifact carries
+ * two identities: what composition produced, and what will be published. Signing
+ * changes the bytes, so for a signed artifact they differ, and attesting the first
+ * attests a file nobody downloads. A missing `finalized` block means the release
+ * has not been signed and verified, and the only honest response is to stop.
  */
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
 import type { AttestationSubject } from './ports.js'
-import type { ArtifactResult } from './result.js'
+import type { ArtifactResult, SigningEvidence } from './result.js'
 
 /** The manifest's own shape, as far as this needs it. */
 export interface ReleaseManifestDocument {
   schema: number
   application: { id: string; name: string; version: string }
   root: string
-  variants: { id: string; target: string; platform: string; frontend: string }[]
+  variants: {
+    id: string
+    target: string
+    platform: string
+    frontend: string
+    runtime?: { digest: string; evidence?: SigningEvidence[] }
+  }[]
   artifacts: {
     id: string
     kind: string
     mode: string
     path: string
-    digest: string
-    size: number
-    signature?: { status: string; subject?: string }
+    /** What composition produced, before any signature. */
+    built: { digest: string; size: number }
+    /**
+     * What will be published, and what the platform established about it.
+     *
+     * `evidence` is empty on an unsigned release, which is a real release: it is
+     * finalized, it has a published identity, and nothing proves who produced it.
+     * So "finalized" and "signed" are separate questions about the same block.
+     */
+    finalized?: { digest: string; size: number; evidence: SigningEvidence[] } | null
   }[]
 }
 
@@ -88,19 +107,38 @@ export function parseManifest(text: string, path: string): ReleaseManifestDocume
       'A release manifest without artifacts describes nothing to attest.',
     )
   }
-  return value as unknown as ReleaseManifestDocument
+  const manifest = value as unknown as ReleaseManifestDocument
+  const withoutFinal = manifest.artifacts.filter((artifact) => artifact.finalized === undefined)
+  if (withoutFinal.length > 0) {
+    throw new ManifestError(
+      `\`${path}\` has no \`finalized\` identity for ${withoutFinal
+        .map((artifact) => `\`${artifact.path}\``)
+        .join(', ')}.`,
+      'It was written by a zup that does not finalize releases, or by hand. This ' +
+        'action will not attest pre-signature digests, because they name bytes no ' +
+        'downloader receives.',
+    )
+  }
+  return manifest
 }
 
 /** The manifest's artifacts as the result envelope models them. */
 export function manifestArtifacts(manifest: ReleaseManifestDocument): ArtifactResult[] {
-  return manifest.artifacts.map((artifact) => ({
-    path: artifact.path,
-    digest: artifact.digest,
-    size: artifact.size,
-    kind: artifact.kind,
-    mode: artifact.mode,
-    ...(artifact.signature ? { signature: artifact.signature.status } : {}),
-  }))
+  return manifest.artifacts.map((artifact) => {
+    // The published identity. For an unfinalized release there is none, and the
+    // envelope reports the built digest as the size and digest because that is
+    // all the document says — but with no evidence, so nothing claims a
+    // signature. `parseManifest` refuses such a document outright.
+    const final = artifact.finalized
+    return {
+      path: artifact.path,
+      digest: final?.digest ?? artifact.built.digest,
+      size: final?.size ?? artifact.built.size,
+      kind: artifact.kind,
+      mode: artifact.mode,
+      evidence: final?.evidence ?? [],
+    }
+  })
 }
 
 /**
@@ -128,9 +166,32 @@ export async function attestSubjects(
   subjects.set(manifestPath, { name: manifestPath, digest: await io.digest(manifestPath) })
   for (const artifact of manifest.artifacts) {
     const path = io.resolve(releaseDir, artifact.path)
-    if (!subjects.has(path)) {
-      subjects.set(path, { name: path, digest: artifact.digest })
+    if (subjects.has(path)) {
+      continue
     }
+    const final = artifact.finalized
+    if (final === undefined || final === null) {
+      throw new ManifestError(
+        `\`${artifact.path}\` has no final identity.`,
+        'Sign the release and run `zup sign verify` before attesting it. An ' +
+          'attestation of pre-signature bytes is a claim about a file that no ' +
+          'downloader will ever receive.',
+      )
+    }
+    // Re-derived rather than read. A finalized manifest names what was
+    // published, and attesting a value that disagrees with the bytes on disk
+    // attaches provenance to something else entirely - which is the failure
+    // attestation exists to prevent, so the check is a refusal, not a warning.
+    const measured = await io.digest(path)
+    if (measured !== final.digest) {
+      throw new ManifestError(
+        `\`${artifact.path}\` is sha256:${measured} and the finalized release says ` +
+          `sha256:${final.digest}.`,
+        'The file changed after `zup sign verify` ran. Re-verify the release; ' +
+          'attesting these bytes would attach provenance the release does not claim.',
+      )
+    }
+    subjects.set(path, { name: path, digest: measured })
   }
   for (const entry of extra) {
     const candidate = io.resolve(releaseDir, entry)

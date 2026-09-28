@@ -374,6 +374,23 @@ impl UiModel {
                     ));
                     self.state = ViewState::RecoveryRequired;
                 }
+                InstallOutcome::Busy { operation } => {
+                    // Not an error state. The installation is fine, somebody else
+                    // is working on it, and the right thing to offer is the
+                    // surface they started from with a message — not a red
+                    // dialog suggesting something went wrong.
+                    self.diagnostic = Some(DiagnosticPresentation::from_message(
+                        &format!("{operation} is already running for this installation"),
+                        false,
+                    ));
+                    self.error = None;
+                    self.progress = None;
+                    self.state = if matches!(self.surface, Surface::Installer { .. }) {
+                        ViewState::Options
+                    } else {
+                        ViewState::Maintenance
+                    };
+                }
                 InstallOutcome::Failed(message) => {
                     self.diagnostic = Some(DiagnosticPresentation::from_message(&message, false));
                     self.error = Some(message);

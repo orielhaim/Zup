@@ -39,6 +39,28 @@ export interface Diagnostic {
   help?: string | undefined
 }
 
+/**
+ * One fact a platform established about a signed subject.
+ *
+ * A list rather than a state word, because the facts fail separately and mean
+ * different things: a signature can cover the bytes without the platform
+ * trusting the chain, and either can hold without a publisher. A single
+ * `signed`/`unsigned` field cannot say which, so it would either overstate or
+ * say nothing.
+ *
+ * `fact` is one of `signature_covers_bytes`, `platform_trust_accepted`,
+ * `publisher`, `certificate`, `timestamp`. `value` is the platform's own wording.
+ */
+export interface SigningEvidence {
+  fact: string
+  value: string
+}
+
+/** Whether evidence states that a platform signature covers these bytes. */
+export function coversBytes(evidence: readonly SigningEvidence[] | undefined): boolean {
+  return evidence?.some((entry) => entry.fact === 'signature_covers_bytes') ?? false
+}
+
 /** One file a build produced. */
 export interface ArtifactResult {
   /** The release-relative path, which is what a consumer downloads. */
@@ -48,8 +70,8 @@ export interface ArtifactResult {
   size: number
   kind: string
   mode: string
-  /** Signing state, when the build got that far. */
-  signature?: string | undefined
+  /** What the platform established about the signature, when it got that far. */
+  evidence?: SigningEvidence[] | undefined
 }
 
 /** The release a publication created or found. */
@@ -179,6 +201,28 @@ function asStrings(value: Record<string, unknown>, key: string): string[] {
   return asArray(value, key).filter((entry): entry is string => typeof entry === 'string')
 }
 
+/**
+ * The evidence list, dropping entries that are not a `{fact, value}` pair.
+ *
+ * Dropping rather than repairing: a half-written entry is a document zup did not
+ * produce, and inventing a value for it would put a claim in a summary that
+ * nothing established.
+ */
+function asEvidence(value: Record<string, unknown>, key: string): SigningEvidence[] | undefined {
+  const found = asArray(value, key)
+  const entries: SigningEvidence[] = []
+  for (const entry of found) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue
+    }
+    const pair = entry as Record<string, unknown>
+    if (typeof pair['fact'] === 'string' && typeof pair['value'] === 'string') {
+      entries.push({ fact: pair['fact'], value: pair['value'] })
+    }
+  }
+  return entries
+}
+
 function parseArtifact(found: unknown): ArtifactResult[] {
   if (typeof found !== 'object' || found === null) {
     return []
@@ -196,7 +240,7 @@ function parseArtifact(found: unknown): ArtifactResult[] {
       size: typeof value['size'] === 'number' ? value['size'] : 0,
       kind: typeof value['kind'] === 'string' ? value['kind'] : 'unknown',
       mode: typeof value['mode'] === 'string' ? value['mode'] : 'unknown',
-      signature: asString(value, 'signature'),
+      evidence: asEvidence(value, 'evidence'),
     },
   ]
 }

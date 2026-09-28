@@ -190,6 +190,22 @@ Enterprise, self-hosted runners, and the release/versioning model — and
 [GitHub Releases as a distribution host](docs/github-distribution.md) for the
 release format itself.
 
+## Signing a release
+
+zup never holds a key. `zup sign prepare` writes down what needs a signature and
+in what order; your signer does the signing; `zup sign verify` reads the result
+back, proves it, and records the identity that will actually be published. A
+universal artifact is signed twice — the runtime first, then the outer file — and
+`verify` reads the embedded runtime back out of the composed PE to prove it
+matches.
+
+```text
+zup sign prepare --release-dir dist
+zup sign verify  --release-dir dist
+```
+
+See [signing a release](docs/signing.md).
+
 ## Repository tasks
 
 The package matrices and the GitHub Action refs are single-sourced in `zup-xtask`:
@@ -197,7 +213,10 @@ The package matrices and the GitHub Action refs are single-sourced in `zup-xtask
 ```text
 cargo xtask emit-portable-matrix
 cargo xtask verify-portable-boundaries
+cargo xtask verify-dependency-graph
 cargo xtask toolchain build
+cargo xtask toolchain package
+cargo xtask release clean-room
 cargo xtask github-action-pins check
 cargo xtask github-action-pins refresh
 ```
@@ -206,12 +225,26 @@ cargo xtask github-action-pins refresh
 Windows-only crate, declares a Windows-only platform table, names a Windows API,
 branches on `cfg(windows)` in production code, reintroduces a
 Windows-specific identifier, or spells a Windows concept inside a string
-literal.
+literal. A crate whose domain *is* a platform file format is classified as one
+in the same matrix every other command reads, and is held to every structural
+rule and neither vocabulary rule: `zup-pe` may say `RCDATA`, because a PE parser
+that cannot name a PE resource type is not a PE parser. It still may not depend
+on a Windows crate or branch on the build host.
+
+`verify-dependency-graph` is the gate that holds the supply-chain line.
+`cargo deny check` can only see one resolved version per crate, so a workspace
+that reached two versions of one dependency is invisible to it — and so is
+development tooling reaching a binary that ships. Findings print the offending
+path rather than a count.
 
 `toolchain build` is the step that produces the binaries a build composes an
 installer from. It is also what keeps the launcher's dependency closure out of
 `cargo test`: the four launcher images are built here, as their own step, and
 staged beside `zup` with the descriptors the resolver checks.
+
+`toolchain package` assembles the release directory a developer unzips, and
+`release clean-room` proves it works from outside this repository — no checkout,
+no `target/`, no staged runtime, no `xtask`, and a scrubbed environment.
 
 `github-action-pins check` validates `github-actions.lock.json` — the ref each
 third-party action uses, the commit it resolved to, and the date that was checked
@@ -236,3 +269,42 @@ Bun installs, tests and bundles; `action/dist/index.js` runs on GitHub's Node 24
 runtime. Nothing in `action/src` may use a `Bun.*` API — that is a compile error,
 because the source's `tsconfig.json` declares `"types": ["node"]` and nothing
 else.
+
+## Documentation
+
+Start with the one that matches the question.
+
+**The system**
+
+- [architecture](docs/architecture.md) — the pipeline, the crates, the portable
+  boundary, every persisted format, and the CI jobs.
+- [artifact graph](docs/artifact-graph.md) — what is inside a composed file and
+  how a selection resolves.
+- [installer frontends](docs/frontends.md) — GUI, console and headless.
+- [online acquisition](docs/online-acquisition.md) — thin artifacts, the release
+  graph, the acquisition engine, and its measurements.
+- [plugins](docs/plugins.md) — authoring and the Wasm component runtime.
+
+**Shipping**
+
+- [signing a release](docs/signing.md) — `prepare`/`verify`, the double-signing
+  order for universal artifacts, and why zup holds no key.
+- [GitHub Action](docs/action.md) — inputs, phases, attestation, permissions.
+- [GitHub distribution](docs/github-distribution.md) — releases as a host.
+- [updates](docs/updates.md) — the update channel model.
+
+**Trust**
+
+- [security model](docs/security.md) — what zup trusts, what it refuses, and
+  where the boundaries are.
+- [hardening](docs/hardening.md) — what the repository does to keep itself from
+  being the weakest link, and why each measure exists.
+- [format properties](docs/architecture.md#formats-properties-live-in-the-crate-that-owns-them) —
+  what every document format must satisfy, and why the assertions are in ordinary
+  crates.
+
+**Reference**
+
+- [the toolchain contract](docs/frontends.md) — descriptors, and why a file name
+  is not a compatibility check.
+- [RFC 1](docs/rfc1.md) — the original design record.

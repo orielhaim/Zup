@@ -51,6 +51,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Some(Commands::Doctor(args)) => crate::doctor::run(args, cli.toolchain),
         Some(Commands::Plan(args)) => crate::check::run_plan(args),
         Some(Commands::Build(args)) => crate::build::run(args, cli.toolchain),
+        Some(Commands::Sign(args)) => crate::signing::run(args),
         Some(Commands::Artifact(args)) => match args.command {
             ArtifactVerb::Inspect(args) => crate::inspect_artifact::run(args),
         },
@@ -59,6 +60,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             PublishVerb::Github(args) => crate::publish::run_github(args),
         },
         Some(Commands::Ci(args)) => crate::ci::run(args),
+        Some(Commands::Toolchain(args)) => crate::toolchain_cli::run(args, cli.toolchain),
         Some(Commands::Schema(args)) => crate::manifest_tools::run_schema(args),
         Some(Commands::Fmt(args)) => crate::manifest_tools::run_fmt(args),
         Some(Commands::Completions(args)) => crate::manifest_tools::run_completions(args),
@@ -87,10 +89,14 @@ pub enum Commands {
     Build(BuildCommand),
     /// Look at what a build produced.
     Artifact(ArtifactCommand),
+    /// Sign a build's output with an external signer, then finalize it.
+    Sign(SignCommand),
     /// Publish a release.
     Publish(PublishCommand),
     /// Generate and check the release pipeline a project commits.
     Ci(crate::ci::CiCommand),
+    /// Manage the zup binaries a build composes an artifact from.
+    Toolchain(crate::toolchain_cli::ToolchainCommand),
     /// Print the authoritative zup.toml JSON Schema.
     Schema(SchemaCommand),
     /// Format zup.toml without losing its comments.
@@ -241,9 +247,21 @@ pub struct BuildCommand {
     #[arg(long, conflicts_with = "artifact")]
     pub universal: bool,
     /// Where to write the machine-readable release description, or `none` to
-    /// skip it. Defaults to `dist/zup-release.json` beside the manifest.
-    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
-    pub release_manifest: Option<String>,
+    /// skip it.
+    ///
+    /// Defaults to `zup-release.json` beside the artifacts, which is where
+    /// `zup publish github` and `zup sign verify` look. Writing it is not
+    /// optional in a release: it is the document that says which bytes were
+    /// published, and a release without one cannot be verified by anyone.
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath, default_value = "zup-release.json")]
+    pub release_manifest: String,
+    /// The publisher whose signature the release must carry.
+    ///
+    /// Recorded in the signing plan as a subject every signable has to match, and
+    /// checked by `zup sign verify`. It is a *name*, not a key: zup never holds the
+    /// credential that produces the signature.
+    #[arg(long, value_name = "SUBJECT")]
+    pub signing_subject: Option<String>,
 }
 
 /// Look at what a build produced.
@@ -251,6 +269,89 @@ pub struct BuildCommand {
 pub struct ArtifactCommand {
     #[command(subcommand)]
     pub command: ArtifactVerb,
+}
+
+/// Where a release lives for `zup sign`.
+#[derive(Debug, Args, Clone)]
+pub struct ReleaseLocation {
+    /// The release root: the directory the artifacts were written into.
+    #[arg(long, value_name = "DIR", default_value = "dist", value_hint = ValueHint::DirPath)]
+    pub release_dir: PathBuf,
+}
+
+/// Sign what a build produced, then finalize the release.
+///
+/// Two verbs, not a maze. `prepare` writes down what needs signing and in what
+/// order; the project's own signer does the signing; `verify` reads the result
+/// back, proves it, and rewrites the release description with the identity that
+/// will actually be published. Nothing here holds a credential — a PFX, a
+/// password, a client secret, or a token — so this is safe to run in a pipeline
+/// that has a signing step and nothing else.
+#[derive(Debug, Args)]
+pub struct SignCommand {
+    #[command(flatten)]
+    pub location: ReleaseLocation,
+    #[command(subcommand)]
+    pub command: SignVerb,
+}
+
+/// What to do about a build's signature.
+#[derive(Debug, Subcommand)]
+pub enum SignVerb {
+    /// Print, and optionally re-stamp, the list of files that need a signature.
+    Prepare(SignPrepareCommand),
+    /// Verify every signature and finalize the release description.
+    Verify(SignVerifyCommand),
+}
+
+/// Write the list of files that require a signature.
+#[derive(Debug, Args)]
+pub struct SignPrepareCommand {
+    /// The publisher whose signature every signable must carry.
+    #[arg(long, value_name = "SUBJECT")]
+    pub subject: Option<String>,
+    /// The certificate every signable must be signed with.
+    #[arg(long, value_name = "THUMBPRINT")]
+    pub thumbprint: Option<String>,
+    /// Write the plan even when the expected publisher cannot be trusted.
+    ///
+    /// A self-signed development certificate does not chain to a root Windows
+    /// trusts, so without this a developer could not produce a plan at all. It
+    /// changes what `verify` demands and nothing else.
+    #[arg(long)]
+    pub allow_untrusted_chain: bool,
+    /// Do not require an RFC 3161 timestamp.
+    ///
+    /// For a local test certificate, which cannot reach a TSA. Production
+    /// signatures are required to carry one.
+    #[arg(long)]
+    pub allow_missing_timestamp: bool,
+}
+
+/// Verify signatures and finalize the release.
+#[derive(Debug, Args)]
+pub struct SignVerifyCommand {
+    /// Report what is wrong with each file without failing.
+    #[arg(long)]
+    pub report_only: bool,
+    /// Finalize artifacts that carry no signature.
+    ///
+    /// An unsigned release is a real release: nothing changed the bytes, so the
+    /// built digest *is* the published digest, and the description records
+    /// `unsigned` rather than claiming a signature. Use it for a development or
+    /// internal distribution where a public Authenticode identity is not
+    /// available. A release that reaches the public internet without one is a
+    /// release Windows SmartScreen will warn about, and `zup publish github`
+    /// says so.
+    #[arg(long)]
+    pub allow_unsigned: bool,
+    /// Check revocation over the network.
+    ///
+    /// Off by default: a build host without access to a CRL must not fail an
+    /// otherwise valid signature, and cache-only retrieval is what makes
+    /// verification offline-safe.
+    #[arg(long)]
+    pub online_revocation: bool,
 }
 
 /// What to do with an artifact.

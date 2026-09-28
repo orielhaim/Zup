@@ -413,6 +413,7 @@ pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
         InstallOutcome::Committed => ProcessOutcome::Success,
         InstallOutcome::Cancelled => ProcessOutcome::Cancelled,
         InstallOutcome::RecoveryRequired => ProcessOutcome::RecoveryRequired,
+        InstallOutcome::Busy { .. } => ProcessOutcome::InstallationBusy,
         InstallOutcome::RolledBack => ProcessOutcome::Failure,
         InstallOutcome::Failed(message) => ProcessOutcome::from_message(message),
     }
@@ -528,7 +529,17 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
             vec![AutomationEvent::Completed { outcome }]
         }
         RuntimeEvent::Failed { kind, message } => {
-            let outcome = ProcessOutcome::from_message(message);
+            // The event carries a typed `kind`, so the exit code is chosen from
+            // it rather than by reading an English sentence. Classifying prose is
+            // how "another operation is running" ends up reported as a failure
+            // with code 1, which a scheduler treats as a broken installation
+            // rather than as five seconds of waiting.
+            let outcome = match kind.as_str() {
+                "installation_busy" => ProcessOutcome::InstallationBusy,
+                "recovery_required" => ProcessOutcome::RecoveryRequired,
+                "authorization_required" => ProcessOutcome::AuthorizationRequired,
+                _ => ProcessOutcome::from_message(message),
+            };
             vec![AutomationEvent::Failed {
                 outcome,
                 code: outcome.code(),

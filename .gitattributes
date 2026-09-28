@@ -1,0 +1,7 @@
+# The Action's committed bundle is a build artifact, not text.
+#
+# Without this, a Windows checkout with `core.autocrlf=true` rewrites its line
+# endings on checkout, which makes `git diff --check` report trailing whitespace
+# on three megabyte-long lines and makes `bun run check:dist` fail on a bundle
+# that is byte-identical to the committed one. Git must not touch these bytes.
+action/dist/** -text

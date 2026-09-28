@@ -65,12 +65,15 @@ impl MatrixTarget {
 
 /// How a command signs the composed artifacts.
 ///
-/// A command rather than a vendor, because signing is platform and vendor specific.
-/// The generated workflow runs it, checks that it succeeded, and then does nothing
-/// else — the sign step is a phase boundary, not an integration.
+/// A command rather than a vendor, because signing is platform and vendor
+/// specific, and because the credential belongs to the project: zup orchestrates
+/// an external provider and never holds a key. The generated workflow runs the
+/// command in the release directory with `zup-signing.json` beside it, then runs
+/// `zup sign verify`, which checks the result rather than trusting the command's
+/// exit code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signing {
-    /// The command, run from the compose directory.
+    /// The command, run from the release directory.
     pub command: String,
 }
 
@@ -206,10 +209,12 @@ pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
     plan(policy, targets, &mut out);
     build(policy, targets, &mut out);
     compose(policy, targets, &mut out);
+    sign(policy, &mut out);
+    let signed = vec!["compose", "sign"];
     if policy.attestations {
-        attest(policy, &mut out);
+        attest(policy, &signed, &mut out);
     }
-    publish(policy, policy.attestations, &mut out);
+    publish(policy, &signed, policy.attestations, &mut out);
     out
 }
 
@@ -324,7 +329,7 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     }
     let _ = writeln!(
         out,
-        "      - name: Compose release\n        uses: {}\n        with:\n          operation: compose\n          release-dir: {}\n          upload-workflow-artifacts: true\n          workflow-artifact-name: compose",
+        "      - name: Compose release\n        uses: {}\n        with:\n          operation: compose\n          release-dir: {}",
         policy.action, policy.release_dir
     );
     // The inputs are declared so the path filter is visible in the file rather
@@ -333,21 +338,124 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     for input in &inputs {
         let _ = writeln!(out, "      #   {input}");
     }
-    if let Some(signing) = &policy.signing {
-        // Sign after compose and before anything hashes the final bytes, so the
-        // digest that is attested and published is the digest of the signed file.
-        out.push_str("      - name: Sign\n        shell: bash\n        run: |\n");
-        for line in signing.command.lines() {
-            let _ = writeln!(out, "          {line}");
-        }
+    if policy.signing.is_none() {
+        // Nothing will change the bytes, so there is no reason to hand the tree
+        // to another job and collect it again — a release can be gigabytes, and
+        // uploading it twice to measure it is the expensive way to learn that.
+        // Finalizing here is the same check, on the same bytes, for free.
+        out.push_str(
+            "      # No signing command is configured, so this release publishes unsigned\n\
+             \x20     # artifacts and Windows SmartScreen will warn about them. Set\n\
+             \x20     # `[publish.github.workflow] signing` in zup.toml and regenerate.\n",
+        );
+        let _ = writeln!(
+            out,
+            "      - name: Finalize\n        uses: {}\n        with:\n          operation: finalize\n          release-dir: {}\n          allow-unsigned: true",
+            policy.action, policy.release_dir
+        );
     }
+    let _ = writeln!(
+        out,
+        "      - name: Upload the release\n        uses: {}\n        with:\n          name: {}\n          path: {}\n          retention-days: 7\n          if-no-files-found: error",
+        uses("actions/upload-artifact"),
+        composed_artifact(policy),
+        policy.release_dir
+    );
     out.push('\n');
 }
 
-fn attest(policy: &WorkflowPolicy, out: &mut String) {
+/// The workflow artifact a compose job hands to signing.
+///
+/// Named for what it is when the project signs: the composed release, still
+/// unsigned. A pipeline that signs nothing hands over the same tree under the
+/// name everything downstream collects, because there is no other producer of
+/// the finalized bytes.
+fn composed_artifact(policy: &WorkflowPolicy) -> &'static str {
+    if policy.signing.is_some() {
+        "compose-unsigned"
+    } else {
+        "compose"
+    }
+}
+
+/// Sign the composed release and finalize it.
+///
+/// The job runs on the compose runner, which is a Windows host, because both the
+/// signing tool and `zup sign verify` are. A project signing from a hosted x64
+/// runner while building ARM64 artifacts elsewhere is the ordinary arrangement,
+/// and this is the job where the two meet — which is also why a centrally hosted
+/// x64 signing job is the shape a cross-architecture release needs.
+///
+/// It is generated only when a signing command is configured. Without one there
+/// is nothing to do but finalize, and that happens in the compose job where the
+/// bytes already are.
+fn sign(policy: &WorkflowPolicy, out: &mut String) {
+    let Some(signing) = &policy.signing else {
+        return;
+    };
+    out.push_str("  sign:\n");
+    out.push_str("    name: sign and finalize\n");
+    out.push_str("    needs: compose\n");
+    let _ = writeln!(out, "    runs-on: {}", policy.compose_runner);
+    out.push_str("    permissions:\n      contents: read\n");
+    out.push_str("    steps:\n");
+    step(
+        out,
+        "Checkout",
+        &uses("actions/checkout"),
+        &["persist-credentials: false"],
+    );
+    let _ = writeln!(
+        out,
+        "      - name: Collect the composed release\n        uses: {}\n        with:\n          name: {}\n          path: {}",
+        uses("actions/download-artifact"),
+        composed_artifact(policy),
+        policy.release_dir
+    );
+    // The command is the project's, and it runs in the release directory with
+    // `zup-signing.json` beside it. The plan names every file, in signing order;
+    // honouring that order is the project's job, and the finalize step below
+    // proves it did — including that a composed artifact embeds the runtime that
+    // was signed, not a different one.
+    let _ = writeln!(
+        out,
+        "      - name: Sign\n        shell: pwsh\n        working-directory: {}\n        run: |",
+        policy.release_dir
+    );
+    for line in signing.command.lines() {
+        let _ = writeln!(out, "          {line}");
+    }
+    let _ = writeln!(
+        out,
+        "      - name: Verify signatures and finalize\n        uses: {}\n        with:\n          operation: finalize\n          release-dir: {}",
+        policy.action, policy.release_dir
+    );
+    let _ = writeln!(
+        out,
+        "      - name: Upload the signed release\n        uses: {}\n        with:\n          name: compose\n          path: {}\n          retention-days: 7\n          if-no-files-found: error",
+        uses("actions/upload-artifact"),
+        policy.release_dir
+    );
+    out.push('\n');
+}
+
+/// The phases a later job depends on.
+///
+/// A job that does not depend on signing cannot be trusted to have signed bytes:
+/// `compose` alone hands over the unsigned tree, and attesting or publishing that
+/// is the whole failure this generator exists to prevent.
+fn needs(upstream: &[&str], attestations: bool) -> String {
+    let mut list: Vec<String> = upstream.iter().map(|name| (*name).to_owned()).collect();
+    if attestations {
+        list.push("attest".to_owned());
+    }
+    format!("[{}]", list.join(", "))
+}
+
+fn attest(policy: &WorkflowPolicy, upstream: &[&str], out: &mut String) {
     out.push_str("  attest:\n");
     out.push_str("    name: attest\n");
-    out.push_str("    needs: compose\n");
+    let _ = writeln!(out, "    needs: {}", needs(upstream, false));
     out.push_str("    runs-on: ubuntu-latest\n");
     out.push_str("    permissions:\n");
     out.push_str("      contents: read\n");
@@ -360,16 +468,17 @@ fn attest(policy: &WorkflowPolicy, out: &mut String) {
         &uses("actions/checkout"),
         &["persist-credentials: false"],
     );
-    step(
+    let _ = writeln!(
         out,
-        "Collect release",
-        &uses("actions/download-artifact"),
-        &["pattern: compose", "path: dist"],
+        "      - name: Collect the finalized release\n        uses: {}\n        with:\n          name: compose\n          path: {}",
+        uses("actions/download-artifact"),
+        policy.release_dir
     );
     // Only what a project says is worth attesting, plus the manifest that names the
     // hashes: attesting every icon would produce an attestation store nobody reads.
     // `attest: true` rather than an `actions/attest` step, so the subject list comes
-    // from the release manifest rather than a glob a human wrote.
+    // from the release manifest rather than a glob a human wrote — and the action
+    // refuses an unfinalized manifest, so the subjects are the signed bytes.
     let _ = writeln!(
         out,
         "      - name: Attest provenance\n        uses: {}\n        with:\n          operation: attest\n          release-dir: {}",
@@ -384,16 +493,12 @@ fn attest(policy: &WorkflowPolicy, out: &mut String) {
     out.push('\n');
 }
 
-fn publish(policy: &WorkflowPolicy, attestations: bool, out: &mut String) {
+fn publish(policy: &WorkflowPolicy, upstream: &[&str], attestations: bool, out: &mut String) {
     out.push_str("  publish:\n");
     out.push_str("    name: publish\n");
     // A job that names a dependency which does not exist is a workflow that cannot
     // start, so the attest job is only in the list when it is generated.
-    out.push_str(if attestations {
-        "    needs: [compose, attest]\n"
-    } else {
-        "    needs: [compose]\n"
-    });
+    let _ = writeln!(out, "    needs: {}", needs(upstream, attestations));
     out.push_str("    runs-on: ubuntu-latest\n");
     out.push_str("    permissions:\n      contents: write\n");
     if let Some(environment) = &policy.environment {
@@ -408,8 +513,9 @@ fn publish(policy: &WorkflowPolicy, attestations: bool, out: &mut String) {
     );
     let _ = writeln!(
         out,
-        "      - name: Collect release\n        uses: {}\n        with:\n          pattern: compose\n          path: dist",
-        uses("actions/download-artifact")
+        "      - name: Collect the finalized release\n        uses: {}\n        with:\n          name: compose\n          path: {}",
+        uses("actions/download-artifact"),
+        policy.release_dir
     );
     // One call owns the whole publication: create-or-resume the draft, upload what is
     // missing, verify every remote digest, and publish once. A matrix of publish jobs

@@ -34,9 +34,12 @@ jobs:
         with:
           key: windows-full
 
+      # Every tool version is pinned. An unpinned `cargo-nextest` is the same
+      # class of problem as an unpinned action: a red build nobody can reproduce
+      # from the same commit.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-machete
+          tool: cargo-nextest@0.9.146,cargo-machete,cargo-deny@0.20.0
 
       - name: Format
         run: cargo fmt --all --check
@@ -61,6 +64,20 @@ jobs:
       - name: Unused dependencies
         run: cargo machete
 
+      # Advisories, licences, sources and yanked versions. `deny.toml` is the
+      # policy; this is the check that the policy is still satisfied, which is a
+      # different question from whether the policy is written down.
+      - name: Supply chain policy
+        run: cargo deny check
+
+      # The gate that actually holds the line. `cargo deny` can only see one
+      # resolved version per crate, so a workspace that reached two versions of
+      # one dependency is invisible to it — and so is development tooling
+      # reaching a binary that ships. Both are checked here, and findings print
+      # the path rather than a count.
+      - name: Dependency graph
+        run: cargo xtask verify-dependency-graph
+
       - name: Whitespace
         run: git diff --check
 
@@ -82,6 +99,66 @@ jobs:
       - name: Role boundaries
         shell: pwsh
         run: ./scripts/verify-frontend-features.ps1
+
+  clean-room:
+    name: clean room
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clean-room
+
+      # The product's own acceptance test, and the only job that answers the
+      # question a person who just downloaded zup actually has: does `zup build`
+      # work with no checkout, no `target/`, no staged runtime and no `xtask`?
+      #
+      # It is a separate job rather than a step in `windows` on purpose. That job
+      # has a populated `target/` and a staged toolchain in it, and a run there
+      # can only prove what this repository can already prove.
+      - name: Toolchain
+        run: cargo xtask toolchain build
+
+      - name: Package
+        run: cargo xtask toolchain package
+
+      - name: Clean room
+        run: cargo xtask release clean-room
+
+  release-size:
+    name: release size
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-size
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+
+      # A size budget is a claim about a release image. Measured on a debug build
+      # it is a claim about debuginfo, so the release profile is not optional
+      # here — and it is why this is its own job rather than another step.
+      - name: Toolchain (release)
+        run: cargo xtask toolchain build --profile release
+
+      # Deferred, not weakened. The test is `#[ignore]`d in the default run and
+      # requested here explicitly, so it stays checked on every PR against a real
+      # release image instead of being quietly dropped.
+      - name: Bootstrapper budget
+        run: cargo nextest run -p zup-dispatch --all-features --run-ignored -E 'test(a_thin_bootstrapper)'
 
   ubuntu-portable:
     name: ubuntu (portable)
@@ -107,8 +184,9 @@ jobs:
         run: |
           cargo xtask emit-portable-matrix
           core="$(cargo xtask emit-portable-matrix --matrix portable-core --format cargo-args)"
+          formats="$(cargo xtask emit-portable-matrix --matrix portable-file-format --format cargo-args)"
           tests="$(cargo xtask emit-portable-matrix --matrix portable-tests --format cargo-args)"
-          printf 'PORTABLE=%s %s\n' "$core" "$tests" >> "$GITHUB_ENV"
+          printf 'PORTABLE=%s %s %s\n' "$core" "$formats" "$tests" >> "$GITHUB_ENV"
 
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries

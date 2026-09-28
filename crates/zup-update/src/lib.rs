@@ -156,6 +156,12 @@ impl TrustContext {
                 trusted_root: zup_core::base64_encode(&config.trusted_root),
                 pin: channel.clone(),
                 mirrors: Vec::new(),
+                // An update client is driven by a configuration file, not by an
+                // artifact a person double-clicked, so the scope comes from that
+                // configuration rather than from a default that would have to be
+                // guessed. `User` here is the value a client is constructed with
+                // by `zup`, which passes the manifest's declared scope.
+                scope: zup_acquire::ThinScope::User,
             },
             state_root: state_root.into(),
             pin: channel,

@@ -481,6 +481,53 @@ pub struct OnlineTrust {
     /// place for a signed mirror list later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrors: Vec<String>,
+    /// The installation scope this bootstrapper installs into.
+    ///
+    /// A thin artifact carries no variant manifest, so the scope the
+    /// application's plan declares has nowhere else to travel. Without this the
+    /// launcher picks one, and a manifest that says `machine` would be installed
+    /// into the user's profile by an artifact nobody asked to be scoped that way.
+    ///
+    /// `either` is refused rather than encoded: a bootstrapper a person
+    /// double-clicked cannot ask them a question, so a project that means `either`
+    /// has to publish a thin artifact per scope or an offline one.
+    #[serde(default)]
+    pub scope: ThinScope,
+}
+
+/// The scope a thin bootstrapper installs into.
+///
+/// Its own type rather than a `String`, because the three values are not
+/// interchangeable: `Either` is a *user choice* a bootstrapper cannot make, and
+/// letting the string through would put the choice back as a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinScope {
+    /// The per-user profile. The default, and the only scope available without
+    /// elevation.
+    #[default]
+    User,
+    /// Every user on the machine. Requires elevation, which the runtime asks for
+    /// after the bootstrapper has done its unelevated part.
+    Machine,
+}
+
+impl ThinScope {
+    /// The wire name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Machine => "machine",
+        }
+    }
+
+    /// The scope this resolves to on a build host.
+    pub const fn selected(self) -> zup_core::SelectedScope {
+        match self {
+            Self::User => zup_core::SelectedScope::User,
+            Self::Machine => zup_core::SelectedScope::Machine,
+        }
+    }
 }
 
 impl OnlineTrust {
@@ -505,7 +552,14 @@ impl OnlineTrust {
             trusted_root: zup_core::base64_encode(trusted_root),
             pin,
             mirrors: Vec::new(),
+            scope: ThinScope::User,
         }
+    }
+
+    /// State the scope this bootstrapper installs into.
+    pub fn with_scope(mut self, scope: ThinScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// The root bytes, decoded from the embedded base64.

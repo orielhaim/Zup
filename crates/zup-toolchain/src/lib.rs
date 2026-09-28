@@ -139,12 +139,222 @@ pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> Str
 /// matters for a file that is downloaded before any of it has been needed.
 pub const DISPATCHER_TARGET: &str = "i686-pc-windows-msvc";
 
+/// Every component a build host needs, in one order.
+///
+/// One function rather than a list spelled at each use. Three callers would
+/// otherwise keep three lists — the staging step that produces them, a readiness
+/// report that names them, and a cache that has to hold all of them — and the
+/// moment one of the three gains a component the other two quietly stop covering
+/// it. The order is presentation: runtimes first, then launchers, because that is
+/// the order a reader cares about them in.
+pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponent> {
+    let mut out = Vec::with_capacity(7);
+    for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
+        out.push(ToolchainComponent::Runtime {
+            target: target.clone(),
+            frontend,
+        });
+    }
+    for subsystem in [Subsystem::Gui, Subsystem::Console] {
+        for online in [false, true] {
+            out.push(ToolchainComponent::Dispatcher { subsystem, online });
+        }
+    }
+    out
+}
+
 /// The descriptor written beside a component.
 pub fn descriptor_file_name(component: &ToolchainComponent, executable_suffix: &str) -> String {
     format!(
         "{}{DESCRIPTOR_SUFFIX}",
         file_name(component, executable_suffix)
     )
+}
+
+/// Schema of the release index.
+pub const RELEASE_INDEX_SCHEMA: u32 = 1;
+
+/// The name a release gives its index.
+///
+/// One constant, in the crate that owns the contract, because three callers read
+/// it: the packaging step that writes it, the clean room that verifies a
+/// downloaded release, and `zup toolchain install` that populates a cache. Three
+/// spellings of one file name is a release that verifies against nothing.
+pub const RELEASE_INDEX_NAME: &str = "zup-toolchain.json";
+
+/// The index a zup release carries, naming every file that release ships.
+///
+/// One document and one directory. A developer installing zup gets a tree they can
+/// point a build at, and the index is what says which tree is the right one for
+/// this exact version — so "did I get the toolchain that goes with this CLI" is
+/// answered by reading one file rather than by installing six things and hoping.
+///
+/// The index deliberately holds **no component identity**. Each component's
+/// identity lives in the descriptor beside it, which is the same descriptor the
+/// resolver already checks and which a build host can read without running the
+/// component. Two documents each holding half of one fact is how they drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolchainRelease {
+    pub schema: u32,
+    /// The zup release this material belongs to.
+    pub zup_version: String,
+    /// The canonical target triple every component here is built for.
+    ///
+    /// One machine, because a release is one build. A developer on Windows x64
+    /// downloads the x64 material; an arm64 machine downloads the arm64 material.
+    /// Mixed machines in one tree is how a resolver finds a template it cannot
+    /// run.
+    pub target: String,
+    /// The developer CLI, relative to the release root.
+    pub cli: ReleaseFile,
+    /// Every component, relative to the release root, in a stable order.
+    pub components: Vec<ReleaseFile>,
+}
+
+/// One file a release ships, and the identity of its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseFile {
+    /// Path relative to the release root, with `/` separators.
+    pub path: String,
+    /// SHA-256 of the bytes, hex.
+    pub digest: String,
+    /// Size of those bytes.
+    pub size: u64,
+}
+
+impl ReleaseFile {
+    /// Measure a file.
+    pub fn of(path: &str, absolute: &Path) -> Result<Self, ToolchainError> {
+        let (size, digest) = measure(absolute)?;
+        Ok(Self {
+            path: path.replace('\\', "/"),
+            digest,
+            size,
+        })
+    }
+}
+
+impl ToolchainRelease {
+    /// A release index for `zup_version` on `target`.
+    pub fn new(zup_version: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            schema: RELEASE_INDEX_SCHEMA,
+            zup_version: zup_version.into(),
+            target: target.into(),
+            cli: ReleaseFile {
+                path: String::new(),
+                digest: String::new(),
+                size: 0,
+            },
+            components: Vec::new(),
+        }
+    }
+    /// Every path this index names, in name order.
+    pub fn paths(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.files().map(|file| file.path.as_str()).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Check that `root` holds exactly the files this index names, unmodified.
+    ///
+    /// This is the check a developer runs once, after extracting a release, and
+    /// the one an installer runs before populating a cache. It is worth having as
+    /// a single function because "is this release material intact" is asked in
+    /// three places and answering it three ways is how one of them ends up
+    /// trusting a file the other two would refuse.
+    ///
+    /// The descriptors are in the index too, and that is not redundancy. The index
+    /// proves the bytes; the descriptor states what those bytes are, and a
+    /// descriptor that disagrees with the index is either a different component or
+    /// a different zup release wearing the same name. Neither is installable, and
+    /// only reading both files finds it.
+    pub fn verify(&self, root: &Path) -> Result<(), ToolchainError> {
+        if self.schema != RELEASE_INDEX_SCHEMA {
+            return Err(ToolchainError::Incompatible(format!(
+                "the toolchain index is schema {} and this zup reads schema {RELEASE_INDEX_SCHEMA}",
+                self.schema
+            )));
+        }
+        for file in self.files() {
+            let absolute = resolve(root, &file.path);
+            let (size, digest) = measure(&absolute)?;
+            if size != file.size {
+                return Err(ToolchainError::WrongSize {
+                    path: absolute,
+                    found: size,
+                    wanted: file.size,
+                });
+            }
+            if digest != file.digest {
+                return Err(ToolchainError::WrongDigest { path: absolute });
+            }
+        }
+        // A descriptor is a component's claim about itself. It has to agree with
+        // the release that carries it, or the release contains bytes from one
+        // zup and a description of another.
+        for file in &self.components {
+            if file.path.ends_with(DESCRIPTOR_SUFFIX) {
+                continue;
+            }
+            let absolute = resolve(root, &file.path);
+            let descriptor_path = descriptor_path_for(&absolute);
+            let bytes =
+                std::fs::read(&descriptor_path).map_err(|error| ToolchainError::Unreadable {
+                    path: descriptor_path.clone(),
+                    reason: format!(
+                        "the descriptor for `{}` is missing or unreadable: {error}",
+                        file.path
+                    ),
+                })?;
+            let descriptor = ComponentDescriptor::parse(&bytes)?;
+            if descriptor.digest != file.digest {
+                return Err(ToolchainError::Incompatible(format!(
+                    "`{}` describes itself as sha256:{} and the release index says sha256:{}",
+                    file.path, descriptor.digest, file.digest
+                )));
+            }
+            if descriptor.zup_version != self.zup_version {
+                return Err(ToolchainError::Incompatible(format!(
+                    "`{}` is from zup {} and this release is zup {}",
+                    file.path, descriptor.zup_version, self.zup_version
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every file this index names, the CLI included.
+    pub fn files(&self) -> impl Iterator<Item = &ReleaseFile> {
+        std::iter::once(&self.cli).chain(&self.components)
+    }
+
+    /// Serialize canonically.
+    pub fn encode(&self) -> String {
+        serde_json::to_string_pretty(self).expect("a toolchain index is always serializable")
+    }
+
+    /// Read an index.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ToolchainError> {
+        serde_json::from_slice(bytes).map_err(|error| ToolchainError::Malformed(error.to_string()))
+    }
+
+    /// The index a release root carries, read from that root.
+    pub fn read(root: &Path) -> Result<Self, ToolchainError> {
+        let path = root.join(RELEASE_INDEX_NAME);
+        let bytes = std::fs::read(&path).map_err(|error| ToolchainError::Unreadable {
+            path: path.clone(),
+            reason: format!("{error}; this directory is not a zup release"),
+        })?;
+        Self::parse(&bytes)
+    }
+}
+
+/// A path inside a release root, refusing anything that escapes it.
+pub fn resolve(root: &Path, relative: &str) -> PathBuf {
+    root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
 /// The compatibility identity of one component.
@@ -588,5 +798,170 @@ mod tests {
             "the resolver looks for the component's own name plus the suffix"
         );
         assert!(read(&path, &component, "0.1.0").is_ok());
+    }
+
+    /// The release index is the one document that answers "is this material the
+    /// toolchain for *this* zup", so it has to survive being moved, renamed, and
+    /// half-extracted without becoming a smaller claim than it was.
+    #[test]
+    fn a_release_index_proves_every_file_it_names() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let cli = root.path().join("zup.exe");
+        std::fs::write(&cli, b"a cli").expect("write");
+        index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
+        std::fs::create_dir_all(root.path().join("toolchain/0.1.0")).expect("the staged directory");
+        for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
+            let component = runtime("x86_64-pc-windows-msvc", frontend);
+            let file_name = file_name(&component, EXECUTABLE_SUFFIX);
+            let path = write_component(root.path(), &component, "0.1.0");
+            let staged = root.path().join(format!("toolchain/0.1.0/{file_name}"));
+            std::fs::write(&staged, std::fs::read(&path).expect("read")).expect("copy");
+            std::fs::write(
+                root.path()
+                    .join(format!("toolchain/0.1.0/{file_name}{DESCRIPTOR_SUFFIX}")),
+                std::fs::read(descriptor_path_for(&path)).expect("read"),
+            )
+            .expect("copy");
+            index.components.push(
+                ReleaseFile::of(&format!("toolchain/0.1.0/{file_name}"), &staged).expect("measure"),
+            );
+        }
+        index
+            .components
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        assert!(index.verify(root.path()).is_ok());
+
+        // One byte changed anywhere is the whole claim failing.
+        let victim = root.path().join(&index.components[0].path);
+        let mut bytes = std::fs::read(&victim).expect("read");
+        bytes[0] = b'X';
+        std::fs::write(&victim, &bytes).expect("corrupt");
+        let error = index.verify(root.path()).expect_err("a changed file");
+        assert!(error.to_string().contains("digest"), "{error}");
+    }
+
+    #[test]
+    fn a_release_index_without_a_descriptor_is_not_a_release() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let cli = root.path().join("zup.exe");
+        std::fs::write(&cli, b"a cli").expect("write");
+        index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
+        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let file_name = file_name(&component, EXECUTABLE_SUFFIX);
+        let path = root.path().join(&file_name);
+        std::fs::write(&path, b"component bytes").expect("write");
+        // No descriptor beside it.
+        index
+            .components
+            .push(ReleaseFile::of(&file_name, &path).expect("measure"));
+        let error = index.verify(root.path()).expect_err("no descriptor");
+        assert!(error.to_string().contains("descriptor"), "{error}");
+    }
+
+    /// An index that proves the bytes but not the claim is asserting half of what
+    /// the release ships, and half is how a component from one zup release gets
+    /// composed into an installer for another.
+    #[test]
+    fn a_descriptor_that_disagrees_with_the_index_is_refused() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let file_name = file_name(&component, EXECUTABLE_SUFFIX);
+        let path = write_component(root.path(), &component, "0.1.0");
+        let descriptor_path = descriptor_path_for(&path);
+        let descriptor =
+            ComponentDescriptor::parse(&std::fs::read(&descriptor_path).unwrap()).expect("parse");
+
+        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let cli = root.path().join("zup.exe");
+        std::fs::write(&cli, b"a cli").expect("write");
+        index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
+        let relative = file_name.clone();
+        index
+            .components
+            .push(ReleaseFile::of(&relative, &path).expect("measure"));
+        assert!(index.verify(root.path()).is_ok());
+
+        // Same bytes, a descriptor that claims a different digest.
+        let mut lying = descriptor.clone();
+        lying.digest = hex(&[0; 32]);
+        std::fs::write(&descriptor_path, lying.encode()).expect("rewrite");
+        let error = index.verify(root.path()).expect_err("a lying descriptor");
+        assert!(error.to_string().contains("describes itself"), "{error}");
+
+        // And a descriptor from another zup release, which is the other half of
+        // the same mistake.
+        let mut foreign = descriptor;
+        foreign.zup_version = "9.9.9".to_owned();
+        std::fs::write(&descriptor_path, foreign.encode()).expect("rewrite");
+        let error = index.verify(root.path()).expect_err("a foreign descriptor");
+        assert!(error.to_string().contains("is from zup 9.9.9"), "{error}");
+    }
+
+    #[test]
+    fn a_release_index_nothing_can_read_is_refused() {
+        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        index.cli = ReleaseFile {
+            path: "zup.exe".to_owned(),
+            digest: hex(&[0; 32]),
+            size: 1,
+        };
+        index.schema = RELEASE_INDEX_SCHEMA + 1;
+        let bytes = index.encode();
+        let parsed = ToolchainRelease::parse(bytes.as_bytes()).expect("parse");
+        let error = parsed
+            .verify(Path::new("."))
+            .expect_err("an unknown index shape");
+        assert!(error.to_string().contains("schema"), "{error}");
+    }
+
+    /// The set a build host needs, checked against what actually exists.
+    ///
+    /// Seven: three presentations of the runtime, and each launcher's
+    /// presentation crossed with whether it can reach a release over the network.
+    /// A host missing any of them cannot build something, and a host that
+    /// accumulates an eighth has a component nothing asked for.
+    #[test]
+    fn a_host_needs_exactly_seven_components_and_they_are_the_ones_listed() {
+        let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid");
+        let components = host_components(&target);
+        assert_eq!(components.len(), 7, "{components:?}");
+        let names: Vec<String> = components
+            .iter()
+            .map(|component| file_name(component, EXECUTABLE_SUFFIX))
+            .collect();
+        for expected in [
+            "zup-setup-gui-",
+            "zup-setup-console-",
+            "zup-setup-headless-",
+            "zup-dispatch-gui-i686",
+            "zup-dispatch-gui-online-i686",
+            "zup-dispatch-console-i686",
+            "zup-dispatch-console-online-i686",
+        ] {
+            assert!(
+                names.iter().any(|name| name.starts_with(expected)),
+                "no component named {expected}*: {names:?}"
+            );
+        }
+        // The launchers all target the one machine that runs everywhere, and the
+        // runtimes all target the host. A list that mixed these up would name a
+        // launcher nobody can run and a runtime for a machine it is not.
+        for component in &components {
+            match component {
+                ToolchainComponent::Runtime { target: found, .. } => {
+                    assert_eq!(found, &target, "{component:?}");
+                }
+                ToolchainComponent::Dispatcher { .. } => {}
+            }
+        }
+    }
+
+    #[test]
+    fn the_index_name_is_the_one_the_release_is_packaged_under() {
+        // A release written with one name and read with another verifies against
+        // nothing, and the failure is "this directory is not a zup release".
+        assert_eq!(RELEASE_INDEX_NAME, "zup-toolchain.json");
     }
 }

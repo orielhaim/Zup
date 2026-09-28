@@ -16,6 +16,28 @@ pub enum Host {
     Windows,
 }
 
+/// Whose vocabulary a matrix's packages are allowed to use.
+///
+/// The portable boundary forbids a portable package from presenting a Windows
+/// concept as part of the domain model, because a model that names `HKEY_LOCAL_MACHINE`
+/// is a model that only one platform can be right about. That argument does not
+/// reach a crate whose *domain* is a Windows file format: a Portable Executable
+/// has the same bytes on every host, and `RCDATA` in a PE parser is the format's
+/// own constant, exactly as `TargetOperatingSystem::Windows` is a target
+/// lexicon's own constant in a portable crate today.
+///
+/// The relaxation is to the vocabulary rules only. A file-format crate still may
+/// not depend on a Windows crate, branch on the build host, import
+/// `std::os::windows`, or name a Win32 namespace: the format is portable, so its
+/// implementation has to be too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vocabulary {
+    /// The package's own domain vocabulary, which must not name a Windows concept.
+    Domain,
+    /// A platform file format, whose vocabulary is the format's.
+    FileFormat,
+}
+
 /// One named package set.
 #[derive(Debug, Clone, Copy)]
 pub struct Matrix {
@@ -23,6 +45,7 @@ pub struct Matrix {
     /// Shown next to the name in the emitted text view.
     pub summary: &'static str,
     pub host: Host,
+    pub vocabulary: Vocabulary,
     /// Declaration order, preserved in every emitted view.
     pub packages: &'static [&'static str],
 }
@@ -55,10 +78,25 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-plugin-build",
     "zup-plugin-runtime",
     // The toolchain compatibility contract. Portable because the repository's own
-    // tooling writes these descriptors on a host that cannot run — or even
-    // compile — the components they describe.
+    // tooling writes these descriptors on a host that cannot run - or even
+    // compile - the components they describe.
     "zup-toolchain",
+    // The signing, evidence and finalization contract. Portable because it is a
+    // description of a release, and a description of a release is the same on
+    // every platform. It knows nothing about Authenticode, `codesign`, a
+    // certificate store or a TSA; those are integrations.
+    "zup-signing",
 ];
+
+/// Crates whose domain is a platform file format.
+///
+/// Separate from [`PORTABLE_CORE`] because of vocabulary, not portability: a PE
+/// image, a resource table and an Authenticode digest are facts about bytes, and
+/// reading them is the same work on every host. What they do *not* include is
+/// WinVerifyTrust, `UpdateResourceW`, or any other host's judgement about a file
+/// — those are the Windows adapter's, and a file-format crate that grew one would
+/// stop being portable in the way that matters.
+pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe"];
 
 /// Portable crates that verify the stack instead of shipping inside an
 /// installer. Their test suites are part of the native portable run.
@@ -68,7 +106,6 @@ pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 /// composition CLI, the runtime an installer embeds, the native frontends, and
 /// the small dispatcher a universal artifact starts through.
 pub const WINDOWS_ONLY: &[&str] = &[
-    "zup-pe",
     "zup-windows",
     "zup-dispatch",
     "zup",
@@ -81,18 +118,28 @@ pub const MATRICES: &[Matrix] = &[
         name: "portable-core",
         summary: "crates that build and test on a non-Windows host",
         host: Host::Any,
+        vocabulary: Vocabulary::Domain,
         packages: PORTABLE_CORE,
+    },
+    Matrix {
+        name: "portable-file-format",
+        summary: "crates whose domain is a platform file format, read the same way on every host",
+        host: Host::Any,
+        vocabulary: Vocabulary::FileFormat,
+        packages: PORTABLE_FILE_FORMAT,
     },
     Matrix {
         name: "portable-tests",
         summary: "portable crates that verify the stack instead of shipping in an installer",
         host: Host::Any,
+        vocabulary: Vocabulary::Domain,
         packages: PORTABLE_TESTS,
     },
     Matrix {
         name: "windows-only",
         summary: "crates that require a Windows build host",
         host: Host::Windows,
+        vocabulary: Vocabulary::Domain,
         packages: WINDOWS_ONLY,
     },
 ];
@@ -130,6 +177,17 @@ pub fn portable() -> Vec<&'static str> {
         .filter(|matrix| matrix.host == Host::Any)
         .flat_map(|matrix| matrix.packages.iter().copied())
         .collect()
+}
+
+/// The vocabulary a portable package is held to, and `None` for a package no
+/// matrix claims. Callers treat a package that is not in a matrix as
+/// [`Vocabulary::Domain`], so an unclassified crate gets the strictest rules
+/// rather than none.
+pub fn vocabulary_of(package: &str) -> Vocabulary {
+    MATRICES
+        .iter()
+        .find(|matrix| matrix.packages.contains(&package))
+        .map_or(Vocabulary::Domain, |matrix| matrix.vocabulary)
 }
 
 /// Packages listed in more than one matrix. A package belongs to exactly one.

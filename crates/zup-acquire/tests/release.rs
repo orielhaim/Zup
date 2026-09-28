@@ -10,7 +10,7 @@ use common::*;
 use zup_acquire::{
     CatalogEntry, ContentCatalog, ContentDescriptor, ContentKind, DocumentRef, OnlineTrust,
     RELEASE_SCHEMA, ReleaseDescriptor, ReleaseDownload, ReleaseDownloadKind, ReleaseIdentity,
-    ReleasePin, ReleaseVariant, WebLayout, blob_path, check_channel, check_segment,
+    ReleasePin, ReleaseVariant, ThinScope, WebLayout, blob_path, check_channel, check_segment,
 };
 use zup_core::{AppId, TargetTriple};
 
@@ -339,11 +339,20 @@ fn a_thin_bootstrapper_carries_only_what_it_needs_to_resolve_a_release() {
             channel: "stable".to_owned(),
         },
         mirrors: vec!["https://mirror.internal/acme".to_owned()],
+        scope: ThinScope::Machine,
     };
     trust
         .validate()
         .expect("the trust configuration is well formed");
+    // The scope travels in the block, because a thin artifact carries no variant
+    // manifest and the launcher has nowhere else to read it from.
+    assert_eq!(trust.scope, ThinScope::Machine);
+    assert_eq!(trust.scope.selected(), zup_core::SelectedScope::Machine);
     let bytes = serde_json::to_vec(&trust).expect("it serializes");
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"scope\":\"machine\""),
+        "{bytes:?}"
+    );
     // A bootstrapper embeds identity, a channel, a location, and a root. It
     // does not embed payload, runtimes, or other architectures. The dominant
     // term is the base64-encoded trusted root, which is why a root is a
@@ -370,6 +379,7 @@ fn a_version_pinned_bootstrapper_and_a_channel_bootstrapper_are_different_artifa
             version: "1.4.0".to_owned(),
         },
         mirrors: Vec::new(),
+        scope: ThinScope::User,
     };
     pinned.validate().expect("well formed");
     assert!(pinned.pin.is_pinned());
@@ -414,6 +424,7 @@ fn a_trust_configuration_that_points_somewhere_unexpected_is_refused() {
             channel: "stable".to_owned(),
         },
         mirrors: Vec::new(),
+        scope: ThinScope::User,
     };
     assert!(base.validate().is_ok());
     for hostile in [

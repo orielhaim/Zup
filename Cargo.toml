@@ -48,6 +48,7 @@ zup-pe = { path = "crates/zup-pe" }
 zup-dispatch = { path = "crates/zup-dispatch" }
 zup-installer = { path = "crates/zup-installer" }
 zup-toolchain = { path = "crates/zup-toolchain" }
+zup-signing = { path = "crates/zup-signing" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
@@ -105,6 +106,7 @@ serde_ignored = "0.1"
 
 # Test
 criterion = "0.8"
+proptest = "1"
 rstest = "0.27"
 tempfile = "3"
 

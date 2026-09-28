@@ -20,7 +20,14 @@
 import * as core from '@actions/core'
 
 /** What this step does. */
-export type Operation = 'setup' | 'build' | 'compose' | 'attest' | 'publish' | 'release'
+export type Operation =
+  | 'setup'
+  | 'build'
+  | 'compose'
+  | 'finalize'
+  | 'attest'
+  | 'publish'
+  | 'release'
 
 /** Everything the action was asked to do. */
 export interface Inputs {
@@ -50,6 +57,10 @@ export interface Inputs {
   workflowArtifactName: string | undefined
   artifactRetentionDays: number | undefined
   attest: boolean
+  /** Whether a release with no signature may still be finalized and published. */
+  allowUnsigned: boolean
+  /** Whether revocation may be checked over the network. */
+  onlineRevocation: boolean
   /** Extra subjects to attest, relative to the release directory. */
   attestPaths: string[]
   /** Whether a dangerous trigger may proceed with a credential. */
@@ -76,6 +87,7 @@ const OPERATIONS: readonly Operation[] = [
   'setup',
   'build',
   'compose',
+  'finalize',
   'attest',
   'publish',
   'release',
@@ -129,6 +141,8 @@ export function readInputs(): Inputs {
     workflowArtifactName: text('workflow-artifact-name'),
     artifactRetentionDays: number('artifact-retention-days'),
     attest: flag('attest'),
+    allowUnsigned: flag('allow-unsigned'),
+    onlineRevocation: flag('online-revocation'),
     attestPaths: list('attest-paths'),
     allowUnsafePublish: flag('allow-unsafe-publish'),
     args: tokenize(text('args') ?? '', process.platform),

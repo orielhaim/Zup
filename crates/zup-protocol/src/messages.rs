@@ -22,6 +22,43 @@ pub const BACKEND_OPERATIONS_V1: &str = "backend-operations-v1";
 pub const LIFECYCLE_V1: &str = "owned-lifecycle-v1";
 pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 
+/// The closed vocabulary of `Failed.kind`.
+///
+/// A closed set, and it lives here rather than in either peer, because the
+/// parent's response depends on it: a busy installation is a retry and an
+/// authentication failure is a refusal, and a parent that could not tell them
+/// apart offers the user the wrong advice. An unrecognized kind is a protocol
+/// error and never a default — a newer worker talking to an older parent has to be
+/// refused rather than reported as something the user did wrong.
+pub mod failure {
+    /// Another operation holds this installation's lock.
+    pub const INSTALLATION_BUSY: &str = "installation_busy";
+    /// The worker could not prove who started it or what it was asked to do.
+    pub const AUTHENTICATION: &str = "authentication";
+    /// The parent or the worker spoke something the other could not follow.
+    pub const PROTOCOL: &str = "protocol";
+    /// A transaction or a prerequisite failed.
+    pub const TRANSACTION: &str = "transaction";
+    /// The user cancelled.
+    pub const CANCELLED: &str = "cancelled";
+    /// A transaction did not finish safely and a human has to look at it.
+    pub const RECOVERY_REQUIRED: &str = "recovery_required";
+    /// The operation needs elevation the user did not grant.
+    pub const AUTHORIZATION_REQUIRED: &str = "authorization_required";
+}
+
+/// Every failure kind, so a reader can check the vocabulary is complete and a
+/// test can check nothing outside it is sent.
+pub const FAILURE_KINDS: &[&str] = &[
+    failure::INSTALLATION_BUSY,
+    failure::AUTHENTICATION,
+    failure::PROTOCOL,
+    failure::TRANSACTION,
+    failure::CANCELLED,
+    failure::RECOVERY_REQUIRED,
+    failure::AUTHORIZATION_REQUIRED,
+];
+
 /// Versioned envelope wrapping every message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {

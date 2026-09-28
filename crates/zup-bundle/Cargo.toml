@@ -20,5 +20,6 @@ zup-plugin-contract.workspace = true
 [dev-dependencies]
 zup-build.workspace = true
 zup-manifest.workspace = true
+proptest.workspace = true
 zstd.workspace = true
 sha2.workspace = true

@@ -24,6 +24,19 @@
 //! `Receipt` are portable transaction and bundle terms, and `Privilege` names
 //! an actor rather than an elevation mechanism.
 //!
+//! # Two vocabularies, one boundary
+//!
+//! [`matrix::Vocabulary`] decides whether the concept tables apply at all. A
+//! `Domain` package is held to all of them. A `FileFormat` package is held to
+//! every *structural* rule — no Windows dependency, no `cfg(windows)`, no
+//! `std::os::windows`, no Win32 namespace — and to neither concept table,
+//! because a crate whose domain is a Windows file format must name that format
+//! to be about it at all. `RCDATA` in `zup-pe` is the format's resource type,
+//! not a Windows concept leaking into a portable model.
+//!
+//! The relaxation is declared once, in the matrix every other command reads, so
+//! a package does not gain it by a line added next to the code it silences.
+//!
 //! Adding a rule means adding a [`Rule`] variant, its summary, a token table,
 //! and one [`check_source`] arm. Findings are ordered by matrix order, then
 //! package, then path, then line, so two runs over one workspace are equal.
@@ -347,6 +360,10 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
         if member.name == ENFORCER {
             continue;
         }
+        // A file-format crate is held to every structural rule and none of the
+        // vocabulary ones. Decided by the matrix rather than by an allowlist here,
+        // so the classification is the one the rest of the tooling already reads.
+        let vocabulary = matrix::vocabulary_of(package);
         for source in production_sources(&directory)? {
             violations.extend(check_source(
                 member,
@@ -356,6 +373,7 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
                     workspace::relative(&directory, &source)
                 ),
                 &source,
+                vocabulary,
             )?);
         }
     }
@@ -506,8 +524,23 @@ fn scan_dependencies(
     }
 }
 
-fn check_source(member: &Member, location: &str, path: &Path) -> Result<Vec<Violation>, String> {
+fn check_source(
+    member: &Member,
+    location: &str,
+    path: &Path,
+    vocabulary: matrix::Vocabulary,
+) -> Result<Vec<Violation>, String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    // The vocabulary tables are what a file-format crate is exempt from; every
+    // other table applies to it unchanged.
+    let mut structural = vec![
+        (Rule::WindowsCfgBranch, WINDOWS_CFG_TOKENS),
+        (Rule::OsWindowsImport, OS_WINDOWS_TOKENS),
+        (Rule::WindowsApiNamespace, WINDOWS_API_TOKENS),
+    ];
+    if vocabulary == matrix::Vocabulary::Domain {
+        structural.push((Rule::BannedIdentifier, BANNED_IDENTIFIERS));
+    }
     let mut scrubber = Scrubber::default();
     let mut modules = TestModules::default();
     let mut violations = Vec::new();
@@ -518,12 +551,7 @@ fn check_source(member: &Member, location: &str, path: &Path) -> Result<Vec<Viol
             continue;
         }
         let number = index + 1;
-        for (rule, tokens) in [
-            (Rule::WindowsCfgBranch, WINDOWS_CFG_TOKENS),
-            (Rule::OsWindowsImport, OS_WINDOWS_TOKENS),
-            (Rule::WindowsApiNamespace, WINDOWS_API_TOKENS),
-            (Rule::BannedIdentifier, BANNED_IDENTIFIERS),
-        ] {
+        for (rule, tokens) in &structural {
             let matched = tokens
                 .iter()
                 .filter(|token| line.code.contains(**token))
@@ -533,12 +561,15 @@ fn check_source(member: &Member, location: &str, path: &Path) -> Result<Vec<Viol
                 continue;
             }
             violations.push(Violation {
-                rule,
+                rule: *rule,
                 package: member.name.clone(),
                 path: location.to_owned(),
                 line: Some(number),
                 detail: matched.join(", "),
             });
+        }
+        if vocabulary != matrix::Vocabulary::Domain {
+            continue;
         }
         let literals = line.literals.to_ascii_lowercase();
         let matched = BANNED_LITERALS
@@ -724,5 +755,138 @@ impl TestModules {
 
     fn inside(&self) -> bool {
         self.inside
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix::{Host, MATRICES, Vocabulary};
+
+    fn rules(violations: &[Violation]) -> Vec<Rule> {
+        violations.iter().map(|violation| violation.rule).collect()
+    }
+
+    fn member(name: &str) -> Member {
+        Member {
+            name: name.to_owned(),
+            directory: format!("crates/{name}"),
+        }
+    }
+
+    /// Write `source` to a scratch file and scan it under one vocabulary.
+    fn scan(vocabulary: Vocabulary, source: &str) -> Vec<Rule> {
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let path = directory.path().join("source.rs");
+        fs::write(&path, source).expect("write");
+        rules(&check_source(&member("probe"), "probe.rs", &path, vocabulary).expect("scan"))
+    }
+
+    /// The relaxation is to the concept tables and to nothing else. Every
+    /// structural rule still fires for a file-format crate, which is what makes
+    /// the tier a boundary rather than an exemption.
+    #[test]
+    fn a_file_format_crate_is_still_held_to_every_structural_rule() {
+        for (source, expected) in [
+            ("#[cfg(windows)]\npub fn f() {}\n", Rule::WindowsCfgBranch),
+            (
+                "use std::os::windows::ffi::OsStrExt;\n",
+                Rule::OsWindowsImport,
+            ),
+            (
+                "use windows::Win32::System::SystemInformation;\n",
+                Rule::WindowsApiNamespace,
+            ),
+        ] {
+            assert_eq!(
+                scan(Vocabulary::FileFormat, source),
+                vec![expected],
+                "a file-format crate is not exempt from {expected}"
+            );
+        }
+    }
+
+    /// A file-format crate's own vocabulary is the format's. `RCDATA` is what a
+    /// PE resource type is called in the PE specification, so a PE parser that
+    /// cannot write it is not a PE parser.
+    #[test]
+    fn a_file_format_crate_may_name_the_format() {
+        assert!(
+            scan(
+                Vocabulary::FileFormat,
+                "pub const RESOURCE_TYPE_RCDATA: u16 = 10;\n"
+            )
+            .is_empty(),
+            "the format's vocabulary is not a leak"
+        );
+        assert_eq!(
+            scan(
+                Vocabulary::Domain,
+                "pub const RESOURCE_TYPE_RCDATA: u16 = 10;\n"
+            ),
+            vec![Rule::BannedIdentifier],
+            "a domain crate has no such excuse"
+        );
+    }
+
+    /// The classification is the matrix's, so a package cannot acquire the
+    /// relaxation by anything written next to the code it silences, and a
+    /// package no matrix claims gets the strict rules rather than none.
+    #[test]
+    fn the_vocabulary_is_the_matrixs_and_an_unclaimed_package_gets_the_strict_one() {
+        assert_eq!(matrix::vocabulary_of("zup-pe"), Vocabulary::FileFormat);
+        assert_eq!(matrix::vocabulary_of("zup-signing"), Vocabulary::Domain);
+        assert_eq!(matrix::vocabulary_of("zup-core"), Vocabulary::Domain);
+        assert_eq!(
+            matrix::vocabulary_of("no-such-crate"),
+            Vocabulary::Domain,
+            "an unclassified package is held to the strict rules"
+        );
+    }
+
+    /// A file-format crate is portable by definition. One that needed a Windows
+    /// build host would be a host adapter wearing a file format's name, and the
+    /// gate would be checking the wrong thing.
+    #[test]
+    fn a_file_format_crate_is_verified_on_every_host() {
+        for matrix_entry in MATRICES {
+            if matrix_entry.vocabulary != Vocabulary::FileFormat {
+                continue;
+            }
+            assert_eq!(
+                matrix_entry.host,
+                Host::Any,
+                "`{}` is a file format, so it builds everywhere",
+                matrix_entry.name
+            );
+        }
+    }
+
+    /// The structural tables are not narrowed by the tier. A token list that
+    /// lost an entry would silently stop holding anything at all, including the
+    /// crates the tier was built to keep honest.
+    #[test]
+    fn the_structural_tables_are_the_whole_boundary() {
+        assert_eq!(WINDOWS_CFG_TOKENS.len(), 5);
+        assert_eq!(OS_WINDOWS_TOKENS, ["std::os::windows"]);
+        assert!(!WINDOWS_API_TOKENS.is_empty());
+    }
+
+    /// The scrubber is what keeps prose from satisfying or tripping a rule, and
+    /// a file-format crate is held to the structural rules exactly as a domain
+    /// crate is, so its comments must be blanked the same way.
+    #[test]
+    fn a_comment_is_not_production_code() {
+        assert!(
+            scan(
+                Vocabulary::FileFormat,
+                "// #[cfg(windows)] is what we refuse\n"
+            )
+            .is_empty()
+        );
+        assert!(
+            scan(Vocabulary::FileFormat, "/* std::os::windows::ffi */\n").is_empty(),
+            "a block comment is closed before the next line is read"
+        );
     }
 }

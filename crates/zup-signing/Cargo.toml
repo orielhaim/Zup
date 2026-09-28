@@ -1,0 +1,23 @@
+[package]
+name = "zup-signing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The portable signing, evidence and finalization contract for a zup release"
+
+# Deliberately no `windows-*`, no `object`, no ASN.1, no network client and no
+# credential library. The crate states what must be signed, in what order, and
+# what the result has to prove; every one of those is a property of the release,
+# not of the machine that verifies it. `verify-portable-boundaries` enforces the
+# part that can be expressed as a rule.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+semver.workspace = true
+tempfile.workspace = true

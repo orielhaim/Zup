@@ -50,6 +50,15 @@ pub enum WorkerError {
     #[error("transaction failed: {0}")]
     Transaction(String),
 
+    /// Another operation holds this installation's lock.
+    ///
+    /// A distinct error rather than a `Transaction` string, because the parent
+    /// has to turn it into "wait and retry" rather than "this installation is
+    /// broken", and the only way to do that across a process boundary is for the
+    /// worker to say which it is.
+    #[error("another operation is running for this installation")]
+    Busy,
+
     #[error("parent disconnect")]
     ParentDisconnect,
 }

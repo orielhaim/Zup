@@ -1185,19 +1185,52 @@ mod workflow {
 
     #[test]
     fn the_phases_are_explicit_and_ordered() {
-        let rendered = generate(&WorkflowPolicy::default(), &matrix());
-        let order: Vec<usize> = [
+        // Without a signing command there is no separate signing job, and the
+        // order is still total: the release is finalized inside `compose`.
+        let unsigned = generate(&WorkflowPolicy::default(), &matrix());
+        for phase in [
             "  plan:",
             "  build:",
             "  compose:",
             "  attest:",
             "  publish:",
+        ] {
+            assert!(unsigned.contains(phase), "{phase} missing from\n{unsigned}");
+        }
+        assert!(
+            !unsigned.contains("  sign:"),
+            "nothing to sign with means no signing job:\n{unsigned}"
+        );
+        assert!(
+            unsigned
+                .find("operation: finalize")
+                .expect("a finalize step")
+                < unsigned.find("operation: attest").expect("attest"),
+            "finalization precedes attestation"
+        );
+
+        let signed = generate(
+            &WorkflowPolicy {
+                signing: Some(zup_publish_github::Signing {
+                    command: "signtool sign $FILE".to_owned(),
+                }),
+                ..WorkflowPolicy::default()
+            },
+            &matrix(),
+        );
+        let order: Vec<usize> = [
+            "  plan:",
+            "  build:",
+            "  compose:",
+            "  sign:",
+            "  attest:",
+            "  publish:",
         ]
         .iter()
         .map(|phase| {
-            rendered
+            signed
                 .find(phase)
-                .unwrap_or_else(|| panic!("{phase} missing"))
+                .unwrap_or_else(|| panic!("{phase} missing from\n{signed}"))
         })
         .collect();
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
@@ -1217,13 +1250,118 @@ mod workflow {
     fn attestations_can_be_turned_off_entirely() {
         let policy = WorkflowPolicy {
             attestations: false,
+            signing: Some(zup_publish_github::Signing {
+                command: "signtool sign $FILE".to_owned(),
+            }),
             ..WorkflowPolicy::default()
         };
         let rendered = generate(&policy, &matrix());
         assert!(!rendered.contains("  attest:"), "{rendered}");
         assert!(!rendered.contains("id-token: write"), "{rendered}");
-        // The publish job must not depend on a job that no longer exists.
-        assert!(rendered.contains("needs: [compose]"), "{rendered}");
+        // The publish job must not depend on a job that no longer exists, and it
+        // must still depend on signing: a release nobody verified a signature on
+        // is not one this tool should put out.
+        assert!(rendered.contains("needs: [compose, sign]"), "{rendered}");
+    }
+
+    #[test]
+    fn nothing_downstream_of_composition_runs_before_the_release_is_finalized() {
+        // The failure this generator exists to prevent: compose uploads its
+        // artifact, signing runs afterwards, and attest and publish both collect
+        // the *unsigned* tree. So the artifact those two jobs collect has to be
+        // produced by a job that ran `zup sign verify`, which means the upload
+        // that names it has to come after signing.
+        //
+        // Everything is compared as a line index: the file is a sequence of lines,
+        // and a byte offset compared against a line number is a comparison of two
+        // different things that happens to be a `usize`.
+        let line_of = |rendered: &str, needle: &str| {
+            rendered
+                .lines()
+                .position(|line| line.trim() == needle)
+                .unwrap_or_else(|| panic!("no line `{needle}` in\n{rendered}"))
+        };
+
+        let signed = generate(
+            &WorkflowPolicy {
+                signing: Some(zup_publish_github::Signing {
+                    command: "signtool sign /tr $URL $FILE".to_owned(),
+                }),
+                ..WorkflowPolicy::default()
+            },
+            &matrix(),
+        );
+        let sign = line_of(&signed, "sign:");
+        let unsigned_handover = line_of(&signed, "- name: Upload the release");
+        assert!(
+            unsigned_handover < sign,
+            "composition hands the tree over before the signing job consumes it"
+        );
+        assert!(
+            line_of(&signed, "- name: Upload the signed release") > sign,
+            "the finalized tree is uploaded by the job that verified it"
+        );
+        for job in ["attest:", "publish:"] {
+            let start = line_of(&signed, job);
+            let collects = signed
+                .lines()
+                .skip(start)
+                .any(|line| line.trim() == "name: compose" && line.starts_with("          "));
+            assert!(collects, "{job} does not collect the finalized release");
+        }
+
+        // With no signing command, nothing changes the bytes, so the compose job
+        // finalizes and uploads in place: same check, one upload.
+        let unsigned = generate(&WorkflowPolicy::default(), &matrix());
+        let finalize = unsigned
+            .lines()
+            .position(|line| line.trim() == "operation: finalize")
+            .expect("an unsigned pipeline still finalizes");
+        let upload = line_of(&unsigned, "- name: Upload the release");
+        assert!(
+            finalize < upload,
+            "the release is uploaded before it is finalized:\n{unsigned}"
+        );
+    }
+
+    #[test]
+    fn signing_happens_in_its_own_job_between_composition_and_publication() {
+        let policy = WorkflowPolicy {
+            signing: Some(zup_publish_github::Signing {
+                command: "signtool sign /fd SHA256 /tr $URL /td SHA256 $FILE".to_owned(),
+            }),
+            ..WorkflowPolicy::default()
+        };
+        let with = generate(&policy, &matrix());
+        let compose = with.find("operation: compose").expect("compose");
+        let sign = with.find("- name: Sign").expect("a sign step");
+        let finalize = with.find("operation: finalize").expect("a finalize step");
+        let publish = with.find("operation: publish").expect("a publish step");
+        assert!(compose < sign, "signing is after composition");
+        assert!(
+            sign < finalize,
+            "verification reads the bytes signing produced, so it comes after"
+        );
+        assert!(
+            finalize < publish,
+            "publication reads the finalized release"
+        );
+        assert!(with.contains("signtool sign"));
+        // The composed tree is handed over under a name that says what it is.
+        assert!(with.contains("name: compose-unsigned"), "{with}");
+        // And signing runs where the signing tool is, which is Windows.
+        assert!(with.contains("runs-on: windows-latest"), "{with}");
+    }
+
+    #[test]
+    fn a_release_with_no_signing_command_says_so_in_the_file() {
+        // Not a silent downgrade. A project that has not configured signing gets
+        // an unsigned release, and the generated pipeline has to say so in a place
+        // a reviewer reads before merging it.
+        let rendered = generate(&WorkflowPolicy::default(), &matrix());
+        assert!(rendered.contains("allow-unsigned: true"), "{rendered}");
+        assert!(rendered.contains("SmartScreen"), "{rendered}");
+        assert!(!rendered.contains("name: compose-unsigned"), "{rendered}");
     }
 
     #[test]
@@ -1333,10 +1471,10 @@ mod workflow {
             .lines()
             .filter(|line| line.contains(&format!("uses: {action}")))
             .count();
-        // build, compose, attest, publish. One per phase: the pipeline stays
-        // readable and each call is a place a developer can look.
-        assert_eq!(calls, 4, "{rendered}");
-        for operation in ["build", "compose", "attest", "publish"] {
+        // build, compose, finalize, attest, publish. One per phase: the pipeline
+        // stays readable and each call is a place a developer can look.
+        assert_eq!(calls, 5, "{rendered}");
+        for operation in ["build", "compose", "finalize", "attest", "publish"] {
             assert!(
                 rendered.contains(&format!("operation: {operation}")),
                 "no `{operation}` phase in\n{rendered}"

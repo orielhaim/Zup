@@ -60,9 +60,12 @@ const SEED_NAME: &str = "local source";
 
 /// Run the thin path for the artifact described by `index`.
 ///
-/// `scope` is the installation scope the selected variant's plan declares, which
-/// the bootstrapper knows from the release graph rather than from a command line
-/// argument — a user double-clicking the artifact never chose one.
+/// `scope` is the installation scope the artifact's trust block declares, which
+/// the bootstrapper knows from the artifact rather than from a command line
+/// argument — a user double-clicking the artifact never chose one. It is the same
+/// scope the launcher passes to the runtime it starts, and the same scope that
+/// decides which state root this process reads, so a thin install lands where the
+/// project said it would.
 pub fn run(
     index: &ArtifactIndex,
     request: &BootstrapRequest,
@@ -540,5 +543,44 @@ mod tests {
                 .any(|pair| pair == ["--output", "jsonl"])
         );
         assert!(arguments.contains(&"--ui".to_owned()));
+    }
+
+    /// The scope a thin artifact installs into is the one its **trust block**
+    /// declares, carried all the way to the `--scope` the runtime is launched
+    /// with.
+    ///
+    /// A thin artifact carries no variant manifest, so the scope the
+    /// application's plan declares has nowhere else to travel, and a launcher
+    /// that defaulted it would install a `machine`-scoped application into the
+    /// user's profile and report success. This is the test that says the constant
+    /// is not there.
+    #[test]
+    fn a_thin_artifacts_scope_travels_to_the_runtime_it_starts() {
+        for (trust, expected) in [
+            (zup_acquire::ThinScope::User, "user"),
+            (zup_acquire::ThinScope::Machine, "machine"),
+        ] {
+            let scope = trust.selected();
+            let arguments = handoff_arguments(
+                std::path::Path::new(r"C:\state\content"),
+                std::path::Path::new(r"C:\state\content\handoff\abc.json"),
+                Some(zup_core::Sha256Digest::from_bytes([1; 32])),
+                &BootstrapRequest {
+                    source: None,
+                    state_root: None,
+                    machine_readable: false,
+                },
+                scope,
+                false,
+            );
+            assert!(
+                arguments
+                    .iter()
+                    .position(|argument| argument == "--scope")
+                    .map(|at| arguments[at + 1].as_str() == expected)
+                    .unwrap_or(false),
+                "a trust block declaring {trust:?} reached the runtime as {arguments:?}"
+            );
+        }
     }
 }

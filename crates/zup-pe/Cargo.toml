@@ -7,8 +7,23 @@ repository.workspace = true
 description = "Portable Executable resources and headers for zup"
 
 [dependencies]
+authenticode = { version = "0.6", features = ["std"] }
+# The CMS types behind the `authenticode` crate's own parser, reached only to read
+# the `SignerInfo`'s issuer and serial number. Naming them here rather than
+# re-deriving them from the DER keeps the version skew in one place: the two
+# crates publish against the same `der` release, so there is one ASN.1 stack in
+# the graph and not two.
+cms = "0.2"
+der = "0.7"
+x509-cert = "0.2"
+# `authenticode` 0.6 is published against `digest` 0.10 and zup is on `sha2`
+# 0.11, so the two hash traits are different releases of one interface and
+# `zup-pe` needs to name both to bridge them. It is one crate, it is upstream's
+# version skew, and there is no second hash implementation anywhere in the tree.
+digest = "0.10"
+sha2.workspace = true
 thiserror.workspace = true
-windows-link.workspace = true
+zup-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
