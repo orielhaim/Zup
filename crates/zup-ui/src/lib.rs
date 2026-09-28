@@ -9,14 +9,16 @@ use std::sync::mpsc::{Receiver, Sender};
 use gpui_kit::base::{Disableable, StyledExt};
 use gpui_kit::component::button::*;
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
+use gpui_kit::component::form::{field, v_form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
 use gpui_kit::{
-    AppContext, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled,
-    Window, WindowBounds, WindowOptions, application, assets, div, px, rgb, size,
+    App, AppContext, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement, Render,
+    Styled, Window, WindowBounds, WindowOptions, application, assets, div, px, rgb, size,
 };
 use zup_core::{ComponentId, SelectedScope, UiBranding, UiTheme};
 use zup_presentation::{
@@ -577,6 +579,40 @@ fn parse_accent(value: Option<&str>) -> u32 {
         .unwrap_or(0x2563eb)
 }
 
+/// Selects the palette, then paints the publisher's accent across every role
+/// that renders it.
+///
+/// The accent is applied through `Theme::update` rather than by editing the
+/// global theme in place: components paint from the renderable tokens, and only
+/// `update` copies an edited color onto them. Editing `Theme::global_mut`
+/// leaves Buttons, Checkboxes and Inputs on the default blue while the
+/// hand-built layout below uses the branded one.
+fn apply_branding(theme_mode: UiTheme, accent: Option<&str>, cx: &mut App) {
+    match theme_mode {
+        UiTheme::System => Theme::sync_system_appearance(None, cx),
+        UiTheme::Light => Theme::change(ThemeMode::Light, None, cx),
+        UiTheme::Dark => Theme::change(ThemeMode::Dark, None, cx),
+    }
+    let accent = rgb(parse_accent(accent)).into();
+    let foreground = rgb(0xffffff).into();
+    Theme::update(cx, |theme| {
+        let colors = &mut theme.colors;
+        colors.accent = accent;
+        colors.ring = accent;
+        colors.primary = accent;
+        colors.primary_hover = accent;
+        colors.primary_active = accent;
+        colors.primary_foreground = foreground;
+        colors.button_primary = accent;
+        colors.button_primary_hover = accent;
+        colors.button_primary_active = accent;
+        colors.button_primary_foreground = foreground;
+        theme.radius = px(10.0);
+        theme.radius_lg = px(16.0);
+        theme.focus_ring = true;
+    });
+}
+
 pub fn run_with_branding(
     surface: Surface,
     commands: Sender<UiCommand>,
@@ -585,39 +621,15 @@ pub fn run_with_branding(
 ) {
     application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
-        match branding
-            .as_ref()
-            .map(|branding| branding.theme)
-            .unwrap_or(UiTheme::System)
-        {
-            UiTheme::System => Theme::sync_system_appearance(None, cx),
-            UiTheme::Light => Theme::change(ThemeMode::Light, None, cx),
-            UiTheme::Dark => Theme::change(ThemeMode::Dark, None, cx),
-        }
-        let theme = Theme::global_mut(cx);
-        let accent_value = parse_accent(
+        apply_branding(
+            branding
+                .as_ref()
+                .map_or(UiTheme::System, |branding| branding.theme),
             branding
                 .as_ref()
                 .and_then(|branding| branding.accent.as_deref()),
+            cx,
         );
-        let accent = rgb(accent_value).into();
-        let accent_hover = rgb(accent_value).into();
-        let accent_active = rgb(accent_value).into();
-        let accent_foreground = rgb(0xffffff).into();
-        theme.colors.accent = accent;
-        theme.colors.ring = accent;
-        theme.colors.primary = accent;
-        theme.colors.primary_hover = accent_hover;
-        theme.colors.primary_active = accent_active;
-        theme.colors.primary_foreground = accent_foreground;
-        theme.colors.button_primary = accent;
-        theme.colors.button_primary_hover = accent_hover;
-        theme.colors.button_primary_active = accent_active;
-        theme.colors.button_primary_foreground = accent_foreground;
-        theme.radius = px(10.0);
-        theme.radius_lg = px(16.0);
-        theme.focus_ring = true;
-        Theme::sync_base(cx);
         let events = std::sync::Arc::new(std::sync::Mutex::new(events));
         let bounds = Bounds::centered(None, size(px(640.0), px(620.0)), cx);
         let options = WindowOptions {
@@ -625,79 +637,76 @@ pub fn run_with_branding(
             is_resizable: true,
             ..Default::default()
         };
-        cx.spawn(async move |cx| {
-            cx.open_window(options, |window, cx| {
-                let (title, suffix) = match &surface {
-                    Surface::Installer { identity, .. } => (identity.name.clone(), "Setup"),
-                    Surface::Maintenance { identity, .. } => (identity.name.clone(), "Maintenance"),
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            let (title, suffix) = match &surface {
+                Surface::Installer { identity, .. } => (identity.name.clone(), "Setup"),
+                Surface::Maintenance { identity, .. } => (identity.name.clone(), "Maintenance"),
+            };
+            window.set_window_title(&format!("{title} {suffix}"));
+            let default_directory = match &surface {
+                Surface::Installer { install, .. } => {
+                    install.install_directory.clone().unwrap_or_default()
+                }
+                Surface::Maintenance {
+                    install_directory, ..
+                } => install_directory.clone().unwrap_or_default(),
+            };
+            let install_directory_input =
+                cx.new(|cx| InputState::new(window, cx).default_value(default_directory));
+            let view = cx.new(|_| {
+                let selected_scope = match &surface {
+                    Surface::Installer { install, .. } => install.selected_scope,
+                    _ => SelectedScope::User,
                 };
-                window.set_window_title(&format!("{title} {suffix}"));
-                let default_directory = match &surface {
-                    Surface::Installer { install, .. } => {
-                        install.install_directory.clone().unwrap_or_default()
-                    }
+                let selected_install_directory = match &surface {
+                    Surface::Installer { install, .. } => install.install_directory.clone(),
                     Surface::Maintenance {
                         install_directory, ..
-                    } => install_directory.clone().unwrap_or_default(),
+                    } => install_directory.clone(),
                 };
-                let install_directory_input =
-                    cx.new(|cx| InputState::new(window, cx).default_value(default_directory));
-                let view = cx.new(|_| {
-                    let selected_scope = match &surface {
-                        Surface::Installer { install, .. } => install.selected_scope,
-                        _ => SelectedScope::User,
+                InstallerView {
+                    model: UiModel::new(surface),
+                    commands,
+                    events: events.clone(),
+                    selected_components: BTreeSet::new(),
+                    selected_scope,
+                    selected_install_directory,
+                    install_directory_input: Some(install_directory_input),
+                    initialized_components: false,
+                    editing_components: false,
+                    customizing: false,
+                    showing_changes: false,
+                    details_open: false,
+                }
+            });
+            let weak = view.downgrade();
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(80))
+                        .await;
+                    let Some(view) = weak.upgrade() else {
+                        break;
                     };
-                    let selected_install_directory = match &surface {
-                        Surface::Installer { install, .. } => install.install_directory.clone(),
-                        Surface::Maintenance {
-                            install_directory, ..
-                        } => install_directory.clone(),
-                    };
-                    InstallerView {
-                        model: UiModel::new(surface),
-                        commands,
-                        events: events.clone(),
-                        selected_components: BTreeSet::new(),
-                        selected_scope,
-                        selected_install_directory,
-                        install_directory_input: Some(install_directory_input),
-                        initialized_components: false,
-                        editing_components: false,
-                        customizing: false,
-                        showing_changes: false,
-                        details_open: false,
-                    }
-                });
-                let weak = view.downgrade();
-                cx.spawn(async move |cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(80))
-                            .await;
-                        let Some(view) = weak.upgrade() else {
-                            break;
-                        };
-                        view.update(cx, |_, cx| cx.notify());
-                    }
-                })
-                .detach();
-                let close = view.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    close
-                        .update(cx, |view, cx| {
-                            let should_close = view.model.request_close();
-                            if !should_close {
-                                cx.notify();
-                            }
-                            should_close
-                        })
-                        .unwrap_or(true)
-                });
-                cx.new(|cx| Root::new(view, window, cx))
+                    view.update(cx, |_, cx| cx.notify());
+                }
             })
-            .expect("open zup window");
+            .detach();
+            let close = view.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                close
+                    .update(cx, |view, cx| {
+                        let should_close = view.model.request_close();
+                        if !should_close {
+                            cx.notify();
+                        }
+                        should_close
+                    })
+                    .unwrap_or(true)
+            });
+            view
         })
-        .detach();
+        .expect("open zup window");
     });
 }
 
@@ -822,7 +831,6 @@ impl Render for InstallerView {
             Theme::global(cx),
             cx.entity(),
         ));
-        let _ = cx;
         body
     }
 }
@@ -960,14 +968,13 @@ fn identity_view(identity: &ProductIdentity, theme: &Theme) -> impl IntoElement 
         )
 }
 
-fn text_line(label: &str, value: &str, size: f32) -> impl IntoElement {
-    div()
-        .h_flex()
-        .justify_between()
-        .items_center()
-        .text_size(px(size))
-        .child(label.to_owned())
-        .child(value.to_owned())
+/// A single-column key/value list, skipping rows the manifest did not supply.
+fn detail_rows(rows: impl IntoIterator<Item = (&'static str, String)>) -> impl IntoElement {
+    let mut list = DescriptionList::vertical().columns(1);
+    for (label, value) in rows {
+        list = list.item(label, value, 1);
+    }
+    list
 }
 
 struct InstallerRenderOptions<'a> {
@@ -1007,38 +1014,22 @@ fn installer_body(
     let location = selected_install_directory
         .or_else(|| install.install_directory.clone())
         .unwrap_or_else(|| "The default location".into());
-    let summary = div()
-        .v_flex()
-        .gap_2()
-        .p_4()
-        .rounded(theme.radius_lg)
-        .bg(theme.colors.popover)
-        .child(
-            div()
-                .h_flex()
-                .justify_between()
-                .child("Install to")
-                .child(location.clone()),
+    let summary = DescriptionList::vertical()
+        .columns(1)
+        .item("Install to", location.clone(), 1)
+        .item(
+            "Download size",
+            zup_presentation::format_bytes(install.estimated_bytes),
+            1,
         )
-        .child(
-            div()
-                .h_flex()
-                .justify_between()
-                .text_color(theme.colors.muted_foreground)
-                .child("Download size")
-                .child(zup_presentation::format_bytes(install.estimated_bytes)),
-        )
-        .child(
-            div()
-                .h_flex()
-                .justify_between()
-                .text_color(theme.colors.muted_foreground)
-                .child("Permissions")
-                .child(if install.requires_authorization {
-                    "Administrator approval required"
-                } else {
-                    "Current user"
-                }),
+        .item(
+            "Permissions",
+            if install.requires_authorization {
+                "Administrator approval required"
+            } else {
+                "Current user"
+            },
+            1,
         );
     let mut body = div()
         .v_flex()
@@ -1076,6 +1067,10 @@ fn installer_body(
     }
 
     if customizing {
+        // `Form`/`Field` own the label-above-control layout and the muted
+        // description line, so the fields stay consistent as they are added or
+        // removed per manifest.
+        let mut form = v_form();
         if install.scopes.len() > 1 {
             let scope_entity = entity.clone();
             let scope_entity_machine = scope_entity.clone();
@@ -1084,8 +1079,8 @@ fn installer_body(
             } else {
                 0
             };
-            body = body.child(
-                div().v_flex().gap_2().child("Install for").child(
+            form = form.child(
+                field().label("Install for").child(
                     RadioGroup::new("install-scope")
                         .selected_index(Some(selected_index))
                         .child(
@@ -1118,27 +1113,26 @@ fn installer_body(
             );
         }
         if install.allow_directory_override {
-            body = body.child(
-                div()
-                    .v_flex()
-                    .gap_2()
-                    .child("Install directory")
+            form = form.child(
+                field()
+                    .label("Install directory")
+                    .description(
+                        "The author allows this application to be moved before installation.",
+                    )
                     .child(
                         install_directory_input
                             .as_ref()
-                            .map(|state| Input::new(state).aria_label("Install directory").into_any_element())
+                            .map(|state| {
+                                Input::new(state)
+                                    .aria_label("Install directory")
+                                    .into_any_element()
+                            })
                             .unwrap_or_else(|| div().child(location.clone()).into_any_element()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.colors.muted_foreground)
-                            .child("The author allows this application to be moved before installation."),
                     ),
             );
         }
         if !install.components.is_empty() {
-            let mut components = div().v_flex().gap_2().child("Application components");
+            let mut components = div().v_flex().gap_2();
             for component in &install.components {
                 let enabled = selected.contains(&component.id);
                 let id = component.id.clone();
@@ -1176,8 +1170,9 @@ fn installer_body(
                         .child(component.description.clone().unwrap_or_default()),
                 );
             }
-            body = body.child(components);
+            form = form.child(field().label("Application components").child(components));
         }
+        body = body.child(form);
     }
 
     if model.state == ViewState::Options {
@@ -1272,24 +1267,22 @@ fn change_preview(preview: &PlanPreview, theme: &Theme) -> impl IntoElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Requirements"),
                 )
-                .children(preview.requirements.iter().map(|requirement| {
-                    let marker = match requirement.status {
-                        RequirementStatus::Satisfied => "✓",
-                        RequirementStatus::Missing => "+",
-                        RequirementStatus::Unknown => "?",
-                    };
-                    div()
-                        .h_flex()
-                        .justify_between()
-                        .gap_3()
-                        .text_size(px(13.0))
-                        .child(format!("{marker}  {}", requirement.name))
-                        .child(if requirement.shared {
-                            "Shared system dependency".to_owned()
-                        } else {
-                            String::new()
-                        })
-                }))
+                .child(DescriptionList::vertical().columns(1).children(
+                    preview.requirements.iter().map(|requirement| {
+                        let marker = match requirement.status {
+                            RequirementStatus::Satisfied => "✓",
+                            RequirementStatus::Missing => "+",
+                            RequirementStatus::Unknown => "?",
+                        };
+                        DescriptionItem::new(format!("{marker}  {}", requirement.name)).value(
+                            if requirement.shared {
+                                "Shared system dependency".to_owned()
+                            } else {
+                                String::new()
+                            },
+                        )
+                    }),
+                ))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -1298,32 +1291,36 @@ fn change_preview(preview: &PlanPreview, theme: &Theme) -> impl IntoElement {
         );
     }
     for group in &preview.groups {
-        content = content.child(
-            div()
-                .v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(group.title.clone()),
-                )
-                .children(group.changes.iter().map(|change| {
-                    div()
-                        .h_flex()
-                        .justify_between()
-                        .gap_3()
-                        .text_size(px(13.0))
-                        .child(format!("{}  {}", change.kind.label(), change.label))
-                        .child(change.location.clone().unwrap_or_else(|| {
-                            if change.requires_authorization {
-                                "Elevation"
-                            } else {
-                                ""
-                            }
-                            .into()
-                        }))
-                })),
-        );
+        content =
+            content.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(group.title.clone()),
+                    )
+                    .child(DescriptionList::vertical().columns(1).children(
+                        group.changes.iter().map(|change| {
+                            DescriptionItem::new(format!(
+                                "{}  {}",
+                                change.kind.label(),
+                                change.label
+                            ))
+                            .value(
+                                change.location.clone().unwrap_or_else(|| {
+                                    if change.requires_authorization {
+                                        "Elevation"
+                                    } else {
+                                        ""
+                                    }
+                                    .into()
+                                }),
+                            )
+                        }),
+                    )),
+            );
     }
     content
 }
@@ -1335,30 +1332,24 @@ fn maintenance_summary(
     component_count: usize,
     health: &InstallationHealth,
 ) -> impl IntoElement {
-    let mut summary = div()
-        .v_flex()
-        .gap_2()
-        .child(text_line("Installed version", version, 13.0))
-        .child(text_line(
-            "Installed for",
-            if scope == SelectedScope::User {
-                "Current user"
-            } else {
-                "Everyone"
-            },
-            13.0,
-        ));
-    if let Some(directory) = install_directory {
-        summary = summary.child(text_line("Location", directory, 13.0));
-    }
-    summary = summary.child(text_line("Components", &component_count.to_string(), 13.0));
-    summary.child(
-        div()
-            .h_flex()
-            .justify_between()
-            .text_size(px(13.0))
-            .child("Health")
-            .child(health.summary.clone()),
+    detail_rows(
+        [
+            Some(("Installed version", version.to_owned())),
+            Some((
+                "Installed for",
+                if scope == SelectedScope::User {
+                    "Current user"
+                } else {
+                    "Everyone"
+                }
+                .to_owned(),
+            )),
+            install_directory.map(|directory| ("Location", directory.to_owned())),
+            Some(("Components", component_count.to_string())),
+            Some(("Health", health.summary.clone())),
+        ]
+        .into_iter()
+        .flatten(),
     )
 }
 
@@ -1996,6 +1987,46 @@ mod tests {
         model.begin_operation();
         assert!(!model.request_close());
         assert!(model.close_requested);
+    }
+
+    /// The branded accent has to reach the tokens components paint from, not
+    /// only the solid colors the hand-built layout reads. A publisher accent
+    /// that stopped at `colors` would leave every Button, Checkbox and Input
+    /// on the default blue next to a blue-free heading.
+    #[gpui_kit::test]
+    fn branded_accent_reaches_the_tokens_components_paint(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            apply_branding(UiTheme::Light, Some("#ff0000"), cx);
+
+            let theme = Theme::global(cx);
+            let accent = gpui_kit::Hsla::from(rgb(0xff0000));
+            assert_eq!(theme.colors.accent, accent);
+            assert_eq!(theme.tokens.accent.color, accent);
+            assert_eq!(theme.tokens.button_primary.color, accent);
+            assert_eq!(theme.tokens.primary.color, accent);
+            assert_eq!(
+                gpui_kit::base::Theme::global(cx).tokens.colors.accent,
+                accent
+            );
+        });
+    }
+
+    /// An unparseable or absent accent falls back to the default blue instead
+    /// of leaving a partially-applied palette behind.
+    #[gpui_kit::test]
+    fn a_missing_accent_falls_back_to_the_default(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            apply_branding(UiTheme::Light, None, cx);
+            let expected = gpui_kit::Hsla::from(rgb(0x2563eb));
+            let theme = Theme::global(cx);
+            assert_eq!(theme.colors.accent, expected);
+            assert_eq!(theme.tokens.accent.color, expected);
+
+            apply_branding(UiTheme::Light, Some("not-a-color"), cx);
+            assert_eq!(Theme::global(cx).tokens.accent.color, expected);
+        });
     }
 }
 

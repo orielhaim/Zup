@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Native GPUI frontend for zup installers and maintenance"
 
 [dependencies]
-gpui-kit = "0.6"
+gpui-kit = "0.7"
 zup-core.workspace = true
 zup-presentation.workspace = true
 zup-runtime.workspace = true
@@ -21,7 +21,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-gpui-kit = { version = "0.6", features = ["test-support"] }
+gpui-kit = { version = "0.7", features = ["test-support"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tempfile.workspace = true
 zup-platform.workspace = true
