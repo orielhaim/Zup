@@ -622,6 +622,15 @@ mod tests {
         })
     }
 
+    fn remote_package(filename: &str) -> zup_core::PrerequisitePackage {
+        zup_core::PrerequisitePackage::Remote {
+            url: format!("https://cdn.example.test/{filename}"),
+            sha256: digest(filename.as_bytes()),
+            size: Some(filename.len() as u64),
+            filename: filename.into(),
+        }
+    }
+
     fn provider_request(
         executable: PathBuf,
         requirement: PrerequisiteRequirement,
@@ -636,22 +645,6 @@ mod tests {
             success_exit_codes: vec![0],
             reboot_exit_codes: vec![1641, 3010],
         }
-    }
-
-    #[test]
-    fn windows_owned_ids_are_valid_portable_requirement_ids() {
-        for id in [
-            runtime_requirements::VISUAL_CPP_V14,
-            runtime_requirements::DOTNET_DESKTOP,
-            runtime_requirements::DOTNET_RUNTIME,
-            runtime_requirements::WEBVIEW2_EVERGREEN,
-        ] {
-            assert!(
-                RuntimeRequirementId::new(id).is_ok(),
-                "`{id}` must be usable"
-            );
-        }
-        assert!(InstalledPackageId::new(package_requirements::WEBVIEW2_BOOTSTRAPPER).is_ok());
     }
 
     #[test]
@@ -674,11 +667,17 @@ mod tests {
         );
     }
 
+    /// A prerequisite is started, not obeyed: the plan has to name a real silent
+    /// contract for the artifact it verified, because a prerequisite that stops
+    /// and asks a question is a prerequisite an unattended install cannot finish.
+    /// Each vendor's flags are its own, and the msi path is the only one that
+    /// goes through a system program rather than running the artifact.
     #[test]
-    fn windows_installer_packages_run_through_msiexec_silently() {
+    fn a_launch_plan_carries_the_silent_contract_of_its_artifact() {
         let package = compound_file_bytes();
-        let (_root, path) = artifact(&package, "runtime.msi");
-        let mut request = provider_request(path.clone(), runtime_requirement("windows.vc.v14"));
+        let (_root, installer) = artifact(&package, "runtime.msi");
+        let mut request =
+            provider_request(installer.clone(), runtime_requirement("windows.vc.v14"));
         request.arguments = vec!["ALLUSERS=1".to_owned()];
         let launch = plan_launch(&request, ArtifactFormat::WindowsInstaller).unwrap();
         assert_eq!(
@@ -689,100 +688,81 @@ mod tests {
             launch.arguments,
             [
                 "/i".to_owned(),
-                path.display().to_string(),
+                installer.display().to_string(),
                 "/qn".to_owned(),
                 "ALLUSERS=1".to_owned(),
                 "/norestart".to_owned(),
             ]
         );
-    }
 
-    #[test]
-    fn executables_keep_their_own_silent_contract_and_run_directly() {
-        let package = compound_file_bytes();
-        let (_root, path) = artifact(&package, "runtime.exe");
-        let launch = plan_launch(
-            &provider_request(
-                path.clone(),
+        let (_root, executable) = artifact(&package, "runtime.exe");
+        for (requirement, arguments, expected) in [
+            (
                 runtime_requirement(runtime_requirements::VISUAL_CPP_V14),
+                Vec::new(),
+                vec!["/install", "/quiet", "/norestart"],
             ),
-            ArtifactFormat::Executable,
-        )
-        .unwrap();
-        assert_eq!(launch.program, path);
-        assert_eq!(launch.arguments, ["/install", "/quiet", "/norestart"]);
-
-        let launch = plan_launch(
-            &provider_request(
-                path.clone(),
+            (
                 runtime_requirement(runtime_requirements::WEBVIEW2_EVERGREEN),
+                Vec::new(),
+                vec!["/silent", "/install", "/norestart"],
             ),
-            ArtifactFormat::Executable,
-        )
-        .unwrap();
-        assert_eq!(launch.arguments, ["/silent", "/install", "/norestart"]);
-
-        let mut request = provider_request(
-            path.clone(),
-            runtime_requirement(runtime_requirements::DOTNET_DESKTOP),
-        );
-        request.arguments = vec!["/norestart".to_owned()];
-        let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
-        assert_eq!(launch.arguments, ["/install", "/quiet", "/norestart"]);
-
-        let request = provider_request(
-            path.clone(),
-            PrerequisiteRequirement::InstalledPackage(InstalledPackage {
-                id: InstalledPackageId::new(package_requirements::WEBVIEW2_BOOTSTRAPPER).unwrap(),
-                version: None,
-            }),
-        );
-        let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
-        assert_eq!(launch.arguments, ["/norestart"]);
+            (
+                runtime_requirement(runtime_requirements::DOTNET_DESKTOP),
+                vec!["/norestart".to_owned()],
+                vec!["/install", "/quiet", "/norestart"],
+            ),
+            (
+                PrerequisiteRequirement::InstalledPackage(InstalledPackage {
+                    id: InstalledPackageId::new(package_requirements::WEBVIEW2_BOOTSTRAPPER)
+                        .unwrap(),
+                    version: None,
+                }),
+                Vec::new(),
+                vec!["/norestart"],
+            ),
+        ] {
+            let mut request = provider_request(executable.clone(), requirement);
+            request.arguments = arguments;
+            let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
+            assert_eq!(launch.program, executable, "an executable runs itself");
+            assert_eq!(launch.arguments, expected);
+        }
     }
 
+    /// The detector has to distinguish "nobody has installed this" from "this
+    /// runtime is not one I know how to install", because only the first is
+    /// something an installer may act on by downloading the package.
     #[test]
-    fn unknown_runtime_ids_are_rejected_instead_of_reported_missing() {
-        let operation = BootstrapOperation {
+    fn detection_separates_an_absent_requirement_from_an_unsupported_one() {
+        let unknown_runtime = BootstrapOperation {
             id: PrerequisiteId::new("runtime").unwrap(),
             name: "Runtime".into(),
             target: PrerequisiteArchitecture::Current,
             requirement: runtime_requirement("windows.vc.v99"),
-            package: zup_core::PrerequisitePackage::Remote {
-                url: "https://cdn.example.test/vc.exe".into(),
-                sha256: digest(b"vc"),
-                size: Some(2),
-                filename: "vc.exe".into(),
-            },
+            package: remote_package("vc.exe"),
             installer: zup_core::PrerequisiteInstaller::default(),
         };
         assert!(matches!(
-            WindowsPrerequisiteDetector.satisfy(&operation),
+            WindowsPrerequisiteDetector.satisfy(&unknown_runtime),
             Err(BootstrapError::Requirement(_))
         ));
-    }
 
-    #[test]
-    fn an_absent_installed_package_is_missing_rather_than_an_error() {
-        let requirement = PrerequisiteRequirement::InstalledPackage(InstalledPackage {
-            id: InstalledPackageId::new("{00000000-0000-0000-0000-000000000000}").unwrap(),
-            version: None,
-        });
-        let operation = BootstrapOperation {
+        let absent_package = BootstrapOperation {
             id: PrerequisiteId::new("runtime").unwrap(),
             name: "Runtime".into(),
             target: PrerequisiteArchitecture::Current,
-            requirement,
-            package: zup_core::PrerequisitePackage::Remote {
-                url: "https://cdn.example.test/pkg.msi".into(),
-                sha256: digest(b"pkg"),
-                size: Some(3),
-                filename: "pkg.msi".into(),
-            },
+            requirement: PrerequisiteRequirement::InstalledPackage(InstalledPackage {
+                id: InstalledPackageId::new("{00000000-0000-0000-0000-000000000000}").unwrap(),
+                version: None,
+            }),
+            package: remote_package("pkg.msi"),
             installer: zup_core::PrerequisiteInstaller::default(),
         };
         assert_eq!(
-            WindowsPrerequisiteDetector.satisfy(&operation).unwrap(),
+            WindowsPrerequisiteDetector
+                .satisfy(&absent_package)
+                .unwrap(),
             DetectionResult::Missing
         );
     }

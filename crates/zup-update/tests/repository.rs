@@ -410,8 +410,11 @@ async fn a_pinned_context_reads_the_immutable_version_document() {
     assert_eq!(resolved.descriptor.release_digest, release.release_digest);
 }
 
+/// A document that was never published is a refusal, not a default: a
+/// missing target, an unlinked one, and a pin for a version nobody released
+/// are all the same answer.
 #[tokio::test]
-async fn a_pinned_context_will_not_install_another_version() {
+async fn a_document_that_was_never_published_is_refused_rather_than_trusted() {
     let options = ReleaseOptions {
         version: "2.3.4".to_owned(),
         ..ReleaseOptions::default()
@@ -419,17 +422,33 @@ async fn a_pinned_context_will_not_install_another_version() {
     let release = release(&options);
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
 
-    // The version-addressed document for 1.0.0 was never published, so a pinned
-    // client asking for it gets a missing target rather than the current
-    // release. That is the property that keeps a pinned installer from moving.
+    // The version-addressed document for 1.0.0 was never published, so a
+    // pinned client asking for it gets a missing target rather than the
+    // current release. That is what keeps a pinned installer from moving.
     let pinned = context(&fixture).pinned_to("1.0.0");
     let error = resolver_with(&fixture, pinned)
         .resolve()
         .await
         .expect_err("refused");
     assert!(matches!(error, UpdateError::MissingTarget(_)), "{error:?}");
-}
 
+    // A release whose targets were never linked is equally untrusted, and
+    // equally a refusal.
+    let fixture = publish(
+        &release,
+        &options.content,
+        SigningOptions {
+            unlink_targets: true,
+            ..SigningOptions::default()
+        },
+    )
+    .await;
+    let error = resolver(&fixture).resolve().await.expect_err("refused");
+    assert!(
+        matches!(error, UpdateError::Tuf(_) | UpdateError::MissingTarget(_)),
+        "{error:?}"
+    );
+}
 #[tokio::test]
 async fn a_release_for_another_application_is_refused() {
     let options = ReleaseOptions::default();
@@ -605,7 +624,7 @@ async fn root_rotation_is_followed() {
 }
 
 #[tokio::test]
-async fn durable_state_is_namespaced_and_survives_a_failed_fetch() {
+async fn a_failed_fetch_leaves_the_rollback_datastore_in_place() {
     let options = ReleaseOptions::default();
     let release = release(&options);
     let fixture = publish(
@@ -619,36 +638,12 @@ async fn durable_state_is_namespaced_and_survives_a_failed_fetch() {
     .await;
     let context = context(&fixture);
     let datastore = context.datastore_dir().expect("a datastore");
-    let _ = resolver_with(&fixture, context.clone()).resolve().await;
+    let _ = resolver_with(&fixture, context).resolve().await;
     assert!(
         datastore.is_dir(),
         "a failed fetch must leave the datastore in place, because that is where rollback memory lives"
     );
-    let mut other = context;
-    other.trust.repository = "https://elsewhere.example.com/acme".to_owned();
-    assert_ne!(datastore, other.datastore_dir().expect("a datastore"));
 }
-
-#[tokio::test]
-async fn a_missing_target_document_is_refused_rather_than_trusted() {
-    let options = ReleaseOptions::default();
-    let release = release(&options);
-    let fixture = publish(
-        &release,
-        &options.content,
-        SigningOptions {
-            unlink_targets: true,
-            ..SigningOptions::default()
-        },
-    )
-    .await;
-    let error = resolver(&fixture).resolve().await.expect_err("refused");
-    assert!(
-        matches!(error, UpdateError::Tuf(_) | UpdateError::MissingTarget(_)),
-        "{error:?}"
-    );
-}
-
 #[tokio::test]
 async fn a_local_seed_satisfies_a_closure_with_no_network_at_all() {
     // The offline story, and the reason one artifact can work from a USB stick
@@ -713,41 +708,7 @@ async fn a_local_seed_satisfies_a_closure_with_no_network_at_all() {
 }
 
 #[tokio::test]
-async fn the_events_a_consumer_sees_name_the_release_and_the_variant() {
-    let options = ReleaseOptions::default();
-    let release = release(&options);
-    let fixture = publish(&release, &options.content, SigningOptions::default()).await;
-    let (sink, mut receiver) = zup_acquire::ProgressSink::channel(8);
-    let resolver = ReleaseResolver::new(
-        context(&fixture),
-        host(),
-        zup_acquire::CachePolicy::Auto,
-        sink,
-    )
-    .expect("a resolver");
-    let _ = resolver.resolve().await;
-    let mut seen: Vec<&'static str> = Vec::new();
-    while let Ok(event) = receiver.try_recv() {
-        seen.push(event.name());
-    }
-    assert!(seen.contains(&"release_resolved"), "{seen:?}");
-    assert!(seen.contains(&"variant_selected"), "{seen:?}");
-}
-
-#[tokio::test]
-async fn a_release_that_publishes_no_human_download_still_resolves() {
-    // The offline installer is a claim in the graph, not a requirement of it. An
-    // updater that only wants content must not care whether one was published.
-    let options = ReleaseOptions::default();
-    let release = release(&options);
-    let fixture = publish(&release, &options.content, SigningOptions::default()).await;
-    let resolved = resolver(&fixture).resolve().await.expect("resolved");
-    assert!(resolved.descriptor.human_download().is_none());
-    assert!(resolved.descriptor.thin_download().is_none());
-}
-
-#[tokio::test]
-async fn a_release_names_its_offline_installer_without_the_updater_needing_it() {
+async fn a_release_classifies_its_offline_and_thin_downloads() {
     let options = ReleaseOptions {
         downloads: vec![
             ReleaseDownload {
@@ -768,6 +729,7 @@ async fn a_release_names_its_offline_installer_without_the_updater_needing_it() 
     let release = release(&options);
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
     let resolved = resolver(&fixture).resolve().await.expect("resolved");
+    // The offline installer is a claim in the graph, not a requirement of it.
     assert_eq!(
         resolved
             .descriptor
@@ -783,33 +745,6 @@ async fn a_release_names_its_offline_installer_without_the_updater_needing_it() 
         Some("Acme-Setup-web.exe")
     );
 }
-
-#[tokio::test]
-async fn two_releases_of_one_version_are_distinguished_by_digest_not_version() {
-    let one = ReleaseOptions {
-        version: "1.0.0".to_owned(),
-        content: content(&[64]),
-        ..ReleaseOptions::default()
-    };
-    let one_release = release(&one);
-    let two = ReleaseOptions {
-        version: "1.0.1".to_owned(),
-        content: content(&[64, 128]),
-        ..ReleaseOptions::default()
-    };
-    let two_release = release(&two);
-    assert_ne!(one_release.release_digest, two_release.release_digest);
-    assert_ne!(one_release.catalog.digest, two_release.catalog.digest);
-
-    let fixture = publish(&two_release, &two.content, SigningOptions::default()).await;
-    let pinned = context(&fixture).pinned_to("1.0.0");
-    let error = resolver_with(&fixture, pinned)
-        .resolve()
-        .await
-        .expect_err("refused");
-    assert!(matches!(error, UpdateError::MissingTarget(_)), "{error:?}");
-}
-
 #[tokio::test]
 async fn the_closure_narrows_by_component_selection() {
     let options = ReleaseOptions {

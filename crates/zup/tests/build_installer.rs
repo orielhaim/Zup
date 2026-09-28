@@ -166,45 +166,36 @@ fn a_frontend_flag_selects_the_matching_template() {
     );
 }
 
-/// A headless template is a console template with a different contract, and
-/// composing the wrong one is refused rather than quietly accepted.
+/// A template is named for the machine and the frontend it is for, and the build
+/// confirms both against the file's own header rather than against the name. A
+/// refusal is the same shape either way: what was given, and what was wanted.
 #[test]
-fn a_headless_template_is_refused_for_a_console_selection() {
-    let project = Project::new();
-    let headless = toolchain_fixture::runtime(HOST_TARGET, Frontend::Headless)
-        .write(&project.path().join("templates"));
-    let result = project.build(&[
-        "--runtime",
-        headless.to_str().expect("a path"),
-        "--frontend",
-        "console",
-        "--release-manifest",
-        "none",
-    ]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("was wanted"), "{message}");
-    assert!(!project.path().join("Setup.exe").exists());
-}
-
-/// A template is named for the machine it is for, and the build confirms that
-/// against the file's own header rather than against the name.
-#[test]
-fn a_template_for_the_wrong_machine_is_refused() {
-    let project = Project::new();
-    let arm64 =
-        toolchain_fixture::runtime(ARM64, Frontend::Gui).write(&project.path().join("templates"));
-    let result = project.build(&[
-        "--runtime",
-        arm64.to_str().expect("a path"),
-        "--release-manifest",
-        "none",
-    ]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains(ARM64), "{message}");
-    assert!(message.contains(X64), "{message}");
-    assert!(!project.path().join("Setup.exe").exists());
+fn a_template_for_the_wrong_machine_or_frontend_is_refused() {
+    for (label, target, frontend, extra) in [
+        ("machine", ARM64, Frontend::Gui, vec![]),
+        (
+            "frontend",
+            HOST_TARGET,
+            Frontend::Headless,
+            vec!["--frontend", "console"],
+        ),
+    ] {
+        let project = Project::new();
+        let template =
+            toolchain_fixture::runtime(target, frontend).write(&project.path().join("templates"));
+        let mut args = vec![
+            "--runtime",
+            template.to_str().expect("a path"),
+            "--release-manifest",
+            "none",
+        ];
+        args.extend(extra);
+        let result = project.build(&args);
+        assert!(!result.status.success(), "{label} was accepted");
+        let message = stderr(&result);
+        assert!(message.contains("was wanted"), "{label}: {message}");
+        assert!(!project.path().join("Setup.exe").exists(), "{label}");
+    }
 }
 
 /// A file that is not a component at all is refused with a reason that names the
@@ -278,38 +269,6 @@ fn an_invalid_windows_destination_is_refused_before_writing_an_artifact() {
     assert!(message.contains("Windows lowering"), "{message}");
     assert!(message.contains("reserved device name"), "{message}");
     assert!(!project.path().join("Setup.exe").exists());
-}
-
-/// A target with no implemented backend is refused before the source tree is read,
-/// so a manifest that names one gets a backend answer rather than a payload one.
-#[test]
-fn a_target_with_no_backend_is_refused_before_any_source_is_read() {
-    let project = Project::with_manifest(
-        r#"
-schema = 1
-[app]
-id = "com.example.backend"
-name = "Backend"
-version = "1.0.0"
-[build]
-
-[build.targets.default]
-target = "aarch64-unknown-linux-gnu"
-source = { directory = "dist/never-created" }
-[install]
-scope = "user"
-[install.directory]
-user = "${location.user_data}/Backend"
-"#,
-    );
-    let result = project.build(&["--release-manifest", "none"]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("unsupported backend"), "{message}");
-    assert!(
-        !message.contains("dist/never-created"),
-        "the refusal came after a filesystem walk: {message}"
-    );
 }
 
 /// A build runs from wherever the reader is standing, and every path it reads is

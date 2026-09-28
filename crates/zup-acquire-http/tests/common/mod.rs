@@ -12,7 +12,7 @@
 //! response is exactly what the test says it is.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,18 +30,12 @@ pub enum Behaviour {
     Throttled(u16, u64),
     /// Serve a prefix, then close the connection without finishing.
     DisconnectAfter(Vec<u8>, usize),
-    /// Serve bytes that are not what the caller asked for.
-    Corrupt(Vec<u8>),
     /// Promise one length and send another.
     WrongContentLength(Vec<u8>),
     /// Answer a range request with a `206` whose `Content-Range` is wrong.
     WrongContentRange(Vec<u8>),
     /// Answer a range request with a `206` and no `Content-Range` at all.
     NoContentRange(Vec<u8>),
-    /// Redirect to `location`.
-    Redirect(String),
-    /// Slow down: pause before each chunk.
-    Slow(Vec<u8>, u64),
     /// Never answer at all.
     Hang,
 }
@@ -208,10 +202,8 @@ fn serve(
             status,
             Some(("Retry-After", seconds.to_string())),
         ),
-        Behaviour::Redirect(location) => write_redirect(&mut writer, &location),
         Behaviour::Serve(bytes) => write_body(&mut writer, &bytes, range.as_deref(), true, None),
         Behaviour::ServeWithoutRange(bytes) => write_body(&mut writer, &bytes, None, false, None),
-        Behaviour::Corrupt(bytes) => write_body(&mut writer, &bytes, None, false, None),
         Behaviour::WrongContentLength(bytes) => write_body(
             &mut writer,
             &bytes,
@@ -230,12 +222,6 @@ fn serve(
             writer.write_all(head.as_bytes())?;
             writer.write_all(&bytes)?;
             writer.flush()
-        }
-        Behaviour::Slow(bytes, millis) => {
-            // A pause before the body, which is what a throttled origin looks
-            // like from the client's side.
-            std::thread::sleep(std::time::Duration::from_millis(millis));
-            write_body(&mut writer, &bytes, range.as_deref(), true, None)
         }
         Behaviour::DisconnectAfter(bytes, after) => {
             let head = format!(
@@ -272,14 +258,6 @@ fn write_status(
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
-    writer.write_all(head.as_bytes())?;
-    writer.flush()
-}
-
-fn write_redirect(writer: &mut TcpStream, location: &str) -> std::io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
     writer.write_all(head.as_bytes())?;
     writer.flush()
 }
@@ -354,21 +332,19 @@ pub fn fill(buffer: &mut [u8], seed: u8) {
 /// A server preloaded with a set of blobs at their immutable paths.
 pub struct TestOrigin {
     server: TestServer,
-    /// Path of each blob, so a test can seed a local tree from the same fixture.
-    pub paths: std::collections::BTreeMap<zup_core::Sha256Digest, String>,
 }
 
 impl TestOrigin {
     /// Serve `blobs` as `(descriptor, wire)` pairs.
     pub fn start(blobs: &[(zup_acquire::ContentDescriptor, Vec<u8>)]) -> Self {
         let server = TestServer::start();
-        let mut paths = std::collections::BTreeMap::new();
         for (descriptor, wire) in blobs {
-            let path = zup_acquire::WebLayout::blob(&descriptor.digest).to_string();
-            server.route(&path, Behaviour::Serve(wire.clone()));
-            paths.insert(descriptor.digest, path);
+            server.route(
+                &zup_acquire::WebLayout::blob(&descriptor.digest).to_string(),
+                Behaviour::Serve(wire.clone()),
+            );
         }
-        Self { server, paths }
+        Self { server }
     }
 
     /// The base URL of this origin.
@@ -390,17 +366,4 @@ pub fn seed_tree(root: &std::path::Path, descriptor: &zup_acquire::ContentDescri
         std::fs::create_dir_all(parent).expect("the tree is created");
     }
     std::fs::write(&path, wire).expect("the blob is written");
-}
-
-/// Drain a reader, for a caller that must consume a body.
-pub fn drain(mut reader: impl Read) -> usize {
-    let mut buffer = [0u8; 8192];
-    let mut total = 0;
-    while let Ok(read) = reader.read(&mut buffer) {
-        if read == 0 {
-            break;
-        }
-        total += read;
-    }
-    total
 }

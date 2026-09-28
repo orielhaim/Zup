@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use rstest::rstest;
 use tempfile::TempDir;
 use zup_build::TargetBuildPlan;
 use zup_bundle::{BundleWriter, PayloadSource};
@@ -46,40 +47,63 @@ destination = "${{install}}"
     build.targets.pop().unwrap()
 }
 
-#[test]
-fn pe_target_and_frontend_readers_accept_synthetic_pe() {
+/// Reading a PE and deciding whether it may be the installer is one decision at
+/// three levels: what the image declares, whether the bytes are an image at all,
+/// and whether what they declare is the frontend the build asked for. The three
+/// share one parser, so they are one table.
+#[rstest]
+#[case(pe_bytes(3), Some((PeSubsystem::Console, Frontend::Console)), true)]
+#[case(pe_bytes(2), Some((PeSubsystem::Gui, Frontend::Gui)), true)]
+#[case(pe_bytes(9), None, true)]
+#[case(b"not a PE".to_vec(), None, false)]
+fn a_pe_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
+    #[case] bytes: Vec<u8>,
+    #[case] declared: Option<(PeSubsystem, Frontend)>,
+    #[case] readable_target: bool,
+) {
     let root = TempDir::new().unwrap();
     let runtime = root.path().join("runtime.exe");
-    fs::write(&runtime, pe_bytes(3)).unwrap();
+    fs::write(&runtime, bytes).unwrap();
+
+    let Some((subsystem, frontend)) = declared else {
+        assert!(
+            matches!(read_pe_frontend(&runtime), Err(BundleError::Invalid)),
+            "a subsystem the loader has no frontend for is not guessed at"
+        );
+        if readable_target {
+            assert!(
+                read_pe_target(&runtime).is_ok(),
+                "the machine type is still readable"
+            );
+        } else {
+            assert!(matches!(
+                read_pe_target(&runtime),
+                Err(BundleError::Invalid)
+            ));
+        }
+        return;
+    };
+
+    assert_eq!(read_pe_subsystem(&runtime).unwrap(), subsystem);
+    assert_eq!(read_pe_frontend(&runtime).unwrap(), frontend);
+    assert!(read_pe_target(&runtime).is_ok());
     assert_eq!(
         read_pe_target(&runtime).unwrap(),
         zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
     );
-    assert_eq!(read_pe_subsystem(&runtime).unwrap(), PeSubsystem::Console);
-    assert_eq!(read_pe_frontend(&runtime).unwrap(), Frontend::Console);
-    assert!(validate_pe_frontend(&runtime, Frontend::Console).is_ok());
-}
-
-#[test]
-fn pe_frontend_rejects_mismatches() {
-    let root = TempDir::new().unwrap();
-    let runtime = root.path().join("runtime.exe");
-    fs::write(&runtime, pe_bytes(3)).unwrap();
-    assert!(matches!(
-        validate_pe_frontend(&runtime, Frontend::Gui),
-        Err(BundleError::FrontendMismatch { .. })
-    ));
-}
-
-#[test]
-fn pe_target_rejects_non_pe_bytes() {
-    let root = TempDir::new().unwrap();
-    let runtime = root.path().join("runtime.exe");
-    fs::write(&runtime, b"not a PE").unwrap();
-    assert!(matches!(
-        read_pe_target(&runtime),
-        Err(BundleError::Invalid)
-    ));
+    assert!(validate_pe_frontend(&runtime, frontend).is_ok());
+    let other = match frontend {
+        Frontend::Console => Frontend::Gui,
+        Frontend::Gui => Frontend::Console,
+        Frontend::Headless => Frontend::Console,
+    };
+    assert!(
+        matches!(
+            validate_pe_frontend(&runtime, other),
+            Err(BundleError::FrontendMismatch { .. })
+        ),
+        "a {frontend:?} image may not launch a {other:?} installer"
+    );
 }
 
 #[cfg(windows)]
@@ -145,27 +169,6 @@ fn self_contained_build_round_trips_matching_target() {
     assert!(package_size > 0);
     let bundle = EmbeddedBundle::open(&output).unwrap();
     assert_eq!(bundle.plan().installer.target, build.installer.target);
-}
-
-#[cfg(windows)]
-#[test]
-fn self_contained_build_rejects_frontend_mismatch() {
-    let root = TempDir::new().unwrap();
-    let mut build = plan(root.path());
-    let found = read_pe_frontend(&std::env::current_exe().unwrap()).unwrap();
-    build.installer.frontend = match found {
-        Frontend::Console => Frontend::Gui,
-        Frontend::Gui => Frontend::Console,
-        Frontend::Headless => Frontend::Gui,
-    };
-    let error = build_self_contained_executable(
-        &std::env::current_exe().unwrap(),
-        &root.path().join("Setup.exe"),
-        &build,
-        &[],
-    )
-    .unwrap_err();
-    assert!(matches!(error, BundleError::FrontendMismatch { .. }));
 }
 
 #[cfg(windows)]

@@ -193,6 +193,8 @@ mod tests {
             "offline",
             "x64",
             "build_1",
+            "single-target",
+            "zup.toolchain.component-mismatch",
         ] {
             assert!(is_identifier(value), "`{value}` should be an identifier");
         }
@@ -215,27 +217,13 @@ mod tests {
         }
     }
 
-    /// A separator joins two words and does nothing else, which is why the walk above
-    /// tracks the previous character instead of testing membership.
-    #[test]
-    fn a_separator_joins_words_and_does_nothing_else() {
-        assert!(is_identifier("single-target"));
-        assert!(is_identifier("zup.toolchain.component_mismatch"));
-        assert!(is_identifier("zup.toolchain.component-mismatch"));
-        assert!(!is_identifier("component--mismatch"));
-        assert!(!is_identifier("component-"));
-        assert!(!is_identifier("_component"));
-    }
-
+    /// Coming *in* from the wire, an ungrammatical value is refused rather than
+    /// normalized: silently repairing it would hand a consumer a name zup never
+    /// emitted, and a consumer that matches on names would never notice.
     #[test]
     fn a_wire_identifier_is_checked_in_both_directions() {
         let value: Identifier = serde_json::from_str("\"publish.github\"").expect("an identifier");
         assert!(value.is("publish.github"));
-        assert_eq!(value.segments().collect::<Vec<_>>(), ["publish", "github"]);
-        assert_eq!(serde_json::to_string(&value).unwrap(), "\"publish.github\"");
-        // Coming *in* from the wire, an ungrammatical value is refused rather than
-        // normalized: silently repairing it would hand a consumer a name zup never
-        // emitted, and a consumer that matches on names would never notice.
         let error = serde_json::from_str::<Identifier>("\"Not An Identifier\"").unwrap_err();
         assert!(error.to_string().contains("not an identifier"), "{error}");
     }

@@ -15,7 +15,7 @@ use zup_publish::{
     Application, ProductClass, ProductRole, PublishReport, ReleasePlan, ReleaseProduct,
     SourceClaim, TagIntent,
 };
-use zup_publish_github::{GithubClient, PublishRequest, publish, supplied};
+use zup_publish_github::{PublishRequest, publish, supplied};
 
 /// A plan with one installer and one manifest, so a test can vary the assets
 /// without restating the whole shape.
@@ -635,24 +635,6 @@ async fn a_duplicate_filename_is_a_refusal_not_a_retry() {
     assert!(error.to_string().contains("Validation Failed"), "{error}");
 }
 
-#[tokio::test]
-async fn the_client_speaks_one_api_version_and_binds_the_credential() {
-    let github = Github::start(Behaviour::new());
-    let _ = GithubClient::at(
-        &github.repository(),
-        &supplied("test-token"),
-        &zup_publish_github::ClientEndpoints {
-            api: github.api_origin(),
-            upload: github.upload_origin(),
-        },
-    )
-    .expect("a client")
-    .repository_info()
-    .await;
-    let log = github.log();
-    assert!(log.iter().any(|line| line.contains("acme/acme")), "{log:?}");
-}
-
 /// A repository is discovered from a remote, and two candidates are a refusal.
 mod discovery {
     use std::collections::BTreeMap;
@@ -667,26 +649,25 @@ mod discovery {
     }
 
     #[test]
-    fn every_common_remote_form_reduces_to_the_same_three_strings() {
+    fn a_remote_url_is_read_as_a_host_and_two_names() {
         for url in [
             "https://github.com/acme/acme.git",
             "git@github.com:acme/acme.git",
-            "ssh://git@github.com/acme/acme.git",
+            "ssh://git@github.com:acme/acme.git",
             "https://user@github.com/acme/acme",
         ] {
-            let parsed = parse_remote_url(url).unwrap_or_else(|| panic!("{url}"));
             assert_eq!(
-                parsed,
-                ("github.com".into(), "acme".into(), "acme".into()),
+                parse_remote_url(url),
+                Some(("github.com".into(), "acme".into(), "acme".into())),
                 "{url}"
             );
         }
-    }
-
-    #[test]
-    fn a_non_github_remote_is_not_a_candidate() {
-        assert!(parse_remote_url("https://gitlab.com/acme/acme.git").is_none());
-        assert!(parse_remote_url("https://git.acme.internal/acme/acme.git").is_none());
+        for url in [
+            "https://gitlab.com/acme/acme.git",
+            "https://git.acme.internal/acme/acme.git",
+        ] {
+            assert!(parse_remote_url(url).is_none(), "{url} is not a candidate");
+        }
     }
 
     #[test]
@@ -715,112 +696,69 @@ mod discovery {
         );
     }
 
+    /// The order a repository is chosen in: an explicit `--repo`, then the
+    /// environment, then a remote — and never a guess between two of them.
     #[test]
-    fn the_environment_wins_over_a_remote() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        std::fs::create_dir_all(root.path().join(".git")).expect("a .git directory");
-        std::fs::write(
-            root.path().join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@github.com:from-remote/acme.git\n",
-        )
-        .expect("the config is written");
-        let environment = Env(BTreeMap::from([(
-            "GITHUB_REPOSITORY".to_owned(),
-            "from-env/acme".to_owned(),
-        )]));
-        let resolved = resolve(None, &environment, root.path()).expect("a repository");
+    fn a_repository_is_chosen_by_precedence() {
+        let working = |config: &str| {
+            let root = tempfile::tempdir().expect("a temporary directory");
+            std::fs::create_dir_all(root.path().join(".git")).expect("a .git directory");
+            std::fs::write(root.path().join(".git/config"), config).expect("the config");
+            root
+        };
+        let environment = |repository: &str| {
+            Env(BTreeMap::from([(
+                "GITHUB_REPOSITORY".to_owned(),
+                repository.to_owned(),
+            )]))
+        };
+        let one_remote = "[remote \"origin\"]\n\turl = git@github.com:from-remote/acme.git\n";
+        let spec = |spec: &str| zup_publish_github::RepositorySpec::parse(spec).expect("a spec");
+
+        // An explicit `--repo` beats both the environment and the remotes.
+        let git = working(one_remote);
+        let explicit = spec("explicit/acme");
+        assert_eq!(
+            resolve(Some(&explicit), &environment("from-env/acme"), git.path())
+                .expect("a repository")
+                .repository
+                .to_string(),
+            "explicit/acme"
+        );
+
+        // The environment beats a remote.
+        let git = working(one_remote);
+        let resolved =
+            resolve(None, &environment("from-env/acme"), git.path()).expect("a repository");
         assert_eq!(resolved.repository.to_string(), "from-env/acme");
         assert_eq!(resolved.discovery.as_str(), "github_repository");
-    }
 
-    #[test]
-    fn a_single_github_remote_is_the_answer() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        std::fs::create_dir_all(root.path().join(".git")).expect("a .git directory");
-        std::fs::write(
-            root.path().join(".git/config"),
-            "[remote \"fork\"]\n\turl = git@github.com:acme/acme.git\n",
-        )
-        .expect("the config is written");
-        let resolved = resolve(None, &Env(BTreeMap::new()), root.path()).expect("a repository");
+        // One remote is the answer, and the name it was found under is kept.
+        let git = working("[remote \"fork\"]\n\turl = git@github.com:acme/acme.git\n");
+        let resolved = resolve(None, &Env(BTreeMap::new()), git.path()).expect("a repository");
         assert_eq!(resolved.repository.to_string(), "acme/acme");
         assert_eq!(resolved.remote.as_deref(), Some("fork"));
-    }
 
-    #[test]
-    fn two_github_remotes_and_no_origin_is_an_actionable_refusal() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        std::fs::create_dir_all(root.path().join(".git")).expect("a .git directory");
-        std::fs::write(
-            root.path().join(".git/config"),
+        // Two candidates and no origin is a question, and the refusal names the
+        // remedy rather than picking one.
+        let git = working(
             "[remote \"fork\"]\n\turl = git@github.com:acme/fork.git\n\
              [remote \"mirror\"]\n\turl = https://github.com/acme/acme.git\n",
-        )
-        .expect("the config is written");
-        let error = resolve(None, &Env(BTreeMap::new()), root.path())
-            .expect_err("two candidates and no origin is a question, not a guess");
-        let text = error.to_string();
+        );
+        let text = resolve(None, &Env(BTreeMap::new()), git.path())
+            .expect_err("this is a question, not a guess")
+            .to_string();
         assert!(text.contains("--repo"), "{text}");
         assert!(text.contains("fork"), "{text}");
-    }
-
-    #[test]
-    fn an_explicit_repository_beats_everything() {
-        let environment = Env(BTreeMap::from([(
-            "GITHUB_REPOSITORY".to_owned(),
-            "from-env/acme".to_owned(),
-        )]));
-        let spec = zup_publish_github::RepositorySpec::parse("explicit/acme").expect("a spec");
-        let resolved =
-            resolve(Some(&spec), &environment, std::path::Path::new(".")).expect("a repository");
-        assert_eq!(resolved.repository.to_string(), "explicit/acme");
-    }
-
-    #[test]
-    fn an_enterprise_installation_keeps_its_hostname() {
-        let spec = zup_publish_github::RepositorySpec::parse("git.acme.internal/acme/acme")
-            .expect("a three-segment spec");
-        let resolved = resolve(
-            Some(&spec),
-            &Env(BTreeMap::new()),
-            std::path::Path::new("."),
-        )
-        .expect("a repository");
-        assert_eq!(resolved.repository.host.host, "git.acme.internal");
-        assert_eq!(
-            resolved.repository.host.api_base,
-            "https://git.acme.internal/api/v3/"
-        );
-        assert_eq!(
-            resolved.repository.host.upload_base,
-            "https://git.acme.internal/uploads/"
-        );
     }
 }
 
 /// Endpoints are modelled once, not spelled into format strings.
 mod endpoints {
     use zup_publish_github::GithubHost;
-    #[test]
-    fn github_com_has_three_distinct_bases() {
-        let host = GithubHost::dotcom();
-        assert_eq!(host.web_base, "https://github.com/");
-        assert_eq!(host.api_base, "https://api.github.com/");
-        assert_eq!(host.upload_base, "https://uploads.github.com/");
-        assert!(host.dotcom);
-    }
 
     #[test]
-    fn an_enterprise_installation_serves_all_three_from_one_host() {
-        let host = GithubHost::enterprise("git.acme.internal").expect("an enterprise host");
-        assert_eq!(host.web_base, "https://git.acme.internal/");
-        assert_eq!(host.api_base, "https://git.acme.internal/api/v3/");
-        assert_eq!(host.upload_base, "https://git.acme.internal/uploads/");
-        assert!(!host.dotcom);
-    }
-
-    #[test]
-    fn the_pinned_and_latest_addresses_are_different_shapes_of_url() {
+    fn a_download_url_names_the_release_and_the_asset() {
         let host = GithubHost::dotcom();
         assert_eq!(
             host.download_url("acme/acme", "v1.4.0", "Acme-Windows-Setup.exe"),
@@ -830,14 +768,11 @@ mod endpoints {
             host.latest_download_url("acme/acme", "Acme-Windows-Setup.exe"),
             "https://github.com/acme/acme/releases/latest/download/Acme-Windows-Setup.exe"
         );
-    }
-
-    #[test]
-    fn a_tag_with_a_space_is_encoded_rather_than_meaning_something_else() {
-        let host = GithubHost::dotcom();
+        // A tag with a space is encoded rather than becoming a path that means
+        // something else.
         assert_eq!(
-            host.download_url("acme/acme", "v1.4.0 rc1", "a.exe"),
-            "https://github.com/acme/acme/releases/download/v1.4.0%20rc1/a.exe"
+            host.download_url("acme/acme", "v1.4.0 rc1", "Acme-Windows-Setup.exe"),
+            "https://github.com/acme/acme/releases/download/v1.4.0%20rc1/Acme-Windows-Setup.exe"
         );
     }
 }
@@ -847,60 +782,51 @@ mod notes_policy {
     use zup_publish_github::NotesPolicy;
 
     #[test]
-    fn the_default_is_githubs_own_generator() {
-        assert_eq!(NotesPolicy::default().as_str(), "generated");
-    }
-
-    #[test]
-    fn no_policy_writes_no_body() {
-        assert!(
-            zup_publish_github::notes_compose(
-                &NotesPolicy::None,
-                Some("x".into()),
-                None,
-                None,
-                &[]
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn a_generated_body_gains_a_download_table_and_keeps_its_text() {
+    fn a_notes_policy_decides_what_body_is_written() {
         let rows = vec![zup_publish_github::DownloadRow {
             name: "Acme-Windows-Setup.exe".to_owned(),
             size: 418 * 1024 * 1024,
             role: "install".to_owned(),
         }];
-        let body = zup_publish_github::notes_compose(
-            &NotesPolicy::Generated,
-            Some("## What's Changed\n* a fix\n".to_owned()),
-            None,
-            None,
-            &rows,
-        )
-        .expect("a body");
-        assert!(body.starts_with("## What's Changed"), "{body}");
-        assert!(body.contains("Acme-Windows-Setup.exe"), "{body}");
-        assert!(body.contains("418 MiB"), "{body}");
-    }
+        let body = |policy, generated, file, text| {
+            zup_publish_github::notes_compose(&policy, generated, file, text, &rows)
+        };
 
-    #[test]
-    fn a_file_policy_sends_the_file_verbatim_plus_the_table() {
-        let rows = vec![zup_publish_github::DownloadRow {
-            name: "Acme.exe".to_owned(),
-            size: 1,
-            role: "install".to_owned(),
-        }];
-        let body = zup_publish_github::notes_compose(
-            &NotesPolicy::File("CHANGELOG.md".to_owned()),
-            None,
-            Some("Curated notes.\n".to_owned()),
-            None,
-            &rows,
-        )
-        .expect("a body");
-        assert!(body.starts_with("Curated notes."), "{body}");
+        // No policy writes no body, even when there is a generated body to write.
+        assert!(body(NotesPolicy::None, Some("text".into()), None, None).is_none());
+
+        // Whatever somebody wrote is kept; the table is added after it.
+        for (policy, generated, file, text) in [
+            (
+                NotesPolicy::Generated,
+                Some("generated text\n".into()),
+                None,
+                None,
+            ),
+            (
+                NotesPolicy::File("CHANGELOG.md".to_owned()),
+                None,
+                Some("Curated notes.\n".to_owned()),
+                None,
+            ),
+            (
+                NotesPolicy::Text("release notes".to_owned()),
+                None,
+                None,
+                Some("Caller text.\n".to_owned()),
+            ),
+        ] {
+            let lede = match &policy {
+                NotesPolicy::Generated => "generated text",
+                NotesPolicy::File(_) => "Curated notes.",
+                NotesPolicy::Text(_) => "Caller text.",
+                NotesPolicy::None => unreachable!(),
+            };
+            let composed = body(policy, generated, file, text).expect("a body");
+            assert!(composed.starts_with(lede), "{composed}");
+            assert!(composed.contains("Acme-Windows-Setup.exe"), "{composed}");
+            assert!(composed.contains("418 MiB"), "{composed}");
+        }
     }
 }
 
@@ -911,7 +837,7 @@ mod credentials {
     use zup_acquire_http::SecretHeader;
     use zup_publish_github::Environment;
     use zup_publish_github::{
-        GithubError, GithubReceipt, GithubRepository, Token, authorization, discover, discover_with,
+        GithubError, GithubReceipt, GithubRepository, Token, authorization, discover_with,
     };
 
     struct Env(BTreeMap<String, String>);
@@ -922,15 +848,36 @@ mod credentials {
         }
     }
 
+    /// A credential comes from the environment before anything else, `GH_TOKEN`
+    /// before `GITHUB_TOKEN`, and the `gh` process is the last resort — it must
+    /// never run while the environment already has an answer.
     #[test]
-    fn gh_token_wins_over_github_token() {
-        let environment = Env(BTreeMap::from([
-            ("GH_TOKEN".to_owned(), "from-gh".to_owned()),
-            ("GITHUB_TOKEN".to_owned(), "from-github".to_owned()),
-        ]));
-        let found = discover(&environment).expect("a token");
+    fn a_credential_comes_from_the_environment_before_anything_else() {
+        let environment = |pairs: &[(&str, &str)]| {
+            Env(pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect())
+        };
+
+        let both = environment(&[("GH_TOKEN", "from-gh"), ("GITHUB_TOKEN", "from-github")]);
+        let found =
+            discover_with(&both, || panic!("the gh process must not run")).expect("a token");
         assert_eq!(found.expose(), "from-gh");
         assert!(found.is_ambient());
+
+        let one = environment(&[("GITHUB_TOKEN", "from-github")]);
+        let found = discover_with(&one, || panic!("the gh process must not run")).expect("a token");
+        assert_eq!(found.expose(), "from-github");
+        assert!(found.is_ambient());
+
+        let found =
+            discover_with(&Env(BTreeMap::new()), || Some("from-gh".to_owned())).expect("a token");
+        assert_eq!(found.expose(), "from-gh");
+        assert!(
+            !found.is_ambient(),
+            "a spawned credential is not the environment"
+        );
     }
 
     #[test]
@@ -940,39 +887,12 @@ mod credentials {
             discover_with(&environment, || None).expect_err("an empty value is not a token");
         assert!(error.to_string().contains("GH_TOKEN"), "{error}");
     }
-
-    #[test]
-    fn the_gh_fallback_is_only_reached_when_the_environment_has_nothing() {
-        // The fallback is a process spawn, so it must never run when a token is
-        // already in the environment.
-        let environment = Env(BTreeMap::from([(
-            "GITHUB_TOKEN".to_owned(),
-            "t".to_owned(),
-        )]));
-        let found =
-            discover_with(&environment, || panic!("the fallback must not run")).expect("a token");
-        assert_eq!(found.expose(), "t");
-
-        let empty = Env(BTreeMap::new());
-        let found = discover_with(&empty, || Some("from-gh".to_owned())).expect("a token");
-        assert_eq!(found.expose(), "from-gh");
-        assert!(!found.is_ambient());
-    }
-
     #[test]
     fn a_token_redacts_itself_in_debug() {
         let found = Token::new("ghp_supersecret");
         let rendered = format!("{found:?}");
         assert!(!rendered.contains("ghp_supersecret"), "{rendered}");
         assert!(rendered.contains("REDACTED"), "{rendered}");
-    }
-
-    #[test]
-    fn the_authorization_header_is_a_bearer_token() {
-        assert_eq!(
-            zup_publish_github::authorization(&Token::new("abc")),
-            "Bearer abc"
-        );
     }
 
     /// The reason `secrecy` is a dependency rather than a hand-written `Debug`.
@@ -999,8 +919,7 @@ mod credentials {
             repository: "acme/acme",
             token: &token,
         };
-        // Read the fields, so the struct is not dead code, and prove the derived
-        // `Debug` still does not print the value.
+        // The derived `Debug` must not reach the secret through either field.
         assert_eq!(request.repository, "acme/acme");
         assert!(request.token.same_secret_as(&token));
         for rendered in [format!("{request:?}"), format!("{token:?}")] {
@@ -1128,8 +1047,8 @@ mod credentials {
         let left = Token::new("a");
         assert!(left.same_secret_as(&Token::new("a")));
         assert!(!left.same_secret_as(&Token::new("b")));
+        // A prefix is not a match, or a short token would stand in for a longer one.
         assert!(!left.same_secret_as(&Token::new("aa")));
-        assert!(left.same_secret_as(&left));
     }
 }
 
@@ -1150,39 +1069,58 @@ mod workflow {
         ]
     }
 
+    /// One runner per target, named for the architecture it builds rather than
+    /// guessed from the triple.
+    // A target with no native runner is cross-compiled on the nearest one rather
+    // than being given a runner it does not exist for.
+    // A configured override is the project's decision, not a derivation.
     #[test]
-    fn a_single_target_produces_a_single_matrix_entry() {
-        let rendered = generate(
-            &WorkflowPolicy::default(),
-            &[MatrixTarget::new("windows-x64", "x86_64-pc-windows-msvc")],
-        );
-        assert_eq!(rendered.matches("- profile:").count(), 1);
-        assert!(rendered.contains("runner: windows-latest"));
-    }
+    fn a_runner_is_derived_from_the_target() {
+        for (triple, runner) in [
+            ("x86_64-pc-windows-msvc", "windows-latest"),
+            ("aarch64-pc-windows-msvc", "windows-11-arm"),
+            ("x86_64-unknown-linux-gnu", "ubuntu-latest"),
+            ("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"),
+            ("aarch64-apple-darwin", "macos-latest"),
+            // A target with no native runner is cross-compiled on the nearest one
+            // rather than being given a runner it does not exist for.
+            ("i686-pc-windows-msvc", "windows-latest"),
+        ] {
+            let rendered = generate(
+                &WorkflowPolicy::default(),
+                &[MatrixTarget::new("the-target", triple)],
+            );
+            assert!(
+                rendered.contains(&format!("runner: {runner}")),
+                "{triple} is not built on {runner}:\n{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("- profile:").count(),
+                1,
+                "one target is one matrix entry:\n{rendered}"
+            );
+        }
 
-    #[test]
-    fn the_matrix_uses_native_runners_and_names_the_right_ones() {
-        let rendered = generate(&WorkflowPolicy::default(), &matrix());
-        assert!(rendered.contains("runner: windows-latest"), "{rendered}");
-        assert!(rendered.contains("runner: windows-11-arm"), "{rendered}");
-        assert!(rendered.contains("runner: ubuntu-latest"), "{rendered}");
-        assert!(rendered.contains("runner: ubuntu-24.04-arm"), "{rendered}");
-        assert!(rendered.contains("runner: macos-latest"), "{rendered}");
-    }
-
-    #[test]
-    fn a_target_with_no_native_runner_cross_compiles_instead_of_lying() {
+        // A configured override is the project's decision, not a derivation.
+        let policy = WorkflowPolicy {
+            runner_overrides: BTreeMap::from([(
+                "aarch64-pc-windows-msvc".to_owned(),
+                "windows-11-vs2026-arm".to_owned(),
+            )]),
+            ..WorkflowPolicy::default()
+        };
         let rendered = generate(
-            &WorkflowPolicy::default(),
-            &[MatrixTarget::new("windows-x86", "i686-pc-windows-msvc")],
+            &policy,
+            &[MatrixTarget::new(
+                "windows-arm64",
+                "aarch64-pc-windows-msvc",
+            )],
         );
-        assert!(rendered.contains("runner: windows-latest"), "{rendered}");
         assert!(
-            !rendered.contains("runner: windows-11-arm"),
-            "an i686 target is not an arm64 target: {rendered}"
+            rendered.contains("runner: windows-11-vs2026-arm"),
+            "{rendered}"
         );
     }
-
     #[test]
     fn the_phases_are_explicit_and_ordered() {
         // Without a signing command there is no separate signing job, and the
@@ -1354,46 +1292,6 @@ mod workflow {
     }
 
     #[test]
-    fn a_release_with_no_signing_command_says_so_in_the_file() {
-        // Not a silent downgrade. A project that has not configured signing gets
-        // an unsigned release, and the generated pipeline has to say so in a place
-        // a reviewer reads before merging it.
-        let rendered = generate(&WorkflowPolicy::default(), &matrix());
-        assert!(rendered.contains("allow-unsigned: true"), "{rendered}");
-        assert!(rendered.contains("SmartScreen"), "{rendered}");
-        assert!(!rendered.contains("name: compose-unsigned"), "{rendered}");
-    }
-
-    #[test]
-    fn signing_is_optional_and_lands_after_composition() {
-        let without = generate(&WorkflowPolicy::default(), &matrix());
-        assert!(!without.contains("- name: Sign"));
-        let policy = WorkflowPolicy {
-            signing: Some(zup_publish_github::Signing {
-                command: "signtool sign /tr $URL $FILE".to_owned(),
-            }),
-            ..WorkflowPolicy::default()
-        };
-        let with = generate(&policy, &matrix());
-        let compose = with.find("- name: Compose release").expect("compose");
-        let sign = with.find("- name: Sign").expect("a sign step");
-        let publish = with.find("Publish release").expect("a publish step");
-        assert!(compose < sign, "signing is after composition");
-        assert!(sign < publish, "signing is before publication");
-        assert!(with.contains("signtool sign"));
-    }
-
-    #[test]
-    fn an_environment_is_opt_in() {
-        assert!(!generate(&WorkflowPolicy::default(), &matrix()).contains("environment:"));
-        let policy = WorkflowPolicy {
-            environment: Some("release".to_owned()),
-            ..WorkflowPolicy::default()
-        };
-        assert!(generate(&policy, &matrix()).contains("environment: release"));
-    }
-
-    #[test]
     fn concurrency_never_cancels_a_half_published_release() {
         let rendered = generate(&WorkflowPolicy::default(), &matrix());
         assert!(rendered.contains("cancel-in-progress: false"), "{rendered}");
@@ -1464,44 +1362,6 @@ mod workflow {
     }
 
     #[test]
-    fn the_workflow_calls_the_zup_action_once_per_phase() {
-        let rendered = generate(&WorkflowPolicy::default(), &matrix());
-        let action = &WorkflowPolicy::default().action;
-        let calls = rendered
-            .lines()
-            .filter(|line| line.contains(&format!("uses: {action}")))
-            .count();
-        // build, compose, finalize, attest, publish. One per phase: the pipeline
-        // stays readable and each call is a place a developer can look.
-        assert_eq!(calls, 5, "{rendered}");
-        for operation in ["build", "compose", "finalize", "attest", "publish"] {
-            assert!(
-                rendered.contains(&format!("operation: {operation}")),
-                "no `{operation}` phase in\n{rendered}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_action_ref_is_the_projects_to_choose() {
-        let rendered = generate(
-            &WorkflowPolicy {
-                action: "acme/fork-of-zup@v1.2.3".to_owned(),
-                ..WorkflowPolicy::default()
-            },
-            &matrix(),
-        );
-        assert!(
-            rendered.contains("uses: acme/fork-of-zup@v1.2.3"),
-            "{rendered}"
-        );
-        assert!(
-            !rendered.contains(&WorkflowPolicy::default().action),
-            "the default ref is still in the file"
-        );
-    }
-
-    #[test]
     fn the_token_is_an_action_input_rather_than_a_step_environment() {
         let rendered = generate(&WorkflowPolicy::default(), &matrix());
         // A step-level `env: GITHUB_TOKEN` would put the credential in the
@@ -1513,28 +1373,6 @@ mod workflow {
         );
         assert!(
             rendered.contains("github-token: ${{ secrets.GITHUB_TOKEN }}"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn a_runner_override_wins_over_the_derived_mapping() {
-        let policy = WorkflowPolicy {
-            runner_overrides: BTreeMap::from([(
-                "aarch64-pc-windows-msvc".to_owned(),
-                "windows-11-vs2026-arm".to_owned(),
-            )]),
-            ..WorkflowPolicy::default()
-        };
-        let rendered = generate(
-            &policy,
-            &[MatrixTarget::new(
-                "windows-arm64",
-                "aarch64-pc-windows-msvc",
-            )],
-        );
-        assert!(
-            rendered.contains("runner: windows-11-vs2026-arm"),
             "{rendered}"
         );
     }

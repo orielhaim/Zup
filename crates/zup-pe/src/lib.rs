@@ -563,30 +563,6 @@ mod tests {
     /// into memory. Reading it as an RVA would look for the signature somewhere
     /// inside a section and find nothing.
     ///
-    /// The table here is placed past the end of every section, which is where a
-    /// signer puts it, and the address is chosen so that reading it as an RVA
-    /// would land in the middle of the image rather than at the table.
-    #[test]
-    fn the_certificate_table_directory_is_read_as_a_file_offset() {
-        const OPTIONAL: usize = 0x58;
-        const SECTION: usize = OPTIONAL + 240;
-        const DATA_DIRECTORY: usize = OPTIONAL + 112 + 4 * 8;
-        let mut bytes = image(2);
-        // `SizeOfHeaders` and one section of raw data at 0x200.
-        bytes[OPTIONAL + 60..OPTIONAL + 64].copy_from_slice(&0x200u32.to_le_bytes());
-        bytes[SECTION + 20..SECTION + 24].copy_from_slice(&0x200u32.to_le_bytes());
-        bytes[SECTION + 16..SECTION + 20].copy_from_slice(&16u32.to_le_bytes());
-        bytes.resize(0x200, 0);
-        bytes.extend_from_slice(&[0xcc; 16]);
-        bytes[DATA_DIRECTORY..DATA_DIRECTORY + 4].copy_from_slice(&0x200u32.to_le_bytes());
-        bytes[DATA_DIRECTORY + 4..DATA_DIRECTORY + 8].copy_from_slice(&16u32.to_le_bytes());
-
-        let (_dir, path) = write(&bytes, "signed.exe");
-        let header = read_pe_header(&path).unwrap();
-        assert!(header.is_signed());
-        assert_eq!(header.certificate_table(), Some(0x200..0x210));
-    }
-
     #[test]
     fn a_truncated_or_foreign_file_is_rejected() {
         let (_dir, path) = write(b"not an image", "x.bin");

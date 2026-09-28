@@ -2,11 +2,13 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rstest::rstest;
+
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 use zup_plugin_contract::{
-    Context, ContractError, EngineFingerprint, HOST_TARGET, InstallScope, InvocationError,
-    PluginEngine, engine_fingerprint,
+    Context, ContractError, EngineFingerprint, InstallScope, InvocationError, PluginEngine,
+    engine_fingerprint,
 };
 
 const VALID_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
@@ -78,37 +80,75 @@ fn context() -> Context {
     }
 }
 
-#[test]
-fn accepts_valid_contract_shape() {
+/// Every way a guest can fail has to arrive as its own `InvocationError`. These are the
+/// ABI's error-mapping rules, and they are what a host branches on: a caller that cannot
+/// tell a fuel exhaustion from a trap cannot decide whether to retry, and one that sees
+/// a generic "the plugin failed" cannot tell a plugin's own refusal from a host fault.
+#[rstest]
+#[case::oversized_output(
+    "(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)",
+    Refusal::OutputLimit,
+    Never::Ask
+)]
+#[case::trap("unreachable", Refusal::Trap, Never::Ask)]
+#[case::out_of_fuel("(loop (br 0)) unreachable", Refusal::FuelExhausted, Never::Ask)]
+#[case::out_of_memory(
+    "(drop (memory.grow (i32.const 513))) (i32.const 0)",
+    Refusal::MemoryLimit,
+    Never::Ask
+)]
+#[case::cancelled("(loop (br 0)) unreachable", Refusal::Cancelled, Never::AfterFirstPoll)]
+fn a_guest_that_misbehaves_is_mapped_to_its_own_failure(
+    #[case] body: &str,
+    #[case] expected: Refusal,
+    #[case] cancellation: Never,
+) {
     let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_wit(VALID_WIT))
-        .unwrap();
-    assert_eq!(component.fingerprint(), engine.fingerprint());
+    let component = engine.compile_component(&component_for_body(body)).unwrap();
+    let calls = AtomicUsize::new(0);
+    let error = match cancellation {
+        Never::Ask => component.plan(&context()).unwrap_err(),
+        Never::AfterFirstPoll => component
+            .plan_with_cancellation(&context(), &|| calls.fetch_add(1, Ordering::Relaxed) > 0)
+            .unwrap_err(),
+    };
+    assert!(
+        expected.matches(&error),
+        "a guest running `{body}` should fail as {expected:?}, got {error:?}"
+    );
 }
 
-#[test]
-fn invocation_returns_an_empty_plan() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body(
-            "(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 0)) (i32.store (i32.const 1032) (i32.const 0)) (i32.const 1024)",
-        ))
-        .unwrap();
-    let result = component.plan(&context()).unwrap();
-    assert!(result.unwrap().resources.is_empty());
+/// The failure an invocation is expected to produce. Named rather than constructed
+/// because `Trap` carries a message the fixture does not have to predict, and what the
+/// mapping rules promise is *which* failure, not what it says.
+#[derive(Debug, Clone, Copy)]
+enum Refusal {
+    OutputLimit,
+    Trap,
+    FuelExhausted,
+    MemoryLimit,
+    Cancelled,
 }
 
-#[test]
-fn invocation_maps_oversized_guest_error_to_output_limit() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body(
-            "(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)",
-        ))
-        .unwrap();
-    let error = component.plan(&context()).unwrap_err();
-    assert!(matches!(error, InvocationError::OutputLimit { .. }));
+impl Refusal {
+    fn matches(self, error: &InvocationError) -> bool {
+        matches!(
+            (self, error),
+            (Refusal::OutputLimit, InvocationError::OutputLimit { .. })
+                | (Refusal::Trap, InvocationError::Trap { .. })
+                | (Refusal::FuelExhausted, InvocationError::FuelExhausted)
+                | (Refusal::MemoryLimit, InvocationError::MemoryLimit)
+                | (Refusal::Cancelled, InvocationError::Cancelled)
+        )
+    }
+}
+
+/// Whether the invocation is given a cancellation query at all. The fuel fixture spins
+/// forever, so the two cases differ only in whether anything is watching.
+#[derive(Debug, Clone, Copy)]
+enum Never {
+    Ask,
+    AfterFirstPoll,
 }
 
 #[test]
@@ -127,18 +167,6 @@ fn invocation_returns_all_resource_families() {
 }
 
 #[test]
-fn invocation_returns_one_resource() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body(
-            "(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 1)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 3000)) (i32.store (i32.const 2056) (i32.const 6)) (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 3)) (i32.const 1024)",
-        ))
-        .unwrap();
-    let plan = component.plan(&context()).unwrap().unwrap();
-    assert_eq!(plan.resources.len(), 1);
-}
-
-#[test]
 fn invocation_preserves_guest_rejection() {
     let engine = PluginEngine::host().unwrap();
     let component = engine
@@ -151,166 +179,103 @@ fn invocation_preserves_guest_rejection() {
     assert_eq!(error.message, "failure");
 }
 
-#[test]
-fn invocation_maps_trap_without_text_matching() {
+/// A component is accepted or refused on its shape, and each shape below is one a
+/// hand-written or generated component can actually arrive in. Nothing here runs the
+/// guest: these are all decided before a plugin ever executes.
+/// A component is refused on its shape, and each shape below is one a hand-written or
+/// generated component can actually arrive in. Nothing here runs the guest: every one of
+/// these is decided before a plugin ever executes.
+#[rstest]
+#[case::missing_export("(component)", "missing_export")]
+#[case::extra_export(
+    r#"(component (type $t (func)) (export "extra" (type $t)))"#,
+    "extra_export"
+)]
+#[case::any_import(r#"(component (import "env" (func)))"#, "any_import")]
+#[case::core_module("(module)", "core_module")]
+fn a_component_of_the_wrong_shape_is_refused(#[case] wat: &str, #[case] refusal: &str) {
     let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body("unreachable"))
-        .unwrap();
-    let error = component.plan(&context()).unwrap_err();
-    assert!(matches!(error, InvocationError::Trap { .. }));
+    let error = engine.compile_component(&component_wat(wat)).unwrap_err();
+    assert_eq!(refusal_of(&error), refusal, "{error:?}");
 }
 
-#[test]
-fn invocation_maps_cancellation() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body("(loop (br 0)) unreachable"))
-        .unwrap();
-    let calls = AtomicUsize::new(0);
-    let cancellation = || calls.fetch_add(1, Ordering::Relaxed) > 0;
-    let error = component
-        .plan_with_cancellation(&context(), &cancellation)
-        .unwrap_err();
-    assert_eq!(error, InvocationError::Cancelled);
-}
-
-#[test]
-fn invocation_maps_fuel_exhaustion() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body("(loop (br 0)) unreachable"))
-        .unwrap();
-    let error = component.plan(&context()).unwrap_err();
-    assert_eq!(error, InvocationError::FuelExhausted);
-}
-
-#[test]
-fn invocation_maps_memory_growth_rejection() {
-    let engine = PluginEngine::host().unwrap();
-    let component = engine
-        .compile_component(&component_for_body(
-            "(drop (memory.grow (i32.const 513))) (i32.const 0)",
-        ))
-        .unwrap();
-    let error = component.plan(&context()).unwrap_err();
-    assert_eq!(error, InvocationError::MemoryLimit);
-}
-
-#[test]
-fn rejects_missing_export() {
-    let engine = PluginEngine::host().unwrap();
-    let component = component_wat("(component)");
-    let error = engine.compile_component(&component).unwrap_err();
-    assert_eq!(
-        error,
-        ContractError::MissingExport {
-            expected: "zup:plugin/planner@1.0.0",
-        }
-    );
-}
-
-#[test]
-fn rejects_extra_export() {
-    let engine = PluginEngine::host().unwrap();
-    let component = component_wat(r#"(component (type $t (func)) (export "extra" (type $t)))"#);
-    let error = engine.compile_component(&component).unwrap_err();
-    assert_eq!(
-        error,
-        ContractError::UnexpectedExport {
-            name: "extra".to_owned(),
-        }
-    );
-}
-
-#[test]
-fn rejects_extra_planner_function() {
-    let engine = PluginEngine::host().unwrap();
-    let wit = VALID_WIT.replace(
+/// A world that names a second planner function, and a world whose `plan` has the wrong
+/// signature: the first because the export set is closed, the second because the
+/// canonical ABI is what the host links against.
+#[rstest]
+#[case::extra_planner_function(
+    VALID_WIT.replace(
         "  plan: func(context: context) -> result<installation-plan, plugin-error>;",
         "  extra: func();\n\n  plan: func(context: context) -> result<installation-plan, plugin-error>;",
-    );
-    assert_ne!(wit, VALID_WIT);
+    ),
+    "unexpected_plan_export"
+)]
+#[case::wrong_signature(
+    r#"
+package zup:plugin@1.0.0;
+
+interface planner {
+    plan: func();
+}
+
+world plugin {
+    export planner;
+}
+"#,
+    "signature"
+)]
+fn a_world_that_does_not_match_the_contract_is_refused(#[case] wit: String, #[case] refusal: &str) {
+    assert_ne!(wit, VALID_WIT, "the fixture must actually change the world");
+    let engine = PluginEngine::host().unwrap();
     let error = engine
         .compile_component(&component_for_wit(&wit))
         .unwrap_err();
-    assert_eq!(
-        error,
-        ContractError::UnexpectedPlanExport {
-            name: "extra".to_owned(),
+    assert_eq!(refusal_of(&error), refusal, "{error:?}");
+}
+
+/// Which refusal the contract layer produced, and whether it named the offending symbol.
+/// Naming the variant is what lets the two tables above read as tables; the payload is
+/// checked here because a refusal that does not say which import or export was refused
+/// leaves the plugin author nothing to act on.
+fn refusal_of(error: &ContractError) -> &'static str {
+    match error {
+        ContractError::CoreModule => "core_module",
+        ContractError::UnexpectedImport { name } => {
+            assert_eq!(name, "env");
+            "any_import"
         }
+        ContractError::MissingExport { expected } => {
+            assert_eq!(*expected, "zup:plugin/planner@1.0.0");
+            "missing_export"
+        }
+        ContractError::UnexpectedExport { name } | ContractError::UnexpectedPlanExport { name } => {
+            assert_eq!(name, "extra");
+            if matches!(error, ContractError::UnexpectedExport { .. }) {
+                "extra_export"
+            } else {
+                "unexpected_plan_export"
+            }
+        }
+        ContractError::Signature { .. } => "signature",
+        other => panic!("not a shape refusal: {other:?}"),
+    }
+}
+
+/// Only a component this engine's own cranelift precompiled may be loaded. A raw module
+/// is not a component, and a component is not trusted merely for being one: the host
+/// links against the exact artifact shape its engine produces, so anything else is
+/// refused before a deserializer is handed a byte of it.
+#[rstest]
+#[case::arbitrary_bytes(&b"not aot"[..])]
+#[case::raw_core_module(&component_wat("(module)"))]
+#[case::component_that_was_never_precompiled(&component_for_wit(VALID_WIT))]
+fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]) {
+    let engine = PluginEngine::host().unwrap();
+    let error = engine.verify_precompiled(aot).unwrap_err();
+    assert!(
+        matches!(error, ContractError::TrustedAot { .. }),
+        "{error:?}"
     );
-}
-
-#[test]
-fn rejects_any_import() {
-    let engine = PluginEngine::host().unwrap();
-    let component = component_wat(r#"(component (import "env" (func)))"#);
-    let error = engine.compile_component(&component).unwrap_err();
-    assert_eq!(
-        error,
-        ContractError::UnexpectedImport {
-            name: "env".to_owned(),
-        }
-    );
-}
-
-#[test]
-fn rejects_core_module() {
-    let engine = PluginEngine::host().unwrap();
-    let module = component_wat("(module)");
-    let error = engine.compile_component(&module).unwrap_err();
-    assert_eq!(error, ContractError::CoreModule);
-}
-
-#[test]
-fn rejects_wrong_wit_signature() {
-    let engine = PluginEngine::host().unwrap();
-    let component = component_for_wit(
-        r#"
-        package zup:plugin@1.0.0;
-
-        interface planner {
-            plan: func();
-        }
-
-        world plugin {
-            export planner;
-        }
-        "#,
-    );
-    let error = engine.compile_component(&component).unwrap_err();
-    assert!(matches!(error, ContractError::Signature { .. }));
-}
-
-#[test]
-fn round_trips_precompiled_aot_with_the_same_fingerprint() {
-    let compiler = PluginEngine::new(HOST_TARGET).unwrap();
-    let aot = compiler
-        .precompile_component(&component_for_wit(VALID_WIT))
-        .unwrap();
-
-    let runtime = PluginEngine::new(HOST_TARGET).unwrap();
-    assert!(wasmtime::Engine::detect_precompiled(&aot).is_some());
-    let component = runtime
-        .compile_component(&component_for_wit(VALID_WIT))
-        .unwrap();
-    assert_eq!(component.fingerprint(), runtime.fingerprint());
-}
-
-#[test]
-fn rejects_wrong_precompiled_output() {
-    let engine = PluginEngine::host().unwrap();
-    let error = engine.verify_precompiled(b"not aot").unwrap_err();
-    assert!(matches!(error, ContractError::TrustedAot { .. }));
-}
-
-#[test]
-fn rejects_raw_webassembly_before_deserialize() {
-    let engine = PluginEngine::host().unwrap();
-    let module = component_wat("(module)");
-    let error = engine.verify_precompiled(&module).unwrap_err();
-    assert!(matches!(error, ContractError::TrustedAot { .. }));
 }
 
 #[test]

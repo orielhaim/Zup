@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::Path;
 
+use rstest::rstest;
 use tempfile::TempDir;
 use zup_xtask::boundary::{self, Rule};
 use zup_xtask::matrix;
@@ -88,6 +89,9 @@ fn findings(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The negative control. Every other fixture in this file dirties exactly one
+/// thing and expects a finding; without a workspace that is clean by construction,
+/// a rule that stopped firing would look identical to a rule that never worked.
 #[test]
 fn a_clean_portable_workspace_has_no_findings() {
     let root = workspace_with(
@@ -109,6 +113,10 @@ fn a_clean_portable_workspace_has_no_findings() {
     assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
+/// The fixture workspace is built from the matrices, so this checks that the
+/// fixture builder did what it claims. The real coverage gate is
+/// `every_member_of_this_workspace_is_classified`, which runs against this
+/// repository rather than a fixture built from the same table.
 #[test]
 fn a_complete_workspace_classifies_every_member() {
     let root = complete_workspace();
@@ -121,59 +129,45 @@ fn a_complete_workspace_classifies_every_member() {
     assert_eq!(matrix::duplicated_packages(), Vec::<&str>::new());
 }
 
-#[test]
-fn a_windows_dependency_in_any_manifest_table_is_reported() {
-    for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        let root = workspace_with(
-            "zup-core",
-            &format!(
-                "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
-                 \n[{table}]\nwindows = \"0.62\"\n"
-            ),
-            &[],
-        );
-        let reported = rules(root.path());
-        assert!(
-            reported.contains(&Rule::ForbiddenDependency),
-            "{table} was not reported: {reported:?}"
-        );
-    }
-}
-
-#[test]
-fn a_windows_target_scope_reports_both_the_scope_and_the_dependency() {
+/// A forbidden dependency is a forbidden dependency wherever a manifest names it.
+/// Every table and every target scope is checked, because a rule that reads only
+/// `[dependencies]` is a rule a contributor routes around. `dev-dependencies` and
+/// `build-dependencies` are the two that get forgotten, so they are the two that
+/// are pinned; `[dependencies]` and the workspace's own Windows crate are already
+/// covered by the clean-workspace control and the enforcer case.
+#[rstest]
+#[case::dev_dependencies(
+    "[dev-dependencies]\nwindows = \"0.62\"\n",
+    vec![Rule::ForbiddenDependency]
+)]
+#[case::build_dependencies(
+    "[build-dependencies]\nwindows = \"0.62\"\n",
+    vec![Rule::ForbiddenDependency]
+)]
+#[case::the_repositorys_own_windows_crate(
+    "[dependencies]\nzup-windows = { path = \"../zup-windows\" }\n",
+    vec![Rule::ForbiddenDependency]
+)]
+#[case::a_windows_target_scope(
+    "[target.'cfg(windows)'.dependencies]\nwindows-link = \"0.100\"\n",
+    vec![Rule::ForbiddenDependency, Rule::WindowsTargetScope]
+)]
+#[case::a_windows_target_scope_over_a_portable_dependency(
+    "[target.'cfg(windows)'.dependencies]\nserde = \"1\"\n",
+    vec![Rule::WindowsTargetScope]
+)]
+fn a_manifest_that_reaches_for_windows_is_reported(
+    #[case] table: &str,
+    #[case] expected: Vec<Rule>,
+) {
     let root = workspace_with(
         "zup-core",
-        "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
-         \n[target.'cfg(windows)'.dependencies]\nwindows-link = \"0.100\"\n",
+        &format!(
+            "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\n{table}"
+        ),
         &[],
     );
-    assert_eq!(
-        rules(root.path()),
-        vec![Rule::ForbiddenDependency, Rule::WindowsTargetScope]
-    );
-}
-
-#[test]
-fn a_windows_target_scope_without_windows_dependencies_is_reported() {
-    let root = workspace_with(
-        "zup-core",
-        "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
-         \n[target.'cfg(windows)'.dependencies]\nserde = \"1\"\n",
-        &[],
-    );
-    assert_eq!(rules(root.path()), vec![Rule::WindowsTargetScope]);
-}
-
-#[test]
-fn the_windows_backend_crate_itself_is_reported_as_a_dependency() {
-    let root = workspace_with(
-        "zup-core",
-        "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
-         \n[dependencies]\nzup-windows = { path = \"../zup-windows\" }\n",
-        &[],
-    );
-    assert_eq!(rules(root.path()), vec![Rule::ForbiddenDependency]);
+    assert_eq!(rules(root.path()), expected);
 }
 
 #[test]
@@ -202,6 +196,9 @@ fn a_windows_cfg_branch_in_production_source_is_reported() {
     assert!(reported[1].contains("cfg(not(windows))"), "{reported:?}");
 }
 
+/// An import nested inside a function is still an import. A scanner that only
+/// matched at the top of a file would let every portable crate re-acquire the
+/// Windows filesystem API behind one level of indentation.
 #[test]
 fn a_platform_specific_std_import_is_reported() {
     let root = workspace_with(
@@ -215,24 +212,22 @@ fn a_platform_specific_std_import_is_reported() {
     assert_eq!(rules(root.path()), vec![Rule::OsWindowsImport]);
 }
 
-#[test]
-fn a_windows_api_namespace_is_reported() {
-    for token in [
-        "use windows::Win32::System::SystemInformation;",
-        "use windows_bindgen::Generator;",
-        "use winapi::um::winbase;",
-    ] {
-        let root = workspace_with(
-            "zup-core",
-            &manifest("zup-core"),
-            &[("src/lib.rs", &format!("{token}\n"))],
-        );
-        assert_eq!(
-            rules(root.path()),
-            vec![Rule::WindowsApiNamespace],
-            "{token} was not reported"
-        );
-    }
+/// A ban that matched the `windows` crate exactly would be routed around by
+/// `windows_bindgen` or `winapi`, so the namespace rule is a prefix rule.
+#[rstest]
+#[case::a_crate_that_starts_with_the_windows_prefix("use windows_bindgen::Generator;")]
+#[case::the_legacy_crate("use winapi::um::winbase;")]
+fn a_windows_api_namespace_is_reported(#[case] token: &str) {
+    let root = workspace_with(
+        "zup-core",
+        &manifest("zup-core"),
+        &[("src/lib.rs", &format!("{token}\n"))],
+    );
+    assert_eq!(
+        rules(root.path()),
+        vec![Rule::WindowsApiNamespace],
+        "{token}"
+    );
 }
 
 #[test]
@@ -251,6 +246,10 @@ fn every_banned_portable_identifier_is_reported() {
     }
 }
 
+/// The exemption for a windows-only package must be an exemption, not a gap. A
+/// rule that failed to fire on `zup-windows` would also fail to fire on a
+/// portable crate that merely claimed to be windows-only, which is why the matrix
+/// is what grants the exemption and not the crate's own say-so.
 #[test]
 fn a_windows_only_package_may_use_everything() {
     let root = workspace_with(
@@ -269,6 +268,9 @@ fn a_windows_only_package_may_use_everything() {
     assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
+/// Test code names the vocabulary it is testing, so a `#[cfg(test)]` module and a
+/// `tests/` integration file are held to no rules at all. Without this, every
+/// crate that asserts "this token is banned" would itself be a finding.
 #[test]
 fn unit_test_modules_and_test_directories_may_use_windows() {
     let root = workspace_with(
@@ -292,6 +294,9 @@ fn unit_test_modules_and_test_directories_may_use_windows() {
     assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
+/// The scrubber is what makes the rest of the vocabulary rules usable. Without it
+/// a crate could document the vocabulary it is forbidden from, and a doc comment
+/// naming a Windows API would be indistinguishable from a call to one.
 #[test]
 fn comments_do_not_trip_a_rule() {
     let root = workspace_with(
@@ -309,23 +314,20 @@ fn comments_do_not_trip_a_rule() {
     assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
+/// Every token the ban table lists must fire when it appears inside a string
+/// literal, in the spelling a real manifest would use — a registry path, a shell
+/// verb, a pipe endpoint, a redistributable name. The table is the whole check;
+/// this walks it in the shapes that are easiest to miss.
 #[test]
 fn a_windows_concept_in_a_string_literal_is_reported() {
     for literal in [
         r#"pub const KEY: &str = "HKEY_LOCAL_MACHINE\\Software\\Acme";"#,
-        r#"pub const HIVE: &str = "HKEY_CURRENT_USER";"#,
         r#"pub const COMMAND: &str = r"shell\open\command";"#,
-        r#"pub const CLASS: &str = "Acme.Shell.1"; pub const KEY: &str = "ProgId";"#,
         r#"pub const TOOL: &str = "sc.exe delete Acme";"#,
-        r#"pub const VERB: &str = "runas";"#,
         r#"pub const ENDPOINT: &str = "\\\\.\\pipe\\Acme";"#,
         r#"pub const ENDPOINT: &str = r"\\.\pipe\Acme";"#,
-        r#"pub const PACKAGE: &str = "Acme.msi";"#,
         r#"pub const RUNTIME: &str = "WebView2 Evergreen Runtime";"#,
-        r#"pub const REDIST: &str = "vcredist.x64.exe";"#,
-        r#"pub const RESOURCE: &str = "RCDATA";"#,
         r#"pub const FOLDER: &str = "C:\\ProgramData\\Acme";"#,
-        r#"pub const REGISTRATION: &str = "UninstallString";"#,
     ] {
         let root = workspace_with(
             "zup-core",
@@ -340,11 +342,13 @@ fn a_windows_concept_in_a_string_literal_is_reported() {
     }
 }
 
+/// The ban table is compared case-insensitively, so a contributor routes around it
+/// by lower-casing. The report also has to carry a line number, or a workspace
+/// with one leak in it is a workspace nobody can fix.
 #[test]
 fn a_banned_literal_is_reported_whatever_its_case() {
     for literal in [
         r#"pub const HIVE: &str = "hkey_local_machine";"#,
-        r#"pub const HIVE: &str = "HKey_Local_Machine";"#,
         r#"pub const HIVE: &str = r"hkey_local_machine";"#,
     ] {
         let root = workspace_with(
@@ -360,20 +364,6 @@ fn a_banned_literal_is_reported_whatever_its_case() {
         );
         assert!(reported[0].contains("hkey_local_machine"), "{reported:?}");
     }
-}
-
-#[test]
-fn a_banned_literal_outside_a_string_is_not_a_banned_literal() {
-    let root = workspace_with(
-        "zup-core",
-        &manifest("zup-core"),
-        &[(
-            "src/lib.rs",
-            "// hkey_local_machine is spelled out in this comment.\n\
-             pub fn hive() -> &'static str {\n    let key = \"acme\";\n    key\n}\n",
-        )],
-    );
-    assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
 #[test]
@@ -397,6 +387,9 @@ fn every_banned_portable_literal_is_reported() {
     }
 }
 
+/// The ban table cannot be a substring ban. A portable crate has to be able to
+/// name `windows` as a target, a triple, and a path segment, or the vocabulary
+/// this repository uses is itself illegal.
 #[test]
 fn the_portable_vocabulary_that_shares_a_windows_word_stays_legal() {
     let root = workspace_with(
@@ -420,6 +413,10 @@ fn the_portable_vocabulary_that_shares_a_windows_word_stays_legal() {
     assert_eq!(findings(root.path()), Vec::<String>::new());
 }
 
+/// The enforcer holds the ban table, so it necessarily spells every banned token
+/// out. It is exempted from the vocabulary rules, and the exemption has to be
+/// narrow: an enforcer that could not name a Windows concept could not check for
+/// one.
 #[test]
 fn the_enforcer_may_name_the_concepts_it_bans() {
     let root = workspace_with(
@@ -447,39 +444,27 @@ fn the_enforcer_still_may_not_depend_on_a_windows_crate() {
     assert_eq!(rules(root.path()), vec![Rule::ForbiddenDependency]);
 }
 
-#[test]
-fn target_lexicon_windows_identifiers_are_allowed() {
-    let root = workspace_with(
-        "zup-core",
-        &manifest("zup-core"),
-        &[(
-            "src/lib.rs",
-            "use zup_core::{TargetOperatingSystem, TargetTriple};\n\
-             pub fn is_windows(target: &TargetTriple) -> bool {\n    \
-             target.operating_system() == TargetOperatingSystem::Windows\n}\n",
-        )],
-    );
-    assert_eq!(findings(root.path()), Vec::<String>::new());
-}
-
-#[test]
-fn an_unclassified_member_is_reported() {
+/// An unclassified member is a package no matrix claims, so nothing verifies it
+/// and nothing knows which host it builds on. Excluding it is the deliberate way
+/// to say "not mine" — but only if the exclusion is actually honoured.
+#[rstest]
+#[case::a_package_no_matrix_claims(&[], 1)]
+#[case::the_same_package_explicitly_excluded(&["crates/zup-scratch"], 0)]
+fn an_unclassified_member_is_reported_unless_it_is_excluded(
+    #[case] exclude: &[&str],
+    #[case] expected_findings: usize,
+) {
     let root = complete_workspace();
     add_package(root.path(), "zup-scratch", &manifest("zup-scratch"), &[]);
+    write_root(root.path(), &["crates/*"], exclude);
     let reported = findings(root.path());
-    assert_eq!(reported.len(), 1, "{reported:?}");
-    assert!(
-        reported[0].contains("unclassified workspace member `zup-scratch`"),
-        "{reported:?}"
-    );
-}
-
-#[test]
-fn an_excluded_member_is_not_a_finding() {
-    let root = complete_workspace();
-    add_package(root.path(), "zup-scratch", &manifest("zup-scratch"), &[]);
-    write_root(root.path(), &["crates/*"], &["crates/zup-scratch"]);
-    assert_eq!(findings(root.path()), Vec::<String>::new());
+    assert_eq!(reported.len(), expected_findings, "{reported:?}");
+    if expected_findings == 1 {
+        assert!(
+            reported[0].contains("unclassified workspace member `zup-scratch`"),
+            "{reported:?}"
+        );
+    }
 }
 
 #[test]

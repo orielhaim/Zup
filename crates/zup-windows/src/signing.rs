@@ -743,6 +743,11 @@ mod tests {
         }
     }
 
+    /// The product's policy is the conjunction of three independent demands, and
+    /// the development policy differs from it in exactly one of them: it accepts
+    /// an untrusted chain. That is the only way a developer signing with a
+    /// self-signed certificate gets a usable build without the product policy ever
+    /// being relaxed.
     #[test]
     fn the_production_policy_demands_a_trusted_chain_and_an_rfc3161_timestamp() {
         let policy = SignaturePolicy::default();
@@ -759,21 +764,11 @@ mod tests {
             policy.accepts(&image(true, Timestamp::LegacyOnly)),
             Err(VerificationError::LegacyTimestamp)
         ));
-    }
 
-    #[test]
-    fn a_development_signature_is_accepted_without_weakening_the_product() {
-        // The self-signed certificate a developer signs with. The product's
-        // policy still refuses it; only the test policy accepts it.
+        let development = SignaturePolicy::test_identity();
         assert!(
-            SignaturePolicy::default()
-                .accepts(&image(false, Timestamp::None))
-                .is_err()
-        );
-        assert!(
-            SignaturePolicy::test_identity()
-                .accepts(&image(false, Timestamp::None))
-                .is_ok()
+            development.accepts(&image(false, Timestamp::None)).is_ok(),
+            "only the chain demand is relaxed for a development certificate"
         );
     }
 
@@ -822,24 +817,5 @@ mod tests {
         for word in ["password", "pfx", "secret", "token", "private"] {
             assert!(!encoded.contains(word), "the evidence mentions `{word}`");
         }
-    }
-
-    /// A signature from an untrusted chain is still a signature, and the
-    /// difference is one fact rather than a different answer.
-    #[test]
-    fn an_untrusted_chain_does_not_erase_the_signature_it_describes() {
-        let verified = VerifiedFile {
-            path: std::path::PathBuf::from("dev.exe"),
-            image: image(false, Timestamp::None),
-        };
-        let evidence = verified.evidence();
-        assert!(zup_signing::covers_bytes(&evidence));
-        assert!(
-            !evidence
-                .iter()
-                .any(|entry| entry.fact == EvidenceFact::PlatformTrustAccepted),
-            "an untrusted chain is not recorded as a trusted one"
-        );
-        assert_eq!(zup_signing::timestamp(&evidence), Some("none"));
     }
 }

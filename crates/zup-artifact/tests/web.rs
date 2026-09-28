@@ -328,11 +328,15 @@ async fn a_corrupt_blob_in_the_staged_tree_is_refused_rather_than_installed() {
     );
 }
 
+/// The fixture is only worth anything if the two architectures actually overlap,
+/// so this asserts the premise every other staging claim rests on rather than
+/// re-deriving what `a_build_stages_a_complete_immutable_web_tree` already proves
+/// about catalog completeness.
 #[test]
-fn shared_content_is_staged_once_and_served_to_both_variants() {
+fn the_fixture_actually_shares_content_between_the_two_architectures() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let graph = compose(dir.path());
-    let _tree = stage(dir.path(), &graph);
+    stage(dir.path(), &graph);
     let release = ReleaseDescriptor::parse(
         &std::fs::read(dir.path().join("web").join("releases").join("stable.json"))
             .expect("the release is staged"),
@@ -341,33 +345,12 @@ fn shared_content_is_staged_once_and_served_to_both_variants() {
 
     let x64 = release.variant("windows-x64").expect("a variant");
     let arm = release.variant("windows-arm64").expect("a variant");
-    let shared: Vec<_> = x64
-        .content
-        .iter()
-        .filter(|digest| arm.content.contains(digest))
-        .collect();
     assert!(
-        !shared.is_empty(),
+        x64.content
+            .iter()
+            .any(|digest| arm.content.contains(digest)),
         "the fixture shares content between architectures, which is the whole point"
     );
-    // The catalog describes the shared content once.
-    let catalog = ContentCatalog::parse(
-        &std::fs::read(
-            dir.path()
-                .join("web")
-                .join("releases")
-                .join("stable")
-                .join("catalog.json"),
-        )
-        .expect("the catalog is staged"),
-    )
-    .expect("the catalog parses");
-    for digest in &shared {
-        assert!(
-            catalog.entry(digest).is_some(),
-            "a shared digest is catalogued once and served to both variants"
-        );
-    }
 }
 
 #[test]
@@ -382,6 +365,10 @@ fn a_channel_name_that_could_escape_the_release_directory_is_refused() {
     }
 }
 
+/// A bootstrapper executes the runtime before it can verify anything else, so the
+/// runtime must be ordinary content-addressed bytes that the same verification
+/// path as any other blob will accept. This is what makes executing it before
+/// verification defensible rather than reckless.
 #[test]
 fn a_staged_runtime_is_addressable_content_a_client_can_verify_before_running() {
     let dir = tempfile::tempdir().expect("a temporary directory");

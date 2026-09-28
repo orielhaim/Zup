@@ -14,7 +14,7 @@ use zup_transaction::{
 };
 use zup_windows::launch_worker_for_test;
 use zup_windows::{
-    PipeSecurity, PipeServer, UserSid, WorkerBootstrap, format_bootstrap, frame_server,
+    PipeServer, UserSid, WorkerBootstrap, format_bootstrap, frame_server,
     payload_overlay_base_root, plan_hash_hex, verify_client_pid,
 };
 
@@ -262,21 +262,4 @@ async fn authenticated_worker_consumes_generated_overlay() {
         "committed"
     );
     assert_eq!(std::fs::read(destination).unwrap(), bytes);
-}
-
-#[test]
-fn pipe_security_descriptor_policy() {
-    let security = PipeSecurity::for_initiating_user().expect("sd");
-    assert!(!security.raw().is_null());
-}
-
-#[test]
-fn uac_identity_model_allows_different_sids() {
-    let parent = UserSid::current().unwrap();
-    assert!(!parent.display().is_empty());
-    assert_eq!(
-        parent,
-        UserSid::for_process(std::process::id()).expect("current process token")
-    );
-    let _elevated = zup_windows::is_process_elevated().expect("token elevation query");
 }

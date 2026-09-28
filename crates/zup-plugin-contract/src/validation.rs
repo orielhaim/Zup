@@ -436,31 +436,46 @@ fn option_string_size(value: &Option<String>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
     use crate::{GeneratedFile, PluginError, ResourceItem};
 
-    #[test]
-    fn counts_generated_file_bytes_toward_the_output_limit() {
-        let plan = InstallationPlan {
+    /// A guest has two ways to make the host read an unbounded amount of its own memory:
+    /// a plan that declares a file larger than the limit, and a refusal whose code is.
+    /// Both are counted, and both are refused rather than truncated — a truncated plan is
+    /// a plan the host would act on.
+    #[rstest]
+    #[case::a_generated_file_larger_than_the_limit(
+        Over::Plan(InstallationPlan {
             resources: vec![ResourceItem::GeneratedFile(GeneratedFile {
                 destination: "file".to_owned(),
                 contents: vec![0; MAX_PLAN_OUTPUT_BYTES + 1],
             })],
-        };
-        assert!(matches!(
-            validate_plan_output(&plan),
-            Err(InvocationError::OutputLimit { .. })
-        ));
-    }
-
-    #[test]
-    fn bounds_plugin_error_output() {
-        let error = PluginError {
+        }),
+        true
+    )]
+    #[case::a_plugin_error_code_larger_than_the_limit(
+        Over::Error(PluginError {
             code: "x".repeat(MAX_PLAN_OUTPUT_BYTES),
             message: "y".to_owned(),
+        }),
+        false
+    )]
+    fn output_past_the_limit_is_refused(#[case] over: Over, #[case] is_a_plan: bool) {
+        let result = match over {
+            Over::Plan(plan) => validate_plan_output(&plan),
+            Over::Error(error) => validate_error_output(&error),
         };
-        assert!(matches!(
-            validate_error_output(&error),
-            Err(InvocationError::OutputLimit { .. })
-        ));
+        assert!(
+            matches!(result, Err(InvocationError::OutputLimit { .. })),
+            "a {} is refused",
+            if is_a_plan { "plan" } else { "error" }
+        );
+    }
+
+    /// Which of the two oversized shapes a case is, so one table can hold both.
+    enum Over {
+        Plan(InstallationPlan),
+        Error(PluginError),
     }
 }

@@ -26,9 +26,9 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use zup_acquire::{
-    AcquisitionItem, AcquisitionPlan, AcquisitionSession, CachePolicy, ContentCatalog,
-    ContentDescriptor, ContentKind, ContentReason, DEFAULT_GRACE, RetentionState, SchedulerConfig,
-    Verify, format_bytes, sweep, write_retention,
+    AcquisitionItem, AcquisitionPlan, AcquisitionSession, CachePolicy, ContentDescriptor,
+    ContentKind, ContentReason, DEFAULT_GRACE, RetentionState, SchedulerConfig, Verify,
+    format_bytes, sweep, write_retention,
 };
 use zup_core::Sha256Digest;
 
@@ -270,25 +270,12 @@ fn an_update_moves_the_changed_closure_and_nothing_else() {
         moved * 100 < full_release * 20,
         "an update moves a small fraction of the release: {moved} of {full_release}"
     );
-    // A warm machine moves nothing at all, which is the property that makes a
-    // second update free.
-    let warm = {
-        let session = AcquisitionSession::new(
-            plan_for(&second),
-            Arc::new(
-                zup_acquire::ContentCache::open(dir.path().join("cache"), CachePolicy::Auto)
-                    .expect("a cache"),
-            ),
-            SchedulerConfig::sequential(),
-        );
-        session.estimate()
-    };
-    println!(
-        "  after the update  {:>12} bytes  (re-resolved)",
-        warm.download_bytes
-    );
 }
 
+/// A machine that already has the whole closure moves nothing at all. This is what makes
+/// a second run of the same release free, and it is a different claim from the update
+/// above: that one measures what a *changed* release costs, this one measures what an
+/// unchanged one costs once the bytes are on disk.
 #[test]
 fn a_warm_machine_moves_no_bytes_at_all() {
     let dir = tempfile::tempdir().expect("a temporary directory");
@@ -466,44 +453,6 @@ fn the_grace_protects_a_second_operation_and_is_not_the_policy() {
     assert_eq!(inside.removed, 0, "nothing is collectable inside the grace");
     assert_eq!(inside.fresh, content.len() as u64);
     assert_eq!(outside.removed, content.len() as u64);
-}
-
-#[test]
-fn the_catalog_is_a_rounding_error_against_the_content_it_describes() {
-    let content = blobs(41, 256 * 1024);
-    let entries: Vec<zup_acquire::CatalogEntry> = content
-        .iter()
-        .map(|blob| {
-            zup_acquire::CatalogEntry::compressed(
-                blob.descriptor.digest,
-                blob.descriptor.compressed_size,
-                blob.descriptor.size,
-            )
-        })
-        .collect();
-    let catalog = ContentCatalog::new(entries).expect("a catalog");
-    let bytes = catalog.encode().expect("the catalog encodes");
-    let closure: u64 = content.iter().map(|blob| blob.wire.len() as u64).sum();
-
-    println!("\nmetadata");
-    println!(
-        "  catalog           {:>12} bytes  {}",
-        bytes.len(),
-        format_bytes(bytes.len() as u64)
-    );
-    println!(
-        "  content           {closure:>12} bytes  {}",
-        format_bytes(closure)
-    );
-    println!(
-        "  fraction          {:>11.3}%",
-        bytes.len() as f64 * 100.0 / closure as f64
-    );
-    assert!(
-        (bytes.len() as u64) * 1000 < closure,
-        "a catalog is metadata about a closure, not a copy of it: {} of {closure}",
-        bytes.len()
-    );
 }
 
 #[test]

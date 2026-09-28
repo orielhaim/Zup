@@ -1,63 +1,38 @@
+use rstest::rstest;
 use zup_core::{Source, TargetProfile, TargetProfileId, TargetTriple};
 
-#[test]
-fn parses_and_canonicalizes_target() {
-    let target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
-
-    assert_eq!(target.as_str(), "aarch64-pc-windows-msvc");
-    assert_eq!(target.architecture().to_string(), "aarch64");
-    assert_eq!(target.operating_system().to_string(), "windows");
-}
-
-#[test]
-fn canonicalizes_x64_and_arm64_aliases() {
-    let x64 = TargetTriple::parse("x64-pc-windows-msvc").unwrap();
-    let arm64 = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
-
-    assert_eq!(x64.as_str(), "x86_64-pc-windows-msvc");
-    assert_eq!(arm64.as_str(), "aarch64-pc-windows-msvc");
-    assert_ne!(x64, arm64);
-    assert_eq!(x64, TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+/// An alias is rewritten to the triple the toolchain actually names, so a plan
+/// built on `arm64-` and one built on `aarch64-` are the same target.
+#[rstest]
+#[case::arm64("arm64-pc-windows-msvc", "aarch64-pc-windows-msvc")]
+#[case::x64("x64-pc-windows-msvc", "x86_64-pc-windows-msvc")]
+fn canonicalizes_target_aliases(#[case] alias: &str, #[case] canonical: &str) {
+    let target = TargetTriple::parse(alias).unwrap();
+    assert_eq!(target.as_str(), canonical);
     assert_eq!(
-        arm64,
-        TargetTriple::parse("aarch64-pc-windows-msvc").unwrap()
+        target.architecture().to_string(),
+        canonical.split('-').next().unwrap()
     );
+    assert_eq!(target.operating_system().to_string(), "windows");
+    assert_eq!(target, TargetTriple::parse(canonical).unwrap());
 }
 
-#[test]
-fn rejects_invalid_target() {
-    let error = TargetTriple::parse("not-a-target").unwrap_err();
-
-    assert!(error.to_string().contains("not-a-target"));
-}
-
-#[test]
-fn rejects_unknown_identity_components() {
-    assert!(TargetTriple::parse("unknown-unknown-unknown").is_err());
-}
-
-#[test]
-fn serde_roundtrip_uses_canonical_target() {
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-    let json = serde_json::to_string(&target).unwrap();
-
-    assert_eq!(json, "\"x86_64-pc-windows-msvc\"");
-    assert_eq!(serde_json::from_str::<TargetTriple>(&json).unwrap(), target);
+#[rstest]
+#[case::malformed("not-a-target")]
+#[case::unknown_components("unknown-unknown-unknown")]
+fn rejects_invalid_target(#[case] source: &str) {
+    assert!(TargetTriple::parse(source).is_err(), "source: {source}");
 }
 
 #[test]
 fn validates_target_profile_id() {
     let id = TargetProfileId::new("  windows-x64  ").unwrap();
-
     assert_eq!(id.as_str(), "windows-x64");
     assert!(TargetProfileId::new(" \t ").is_err());
-    assert_eq!(serde_json::to_string(&id).unwrap(), "\"windows-x64\"");
-    assert_eq!(
-        serde_json::from_str::<TargetProfileId>("\"windows-x64\"").unwrap(),
-        id
-    );
 }
 
+/// Deserialization is a normalization point: an aliased triple on the wire must
+/// come back canonical, or two records naming the same target compare unequal.
 #[test]
 fn target_profile_deserializes_canonical_target() {
     let profile: TargetProfile =

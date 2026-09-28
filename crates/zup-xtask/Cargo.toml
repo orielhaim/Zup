@@ -25,3 +25,6 @@ zup-artifact.workspace = true
 zup-core.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

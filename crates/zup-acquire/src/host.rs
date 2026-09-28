@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_with_no_usable_variant_names_every_refusal() {
+    fn a_refusal_names_the_architecture_it_looked_for() {
         let release = release(vec![variant("x64", triple("x86_64"), true)]);
         let host = HostProfile {
             architecture: HostArchitecture::Arm64,

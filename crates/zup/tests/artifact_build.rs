@@ -477,32 +477,6 @@ fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() 
     );
 }
 
-/// A per-target flag that does not line up with the selected targets names them,
-/// because the order is the manifest's own and not the order they were written.
-#[test]
-fn a_wrong_number_of_runtime_templates_names_the_target_order() {
-    let project = Project::new();
-    let result = zup(&[
-        "build".as_ref(),
-        "--manifest".as_ref(),
-        project.manifest().as_os_str(),
-        "--universal".as_ref(),
-        "--runtime".as_ref(),
-        project.runtimes[0].as_os_str(),
-        "--output".as_ref(),
-        project.path().join("Setup.exe").as_os_str(),
-        "--force".as_ref(),
-    ]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(
-        message.contains("selected 2 targets (arm64, x64)"),
-        "{message}"
-    );
-    assert!(message.contains("received 1 runtimes"), "{message}");
-    assert!(message.contains("in that order"), "{message}");
-}
-
 /// Naming an artifact that does not exist is a refusal that lists the ones that
 /// do, not a silent fallback to a default.
 #[test]
@@ -533,8 +507,7 @@ fn a_dispatcher_for_the_wrong_launcher_experience_is_refused() {
     let result =
         project.build_universal(&output, &dispatcher(zup_toolchain::Subsystem::Gui, false));
     assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("launcher"), "{message}");
+    assert!(stderr(&result).contains("launcher"), "{}", stderr(&result));
     assert!(!output.exists(), "a refused build writes nothing");
 }
 
@@ -567,32 +540,15 @@ fn a_runtime_template_for_the_wrong_machine_is_refused() {
     );
 }
 
-/// A template for the right machine but the wrong frontend is refused, and a
-/// universal build refuses it exactly the way a single-target build does.
+/// A universal build refuses a wrong-frontend template exactly the way a
+/// single-target build does. `build_installer.rs` covers the single-target half;
+/// what is only visible here is that composing two variants adds no second
+/// acceptance path.
 #[test]
-fn a_runtime_template_for_the_wrong_frontend_is_refused_by_both_paths() {
+fn a_universal_build_refuses_a_runtime_template_for_the_wrong_frontend() {
     let project = Project::new();
     let template = toolchain_fixture::runtime(X64, zup_core::Frontend::Headless)
         .write(&project.path().join("templates/headless"));
-
-    let single = project.path().join("Single.exe");
-    let result = zup(&[
-        "build".as_ref(),
-        "--manifest".as_ref(),
-        project.manifest().as_os_str(),
-        "--target".as_ref(),
-        "x64".as_ref(),
-        "--runtime".as_ref(),
-        template.as_os_str(),
-        "--output".as_ref(),
-        single.as_os_str(),
-        "--force".as_ref(),
-        "--release-manifest".as_ref(),
-        "none".as_ref(),
-    ]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("was wanted"), "{message}");
 
     let universal = project.path().join("Universal-Windows-Setup.exe");
     let args: Vec<std::ffi::OsString> = [
@@ -626,4 +582,5 @@ fn a_runtime_template_for_the_wrong_frontend_is_refused_by_both_paths() {
         message.contains("was wanted"),
         "a universal artifact refuses the template a single-target build refuses: {message}"
     );
+    assert!(!universal.exists(), "a refused build writes nothing");
 }

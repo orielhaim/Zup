@@ -34,19 +34,26 @@ pub fn validate_shortcut_filename(name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    // A shortcut name becomes a file name, so the reserved device names and the
+    // separator and trailing-dot rules that make a name unrepresentable on
+    // Windows all have to be refused before anything is written.
     #[test]
-    fn accepts_normal_names() {
-        assert!(validate_shortcut_filename("Acme").is_ok());
-        assert!(validate_shortcut_filename("Acme App").is_ok());
-    }
-
-    #[test]
-    fn rejects_bad_names() {
-        assert!(validate_shortcut_filename("a/b").is_err());
-        assert!(validate_shortcut_filename("a\\b").is_err());
-        assert!(validate_shortcut_filename("CON").is_err());
-        assert!(validate_shortcut_filename("file.").is_err());
-        assert!(validate_shortcut_filename("file ").is_err());
-        assert!(validate_shortcut_filename("a:b").is_err());
+    fn shortcut_filenames_are_validated() {
+        for (name, accepted) in [
+            ("Acme", true),
+            ("Acme App", true),
+            ("a/b", false),
+            ("a\\b", false),
+            ("CON", false),
+            ("file.", false),
+            ("file ", false),
+            ("a:b", false),
+        ] {
+            assert_eq!(
+                validate_shortcut_filename(name).is_ok(),
+                accepted,
+                "{name:?}"
+            );
+        }
     }
 }

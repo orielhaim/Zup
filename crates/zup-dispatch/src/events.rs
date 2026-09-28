@@ -175,7 +175,7 @@ pub fn render(event: &AcquisitionEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_acquire::{AcquisitionEstimate, AcquisitionPhase, AcquisitionProgress, ContentReason};
+    use zup_acquire::{AcquisitionEstimate, AcquisitionPhase, AcquisitionProgress};
 
     fn progress(completed: u64, total: u64) -> AcquisitionProgress {
         let mut progress = AcquisitionProgress {
@@ -196,17 +196,18 @@ mod tests {
         progress
     }
 
+    /// A progress line states a percentage and the byte counts it came from, and a
+    /// terminal at a shell repaints it in place rather than scrolling one line per poll.
+    /// Both matter for the same reason: a person watching a download has to be able to
+    /// leave it running without filling the screen.
     #[test]
-    fn progress_renders_as_a_percentage_and_a_line() {
+    fn a_terminal_emitter_keeps_one_moving_progress_line() {
         let line = render(&AcquisitionEvent::DownloadProgress {
             progress: Box::new(progress(63, 100)),
         });
         assert!(line.starts_with("63%"), "{line}");
         assert!(line.contains("63 B of 100 B"), "{line}");
-    }
 
-    #[test]
-    fn a_terminal_emitter_keeps_one_moving_progress_line() {
         let (sink, receiver) = zup_acquire::ProgressSink::channel(8);
         sink.offer(AcquisitionEvent::DownloadProgress {
             progress: Box::new(progress(1, 2)),
@@ -230,24 +231,11 @@ mod tests {
         drop(receiver);
     }
 
+    /// The line a person reads states the download and the install separately. Collapsing
+    /// them would let a release that is mostly cached read as one that has to be
+    /// downloaded in full, which is the number a person is deciding about.
     #[test]
-    fn a_failure_reports_one_line_per_source() {
-        let line = render(&AcquisitionEvent::Failed {
-            kind: "unavailable",
-            digest: None,
-            message: "no source could acquire payload blob".to_owned(),
-            reasons: vec![
-                "the CDN reset twice".to_owned(),
-                "the mirror does not carry it".to_owned(),
-            ],
-            machine_unchanged: true,
-        });
-        assert!(line.contains("the CDN reset twice"), "{line}");
-        assert!(line.contains("the mirror does not carry it"), "{line}");
-    }
-
-    #[test]
-    fn the_estimate_is_rendered_unchanged() {
+    fn the_estimate_states_download_and_install_separately() {
         let line = render(&AcquisitionEvent::AcquisitionStarted {
             variant: "x64".to_owned(),
             items: 3,
@@ -263,6 +251,9 @@ mod tests {
         assert!(line.contains("4.00 MiB"), "{line}");
     }
 
+    /// A cache hit is reported as a cache hit, and a digest names a cache object rather
+    /// than a payload file: the line a person reads is the one that says the machine
+    /// already had the bytes.
     #[test]
     fn a_cache_hit_is_a_line_and_not_a_download() {
         assert_eq!(
@@ -273,6 +264,5 @@ mod tests {
             }),
             "cached 2.00 KiB"
         );
-        assert_eq!(ContentReason::Runtime.group(), "runtime");
     }
 }

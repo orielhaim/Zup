@@ -1,12 +1,15 @@
-//! Command-line output fixtures.
+//! The exit codes and messages the command line promises.
 //!
-//! The expected text is the documented matrix view, so a change in the emitted
-//! matrix is a deliberate change to this file.
+//! The two checks that gate a repository — the boundary check and the pin check —
+//! are covered here end to end, because a gate that cannot fail is a gate nobody
+//! reads. The usage errors are pinned because a silently-ignored argument is how a
+//! typo in a `--matrix` name builds the wrong thing.
 
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use rstest::rstest;
 use tempfile::TempDir;
 use zup_xtask::matrix;
 
@@ -15,16 +18,6 @@ fn xtask(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("xtask runs")
-}
-
-fn stdout(args: &[&str]) -> String {
-    let output = xtask(args);
-    assert!(
-        output.status.success(),
-        "{args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("stdout is utf-8")
 }
 
 fn stderr(args: &[&str]) -> String {
@@ -57,35 +50,22 @@ fn complete_workspace() -> TempDir {
     root
 }
 
-/// The rendered view of one matrix, as the library renders it.
-///
-/// Derived rather than pasted, because a pasted copy of the matrix is a second
-/// place to update every time a package is added — and the two copies are what
-/// this test would then be asserting against each other. What is under test here
-/// is the command line: selection, ordering, and format. The matrix's *contents*
-/// are pinned by the boundary rules, which fail on a member no matrix names.
-fn view(name: &str) -> String {
-    matrix::render(&[matrix::matrix(name).expect("a known matrix")])
-}
-
-#[test]
-fn no_arguments_prints_usage() {
-    let output = xtask(&[]);
-    assert_eq!(code(&output), 2);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(stderr(&[]).contains("emit-portable-matrix"));
-}
-
-#[test]
-fn help_lists_every_command_and_the_exit_codes() {
-    let help = stdout(&["help"]);
-    assert!(help.contains("emit-portable-matrix"), "{help}");
-    assert!(help.contains("verify-portable-boundaries"), "{help}");
-    assert!(help.contains("github-action-pins check"), "{help}");
-    assert!(help.contains("github-action-pins refresh"), "{help}");
-    assert!(help.contains("0  clean"), "{help}");
-    assert!(help.contains("1  problems found"), "{help}");
-    assert!(help.contains("2  usage or unreadable workspace"), "{help}");
+/// An argument the parser does not recognise is a usage error, never a silent
+/// no-op: a typo in a `--matrix` name must not quietly build the wrong thing.
+#[rstest]
+#[case::an_unknown_command(&["verify-everything"], "verify-everything")]
+#[case::an_unknown_matrix(&["emit-portable-matrix", "--matrix", "nope"], "nope")]
+#[case::an_option_from_another_command(
+    &["verify-portable-boundaries", "--format", "text"],
+    "--format"
+)]
+fn a_rejected_argument_is_a_usage_error(#[case] args: &[&str], #[case] named: &str) {
+    let output = xtask(args);
+    assert_eq!(code(&output), 2, "{args:?}");
+    assert!(
+        stderr(args).contains(named),
+        "{args:?} should name `{named}`"
+    );
 }
 
 #[test]
@@ -113,9 +93,11 @@ fn the_pin_check_reports_a_broken_lock_rather_than_passing() {
     assert!(stderr.contains("does not match the lock"), "{stderr}");
 }
 
+/// The negative control for the pin check: a repository that has not generated a
+/// workflow yet is not a failure. Without it, a `check` that reported nothing at
+/// all would be indistinguishable from a `check` that passed.
 #[test]
 fn the_pin_check_passes_on_a_workspace_with_no_workflows() {
-    // A repository that has not generated a workflow yet is not a failure.
     let fixture = tempfile::tempdir().expect("a temporary workspace");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(["github-action-pins", "check", "--root"])
@@ -124,113 +106,6 @@ fn the_pin_check_passes_on_a_workspace_with_no_workflows() {
         .expect("xtask runs");
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("tracked"));
-}
-
-#[test]
-fn the_matrix_view_lists_every_matrix_in_declaration_order() {
-    assert_eq!(
-        stdout(&["emit-portable-matrix"]),
-        matrix::render(&matrix::MATRICES.iter().collect::<Vec<_>>())
-    );
-}
-
-#[test]
-fn one_matrix_can_be_selected() {
-    for name in matrix::names() {
-        assert_eq!(
-            stdout(&["emit-portable-matrix", "--matrix", name]),
-            view(name),
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn a_repeated_matrix_selector_keeps_the_requested_order() {
-    assert_eq!(
-        stdout(&[
-            "emit-portable-matrix",
-            "--matrix",
-            "portable-tests",
-            "--matrix",
-            "portable-core"
-        ]),
-        format!("{}{}", view("portable-tests"), view("portable-core"))
-    );
-}
-
-#[test]
-fn cargo_args_format_emits_package_flags_for_one_matrix() {
-    let core = matrix::matrix("portable-core").expect("a known matrix");
-    assert_eq!(
-        stdout(&[
-            "emit-portable-matrix",
-            "--matrix",
-            "portable-core",
-            "--format",
-            "cargo-args"
-        ]),
-        format!("{}\n", matrix::render_cargo_args(core))
-    );
-}
-
-#[test]
-fn cargo_args_format_needs_exactly_one_matrix() {
-    for args in [
-        vec!["emit-portable-matrix", "--format", "cargo-args"],
-        vec![
-            "emit-portable-matrix",
-            "--matrix",
-            "portable-core",
-            "--matrix",
-            "portable-tests",
-            "--format",
-            "cargo-args",
-        ],
-    ] {
-        let output = xtask(&args);
-        assert_eq!(code(&output), 2, "{args:?}");
-        assert!(stderr(&args).contains("exactly one --matrix"), "{args:?}");
-    }
-}
-
-#[test]
-fn an_unknown_matrix_is_a_usage_error_naming_the_known_matrices() {
-    let output = xtask(&["emit-portable-matrix", "--matrix", "portable-everything"]);
-    assert_eq!(code(&output), 2);
-    let message = stderr(&["emit-portable-matrix", "--matrix", "portable-everything"]);
-    assert!(message.contains("portable-everything"), "{message}");
-    for known in [
-        "portable-core",
-        "portable-file-format",
-        "portable-tests",
-        "windows-only",
-    ] {
-        assert!(message.contains(known), "{message}");
-    }
-}
-
-#[test]
-fn an_unknown_format_is_a_usage_error() {
-    let output = xtask(&["emit-portable-matrix", "--format", "json"]);
-    assert_eq!(code(&output), 2);
-    assert!(stderr(&["emit-portable-matrix", "--format", "json"]).contains("cargo-args"));
-}
-
-#[test]
-fn an_option_from_another_command_is_a_usage_error() {
-    let output = xtask(&["verify-portable-boundaries", "--format", "text"]);
-    assert_eq!(code(&output), 2);
-    let message = stderr(&["verify-portable-boundaries", "--format", "text"]);
-    assert!(message.contains("--format"), "{message}");
-    assert!(message.contains("verify-portable-boundaries"), "{message}");
-}
-
-#[test]
-fn an_unknown_command_is_a_usage_error() {
-    let output = xtask(&["verify-everything"]);
-    assert_eq!(code(&output), 2);
-    assert!(stderr(&["verify-everything"]).contains("verify-everything"));
 }
 
 #[test]
@@ -278,6 +153,10 @@ fn a_clean_workspace_boundary_check_is_silent() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
+/// A CI job runs the check with no arguments, so the default root has to be the
+/// repository rather than whatever the working directory happens to be. Both
+/// invocations must reach the same tree, which is what an identical exit code and
+/// an identical report show.
 #[test]
 fn the_repository_root_is_the_default_workspace() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

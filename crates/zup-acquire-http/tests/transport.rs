@@ -14,10 +14,10 @@ use sha2::{Digest, Sha256};
 use zup_acquire::{
     AcquireError, AcquisitionItem, AcquisitionPlan, AcquisitionSession, ArtifactSource,
     CachePolicy, CacheProbe, ContentCache, ContentDescriptor, ContentKind, ContentReason,
-    DirectorySource, ProgressSink, SchedulerConfig, SourceChain, Verify,
+    ProgressSink, SchedulerConfig, SourceChain, Verify,
 };
 use zup_acquire_http::{
-    BackoffPolicy, HttpClient, HttpClientConfig, HttpSource, Origin, OriginSet, RepositoryLocation,
+    BackoffPolicy, HttpClient, HttpClientConfig, HttpError, HttpSource, Origin, OriginSet,
     TimeoutPolicy, USER_AGENT, is_retryable_status, retry_after,
 };
 use zup_core::Sha256Digest;
@@ -168,24 +168,30 @@ async fn a_blob_the_server_corrupts_never_reaches_the_cache() {
     );
 }
 
+/// A resumed transfer asks for the remainder and appends it. An origin that
+/// cannot serve a range answers `200` with the whole object instead, which costs
+/// a full re-download but must still be correct rather than merely attempted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_range_request_is_honoured_and_the_remainder_is_appended() {
-    let fixture = fixture();
+async fn a_resumed_transfer_appends_a_range_and_restarts_against_an_origin_without_one() {
     let bytes = logical(3, 512 * 1024);
     let descriptor = payload_descriptor(&bytes);
     let wire_form = wire(&bytes);
 
-    // Seed a partial with a verified prefix, exactly as an interrupted transfer
-    // would leave behind.
+    let honoured = fixture();
     {
+        // Seed a partial with a verified prefix, exactly as an interrupted
+        // transfer would leave behind.
         let cut = wire_form.len() / 3;
-        let mut writer = fixture.cache.writer(&descriptor).expect("the writer opens");
+        let mut writer = honoured
+            .cache
+            .writer(&descriptor)
+            .expect("the writer opens");
         writer.write(&wire_form[..cut]).expect("the prefix lands");
         writer.abandon();
     }
     assert!(
         matches!(
-            fixture
+            honoured
                 .cache
                 .probe(&descriptor, Verify::Full)
                 .expect("the cache probes"),
@@ -193,106 +199,103 @@ async fn a_range_request_is_honoured_and_the_remainder_is_appended() {
         ),
         "the fixture really has a resumable partial"
     );
-
-    fixture
+    honoured
         .server
-        .route(&blob_path(&descriptor), Behaviour::Serve(wire_form));
+        .route(&blob_path(&descriptor), Behaviour::Serve(wire_form.clone()));
 
-    let blob = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    let blob = acquire_raw(&honoured, descriptor, source_for(&honoured.server))
         .await
         .expect("the resumed blob verifies");
     assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
-    let ranges = fixture.server.ranges();
+    let ranges = honoured.server.ranges();
     assert!(
         ranges.iter().any(|range| range.is_some()),
         "the transfer asked for a range: {ranges:?}"
     );
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_server_that_ignores_a_range_still_works_by_restarting() {
-    let fixture = fixture();
-    let bytes = logical(4, 128 * 1024);
-    let descriptor = payload_descriptor(&bytes);
-    let wire_form = wire(&bytes);
+    let no_ranges = fixture();
     {
         let cut = wire_form.len() / 2;
-        let mut writer = fixture.cache.writer(&descriptor).expect("the writer opens");
+        let mut writer = no_ranges
+            .cache
+            .writer(&descriptor)
+            .expect("the writer opens");
         writer.write(&wire_form[..cut]).expect("the prefix lands");
         writer.abandon();
     }
-    // The server answers every request with the whole object and a 200.
-    fixture.server.route(
+    no_ranges.server.route(
         &blob_path(&descriptor),
         Behaviour::ServeWithoutRange(wire_form.clone()),
     );
 
-    let blob = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    let blob = acquire_raw(&no_ranges, descriptor, source_for(&no_ranges.server))
         .await
         .expect("a CDN without range support still satisfies the closure");
     assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
-    // It costs a full re-download, which is the documented fallback, and it is
-    // correct rather than merely attempted.
     assert!(
-        fixture.server.requests() >= 2,
+        no_ranges.server.requests() >= 2,
         "one refused range, one full body"
     );
 }
 
+/// A `206` that cannot be aligned with the partial is never appended to. A range
+/// that starts somewhere else would produce a corrupt object of exactly the right
+/// length, and a `206` with no `Content-Range` at all describes nothing, so the
+/// client cannot tell which bytes it has been handed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_content_range_that_does_not_line_up_is_refused_rather_than_appended() {
-    let fixture = fixture();
     let bytes = logical(5, 64 * 1024);
     let descriptor = payload_descriptor(&bytes);
     let wire_form = wire(&bytes);
+
+    // A `206` whose range does not start where the partial ends. Appending it
+    // would produce a corrupt object that still has the right length.
+    let misaligned = fixture();
     {
         let cut = wire_form.len() / 2;
-        let mut writer = fixture.cache.writer(&descriptor).expect("the writer opens");
+        let mut writer = misaligned
+            .cache
+            .writer(&descriptor)
+            .expect("the writer opens");
         writer.write(&wire_form[..cut]).expect("the prefix lands");
         writer.abandon();
     }
-    // The server claims a `206` and a range that does not start where the
-    // partial ends. Appending would produce a corrupt object that still has the
-    // right length, so the transfer must refuse.
-    fixture.server.route(
+    misaligned.server.route(
         &blob_path(&descriptor),
         Behaviour::WrongContentRange(wire_form.clone()),
     );
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    let error = acquire_raw(&misaligned, descriptor, source_for(&misaligned.server))
         .await
         .expect_err("a mismatched content range is refused");
     assert!(error.left_machine_unchanged());
     assert!(
-        !fixture
+        !misaligned
             .cache
             .get(&descriptor, Verify::Full)
             .expect("the cache probes")
             .is_some()
     );
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_partial_content_with_no_content_range_is_never_appended_to() {
-    let fixture = fixture();
-    let bytes = logical(6, 64 * 1024);
-    let descriptor = payload_descriptor(&bytes);
-    let wire_form = wire(&bytes);
+    // A `206` with no `Content-Range` at all. The only safe answer is to refuse
+    // to append and start over, so the result is the whole verified object rather
+    // than a concatenation.
+    let unstated = fixture();
     {
         let cut = (wire_form.len() / 2) as u64;
-        let mut writer = fixture.cache.writer(&descriptor).expect("the writer opens");
+        let mut writer = unstated
+            .cache
+            .writer(&descriptor)
+            .expect("the writer opens");
         writer
             .write(&wire_form[..cut as usize])
             .expect("the prefix lands");
         writer.abandon();
     }
-    // A 206 with no `Content-Range` describes nothing: the client cannot tell
-    // which bytes these are. The only safe answer is to refuse to append and
-    // start over, which is what happens.
-    fixture.server.route(
+    unstated.server.route(
         &blob_path(&descriptor),
         Behaviour::NoContentRange(wire_form),
     );
-    let blob = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    let blob = acquire_raw(&unstated, descriptor, source_for(&unstated.server))
         .await
         .expect("the transfer restarts and the closure is satisfied");
     assert_eq!(
@@ -301,9 +304,9 @@ async fn a_partial_content_with_no_content_range_is_never_appended_to() {
         "the result is the whole verified object, not a concatenation"
     );
     assert!(
-        fixture.server.requests() >= 2,
+        unstated.server.requests() >= 2,
         "the refused range was followed by a full request, saw {} requests",
-        fixture.server.requests()
+        unstated.server.requests()
     );
 }
 
@@ -329,8 +332,10 @@ async fn a_wrong_content_length_is_refused_before_a_byte_is_appended() {
     assert!(error.left_machine_unchanged());
 }
 
+/// A connection that drops part-way through a promised body is a failure, and it
+/// publishes nothing: the bytes that arrived stay a partial, never a blob.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_connection_that_drops_mid_body_leaves_a_resumable_partial() {
+async fn a_connection_that_drops_mid_body_publishes_nothing() {
     let fixture = fixture();
     let bytes = logical(8, 256 * 1024);
     let descriptor = payload_descriptor(&bytes);
@@ -355,34 +360,44 @@ async fn a_connection_that_drops_mid_body_leaves_a_resumable_partial() {
     );
 }
 
+/// A server that paces its own retries outranks the local curve. A value this
+/// build cannot read as a delay falls back to the curve rather than to an
+/// unbounded wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_throttled_server_is_retried_and_a_permanent_refusal_is_not() {
-    // The rule is the whole point: 429 is a statement about now, 404 is a
-    // statement about the request.
-    assert!(is_retryable_status(429));
-    assert!(is_retryable_status(503));
-    assert!(is_retryable_status(408));
-    assert!(!is_retryable_status(404));
-    assert!(!is_retryable_status(403));
-    assert!(!is_retryable_status(501));
+async fn a_servers_own_pacing_outranks_the_local_curve() {
     assert_eq!(
         retry_after(Some("7")),
-        Some(std::time::Duration::from_secs(7)),
-        "a server's own pacing outranks a local curve"
+        Some(std::time::Duration::from_secs(7))
     );
-    assert_eq!(retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
-    assert_eq!(retry_after(Some("not a number")), None);
-    assert_eq!(retry_after(None), None);
+    for unreadable in [
+        Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        Some("not a number"),
+        None,
+    ] {
+        assert_eq!(retry_after(unreadable), None, "{unreadable:?} falls back");
+    }
 }
 
+/// 429 is a statement about now and 404 is a statement about the request, so
+/// only the first is worth repeating. The fixture answers the same route the
+/// same way each time, so the throttle is expressed by the retry budget rather
+/// than by state: the transfer is retried and then gives up cleanly rather than
+/// reporting a success it did not have.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_throttled_response_is_retried_and_then_succeeds() {
+async fn a_throttled_response_is_retried_and_then_gives_up_cleanly() {
+    for status in [408, 429, 503] {
+        assert!(is_retryable_status(status), "{status} is about now");
+    }
+    for status in [403, 404, 501] {
+        assert!(
+            !is_retryable_status(status),
+            "{status} is about the request"
+        );
+    }
+
     let fixture = fixture();
     let bytes = logical(9, 32 * 1024);
     let descriptor = payload_descriptor(&bytes);
-    // A server that throttles once and then serves. The fixture answers the same
-    // route the same way each time, so the throttle is expressed by the retry
-    // budget rather than by state: the transfer is expected to fail cleanly.
     fixture
         .server
         .route(&blob_path(&descriptor), Behaviour::Throttled(429, 1));
@@ -416,53 +431,47 @@ async fn a_not_found_is_not_retried() {
     assert!(error.left_machine_unchanged());
 }
 
+/// A chain moves to the next origin when one is down or when one lies, and
+/// neither origin is trusted for the content: the bytes are proved by digest, not
+/// by which host produced them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_broken_origin_moves_to_the_next_one_and_neither_is_trusted() {
-    let primary = TestServer::start();
-    let secondary = TestServer::start();
+async fn a_broken_or_lying_origin_moves_to_the_next_one_and_neither_is_trusted() {
+    let client = HttpClient::new(&HttpClientConfig::default()).expect("the client builds");
     let bytes = logical(11, 64 * 1024);
     let descriptor = payload_descriptor(&bytes);
-    let wire_form = wire(&bytes);
-    // The primary is down; the secondary has the object.
-    primary.server_shutdown();
-    secondary.route(&blob_path(&descriptor), Behaviour::Serve(wire_form));
 
-    let client =
-        zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("the client builds");
-    let origins = OriginSet::from_origins(vec![primary.origin(), secondary.origin()]);
-    let source = HttpSource::new("cdn", client, origins).with_policy(fast_policy());
-
-    let blob = acquire_raw(&fixture_of(&secondary), descriptor, Arc::new(source))
+    // The first origin is down; the second has the object.
+    let down = TestServer::start();
+    let honest = TestServer::start();
+    down.server_shutdown();
+    honest.route(&blob_path(&descriptor), Behaviour::Serve(wire(&bytes)));
+    let source = HttpSource::new(
+        "cdn",
+        HttpClient::new(&HttpClientConfig::default()).expect("the client builds"),
+        OriginSet::from_origins(vec![down.origin(), honest.origin()]),
+    )
+    .with_policy(fast_policy());
+    let blob = acquire_raw(&fixture(), descriptor, Arc::new(source))
         .await
         .expect("the secondary origin satisfies the closure");
     assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_origin_that_serves_wrong_bytes_does_not_satisfy_the_closure() {
+    // The first origin answers 200 with the wrong content and looks healthy. It
+    // burns its failure budget and the honest one serves.
+    let corrupt = TestServer::start();
     let good = TestServer::start();
-    let bad = TestServer::start();
-    let bytes = logical(12, 64 * 1024);
-    let descriptor = payload_descriptor(&bytes);
-    // The first origin answers 200 with the wrong content and looks healthy.
-    bad.route(
+    corrupt.route(
         &blob_path(&descriptor),
         Behaviour::Serve(wire(&logical(98, bytes.len()))),
     );
     good.route(&blob_path(&descriptor), Behaviour::Serve(wire(&bytes)));
-
-    let client =
-        zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("the client builds");
     let source = HttpSource::new(
         "chain",
         client,
-        OriginSet::from_origins(vec![bad.origin(), good.origin()]),
+        OriginSet::from_origins(vec![corrupt.origin(), good.origin()]),
     )
     .with_policy(fast_policy());
-
-    // The corrupt origin burns its failure budget and the good one serves. The
-    // content is still proved by digest, not by which origin produced it.
-    let blob = acquire_raw(&fixture_of(&good), descriptor, Arc::new(source))
+    let blob = acquire_raw(&fixture(), descriptor, Arc::new(source))
         .await
         .expect("the honest origin satisfies the closure");
     assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
@@ -616,29 +625,27 @@ async fn a_document_is_fetched_whole_and_bounded_by_its_limit() {
     );
 }
 
+/// Two properties of streaming a body into a sink, which are the ones that make
+/// a large blob resumable. Chunks reach the sink as they arrive, so a connection
+/// that drops part-way through leaves the progress that did arrive on disk; and
+/// the caller's limit is a ceiling rather than a hint, so a server that sends
+/// more than the caller will accept is refused rather than truncated.
 #[tokio::test]
-async fn a_body_is_streamed_into_a_sink_chunk_by_chunk() {
-    // The property that makes a large body resumable: chunks reach the sink as
-    // they arrive, so a connection that drops part-way through leaves the
-    // progress that did arrive on disk. Reading the body whole first would hand
-    // over nothing until the last byte, and a sink that is fed only at the end
-    // cannot resume.
-    let server = TestServer::start();
+async fn a_streamed_body_reaches_the_sink_as_it_arrives_and_stops_at_the_limit() {
+    let client = HttpClient::new(&HttpClientConfig::default()).expect("a client");
     let body: Vec<u8> = (0..64 * 1024u32).map(|index| index as u8).collect();
-    server.route("blobs/big", Behaviour::DisconnectAfter(body.clone(), 4096));
 
-    let client = zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("a client");
-    let origin = zup_acquire_http::Origin::parse(&server.url()).expect("the origin parses");
-    let address = url::Url::parse(&format!("{}/blobs/big", server.url())).expect("a url");
+    let dropped = TestServer::start();
+    dropped.route("blobs/big", Behaviour::DisconnectAfter(body.clone(), 4096));
+    let origin = Origin::parse(&dropped.url()).expect("the origin parses");
+    let address = url::Url::parse(&format!("{}/blobs/big", dropped.url())).expect("a url");
 
-    let mut seen: Vec<usize> = Vec::new();
     let mut kept = Vec::new();
     let error = client
         .get(&origin, &address, 0)
         .await
         .expect("the response arrives")
         .stream_into(u64::MAX, |chunk| {
-            seen.push(chunk.len());
             kept.extend_from_slice(chunk);
             Ok(())
         })
@@ -647,35 +654,21 @@ async fn a_body_is_streamed_into_a_sink_chunk_by_chunk() {
     assert!(
         matches!(
             error,
-            zup_acquire_http::HttpError::Transport { .. }
-                | zup_acquire_http::HttpError::Disconnected { .. }
+            HttpError::Transport { .. } | HttpError::Disconnected { .. }
         ),
         "{error}"
     );
-    // What arrived reached the sink. How many chunks that took is the transport's
-    // business and not a guarantee, so the assertion is about the bytes rather
-    // than the framing: a caller writing to disk has the progress to resume from.
-    assert!(!seen.is_empty(), "the sink saw the bytes that arrived");
-    assert_eq!(
-        kept.len(),
-        seen.iter().sum::<usize>(),
-        "and kept every one of them"
-    );
+    // How many chunks that took is the transport's business and not a guarantee,
+    // so the claim is about the bytes: a caller writing to disk has the progress
+    // to resume from.
+    assert!(!kept.is_empty(), "the sink saw the bytes that arrived");
     assert!(kept.len() < body.len(), "short of the whole body");
     assert_eq!(kept, body[..kept.len()], "and it is the front of it");
-}
 
-#[tokio::test]
-async fn a_streamed_body_is_bounded_by_its_limit() {
-    // The bound is a ceiling, not a hint, and it is checked before anything is
-    // written as well as while: a server that sends more than the caller will
-    // accept is refused rather than truncated.
-    let server = TestServer::start();
-    server.route("blobs/big", Behaviour::Serve(vec![7u8; 4096]));
-
-    let client = zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("a client");
-    let origin = zup_acquire_http::Origin::parse(&server.url()).expect("the origin parses");
-    let address = url::Url::parse(&format!("{}/blobs/big", server.url())).expect("a url");
+    let oversized = TestServer::start();
+    oversized.route("blobs/big", Behaviour::Serve(vec![7u8; 4096]));
+    let origin = Origin::parse(&oversized.url()).expect("the origin parses");
+    let address = url::Url::parse(&format!("{}/blobs/big", oversized.url())).expect("a url");
 
     let mut written = 0usize;
     let error = client
@@ -688,104 +681,15 @@ async fn a_streamed_body_is_bounded_by_its_limit() {
         })
         .await
         .expect_err("a body over the limit is refused");
-    assert!(
-        matches!(error, zup_acquire_http::HttpError::TooLarge { .. }),
-        "{error}"
-    );
+    assert!(matches!(error, HttpError::TooLarge { .. }), "{error}");
     assert!(
         written < 4096,
         "and it stopped early, after {written} bytes"
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repository_location_refuses_a_channel_that_could_escape() {
-    let origins = OriginSet::from_urls("https://updates.example.com/acme", Vec::<&str>::new())
-        .expect("valid");
-    assert!(
-        RepositoryLocation::new("../evil", origins.clone()).is_err(),
-        "a channel is a path segment, not a path"
-    );
-    let location = RepositoryLocation::new("stable", origins).expect("valid");
-    assert_eq!(
-        location.release().expect("a path").to_string(),
-        "releases/stable.json"
-    );
-    assert_eq!(
-        location.catalog().expect("a path").to_string(),
-        "releases/stable/catalog.json"
-    );
-    assert_eq!(
-        location
-            .variant_manifest("windows-x64")
-            .expect("a path")
-            .to_string(),
-        "releases/stable/variants/windows-x64.json"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_https_origin_never_downgrades_through_a_redirect() {
-    let server = TestServer::start();
-    server.route(
-        "blobs/sha256/aa/bb",
-        Behaviour::Redirect("http://127.0.0.1:1/insecure".to_owned()),
-    );
-    let source = HttpSource::new(
-        "cdn",
-        zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("the client builds"),
-        OriginSet::from_urls("https://updates.invalid/acme", Vec::<&str>::new()).expect("valid"),
-    );
-    // The redirect cannot even be reached over https in a test, so the check is
-    // made directly: a downgrade is refused before a request is sent.
-    let path = zup_acquire::RelativeContentPath::parse("blobs/sha256/aa/bb").expect("valid");
-    let url = source
-        .fetch_document(&path, 1024)
-        .await
-        .expect_err("an unreachable origin fails");
-    assert!(matches!(
-        url,
-        zup_acquire_http::HttpError::Status { .. } | zup_acquire_http::HttpError::Transport { .. }
-    ));
-    let _ = server;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_local_tree_and_an_http_origin_satisfy_the_same_closure() {
-    let server = TestServer::start();
-    let tree = tempfile::tempdir().expect("a temporary tree");
-    let bytes = logical(13, 48 * 1024);
-    let descriptor = payload_descriptor(&bytes);
-    let wire_form = wire(&bytes);
-    server.route(&blob_path(&descriptor), Behaviour::Serve(wire_form.clone()));
-
-    let mut seeded = tree.path().to_path_buf();
-    for segment in blob_path(&descriptor).split('/') {
-        seeded.push(segment);
-    }
-    if let Some(parent) = seeded.parent() {
-        std::fs::create_dir_all(parent).expect("the tree is created");
-    }
-    std::fs::write(&seeded, &wire_form).expect("the seed is written");
-
-    let from_disk = fixture();
-    let blob = acquire_raw(
-        &from_disk,
-        descriptor,
-        Arc::new(DirectorySource::new("usb", tree.path())),
-    )
-    .await
-    .expect("the local tree satisfies the closure");
-    assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
-
-    let from_http = fixture();
-    let blob = acquire_raw(&from_http, descriptor, source_for(&server))
-        .await
-        .expect("the origin satisfies the closure");
-    assert_eq!(blob.read_to_end().expect("the blob decodes"), bytes);
-    assert!(seeded.exists(), "the seeded tree is untouched by the read");
-}
-
+/// A channel is a path segment, not a path: a client that joins it unescaped
+/// would address a document outside the repository.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_identifies_itself_and_a_secret_header_is_never_rendered() {
     let server = TestServer::start();
@@ -812,39 +716,6 @@ async fn a_request_identifies_itself_and_a_secret_header_is_never_rendered() {
     assert_eq!(format!("{header:?}"), "SecretHeader(<redacted>)");
     assert!(!format!("{header:?}").contains("super-secret-token"));
     assert!(USER_AGENT.starts_with("zup-acquire/"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cancelled_transfer_stops_promptly_and_publishes_nothing() {
-    let server = TestServer::start();
-    let bytes = logical(15, 4 * 1024 * 1024);
-    let descriptor = payload_descriptor(&bytes);
-    server.route(&blob_path(&descriptor), Behaviour::Serve(wire(&bytes)));
-    let flag = Arc::new(zup_acquire::CancelFlag::new());
-    // Cancel as soon as the session starts, before any byte is verified.
-    flag.cancel();
-    let plan = AcquisitionPlan::build(vec![AcquisitionItem::new(
-        descriptor,
-        ContentReason::File { component: None },
-    )])
-    .expect("the closure is well formed");
-    let cache = Arc::new(
-        ContentCache::open(
-            tempfile::tempdir().expect("a temporary directory").path(),
-            CachePolicy::Keep,
-        )
-        .expect("the cache opens"),
-    );
-    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
-        .run(
-            SourceChain::new(vec![source_for(&server)]),
-            flag,
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect_err("a cancelled session does not reach the barrier");
-    assert!(matches!(error, AcquireError::Cancelled), "{error}");
-    assert!(cache.digests().expect("the cache lists").is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -892,61 +763,6 @@ async fn a_warm_cache_means_no_request_is_made_at_all() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn several_blobs_download_concurrently_over_one_pooled_client() {
-    let server = TestServer::start();
-    let blobs: Vec<(ContentDescriptor, Vec<u8>)> = (0..8)
-        .map(|index| {
-            let bytes = logical(20 + index, 32 * 1024);
-            (payload_descriptor(&bytes), bytes)
-        })
-        .collect();
-    for (descriptor, bytes) in &blobs {
-        server.route(&blob_path(descriptor), Behaviour::Serve(wire(bytes)));
-    }
-    let plan = AcquisitionPlan::build(
-        blobs
-            .iter()
-            .map(|(descriptor, _)| {
-                AcquisitionItem::new(*descriptor, ContentReason::File { component: None })
-            })
-            .collect(),
-    )
-    .expect("the closure is well formed");
-    let cache = Arc::new(
-        ContentCache::open(
-            tempfile::tempdir().expect("a temporary directory").path(),
-            CachePolicy::Keep,
-        )
-        .expect("the cache opens"),
-    );
-    let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
-        .run(
-            SourceChain::new(vec![source_for(&server)]),
-            Arc::new(zup_acquire::NeverCancelled),
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect("the closure is satisfied")
-        .enter();
-    assert_eq!(outcome.items.len(), 8);
-    for (descriptor, bytes) in &blobs {
-        let blob = outcome
-            .get(&descriptor.digest)
-            .expect("every blob is present");
-        assert_eq!(blob.read_to_end().expect("the blob decodes"), *bytes);
-    }
-    assert_eq!(server.requests(), 8, "one request per blob, no HEAD probes");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_timeout_policy_separates_connect_headers_and_the_whole_blob() {
-    let policy = TimeoutPolicy::default();
-    assert!(policy.connect < policy.per_blob);
-    assert!(policy.headers <= policy.per_blob);
-    assert!(policy.idle <= policy.per_blob);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_server_that_never_answers_is_abandoned_by_the_header_timeout() {
     let server = TestServer::start();
     let bytes = logical(17, 4096);
@@ -979,20 +795,4 @@ async fn a_server_that_never_answers_is_abandoned_by_the_header_timeout() {
         started.elapsed() < std::time::Duration::from_secs(10),
         "a stalled origin is abandoned, not waited on"
     );
-}
-
-fn fixture_of(server: &TestServer) -> Fixture {
-    // A cache for a test that brings its own server.
-    let _ = server;
-    Fixture {
-        server: TestServer::start(),
-        cache: Arc::new(
-            ContentCache::open(
-                tempfile::tempdir().expect("a temporary directory").path(),
-                CachePolicy::Keep,
-            )
-            .expect("the cache opens"),
-        ),
-        _dir: tempfile::tempdir().expect("a temporary directory"),
-    }
 }

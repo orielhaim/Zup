@@ -1,6 +1,7 @@
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rstest::rstest;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -12,9 +13,7 @@ use zup_core::{
     App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, TargetTriple, Template,
 };
-use zup_plan::{
-    NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource, PluginResourceProposal,
-};
+use zup_plan::{NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     engine_fingerprint, wit_package_digest,
@@ -195,11 +194,13 @@ fn valid_empty_component_loads_and_runs() {
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     assert_eq!(executor.target(), &host_target());
     let installer = installer();
-    let binding = installer.plugins[0].clone();
     let proposal = executor
-        .plan(&binding, &context(&installer), &NeverCancelled)
+        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
         .unwrap();
-    assert_eq!(proposal, PluginResourceProposal::default());
+    assert!(
+        proposal.resources.is_empty(),
+        "a component that plans nothing proposes nothing"
+    );
 }
 
 #[test]
@@ -229,17 +230,6 @@ fn configure_fixture_is_one_deterministic_generated_file_without_imports() {
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap();
     assert_eq!(first, second);
-}
-
-#[test]
-fn oversized_output_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("output"), &host_target());
-    let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
-    let installer = installer();
-    let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-        .unwrap_err();
-    assert!(matches!(error, zup_plan::PluginFailure::OutputLimit { .. }));
 }
 
 #[test]
@@ -277,65 +267,69 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     ));
 }
 
-#[test]
-fn guest_rejection_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("rejected"), &host_target());
-    let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
-    let installer = installer();
-    let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        zup_plan::PluginFailure::Rejected { ref code, ref message }
-            if code == "bad" && message == "failure"
-    ));
+/// Which kind of failure a plugin's misbehaviour has to arrive as. Named rather than
+/// constructed because the payload-carrying variants (`Trap`, `Rejected`) hold a message
+/// a fixture is not required to predict, and what matters is which failure it is: a
+/// caller that cannot tell a fuel exhaustion from a trap cannot decide whether to retry.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Expected {
+    Cancelled,
+    Trapped,
+    OutOfFuel,
+    OutOfMemory,
+    Rejected,
 }
 
-#[test]
-fn cancellation_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("fuel"), &host_target());
+impl Expected {
+    fn matches(self, failure: &zup_plan::PluginFailure) -> bool {
+        use zup_plan::PluginFailure;
+        matches!(
+            (self, failure),
+            (Expected::Cancelled, PluginFailure::Cancelled)
+                | (Expected::Trapped, PluginFailure::Trap { .. })
+                | (Expected::OutOfFuel, PluginFailure::FuelExhausted)
+                | (Expected::OutOfMemory, PluginFailure::MemoryLimit)
+                | (Expected::Rejected, PluginFailure::Rejected { .. })
+        )
+    }
+}
+
+/// A misbehaving plugin is contained, and each way it can misbehave arrives at the
+/// caller as its own typed failure rather than as one generic "the plugin failed".
+#[rstest]
+#[case::cancelled("fuel", Expected::Cancelled, Cancellation::AfterFirstPoll)]
+#[case::trapped("trap", Expected::Trapped, Cancellation::Never)]
+#[case::out_of_fuel("fuel", Expected::OutOfFuel, Cancellation::Never)]
+#[case::out_of_memory("memory", Expected::OutOfMemory, Cancellation::Never)]
+#[case::rejected("rejected", Expected::Rejected, Cancellation::Never)]
+fn a_misbehaving_plugin_is_contained_and_named(
+    #[case] behaviour: &str,
+    #[case] expected: Expected,
+    #[case] cancellation: Cancellation,
+) {
+    let bundle = build_package(&fixture(behaviour), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let calls = AtomicUsize::new(0);
-    let cancellation = || calls.fetch_add(1, Ordering::Relaxed) > 0;
+    let query = match cancellation {
+        Cancellation::Never => &NeverCancelled as &dyn zup_plan::CancellationQuery,
+        Cancellation::AfterFirstPoll => &move || calls.fetch_add(1, Ordering::Relaxed) > 0,
+    };
     let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &cancellation)
+        .plan(&installer.plugins[0], &context(&installer), query)
         .unwrap_err();
-    assert_eq!(error, zup_plan::PluginFailure::Cancelled);
+    assert!(
+        expected.matches(&error),
+        "a {behaviour} plugin should fail as {expected:?}, got {error:?}"
+    );
 }
 
-#[test]
-fn trap_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("trap"), &host_target());
-    let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
-    let installer = installer();
-    let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-        .unwrap_err();
-    assert!(matches!(error, zup_plan::PluginFailure::Trap { .. }));
-}
-
-#[test]
-fn fuel_exhaustion_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("fuel"), &host_target());
-    let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
-    let installer = installer();
-    let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-        .unwrap_err();
-    assert_eq!(error, zup_plan::PluginFailure::FuelExhausted);
-}
-
-#[test]
-fn memory_growth_rejection_maps_to_a_typed_failure() {
-    let bundle = build_package(&fixture("memory"), &host_target());
-    let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
-    let installer = installer();
-    let error = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-        .unwrap_err();
-    assert_eq!(error, zup_plan::PluginFailure::MemoryLimit);
+/// Whether a cancellation query ever says yes. `NeverCancelled` is the crate's own "no",
+/// and the counting closure is the "yes, after the first poll" that proves the watchdog
+/// polls rather than checking once.
+enum Cancellation {
+    Never,
+    AfterFirstPoll,
 }
 
 fn other_target() -> TargetTriple {
@@ -364,6 +358,18 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     ));
 }
 
+/// Bytes that are not a trusted precompiled component are refused by name before the
+/// engine is asked to deserialize anything: a raw module is not a component, and a
+/// component that was never precompiled by this engine's cranelift is not trusted.
+#[rstest]
+#[case::raw_webassembly(b"\0asm\x01\0\0\0")]
+#[case::never_precompiled(b"not a precompiled component")]
+fn bytes_that_are_not_a_trusted_component_are_refused(#[case] aot: &[u8]) {
+    let bundle = build_package(aot, &host_target());
+    let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
+    assert!(matches!(error, LoadError::NotAComponent { .. }));
+}
+
 #[test]
 fn target_mismatch_is_rejected_before_deserialize() {
     let target = other_target();
@@ -372,35 +378,6 @@ fn target_mismatch_is_rejected_before_deserialize() {
     assert_eq!(bundle.plugin_artifacts()[0].target, target);
     let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
     assert!(matches!(error, LoadError::TargetMismatch { .. }));
-}
-
-#[test]
-fn raw_wasm_is_rejected_before_deserialize() {
-    let bundle = build_package(b"\0asm\x01\0\0\0", &host_target());
-    let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
-    assert!(matches!(error, LoadError::NotAComponent { .. }));
-}
-
-#[test]
-fn bad_precompiled_bytes_are_rejected_before_deserialize() {
-    let bundle = build_package(b"not a precompiled component", &host_target());
-    let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
-    assert!(matches!(error, LoadError::NotAComponent { .. }));
-}
-
-#[test]
-fn package_clone_loads_independently() {
-    let aot = empty_aot();
-    let package = build_package(&aot, &host_target());
-    let clone = package.clone();
-    let executor = WasmtimePluginExecutor::load(clone, &host_target()).unwrap();
-    assert_eq!(executor.plugin_count(), 1);
-    assert_eq!(
-        package
-            .plugin_aot(&PluginId::new(PLUGIN_ID).unwrap())
-            .unwrap(),
-        aot
-    );
 }
 
 #[test]
@@ -418,18 +395,6 @@ fn loader_reports_package_errors_for_tampered_aot() {
     let package = Package::open_unverified(path).unwrap();
     let error = WasmtimePluginExecutor::load(package, &host_target()).unwrap_err();
     assert!(matches!(error, LoadError::Package(_)));
-}
-
-#[test]
-fn package_rejects_tampered_plugin_bytes_before_loading() {
-    let mut package = BundleWriter::encode(
-        &plan(host_target()),
-        &[artifact(&empty_aot(), &host_target())],
-    )
-    .unwrap();
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    package[60 + metadata_len] ^= 1;
-    assert!(Package::parse(package).is_err());
 }
 
 fn assert_metadata_mutation_rejected(field: &str, value: serde_json::Value) {

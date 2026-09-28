@@ -184,50 +184,44 @@ mod tests {
         ));
     }
 
+    // Windows' own filename rules, stated as one table: a reserved device name,
+    // a separator, an illegal character, or a trailing dot or space makes a
+    // component unrepresentable, and a path is only refused if one of its
+    // components is.
     #[test]
-    fn validates_every_component_without_host_path_semantics() {
-        for path in [
-            r"C:\CON",
-            r"C:\nul.txt",
-            r"C:\PRN.txt",
-            r"C:\AUX",
-            r"C:\COM1.dat",
-            r"C:\COM9.log",
-            r"C:\LPT1",
-            r"C:\LPT9.dat",
-            r"C:\file.",
-            r"C:\file ",
-            r"C:\a:b",
-            r"C:\a?b",
-            r"C:\a*b",
-            r"C:\a<b",
-            r"C:\a>b",
-            r"C:\a|b",
-            "C:\\file\u{0001}.txt",
+    fn every_component_is_validated_without_host_path_semantics() {
+        for (path, accepted) in [
+            (r"C:\CON", false),
+            (r"C:\nul.txt", false),
+            (r"C:\PRN.txt", false),
+            (r"C:\AUX", false),
+            (r"C:\COM1.dat", false),
+            (r"C:\COM9.log", false),
+            (r"C:\LPT1", false),
+            (r"C:\LPT9.dat", false),
+            (r"C:\file.", false),
+            (r"C:\file ", false),
+            (r"C:\a:b", false),
+            (r"C:\a?b", false),
+            (r"C:\a*b", false),
+            (r"C:\a<b", false),
+            (r"C:\a>b", false),
+            (r"C:\a|b", false),
+            ("C:\\file\u{0001}.txt", false),
+            (r"C:\", true),
+            (r"C:\Program Files\Acme\app.exe", true),
+            (r"\\server\share\Acme\app.exe", true),
         ] {
-            assert!(
-                validate_windows_target_path(&target_path(path)).is_err(),
-                "{path:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn accepts_valid_drive_and_unc_components() {
-        for path in [
-            r"C:\",
-            r"C:\Program Files\Acme\app.exe",
-            r"\\server\share\Acme\app.exe",
-        ] {
-            assert!(
+            assert_eq!(
                 validate_windows_target_path(&target_path(path)).is_ok(),
+                accepted,
                 "{path:?}"
             );
         }
     }
 
     #[test]
-    fn rejects_device_paths_at_the_target_path_boundary() {
+    fn device_paths_are_rejected_at_the_target_path_boundary() {
         for path in [r"\\.\PIPE\device", r"\\?\C:\Windows"] {
             let result =
                 TargetPath::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(), path);
@@ -240,12 +234,5 @@ mod tests {
         let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
         let path = target_path_from_host(Path::new(r"\\?\C:\Program Files\Acme"), &target).unwrap();
         assert_eq!(path.as_str(), r"C:\Program Files\Acme");
-    }
-
-    #[test]
-    fn preserves_the_requested_target_when_reconstructing_paths() {
-        let target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
-        let path = target_path_from_host(Path::new(r"C:\Program Files\Acme"), &target).unwrap();
-        assert_eq!(path.target(), &target);
     }
 }

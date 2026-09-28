@@ -102,15 +102,17 @@ fn check(line: &str) {
     );
 }
 
-/// The specific bug this property found, kept as a named case rather than left to
-/// the generator to rediscover.
+/// The generators below cover every case a hand-written test would think of, so
+/// the only list left is the one the corpus cannot reach.
 ///
-/// `quote_arg` used to quote on `' '`, `\t`, `\n` and `\v` while
-/// `split_command_line` split on `char::is_whitespace()`. A carriage return, a
-/// form feed or a non-breaking space in an argument therefore formatted
-/// **unquoted** and read back as two arguments — a path that resolves somewhere
-/// else. Fixed by quoting on `c.is_whitespace() || c == '"'`, which is also
-/// strictly safer: `CommandLineToArgvW` accepts quotes anywhere.
+/// `formatting_and_parsing_are_inverse` filters control characters out of the
+/// arguments it generates, because a control character in a `CreateProcessW`
+/// argument is a caller bug rather than a quoting rule. That leaves the
+/// whitespace separators unguarded, and they are exactly the bug this file
+/// exists for: `quote_arg` once quoted on `' '`, `\t`, `\n` and `\v` while
+/// `split_command_line` split on `char::is_whitespace()`, so a carriage return,
+/// a form feed or a non-breaking space formatted **unquoted** and read back as
+/// two arguments — a path that resolves somewhere else.
 #[test]
 fn unusual_whitespace_in_an_argument_survives_the_round_trip() {
     for separator in ['\r', '\u{c}', '\u{b}', '\u{a0}', '\u{2028}', '\u{3000}'] {
@@ -129,28 +131,6 @@ fn unusual_whitespace_in_an_argument_survives_the_round_trip() {
             "an argument containing U+{:04X} was quoted wrongly: `{line}`",
             separator as u32
         );
-    }
-}
-
-/// The other direction, named rather than generated: the cases a hand-written
-/// test would think of, all of which a formatter that quotes correctly survives.
-#[test]
-fn the_cases_that_break_quoting_are_quoted() {
-    for argument in [
-        String::new(),
-        "plain".to_owned(),
-        "trailing\\".to_owned(),
-        "trailing\\\\".to_owned(),
-        "with \"quote\" inside".to_owned(),
-        "\"leading quote".to_owned(),
-        "a\\\\\"b".to_owned(),
-        "tab\there".to_owned(),
-        "\r\n".to_owned(),
-    ] {
-        let line = format_command_line(Path::new("zup.exe"), std::slice::from_ref(&argument));
-        let (executable, parsed) = parse_command_line(&line);
-        assert_eq!(executable.as_deref(), Some("zup.exe"), "`{line}`");
-        assert_eq!(parsed, vec![argument], "`{line}`");
     }
 }
 

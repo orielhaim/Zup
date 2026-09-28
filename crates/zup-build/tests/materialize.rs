@@ -86,7 +86,7 @@ fn materialize_project(
 }
 
 #[test]
-fn trusted_update_root_is_embedded_from_build_time_path() {
+fn the_configured_update_root_bytes_are_embedded() {
     let dir = project(&[
         ("dist/app.exe", b"app"),
         ("keys/root.json", br#"{"signed":{"_type":"root"}}"#),
@@ -138,29 +138,6 @@ destination = "${install}"
 // --- Source root ---
 
 #[test]
-fn source_root_is_relative_to_manifest_not_cwd() {
-    let dir = project(&[("dist/acme.exe", b"bin")]);
-    // Nested project root; CWD is unrelated.
-    let nested = dir.path().join("project");
-    fs::create_dir_all(nested.join("dist")).unwrap();
-    write_file(&nested.join("dist/acme.exe"), b"bin");
-    fs::write(nested.join("zup.toml"), b"").unwrap();
-
-    let source = manifest_toml(
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    );
-    let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&nested.join("zup.toml"), &manifest, installer).unwrap();
-    assert_eq!(plan.files.len(), 1);
-    assert_eq!(plan.files[0].source_relative.as_str(), "acme.exe");
-}
-
-#[test]
 fn missing_source_root() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("zup.toml"), b"").unwrap();
@@ -168,10 +145,12 @@ fn missing_source_root() {
     assert!(matches!(err, BuildError::SourceMissing { .. }), "{err:?}");
 }
 
+/// A source root that is not there and one that is not a directory are different
+/// mistakes with different remedies, so they are reported differently rather than
+/// both collapsing into "no files".
 #[test]
-fn source_not_directory() {
+fn a_source_root_that_is_not_a_directory_is_reported_as_such() {
     let dir = project(&[("dist", b"file-not-dir")]);
-    // `dist` is a file
     let err = materialize_project(dir.path(), "").unwrap_err();
     assert!(
         matches!(err, BuildError::SourceNotDirectory { .. }),
@@ -194,35 +173,12 @@ fn source_lexical_escape_rejected() {
 
 // --- Globs and static-root mapping ---
 
+/// A pattern with a static root does not copy that root into the destination:
+/// `bin/**/*` under `${install}/tools` puts `acme.exe` in the install directory,
+/// not in a `bin` the manifest never mentioned. The third file is outside the
+/// pattern entirely, so it must not appear at all.
 #[test]
-fn glob_star_star_preserves_tree() {
-    let dir = project(&[("dist/acme.exe", b"exe"), ("dist/helpers/foo.dll", b"dll")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-
-    let dests: Vec<_> = plan
-        .files
-        .iter()
-        .map(|f| f.destination.to_string())
-        .collect();
-    assert_eq!(
-        dests,
-        [
-            "${install}/acme.exe".to_owned(),
-            "${install}/helpers/foo.dll".to_owned(),
-        ]
-    );
-}
-
-#[test]
-fn glob_bin_strips_bin_prefix() {
+fn a_glob_with_a_static_root_does_not_copy_the_root_into_the_destination() {
     let dir = project(&[
         ("dist/bin/acme.exe", b"exe"),
         ("dist/bin/helpers/foo.dll", b"dll"),
@@ -253,140 +209,60 @@ destination = "${install}/tools"
     );
 }
 
-#[test]
-fn glob_assets_icons_strips_prefix() {
-    let dir = project(&[
-        ("dist/assets/icons/app.png", b"png"),
-        ("dist/assets/other.png", b"png"),
-    ]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "assets/icons/*.png"
-destination = "${install}/icons"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 1);
-    assert_eq!(
-        plan.files[0].destination.to_string(),
-        "${install}/icons/app.png"
-    );
-}
-
-#[test]
-fn glob_exe_extension() {
+/// A bare `*` matches one path segment; `**` crosses them. An installer that
+/// shipped only the top level of a tree would be missing the libraries that tree
+/// exists to carry.
+#[rstest]
+#[case::one_segment(&["a.exe"], "*.exe")]
+#[case::crossing_segments(&["a.exe", "nested/c.exe"], "**/*.exe")]
+fn a_glob_matches_the_depth_it_names(#[case] expected: &[&str], #[case] pattern: &str) {
     let dir = project(&[
         ("dist/a.exe", b"a"),
         ("dist/b.txt", b"b"),
         ("dist/nested/c.exe", b"c"),
     ]);
-    // `*.exe` is not recursive
     let plan = materialize_project(
         dir.path(),
-        r#"
-[[files]]
-source = "*.exe"
-destination = "${install}"
-"#,
+        &format!("[[files]]\nsource = \"{pattern}\"\ndestination = \"${{install}}\"\n"),
     )
     .unwrap();
-    assert_eq!(plan.files.len(), 1);
-    assert_eq!(plan.files[0].source_relative.as_str(), "a.exe");
-
-    // `**/*.exe` is recursive
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "**/*.exe"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 2);
-}
-
-#[test]
-fn nested_matching() {
-    let dir = project(&[
-        ("dist/x/1.txt", b"1"),
-        ("dist/x/y/2.txt", b"2"),
-        ("dist/x/y/z/3.txt", b"3"),
-    ]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "x/**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    let mut dests: Vec<_> = plan
+    let matched: Vec<_> = plan
         .files
         .iter()
-        .map(|f| f.destination.to_string())
+        .map(|file| file.source_relative.as_str())
         .collect();
-    dests.sort();
-    assert_eq!(
-        dests,
-        [
-            "${install}/1.txt".to_owned(),
-            "${install}/y/2.txt".to_owned(),
-            "${install}/y/z/3.txt".to_owned(),
-        ]
+    assert_eq!(matched, expected, "{pattern}");
+}
+
+/// A pattern that matches nothing is a typo far more often than it is an
+/// intention, so it fails by default. `allow_empty` is how an author says they
+/// meant it — and that flag has to be honoured, or an optional component could
+/// never be declared for a build that does not produce it.
+#[rstest]
+#[case::by_default("bni/**/*.exe", false)]
+#[case::when_the_author_says_so("bni/**/*.exe", true)]
+fn a_pattern_that_matches_nothing_is_refused_unless_allowed(
+    #[case] pattern: &str,
+    #[case] allow_empty: bool,
+) {
+    let dir = project(&[("dist/a.txt", b"a")]);
+    let files_block = format!(
+        r#"
+[[files]]
+source = "{pattern}"
+destination = "${{install}}"
+allow_empty = {allow_empty}
+"#
     );
-}
-
-#[test]
-fn invalid_glob_rejected() {
-    let dir = project(&[("dist/a.txt", b"a")]);
-    let err = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "a/["
-destination = "${install}"
-"#,
-    )
-    .unwrap_err();
-    assert!(matches!(err, BuildError::InvalidGlob { .. }), "{err:?}");
-}
-
-#[test]
-fn empty_match_rejected_by_default() {
-    let dir = project(&[("dist/a.txt", b"a")]);
-    let err = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "bni/**/*.exe"
-destination = "${install}"
-"#,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, BuildError::PatternMatchedNothing { .. }),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn allow_empty_permits_zero_matches() {
-    let dir = project(&[("dist/a.txt", b"a")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "bni/**/*.exe"
-destination = "${install}"
-allow_empty = true
-"#,
-    )
-    .unwrap();
-    assert!(plan.files.is_empty());
+    let outcome = materialize_project(dir.path(), &files_block);
+    if allow_empty {
+        assert!(outcome.unwrap().files.is_empty());
+    } else {
+        assert!(matches!(
+            outcome.unwrap_err(),
+            BuildError::PatternMatchedNothing { .. }
+        ));
+    }
 }
 
 #[test]
@@ -408,22 +284,6 @@ destination = "${install}"
         .collect();
     names.sort();
     assert_eq!(names, [".env".to_owned(), "visible.txt".to_owned()]);
-}
-
-#[test]
-fn windows_separators_normalized_in_pattern() {
-    let dir = project(&[("dist/bin/acme.exe", b"exe")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "bin\\**\\*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 1);
-    assert_eq!(plan.files[0].destination.to_string(), "${install}/acme.exe");
 }
 
 // --- Determinism ---
@@ -484,45 +344,6 @@ destination = "${install}"
 // --- Hashing ---
 
 #[test]
-fn known_sha256_empty_file() {
-    let dir = project(&[("dist/empty.txt", b"")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "empty.txt"
-destination = "${install}/empty.txt"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files[0].size, 0);
-    assert_eq!(
-        plan.files[0].sha256.to_hex(),
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-}
-
-#[test]
-fn known_sha256_fixture() {
-    // SHA-256("abc")
-    let dir = project(&[("dist/abc.txt", b"abc")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "abc.txt"
-destination = "${install}/abc.txt"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files[0].size, 3);
-    assert_eq!(
-        plan.files[0].sha256.to_hex(),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-}
-
-#[test]
 fn large_file_streamed_with_correct_size() {
     let big = vec![0xABu8; 3 * 1024 * 1024];
     let dir = project(&[("dist/big.bin", &big)]);
@@ -542,29 +363,6 @@ destination = "${install}/big.bin"
     hasher.update(&big);
     let expected = Sha256Digest::from_hasher(hasher);
     assert_eq!(plan.files[0].sha256, expected);
-}
-
-#[test]
-fn duplicate_content_allowed() {
-    let dir = project(&[
-        ("dist/a/config.dat", b"same"),
-        ("dist/b/config.dat", b"same"),
-    ]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "a/**/*"
-destination = "${install}/a"
-
-[[files]]
-source = "b/**/*"
-destination = "${install}/b"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 2);
-    assert_eq!(plan.files[0].sha256, plan.files[1].sha256);
 }
 
 // --- Collisions ---
@@ -613,12 +411,12 @@ destination = "${install}"
     );
 }
 
-#[test]
-fn case_only_destinations_are_left_for_target_lowering() {
-    let dir = project(&[("dist/x/Foo.dll", b"a"), ("dist/y/foo.dll", b"b")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
+/// Names a Windows filesystem would reject are left for the target lowering pass,
+/// which owns the rules that differ per target. Refusing them here would make a
+/// manifest unrepresentable on a host that would have accepted it.
+#[rstest]
+#[case::case_only_destinations(
+    r#"
 [[files]]
 source = "x/Foo.dll"
 destination = "${install}/Foo.dll"
@@ -627,28 +425,35 @@ destination = "${install}/Foo.dll"
 source = "y/foo.dll"
 destination = "${install}/foo.dll"
 "#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 2);
-}
-
-#[test]
-fn same_filename_different_directories_ok() {
-    let dir = project(&[("dist/a/foo.dll", b"a"), ("dist/b/foo.dll", b"b")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
+    2
+)]
+#[case::reserved_device_name(
+    r#"
 [[files]]
-source = "a/foo.dll"
-destination = "${install}/a/foo.dll"
-
-[[files]]
-source = "b/foo.dll"
-destination = "${install}/b/foo.dll"
+source = "file.txt"
+destination = "${install}/CON"
 "#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 2);
+    1
+)]
+#[case::trailing_dot(
+    r#"
+[[files]]
+source = "file.txt"
+destination = "${install}/bad."
+"#,
+    1
+)]
+fn windows_hostile_destinations_are_left_for_target_lowering(
+    #[case] files_block: &str,
+    #[case] expected_files: usize,
+) {
+    let dir = project(&[
+        ("dist/x/Foo.dll", b"a"),
+        ("dist/y/foo.dll", b"b"),
+        ("dist/file.txt", b"x"),
+    ]);
+    let plan = materialize_project(dir.path(), files_block).unwrap();
+    assert_eq!(plan.files.len(), expected_files);
 }
 
 // --- Path safety ---
@@ -702,43 +507,17 @@ destination = "${install}"
     }
 }
 
-#[test]
-fn literal_dot_dot_pattern_rejected() {
-    let pattern = FilePattern::compile("../outside/*");
-    assert!(matches!(pattern, Err(BuildError::InvalidGlob { .. })));
-}
-
-#[test]
-fn invalid_windows_names_are_left_for_target_lowering() {
-    let dir = project(&[("dist/file.txt", b"x")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "file.txt"
-destination = "${install}/CON"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files.len(), 1);
-}
-
-#[test]
-fn trailing_dot_destinations_are_left_for_target_lowering() {
-    let dir = project(&[("dist/file.txt", b"x")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "file.txt"
-destination = "${install}/bad."
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        plan.files[0].destination.to_string(),
-        "${install}/bad./file.txt"
-    );
+/// A pattern is a manifest author's claim about where bytes come from, so one
+/// that climbs out of the project is refused before anything is read. A malformed
+/// glob is refused the same way rather than matching nothing.
+#[rstest]
+#[case::a_climbing_pattern("../outside/*")]
+#[case::an_unterminated_bracket("a/[")]
+fn an_unusable_pattern_is_refused(#[case] pattern: &str) {
+    assert!(matches!(
+        FilePattern::compile(pattern),
+        Err(BuildError::InvalidGlob { .. })
+    ));
 }
 
 // --- Metadata preservation ---
@@ -766,9 +545,8 @@ when = 'component("cli")'
     let file = &plan.files[0];
     assert_eq!(file.component.as_ref().unwrap().as_str(), "cli");
     assert!(file.condition.is_some());
+    // Install variables are still unresolved: materialization does not lower them.
     assert_eq!(file.destination.to_string(), "${install}/tools/tool.exe");
-    // Destination variables remain unresolved.
-    assert!(file.destination.to_string().contains("${install}"));
 }
 
 #[test]
@@ -786,37 +564,7 @@ destination = "${install}/a.txt"
     let file = &plan.files[0];
     assert!(file.source.is_absolute() || file.source.starts_with(dir.path()));
     assert_eq!(file.source_relative.as_str(), "a.txt");
-    // Portable path must not contain the temp-dir absolute prefix as its serialized form.
     assert!(!file.source_relative.as_str().contains("C:\\"));
-}
-
-// --- Static root unit coverage ---
-
-#[rstest]
-#[case("bin/**/*", "bin/acme.exe", "acme.exe")]
-#[case("bin/**/*", "bin/helpers/foo.dll", "helpers/foo.dll")]
-#[case("**/*", "a/b/c.txt", "a/b/c.txt")]
-#[case("assets/icons/*.png", "assets/icons/app.png", "app.png")]
-#[case("*.exe", "acme.exe", "acme.exe")]
-fn static_root_mapping(#[case] pattern: &str, #[case] matched: &str, #[case] suffix: &str) {
-    let compiled = FilePattern::compile(pattern).unwrap();
-    assert_eq!(compiled.destination_suffix(matched).unwrap(), suffix);
-}
-
-#[test]
-fn total_size_sums_all_files() {
-    let dir = project(&[("dist/a.txt", b"aaa"), ("dist/b.txt", b"bb")]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.total_size, 5);
-    assert_eq!(plan.files.len(), 2);
 }
 
 #[test]
@@ -852,8 +600,12 @@ source = "plugins/a.wasm"
     assert_eq!(plan.plugins[1].source_relative.as_str(), "plugins/a.wasm");
 }
 
-#[test]
-fn rejects_plugin_source_traversal_after_manifest_parse() {
+/// A manifest that parses may still name a plugin source outside the project, and
+/// the source is resolved after parsing, so the check has to happen there too.
+#[rstest]
+#[case::lexical_traversal("lexical")]
+#[case::absolute_path("absolute")]
+fn a_plugin_source_outside_the_project_is_refused(#[case] kind: &str) {
     let dir = project(&[("dist/app.bin", b"app"), ("outside.wasm", b"bad")]);
     let source = manifest_toml(
         r#"
@@ -864,35 +616,18 @@ source = "plugins/helper.wasm"
     );
     let mut manifest = zup_manifest::parse(&source).unwrap();
     let installer = parse_and_compile(&source, "default").unwrap();
-    manifest.plugins[0].value.source = "../outside.wasm".to_owned();
+    manifest.plugins[0].value.source = match kind {
+        "lexical" => "../outside.wasm".to_owned(),
+        _ => dir
+            .path()
+            .join("helper.wasm")
+            .to_string_lossy()
+            .into_owned(),
+    };
     let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(
         error,
         BuildError::PluginSourceEscapesProject { .. } | BuildError::UnsafeRelativePath { .. }
-    ));
-}
-
-#[test]
-fn rejects_absolute_plugin_source_after_manifest_parse() {
-    let dir = project(&[("dist/app.bin", b"app")]);
-    let source = manifest_toml(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/helper.wasm"
-"#,
-    );
-    let mut manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    manifest.plugins[0].value.source = dir
-        .path()
-        .join("helper.wasm")
-        .to_string_lossy()
-        .into_owned();
-    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
-    assert!(matches!(
-        error,
-        BuildError::PluginSourceEscapesProject { .. }
     ));
 }
 

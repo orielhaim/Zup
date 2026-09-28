@@ -141,43 +141,21 @@ fn is_pattern_component(component: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// `static_root_of` is private, so it is pinned through the suffix it produces:
+    /// a root the caller cannot see is a destination that silently keeps a prefix
+    /// the manifest never asked for. `tests/materialize.rs` asserts the same
+    /// mapping end to end, against a real destination.
     #[test]
-    fn static_roots() {
-        assert_eq!(static_root_of("**/*"), Some(String::new()));
-        assert_eq!(static_root_of("bin/**/*"), Some("bin".to_owned()));
-        assert_eq!(
-            static_root_of("assets/icons/*.png"),
-            Some("assets/icons".to_owned())
-        );
-        assert_eq!(static_root_of("*.exe"), Some(String::new()));
-        assert_eq!(static_root_of("a/foo.dll"), Some("a".to_owned()));
-        assert_eq!(static_root_of("foo.exe"), Some(String::new()));
-        assert_eq!(
-            static_root_of("foo/bar/baz.txt"),
-            Some("foo/bar".to_owned())
-        );
-        assert_eq!(static_root_of("foo/**/bar.txt"), Some("foo".to_owned()));
-    }
-
-    #[test]
-    fn destination_suffix_strips_static_root() {
-        let pattern = FilePattern::compile("bin/**/*").unwrap();
-        assert_eq!(
-            pattern.destination_suffix("bin/acme.exe").unwrap(),
-            "acme.exe"
-        );
-        assert_eq!(
-            pattern.destination_suffix("bin/helpers/foo.dll").unwrap(),
-            "helpers/foo.dll"
-        );
-    }
-
-    #[test]
-    fn destination_suffix_preserves_full_path_for_recursive_root() {
-        let pattern = FilePattern::compile("**/*").unwrap();
-        assert_eq!(
-            pattern.destination_suffix("a/b/c.txt").unwrap(),
-            "a/b/c.txt"
-        );
+    fn destination_suffix_strips_the_static_root() {
+        for (pattern, matched, suffix) in [
+            ("bin/**/*", "bin/acme.exe", "acme.exe"),
+            ("bin/**/*", "bin/helpers/foo.dll", "helpers/foo.dll"),
+            ("**/*", "a/b/c.txt", "a/b/c.txt"),
+            ("assets/icons/*.png", "assets/icons/app.png", "app.png"),
+            ("*.exe", "acme.exe", "acme.exe"),
+        ] {
+            let compiled = FilePattern::compile(pattern).unwrap();
+            assert_eq!(compiled.destination_suffix(matched).unwrap(), suffix);
+        }
     }
 }

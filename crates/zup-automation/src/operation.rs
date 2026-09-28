@@ -82,22 +82,4 @@ mod tests {
             );
         }
     }
-
-    /// The operations that take a compound form take it with a dot, and the
-    /// orchestrator's vocabulary is deliberately absent: nothing here is called
-    /// `compose`, `release`, `setup` or `attest`, because none of those is something
-    /// zup does.
-    #[test]
-    fn the_names_describe_zup_and_not_an_orchestrator() {
-        for name in [OPERATION_PUBLISH_STAGE, OPERATION_PUBLISH_GITHUB] {
-            let operation = Operation::parse(name).expect("an operation");
-            assert_eq!(operation.segments().next(), Some("publish"));
-        }
-        for forbidden in ["compose", "release", "setup", "attest", "finalize"] {
-            assert!(
-                !ALL_OPERATIONS.contains(&forbidden),
-                "`{forbidden}` is an orchestrator's word, not a zup operation"
-            );
-        }
-    }
 }

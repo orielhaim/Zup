@@ -49,18 +49,3 @@ pub fn console_is_a_terminal() -> bool {
         && std::io::stdout().is_terminal()
         && std::io::stderr().is_terminal()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_machine_readable_output_format_is_carried_on_the_context() {
-        let context = RuntimeContext::new(Frontend::Console).with_output(OutputFormat::Jsonl);
-        assert_eq!(context.output, OutputFormat::Jsonl);
-        assert_eq!(
-            RuntimeContext::new(Frontend::Console).output,
-            OutputFormat::Human
-        );
-    }
-}

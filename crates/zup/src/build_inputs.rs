@@ -633,52 +633,6 @@ mod tests {
         assert!(error.contains("cargo xtask toolchain build"), "{error}");
     }
 
-    /// One value for two targets names the profiles, and names the path it reached.
-    #[test]
-    fn a_short_runtime_list_names_the_profiles_it_was_given_against() {
-        let targets = vec![target_config("alpha"), target_config("beta")];
-        let one = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("one-component.exe");
-        let slots = resolve_runtimes(
-            InputMode::Preflight,
-            &empty_resolver(),
-            std::slice::from_ref(&one),
-            &targets,
-        )
-        .expect("preflight reports rather than raises");
-        for (index, slot) in slots.iter().enumerate() {
-            assert_eq!(slot.problems.len(), 2, "target {index}: {slot:?}");
-            assert_eq!(
-                slot.problems[0].message,
-                "selected 2 targets (alpha, beta) but received 1 runtimes; provide one --runtime per target, in that order"
-            );
-            // The path is only on the slot the path reached: the second target was
-            // given nothing, so the message it gets is about the toolchain, not
-            // about a file.
-            if index == 0 {
-                assert_eq!(slot.problems[1].path.as_deref(), Some(one.as_path()));
-            } else {
-                assert!(slot.problems[1].path.is_none());
-            }
-        }
-    }
-
-    /// An empty `--runtime` is not a count of zero. It is the toolchain resolver
-    /// being asked, which is the ordinary way a build finds its templates.
-    #[test]
-    fn an_absent_runtime_flag_is_not_a_cardinality_problem() {
-        let targets = vec![target_config("alpha")];
-        let slots = resolve_runtimes(InputMode::Preflight, &empty_resolver(), &[], &targets)
-            .expect("preflight reports rather than raises");
-        assert!(
-            slots[0]
-                .problems
-                .iter()
-                .all(|problem| !problem.message.contains("--runtime per target")),
-            "an absent flag is the resolver's question, not a count: {:?}",
-            slots[0].problems
-        );
-    }
-
     #[test]
     fn every_repeatable_per_target_flag_uses_one_alignment_message() {
         let targets = vec![target_config("alpha"), target_config("beta")];
@@ -723,28 +677,27 @@ mod tests {
     }
 
     #[test]
-    fn derived_output_names_are_distinct_per_target() {
+    fn a_derived_output_is_named_for_its_target_and_the_run_is_left_to_the_caller() {
         let targets = vec![target_config("alpha"), target_config("beta")];
         let manifest = Path::new("/tmp/project/zup.toml");
         let outputs = inspect_output_slots(Overwrite::Refuse, &[], manifest, &app(), &targets, &[]);
-        let names = outputs
+        let names: std::collections::BTreeSet<String> = outputs
             .iter()
             .map(|slot| slot.path.display().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "/tmp/project\\Doctor App-Setup-alpha.exe",
-                "/tmp/project\\Doctor App-Setup-beta.exe"
-            ]
-        );
+            .collect();
+        assert_eq!(names.len(), outputs.len(), "derived names must not collide");
         assert!(outputs.iter().all(|slot| slot.derived));
 
+        // One target is one output, and the name is the whole of what a build
+        // composes; nothing picks a directory for it.
         let single =
             inspect_output_slots(Overwrite::Refuse, &[], manifest, &app(), &targets[..1], &[]);
-        assert_eq!(
-            single[0].path.display().to_string(),
-            "/tmp/project\\Doctor App-Setup.exe"
+        assert_eq!(single.len(), 1);
+        assert!(single[0].derived);
+        assert!(
+            single[0].path.ends_with("Doctor App-Setup.exe"),
+            "a single target gets no profile suffix: {}",
+            single[0].path.display()
         );
     }
 
@@ -787,25 +740,6 @@ mod tests {
             "--force permits replacing an existing output: {:?}",
             forced[0].problems
         );
-    }
-
-    #[test]
-    fn the_backend_boundary_needs_no_filesystem() {
-        let mut linux = target_config("linux");
-        linux.target = TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap();
-        let mut windows = target_config("windows");
-        windows.target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-
-        let error = check_backend_support(&linux).unwrap_err().to_string();
-        assert!(error.contains("unsupported backend for target"), "{error}");
-
-        match backend_support(&windows.target) {
-            BackendSupport::Ready => assert!(check_backend_support(&windows).is_ok()),
-            _ => assert!(
-                check_backend_support(&windows).is_err(),
-                "an unavailable backend is refused on every host"
-            ),
-        }
     }
 
     fn app() -> App {

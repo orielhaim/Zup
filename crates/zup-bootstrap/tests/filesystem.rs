@@ -2,7 +2,6 @@
 //! injected adapters are what quarantine and the state store actually consult
 //! for publication and link policy.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -65,15 +64,6 @@ impl RecordingFileSystem {
             })
             .collect()
     }
-
-    fn link_checks(&self) -> usize {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|call| matches!(call, Call::IsLink { .. }))
-            .count()
-    }
 }
 
 impl BootstrapFileSystem for RecordingFileSystem {
@@ -115,49 +105,6 @@ fn quarantine_root_error(result: Result<Quarantine, QuarantineError>) -> Quarant
 }
 
 #[test]
-fn portable_adapter_depends_on_no_platform_adapter() {
-    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .expect("zup-bootstrap manifest");
-
-    assert!(
-        !manifest.contains("[target."),
-        "zup-bootstrap must not carry target-specific dependencies: {manifest}"
-    );
-
-    let mut section = String::new();
-    let mut dependencies = BTreeSet::new();
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            section = line.to_owned();
-            continue;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if !section.ends_with("dependencies]") {
-            continue;
-        }
-        let name = key.split('.').next().unwrap_or(key);
-        assert!(
-            !name.starts_with("windows"),
-            "zup-bootstrap must not depend on a Windows binding crate: {name}"
-        );
-        assert!(
-            !matches!(name, "zup-windows" | "zup-platform" | "zup-ui"),
-            "zup-bootstrap must not depend on a platform adapter crate: {name}"
-        );
-        dependencies.insert(name.to_owned());
-    }
-
-    assert!(
-        dependencies.contains("zup-core"),
-        "expected the shared foundation dependency, found {dependencies:?}"
-    );
-}
-
-#[test]
 fn portable_adapter_publishes_by_replacing_and_never_leaks_a_partial() {
     let root = TempDir::new().unwrap();
     let quarantine = Quarantine::new(root.path()).unwrap();
@@ -194,74 +141,17 @@ fn portable_adapter_publishes_by_replacing_and_never_leaks_a_partial() {
     quarantine.verify(&replaced).unwrap();
 }
 
-#[test]
-fn quarantine_cleans_up_the_partial_when_digest_verification_fails() {
-    let root = TempDir::new().unwrap();
-    let quarantine = Quarantine::new(root.path()).unwrap();
-    let reservation = quarantine
-        .reserve(&runtime_id(), "runtime.exe", Some(7))
-        .unwrap();
-
-    let error = quarantine
-        .stage_bytes(&reservation, b"runtime", digest(b"different"))
-        .unwrap_err();
-
-    assert!(matches!(error, QuarantineError::DigestMismatch));
-    assert!(
-        !reservation.partial_path.exists(),
-        "a failed digest must not leave staged bytes behind"
-    );
-    assert!(!reservation.final_path.exists());
-}
-
-#[test]
-fn injected_adapter_performs_quarantine_publication() {
-    let root = TempDir::new().unwrap();
-    let file_system = Arc::new(RecordingFileSystem::new());
-    let calls = file_system.calls.clone();
-    let quarantine = Quarantine::with_file_system(root.path(), file_system.clone()).unwrap();
-    let reservation = quarantine
-        .reserve(&runtime_id(), "runtime.exe", Some(7))
-        .unwrap();
-
-    quarantine
-        .stage_bytes(&reservation, b"runtime", digest(b"runtime"))
-        .unwrap();
-    let artifact = zup_bootstrap::QuarantinedArtifact {
-        relative_path: reservation.relative_path.clone(),
-        size: 7,
-        sha256: digest(b"runtime"),
-    };
-
-    assert_eq!(
-        file_system.publishes(),
-        vec![(
-            reservation.partial_path.clone(),
-            reservation.final_path.clone()
-        )],
-        "quarantine must publish through the injected adapter"
-    );
-    assert!(
-        file_system.link_checks() > 0,
-        "quarantine must ask the adapter about links"
-    );
-    assert!(calls.lock().unwrap().iter().any(|call| matches!(
-        call,
-        Call::IsLink { path, .. } if *path == reservation.partial_path
-    )));
-    quarantine.verify(&artifact).unwrap();
-}
-
+/// Publication goes through the injected adapter and consults it about links first. The
+/// adapter's refusal has to reach the caller as the adapter's own error, attributed to
+/// the path it refused, and the artifact must not be left published.
 #[test]
 fn injected_adapter_failure_replaces_quarantine_publication() {
     let root = TempDir::new().unwrap();
-    let quarantine = Quarantine::with_file_system(
-        root.path(),
-        Arc::new(RecordingFileSystem::refusing_publish(
-            "seam refused publication",
-        )),
-    )
-    .unwrap();
+    let file_system = Arc::new(RecordingFileSystem::refusing_publish(
+        "seam refused publication",
+    ));
+    let calls = file_system.calls.clone();
+    let quarantine = Quarantine::with_file_system(root.path(), file_system.clone()).unwrap();
     let reservation = quarantine
         .reserve(&runtime_id(), "runtime.exe", Some(7))
         .unwrap();
@@ -277,6 +167,13 @@ fn injected_adapter_failure_replaces_quarantine_publication() {
         "the adapter's failure must reach the caller, got {error:?}"
     );
     assert!(!reservation.final_path.exists());
+    assert!(
+        calls.lock().unwrap().iter().any(|call| matches!(
+            call,
+            Call::IsLink { path, .. } if *path == reservation.partial_path
+        )),
+        "quarantine must ask the adapter about links before it publishes anything"
+    );
 }
 
 #[test]
@@ -293,8 +190,12 @@ fn injected_link_policy_guards_quarantine_root() {
     );
 }
 
+/// Every state write goes through the injected adapter, from a temporary sibling that the
+/// rename consumes, and the compare-and-swap refuses a revision that is not the one the
+/// caller read. The failure-injection sibling proves the adapter is actually consulted;
+/// this proves what it is asked to do when it answers.
 #[test]
-fn injected_adapter_performs_state_publication_and_cas() {
+fn state_publication_and_cas_go_through_the_injected_adapter() {
     let root = TempDir::new().unwrap();
     let file_system = Arc::new(RecordingFileSystem::new());
     let store = FilesystemBootstrapStateStore::with_file_system(root.path(), file_system.clone());

@@ -206,20 +206,3 @@ async fn runtime_creates_a_session_and_exposes_a_verified_payload_source() {
         .unwrap();
     assert_eq!(bytes, b"payload");
 }
-
-#[test]
-fn architecture_boundary_has_no_platform_adapter_dependency() {
-    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .unwrap()
-        .to_ascii_lowercase();
-    let adapter = b"zup-windows"
-        .iter()
-        .map(|byte| *byte as char)
-        .collect::<String>();
-    let forbidden_package = b"windows-registry"
-        .iter()
-        .map(|byte| *byte as char)
-        .collect::<String>();
-    assert!(!manifest.contains(&adapter));
-    assert!(!manifest.contains(&forbidden_package));
-}

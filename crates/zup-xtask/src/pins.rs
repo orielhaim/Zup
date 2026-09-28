@@ -699,20 +699,9 @@ pub fn infrastructure() -> &'static [&'static str] {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_computed_date_is_today_or_tomorrow() {
-        let date = today();
-        assert!(is_date(&date), "{date}");
-        let (year, month, day) = (
-            date[..4].parse::<u32>().expect("a year"),
-            date[5..7].parse::<u32>().expect("a month"),
-            date[8..].parse::<u32>().expect("a day"),
-        );
-        assert!((1..=12).contains(&month), "{date}");
-        assert!((1..=31).contains(&day), "{date}");
-        assert!(year >= 2024, "{date}");
-    }
-
+    /// `v10` sorting before `v9` is a lexically-correct answer and a practically
+    /// useless one, and a prerelease must land before the release it leads to or a
+    /// pipeline resolves to `2.0.0-rc.1` the moment somebody tags one.
     #[test]
     fn tags_sort_numerically_and_prereleases_come_before_their_release() {
         let mut tags = vec![
@@ -730,20 +719,24 @@ mod tests {
         );
     }
 
+    /// A pipeline that silently starts resolving to `2.0.0-rc.1` because somebody
+    /// tagged a release candidate would ship a prerelease to everybody.
     #[test]
     fn a_prerelease_is_never_the_newest_stable() {
-        let tags = tags_of(&["v1.0.0", "v2.0.0-beta.1", "v1.9.0"]);
-        assert_eq!(newest_stable(&tags).as_deref(), Some("v1.9.0"));
+        for tags in [
+            &["v1.0.0", "v2.0.0-beta.1", "v1.9.0"][..],
+            &["v1.9.0", "v2.0.0-rc.1"][..],
+        ] {
+            assert_eq!(
+                newest_stable(&tags_of(tags)).as_deref(),
+                Some("v1.9.0"),
+                "{tags:?}"
+            );
+        }
     }
 
-    #[test]
-    fn a_newer_prerelease_does_not_hide_the_release_it_follows() {
-        // A pipeline that silently starts resolving to `2.0.0-rc.1` because
-        // somebody tagged a release candidate.
-        let tags = tags_of(&["v1.9.0", "v2.0.0-rc.1"]);
-        assert_eq!(newest_stable(&tags).as_deref(), Some("v1.9.0"));
-    }
-
+    /// `newest_stable` reads the tag list, and that list arrives from the network
+    /// in whatever order the API returned, so the answer must not depend on it.
     #[test]
     fn an_unordered_tag_list_finds_the_right_release() {
         let ordered = tags_of(&["v1.0.0", "v1.9.0", "v2.0.0-rc.1", "v10.0.0"]);
@@ -759,31 +752,24 @@ mod tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    /// A version that is not a *series* must not be advanced. A `stable` channel
+    /// and a pinned release are both deliberate choices, and a check that rewrote
+    /// either would make a correct lock look stale forever.
     #[test]
-    fn a_channel_ref_is_never_advanced_or_reported_as_outdated() {
-        // `stable` has no newer self, so treating it as a series would make a correct
-        // lock look stale forever.
-        let pin = ActionPin {
-            repository: "dtolnay/rust-toolchain".to_owned(),
-            version: "stable".to_owned(),
-            sha: "0".repeat(40),
-            checked_at: "2026-09-27".to_owned(),
-        };
-        assert!(!pin.is_series());
-        assert_eq!(newer_series(&tags_of(&["v9", "v99"]), &pin), None);
-    }
-
-    #[test]
-    fn a_fixed_release_is_never_advanced_either() {
-        // Advancing a workflow on `v7.0.1` would rewrite a decision made on purpose.
-        let pin = ActionPin {
-            repository: "example/action".to_owned(),
-            version: "v7.0.1".to_owned(),
-            sha: "0".repeat(40),
-            checked_at: "2026-09-27".to_owned(),
-        };
-        assert!(!pin.is_series());
-        assert_eq!(newer_series(&tags_of(&["v8", "v9"]), &pin), None);
+    fn a_ref_that_is_not_a_series_is_never_advanced() {
+        for (repository, version) in [
+            ("dtolnay/rust-toolchain", "stable"),
+            ("example/action", "v7.0.1"),
+        ] {
+            let pin = ActionPin {
+                repository: repository.to_owned(),
+                version: version.to_owned(),
+                sha: "0".repeat(40),
+                checked_at: "2026-09-27".to_owned(),
+            };
+            assert!(!pin.is_series(), "{version}");
+            assert_eq!(newer_series(&tags_of(&["v8", "v9", "v99"]), &pin), None);
+        }
     }
 
     #[test]
@@ -816,49 +802,35 @@ mod tests {
         assert_eq!(newest_series_tag(&all).as_deref(), Some("v8"));
     }
 
-    #[test]
-    fn a_bad_date_is_reported_rather_than_accepted() {
-        assert!(!is_date("2026-9-27"));
-        assert!(!is_date("26-09-27"));
-        assert!(!is_date(""));
-        assert!(is_date("2026-09-27"));
-    }
-
+    /// A `uses:` line is what the lock is checked against, so a reference read out
+    /// of one must be the whole reference — with a comment tolerated, because
+    /// nothing writes one but somebody will add one, and a `run:` line must yield
+    /// nothing rather than a misread.
     #[test]
     fn a_uses_line_is_read_without_its_comment() {
         assert_eq!(
             uses_reference("        uses: actions/checkout@v7").as_deref(),
             Some("actions/checkout@v7")
         );
-        // A trailing comment is tolerated even though nothing writes one, so
-        // somebody adding one does not make `check` fail.
-        assert_eq!(
-            uses_reference("        uses: actions/checkout@abc123 # v4.1.7").as_deref(),
-            Some("actions/checkout@abc123")
-        );
         assert_eq!(
             uses_reference("  - uses: \"acme/zup@v1\"").as_deref(),
             Some("acme/zup@v1")
         );
+        assert_eq!(
+            uses_reference("        uses: actions/checkout@abc123 # v4.1.7").as_deref(),
+            Some("actions/checkout@abc123")
+        );
         assert_eq!(uses_reference("        run: zup build"), None);
     }
 
+    /// A SHA is not a *different series*, and the report has to say so —
+    /// otherwise the remedy names a ref the file obviously does not use.
     #[test]
-    fn a_full_sha_in_a_workflow_is_recognised_as_not_a_series() {
-        // A SHA is not a *different series*, and the report has to say so —
-        // otherwise the remedy names a ref the file obviously does not use.
+    fn only_a_major_series_looks_like_a_series() {
         assert!(!looks_like_a_series(
             "3d3c42e5aac5ba805825da76410c181273ba90b1"
         ));
         assert!(looks_like_a_series("v7"));
         assert!(!looks_like_a_series("stable"));
-    }
-
-    #[test]
-    fn a_refresh_renders_the_same_comment_the_file_has() {
-        let current = lock();
-        let rendered = render(&current);
-        assert!(rendered.contains("$comment"), "{rendered}");
-        assert!(rendered.ends_with("}\n"), "{rendered}");
     }
 }

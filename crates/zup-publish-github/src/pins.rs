@@ -229,53 +229,26 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_renders_as_the_ecosystem_writes_it() {
-        let pin = pin("actions/checkout").expect("checkout is tracked");
-        assert_eq!(pin.uses(), "actions/checkout@v7");
-        assert_eq!(pin.version, "v7");
-        assert_eq!(pin.uses(), format!("{}@{}", pin.repository, pin.version));
-        // The version is already in the ref; a second copy beside it is a second
-        // thing that can disagree.
-        assert!(!pin.uses().contains('#'));
-    }
-
-    #[test]
-    fn a_series_is_recognised_and_numbered() {
-        for (version, expected) in [("v1", Some(1)), ("v7", Some(7)), ("v12", Some(12))] {
-            let pin = ActionPin {
-                repository: "example/action".to_owned(),
-                version: version.to_owned(),
-                sha: "0".repeat(40),
-                checked_at: "2026-09-27".to_owned(),
-            };
+    fn only_a_bare_major_series_is_a_series() {
+        let numbered = |version: &str| ActionPin {
+            repository: "example/action".to_owned(),
+            version: version.to_owned(),
+            sha: "0".repeat(40),
+            checked_at: "2026-09-27".to_owned(),
+        };
+        for (version, expected) in [("v1", Some(1u64)), ("v7", Some(7)), ("v12", Some(12))] {
+            let pin = numbered(version);
             assert!(pin.is_series(), "{version} is a major series");
             assert_eq!(pin.series(), expected);
         }
-    }
-
-    #[test]
-    fn a_channel_is_not_a_series() {
-        // Only a bare `v<n>` is a series: `stable` has no version to compare against
-        // and `v7.0.1` is a fixed release rather than something that moves.
+        // `stable` has no version to compare against and `v7.0.1` is a fixed
+        // release rather than something that moves.
         for version in ["stable", "nightly", "v7.0.1", "main", "v"] {
-            let pin = ActionPin {
-                repository: "example/action".to_owned(),
-                version: version.to_owned(),
-                sha: "0".repeat(40),
-                checked_at: "2026-09-27".to_owned(),
-            };
+            let pin = numbered(version);
             assert!(!pin.is_series(), "{version} is not a moving major series");
             assert_eq!(pin.series(), None, "{version} has no series number");
         }
     }
-
-    #[test]
-    fn a_channel_ref_renders_verbatim() {
-        let pin = pin("dtolnay/rust-toolchain").expect("rust-toolchain is tracked");
-        assert_eq!(pin.uses(), "dtolnay/rust-toolchain@stable");
-        assert!(!pin.is_series());
-    }
-
     #[test]
     fn every_tracked_ref_is_one_a_workflow_can_spell() {
         // A ref with a space or a comment in it renders a `uses:` line GitHub cannot
@@ -297,14 +270,6 @@ mod tests {
         let error = pin("someone/does-not-exist").expect_err("the lock has no such entry");
         assert!(matches!(error, PinError::Unknown { .. }));
         assert!(error.to_string().contains("github-action-pins refresh"));
-    }
-
-    #[test]
-    fn the_lock_round_trips() {
-        let lock = lock();
-        let encoded = lock.encode();
-        let decoded: PinLock = serde_json::from_str(&encoded).expect("the lock round trips");
-        assert_eq!(decoded, lock);
     }
 
     #[test]

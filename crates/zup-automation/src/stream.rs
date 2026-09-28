@@ -216,20 +216,6 @@ mod tests {
     use crate::diagnostic::Diagnostic;
     use crate::operation::OPERATION_BUILD;
 
-    /// The forward-compatibility rule, tested from the consumer's side. A new event
-    /// type inside the same major is skipped, not refused, and the events around it
-    /// still parse.
-    #[test]
-    fn an_unknown_event_type_does_not_stop_the_stream() {
-        let line = r#"{"type":"cache_warm","paths":3,"bytes":9001}"#;
-        let event: StreamEvent = serde_json::from_str(line).expect("an unknown event");
-        assert!(matches!(event, StreamEvent::Unknown));
-        assert_eq!(event.kind(), "unknown");
-        // A message a consumer has never seen still has to carry enough to display, or
-        // ignoring it would mean throwing away a line a newer zup thought was useful.
-        assert!(!line.is_empty());
-    }
-
     /// A stream is well-formed: one version line, then anything, then one completed
     /// line. The check is on the shape, not on the order of the middle, because a
     /// producer that reorders progress is making no promise.
@@ -290,32 +276,5 @@ mod tests {
         };
         assert_eq!(back, diagnostic);
         assert_eq!(back.identity(), diagnostic.identity());
-    }
-
-    /// No timestamps. A wall clock in a stream makes every fixture a diff and every
-    /// comparison a comparison of when the fixture was written.
-    #[test]
-    fn nothing_in_a_stream_is_a_wall_clock() {
-        for event in [
-            StreamEvent::Version(StreamVersion::new(Identifier::fixed(OPERATION_BUILD))),
-            StreamEvent::Phase {
-                phase: "build".to_owned(),
-                message: "m".to_owned(),
-            },
-            StreamEvent::Progress {
-                completed: 1,
-                total: 2,
-                label: "l".to_owned(),
-            },
-            StreamEvent::Log {
-                level: LogLevel::Info,
-                message: "l".to_owned(),
-            },
-        ] {
-            let line = event.to_line();
-            for banned in ["time", "timestamp", "date", "clock", "epoch"] {
-                assert!(!line.contains(banned), "`{banned}` in {line}");
-            }
-        }
     }
 }

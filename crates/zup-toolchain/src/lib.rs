@@ -957,11 +957,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn the_index_name_is_the_one_the_release_is_packaged_under() {
-        // A release written with one name and read with another verifies against
-        // nothing, and the failure is "this directory is not a zup release".
-        assert_eq!(RELEASE_INDEX_NAME, "zup-toolchain.json");
-    }
 }

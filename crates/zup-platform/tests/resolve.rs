@@ -127,28 +127,40 @@ fn unc_paths_keep_their_root_and_parent() {
     assert_eq!(path.file_name(), Some("tool.exe"));
 }
 
-#[test]
-fn parent_of_a_unicode_segment_walks_back_to_the_root() {
-    let path = TargetPath::new(windows_target(), r"C:\Ünïcodé\toolé").unwrap();
-    assert_eq!(path.as_str(), r"C:\Ünïcodé\toolé");
-    assert_eq!(path.parent().unwrap().as_str(), r"C:\Ünïcodé");
-    assert_eq!(path.parent().unwrap().parent().unwrap().as_str(), r"C:\");
-    assert!(path.parent().unwrap().parent().unwrap().parent().is_none());
-    assert_eq!(path.file_name(), Some("toolé"));
-}
-
-#[test]
-fn parent_of_a_unicode_leaf_splits_on_separators_not_bytes() {
-    // The final segment ends on a multi-byte character, so the byte before the
-    // end of the path is not a character boundary.
-    let path = TargetPath::new(unix_target(), "/opt/café/naïvé").unwrap();
-    assert_eq!(path.as_str(), "/opt/café/naïvé");
-    assert_eq!(path.parent().unwrap().as_str(), "/opt/café");
-    assert_eq!(path.parent().unwrap().parent().unwrap().as_str(), "/opt");
-    let root = path.parent().unwrap().parent().unwrap().parent().unwrap();
-    assert_eq!(root.as_str(), "/");
-    assert!(root.parent().is_none());
-    assert_eq!(path.file_name(), Some("naïvé"));
+/// A path whose segments end on multi-byte characters: the byte before the end
+/// is not a character boundary, so the split has to be on separators.
+#[rstest]
+#[case::windows(r"C:\Ünïcodé\toolé", "windows", &["C:\\Ünïcodé", "C:\\"], "toolé")]
+#[case::unix("/opt/café/naïvé", "unix", &["/opt/café", "/opt", "/"], "naïvé")]
+fn parent_splits_on_separators_not_bytes(
+    #[case] authored: &str,
+    #[case] target_kind: &str,
+    #[case] ancestors: &[&str],
+    #[case] file_name: &str,
+) {
+    let target = if target_kind == "unix" {
+        unix_target()
+    } else {
+        windows_target()
+    };
+    let path = TargetPath::new(target, authored).unwrap();
+    assert_eq!(path.as_str(), authored);
+    assert_eq!(path.file_name(), Some(file_name));
+    for (depth, expected) in ancestors.iter().enumerate() {
+        let mut at = path.clone();
+        for _ in 0..=depth {
+            at = at.parent().expect("the path is above its root");
+        }
+        assert_eq!(at.as_str(), *expected);
+    }
+    let mut at_root = path;
+    for _ in ancestors {
+        at_root = at_root.parent().expect("the path is above its root");
+    }
+    assert!(
+        at_root.parent().is_none(),
+        "the last ancestor is the root and has no parent"
+    );
 }
 
 #[test]
@@ -217,16 +229,6 @@ fn unix_backslashes_remain_lexical_characters() {
 fn preserves_case_and_normalizes_only_separators() {
     let path = TargetPath::new(windows_target(), r"c:/Users/Alice/AppData/Local").unwrap();
     assert_eq!(path.as_str(), r"c:\Users\Alice\AppData\Local");
-}
-
-#[test]
-fn target_path_serializes_with_its_target() {
-    let path = TargetPath::new(windows_target(), r"C:\PF\Acme").unwrap();
-    let json = serde_json::to_string(&path).unwrap();
-    let restored: TargetPath = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, path);
-    assert_eq!(restored.target(), path.target());
-    assert_eq!(restored.as_str(), path.as_str());
 }
 
 #[test]

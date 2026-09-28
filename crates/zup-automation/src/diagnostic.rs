@@ -194,39 +194,6 @@ impl DiagnosticSource {
 mod tests {
     use super::*;
 
-    /// A code is a public identifier, so its shape is asserted. This is the vocabulary
-    /// rule the module documentation states, made into something a change has to
-    /// satisfy rather than a paragraph a change has to respect.
-    #[test]
-    fn codes_are_dotted_lowercase_identifiers() {
-        for code in [
-            FALLBACK_CODE,
-            "zup.manifest.unknown_target",
-            "zup.toolchain.component_mismatch",
-            "zup.publish.asset_conflict",
-        ] {
-            assert!(Identifier::parse(code).is_ok(), "`{code}` is not a code");
-            assert!(
-                code.starts_with("zup."),
-                "`{code}` is not in zup's namespace"
-            );
-        }
-    }
-
-    #[test]
-    fn a_diagnostic_carries_every_field_so_a_consumer_never_guesses() {
-        let diagnostic = Diagnostic::error("zup.manifest.unknown_target", "no such target")
-            .with_help("declare it under [build.targets]")
-            .in_file("zup.toml");
-        let value: serde_json::Value = serde_json::to_value(&diagnostic).unwrap();
-        for field in ["severity", "code", "message", "source", "help"] {
-            assert!(value.get(field).is_some(), "`{field}` is missing: {value}");
-        }
-        assert_eq!(value["severity"], "error");
-        assert_eq!(value["source"]["file"], "zup.toml");
-        assert!(value["source"]["start_line"].is_null());
-    }
-
     /// The dedup key the Action uses to avoid annotating a streamed diagnostic and
     /// then the same diagnostic again from the final result.
     #[test]

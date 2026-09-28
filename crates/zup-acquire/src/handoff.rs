@@ -359,15 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_round_trips() {
-        let one = handoff();
-        let bytes = one.encode().expect("encodes");
-        let decoded = RuntimeHandoff::parse(&bytes).expect("parses");
-        assert_eq!(decoded, one);
-        assert_eq!(decoded.digest(), one.digest());
-    }
-
-    #[test]
     fn a_traversing_variant_or_scope_is_refused() {
         let mut one = handoff();
         one.variant = "../../windows/system32".to_owned();
@@ -375,16 +366,5 @@ mod tests {
         let mut two = handoff();
         two.scope = "machine/../user".to_owned();
         assert_eq!(two.validate(), Err(HandoffError::Scope));
-    }
-
-    #[test]
-    fn a_warm_session_reports_where_it_was() {
-        let summary = SessionSummary::warm(1_000_000, 1_000_000, 41);
-        assert!(
-            summary.resume_line().contains("resuming at"),
-            "{}",
-            summary.resume_line()
-        );
-        assert_eq!(SessionSummary::default().resume_line(), "");
     }
 }

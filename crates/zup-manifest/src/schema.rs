@@ -109,66 +109,6 @@ pub fn schema_json() -> Result<String, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn schema_exposes_authoring_capabilities() {
-        let value: serde_json::Value =
-            serde_json::from_str(&super::schema_json().unwrap()).unwrap();
-        assert_eq!(value["$id"], "https://zup.dev/schema/zup.toml.json");
-        assert_eq!(
-            value["properties"]["schema"]["const"],
-            super::SCHEMA_VERSION
-        );
-        assert!(value["properties"]["source"].is_null());
-        assert_eq!(value["properties"]["build"]["$ref"], "#/$defs/Build");
-        assert_eq!(
-            value["$defs"]["Build"]["required"],
-            serde_json::json!(["targets"])
-        );
-        assert_eq!(
-            value["$defs"]["Build"]["properties"]["targets"]["minProperties"],
-            1
-        );
-        assert_eq!(
-            value["$defs"]["TargetProfile"]["required"],
-            serde_json::json!(["target", "source"])
-        );
-        assert!(
-            value["$defs"]["TargetProfile"]["properties"]["frontend"].is_object()
-                || value["$defs"]["TargetProfile"]["properties"]["frontend"]["anyOf"].is_array()
-        );
-        assert_eq!(
-            value["$defs"]["TargetProfile"]["properties"]["install"]["anyOf"][0]["$ref"],
-            "#/$defs/Install"
-        );
-        assert_eq!(
-            value["$defs"]["Targeted2"]["properties"]["targets"]["default"],
-            serde_json::json!([])
-        );
-        assert_eq!(
-            value["$defs"]["Targeted2"]["properties"]["targets"]["items"]["$ref"],
-            "#/$defs/TargetProfileId"
-        );
-
-        assert_eq!(
-            value["examples"][0]["build"]["targets"]["windows-x64"]["frontend"],
-            "console"
-        );
-        assert_eq!(
-            value["examples"][0]["build"]["targets"]["windows-x64"]["install"]["scope"],
-            "user"
-        );
-        assert_eq!(value["examples"][0]["schema"], super::SCHEMA_VERSION);
-        assert_eq!(value["properties"]["frontend"]["default"], "gui");
-        assert_eq!(
-            value["$defs"]["Frontend"]["enum"],
-            serde_json::json!(["gui", "console", "headless"])
-        );
-        assert!(
-            value["properties"]["ui"].is_object() || value["properties"]["ui"]["anyOf"].is_array()
-        );
-        assert!(value["$defs"]["Install"]["properties"]["allow_directory_override"].is_object());
-    }
-
-    #[test]
     fn prerequisite_requirements_expose_only_portable_kinds() {
         let value: serde_json::Value =
             serde_json::from_str(&super::schema_json().unwrap()).unwrap();

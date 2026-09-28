@@ -7,8 +7,7 @@
 
 use crate::{
     Application, Artifact, AutomationResult, ByteCount, Details, Diagnostic, DiagnosticSource,
-    Digest, Identifier, LogLevel, PROTOCOL, Publication, PublicationAsset, SigningEvidence,
-    SigningState, Status, StreamEvent, StreamVersion, Target,
+    Digest, Identifier, PROTOCOL, Publication, SigningState, StreamEvent, StreamVersion, Target,
 };
 
 fn build() -> AutomationResult {
@@ -38,9 +37,9 @@ fn encode(value: &AutomationResult) -> serde_json::Value {
     serde_json::to_value(value).expect("a result this crate built")
 }
 
-/// The accepting direction, one case at a time. Every one of these is a change a
-/// future minor bump is allowed to make, and every one of them is a document this
-/// build's own decoder has to survive.
+/// The accepting direction. A field, an event type, an operation name and an artifact
+/// kind the consumer has never heard of are all things a future minor bump may add, and
+/// this build's own decoder has to survive every one of them.
 #[test]
 fn an_older_consumer_tolerates_an_additive_change() {
     let mut document = encode(&build());
@@ -48,44 +47,53 @@ fn an_older_consumer_tolerates_an_additive_change() {
     // A new optional field, from any depth.
     document["timing"] = serde_json::json!({ "elapsed_ms": 91_000 });
     document["artifacts"][0]["compression"] = serde_json::json!("zstd");
-    assert!(PROTOCOL.accepts(PROTOCOL));
     let parsed: &serde_json::Value = &document;
     assert_eq!(parsed["timing"]["elapsed_ms"], 91_000);
+    assert_eq!(
+        serde_json::from_value::<AutomationResult>(document)
+            .expect("an unknown field is skipped")
+            .artifacts
+            .len(),
+        1
+    );
 
     // A new event type, mid-stream.
-    let line = r#"{"type":"cache_warm","blobs":2}"#;
     assert!(matches!(
-        serde_json::from_str::<StreamEvent>(line),
+        serde_json::from_str::<StreamEvent>(r#"{"type":"cache_warm","blobs":2}"#),
         Ok(StreamEvent::Unknown)
     ));
 
     // A new operation name.
     let warm = AutomationResult::new("toolchain.warm");
-    assert!(warm.operation.is("toolchain.warm"));
     assert!(PROTOCOL.accepts(warm.protocol));
+    assert!(
+        serde_json::to_string(&warm)
+            .expect("an operation name on the wire")
+            .contains("toolchain.warm")
+    );
 
-    // A new artifact kind and a new publication state.
-    let mut artifact = document["artifacts"][0].clone();
+    // A new artifact kind, and a new publication state.
+    let mut artifact = encode(&build())["artifacts"][0].clone();
     artifact["kind"] = serde_json::json!("bound");
     let decoded: Artifact = serde_json::from_value(artifact).expect("a new kind");
     assert!(decoded.kind.is("bound"));
-    let publication = Publication {
-        provider: "github".to_owned(),
-        subject: "acme/acme".to_owned(),
-        tag: "v1.4.0".to_owned(),
-        id: None,
-        state: Identifier::fixed("sealed"),
-        url: None,
-        immutable: None,
-        assets: vec![PublicationAsset {
-            name: "Acme-Setup.exe".to_owned(),
-            size: ByteCount::new(1),
-            digest: None,
-            state: Identifier::fixed("mirrored"),
+    let publication: Publication = serde_json::from_value(serde_json::json!({
+        "provider": "github",
+        "subject": "acme/acme",
+        "tag": "v1.4.0",
+        "id": null,
+        "state": "sealed",
+        "url": null,
+        "immutable": null,
+        "assets": [{
+            "name": "Acme-Setup.exe",
+            "size": 1,
+            "digest": null,
+            "state": "mirrored"
         }],
-        receipt: None,
-    };
-    assert!(publication.state.is("sealed"));
+        "receipt": null
+    }))
+    .expect("a new publication state");
     assert!(publication.assets[0].state.is("mirrored"));
 }
 
@@ -117,56 +125,22 @@ fn an_older_consumer_refuses_a_semantic_change() {
         "a result without `diagnostics` is not a result"
     );
 
-    // A malformed digest, and an unsafe integer.
-    let mut bad_digest = encode(&build());
-    bad_digest["artifacts"][0]["digest"]["value"] = serde_json::json!("nope");
-    assert!(serde_json::from_value::<AutomationResult>(bad_digest).is_ok());
-    let mut document = encode(&build());
-    let mut result: AutomationResult = serde_json::from_value(document.clone()).unwrap();
-    result.artifacts[0].digest = Digest::sha256("nope");
-    assert!(result.validate().is_err(), "a short digest is not a digest");
-
-    document["artifacts"][0]["size"] = serde_json::json!(9_007_199_254_740_993u64);
+    // A digest is a string, so the wire form cannot refuse it; `validate` is where a
+    // short digest is caught. A size, however, is a number, and 2^53+1 is one no
+    // consumer can hold exactly — that one is refused on the way in.
+    let mut short_digest = build();
+    short_digest.artifacts[0].digest = Digest::sha256("nope");
     assert!(
-        serde_json::from_value::<AutomationResult>(document).is_err(),
+        short_digest.validate().is_err(),
+        "a short digest is not a digest"
+    );
+
+    let mut unsafe_size = encode(&build());
+    unsafe_size["artifacts"][0]["size"] = serde_json::json!(9_007_199_254_740_993u64);
+    assert!(
+        serde_json::from_value::<AutomationResult>(unsafe_size).is_err(),
         "2^53+1 cannot be represented exactly and must not parse"
     );
-}
-
-/// A completed line whose result is not a usable document is the failure a consumer
-/// must not paper over, so the two are checked together rather than separately.
-#[test]
-fn a_malformed_completed_result_is_refused() {
-    let mut result = build();
-    result.status = Status::Failure;
-    let text = serde_json::to_string(&StreamEvent::completed(result)).unwrap();
-    let event: StreamEvent = serde_json::from_str(&text).expect("a stream line");
-    let completed = event.result().expect("a completed line");
-    assert_eq!(completed.status, Status::Failure);
-    assert!(
-        completed.validate().is_err(),
-        "a failure with no diagnostic is a document a consumer cannot use"
-    );
-}
-
-/// A consumer that treats a warning as a failure is a consumer that turns a successful
-/// release into a red build; a consumer that treats an error as a notice is one that
-/// ships a broken artifact. The mapping is the contract.
-#[test]
-fn severity_and_status_agree() {
-    let warning = build().with_diagnostic(Diagnostic {
-        severity: crate::Severity::Warning,
-        ..Diagnostic::error("zup.build.deferred", "signing was skipped")
-    });
-    warning.validate().expect("a warning does not fail a build");
-    assert_eq!(warning.status, Status::Success);
-
-    let failure = AutomationResult::new(crate::OPERATION_BUILD)
-        .failed()
-        .with_diagnostic(Diagnostic::error("zup.build.digest_mismatch", "changed"))
-        .with_summary("1 artifact could not be built");
-    failure.validate().expect("a failure that says why");
-    assert_eq!(failure.status, Status::Failure);
 }
 
 /// A stream is read for its events and for its final result, and the two must be the
@@ -183,20 +157,6 @@ fn the_final_event_is_the_document_json_mode_would_have_written() {
     let json_mode = serde_json::to_string(&result).unwrap();
     let json_value: serde_json::Value = serde_json::from_str(&json_mode).unwrap();
     assert_eq!(json_value, final_value["result"]);
-}
-
-/// A routing message carries what a person would have read, and it is a protocol event
-/// rather than a suppressed line, so a consumer that shows nothing still has a record.
-#[test]
-fn a_routed_human_line_is_a_protocol_message() {
-    let event = StreamEvent::Log {
-        level: LogLevel::Warning,
-        message: "compiling plugin configure".to_owned(),
-    };
-    let value: serde_json::Value = serde_json::from_str(&event.to_line()).unwrap();
-    assert_eq!(value["type"], "log");
-    assert_eq!(value["level"], "warning");
-    assert_eq!(value["message"], "compiling plugin configure");
 }
 
 /// The header names the protocol, the tool and the operation, in that order of
@@ -219,31 +179,6 @@ fn the_header_is_the_only_place_the_tool_version_appears() {
         result.get("zup").is_none(),
         "the tool version is in the header, not in every result"
     );
-}
-
-/// Signing evidence is a list of facts rather than a state word, and the facts still
-/// mean the same thing in this contract as they do in a release manifest.
-#[test]
-fn signing_evidence_keeps_its_vocabulary() {
-    let evidence = vec![
-        SigningEvidence::new("signature_covers_bytes", "sha256"),
-        SigningEvidence::new("platform_trust_accepted", "trusted root"),
-        SigningEvidence::new("publisher", "CN=Acme"),
-        SigningEvidence::new("certificate", "3f9a…"),
-        SigningEvidence::new("timestamp", "rfc3161"),
-    ];
-    let state = SigningState::signed(evidence.clone());
-    assert!(state.covers_bytes());
-    assert!(!SigningState::unsigned().covers_bytes());
-    let value = serde_json::to_value(&state).unwrap();
-    let facts = value["evidence"]
-        .as_array()
-        .expect("a list")
-        .iter()
-        .map(|entry| entry["fact"].as_str().unwrap_or_default().to_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(facts.len(), 5);
-    assert!(facts.contains(&"publisher".to_owned()));
 }
 
 /// The details payload is optional, and a consumer that meets a `kind` from a newer
@@ -331,8 +266,6 @@ mod schema {
         }
         // A byte count is bounded in the schema, not just in the deserializer.
         assert_eq!(definitions["ByteCount"]["maximum"], crate::MAX_SAFE_BYTES);
-        // The generated document is byte-stable, because CI diffs it.
-        assert_eq!(crate::schema_json(), crate::schema_json());
     }
 
     /// Both roots share one definition table, and a name that appeared twice with

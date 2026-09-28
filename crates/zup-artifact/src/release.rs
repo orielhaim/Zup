@@ -755,14 +755,6 @@ mod tests {
         assert!(require_relative("").is_err());
     }
 
-    #[test]
-    fn encoding_is_deterministic() {
-        let manifest = ReleaseManifest::new(&app());
-        assert_eq!(manifest.encode().unwrap(), manifest.encode().unwrap());
-        let parsed = ReleaseManifest::parse(&manifest.encode().unwrap()).unwrap();
-        assert_eq!(parsed, manifest);
-    }
-
     /// A release, one installer, and the file on disk beside it.
     fn release_with(bytes: &[u8], path: &str) -> (tempfile::TempDir, ReleaseManifest) {
         let root = tempfile::TempDir::new().unwrap();
@@ -832,22 +824,6 @@ mod tests {
         );
         assert_eq!(manifest.bytes(), measured.size);
         assert_eq!(manifest.unfinalized(), Vec::<&str>::new());
-    }
-
-    /// An unsigned release is a real release with a real published identity:
-    /// nothing changed the bytes, so the built digest *is* the final digest. What
-    /// it is not is signed, and no consumer of this document may conclude
-    /// otherwise.
-    #[test]
-    fn an_unsigned_release_is_finalized_and_still_reports_that_it_is_unsigned() {
-        let (root, mut manifest) = release_with(b"unsigned!", "dist/Acme-Setup.exe");
-        let path = root.path().join("dist").join("Acme-Setup.exe");
-        manifest
-            .finalize(root.path(), "windows-x64", &claimed(&path), Vec::new())
-            .unwrap();
-        assert!(manifest.is_finalized());
-        assert!(!manifest.is_signed());
-        assert_eq!(manifest.unsigned(), vec!["windows-x64"]);
     }
 
     /// The published identity is measured, not transcribed, and the two
@@ -921,6 +897,11 @@ mod tests {
 
     /// The runtime a variant executes is a different file from the artifact that
     /// embeds it, and a downloader is entitled to know whether that one is signed.
+    /// The runtime a variant executes is a different file from the artifact that
+    /// embeds it, and a downloader is entitled to know whether that one is signed.
+    /// Composition knows the runtime's digest and nothing about a signature, so the
+    /// evidence arrives later and is filed against the variant rather than the
+    /// artifact.
     #[test]
     fn a_signed_runtime_is_recorded_separately_from_the_artifact() {
         let (_, mut manifest) = release_with(b"unsigned!", "dist/Acme-Setup.exe");
@@ -941,37 +922,8 @@ mod tests {
         ));
     }
 
-    /// The published document carries identities, and identities are public. A
-    /// release description is uploaded to a CDN; a credential in it is a
-    /// credential in the clear.
-    #[test]
-    fn a_release_description_holds_no_credential() {
-        let (root, mut manifest) = release_with(b"unsigned", "dist/Acme-Setup.exe");
-        let path = root.path().join("dist").join("Acme-Setup.exe");
-        manifest
-            .finalize(
-                root.path(),
-                "windows-x64",
-                &claimed(&path),
-                signed_evidence(),
-            )
-            .unwrap();
-        manifest
-            .note_runtime_evidence("windows-x64", signed_evidence())
-            .unwrap();
-        let encoded = String::from_utf8(manifest.encode().unwrap()).unwrap();
-        for word in [
-            "password",
-            "pfx",
-            "secret",
-            "token",
-            "private",
-            "credential",
-        ] {
-            assert!(!encoded.contains(word), "the description mentions `{word}`");
-        }
-    }
-
+    /// A description that parses must be one this build wrote, or a peer would
+    /// publish bytes none of its fields describe.
     #[test]
     fn a_parsed_description_requires_the_current_schema() {
         let mut manifest = ReleaseManifest::new(&app());

@@ -184,38 +184,36 @@ fn a_failure_still_emits_a_usable_document_and_exits_nonzero() {
     );
 }
 
+/// The documented boundary: zup speaks the protocol for a command it could have
+/// run, and clap for a command line it could not. A line that names an operation
+/// gets a document, even when the document is a refusal; a line that names nothing
+/// gets a usage message, because a document naming a made-up operation would be a
+/// worse answer than a usage message.
 #[test]
-fn a_usage_error_that_names_an_operation_still_emits_a_document() {
-    // The documented boundary: zup speaks the protocol for a command it could have
-    // run, and clap for a command line it could not. `build --format json
-    // --nonsense` names an operation, so the caller that asked for a document gets
-    // one.
+fn a_usage_error_speaks_the_protocol_only_when_it_names_an_operation() {
     let project = project();
-    let output = run(
+
+    let named = run(
         project.path(),
         None,
         &["build", "--format", "json", "--nonsense"],
     );
-    assert!(!output.status.success());
-    let document = only_document(&output.stdout, "a refused zup build");
+    assert!(!named.status.success());
+    let document = only_document(&named.stdout, "a refused zup build");
     assert_eq!(document["operation"], "build");
     assert_eq!(document["status"], "failure");
     assert_eq!(
         document["diagnostics"][0]["code"],
         "zup.cli.invalid_invocation"
     );
-}
 
-#[test]
-fn a_command_line_with_no_operation_is_claps_to_answer_for() {
-    // The other half of the same boundary: a `--format json` on its own has nothing
-    // to report a result *about*, and a document naming a made-up operation would be
-    // a worse answer than a usage message.
-    let project = project();
-    let output = run(project.path(), None, &["--format", "json"]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "no document is invented");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage"));
+    let anonymous = run(project.path(), None, &["--format", "json"]);
+    assert!(!anonymous.status.success());
+    assert!(
+        anonymous.stdout.is_empty(),
+        "no document is invented for an unnamed operation"
+    );
+    assert!(String::from_utf8_lossy(&anonymous.stderr).contains("Usage"));
 }
 
 #[test]
@@ -231,10 +229,6 @@ fn a_raw_output_command_writes_its_product_and_no_envelope() {
     assert!(document.get("operation").is_none());
     assert!(document.get("protocol").is_none());
 }
-
-// ---------------------------------------------------------------------------
-// The adversarial case
-// ---------------------------------------------------------------------------
 
 /// A directory holding programs that write junk to stdout and exit zero.
 ///

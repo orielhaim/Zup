@@ -250,6 +250,8 @@ impl BlobTable {
 mod tests {
     use super::*;
 
+    use rstest::rstest;
+
     fn entry(seed: u8, size: u64) -> BlobEntry {
         BlobEntry {
             digest: Sha256Digest::from_bytes([seed; 32]),
@@ -277,21 +279,32 @@ mod tests {
         forward.validate().unwrap();
     }
 
-    #[test]
-    fn validation_rejects_unsorted_and_gapped_tables() {
+    /// A reader that trusts a table without checking it can be pointed at a blob
+    /// that is not there, or at bytes that belong to a different blob. Every
+    /// inconsistency is refused rather than repaired.
+    #[rstest]
+    #[case::entries_out_of_digest_order(Tamper::Swap)]
+    #[case::an_offset_that_skips_a_gap(Tamper::Gap)]
+    #[case::an_entry_naming_a_segment_that_does_not_exist(Tamper::ExtraSegment)]
+    fn an_inconsistent_table_is_refused(#[case] tamper: Tamper) {
         let mut table = BlobTable::pack(vec![entry(1, 4), entry(2, 4)]).unwrap();
-        table.blobs.swap(0, 1);
-        assert!(matches!(table.validate(), Err(ArtifactError::Invalid)));
-
-        let mut table = BlobTable::pack(vec![entry(1, 4), entry(2, 4)]).unwrap();
-        table.blobs[1].offset = 9;
-        assert!(matches!(table.validate(), Err(ArtifactError::Invalid)));
-
-        let mut table = BlobTable::pack(vec![entry(1, 4), entry(2, 4)]).unwrap();
-        table.segments = 3;
+        match tamper {
+            Tamper::Swap => table.blobs.swap(0, 1),
+            Tamper::Gap => table.blobs[1].offset = 9,
+            Tamper::ExtraSegment => table.segments = 3,
+        }
         assert!(matches!(table.validate(), Err(ArtifactError::Invalid)));
     }
 
+    #[derive(Clone, Copy)]
+    enum Tamper {
+        Swap,
+        Gap,
+        ExtraSegment,
+    }
+
+    /// A table describing blobs whose bytes are not carried with it still has to
+    /// be readable, because it is what a peer hands over before the blobs arrive.
     #[test]
     fn a_detached_table_validates_without_bytes() {
         let table = BlobTable::detached(vec![entry(1, 4), entry(2, 4)]).unwrap();

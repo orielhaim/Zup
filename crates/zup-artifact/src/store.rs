@@ -598,6 +598,8 @@ mod tests {
         Descriptor::of(MediaType::BLOB, bytes)
     }
 
+    /// A source that publishes bytes it has not matched against the digest they
+    /// are addressed by is a source that can serve anything at any address.
     #[test]
     fn a_memory_source_refuses_content_that_does_not_match_its_descriptor() {
         let descriptor = descriptor(b"content");
@@ -608,6 +610,9 @@ mod tests {
         assert!(source.contains(&descriptor));
     }
 
+    /// The spooled form is the one that reaches the filesystem, so a short write
+    /// must leave no file at all: a truncated blob at a valid path is a blob a
+    /// later reader would trust.
     #[test]
     fn a_spool_source_publishes_only_verified_content() {
         let root = tempfile::tempdir().unwrap();
@@ -629,6 +634,9 @@ mod tests {
         assert_eq!(read, b"payload");
     }
 
+    /// A digest nothing was ever written for is reported as missing, not as an
+    /// empty read. A zero-length blob is a valid blob, so "no bytes" and "these
+    /// bytes" must stay distinguishable all the way to the caller.
     #[test]
     fn a_spool_source_reports_a_missing_digest_rather_than_a_short_read() {
         let root = tempfile::tempdir().unwrap();
@@ -638,6 +646,9 @@ mod tests {
         assert!(!source.contains(&descriptor(b"absent")));
     }
 
+    /// The spool is a directory other processes can reach, so the file behind a
+    /// digest can be replaced between the write and the read. A reader that trusted
+    /// the path rather than the bytes would serve whatever is there now.
     #[test]
     fn a_spooled_file_replaced_behind_the_source_is_detected() {
         let root = tempfile::tempdir().unwrap();
@@ -651,6 +662,9 @@ mod tests {
         ));
     }
 
+    /// A blob entry addresses a byte range inside a segment. Reading one past the end
+    /// would splice the next blob's bytes into this one, and every digest check
+    /// downstream would then be checking a blob that never existed.
     #[test]
     fn segments_read_exact_ranges_and_refuse_to_run_past_their_end() {
         let mut segments = MemorySegments::new();

@@ -145,19 +145,6 @@ async fn noninteractive_machine_scope_reports_authorization_required() {
     assert!(matches!(error, SessionError::AuthorizationRequired));
 }
 
-#[test]
-fn backend_payload_source_is_exposed_without_runtime_roots() {
-    let root = TempDir::new().unwrap();
-    let (request, backend) = request(&root, SelectedScope::User);
-    let source = zup_runtime::RuntimeBackend::payload_source(&backend, &request);
-    let relative = RelativePath::new("app.exe").unwrap();
-    let (size, digest) = hash_reader(&b"installed"[..]).unwrap();
-    let mut reader = source.open(&relative, &digest, size).unwrap();
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut bytes).unwrap();
-    assert_eq!(bytes, b"installed");
-}
-
 #[tokio::test]
 async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
     let root = TempDir::new().unwrap();

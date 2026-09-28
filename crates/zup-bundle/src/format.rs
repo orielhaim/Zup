@@ -1758,8 +1758,11 @@ mod tests {
         }
     }
 
+    /// The aggregate is refused twice over: by the canonicalization the writer runs
+    /// first, and by the writer's own file path, which must not have created a
+    /// half-written bundle before it discovered the refusal.
     #[test]
-    fn canonicalization_checks_aggregate_uncompressed_aot_size() {
+    fn the_aggregate_uncompressed_aot_size_is_refused_before_anything_is_written() {
         let plan = plan_with_plugins(5);
         let artifacts = plan
             .installer
@@ -1767,35 +1770,25 @@ mod tests {
             .iter()
             .map(|binding| unchecked_artifact(binding.id.as_str()))
             .collect::<Vec<_>>();
+        let expected = 5 * MAX_AOT_BYTES as u64;
 
         assert!(matches!(
             canonical_artifacts(&plan, &artifacts),
             Err(PackageError::PluginAotTooLarge {
                 size,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
-            }) if size == 5 * MAX_AOT_BYTES as u64
+            }) if size == expected
         ));
-    }
 
-    #[test]
-    fn writer_rejects_aggregate_before_reading_payload_sources() {
-        let plan = plan_with_plugins(5);
-        let artifacts = plan
-            .installer
-            .plugins
-            .iter()
-            .map(|binding| unchecked_artifact(binding.id.as_str()))
-            .collect::<Vec<_>>();
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("bundle.zupbundle");
-
         let error = BundleWriter::write_file(&plan, &artifacts, &output).unwrap_err();
         assert!(matches!(
             error,
             PackageError::PluginAotTooLarge {
                 size,
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
-            } if size == 5 * MAX_AOT_BYTES as u64
+            } if size == expected
         ));
         assert!(!output.exists());
     }

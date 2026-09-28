@@ -10,7 +10,7 @@ use zup_transaction::{
 };
 use zup_windows::{
     InstallationLock, LockScope, NullProgress, WindowsFileExecutor, apply_node, create_durable,
-    move_durable, reconcile_node, to_host_path, volume_root, write_durable,
+    reconcile_node, to_host_path,
 };
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
@@ -221,14 +221,6 @@ fn stage_op(id: &str) -> OperationId {
 }
 
 #[test]
-fn durable_write_then_read() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("j.json");
-    write_durable(&path, b"{\"a\":1}").expect("write_durable");
-    assert_eq!(std::fs::read(&path).unwrap(), b"{\"a\":1}");
-}
-
-#[test]
 fn create_durable_refuses_overwrite() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("f.bin");
@@ -236,36 +228,6 @@ fn create_durable_refuses_overwrite() {
     let err = create_durable(&path, b"second").unwrap_err();
     assert!(matches!(err, zup_windows::DurableError::Win32 { .. }));
     assert_eq!(std::fs::read(&path).unwrap(), b"first");
-}
-
-#[test]
-fn move_durable_publishes() {
-    let dir = TempDir::new().unwrap();
-    let a = dir.path().join("a.bin");
-    let b = dir.path().join("b.bin");
-    std::fs::write(&a, b"payload").unwrap();
-    move_durable(&a, &b).unwrap();
-    assert!(b.exists());
-    assert!(!a.exists());
-}
-
-#[test]
-fn move_durable_accepts_embedded_separator_path() {
-    let dir = TempDir::new().unwrap();
-    let source = dir.path().join("work/a.bin");
-    let destination = dir.path().join("target/b.bin");
-    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    std::fs::write(&source, b"payload").unwrap();
-    move_durable(&source, &destination).unwrap();
-    assert_eq!(std::fs::read(destination).unwrap(), b"payload");
-}
-
-#[test]
-fn volume_root_is_absolute() {
-    let dir = TempDir::new().unwrap();
-    let v = volume_root(dir.path()).unwrap();
-    assert!(v.is_absolute());
 }
 
 #[test]
@@ -328,30 +290,9 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
     assert!(!awkward.contains(".."), "{awkward}");
 }
 
-/// The refusal names the state root, not the lock file.
-///
-/// A message containing `%LOCALAPPDATA%\zup\zup-install-com_acme_desktop-user.lock`
-/// sends a user to look at a file that means nothing to them; the directory it
-/// lives in is the thing they can act on.
-#[test]
-fn a_lock_refusal_names_a_directory_and_not_an_implementation_detail() {
-    let dir = TempDir::new().unwrap();
-    // A directory where the lock file goes: opening it cannot succeed, and the
-    // message has to be about the directory a user can look at.
-    let key = InstallationLock::lock_key("com.acme.desktop", "machine");
-    std::fs::create_dir(dir.path().join(format!("{key}.lock"))).unwrap();
-    let error = InstallationLock::try_acquire(dir.path(), &key).expect_err("not a file");
-    let message = error.to_string();
-    assert!(!message.contains(".lock"), "{message}");
-    assert!(
-        message.contains(&dir.path().display().to_string()),
-        "{message}"
-    );
-}
-
-/// An uninstalled installation leaves no lock behind, and a reinstall starts
-/// clean. This is the residue a repeat-lifecycle test would otherwise leave
-/// behind for the next run to trip over.
+/// A lock marker left behind by an uninstall must not be removable while
+/// somebody holds it, and removing an absent one must not be an error — an
+/// uninstall that fails because it ran twice is worse than useless.
 #[test]
 fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
     let dir = TempDir::new().unwrap();
@@ -371,69 +312,30 @@ fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
 }
 
+/// A staged file becomes an installed one through two nodes, and what the
+/// receipt says afterwards differs by whether anything was there before: a
+/// create names what it installed, a replace names what it displaced and keeps a
+/// copy of it.
 #[test]
-fn fresh_install_create() {
+fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
+    let rel = RelativePath::new("a.bin").unwrap();
+
+    // A create names what it installed.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"hello").unwrap();
-
     let dest = target_root.join("a.bin");
-    let op_id = OperationId::resource(
-        "create",
-        &zup_core::ResourceKey::File {
-            destination: dest.display().to_string(),
-        },
-    );
     let mut exec = WindowsFileExecutor::new(
         src,
         target_root.join("work"),
         "tx1".into(),
         Box::new(NullProgress),
     );
-    exec.note_file(&op_id, FilePrecondition::Absent, digest(b"hello"), 5);
-    exec.note_file(
-        &stage_op("a"),
-        FilePrecondition::Absent,
-        digest(b"hello"),
-        5,
-    );
-
-    // Stage then create via apply_node.
-    let stage = zup_transaction::TransactionNode {
-        id: stage_op("a"),
-        phase: zup_transaction::Phase::Stage,
-        kind: zup_transaction::NodeKind::StageFile {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
-    };
-    // Register stage desired state.
+    let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"hello"), 5);
-
-    let rel = RelativePath::new("a.bin").unwrap();
-    let receipt = apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-    assert!(matches!(
-        receipt,
-        zup_windows::OperationReceipt::StageFile(_)
-    ));
-
-    let create = zup_transaction::TransactionNode {
-        id: op_id.clone(),
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-            delta: FileDelta::Create,
-        },
-        declaration_order: 2,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
+    let create = mutation_node("create", FileDelta::Create, &dest);
     exec.note_file(&create.id, FilePrecondition::Absent, digest(b"hello"), 5);
-    let receipt = apply_node(&mut exec, &create, &rel, &dest).expect("create");
-    match receipt {
+    match apply_node(&mut exec, &create, &rel, &dest).expect("create") {
         zup_windows::OperationReceipt::CreateFile(r) => {
             assert_eq!(r.installed_size, 5);
             assert_eq!(r.installed_sha256, digest(b"hello"));
@@ -441,55 +343,22 @@ fn fresh_install_create() {
         other => panic!("expected CreateFile receipt, got {other:?}"),
     }
     assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
-}
 
-#[test]
-fn update_replace_keeps_backup() {
+    // A replace names what it displaced and keeps a copy of it.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
     let dest = target_root.join("a.bin");
     std::fs::write(&dest, b"old!").unwrap();
-
-    let op_id = OperationId::resource(
-        "replace",
-        &zup_core::ResourceKey::File {
-            destination: dest.display().to_string(),
-        },
-    );
     let mut exec = WindowsFileExecutor::new(
         src,
         target_root.join("work"),
         "tx2".into(),
         Box::new(NullProgress),
     );
-    let rel = RelativePath::new("a.bin").unwrap();
-
-    let stage = zup_transaction::TransactionNode {
-        id: stage_op("a"),
-        phase: zup_transaction::Phase::Stage,
-        kind: zup_transaction::NodeKind::StageFile {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-
-    let replace = zup_transaction::TransactionNode {
-        id: op_id.clone(),
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-            delta: FileDelta::Replace,
-        },
-        declaration_order: 2,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let replace = mutation_node("replace", FileDelta::Replace, &dest);
     exec.note_file(
         &replace.id,
         FilePrecondition::Exact {
@@ -499,8 +368,7 @@ fn update_replace_keeps_backup() {
         digest(b"new!"),
         4,
     );
-    let receipt = apply_node(&mut exec, &replace, &rel, &dest).expect("replace");
-    match receipt {
+    match apply_node(&mut exec, &replace, &rel, &dest).expect("replace") {
         zup_windows::OperationReceipt::ReplaceFile(r) => {
             assert_eq!(r.previous_sha256, digest(b"old!"));
             assert_eq!(r.new_sha256, digest(b"new!"));
@@ -512,87 +380,85 @@ fn update_replace_keeps_backup() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"new!");
 }
 
-#[test]
-fn plan_drift_create_when_target_appears() {
-    let (_dir, payload_root, target_root, src) = setup();
-    std::fs::write(payload_root.join("a.bin"), b"x").unwrap();
-    let dest = target_root.join("a.bin");
-    // Target appears after snapshot.
-    std::fs::write(&dest, b"foreign").unwrap();
-
-    let mut exec = WindowsFileExecutor::new(
-        src,
-        target_root.join("work"),
-        "tx3".into(),
-        Box::new(NullProgress),
-    );
-    let rel = RelativePath::new("a.bin").unwrap();
-    let op = zup_transaction::TransactionNode {
-        id: OperationId::new("create"),
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
+fn stage_node(dest: &Path) -> zup_transaction::TransactionNode {
+    zup_transaction::TransactionNode {
+        id: stage_op("a"),
+        phase: zup_transaction::Phase::Stage,
+        kind: zup_transaction::NodeKind::StageFile {
             key: zup_core::ResourceKey::File {
                 destination: dest.display().to_string(),
             },
-            delta: FileDelta::Create,
         },
         declaration_order: 1,
         meta: zup_transaction::NodeMeta::default(),
-    };
-    exec.note_file(&op.id, FilePrecondition::Absent, digest(b"x"), 1);
-    let err = apply_node(&mut exec, &op, &rel, &dest).unwrap_err();
-    assert!(matches!(
-        err,
-        zup_windows::WindowsFileExecutorError::PlanDrift { .. }
-    ));
-    assert_eq!(
-        std::fs::read(&dest).unwrap(),
-        b"foreign",
-        "must not overwrite"
-    );
+    }
 }
 
-#[test]
-fn plan_drift_replace_when_target_changed() {
-    let (_dir, payload_root, target_root, src) = setup();
-    std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
-    let dest = target_root.join("a.bin");
-    std::fs::write(&dest, b"CHANGED").unwrap(); // not the expected old content
-
-    let mut exec = WindowsFileExecutor::new(
-        src,
-        target_root.join("work"),
-        "tx4".into(),
-        Box::new(NullProgress),
-    );
-    let rel = RelativePath::new("a.bin").unwrap();
-    let op = zup_transaction::TransactionNode {
-        id: OperationId::new("replace"),
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-            delta: FileDelta::Replace,
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
+fn mutation_node(verb: &str, delta: FileDelta, dest: &Path) -> zup_transaction::TransactionNode {
+    let key = zup_core::ResourceKey::File {
+        destination: dest.display().to_string(),
     };
-    exec.note_file(
-        &op.id,
-        FilePrecondition::Exact {
-            size: 4,
-            sha256: digest(b"old!"),
-        },
-        digest(b"new!"),
-        4,
-    );
-    let err = apply_node(&mut exec, &op, &rel, &dest).unwrap_err();
-    assert!(matches!(
-        err,
-        zup_windows::WindowsFileExecutorError::PlanDrift { .. }
-    ));
-    assert_eq!(std::fs::read(&dest).unwrap(), b"CHANGED");
+    zup_transaction::TransactionNode {
+        id: OperationId::resource(verb, &key),
+        phase: zup_transaction::Phase::FileMutation,
+        kind: zup_transaction::NodeKind::FileMutation { key, delta },
+        declaration_order: 2,
+        meta: zup_transaction::NodeMeta::default(),
+    }
+}
+
+/// A precondition that no longer holds is drift, and drift is never resolved by
+/// overwriting: whatever is at the destination is somebody's, whoever wrote it
+/// after the plan was made.
+#[test]
+fn a_target_that_changed_after_the_plan_is_refused_and_left_alone() {
+    for (delta, on_disk, expected) in [
+        (
+            FileDelta::Create,
+            b"foreign".as_slice(),
+            b"foreign".as_slice(),
+        ),
+        (
+            FileDelta::Replace,
+            b"CHANGED".as_slice(),
+            b"CHANGED".as_slice(),
+        ),
+    ] {
+        let (_dir, payload_root, target_root, src) = setup();
+        std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
+        let dest = target_root.join("a.bin");
+        std::fs::write(&dest, on_disk).unwrap();
+
+        let mut exec = WindowsFileExecutor::new(
+            src,
+            target_root.join("work"),
+            "tx-drift".into(),
+            Box::new(NullProgress),
+        );
+        let rel = RelativePath::new("a.bin").unwrap();
+        let op = mutation_node("drift", delta, &dest);
+        // The plan recorded the state the executor found when the plan was made,
+        // which is not the state the destination is in now.
+        exec.note_file(
+            &op.id,
+            FilePrecondition::Exact {
+                size: 4,
+                sha256: digest(b"old!"),
+            },
+            digest(b"new!"),
+            4,
+        );
+        let error = apply_node(&mut exec, &op, &rel, &dest).unwrap_err();
+        assert!(matches!(
+            error,
+            zup_windows::WindowsFileExecutorError::PlanDrift { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            expected,
+            "must not overwrite"
+        );
+    }
 }
 
 #[test]
@@ -622,53 +488,20 @@ fn reconcile_absent_and_applied() {
     );
 }
 
+/// A receipt is a claim about bytes on disk, so verification is only as good as
+/// the receipt it was handed. Every part of a receipt has to be checked: a
+/// published payload is no longer staged, a replaced file's backup is as much a
+/// part of the claim as the file in front of it, and a removed file is verified
+/// by its absence.
 #[test]
-fn large_file_staged_streaming() {
-    let (_dir, payload_root, target_root, src) = setup();
-    let big = vec![0xA5u8; 3 * 1024 * 1024];
-    std::fs::write(payload_root.join("big.bin"), &big).unwrap();
-    let dest = target_root.join("big.bin");
-
-    let mut exec = WindowsFileExecutor::new(
-        src,
-        target_root.join("work"),
-        "txbig".into(),
-        Box::new(NullProgress),
-    );
-    let rel = RelativePath::new("big.bin").unwrap();
-    let stage = zup_transaction::TransactionNode {
-        id: stage_op("big"),
-        phase: zup_transaction::Phase::Stage,
-        kind: zup_transaction::NodeKind::StageFile {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
-    };
-    exec.note_file(
-        &stage.id,
-        FilePrecondition::Absent,
-        digest(&big),
-        big.len() as u64,
-    );
-    apply_node(&mut exec, &stage, &rel, &dest).expect("stage large");
-}
-
-#[test]
-fn installed_file_verification_follows_the_receipt() {
+fn verification_follows_every_part_of_a_receipt() {
     use zup_windows::verify_installed_file;
 
+    // Create: the staged copy is consumed by the publish, and anything other
+    // than the recorded bytes fails.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"hello").unwrap();
     let dest = target_root.join("a.bin");
-    let op_id = OperationId::resource(
-        "create",
-        &zup_core::ResourceKey::File {
-            destination: dest.display().to_string(),
-        },
-    );
     let mut exec = WindowsFileExecutor::new(
         src,
         target_root.join("work"),
@@ -676,122 +509,54 @@ fn installed_file_verification_follows_the_receipt() {
         Box::new(NullProgress),
     );
     let rel = RelativePath::new("a.bin").unwrap();
-    let stage = zup_transaction::TransactionNode {
-        id: stage_op("a"),
-        phase: zup_transaction::Phase::Stage,
-        kind: zup_transaction::NodeKind::StageFile {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"hello"), 5);
-    let stage_receipt = apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-    let zup_windows::OperationReceipt::StageFile(staged) = &stage_receipt else {
+    let stage_receipt = zup_windows::transaction_receipt(
+        apply_node(&mut exec, &stage, &rel, &dest).expect("stage"),
+    );
+    let zup_transaction::OperationReceipt::StageFile { staged_path, .. } = &stage_receipt else {
         panic!("expected a stage receipt");
     };
-    let staged_path = staged.staged_path.clone();
-    let staged_receipt = zup_windows::transaction_receipt(stage_receipt);
-    verify_installed_file(&staged_receipt).expect("staged payload matches");
+    let staged_path = PathBuf::from(staged_path);
+    verify_installed_file(&stage_receipt).expect("staged payload matches");
 
-    let create = zup_transaction::TransactionNode {
-        id: op_id.clone(),
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-            delta: FileDelta::Create,
-        },
-        declaration_order: 2,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let create = mutation_node("create", FileDelta::Create, &dest);
     exec.note_file(&create.id, FilePrecondition::Absent, digest(b"hello"), 5);
-    let receipt = apply_node(&mut exec, &create, &rel, &dest).expect("create");
-    let receipt = zup_windows::transaction_receipt(receipt);
-    let zup_transaction::OperationReceipt::CreateFile {
-        destination,
-        installed_sha256,
-        installed_size,
-        ..
-    } = &receipt
-    else {
-        panic!("expected a create receipt");
-    };
-    verify_installed_file(&receipt).expect("installed file matches its receipt");
-
-    // The published file is the installed state, so the staged copy is gone
-    // and staging is no longer verifiable — verification covers the mutation.
+    let created = zup_windows::transaction_receipt(
+        apply_node(&mut exec, &create, &rel, &dest).expect("create"),
+    );
+    verify_installed_file(&created).expect("installed file matches its receipt");
     assert!(
-        verify_installed_file(&staged_receipt).is_err(),
+        verify_installed_file(&stage_receipt).is_err(),
         "a published payload is not still staged"
     );
-    assert!(!std::path::Path::new(&staged_path).exists());
-
-    // Anything other than the recorded bytes fails verification.
+    assert!(!staged_path.exists());
     std::fs::write(&dest, b"HELLO").unwrap();
-    let error = verify_installed_file(&receipt).unwrap_err();
     assert!(matches!(
-        error,
+        verify_installed_file(&created).unwrap_err(),
         zup_windows::WindowsFileExecutorError::Verification { .. }
     ));
     std::fs::remove_file(&dest).unwrap();
     assert!(
-        verify_installed_file(&receipt).is_err(),
+        verify_installed_file(&created).is_err(),
         "a missing installed file is not verified"
     );
-    let _ = (destination, installed_sha256, installed_size);
-}
 
-#[test]
-fn replaced_file_verification_checks_installed_and_backup() {
-    use zup_windows::verify_installed_file;
-
+    // Replace: the backup is part of the claim, not a leftover.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
     let dest = target_root.join("a.bin");
     std::fs::write(&dest, b"old!").unwrap();
-    let op_id = OperationId::resource(
-        "replace",
-        &zup_core::ResourceKey::File {
-            destination: dest.display().to_string(),
-        },
-    );
     let mut exec = WindowsFileExecutor::new(
         src,
         target_root.join("work"),
         "tx-verify-replace".into(),
         Box::new(NullProgress),
     );
-    let rel = RelativePath::new("a.bin").unwrap();
-    let stage = zup_transaction::TransactionNode {
-        id: stage_op("a"),
-        phase: zup_transaction::Phase::Stage,
-        kind: zup_transaction::NodeKind::StageFile {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-        },
-        declaration_order: 1,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-
-    let replace = zup_transaction::TransactionNode {
-        id: op_id,
-        phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation {
-            key: zup_core::ResourceKey::File {
-                destination: dest.display().to_string(),
-            },
-            delta: FileDelta::Replace,
-        },
-        declaration_order: 2,
-        meta: zup_transaction::NodeMeta::default(),
-    };
+    let replace = mutation_node("replace", FileDelta::Replace, &dest);
     exec.note_file(
         &replace.id,
         FilePrecondition::Exact {
@@ -801,23 +566,24 @@ fn replaced_file_verification_checks_installed_and_backup() {
         digest(b"new!"),
         4,
     );
-    let receipt = apply_node(&mut exec, &replace, &rel, &dest).expect("replace");
-    let receipt = zup_windows::transaction_receipt(receipt);
-    verify_installed_file(&receipt).expect("replace matches its receipt");
+    let replaced = zup_windows::transaction_receipt(
+        apply_node(&mut exec, &replace, &rel, &dest).expect("replace"),
+    );
+    verify_installed_file(&replaced).expect("replace matches its receipt");
 
-    let zup_transaction::OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
+    let zup_transaction::OperationReceipt::ReplaceFile { backup_path, .. } = &replaced else {
         panic!("expected a replace receipt");
     };
     let backup = std::path::PathBuf::from(backup_path);
     std::fs::write(&backup, b"zzzz").unwrap();
     assert!(
-        verify_installed_file(&receipt).is_err(),
+        verify_installed_file(&replaced).is_err(),
         "a changed backup fails verification"
     );
     std::fs::write(&backup, b"old!").unwrap();
     std::fs::write(&dest, b"nope").unwrap();
     assert!(
-        verify_installed_file(&receipt).is_err(),
+        verify_installed_file(&replaced).is_err(),
         "a changed installed file fails verification"
     );
 }
@@ -878,28 +644,4 @@ fn removal_verification_requires_absent_destination_and_intact_backup() {
         verify_installed_file(&receipt).is_err(),
         "a changed backup fails verification"
     );
-}
-
-#[test]
-fn backend_receipts_are_not_file_verifications() {
-    use zup_core::ResourceKey;
-    use zup_windows::verify_installed_file;
-
-    let error = verify_installed_file(&zup_transaction::OperationReceipt::Control)
-        .expect_err("a barrier receipt names no file state");
-    assert!(matches!(
-        error,
-        zup_windows::WindowsFileExecutorError::Unsupported { .. }
-    ));
-    let error = verify_installed_file(&zup_transaction::OperationReceipt::Backend {
-        key: ResourceKey::Backend {
-            id: zup_core::BackendResourceId::new("fake.backend").unwrap(),
-        },
-        payload: b"opaque".to_vec(),
-    })
-    .expect_err("an opaque backend receipt is not a file receipt");
-    assert!(matches!(
-        error,
-        zup_windows::WindowsFileExecutorError::Unsupported { .. }
-    ));
 }

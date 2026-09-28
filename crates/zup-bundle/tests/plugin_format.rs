@@ -10,8 +10,8 @@ use zup_bundle::{
 use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, TargetTriple};
 use zup_manifest::TargetOverrides;
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
-    engine_fingerprint, wit_package_digest,
+    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
+    wit_package_digest,
 };
 
 fn project() -> (TempDir, TargetBuildPlan) {
@@ -169,39 +169,26 @@ fn artifact_bytes_cannot_disagree_with_metadata() {
     assert!(CompiledPluginArtifact::new(wrong_size, bytes.to_vec()).is_err());
 }
 
+/// The plugin table in a package's metadata is the reader's only map from a plugin id to
+/// a blob, so a hand-edited one is refused: a descriptor that disagrees with its own
+/// recorded size, and a table whose order no longer matches the ids it is keyed by.
 #[test]
-fn malformed_plugin_metadata_is_rejected_on_package_open() {
-    let (_root, plan) = project();
-    let compiled = artifact(&plan, "z-plugin", b"aot");
-    let second = artifact(&plan, "a-plugin", b"other aot");
-    let mut package = BundleWriter::encode(&plan, &[compiled, second]).unwrap();
-    rewrite_metadata(&mut package, |value| {
-        value["plan"]["plugins"][0]["aot_size"] = Value::from(99);
-    });
-    assert!(Package::parse(package).is_err());
-}
-
-#[test]
-fn plugin_descriptor_order_is_strict() {
+fn plugin_metadata_that_disagrees_with_itself_is_refused() {
     let (_root, plan) = project();
     let first = artifact(&plan, "z-plugin", b"aot");
-    let second = artifact(&plan, "a-plugin", b"other");
-    let mut package = BundleWriter::encode(&plan, &[first, second]).unwrap();
-    rewrite_metadata(&mut package, |value| {
+    let second = artifact(&plan, "a-plugin", b"other aot");
+
+    let mut wrong_size = BundleWriter::encode(&plan, &[first.clone(), second.clone()]).unwrap();
+    rewrite_metadata(&mut wrong_size, |value| {
+        value["plan"]["plugins"][0]["aot_size"] = Value::from(99);
+    });
+    assert!(Package::parse(wrong_size).is_err());
+
+    let mut reordered = BundleWriter::encode(&plan, &[first, second]).unwrap();
+    rewrite_metadata(&mut reordered, |value| {
         value["plan"]["plugins"].as_array_mut().unwrap().swap(0, 1);
     });
-    assert!(Package::parse(package).is_err());
-}
-
-#[test]
-fn tampered_plugin_blob_is_rejected_before_access() {
-    let (_root, plan) = project();
-    let compiled = artifact(&plan, "z-plugin", b"aot");
-    let second = artifact(&plan, "a-plugin", b"other aot");
-    let mut package = BundleWriter::encode(&plan, &[compiled, second]).unwrap();
-    let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
-    package[60 + metadata_len] ^= 1;
-    assert!(Package::parse(package).is_err());
+    assert!(Package::parse(reordered).is_err());
 }
 
 fn other_target() -> TargetTriple {
@@ -249,12 +236,6 @@ fn persisted_plugin_target_must_match_installer_target() {
         Package::parse(package),
         Err(PackageError::TargetMismatch { .. })
     ));
-}
-
-#[test]
-fn typed_plugin_target_is_validated_by_contract() {
-    assert!(TargetTriple::parse("not a target").is_err());
-    let _ = PluginEngine::new(HOST_TARGET).unwrap();
 }
 
 #[test]

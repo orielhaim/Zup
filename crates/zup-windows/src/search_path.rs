@@ -159,6 +159,8 @@ mod tests {
     #[test]
     fn split_drops_empty_segments_and_trims() {
         assert_eq!(split(r"  C:\one ; ;C:\two;; "), vec![r"C:\one", r"C:\two"]);
+        assert!(split("").is_empty());
+        assert!(split(";;;;").is_empty());
     }
 
     #[test]
@@ -183,18 +185,14 @@ mod tests {
     }
 
     #[test]
-    fn membership_survives_unrelated_values() {
-        let target = windows();
-        let desired = TargetPath::new(&target, r"C:\Apps\bin").unwrap();
-        let stored = r"C:\Windows;C:\Apps\bin;D:\tools;";
-        assert!(contains(&target, stored, &desired));
-        assert_eq!(collect(&target, stored).len(), 3);
-    }
-
-    #[test]
     fn write_type_never_downgrades_an_expanding_path() {
         assert_eq!(write_value_type(VALUE_TYPE_EXPAND), VALUE_TYPE_EXPAND);
         assert_eq!(write_value_type(VALUE_TYPE_PLAIN), VALUE_TYPE_PLAIN);
         assert_eq!(write_value_type(VALUE_TYPE_MISSING), VALUE_TYPE_EXPAND);
+        // Losing a value that used to expand is drift the caller has to see, not
+        // a silent promotion of a plain value.
+        assert!(lost_expansion(VALUE_TYPE_MISSING, VALUE_TYPE_EXPAND));
+        assert!(!lost_expansion(VALUE_TYPE_PLAIN, VALUE_TYPE_PLAIN));
+        assert!(!lost_expansion(VALUE_TYPE_EXPAND, VALUE_TYPE_EXPAND));
     }
 }

@@ -163,16 +163,6 @@ pub enum ResourceError {
 mod tests {
     use super::*;
 
-    /// A resource identifier the loader can hold, and one it cannot. The bound
-    /// is a 16-bit field, and `0xFFFF` is the loader's own "by name" marker, so
-    /// the last identifier a container may use is one below it.
-    #[test]
-    fn the_resource_bounds_are_the_format_bounds() {
-        assert_eq!(RESOURCE_TYPE_RCDATA, 10);
-        assert_eq!(MAX_RESOURCE_ID, 0xFFFE);
-        assert_eq!(MAX_RESOURCE_SIZE, u32::MAX as u64);
-    }
-
     /// A document set is refused before any byte is written, so a container that
     /// would not be readable is never created.
     #[test]

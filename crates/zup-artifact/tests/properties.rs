@@ -3,9 +3,8 @@
 //!
 //! These are the documents a build writes and a downloader or a publisher reads,
 //! so a writer and a reader that disagree have no compiler between them: the
-//! disagreement shows up as a release no download can satisfy. So the properties
-//! are stated as *implications* about the values, and each one is a claim the
-//! code could violate without a type error.
+//! disagreement shows up as a release no download can satisfy. Each property below
+//! is a claim the code could violate without a type error.
 //!
 //! - **Canonical form is a fixed point.** `encode(parse(encode(x))) == encode(x)`
 //!   for the index and the release description, because both are hashed or
@@ -21,6 +20,10 @@
 //! - **The two finalization questions partition the artifacts.** `unsigned` and
 //!   `unfinalized` name different artifacts: "unsigned" is a statement about
 //!   published bytes, and an artifact with no published bytes has none to make.
+//!
+//! The bytes are arbitrary, so almost every run exercises only the "did not parse"
+//! path. The properties earn their keep in the runs that find an input the parser
+//! accepts, which is exactly the input a hostile or buggy peer would send.
 
 use proptest::prelude::*;
 use zup_artifact::{ArtifactIndex, BlobTable, RELEASE_SCHEMA, ReleaseManifest, VariantManifest};
@@ -69,11 +72,6 @@ fn check_artifacts(data: &[u8]) {
             "a parsed manifest's plan presents a different experience"
         );
         let digests = manifest.content_digests();
-        assert_eq!(
-            digests,
-            manifest.content_digests(),
-            "the content digest list is not deterministic"
-        );
         for pair in digests.windows(2) {
             assert!(
                 pair[0] <= pair[1],

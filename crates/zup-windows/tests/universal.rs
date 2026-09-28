@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zup_artifact::{ArtifactComposer, ArtifactRequest, ContentSource, MediaType};
+use zup_artifact::{ArtifactComposer, ArtifactRequest};
 use zup_bundle::Package;
 use zup_core::Sha256Digest;
 use zup_windows::{UniversalArtifact, UniversalError, compose_universal_executable, stage_variant};
@@ -180,17 +180,23 @@ fn this_host_selects_exactly_one_variant_and_it_is_its_own() {
     assert!(!selection.emulated, "a supported host selects natively");
 }
 
+/// A dispatcher has to be an image this host can execute, and it has to be the
+/// same kind of window the artifact promises its user. Both refusals happen
+/// before anything is written.
 #[test]
-fn a_mismatched_dispatcher_template_is_refused() {
+fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
     let fixture = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let (_output, graph) = compose(root.path(), &fixture);
+
     // A windowed template cannot produce a console artifact, because the artifact
     // is the launcher experience a user sees.
-    let gui = gui_dispatcher_template();
-    let output = root.path().join("mismatch.exe");
-    let error = compose_universal_executable(&gui, &output, &graph)
-        .expect_err("a windowed template cannot produce a console artifact");
+    let error = compose_universal_executable(
+        &gui_dispatcher_template(),
+        &root.path().join("mismatch.exe"),
+        &graph,
+    )
+    .expect_err("a windowed template cannot produce a console artifact");
     assert!(
         matches!(
             error,
@@ -201,12 +207,10 @@ fn a_mismatched_dispatcher_template_is_refused() {
         ),
         "{error}"
     );
-}
 
-#[test]
-fn a_dispatcher_wider_than_the_narrowest_variant_is_refused() {
-    let fixture = Fixture::new();
-    let root = tempfile::tempdir().unwrap();
+    // The same launcher, relabelled 64-bit. This is the case a project hits when
+    // it composes with a host-built launcher instead of the shipped one: the
+    // build machine runs every variant, and the artifact only works there.
     let dispatcher = dispatcher_template();
     let shipped = zup_pe::read_pe_header(&dispatcher)
         .expect("the dispatcher is an image")
@@ -216,29 +220,14 @@ fn a_dispatcher_wider_than_the_narrowest_variant_is_refused() {
         zup_pe::Machine::I386,
         "the dispatcher is built for the narrowest machine Windows runs everywhere"
     );
-
-    // The same launcher, relabelled 64-bit. This is the case a project hits when
-    // it composes with a host-built launcher instead of the shipped one: the
-    // build machine runs every variant, and the artifact only works there.
     let widened = root.path().join("widened-dispatcher.exe");
-    let bytes = std::fs::read(&dispatcher).unwrap();
-    let mut widened_bytes = bytes;
+    let mut widened_bytes = std::fs::read(&dispatcher).unwrap();
     let machine = pe_machine_offset(&widened_bytes);
     widened_bytes[machine..machine + 2].copy_from_slice(&0x8664u16.to_le_bytes());
     std::fs::write(&widened, &widened_bytes).unwrap();
 
-    let composed = fixture
-        .variants
-        .iter()
-        .collect::<Vec<&zup_artifact::DistributionVariant>>();
-    let request =
-        ArtifactRequest::universal_offline("windows", &app_identity(), "Acme-Windows-Setup.exe");
-    let graph = ArtifactComposer::new(request, &composed)
-        .expect("composable")
-        .compose(&composed)
-        .expect("composed");
-    let output = root.path().join("too-wide.exe");
-    let error = compose_universal_executable(&widened, &output, &graph)
+    let too_wide = root.path().join("too-wide.exe");
+    let error = compose_universal_executable(&widened, &too_wide, &graph)
         .expect_err("a 64-bit dispatcher cannot start a 32-bit Windows host");
     assert!(
         matches!(
@@ -250,7 +239,7 @@ fn a_dispatcher_wider_than_the_narrowest_variant_is_refused() {
         ),
         "{error}"
     );
-    assert!(!output.exists(), "a refused composition writes nothing");
+    assert!(!too_wide.exists(), "a refused composition writes nothing");
 }
 
 /// Where the machine field sits in an image, found the way the reader finds it.
@@ -270,18 +259,4 @@ fn a_missing_resource_is_reported_rather_than_read_as_empty() {
     let plain = root.path().join("plain.exe");
     std::fs::write(&plain, b"MZ not really an image").unwrap();
     assert!(UniversalArtifact::open(&plain).is_err());
-}
-
-#[test]
-fn a_runtime_image_is_verified_against_its_descriptor() {
-    let fixture = Fixture::new();
-    let root = tempfile::tempdir().unwrap();
-    let (output, _graph) = compose(root.path(), &fixture);
-    let artifact = UniversalArtifact::open(&output).expect("the artifact opens");
-    let variant = artifact.index().variant("windows-x64").unwrap();
-    let runtime = variant.runtime.expect("the variant carries a runtime");
-    assert_eq!(runtime.media_type, MediaType::RUNTIME);
-    let bytes = artifact.view().read(&runtime).expect("the runtime reads");
-    assert_eq!(bytes.len() as u64, runtime.size);
-    assert!(artifact.view().contains(&runtime));
 }

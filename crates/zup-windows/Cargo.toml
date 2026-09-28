@@ -74,6 +74,7 @@ ignored = ["windows-bindgen"]
 
 [dev-dependencies]
 proptest.workspace = true
+rstest.workspace = true
 zup-build.workspace = true
 serde_json.workspace = true
 zup-manifest.workspace = true

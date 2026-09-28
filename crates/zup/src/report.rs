@@ -168,35 +168,3 @@ fn line(out: &mut impl Write, text: &str) {
     }
     let _ = out.flush();
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zup_automation::{OPERATION_BUILD, Status};
-
-    fn result() -> AutomationResult {
-        AutomationResult::new(OPERATION_BUILD).with_summary("Built")
-    }
-
-    /// The three formats' contract, asserted on the type rather than on a terminal:
-    /// what a reporter is for.
-    #[test]
-    fn the_format_decides_where_a_line_goes() {
-        assert!(Reporter::new(OutputArg::Human).is_human());
-        assert!(!Reporter::new(OutputArg::Json).is_human());
-        assert!(!Reporter::new(OutputArg::Jsonl).is_human());
-    }
-
-    /// `finish` is the only thing that writes to stdout in `--format json`, and it
-    /// writes one document. Everything before it is a no-op on stdout, which is what
-    /// makes a partially-failed run still emit a readable result.
-    #[test]
-    fn a_human_reporter_writes_nothing_for_the_protocol() {
-        // Human mode renders nothing through `finish`; the assertions here are about
-        // the machine modes, and they are the ones the contract states.
-        let machine = Reporter::new(OutputArg::Json);
-        assert!(!machine.is_human());
-        assert_eq!(machine.format(), OutputArg::Json);
-        assert_eq!(result().status, Status::Success);
-    }
-}

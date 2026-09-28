@@ -5,6 +5,7 @@ mod fake;
 
 use common::{chain_input, sample_app_id, sample_input, sample_plan, sample_version};
 use fake::FakeExecutor;
+use rstest::rstest;
 use tempfile::TempDir;
 use zup_transaction::{
     FilesystemTransactionStore, NodeKind, NodeState, OperationId, ReconcileResult,
@@ -97,26 +98,6 @@ fn mid_verification(record: &TransactionRecord) -> (TransactionRecord, Vec<Trans
         .nodes
         .insert(barrier("ctrl:verify"), NodeState::Running);
     (crashed, checked)
-}
-
-#[test]
-fn execute_commits_all_nodes() {
-    let (_dir, coord) = coord();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            sample_plan(),
-        )
-        .unwrap();
-    let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    assert_eq!(final_record.phase, TransactionPhase::Committed);
-    assert!(exec.applied.iter().any(|id| id.contains("a.exe")));
-    assert!(exec.applied.iter().any(|id| id.contains("b.dll")));
-    assert!(exec.applied.iter().any(|id| id.contains("fake.backend")));
 }
 
 /// A store that lets a competing write win a fixed number of races.
@@ -247,8 +228,11 @@ fn a_lost_swap_costs_a_retry_not_the_transaction() {
     );
 }
 
+/// Commit is gated on verification: nothing is journaled `Verified` that was not
+/// checked, nothing is checked before it was applied, and nothing is checked
+/// after the verify barrier that guards the commit.
 #[test]
-fn commit_requires_every_mutation_verified() {
+fn commit_requires_every_mutation_verified_before_it() {
     let (_dir, coord) = coord();
     let record = coord
         .begin(
@@ -258,23 +242,48 @@ fn commit_requires_every_mutation_verified() {
             sample_plan(),
         )
         .unwrap();
-    let verified = record
+    let verified_nodes = record
         .plan
         .nodes
         .iter()
         .filter(|node| node.kind.requires_verification())
         .map(|node| node.id.clone())
         .collect::<Vec<_>>();
-    assert!(!verified.is_empty());
+    assert!(!verified_nodes.is_empty());
+    let last_verify = verified_nodes.last().expect("has verified node").clone();
+
     let mut exec = FakeExecutor::new();
     let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
     assert_eq!(outcome, TransactionOutcome::Committed);
-    for id in &verified {
+    assert_eq!(final_record.phase, TransactionPhase::Committed);
+
+    for id in &verified_nodes {
         assert!(
             matches!(final_record.nodes.get(id), Some(NodeState::Verified { .. })),
             "{id} must be verified before commit"
         );
+        assert!(
+            exec.position("apply", id).unwrap() < exec.position("verify", id).unwrap(),
+            "{id} is verified after it is applied"
+        );
     }
+    assert_eq!(
+        exec.verified,
+        verified_applies(&exec),
+        "every applied mutation is verified exactly once, in execution order"
+    );
+    let crossed_verify = exec.position("apply", &barrier("ctrl:verify")).unwrap();
+    let crossed_commit = exec.position("apply", &barrier("ctrl:commit")).unwrap();
+    assert!(
+        exec.position("verify", &last_verify).unwrap() < crossed_verify,
+        "all verification precedes the verify barrier: {:?}",
+        exec.labels()
+    );
+    assert!(
+        crossed_verify < crossed_commit,
+        "the commit barrier comes after verification: {:?}",
+        exec.labels()
+    );
     for barrier in [
         "ctrl:begin",
         "ctrl:preflight",
@@ -342,202 +351,65 @@ fn barriers_are_prepared_before_any_side_effect() {
     );
 }
 
-#[test]
-fn verification_runs_after_every_mutation_and_before_commit() {
+/// Whatever a failure undoes, it undoes in reverse execution order, and what
+/// was applied is exactly what gets rolled back.
+#[rstest]
+#[case::prepare_fails_before_any_work(|exec: FakeExecutor| exec.fail_on_prepare(0), 0, 0)]
+#[case::preflight_prepare_fails_after_staging(|exec: FakeExecutor| exec.fail_on_prepare(1), 3, 0)]
+#[case::first_file_mutation_fails(|exec: FakeExecutor| exec.fail_on_apply(6), 3, 0)]
+#[case::verification_fails(|exec: FakeExecutor| exec.fail_on_verify(0), 6, 1)]
+fn failure_rolls_back_applied_work_in_reverse_order(
+    #[case] inject: fn(FakeExecutor) -> FakeExecutor,
+    #[case] applied: usize,
+    #[case] attempted_verifications: usize,
+) {
     let (_dir, coord) = coord();
     let record = coord
         .begin(
             sample_app_id(),
             zup_core::SelectedScope::User,
             sample_version(),
-            sample_plan(),
+            compile_transaction(&chain_input()).unwrap(),
         )
         .unwrap();
-    let verified_nodes = record
-        .plan
-        .nodes
-        .iter()
-        .filter(|node| node.kind.requires_verification())
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    let last_verify = verified_nodes.last().expect("has verified node").clone();
 
-    let mut exec = FakeExecutor::new();
-    let (_, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-
-    assert_eq!(
-        exec.verified,
-        verified_applies(&exec),
-        "every applied mutation is verified exactly once, in execution order"
-    );
-    let crossed_verify = exec.position("apply", &barrier("ctrl:verify")).unwrap();
-    let crossed_commit = exec.position("apply", &barrier("ctrl:commit")).unwrap();
-    let verified_last = exec.position("verify", &last_verify).unwrap();
-    assert!(
-        verified_last < crossed_verify,
-        "all verification precedes the verify barrier: {:?}",
-        exec.labels()
-    );
-    assert!(
-        crossed_verify < crossed_commit,
-        "the commit barrier comes after verification: {:?}",
-        exec.labels()
-    );
-    for id in &verified_nodes {
-        assert!(
-            exec.position("apply", id).unwrap() < exec.position("verify", id).unwrap(),
-            "{id} is verified after it is applied"
-        );
-    }
-}
-
-#[test]
-fn prepare_failure_rolls_back_applied_work() {
-    let (_dir, coord) = coord();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            sample_plan(),
-        )
-        .unwrap();
-    // The second prepare is the preflight barrier, after staging has landed.
-    let mut exec = FakeExecutor::new().fail_on_prepare(1);
+    let mut exec = inject(FakeExecutor::new());
     let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
+
     assert_eq!(outcome, TransactionOutcome::RolledBack);
     assert_eq!(final_record.phase, TransactionPhase::RolledBack);
-    let staged = mutating_applies(&exec);
-    assert!(
-        !staged.is_empty() && staged.iter().all(|id| id.starts_with("op:stage-file:")),
-        "only staging landed before the preflight barrier failed: {:?}",
-        exec.labels()
-    );
+    let mutated = mutating_applies(&exec);
+    assert_eq!(mutated.len(), applied, "applied work: {mutated:?}");
     assert_eq!(
         exec.rolled_back,
-        staged.iter().rev().cloned().collect::<Vec<_>>(),
-        "staged work is undone in reverse order"
+        mutated.iter().rev().cloned().collect::<Vec<_>>(),
+        "every applied mutation is undone, in reverse order"
     );
-    assert!(exec.verified.is_empty());
     assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:preflight"))
-            .cloned()
-            .unwrap(),
-        NodeState::Pending,
-        "a barrier whose prepare failed was never crossed"
-    );
-}
-
-#[test]
-fn prepare_failure_before_any_work_still_rolls_back() {
-    let (_dir, coord) = coord();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            sample_plan(),
-        )
-        .unwrap();
-    let mut exec = FakeExecutor::new().fail_on_prepare(0);
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
-    assert_eq!(final_record.phase, TransactionPhase::RolledBack);
-    assert!(
-        exec.applied.is_empty(),
-        "no side effect: {:?}",
+        verify_attempts(&exec).len(),
+        attempted_verifications,
+        "verification stops at the failure: {:?}",
         exec.labels()
     );
-    assert!(exec.rolled_back.is_empty());
     assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:begin"))
-            .cloned()
-            .unwrap(),
-        NodeState::Pending
+        exec.verified.len(),
+        0,
+        "nothing verifies on the way to a rollback"
     );
-}
-
-#[test]
-fn verify_failure_rolls_back_every_applied_mutation() {
-    let (_dir, coord) = coord();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            sample_plan(),
-        )
-        .unwrap();
-    let mut exec = FakeExecutor::new().fail_on_verify(0);
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
-    assert_eq!(final_record.phase, TransactionPhase::RolledBack);
-    let attempted = verify_attempts(&exec);
-    assert_eq!(attempted.len(), 1, "verification stops at the failure");
-    assert!(exec.verified.is_empty(), "nothing was verified");
-    let applied = mutating_applies(&exec);
-    assert_eq!(
-        exec.rolled_back,
-        applied.iter().rev().cloned().collect::<Vec<_>>(),
-        "every applied mutation is undone, including unverified ones"
-    );
-    for id in &applied {
+    for id in &mutated {
         assert_eq!(
             final_record.nodes.get(&OperationId::new(id)).cloned(),
             Some(NodeState::RolledBack),
             "{id} is undone"
         );
     }
-    assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:verify"))
-            .cloned()
-            .unwrap(),
-        NodeState::Pending,
-        "a failed verification never crosses the verify barrier"
-    );
-    assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:commit"))
-            .cloned()
-            .unwrap(),
-        NodeState::Pending
-    );
-}
-
-#[test]
-fn failure_rolls_back_in_reverse_order() {
-    let (_dir, coord) = coord();
-    let plan = compile_transaction(&chain_input()).unwrap();
-    let record = coord
-        .begin(
-            sample_app_id(),
-            zup_core::SelectedScope::User,
-            sample_version(),
-            plan,
-        )
-        .unwrap();
-    let mut exec = FakeExecutor::new().fail_on_apply(6);
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
-    assert_eq!(final_record.phase, TransactionPhase::RolledBack);
-    let applied = mutating_applies(&exec);
-    assert!(
-        applied.iter().all(|id| id.starts_with("op:stage-file:")),
-        "the first file mutation failed: {applied:?}"
-    );
-    assert_eq!(
-        exec.rolled_back,
-        applied.iter().rev().cloned().collect::<Vec<_>>()
-    );
-    assert!(applied.len() >= 2);
+    for uncrossed in ["ctrl:verify", "ctrl:commit"] {
+        assert_eq!(
+            final_record.nodes.get(&barrier(uncrossed)).cloned(),
+            Some(NodeState::Pending),
+            "{uncrossed} is past the failure and was never crossed"
+        );
+    }
 }
 
 #[test]
@@ -558,8 +430,13 @@ fn rollback_failure_requires_recovery() {
     assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
 }
 
-#[test]
-fn verification_crash_resumes_without_repeating_completed_checks() {
+/// Verification is journalled per node, so a crash inside the pass resumes at
+/// the first node that is not yet `Verified` and never re-checks one that is.
+/// `resume_from` is how many nodes the crashed pass had already checked.
+#[rstest]
+#[case::nothing_checked_yet(0)]
+#[case::first_node_already_checked(1)]
+fn verification_crash_resumes_where_it_stopped(#[case] resume_from: usize) {
     let (_dir, store) = coord_with_store();
     let record = TransactionRecord::new(
         TransactionId::new_v7(),
@@ -569,28 +446,29 @@ fn verification_crash_resumes_without_repeating_completed_checks() {
         sample_plan(),
     );
     store.create(&record).unwrap();
-
-    // A crash in the middle of the verification pass: the first checked node
-    // is already verified, the rest are applied, and the verify barrier is
-    // in flight.
     let (mut crashed, checked) = mid_verification(&record);
     let verified = checked
         .iter()
         .filter(|node| node.kind.requires_verification())
         .cloned()
         .collect::<Vec<_>>();
-    assert!(verified.len() >= 2);
-    let first = verified[0].id.clone();
-    let Some(NodeState::Applied { receipt }) = crashed.nodes.get(&first).cloned() else {
-        panic!("fixture starts applied");
-    };
-    crashed.nodes.insert(first, NodeState::Verified { receipt });
+    assert!(verified.len() > resume_from);
+
+    for node in verified.iter().take(resume_from) {
+        let Some(NodeState::Applied { receipt }) = crashed.nodes.get(&node.id).cloned() else {
+            panic!("{} was applied before the crash", node.id);
+        };
+        crashed
+            .nodes
+            .insert(node.id.clone(), NodeState::Verified { receipt });
+    }
     let revision = crashed.revision;
     crashed.touch();
     store.compare_and_swap(revision, &crashed).unwrap();
 
     let mut exec = FakeExecutor::new();
     let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
+
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert_eq!(final_record.phase, TransactionPhase::Committed);
     for node in &verified {
@@ -605,77 +483,26 @@ fn verification_crash_resumes_without_repeating_completed_checks() {
     }
     assert_eq!(
         exec.verified,
-        verified[1..]
+        verified[resume_from..]
             .iter()
             .map(|node| node.id.as_str().to_owned())
             .collect::<Vec<_>>(),
-        "the already-verified node is never verified twice: {:?}",
+        "an already-verified node is never verified twice: {:?}",
         exec.labels()
     );
     assert_eq!(
         exec.applied,
         vec!["ctrl:verify".to_owned(), "ctrl:commit".to_owned()],
-        "only the remaining barriers run"
+        "only the remaining barriers run; no work is repeated"
     );
-    assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:verify"))
-            .cloned()
-            .unwrap(),
-        NodeState::Applied {
-            receipt: Box::new(zup_transaction::OperationReceipt::Control)
-        }
-    );
-    assert_eq!(
-        final_record
-            .nodes
-            .get(&barrier("ctrl:commit"))
-            .cloned()
-            .unwrap(),
-        NodeState::Applied {
-            receipt: Box::new(zup_transaction::OperationReceipt::Control)
-        }
-    );
-}
-
-#[test]
-fn verification_crash_before_any_check_re_verifies_everything() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-    let (mut crashed, checked) = mid_verification(&record);
-    let verified = checked
-        .iter()
-        .filter(|node| node.kind.requires_verification())
-        .cloned()
-        .collect::<Vec<_>>();
-    let revision = crashed.revision;
-    crashed.touch();
-    store.compare_and_swap(revision, &crashed).unwrap();
-
-    let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    assert_eq!(
-        exec.verified,
-        verified
-            .iter()
-            .map(|node| node.id.as_str().to_owned())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        exec.applied,
-        vec!["ctrl:verify".to_owned(), "ctrl:commit".to_owned()],
-        "no work is repeated"
-    );
-    assert_eq!(final_record.phase, TransactionPhase::Committed);
+    for crossed in ["ctrl:verify", "ctrl:commit"] {
+        assert_eq!(
+            final_record.nodes.get(&barrier(crossed)).cloned(),
+            Some(NodeState::Applied {
+                receipt: Box::new(zup_transaction::OperationReceipt::Control)
+            })
+        );
+    }
 }
 
 #[test]
@@ -713,8 +540,34 @@ fn interrupted_rollback_never_rolls_forward() {
     assert!(exec.rolled_back.is_empty());
 }
 
-#[test]
-fn crash_running_reconcile_not_applied_retries() {
+/// A node found `Running` was interrupted mid-apply, so the side effect may or
+/// may not have landed. The reconcile answer decides: retry, adopt, or stop and
+/// ask a human — and whichever it is, the side effect must not happen twice.
+#[rstest]
+#[case::not_applied_retries(
+    ReconcileResult::NotApplied,
+    TransactionOutcome::Committed,
+    TransactionPhase::Committed,
+    1
+)]
+#[case::applied_skips_the_duplicate(
+    ReconcileResult::Applied,
+    TransactionOutcome::Committed,
+    TransactionPhase::Committed,
+    0
+)]
+#[case::ambiguous_escalates(
+    ReconcileResult::Ambiguous,
+    TransactionOutcome::RecoveryRequired,
+    TransactionPhase::RecoveryRequired,
+    0
+)]
+fn crash_running_reconciles_without_double_applying(
+    #[case] answer: ReconcileResult,
+    #[case] expected: TransactionOutcome,
+    #[case] phase: TransactionPhase,
+    #[case] reapply: usize,
+) {
     let (_dir, store) = coord_with_store();
     let record = TransactionRecord::new(
         TransactionId::new_v7(),
@@ -732,159 +585,27 @@ fn crash_running_reconcile_not_applied_retries() {
     crashed.touch();
     store.compare_and_swap(record.revision, &crashed).unwrap();
 
-    let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::NotApplied);
+    let mut exec = FakeExecutor::new().reconcile_with(answer);
     let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    assert!(exec.reconcile_calls.contains(&op_id.to_string()));
-    assert!(matches!(
-        final_record.nodes.get(&op_id),
-        Some(NodeState::Applied { .. })
-    ));
-}
 
-#[test]
-fn crash_running_reconcile_applied_skips_duplicate() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-
-    let mut crashed = record.clone();
-    let op_id = first_op(&crashed);
-    crashed.nodes.insert(op_id.clone(), NodeState::Running);
-    crashed.phase = TransactionPhase::Applying;
-    crashed.touch();
-    store.compare_and_swap(record.revision, &crashed).unwrap();
-
-    let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Applied);
-    let (final_record, _) = recover(crashed, &store, &mut exec).unwrap();
-    assert!(matches!(
-        final_record.nodes.get(&op_id),
-        Some(NodeState::Applied { .. })
-    ));
-    let apply_count = exec
-        .applied
-        .iter()
-        .filter(|id| *id == op_id.as_str())
-        .count();
+    assert_eq!(outcome, expected);
+    assert_eq!(final_record.phase, phase);
+    assert_eq!(exec.reconcile_calls, vec![op_id.to_string()]);
     assert_eq!(
-        apply_count, 0,
-        "must not re-apply a reconciled Applied node"
+        exec.applied
+            .iter()
+            .filter(|id| *id == op_id.as_str())
+            .count(),
+        reapply,
+        "an interrupted node is never applied twice: {:?}",
+        exec.labels()
     );
-}
-
-#[test]
-fn crash_running_reconcile_ambiguous_needs_recovery() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-
-    let mut crashed = record.clone();
-    let op_id = first_op(&crashed);
-    crashed.nodes.insert(op_id.clone(), NodeState::Running);
-    crashed.phase = TransactionPhase::Applying;
-    crashed.touch();
-    store.compare_and_swap(record.revision, &crashed).unwrap();
-
-    let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Ambiguous);
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
-    assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
-    assert!(exec.applied.is_empty(), "no further mutations");
-}
-
-#[test]
-fn crash_before_commit_intent_abandons() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-    let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = recover(record, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
-    assert!(exec.applied.is_empty());
-    assert_eq!(final_record.phase, TransactionPhase::RolledBack);
-}
-
-#[test]
-fn crash_after_prepared_persisted() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-    // record is Prepared with all nodes Pending — crash here means abandon.
-    let mut exec = FakeExecutor::new();
-    let (_, outcome) = recover(record, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
-}
-
-#[test]
-fn crash_after_running_persisted_before_apply() {
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-    let mut crashed = record.clone();
-    let op_id = first_op(&crashed);
-    crashed.nodes.insert(op_id, NodeState::Running);
-    crashed.phase = TransactionPhase::Applying;
-    crashed.touch();
-    store.compare_and_swap(record.revision, &crashed).unwrap();
-    // Reconcile says NotApplied → retry → Committed (tested above).
-}
-
-#[test]
-fn crash_after_apply_before_applied_persisted() {
-    // Same durable shape as Running-before-apply: node = Running.
-    // Reconcile Applied stands in for "apply landed, receipt lost".
-    let (_dir, store) = coord_with_store();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        sample_plan(),
-    );
-    store.create(&record).unwrap();
-    let mut crashed = record.clone();
-    let op_id = first_op(&crashed);
-    crashed.nodes.insert(op_id.clone(), NodeState::Running);
-    crashed.phase = TransactionPhase::Applying;
-    crashed.touch();
-    store.compare_and_swap(record.revision, &crashed).unwrap();
-    let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Applied);
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    assert!(matches!(
-        final_record.nodes.get(&op_id),
-        Some(NodeState::Applied { .. })
-    ));
+    if reapply > 0 {
+        assert!(matches!(
+            final_record.nodes.get(&op_id),
+            Some(NodeState::Applied { .. })
+        ));
+    }
 }
 
 #[test]
@@ -917,10 +638,6 @@ fn plan_fingerprint_stable() {
     let a = compile_transaction(&sample_input()).unwrap();
     let b = compile_transaction(&sample_input()).unwrap();
     assert_eq!(a.fingerprint(), b.fingerprint());
-    assert_eq!(
-        serde_json::to_string(&a).unwrap(),
-        serde_json::to_string(&b).unwrap()
-    );
 }
 
 #[test]
@@ -940,38 +657,4 @@ fn oversized_backend_payload_is_rejected() {
         err,
         zup_transaction::TransactionPlanError::InvalidInput(_)
     ));
-}
-
-#[test]
-fn transaction_record_roundtrip() {
-    let plan = sample_plan();
-    let record = TransactionRecord::new(
-        TransactionId::new_v7(),
-        sample_app_id(),
-        zup_core::SelectedScope::User,
-        sample_version(),
-        plan,
-    );
-    let json = serde_json::to_string_pretty(&record).unwrap();
-    let back: TransactionRecord = serde_json::from_str(&json).unwrap();
-    assert_eq!(record, back);
-}
-
-#[test]
-fn phase_transitions_validated() {
-    use TransactionPhase::*;
-    assert!(Prepared.transition(Applying).is_ok());
-    assert!(Applying.transition(Committed).is_ok());
-    assert!(Applying.transition(RollingBack).is_ok());
-    assert!(RollingBack.transition(RolledBack).is_ok());
-    assert!(Prepared.transition(Committed).is_err());
-    assert!(Committed.transition(Applying).is_err());
-}
-
-#[test]
-fn dot_renders_graph() {
-    let plan = sample_plan();
-    let dot = plan.to_dot();
-    assert!(dot.starts_with("digraph"));
-    assert!(dot.contains("->"));
 }

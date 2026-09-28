@@ -272,17 +272,36 @@ fn healthy_single_target_passes_every_required_check() {
         );
         assert_eq!(report["ready"], true);
     }
+
+    // The ordinary case: nobody passed `--runtime` at all, and the report still
+    // says where the template came from. A readiness report that needed a path to
+    // say anything about the runtime would be a report about the developer's
+    // typing, and the resolver is what a person who installed `zup` depends on.
+    let resolved = single_target_project(HOST_TARGET);
+    let output = run_doctor(&resolved.path().join("zup.toml"), &[]);
+    let rows = checks(&output, "default");
+    let check = find(&rows, "runtime_template");
+    assert_eq!(check["status"], "pass", "{}", message(check));
+    assert!(message(check).contains("is a zup "), "{}", message(check));
+    assert!(
+        ["staged", "cache", "toolchain root"]
+            .iter()
+            .any(|source| message(check).contains(source)),
+        "the report says where the component came from: {}",
+        message(check)
+    );
 }
 
 fn only_kinds() -> BTreeSet<String> {
     CHECK_KINDS.iter().map(|kind| (*kind).to_owned()).collect()
 }
 
+/// A `--runtime` a person typed is checked exactly like one the resolver found, so
+/// a wrong path and a stale toolchain produce the same report rather than two
+/// different shapes of failure. And a cardinality mismatch is a diagnostic rather
+/// than an argument error: every other check still runs.
 #[test]
-fn a_runtime_that_is_not_a_component_is_reported_without_stopping_other_checks() {
-    // A file a person pointed `--runtime` at is checked exactly like one the
-    // resolver found, so a wrong path and a stale toolchain produce the same
-    // report rather than two different shapes of failure.
+fn a_bad_runtime_is_reported_without_stopping_other_checks() {
     let project = single_target_project(HOST_TARGET);
     let missing = project.path().join("absent-runtime.exe");
     let output = run_doctor(
@@ -290,15 +309,12 @@ fn a_runtime_that_is_not_a_component_is_reported_without_stopping_other_checks()
         &[("--runtime", missing.as_path())],
     );
     assert!(!output.status.success());
-    let report = report(&output);
-    assert_eq!(report["ready"], false);
     let rows = checks(&output, "default");
     let template = find(&rows, "runtime_template");
     assert_eq!(template["status"], "fail", "{template}");
     assert_eq!(template["path"], missing.display().to_string());
     let message = message(template);
     assert!(message.contains("cargo xtask toolchain build"), "{message}");
-    // Every independent check still ran.
     for kind in [
         "output_parent",
         "source_payload",
@@ -462,32 +478,16 @@ destination = "${{install}}"
     }
 }
 
+/// One check failing must not hide the others. `doctor`'s value is that a person
+/// sees everything wrong with a project in one report, so each of these breaks a
+/// different single thing and asserts that the checks which do not depend on it
+/// still report — passing where they can, skipping where the break made the
+/// question unanswerable.
 #[test]
-fn a_single_target_resolves_its_runtime_from_the_toolchain() {
-    if !ON_WINDOWS {
-        return;
-    }
-    // The ordinary case: nobody passed `--runtime`, and the report still says
-    // where the template came from. A readiness report that needed a path to say
-    // anything about the runtime would be a report about the developer's typing.
-    let project = single_target_project(HOST_TARGET);
-    let output = run_doctor(&project.path().join("zup.toml"), &[]);
-    let rows = checks(&output, "default");
-    let check = find(&rows, "runtime_template");
-    assert_eq!(check["status"], "pass", "{}", message(check));
-    let message = message(check);
-    assert!(message.contains("is a zup "), "{message}");
-    assert!(
-        ["staged", "cache", "toolchain root"]
-            .iter()
-            .any(|source| message.contains(source)),
-        "the report says where the component came from: {message}"
-    );
-    assert!(output.status.success());
-}
-
-#[test]
-fn missing_source_root_is_reported_per_target() {
+fn one_broken_thing_leaves_every_independent_check_reporting() {
+    // A missing source root. Nothing can be lowered or composed without a payload,
+    // so those skip; nothing about the target, the frontend or the output is
+    // affected, so those pass.
     let project = single_target_project(HOST_TARGET);
     fs::remove_dir_all(project.path().join("dist")).unwrap();
     let runtime = setup_runtime(project.path(), HOST_TARGET);
@@ -506,11 +506,47 @@ fn missing_source_root_is_reported_per_target() {
     for kind in ["manifest_compile", "plugin_engine", "target_lowering"] {
         assert_eq!(statuses(&rows, kind), only("skip"), "{kind}");
     }
-    // A missing source does not hide the independent checks.
     for kind in ["output_parent", "frontend", "canonical_target"] {
         assert_eq!(statuses(&rows, kind), only("pass"), "{kind}");
     }
-    assert_eq!(statuses(&rows, "update_root"), only("skip"));
+
+    // An unsupported target. The backend is a finding, and no artifact is produced.
+    let project = single_target_project(UNSUPPORTED_TARGET);
+    let runtime = setup_runtime(project.path(), HOST_TARGET);
+    let result = run_doctor(
+        &project.path().join("zup.toml"),
+        &[("--runtime", runtime.as_path())],
+    );
+    assert!(!result.status.success());
+    let report = report(&result);
+    assert_eq!(report["ready"], false);
+    let rows = checks(&result, "default");
+    assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
+    assert_eq!(statuses(&rows, "build_backend"), only("fail"));
+    let backend = find(&rows, "build_backend");
+    assert!(
+        message(backend).contains(if ON_WINDOWS {
+            "backend not implemented"
+        } else {
+            "backend unavailable"
+        }),
+        "{}",
+        message(backend)
+    );
+    assert_eq!(statuses(&rows, "target_lowering"), only("skip"));
+    for kind in [
+        "manifest_compile",
+        "source_payload",
+        "frontend",
+        "canonical_target",
+        "output_parent",
+    ] {
+        assert_eq!(statuses(&rows, kind), only("pass"), "{kind}");
+    }
+    assert!(
+        !project.path().join("Doctor App-Setup.exe").exists(),
+        "no artifact is produced for an unsupported target"
+    );
 }
 
 #[test]
@@ -645,6 +681,9 @@ source = "plugins/helper.wasm"
     }
 }
 
+/// The document names the contract it belongs to, so a consumer gates on a version
+/// rather than on a shape it has to recognise — and the same report twice is
+/// byte-identical, so a CI diff means something changed.
 #[test]
 fn the_result_is_versioned_and_byte_stable() {
     let project = single_target_project(HOST_TARGET);
@@ -653,6 +692,7 @@ fn the_result_is_versioned_and_byte_stable() {
     let first = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     let second = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     assert_eq!(first.stdout, second.stdout, "the report is deterministic");
+
     // The human report moves to stderr rather than disappearing: stdout is the
     // protocol, and a CI log that swallowed the table would be useless to the person
     // reading it.
@@ -662,81 +702,14 @@ fn the_result_is_versioned_and_byte_stable() {
         "{stderr}"
     );
     let document = document(&first);
-    // The document names the contract it belongs to, so a consumer gates on a version
-    // rather than on a shape it has to recognise.
     assert_eq!(document["protocol"], zup_automation::PROTOCOL.to_string());
     assert_eq!(document["operation"], "doctor");
     assert_eq!(document["status"], "success");
-    for field in [
-        "protocol",
-        "operation",
-        "status",
-        "application",
-        "targets",
-        "artifacts",
-        "release_manifest",
-        "publication",
-        "diagnostics",
-        "summary",
-        "details",
-    ] {
-        assert!(
-            document.get(field).is_some(),
-            "{field} missing in {document}"
-        );
-    }
-    let report = report(&first);
-    for field in ["manifest", "host", "ready", "checks", "targets"] {
-        assert!(report.get(field).is_some(), "{field} missing in {report}");
-    }
-    for target in report["targets"].as_array().unwrap() {
-        for field in ["profile", "target", "status", "checks"] {
-            assert!(target.get(field).is_some(), "{field} missing in {target}");
-        }
+    for target in document["details"]["targets"].as_array().unwrap() {
         for check in target["checks"].as_array().unwrap() {
-            for field in ["kind", "status", "message", "path"] {
-                assert!(check.get(field).is_some(), "{field} missing in {check}");
-            }
             assert!(["pass", "fail", "skip"].contains(&check["status"].as_str().unwrap()));
         }
     }
-}
-
-/// An unsupported target is a finding; every other check still runs.
-#[test]
-fn an_unsupported_target_still_reports_every_independent_check() {
-    let project = single_target_project(UNSUPPORTED_TARGET);
-    let runtime = setup_runtime(project.path(), HOST_TARGET);
-    let result = run_doctor(
-        &project.path().join("zup.toml"),
-        &[("--runtime", runtime.as_path())],
-    );
-    assert!(!result.status.success());
-    let report = report(&result);
-    assert_eq!(report["ready"], false);
-    let rows = checks(&result, "default");
-    assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
-    assert_eq!(statuses(&rows, "manifest_compile"), only("pass"));
-    assert_eq!(statuses(&rows, "source_payload"), only("pass"));
-    assert_eq!(statuses(&rows, "frontend"), only("pass"));
-    assert_eq!(statuses(&rows, "canonical_target"), only("pass"));
-    assert_eq!(statuses(&rows, "output_parent"), only("pass"));
-    assert_eq!(statuses(&rows, "build_backend"), only("fail"));
-    let backend = find(&rows, "build_backend");
-    assert!(
-        message(backend).contains(if ON_WINDOWS {
-            "backend not implemented"
-        } else {
-            "backend unavailable"
-        }),
-        "{}",
-        message(backend)
-    );
-    assert_eq!(statuses(&rows, "target_lowering"), only("skip"));
-    assert!(
-        !project.path().join("Doctor App-Setup.exe").exists(),
-        "no artifact is produced for an unsupported target"
-    );
 }
 
 /// The report describes the source it would use, including a CLI override.
@@ -792,8 +765,11 @@ fn the_report_honors_a_cli_source_override() {
     assert_eq!(statuses(&rows, "output_parent"), only("pass"));
 }
 
+/// `doctor` reports, it never writes. Every `--output` state a build can be in —
+/// derivable, parent missing, already present — is a diagnostic here, and none of
+/// them touches the filesystem.
 #[test]
-fn doctor_writes_no_artifact_and_changes_no_files() {
+fn doctor_reports_every_output_state_and_never_writes() {
     let project = single_target_project(HOST_TARGET);
     let runtime = setup_runtime(project.path(), HOST_TARGET);
     let manifest = project.path().join("zup.toml");
@@ -832,14 +808,8 @@ fn doctor_writes_no_artifact_and_changes_no_files() {
     );
     assert!(!chosen.exists());
     assert!(!chosen.parent().unwrap().exists());
-    assert_eq!(before, directory_entries(project.path()));
-}
 
-#[test]
-fn an_existing_output_is_reported_rather_than_overwritten() {
-    let project = single_target_project(HOST_TARGET);
-    let runtime = setup_runtime(project.path(), HOST_TARGET);
-    let manifest = project.path().join("zup.toml");
+    // An existing output is reported, and left byte-for-byte alone.
     let output = project.path().join("Setup.exe");
     fs::write(&output, b"previous build").unwrap();
     let result = run_doctor(

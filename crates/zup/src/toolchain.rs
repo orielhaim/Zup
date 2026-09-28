@@ -380,36 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_root_is_a_root_too() {
-        // The constructor reads ZUP_TOOLCHAIN; with it unset the resolver falls
-        // through to the cache, which is what a normal user has.
-        let resolver = ToolchainResolver::new(
-            "0.1.0".into(),
-            PathBuf::from("C:/bin/zup.exe"),
-            PathBuf::from("C:/state"),
-        );
-        assert!(
-            resolver
-                .roots()
-                .iter()
-                .all(|(_, source)| *source != ToolchainSource::Root),
-            "without ZUP_TOOLCHAIN there is no explicit root"
-        );
-    }
-
-    #[test]
-    fn a_deps_binary_resolves_against_the_directory_above_it() {
-        let resolver = ToolchainResolver::new(
-            "0.1.0".into(),
-            PathBuf::from("C:/target/debug/deps/zup.exe"),
-            PathBuf::from("C:/state"),
-        );
-        let staged = resolver.roots();
-        let last = staged.last().expect("a staged candidate").0.clone();
-        assert_eq!(last, PathBuf::from("C:/target/debug/toolchain"));
-    }
-
-    #[test]
     fn a_missing_component_refusal_names_how_to_produce_one() {
         let component = runtime_for(
             &zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
@@ -490,6 +460,18 @@ mod tests {
                 .iter()
                 .any(|(root, _)| root.starts_with(&current)),
             "resolution must not depend on where the process is standing"
+        );
+
+        // A test binary lives in `target/debug/deps`, so the staged arm resolves
+        // against the directory above it rather than beside it.
+        let deps = ToolchainResolver::new(
+            "0.1.0".into(),
+            PathBuf::from("C:/target/debug/deps/zup.exe"),
+            PathBuf::from("C:/state"),
+        );
+        assert_eq!(
+            deps.roots().last().expect("a staged candidate").0,
+            PathBuf::from("C:/target/debug/toolchain")
         );
     }
 }

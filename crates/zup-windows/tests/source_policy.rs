@@ -147,32 +147,23 @@ fn windows_adapter_reports_a_junction_a_regular_file_and_a_missing_path() {
     );
 }
 
+/// `std::fs` reports a directory junction as a symlink, so the default policy
+/// already refuses this tree. What it cannot see is a reparse point whose tag is
+/// not a name surrogate, which is why a Windows build injects the adapter — and
+/// neither policy may write through the junction on its way to the refusal.
 #[test]
-fn the_windows_adapter_rejects_a_prerequisite_reached_through_a_junction() {
-    let (dir, manifest, _junction) = junction_project();
-
-    let error = materialize_target(dir.path(), &manifest, &WindowsSourceFilePolicy).unwrap_err();
-
-    assert!(
-        matches!(error, BuildError::PrerequisiteSource { .. }),
-        "{error:?}"
-    );
-}
-
-#[test]
-fn the_portable_policy_refuses_a_junctioned_prerequisite_too() {
-    // `std::fs` reports a directory junction as a symlink, so the default
-    // policy already refuses this tree. What it cannot see is a reparse point
-    // whose tag is not a name surrogate, which is why a Windows build injects
-    // the adapter.
-    let (dir, manifest, _junction) = junction_project();
-
-    let error = materialize_target(dir.path(), &manifest, &PortableSourceFilePolicy).unwrap_err();
-
-    assert!(
-        matches!(error, BuildError::PrerequisiteSource { .. }),
-        "{error:?}"
-    );
+fn a_prerequisite_reached_through_a_junction_is_refused_by_every_policy() {
+    for policy in [
+        &WindowsSourceFilePolicy as &dyn SourceFilePolicy,
+        &PortableSourceFilePolicy as &dyn SourceFilePolicy,
+    ] {
+        let (dir, manifest, _junction) = junction_project();
+        let error = materialize_target(dir.path(), &manifest, policy).unwrap_err();
+        assert!(
+            matches!(error, BuildError::PrerequisiteSource { .. }),
+            "{error:?}"
+        );
+    }
 }
 
 #[test]

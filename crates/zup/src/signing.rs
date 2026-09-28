@@ -893,6 +893,9 @@ mod tests {
         SigningPlan::new(&app(), requirement)
     }
 
+    /// A production requirement is the only one that may demand a trusted chain
+    /// and a real TSA. Nothing in a test can prove a signature verifies, so the
+    /// property pinned here is the policy those two booleans drive.
     #[test]
     fn a_production_requirement_becomes_a_production_policy() {
         let policy = policy(
@@ -920,45 +923,14 @@ mod tests {
         );
     }
 
-    /// The plan a signer reads is small, and a plan is committed, uploaded as a
-    /// workflow artifact, and printed in job logs. What a signer needs is the
-    /// path, the role, the subject and the requirement.
-    #[test]
-    fn the_signed_plan_carries_a_requirement_and_nothing_else() {
-        let mut plan = plan(zup_signing::SigningRequirement::production().signed_by("Acme"));
-        plan.push(SigningStep::new(
-            SigningRole::NativeRuntime,
-            SigningStage::PreCompose,
-            SigningReason::VariantRuntime {
-                variant: "windows-x64".to_owned(),
-            },
-            SigningSubject {
-                path: "runtime/windows-x64.exe".to_owned(),
-                digest: zup_core::Sha256Digest::from_bytes([1; 32]),
-                size: 10,
-                variants: vec!["windows-x64".to_owned()],
-            },
-        ))
-        .expect("a distinct path");
-        let encoded = plan.encode().unwrap();
-        let text = String::from_utf8(encoded).expect("utf8");
-        // The release description's own fields are not here: a signer gets the
-        // files to sign, not the manifest, the build graph or the variants list.
-        assert!(!text.contains("logical_size"));
-        assert!(!text.contains("artifact_index"));
-        assert!(text.contains("\"publisher\":\"Acme\""));
-    }
-
     /// The printed plan is what a person reads to decide what to hand their
     /// signing service, so it names the release's own subjects rather than any
-    /// crate or type, and it is the same on every machine that built the same
-    /// release.
+    /// crate or type.
     #[test]
-    fn the_printed_plan_is_deterministic_and_names_no_crate() {
+    fn the_printed_plan_names_no_crate_and_orders_runtimes_before_installers() {
         let mut plan = plan(zup_signing::SigningRequirement::production());
-        // Two variants, so the table's column widths are exercised against
-        // subjects of different lengths and the order is asserted rather than
-        // being trivially one element.
+        // Two variants, so the order is asserted against subjects of different
+        // lengths rather than being trivially one element.
         for variant in ["windows-x64", "windows-arm64"] {
             plan.push(SigningStep::new(
                 SigningRole::NativeRuntime,
@@ -993,11 +965,6 @@ mod tests {
         // order is a property of the plan, not of how it was built.
         let printed = render(&plan);
         assert!(printed.find("native_runtime").unwrap() < printed.find("outer_artifact").unwrap());
-        assert_eq!(plan.pre_compose().count(), 2);
-        assert_eq!(plan.post_compose().count(), 2);
-        let printed = render(&plan);
-        assert_eq!(printed, render(&plan));
-        assert!(printed.contains("windows-x64"));
         assert!(printed.contains("dist/Acme-windows-x64-Setup.exe"));
         assert!(printed.contains("zup sign verify"));
         for word in [

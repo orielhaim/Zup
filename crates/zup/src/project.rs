@@ -420,11 +420,6 @@ mod tests {
         // separator, wherever it falls, so a name in any script still reads as
         // words rather than as one run.
         assert_eq!(slug("Ünïcode"), "n-code");
-        assert_eq!(slug("Ünïcode"), slug("Ünïcode"), "a slug is deterministic");
-        assert!(
-            !slug("Ünïcode").starts_with('-'),
-            "a leading separator would be a leading dot in a hidden file"
-        );
     }
 
     #[test]

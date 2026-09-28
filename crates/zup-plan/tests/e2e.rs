@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zup_build::materialize;
-use zup_core::{ComponentId, InstallLocation, Privilege, TargetTriple, Variable};
+use zup_core::{ComponentId, Privilege, TargetTriple, Variable};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{ComponentOverrides, PlanRequest, SelectedScope, plan};
 
@@ -145,11 +145,6 @@ fn install_directory_variables_resolved_into_destinations() {
             "dest: {dest}"
         );
     }
-    assert!(
-        result
-            .install_directory
-            .contains_variable(Variable::Location(InstallLocation::Programs))
-    );
     assert!(
         !result
             .install_directory

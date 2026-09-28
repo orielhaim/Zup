@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use zup_acquire::{
-    CachePolicy, Cancellation, ContentCache, ContentCatalog, ContentCompression, ContentDescriptor,
-    ContentKind, DirectorySource, MemorySource,
+    CachePolicy, Cancellation, ContentCache, ContentCatalog, ContentDescriptor, ContentKind,
+    DirectorySource, MemorySource,
 };
 use zup_core::Sha256Digest;
 
@@ -318,22 +318,5 @@ impl zup_acquire::ArtifactSource for LyingSource {
     }
 }
 
-/// Whether two wire forms are byte-identical.
-pub fn same_wire(left: &[u8], right: &[u8]) -> bool {
-    left == right
-}
-
 /// The compression level the fixtures use.
 pub const LEVEL: i32 = 3;
-
-/// A descriptor whose declared wire length is deliberately wrong.
-pub fn lying_descriptor(bytes: &[u8], level: i32) -> ContentDescriptor {
-    let mut descriptor = payload_descriptor(bytes, level);
-    descriptor.compressed_size += 7;
-    descriptor
-}
-
-/// Whether a descriptor states that its content is carried compressed.
-pub fn is_compressed(descriptor: &ContentDescriptor) -> bool {
-    descriptor.compression == ContentCompression::Zstandard
-}

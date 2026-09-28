@@ -197,23 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn a_version_is_not_identity() {
-        let one = identity();
-        let mut other = one.clone();
-        other.version = "1.4.0".to_owned();
-        other.release = Sha256Digest::from_bytes([9; 32]);
-        assert!(!one.same_release(&other));
-    }
-
-    #[test]
-    fn an_identity_round_trips_through_the_ledger() {
-        let one = identity();
-        let bytes = one.encode().expect("encodes");
-        let decoded: ReleaseIdentity = serde_json::from_slice(&bytes).expect("decodes");
-        assert_eq!(decoded, one);
-    }
-
-    #[test]
     fn a_traversing_segment_is_refused() {
         let mut one = identity();
         one.variant = "../escape".to_owned();

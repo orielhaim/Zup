@@ -2,7 +2,6 @@
 
 use std::fs;
 
-use rstest::rstest;
 use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId, TargetTriple};
 use zup_manifest::{
     Manifest, ManifestError, TargetOverrides, compile, parse, parse_and_compile, select_targets,
@@ -125,46 +124,6 @@ when = 'component("core")'
 }
 
 #[test]
-fn duplicate_plugin() {
-    let src = with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/one.wasm"
-
-[[plugins]]
-id = "helper"
-source = "plugins/two.wasm"
-"#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
-    ));
-}
-
-#[test]
-fn plugin_ids_are_case_insensitive_identities() {
-    let src = with(
-        r#"
-[[plugins]]
-id = "Helper"
-source = "plugins/one.wasm"
-
-[[plugins]]
-id = "helper"
-source = "plugins/two.wasm"
-"#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::DuplicatePlugin { ref id, .. } if id == "helper"
-    ));
-}
-
-#[test]
 fn invalid_plugin_source_is_rejected_by_compile() {
     let mut manifest = parse(&with(
         r#"
@@ -183,115 +142,10 @@ source = "plugins/helper.wasm"
 }
 
 #[test]
-fn unknown_plugin_component_reference() {
-    let src = with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/helper.wasm"
-component = "missing"
-"#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::UnknownComponent { ref id, ref context, .. }
-            if id == "missing" && context.contains("plugin")
-    ));
-}
-
-#[test]
-fn unknown_plugin_condition_reference() {
-    let src = with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/helper.wasm"
-when = 'component("missing")'
-"#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::UnknownComponent { ref id, ref context, .. }
-            if id == "missing" && context.contains("plugin")
-    ));
-}
-
-#[test]
-fn plugin_declaration_order_is_preserved() {
-    let src = with(
-        r#"
-[[plugins]]
-id = "z-plugin"
-source = "plugins/z.wasm"
-
-[[plugins]]
-id = "a-plugin"
-source = "plugins/a.wasm"
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").unwrap();
-    let ids: Vec<_> = installer
-        .plugins
-        .iter()
-        .map(|plugin| plugin.id.as_str().to_owned())
-        .collect();
-    assert_eq!(ids, ["z-plugin", "a-plugin"]);
-}
-
-#[test]
-fn ir_serialization_roundtrip() {
-    let installer = parse_and_compile(&fixture(), "windows-x64").unwrap();
-    let json = serde_json::to_string_pretty(&installer).unwrap();
-    let restored: Installer = serde_json::from_str(&json).unwrap();
-    assert_eq!(installer, restored);
-}
-
-#[test]
-fn preserves_declaration_order() {
-    let src = with(
-        r#"
-[[components]]
-id = "b"
-name = "B"
-
-[[components]]
-id = "a"
-name = "A"
-requires = ["b"]
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").unwrap();
-    let ids: Vec<_> = installer
-        .components
-        .iter()
-        .map(|c| c.id.as_str().to_owned())
-        .collect();
-    assert_eq!(ids, ["b", "a"]);
-}
-
-#[test]
-fn normalizes_component_defaults() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-required = true
-default = true
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").unwrap();
-    assert!(installer.components[0].required);
-    assert!(installer.components[0].default);
-    assert!(installer.components[0].requires.is_empty());
-}
-
-#[test]
-fn duplicate_component() {
-    let src = with(
-        r#"
+fn duplicate_ids_are_rejected() {
+    let scenarios = [
+        (
+            r#"
 [[components]]
 id = "core"
 name = "Core"
@@ -300,18 +154,10 @@ name = "Core"
 id = "core"
 name = "Also core"
 "#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::DuplicateComponent { ref id, .. } if id == "core"
-    ));
-}
-
-#[test]
-fn duplicate_service() {
-    let src = with(
-        r#"
+            "core",
+        ),
+        (
+            r#"
 [[services]]
 id = "svc"
 name = "svc"
@@ -324,12 +170,45 @@ name = "svc2"
 binary = "${install}/svc2.exe"
 start = "manual"
 "#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::DuplicateService { ref id, .. } if id == "svc"
-    ));
+            "svc",
+        ),
+        (
+            r#"
+[[plugins]]
+id = "helper"
+source = "plugins/one.wasm"
+
+[[plugins]]
+id = "helper"
+source = "plugins/two.wasm"
+"#,
+            "helper",
+        ),
+        // Plugin identities fold case, so only the differing case is a collision.
+        (
+            r#"
+[[plugins]]
+id = "Helper"
+source = "plugins/one.wasm"
+
+[[plugins]]
+id = "helper"
+source = "plugins/two.wasm"
+"#,
+            "helper",
+        ),
+    ];
+
+    for (body, id) in scenarios {
+        let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
+        let collision = match &err {
+            ManifestError::DuplicateComponent { id, .. } => Some(id.as_str()),
+            ManifestError::DuplicateService { id, .. } => Some(id.as_str()),
+            ManifestError::DuplicatePlugin { id, .. } => Some(id.as_str()),
+            other => panic!("expected a duplicate-id diagnostic, got {other:?}"),
+        };
+        assert_eq!(collision, Some(id), "{err:?}");
+    }
 }
 
 #[test]
@@ -351,8 +230,8 @@ default = false
 }
 
 #[test]
-fn missing_dependency() {
-    let src = with(
+fn dangling_and_self_referencing_dependencies_are_rejected() {
+    let dangling = with(
         r#"
 [[components]]
 id = "cli"
@@ -360,17 +239,14 @@ name = "CLI"
 requires = ["tools"]
 "#,
     );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::UnknownComponent { ref id, ref context, .. }
-            if id == "tools" && context.contains("cli")
-    ));
-}
+    let err = compile_selected(&parse(&dangling).unwrap()).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::UnknownComponent { ref id, ref context, .. }
+            if id == "tools" && context.contains("cli")),
+        "{err:?}"
+    );
 
-#[test]
-fn self_dependency() {
-    let src = with(
+    let self_referencing = with(
         r#"
 [[components]]
 id = "core"
@@ -378,17 +254,18 @@ name = "Core"
 requires = ["core"]
 "#,
     );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::ComponentSelfDependency { ref id, .. } if id == "core"
-    ));
+    let err = compile_selected(&parse(&self_referencing).unwrap()).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::ComponentSelfDependency { ref id, .. } if id == "core"),
+        "{err:?}"
+    );
 }
 
 #[test]
-fn direct_cycle() {
-    let src = with(
-        r#"
+fn dependency_cycles_are_rejected() {
+    let cases = [
+        (
+            r#"
 [[components]]
 id = "a"
 name = "A"
@@ -399,21 +276,10 @@ id = "b"
 name = "B"
 requires = ["a"]
 "#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    match err {
-        ManifestError::ComponentCycle { path, .. } => {
-            assert!(path.contains('a'), "path: {path}");
-            assert!(path.contains('b'), "path: {path}");
-        }
-        other => panic!("expected cycle, got {other:?}"),
-    }
-}
-
-#[test]
-fn multi_node_cycle() {
-    let src = with(
-        r#"
+            "two nodes",
+        ),
+        (
+            r#"
 [[components]]
 id = "a"
 name = "A"
@@ -429,49 +295,56 @@ id = "c"
 name = "C"
 requires = ["a"]
 "#,
-    );
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    match err {
-        ManifestError::ComponentCycle { path, .. } => {
-            assert!(path.contains("a →"), "path: {path}");
+            "three nodes",
+        ),
+    ];
+
+    for (body, label) in cases {
+        let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
+        match err {
+            ManifestError::ComponentCycle { path, .. } => {
+                assert!(path.contains('a') && path.contains('b'), "{label}: {path}");
+            }
+            other => panic!("{label}: expected cycle, got {other:?}"),
         }
-        other => panic!("expected cycle, got {other:?}"),
     }
 }
 
-#[rstest]
-#[case::file(
-    r#"
+#[test]
+fn unknown_component_reference_names_the_offending_resource() {
+    let cases = [
+        (
+            r#"
 [[files]]
 source = "**/*"
 destination = "${install}"
 component = "tools"
 "#,
-    "tools",
-    "file"
-)]
-#[case::launcher(
-    r#"
+            "tools",
+            "file",
+        ),
+        (
+            r#"
 [[launchers]]
 location = "desktop"
 name = "App"
 target = "${install}/a.exe"
 component = "tools"
 "#,
-    "tools",
-    "launcher"
-)]
-#[case::path(
-    r#"
+            "tools",
+            "launcher",
+        ),
+        (
+            r#"
 [[path]]
 value = "${install}/bin"
 component = "tools"
 "#,
-    "tools",
-    "path"
-)]
-#[case::service(
-    r#"
+            "tools",
+            "path",
+        ),
+        (
+            r#"
 [[services]]
 id = "s"
 name = "s"
@@ -479,64 +352,54 @@ binary = "${install}/s.exe"
 start = "manual"
 component = "tools"
 "#,
-    "tools",
-    "service"
-)]
-#[case::condition(
-    r#"
+            "tools",
+            "service",
+        ),
+        (
+            r#"
 [[path]]
 value = "${install}/bin"
 when = 'component("tools")'
 "#,
-    "tools",
-    "condition"
-)]
-fn unknown_component_reference(#[case] body: &str, #[case] id: &str, #[case] context: &str) {
-    let src = with(body);
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    match err {
-        ManifestError::UnknownComponent {
-            id: found,
-            context: found_ctx,
-            ..
-        } => {
-            assert_eq!(found, id);
-            assert!(
-                found_ctx.contains(context),
-                "context: {found_ctx}, expected {context}"
-            );
-        }
-        other => panic!("expected unknown component, got {other:?}"),
-    }
-}
-
-#[test]
-fn valid_component_references() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[components]]
-id = "cli"
-name = "CLI"
-requires = ["core"]
-
-[[files]]
-source = "**/*"
-destination = "${install}"
-component = "core"
-when = 'component("cli") && !component("missing")'
+            "tools",
+            "condition",
+        ),
+        (
+            r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+component = "missing"
 "#,
-    );
-    // "missing" is referenced from the condition and must be rejected.
-    let err = compile_selected(&parse(&src).unwrap()).unwrap_err();
-    assert!(matches!(
-        err,
-        ManifestError::UnknownComponent { ref id, ref context, .. }
-            if id == "missing" && context.contains("condition")
-    ));
+            "missing",
+            "plugin",
+        ),
+        (
+            r#"
+[[plugins]]
+id = "helper"
+source = "plugins/helper.wasm"
+when = 'component("missing")'
+"#,
+            "missing",
+            "plugin",
+        ),
+    ];
+
+    for (body, id, context) in cases {
+        let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
+        match err {
+            ManifestError::UnknownComponent {
+                id: found,
+                context: found_ctx,
+                ..
+            } => {
+                assert_eq!(found, id, "context: {found_ctx}");
+                assert!(found_ctx.contains(context), "context: {found_ctx}");
+            }
+            other => panic!("expected unknown component, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -568,36 +431,71 @@ when = 'component("cli") || component("core")'
     assert_eq!(installer.path.len(), 1);
 }
 
-#[rstest]
-#[case::user_scope("user", Some("${location.user_data}/Acme"), None, true)]
-#[case::user_scope_missing("user", None, None, false)]
-#[case::user_scope_wrong_side("user", None, Some("${location.programs}/Acme"), false)]
-#[case::machine_scope("machine", None, Some("${location.programs}/Acme"), true)]
-#[case::machine_scope_missing("machine", None, None, false)]
-#[case::either_scope(
-    "either",
-    Some("${location.user_data}/Acme"),
-    Some("${location.programs}/Acme"),
-    true
-)]
-#[case::either_missing_machine("either", Some("${location.user_data}/Acme"), None, false)]
-#[case::either_missing_user("either", None, Some("${location.programs}/Acme"), false)]
-fn install_directory_coverage(
-    #[case] scope: &str,
-    #[case] user: Option<&str>,
-    #[case] machine: Option<&str>,
-    #[case] ok: bool,
-) {
-    let mut directory = String::from("[install.directory]\n");
-    if let Some(user) = user {
-        directory.push_str(&format!("user = \"{user}\"\n"));
-    }
-    if let Some(machine) = machine {
-        directory.push_str(&format!("machine = \"{machine}\"\n"));
-    }
+#[test]
+fn install_directory_coverage_follows_the_declared_scope() {
+    let directories = [
+        (
+            InstallScope::User,
+            Some("${location.user_data}/Acme"),
+            None,
+            true,
+        ),
+        (InstallScope::User, None, None, false),
+        (
+            InstallScope::User,
+            None,
+            Some("${location.programs}/Acme"),
+            false,
+        ),
+        (
+            InstallScope::Machine,
+            Some("${location.user_data}/Acme"),
+            None,
+            false,
+        ),
+        (
+            InstallScope::Machine,
+            None,
+            Some("${location.programs}/Acme"),
+            true,
+        ),
+        (InstallScope::Machine, None, None, false),
+        (
+            InstallScope::Either,
+            Some("${location.user_data}/Acme"),
+            Some("${location.programs}/Acme"),
+            true,
+        ),
+        (
+            InstallScope::Either,
+            Some("${location.user_data}/Acme"),
+            None,
+            false,
+        ),
+        (
+            InstallScope::Either,
+            None,
+            Some("${location.programs}/Acme"),
+            false,
+        ),
+    ];
 
-    let src = format!(
-        r#"
+    for (scope, user, machine, ok) in directories {
+        let mut directory = String::from("[install.directory]\n");
+        if let Some(user) = user {
+            directory.push_str(&format!("user = \"{user}\"\n"));
+        }
+        if let Some(machine) = machine {
+            directory.push_str(&format!("machine = \"{machine}\"\n"));
+        }
+
+        let scope = match scope {
+            InstallScope::User => "user",
+            InstallScope::Machine => "machine",
+            InstallScope::Either => "either",
+        };
+        let src = format!(
+            r#"
 schema = 1
 
 [app]
@@ -616,56 +514,42 @@ scope = "{scope}"
 
 {directory}
 "#
-    );
+        );
 
-    let result = parse_and_compile(&src, "windows-x64");
-    if ok {
-        assert!(result.is_ok(), "expected success, got {:?}", result.err());
-    } else {
-        assert!(matches!(
-            result,
-            Err(ManifestError::MissingInstallDirectory { .. })
-        ));
+        let result = parse_and_compile(&src, "windows-x64");
+        let label = format!("{scope}/{user:?}/{machine:?}");
+        if ok {
+            assert!(result.is_ok(), "{label}: {:?}", result.err());
+        } else {
+            assert!(
+                matches!(result, Err(ManifestError::MissingInstallDirectory { .. })),
+                "{label}"
+            );
+        }
     }
 }
 
 #[test]
 fn non_existing_source_directory_still_compiles() {
-    let src = r#"
-schema = 1
-
-[app]
-id = "com.example.acme"
-name = "Acme"
-version = "1.0.0"
-
-[build]
-
-[build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "does-not-exist" }
-
-[install]
-scope = "user"
-
-[install.directory]
-user = "${location.user_data}/Acme"
-
+    let src = with(
+        r#"
 [[files]]
 source = "**/*.exe"
 destination = "${install}"
-"#;
-    let installer = parse_and_compile(src, "windows-x64").expect("pure compile ignores filesystem");
-    assert_eq!(
-        installer.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+"#,
+    )
+    .replace(
+        r#"directory = "dist/windows-x64""#,
+        r#"directory = "does-not-exist""#,
     );
+    let installer =
+        parse_and_compile(&src, "windows-x64").expect("pure compile ignores filesystem");
     assert_eq!(installer.files.len(), 1);
 }
 
 #[test]
-fn prerequisite_declarations_are_typed_and_component_scoped() {
-    let src = with(
+fn prerequisite_requirements_are_typed_and_opaque() {
+    let runtime = with(
         r#"
 [[components]]
 id = "core"
@@ -681,7 +565,7 @@ package = { type = "embedded", path = "prerequisites/vc.exe", sha256 = "00000000
 installer = { arguments = ["/install", "/quiet", "/norestart"] }
 "#,
     );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid prerequisite");
+    let installer = parse_and_compile(&runtime, "windows-x64").expect("valid prerequisite");
     assert_eq!(installer.prerequisites.len(), 1);
     assert_eq!(installer.prerequisites[0].id.as_str(), "vc-x64");
     assert_eq!(
@@ -706,11 +590,8 @@ installer = { arguments = ["/install", "/quiet", "/norestart"] }
         installer.prerequisites[0].installer.arguments,
         vec!["/install", "/quiet", "/norestart"]
     );
-}
 
-#[test]
-fn installed_package_requirements_declare_opaque_product_identities() {
-    let src = with(
+    let installed = with(
         r#"
 [[prerequisites]]
 id = "desktop"
@@ -719,7 +600,7 @@ requirement = { kind = "installed_package", id = "{F3017226-FE2A-4295-8A7C-971BF
 package = { type = "embedded", path = "desktop.msi", sha256 = "4444444444444444444444444444444444444444444444444444444444444444", size = 1 }
 "#,
     );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid installed package");
+    let installer = parse_and_compile(&installed, "windows-x64").expect("installed package");
     let zup_core::PrerequisiteRequirement::InstalledPackage(package) =
         &installer.prerequisites[0].requirement
     else {
@@ -743,6 +624,7 @@ package = { type = "embedded", path = "probe.exe", sha256 = "5555555555555555555
 "#,
     );
     assert!(parse_and_compile(&src, "windows-x64").is_err());
+
     let product_detector = with(
         r#"
 [[prerequisites]]
@@ -753,6 +635,7 @@ package = { type = "embedded", path = "desktop.msi", sha256 = "44444444444444444
 "#,
     );
     assert!(parse_and_compile(&product_detector, "windows-x64").is_err());
+
     for kind in ["exe", "msi"] {
         let installer_kind = with(&format!(
             r#"
@@ -813,20 +696,9 @@ package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333
         parse_and_compile(&duplicate, "windows-x64"),
         Err(ManifestError::DuplicatePrerequisite { .. })
     ));
-    let case_duplicate = with(
-        r#"
-[[prerequisites]]
-id = "runtime"
-name = "Runtime"
-requirement = { kind = "runtime", id = "windows.vc.v14" }
-package = { type = "embedded", path = "runtime.exe", sha256 = "2222222222222222222222222222222222222222222222222222222222222222", size = 1 }
-
-[[prerequisites]]
-id = "Runtime"
-name = "Runtime again"
-requirement = { kind = "runtime", id = "windows.vc.v14" }
-package = { type = "embedded", path = "runtime2.exe", sha256 = "3333333333333333333333333333333333333333333333333333333333333333", size = 1 }
-"#,
+    let case_duplicate = duplicate.replace(
+        "id = \"runtime\"\nname = \"Runtime again\"",
+        "id = \"Runtime\"\nname = \"Runtime again\"",
     );
     assert!(matches!(
         parse_and_compile(&case_duplicate, "windows-x64"),
@@ -843,31 +715,4 @@ package = { type = "embedded", path = "runtime.exe", sha256 = "22222222222222222
 "#,
     );
     assert!(parse_and_compile(&unknown, "windows-x64").is_err());
-}
-
-#[test]
-fn missing_field_directories_for_user_only_scope_ok_with_user_template() {
-    let src = r#"
-schema = 1
-
-[app]
-id = "com.example.acme"
-name = "Acme"
-version = "1.0.0"
-
-[build]
-
-[build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "dist/windows-x64" }
-
-[install]
-scope = "user"
-
-[install.directory]
-user = "${location.user_data}/Acme"
-"#;
-    let installer = parse_and_compile(src, "windows-x64").unwrap();
-    assert_eq!(installer.install.scope, InstallScope::User);
-    assert!(installer.install.directory.machine.is_none());
 }

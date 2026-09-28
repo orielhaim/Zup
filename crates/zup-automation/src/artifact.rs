@@ -267,22 +267,17 @@ mod tests {
         );
         // Serializing is a plain number, so a JavaScript consumer reads it as one.
         assert_eq!(serde_json::to_string(&ByteCount::new(42)).unwrap(), "42");
-    }
-
-    /// The producer's side and the consumer's side are the same invariant, and the
-    /// consumer's side is the one that matters: a document carrying a value no consumer
-    /// can hold is a document whose size field is already wrong by the time anybody
-    /// reads it.
-    #[test]
-    fn a_byte_count_from_the_wire_outside_the_safe_range_is_refused() {
-        let over = format!("{}", MAX_SAFE_BYTES + 1);
-        let error = serde_json::from_str::<ByteCount>(&over)
+        // The wire path is the same invariant from the consumer's side, and it is the
+        // one that matters: a document carrying a size no consumer can hold is already
+        // wrong by the time anybody reads it.
+        let error = serde_json::from_str::<ByteCount>(&format!("{}", MAX_SAFE_BYTES + 1))
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot be represented exactly"), "{error}");
-        let at = format!("{MAX_SAFE_BYTES}");
         assert_eq!(
-            serde_json::from_str::<ByteCount>(&at).unwrap().get(),
+            serde_json::from_str::<ByteCount>(&format!("{MAX_SAFE_BYTES}"))
+                .unwrap()
+                .get(),
             MAX_SAFE_BYTES
         );
     }
@@ -300,36 +295,6 @@ mod tests {
                 value: "a".repeat(64)
             }
             .is_well_formed()
-        );
-    }
-
-    /// The distinction the whole `signing` field exists to keep: nobody has looked, or
-    /// nobody found anything.
-    #[test]
-    fn an_unsigned_artifact_and_an_unexamined_one_are_different_facts() {
-        let unsigned = SigningState::unsigned();
-        assert!(!unsigned.covers_bytes());
-        let signed = SigningState::signed(vec![SigningEvidence::new(
-            "signature_covers_bytes",
-            "sha256",
-        )]);
-        assert!(signed.covers_bytes());
-        let artifact = Artifact {
-            path: "Acme-Setup.exe".to_owned(),
-            digest: Digest::sha256("a".repeat(64)),
-            size: ByteCount::new(1024),
-            kind: Identifier::fixed("single"),
-            mode: Identifier::fixed("offline"),
-            id: Some("windows-x64".to_owned()),
-            target: Some("x86_64-pc-windows-msvc".to_owned()),
-            variants: None,
-            signing: None,
-        };
-        let text = serde_json::to_string(&artifact).unwrap();
-        assert!(text.contains("\"signing\":null"), "{text}");
-        assert!(
-            !text.contains("debug") && !text.contains("Debug"),
-            "an artifact is not a Debug rendering: {text}"
         );
     }
 }

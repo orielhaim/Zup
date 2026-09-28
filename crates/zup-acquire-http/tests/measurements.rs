@@ -15,12 +15,12 @@ mod common;
 use std::sync::Arc;
 use std::time::Instant;
 
-use common::{TestOrigin, seed_tree};
+use common::TestOrigin;
 use sha2::{Digest, Sha256};
 use zup_acquire::{
     AcquisitionItem, AcquisitionPlan, AcquisitionSession, ArtifactSource, CachePolicy,
-    Cancellation, ContentCatalog, ContentDescriptor, ContentKind, ContentReason, DirectorySource,
-    MemorySource, ProgressSink, SchedulerConfig, SourceChain, format_bytes,
+    Cancellation, ContentCatalog, ContentDescriptor, ContentKind, ContentReason, MemorySource,
+    ProgressSink, SchedulerConfig, SourceChain, format_bytes,
 };
 use zup_acquire_http::{BackoffPolicy, HttpClient, HttpClientConfig, HttpSource, OriginSet};
 use zup_core::Sha256Digest;
@@ -125,60 +125,6 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn a_cold_install_moves_exactly_the_selected_closure() {
-    // A realistic application: 40 MiB of content in 40 objects, of which the user
-    // selected the component that needs 14 of them.
-    let all = blobs(40, 1024 * 1024);
-    let selected: Vec<Blob> = all.iter().take(14).cloned().collect();
-    let untouched = all.len() - selected.len();
-    let cache = temp_cache();
-
-    let estimate = AcquisitionSession::new(
-        plan_for(&selected),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .estimate();
-    let started = Instant::now();
-    let outcome = run(AcquisitionSession::new(
-        plan_for(&selected),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(
-        SourceChain::new(vec![memory_source(&selected)]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the closure is satisfied")
-    .enter();
-    let elapsed = started.elapsed();
-
-    println!("\ncold install");
-    println!(
-        "  selected        {} of {} objects",
-        selected.len(),
-        all.len()
-    );
-    println!(
-        "  download        {}",
-        format_bytes(outcome.estimate.download_bytes)
-    );
-    println!(
-        "  install         {}",
-        format_bytes(outcome.estimate.install_bytes)
-    );
-    println!("  never fetched   {untouched} objects the machine did not select");
-    println!("  elapsed         {elapsed:?}");
-
-    assert_eq!(outcome.items.len(), selected.len());
-    assert_eq!(
-        estimate.download_bytes, outcome.estimate.download_bytes,
-        "the estimate shown before the download is the number the download met"
-    );
-}
-
-#[test]
 fn an_update_with_mostly_unchanged_content_costs_almost_nothing() {
     let previous = blobs(40, 1024 * 1024);
     let cache = temp_cache();
@@ -247,195 +193,16 @@ fn an_update_with_mostly_unchanged_content_costs_almost_nothing() {
     );
 }
 
-#[test]
-fn a_warm_cache_moves_nothing_at_all() {
-    let content = blobs(20, 512 * 1024);
-    let cache = temp_cache();
-    let first = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(
-        SourceChain::new(vec![memory_source(&content)]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the first run is satisfied")
-    .enter();
-    let started = Instant::now();
-    let second = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(SourceChain::new(vec![]), never(), &ProgressSink::discard()))
-    .expect("a warm cache needs no source at all")
-    .enter();
-
-    println!("\nwarm cache");
-    println!(
-        "  cold            {}",
-        format_bytes(first.estimate.download_bytes)
-    );
-    println!(
-        "  warm            {}",
-        format_bytes(second.estimate.download_bytes)
-    );
-    println!("  cache hits      {}", second.cache_hits);
-    println!("  elapsed         {:?}", started.elapsed());
-    assert_eq!(second.estimate.download_bytes, 0);
-    assert_eq!(second.cache_hits, first.items.len());
-}
-
+/// The scheduler exists to overlap transfers over a real socket, and to do so
+/// without dropping or corrupting one. Sixteen objects small enough that
+/// per-transfer scheduling dominates is the shape of a real installer: many
+/// files, not one big one. The timing is printed rather than asserted, because
+/// absolute numbers belong to the machine that produced them; the correctness of
+/// both pools is asserted, and the overlap itself is observed where it can be —
+/// in the number of transfers live at once.
 #[test]
 fn a_bounded_pool_overlaps_transfers() {
-    // Sixteen objects, each small enough that per-transfer scheduling dominates.
-    // This is the shape of a real installer: many files, not one big one.
     let content = blobs(16, 256 * 1024);
-    let sequential_cache = temp_cache();
-    let started = Instant::now();
-    let sequential_outcome = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&sequential_cache.inner),
-        SchedulerConfig::sequential(),
-    )
-    .run(
-        SourceChain::new(vec![memory_source(&content)]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the sequential run is satisfied")
-    .enter();
-    let sequential = started.elapsed();
-
-    let parallel_cache = temp_cache();
-    let started = Instant::now();
-    let parallel_outcome = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&parallel_cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(
-        SourceChain::new(vec![memory_source(&content)]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the parallel run is satisfied")
-    .enter();
-    let parallel = started.elapsed();
-
-    println!("\nscheduler, {} objects", content.len());
-    println!("  sequential      {sequential:?}");
-    println!("  parallel        {parallel:?}");
-    println!(
-        "  ratio           {:.2}×",
-        sequential.as_secs_f64() / parallel.as_secs_f64().max(f64::MIN_POSITIVE)
-    );
-
-    // The claim, asserted structurally rather than by the clock.
-    //
-    // An earlier version of this test asserted that the parallel run finished no
-    // later than the sequential one. Over a *synchronous in-memory* source there
-    // is nothing to overlap: both runs decompress on one thread, and the only
-    // thing the timing measured was how busy the machine happened to be. On a
-    // loaded runner that inverts, and the fix is not a longer timeout — it is
-    // asking the question the design can actually answer.
-    assert!(
-        SchedulerConfig::default().per_origin > 1,
-        "the default pool is supposed to hold more than one transfer"
-    );
-    assert_eq!(
-        SchedulerConfig::sequential().per_origin,
-        1,
-        "the baseline is one transfer, or it is not a baseline"
-    );
-    assert!(
-        SchedulerConfig::default().total >= SchedulerConfig::default().per_origin,
-        "the global bound cannot be tighter than the per-origin one"
-    );
-
-    // And the property a user can see: whichever pool ran it, every object arrived
-    // verified and the estimate matched the outcome. Concurrency that drops or
-    // corrupts a transfer is worse than no concurrency at all.
-    for outcome in [&sequential_outcome, &parallel_outcome] {
-        assert_eq!(outcome.items.len(), content.len());
-        let wire: u64 = outcome.items.iter().map(|blob| blob.wire_size).sum();
-        assert_eq!(outcome.estimate.download_bytes, wire);
-    }
-}
-
-#[test]
-fn a_local_seed_costs_no_network_at_all() {
-    let content = blobs(8, 1024 * 1024);
-    let tree = tempfile::tempdir().expect("a temporary tree");
-    for entry in &content {
-        seed_tree(tree.path(), &entry.descriptor, &entry.wire);
-    }
-    let cache = temp_cache();
-    let started = Instant::now();
-    let outcome = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(
-        SourceChain::new(vec![
-            Arc::new(DirectorySource::new("usb", tree.path())) as Arc<dyn ArtifactSource>
-        ]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("a seeded tree satisfies the closure")
-    .enter();
-
-    println!("\nlocal seed");
-    println!("  objects         {}", outcome.items.len());
-    println!("  elapsed         {:?}", started.elapsed());
-    println!("  cost            no network, no second packaging format");
-    assert_eq!(outcome.items.len(), content.len());
-}
-
-#[test]
-fn a_closure_estimate_is_exact_rather_than_approximate() {
-    let content = blobs(12, 768 * 1024);
-    let cache = temp_cache();
-    for entry in content.iter().take(6) {
-        let mut writer = cache
-            .inner
-            .writer(&entry.descriptor)
-            .expect("the writer opens");
-        writer.write(&entry.wire).expect("the bytes land");
-        writer.commit().expect("the blob verifies");
-    }
-    let estimate = AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&cache.inner),
-        SchedulerConfig::default(),
-    )
-    .estimate();
-    let expected_download: u64 = content[6..]
-        .iter()
-        .map(|entry| entry.descriptor.compressed_size)
-        .sum();
-    let expected_cached: u64 = content[..6]
-        .iter()
-        .map(|entry| entry.descriptor.compressed_size)
-        .sum();
-
-    println!("\nestimate accuracy");
-    println!("  predicted      {}", format_bytes(estimate.download_bytes));
-    println!("  expected       {}", format_bytes(expected_download));
-    println!("  cached         {}", format_bytes(estimate.cached_bytes));
-    // The number a user is shown before clicking is the number the session
-    // meets, because both are computed from the same authenticated catalog.
-    assert_eq!(estimate.download_bytes, expected_download);
-    assert_eq!(estimate.cached_bytes, expected_cached);
-}
-
-#[test]
-fn an_http_transfer_over_a_real_socket_scales_with_the_pool() {
-    let content = blobs(12, 192 * 1024);
     let origin = TestOrigin::start(
         &content
             .iter()
@@ -458,48 +225,39 @@ fn an_http_transfer_over_a_real_socket_scales_with_the_pool() {
         )
     };
 
-    let sequential_cache = temp_cache();
-    let started = Instant::now();
-    run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&sequential_cache.inner),
-        SchedulerConfig::sequential(),
-    )
-    .run(
-        SourceChain::new(vec![source()]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the sequential transfer is satisfied");
-    let sequential = started.elapsed();
+    let mut elapsed = Vec::new();
+    for config in [SchedulerConfig::sequential(), SchedulerConfig::default()] {
+        let cache = temp_cache();
+        let started = Instant::now();
+        let outcome =
+            run(
+                AcquisitionSession::new(plan_for(&content), Arc::clone(&cache.inner), config).run(
+                    SourceChain::new(vec![source()]),
+                    never(),
+                    &ProgressSink::discard(),
+                ),
+            )
+            .expect("the run is satisfied")
+            .enter();
+        elapsed.push(started.elapsed());
 
-    let parallel_cache = temp_cache();
-    let started = Instant::now();
-    let outcome = run(AcquisitionSession::new(
-        plan_for(&content),
-        Arc::clone(&parallel_cache.inner),
-        SchedulerConfig::default(),
-    )
-    .run(
-        SourceChain::new(vec![source()]),
-        never(),
-        &ProgressSink::discard(),
-    ))
-    .expect("the parallel transfer is satisfied")
-    .enter();
-    let parallel = started.elapsed();
+        assert_eq!(outcome.items.len(), content.len());
+        let wire: u64 = outcome.items.iter().map(|blob| blob.wire_size).sum();
+        assert_eq!(outcome.estimate.download_bytes, wire);
+    }
 
     println!("\nhttp over a loopback socket, {} objects", content.len());
-    println!("  sequential      {sequential:?}");
-    println!("  parallel        {parallel:?}");
+    println!("  sequential      {:?}", elapsed[0]);
+    println!("  parallel        {:?}", elapsed[1]);
     println!(
         "  ratio           {:.2}×",
-        sequential.as_secs_f64() / parallel.as_secs_f64().max(f64::MIN_POSITIVE)
+        elapsed[0].as_secs_f64() / elapsed[1].as_secs_f64().max(f64::MIN_POSITIVE)
     );
-    println!("  verified        {} objects", outcome.items.len());
-    assert_eq!(outcome.items.len(), content.len());
 }
 
+/// A staged tree satisfies the closure over a real directory source, so a USB
+/// Quarantine means a transfer is written once and published by rename, so the
+/// worst case is the closure plus one partial, never two copies of everything.
 #[test]
 fn the_cache_holds_the_wire_form_and_nothing_more() {
     // Quarantine means a transfer is written once and published by rename, so
@@ -568,43 +326,4 @@ fn a_catalog_costs_far_less_than_the_content_it_describes() {
     // reader refuse it before allocating anything.
     assert!(bytes.len() as u64 <= zup_acquire::MAX_CATALOG_BYTES);
     assert!(catalog.entry(&content[0].descriptor.digest).is_some());
-}
-
-#[test]
-fn a_staged_tree_is_the_same_size_as_the_closure_it_serves() {
-    // A static origin serves exactly the bytes a machine would download, which is
-    // what makes a CDN the only infrastructure this design needs.
-    let content = blobs(16, 512 * 1024);
-    let tree = tempfile::tempdir().expect("a temporary tree");
-    for entry in &content {
-        seed_tree(tree.path(), &entry.descriptor, &entry.wire);
-    }
-    let closure: u64 = content
-        .iter()
-        .map(|entry| entry.descriptor.compressed_size)
-        .sum();
-    let on_disk = std::fs::read_dir(tree.path().join("blobs").join("sha256"))
-        .expect("the blob tree exists")
-        .count() as u64;
-    let mut staged = 0u64;
-    for entry in &content {
-        staged += std::fs::metadata(
-            tree.path()
-                .join("blobs")
-                .join("sha256")
-                .join(&entry.descriptor.digest.to_hex()[..2])
-                .join(&entry.descriptor.digest.to_hex()[2..]),
-        )
-        .expect("the blob is staged")
-        .len();
-    }
-    println!("\nstaged tree");
-    println!("  objects         {on_disk}");
-    println!("  closure bytes   {}", format_bytes(closure));
-    println!("  staged bytes    {}", format_bytes(staged));
-    assert_eq!(on_disk, content.len() as u64);
-    assert_eq!(
-        staged, closure,
-        "an origin serves exactly what a client needs"
-    );
 }

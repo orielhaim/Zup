@@ -151,42 +151,9 @@ pub fn command_spec(executable: &TargetPath, arguments: &[String]) -> CommandSpe
 mod tests {
     use super::*;
 
-    #[test]
-    fn quotes_spaces_and_empty() {
-        assert_eq!(quote_arg("simple"), "simple");
-        assert_eq!(quote_arg("has space"), "\"has space\"");
-        assert_eq!(quote_arg(""), "\"\"");
-    }
-
-    #[test]
-    fn quotes_embedded_quote() {
-        assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
-    }
-
-    #[test]
-    fn quotes_trailing_backslash_in_quotes() {
-        // Unquoted args with trailing `\` are fine as-is.
-        assert_eq!(quote_arg("C:\\dir\\"), "C:\\dir\\");
-        // Once quoted, trailing backslashes must be doubled before the close quote.
-        assert_eq!(quote_arg("C:\\my dir\\"), "\"C:\\my dir\\\\\"");
-    }
-
-    #[test]
-    fn parses_quoted_executable_with_spaces() {
-        let (exe, args) = parse_command_line(r#""C:\Program Files\App\app.exe" --flag "a b""#);
-        assert_eq!(exe.as_deref(), Some(r"C:\Program Files\App\app.exe"));
-        assert_eq!(args, vec!["--flag".to_owned(), "a b".to_owned()]);
-    }
-
-    #[test]
-    fn unicode_roundtrip() {
-        let args = vec!["héllo".to_owned(), "世界".to_owned(), " ".to_owned()];
-        let line = format_command_line(Path::new("C:\\ünïcode\\app.exe"), &args);
-        let (exe, parsed) = parse_command_line(&line);
-        assert_eq!(exe.as_deref(), Some("C:\\ünïcode\\app.exe"));
-        assert_eq!(parsed, args);
-    }
-
+    // `quote_arg` and `split_command_line` are exercised over a generated
+    // character corpus in `tests/cmdline_property.rs`. What is left here is the
+    // one rule that corpus cannot state: how two command specs are compared.
     #[test]
     fn command_identity_uses_target_path_identity() {
         let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();

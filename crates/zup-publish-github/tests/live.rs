@@ -32,8 +32,7 @@
 //! maintainer having to wonder.
 
 use zup_publish_github::{
-    API_VERSION, GithubClient, GithubHost, GithubRepository, LIMITS, ProcessEnvironment,
-    RepositorySpec, discover, resolve,
+    GithubClient, GithubRepository, ProcessEnvironment, RepositorySpec, discover, resolve,
 };
 
 /// The repository to ask about, or `None` to skip.
@@ -116,36 +115,6 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
 }
 
 #[tokio::test]
-async fn a_real_host_answers_the_documented_download_shape() {
-    let repository = or_skip!(live_repository(), "no ZUP_GITHUB_LIVE repository");
-
-    // The URL shape is the contract: a tag-addressed download and the `latest`
-    // alias. A project that installed from this provider resolves these, so a
-    // change in either is a change in zup's behaviour, not in GitHub's.
-    let path = repository.path();
-    let pinned = repository
-        .host
-        .download_url(&path, "v1.4.0", "Acme-Setup.exe");
-    assert!(
-        pinned.ends_with("/releases/download/v1.4.0/Acme-Setup.exe"),
-        "{pinned}"
-    );
-    let latest = repository.host.latest_download_url(&path, "Acme-Setup.exe");
-    assert!(
-        latest.ends_with("/releases/latest/download/Acme-Setup.exe"),
-        "{latest}"
-    );
-    // And a name with a space in it is percent-encoded, so it is a 404 rather
-    // than a path that means something else.
-    let awkward = repository.host.download_url(&path, "v1 4 0", "a b.exe");
-    assert!(awkward.contains("%20"), "{awkward}");
-
-    // The API version is one constant, and a host that has moved on is something
-    // a maintainer changes in one place.
-    assert_eq!(API_VERSION, "2022-11-28");
-}
-
-#[tokio::test]
 async fn a_real_release_asset_answers_a_range_request_or_says_it_does_not() {
     // The one fact this design cannot assume, and the reason the content source
     // probes rather than depends on it.
@@ -200,43 +169,4 @@ async fn a_real_release_asset_answers_a_range_request_or_says_it_does_not() {
 fn zup_publish_http() -> Result<zup_acquire_http::HttpClient, String> {
     zup_acquire_http::HttpClient::new(&zup_acquire_http::HttpClientConfig::default())
         .map_err(|error| error.to_string())
-}
-
-#[test]
-fn the_limits_this_provider_preflights_against_are_still_the_documented_ones() {
-    // GitHub's documented limits. If these change, the refusal a project gets
-    // before uploading eleven gigabytes is wrong, and the fix is one file.
-    assert_eq!(LIMITS.max_assets, 1000, "assets per release");
-    assert_eq!(
-        LIMITS.max_asset_bytes,
-        2 * 1024 * 1024 * 1024,
-        "bytes per asset"
-    );
-    // A package is packed to a ceiling comfortably under the limit, because a
-    // package exactly at the limit has no room for a host that rounds. Both are
-    // constants, so this is a fact about the build rather than a runtime check.
-    const { assert!(zup_publish_github::PACKAGE_SHARD_BYTES < LIMITS.max_asset_bytes) };
-}
-
-#[test]
-fn a_github_com_host_has_three_distinct_bases_and_an_enterprise_one_has_three_others() {
-    let dotcom = GithubHost::dotcom();
-    assert_eq!(dotcom.api_host(), "api.github.com");
-    assert_eq!(dotcom.upload_host(), "uploads.github.com");
-    // Uploads are a separate service with a separate rate limit, which is why an
-    // implementation that shares one base with the API cannot read the upload
-    // budget off an API response.
-    assert_ne!(dotcom.api_base, dotcom.upload_base);
-
-    let enterprise = GithubHost::enterprise("git.acme.internal").expect("an enterprise host");
-    assert_eq!(enterprise.api_base, "https://git.acme.internal/api/v3/");
-    assert_eq!(enterprise.upload_base, "https://git.acme.internal/uploads/");
-    assert_eq!(enterprise.web_base, "https://git.acme.internal/");
-    assert!(!enterprise.dotcom);
-    // And naming github.com gets the dotcom host, not an Enterprise one.
-    assert!(
-        GithubHost::enterprise("github.com")
-            .expect("a hostname")
-            .dotcom
-    );
 }

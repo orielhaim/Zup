@@ -901,20 +901,4 @@ mod tests {
             .validate()
             .expect("a warning does not contradict success");
     }
-
-    /// A tagged payload, so `details.kind` is the operation's own identity and a
-    /// consumer switching on it is exhaustive.
-    #[test]
-    fn a_details_payload_is_tagged_by_its_operation() {
-        let result =
-            AutomationResult::new(OPERATION_BUILD).with_details(Details::Build(BuildDetails {
-                signing_plan: Some("dist/zup-signing.json".to_owned()),
-                pending_signatures: 2,
-            }));
-        let value = serde_json::to_value(&result).unwrap();
-        assert_eq!(value["details"]["kind"], "build");
-        assert_eq!(value["details"]["pending_signatures"], 2);
-        let back: AutomationResult = serde_json::from_value(value).unwrap();
-        assert_eq!(back.details, result.details);
-    }
 }

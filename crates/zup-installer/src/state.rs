@@ -154,13 +154,15 @@ mod tests {
             .to_string();
         assert!(refusal.contains("downgrade"), "{refusal}");
         assert!(refusal.contains("3.0.0"), "the refusal names both versions");
-    }
 
-    #[test]
-    fn a_package_whose_version_is_not_a_version_is_refused_rather_than_guessed() {
+        // A version that does not parse is refused rather than guessed at: an ordering
+        // decision made on a version nobody can read is a decision nobody made.
         assert!(resolve_applied_action(None, "not-a-version").is_err());
     }
 
+    /// An install directory the application forbade is refused rather than ignored, and
+    /// a template is not a directory a user named: one is the manifest withholding a
+    /// capability, the other is a manifest token arriving where a path is expected.
     #[test]
     fn an_install_directory_the_application_forbids_is_refused_not_ignored() {
         let explicit = Path::new("/tmp/elsewhere");
@@ -171,10 +173,6 @@ mod tests {
                 .expect("nothing to choose")
                 .is_none()
         );
-    }
-
-    #[test]
-    fn a_directory_with_template_variables_is_not_a_directory_a_user_named() {
         let error = install_directory_template(Path::new("/opt/${location.user_data}"))
             .expect_err("a template is not a chosen path")
             .to_string();

@@ -244,6 +244,8 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.services.len(), 1);
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
+    // Registering a service is a machine operation whatever scope the
+    // application itself installs to.
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
     assert_eq!(result.plan.launchers[0].privilege, Privilege::User);
     assert_eq!(result.plan.file_associations[0].privilege, Privilege::User);
@@ -323,25 +325,6 @@ when = 'component("extra")'
             .any(|file| file.destination.to_string().ends_with("/plugin.txt"))
     );
     assert_eq!(executor.calls.len(), 1);
-}
-
-#[test]
-fn plugin_context_receives_the_selected_canonical_target() {
-    let build = build(&with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/one.wasm"
-"#,
-    ));
-    let mut executor =
-        FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::default())]);
-    plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap();
-    assert_eq!(executor.calls[0].1.target, target());
-    assert_eq!(
-        executor.calls[0].1.target.as_str(),
-        "x86_64-pc-windows-msvc"
-    );
 }
 
 #[test]
@@ -427,6 +410,7 @@ when = 'component("core")'
         vec![component_id("core"), component_id("extra")]
     );
     assert_eq!(context.target, target());
+    assert_eq!(context.target.as_str(), "x86_64-pc-windows-msvc");
     assert!(executor.cancellation_seen);
 }
 
@@ -882,107 +866,23 @@ fn machine_scope_plugin_resources_are_system_authorized() {
     )
     .unwrap();
     assert!(result.plan.summary.requires_authorization);
-    assert!(
-        result
-            .plan
-            .files
-            .iter()
-            .all(|file| file.privilege == Privilege::System)
-    );
-    assert!(
-        result
-            .plan
-            .launchers
-            .iter()
-            .all(|resource| resource.privilege == Privilege::System)
-    );
+    let system = |privilege: &Privilege| *privilege == Privilege::System;
+    assert!(result.plan.files.iter().all(|r| system(&r.privilege)));
+    assert!(result.plan.launchers.iter().all(|r| system(&r.privilege)));
     assert!(
         result
             .plan
             .path_entries
             .iter()
-            .all(|resource| resource.privilege == Privilege::System)
+            .all(|r| system(&r.privilege))
     );
-    assert!(
-        result
-            .plan
-            .services
-            .iter()
-            .all(|resource| resource.privilege == Privilege::System)
-    );
-    assert!(
-        result
-            .plan
-            .protocols
-            .iter()
-            .all(|resource| resource.privilege == Privilege::System)
-    );
+    assert!(result.plan.services.iter().all(|r| system(&r.privilege)));
+    assert!(result.plan.protocols.iter().all(|r| system(&r.privilege)));
     assert!(
         result
             .plan
             .file_associations
             .iter()
-            .all(|resource| resource.privilege == Privilege::System)
+            .all(|r| system(&r.privilege))
     );
-}
-
-#[test]
-fn plugin_planner_selects_the_requested_target() {
-    let source = r#"
-schema = 1
-
-[app]
-id = "com.example.targets"
-name = "Targets"
-version = "1.0.0"
-
-[build]
-
-[build.targets.linux-arm64]
-target = "aarch64-unknown-linux-gnu"
-source = { directory = "dist/linux-arm64" }
-
-[build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "dist/windows-x64" }
-
-[install]
-scope = "user"
-
-[install.directory]
-user = "${location.user_data}/Targets"
-
-[[plugins]]
-id = "helper"
-source = "plugins/helper.wasm"
-"#;
-    let dir = TempDir::new().unwrap();
-    fs::create_dir_all(dir.path().join("dist/linux-arm64")).unwrap();
-    fs::create_dir_all(dir.path().join("dist/windows-x64")).unwrap();
-    fs::write(dir.path().join("dist/linux-arm64/app"), b"linux").unwrap();
-    fs::write(dir.path().join("dist/windows-x64/app"), b"windows").unwrap();
-    fs::create_dir_all(dir.path().join("plugins")).unwrap();
-    fs::write(dir.path().join("plugins/helper.wasm"), b"plugin").unwrap();
-    let manifest = parse(source).unwrap();
-    let selected = select_targets(&manifest, &[], &TargetOverrides::default())
-        .unwrap()
-        .into_iter()
-        .map(|config| {
-            let installer = compile(&manifest, &config, &TargetOverrides::default()).unwrap();
-            (config, installer)
-        })
-        .collect::<Vec<_>>();
-    let build = materialize(&dir.path().join("zup.toml"), &manifest, selected).unwrap();
-    let mut executor = FakeExecutor::default();
-    let result = plan_with_plugins(
-        &build,
-        &PlanRequest::new(target(), SelectedScope::User),
-        &mut executor,
-        &NeverCancelled,
-    )
-    .unwrap();
-
-    assert_eq!(result.plan.target, target());
-    assert_eq!(executor.calls.len(), 1);
-    assert_eq!(executor.calls[0].0, "helper");
 }

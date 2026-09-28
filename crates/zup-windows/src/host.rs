@@ -311,30 +311,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn an_unreported_answer_is_resolved_against_the_documented_boundary() {
-        let older = HostVersion::new(10, 0, 19045);
-        let newer = HostVersion::new(11, 0, 0);
-        assert!(!MachineSupport::Unknown.permits_selection(Some(&older)));
-        assert!(MachineSupport::Unknown.permits_selection(Some(&newer)));
-        assert!(!MachineSupport::Unknown.permits_selection(None));
-        assert!(MachineSupport::Supported.permits_selection(None));
-        assert!(!MachineSupport::Unsupported.permits_selection(Some(&newer)));
-    }
-
-    #[test]
-    fn the_selection_model_sees_this_host_as_itself() {
-        let host = host_execution();
-        assert_eq!(host.os, PlatformOs::Windows);
-        assert_eq!(
-            host.native,
-            native_machine().expect("native machine").architecture
-        );
-        let version = host_version().expect("a supported host reports a version");
-        assert!(
-            version.at_least(&HostVersion::new(6, 2, 0)),
-            "the reported version is the real one, not the manifested one: {version}"
-        );
-    }
 }

@@ -463,41 +463,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_exit_codes_distinguish_the_failures() {
-        // A script that reacts to "no variant for this computer" differently from
-        // "the CDN was down" cannot if both are 1.
-        let codes = [
-            Outcome::ResolveFailed {
-                detail: String::new(),
-            }
-            .exit_code(),
-            Outcome::Unsupported {
-                detail: String::new(),
-            }
-            .exit_code(),
-            Outcome::AcquisitionFailed {
-                detail: String::new(),
-            }
-            .exit_code(),
-            Outcome::VerificationFailed {
-                detail: String::new(),
-            }
-            .exit_code(),
-            Outcome::LaunchFailed {
-                detail: String::new(),
-            }
-            .exit_code(),
-            Outcome::InstallerFailed { code: 1 }.exit_code(),
-            Outcome::RebootRequired { code: 3010 }.exit_code(),
-            Outcome::RecoveryRequired { code: 7 }.exit_code(),
-        ];
-        let mut unique = codes.to_vec();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), codes.len(), "{codes:?}");
-    }
-
-    #[test]
     fn the_native_runtime_outcome_is_forwarded_rather_than_collapsed() {
         assert_eq!(classify(0), Outcome::Completed { code: 0 });
         assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });

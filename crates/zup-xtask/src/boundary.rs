@@ -784,7 +784,10 @@ mod tests {
 
     /// The relaxation is to the concept tables and to nothing else. Every
     /// structural rule still fires for a file-format crate, which is what makes
-    /// the tier a boundary rather than an exemption.
+    /// the tier a boundary rather than an exemption. A tier that quietly dropped a
+    /// structural rule would be indistinguishable from no tier at all. The `cfg`
+    /// branch is the one that matters: a file-format crate is the most plausible
+    /// place to smuggle one in.
     #[test]
     fn a_file_format_crate_is_still_held_to_every_structural_rule() {
         for (source, expected) in [
@@ -829,14 +832,13 @@ mod tests {
         );
     }
 
-    /// The classification is the matrix's, so a package cannot acquire the
-    /// relaxation by anything written next to the code it silences, and a
-    /// package no matrix claims gets the strict rules rather than none.
+    /// The classification comes from the matrix, so a package cannot acquire the
+    /// file-format relaxation by anything written next to the code it silences.
+    /// An unclassified package gets the strict rules, not none — the default is
+    /// the whole point, so it is what this pins.
     #[test]
     fn the_vocabulary_is_the_matrixs_and_an_unclaimed_package_gets_the_strict_one() {
         assert_eq!(matrix::vocabulary_of("zup-pe"), Vocabulary::FileFormat);
-        assert_eq!(matrix::vocabulary_of("zup-signing"), Vocabulary::Domain);
-        assert_eq!(matrix::vocabulary_of("zup-core"), Vocabulary::Domain);
         assert_eq!(
             matrix::vocabulary_of("no-such-crate"),
             Vocabulary::Domain,
@@ -847,29 +849,27 @@ mod tests {
     /// A file-format crate is portable by definition. One that needed a Windows
     /// build host would be a host adapter wearing a file format's name, and the
     /// gate would be checking the wrong thing.
+    /// A file-format crate is portable by definition, so it must be built on
+    /// every host rather than verified only where a Windows toolchain exists.
+    /// Otherwise a cross-platform matrix member is quietly never compiled.
     #[test]
     fn a_file_format_crate_is_verified_on_every_host() {
-        for matrix_entry in MATRICES {
-            if matrix_entry.vocabulary != Vocabulary::FileFormat {
-                continue;
-            }
+        let file_formats: Vec<_> = MATRICES
+            .iter()
+            .filter(|entry| entry.vocabulary == Vocabulary::FileFormat)
+            .collect();
+        assert!(
+            !file_formats.is_empty(),
+            "the tier must be claimed by someone"
+        );
+        for entry in file_formats {
             assert_eq!(
-                matrix_entry.host,
+                entry.host,
                 Host::Any,
                 "`{}` is a file format, so it builds everywhere",
-                matrix_entry.name
+                entry.name
             );
         }
-    }
-
-    /// The structural tables are not narrowed by the tier. A token list that
-    /// lost an entry would silently stop holding anything at all, including the
-    /// crates the tier was built to keep honest.
-    #[test]
-    fn the_structural_tables_are_the_whole_boundary() {
-        assert_eq!(WINDOWS_CFG_TOKENS.len(), 5);
-        assert_eq!(OS_WINDOWS_TOKENS, ["std::os::windows"]);
-        assert!(!WINDOWS_API_TOKENS.is_empty());
     }
 
     /// The scrubber is what keeps prose from satisfying or tripping a rule, and

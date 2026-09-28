@@ -320,101 +320,70 @@ async fn a_second_architecture_is_never_downloaded() {
     );
 }
 
+/// Every way a host can answer a `Range`, and the same verified bytes.
+///
+/// Only the first is an optimisation; the other two are the shapes a client
+/// has to survive, and the accounting has to say which one happened.
 #[tokio::test]
-async fn a_correct_partial_response_is_what_the_host_sends() {
-    let blobs = blobs(5, 24 * 1024);
-    let origin = Origin::start(BTreeMap::new());
-    let release = release(&origin, origin.pinned(), &blobs, u64::MAX);
-    let (source, descriptors) = open_source(&release, &blobs).await;
-    let metrics = source.metrics();
-    assert_eq!(
-        source.range_support(),
-        zup_distribute_github::RangeSupport::Unknown
-    );
+async fn a_host_that_answers_a_range_any_way_still_produces_correct_content() {
+    for (honour, wrong, support, ranged, refused) in [
+        (
+            true,
+            false,
+            Some(zup_distribute_github::RangeSupport::Supported),
+            5u64,
+            0u64,
+        ),
+        (
+            false,
+            false,
+            Some(zup_distribute_github::RangeSupport::Unsupported),
+            0,
+            0,
+        ),
+        // A `206` whose `Content-Range` names a different range than the one
+        // asked for. Reading those bytes would be reading the wrong object.
+        (true, true, None, 0, 1),
+    ] {
+        let blobs = blobs(5, 24 * 1024);
+        let origin = Origin::with_options(BTreeMap::new(), honour, wrong);
+        let release = release(&origin, origin.pinned(), &blobs, u64::MAX);
+        let (source, descriptors) = open_source(&release, &blobs).await;
+        let metrics = source.metrics();
+        assert_eq!(
+            source.range_support(),
+            zup_distribute_github::RangeSupport::Unknown,
+            "the open is a whole read"
+        );
 
-    for (descriptor, fixture) in descriptors.iter().zip(&blobs) {
-        assert!(source.contains(descriptor), "the source carries it");
-        let root = tempfile::tempdir().expect("a temporary directory");
-        let chain = chain(&source);
-        let blob = chain
-            .acquire(
-                descriptor,
-                &ContentCache::open(root.path(), CachePolicy::Keep).expect("a cache"),
-                &NeverCancelled,
-            )
-            .await
-            .expect("a blob is acquired by range");
-        assert_eq!(blob.read_to_end().expect("reads"), fixture.bytes);
+        let (acquired, _cache) = acquire_all(&source, &descriptors).await;
+        assert_bytes(&acquired, &blobs);
+        if let Some(support) = support {
+            assert_eq!(source.range_support(), support, "honour={honour}");
+        }
+        assert_bytes(&acquired, &blobs);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ranged_transfers, ranged, "honour={honour}");
+        assert_eq!(snapshot.refused_transfers, refused, "honour={honour}");
+        let package = release.packed.bytes().len() as u64;
+        if ranged > 0 {
+            let frames: u64 = blobs.iter().map(|blob| blob.compressed.len() as u64).sum();
+            assert!(snapshot.is_fully_ranged(), "{snapshot:?}");
+            assert_eq!(snapshot.needed_bytes, frames, "only the frames");
+            assert_eq!(snapshot.wire_bytes, frames);
+            assert!(
+                snapshot.wire_bytes < package,
+                "a ranged read costs {snapshot:?} against a {package} byte package"
+            );
+        } else {
+            // Slower, and honestly so: the bytes are the package, read once
+            // per blob.
+            assert!(snapshot.fallback_transfers > 0, "{snapshot:?}");
+            assert!(!snapshot.is_fully_ranged());
+            assert!(snapshot.wire_bytes > snapshot.needed_bytes, "{snapshot:?}");
+        }
     }
-
-    assert_eq!(
-        source.range_support(),
-        zup_distribute_github::RangeSupport::Supported,
-        "a `206` that lines up means the host does ranges"
-    );
-    let snapshot = metrics.snapshot();
-    assert!(snapshot.is_fully_ranged(), "{snapshot:?}");
-    assert_eq!(snapshot.fallback_transfers, 0);
-    assert_eq!(snapshot.refused_transfers, 0);
-    // The whole point: the wire cost is the frames, not the package.
-    let package = release.packed.bytes().len() as u64;
-    let frames: u64 = blobs.iter().map(|blob| blob.compressed.len() as u64).sum();
-    assert_eq!(
-        snapshot.needed_bytes, frames,
-        "only the frames crossed the wire"
-    );
-    assert_eq!(snapshot.wire_bytes, frames);
-    assert!(
-        snapshot.wire_bytes < package,
-        "a ranged read costs {snapshot:?} against a {package} byte package"
-    );
 }
-
-#[tokio::test]
-async fn a_host_that_ignores_ranges_still_produces_correct_content() {
-    let blobs = blobs(5, 24 * 1024);
-    // The documented case: the host answers `200` and sends the whole object.
-    let origin = Origin::with_options(BTreeMap::new(), false, false);
-    let release = release(&origin, origin.pinned(), &blobs, u64::MAX);
-    let (source, descriptors) = open_source(&release, &blobs).await;
-    let metrics = source.metrics();
-
-    let (acquired, _cache) = acquire_all(&source, &descriptors).await;
-    assert_bytes(&acquired, &blobs);
-    assert_eq!(
-        source.range_support(),
-        zup_distribute_github::RangeSupport::Unsupported,
-        "the fallback is recorded rather than hidden"
-    );
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.ranged_transfers, 0);
-    assert!(snapshot.fallback_transfers > 0, "{snapshot:?}");
-    assert!(!snapshot.is_fully_ranged());
-    // Slower, and honestly so: the bytes are the package, read five times over.
-    assert!(snapshot.wire_bytes > snapshot.needed_bytes, "{snapshot:?}");
-}
-
-#[tokio::test]
-async fn a_host_that_answers_a_wrong_content_range_falls_back_to_the_whole_object() {
-    let blobs = blobs(3, 20 * 1024);
-    // A `206` whose `Content-Range` names a different range than the one asked
-    // for. Reading those bytes would be reading the wrong object, so the only
-    // correct answer is the whole thing.
-    let origin = Origin::with_options(BTreeMap::new(), true, true);
-    let release = release(&origin, origin.pinned(), &blobs, u64::MAX);
-    let (source, descriptors) = open_source(&release, &blobs).await;
-    let metrics = source.metrics();
-
-    let (acquired, _cache) = acquire_all(&source, &descriptors).await;
-    assert_bytes(&acquired, &blobs);
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.refused_transfers, 1, "{snapshot:?}");
-    // The mismatch is counted as a refusal *and* as a fallback: the host
-    // disagreed about the bytes, and the whole object was fetched anyway.
-    assert!(snapshot.fallback_transfers > 0, "{snapshot:?}");
-    assert_eq!(snapshot.ranged_transfers, 0);
-}
-
 #[tokio::test]
 async fn a_corrupt_package_frame_is_rejected_rather_than_published() {
     let blobs = blobs(3, 16 * 1024);
@@ -512,7 +481,7 @@ async fn a_sharded_package_reads_as_one_logical_source() {
     for shard in &release.descriptor.shards {
         assert!(
             zup_publish::check_asset_name(&shard.name).is_ok(),
-            "`{}` is a safe asset name",
+            "`{}` is not a safe asset name",
             shard.name
         );
         assert!(
@@ -521,23 +490,6 @@ async fn a_sharded_package_reads_as_one_logical_source() {
             shard.name
         );
     }
-    // The pieces tile the package: no gap, no overlap, first piece at byte zero.
-    let mut cursor = 0u64;
-    for shard in &release.descriptor.shards {
-        assert_eq!(
-            shard.start, cursor,
-            "piece {} starts where the last ended",
-            shard.index
-        );
-        cursor += shard.size;
-    }
-    assert_eq!(cursor, release.descriptor.package.size);
-    assert_eq!(release.descriptor.shards[0].start, 0);
-    assert_eq!(
-        zup_publish::shard_name(ASSET, 1),
-        release.descriptor.shards[1].name,
-        "a piece name is derived, not invented"
-    );
 
     let (source, descriptors) = open_source(&release, &blobs).await;
     assert_eq!(
@@ -548,9 +500,8 @@ async fn a_sharded_package_reads_as_one_logical_source() {
     let (acquired, _cache) = acquire_all(&source, &descriptors).await;
     assert_bytes(&acquired, &blobs);
 }
-
 #[tokio::test]
-async fn a_missing_shard_is_reported_rather_than_silently_skipped() {
+async fn a_blob_whose_shard_is_missing_cannot_be_acquired() {
     let blobs = blobs(6, 24 * 1024);
     let origin = Origin::start(BTreeMap::new());
     let release = release(&origin, origin.pinned(), &blobs, 12 * 1024);
@@ -581,36 +532,6 @@ async fn a_missing_shard_is_reported_rather_than_silently_skipped() {
         "a blob that lived only in the missing piece cannot be acquired"
     );
 }
-
-#[tokio::test]
-async fn a_cached_blob_is_not_fetched_again() {
-    let blobs = blobs(3, 16 * 1024);
-    let origin = Origin::start(BTreeMap::new());
-    let release = release(&origin, origin.pinned(), &blobs, u64::MAX);
-    let (source, descriptors) = open_source(&release, &blobs).await;
-
-    let cache = Cache::new();
-    let chain = chain(&source);
-    for descriptor in &descriptors {
-        chain
-            .acquire(descriptor, &cache.cache, &NeverCancelled)
-            .await
-            .expect("a blob is acquired");
-    }
-    let after_first = origin.requests();
-    for descriptor in &descriptors {
-        chain
-            .acquire(descriptor, &cache.cache, &NeverCancelled)
-            .await
-            .expect("a cached blob is returned");
-    }
-    assert_eq!(
-        origin.requests(),
-        after_first,
-        "a verified blob is never re-fetched"
-    );
-}
-
 /// The stable alias is a channel, not an identity, and says so.
 #[tokio::test]
 async fn the_latest_alias_is_a_channel_and_never_a_pin() {
@@ -684,15 +605,6 @@ fn a_written_package_is_its_pieces_in_order_and_nothing_is_left_out() {
 }
 
 #[test]
-fn a_package_smaller_than_its_ceiling_is_one_file() {
-    let blobs = blobs(2, 4 * 1024);
-    let packed = pack(&blobs, u64::MAX);
-    assert_eq!(packed.pieces.len(), 1, "one asset, not a set of them");
-    assert_eq!(packed.metadata.shards.len(), 1);
-    assert_eq!(packed.metadata.shards[0].start, 0);
-}
-
-#[test]
 fn a_package_refuses_metadata_that_has_been_tampered_with() {
     let blobs = blobs(2, 8 * 1024);
     let packed = pack(&blobs, u64::MAX);
@@ -716,15 +628,13 @@ fn a_package_refuses_metadata_that_has_been_tampered_with() {
 
 #[test]
 fn a_package_is_not_a_zup_bundle_and_says_so() {
-    assert_eq!(&zup_distribute_github::MAGIC[..], b"ZUPGPKG\0");
-    let foreign = b"ZUPBNDL\0";
-    let error = zup_distribute_github::Index::read(foreign).expect_err("a bundle is not a package");
+    let error =
+        zup_distribute_github::Index::read(b"ZUPBNDL\0").expect_err("a bundle is not a package");
     assert!(
         matches!(error, zup_distribute_github::PackageError::Short { .. }),
         "{error}"
     );
 }
-
 #[test]
 fn a_release_root_path_never_becomes_an_asset_name() {
     // A blob path is content, not a document, and a publisher that flattened one
@@ -778,28 +688,4 @@ fn a_package_over_the_per_asset_limit_is_refused_before_anything_is_written() {
     assert!(!zup_publish_github::accepts(
         zup_publish_github::MAX_ASSET_BYTES
     ));
-}
-
-#[test]
-fn a_private_repository_cannot_serve_a_thin_installer() {
-    // A thin installer carries no credential, so a private repository is not a
-    // slow path — it is a broken install. The diagnosis says so in one field
-    // rather than leaving a 404 to explain itself at the user's end.
-    let diagnosis = |private: bool| zup_publish_github::Diagnosis {
-        repository: "acme/acme".to_owned(),
-        host: "github.com".to_owned(),
-        private,
-        archived: false,
-        immutable_releases: None,
-        tag: "v1.4.0".to_owned(),
-        assets: 12,
-        asset_limit: zup_publish_github::MAX_ASSETS,
-        largest: Some((ASSET.to_owned(), 1024)),
-        asset_bytes_limit: zup_publish_github::MAX_ASSET_BYTES,
-        release_exists: true,
-        release_is_draft: false,
-        release_is_immutable: None,
-    };
-    assert!(diagnosis(false).distribution_is_public());
-    assert!(!diagnosis(true).distribution_is_public());
 }

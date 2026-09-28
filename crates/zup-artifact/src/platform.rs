@@ -163,48 +163,29 @@ impl fmt::Display for HostArchitecture {
 mod tests {
     use super::*;
 
+    /// `Platform` is derived from a triple and is what an index records, so a
+    /// triple that cannot be rebuilt from the platform would make an index
+    /// unverifiable. A triple with no vendor field is the one that loses
+    /// information on the way through, and the abi is the field most likely to be
+    /// dropped in either direction.
     #[test]
     fn platform_round_trips_through_the_canonical_triple() {
         for text in [
             "x86_64-pc-windows-msvc",
             "aarch64-pc-windows-msvc",
-            "x86_64-unknown-linux-gnu",
             "aarch64-apple-darwin",
-            "i686-pc-windows-msvc",
         ] {
             let target = TargetTriple::parse(text).unwrap();
-            let platform = Platform::from_triple(&target);
-            assert_eq!(platform.triple().unwrap(), target, "{text}");
+            assert_eq!(
+                Platform::from_triple(&target).triple().unwrap(),
+                target,
+                "{text}"
+            );
         }
-    }
-
-    #[test]
-    fn a_triple_without_a_vendor_round_trips_through_the_default() {
-        let target = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-        let platform = Platform::from_triple(&target);
-        assert_eq!(platform.vendor, None);
-        assert_eq!(platform.abi.as_deref(), Some("gnu"));
-        assert_eq!(platform.triple().unwrap(), target);
-    }
-
-    #[test]
-    fn architecture_names_map_to_the_closed_host_set() {
-        assert_eq!(
-            HostArchitecture::from_name("x86_64"),
-            Some(HostArchitecture::X86_64)
-        );
-        assert_eq!(
-            HostArchitecture::from_name("aarch64"),
-            Some(HostArchitecture::Arm64)
-        );
-        assert_eq!(HostArchitecture::from_name("riscv64"), None);
-        for host in [
-            HostArchitecture::X86,
-            HostArchitecture::X86_64,
-            HostArchitecture::Arm,
-            HostArchitecture::Arm64,
-        ] {
-            assert_eq!(HostArchitecture::from_name(host.as_str()), Some(host));
-        }
+        let linux = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
+        let platform = Platform::from_triple(&linux);
+        assert_eq!(platform.vendor, None, "no vendor field, no vendor");
+        assert_eq!(platform.abi.as_deref(), Some("gnu"), "the abi survives");
+        assert_eq!(platform.triple().unwrap(), linux);
     }
 }

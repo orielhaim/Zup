@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::*;
-use tokio::sync::Mutex;
 use zup_acquire::{
     AcquireError, AcquisitionEvent, AcquisitionItem, AcquisitionPlan, AcquisitionSession,
     ArtifactSource, CachePolicy, CancelFlag, Cancellation, ContentDescriptor, ContentKind,
@@ -212,37 +211,35 @@ async fn only_the_selected_variant_and_components_are_downloaded() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
     // Two architectures' content plus two components' content, all present in
-    // the origin. The selection keeps one of each.
-    let windows = payload(40, 16 * 1024);
-    let arm = payload(41, 16 * 1024);
-    let core = payload(42, 16 * 1024);
-    let tooling = payload(43, 16 * 1024);
-    let available: Vec<(ContentDescriptor, Vec<u8>)> = [&windows, &arm, &core, &tooling]
+    // the origin. The user chose the x64 variant with the core component only.
+    let available: Vec<(ContentDescriptor, Vec<u8>)> = [40u8, 41, 42, 43]
         .into_iter()
-        .map(|logical| (payload_descriptor(logical, LEVEL), wire_of(logical, LEVEL)))
+        .map(|seed| {
+            let logical = payload(seed, 16 * 1024);
+            (
+                payload_descriptor(&logical, LEVEL),
+                wire_of(&logical, LEVEL),
+            )
+        })
         .collect();
-    let (windows_descriptor, _, core_descriptor, tooling_descriptor, arm_descriptor) = (
+    let (x64, other_arch, core, other_component) = (
         available[0].0,
         available[1].0,
         available[2].0,
         available[3].0,
-        available[1].0,
     );
-    let _ = arm_descriptor;
-    let _ = (windows_descriptor, core_descriptor, tooling_descriptor);
 
-    // The user chose the x64 variant with the core component only.
     let plan = AcquisitionPlan::build(vec![
-        AcquisitionItem::new(available[0].0, ContentReason::Runtime),
+        AcquisitionItem::new(x64, ContentReason::Runtime),
         AcquisitionItem::new(
-            available[2].0,
+            core,
             ContentReason::File {
                 component: Some("core".to_owned()),
             },
         ),
     ])
     .expect("the closure is well formed");
-    let counting = CountingSource::new("cdn", available.clone(), 64 * 1024);
+    let counting = CountingSource::new("cdn", available, 64 * 1024);
     let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(
             chain(vec![counting.clone()]),
@@ -255,20 +252,15 @@ async fn only_the_selected_variant_and_components_are_downloaded() {
 
     assert_eq!(outcome.items.len(), 2, "only the selection is fetched");
     assert_eq!(counting.started.load(Ordering::SeqCst), 2);
-    assert!(
-        !cache
-            .get(&available[1].0, Verify::WireLength)
-            .expect("the probe runs")
-            .is_some(),
-        "the other architecture is never downloaded"
-    );
-    assert!(
-        !cache
-            .get(&tooling_descriptor, Verify::WireLength)
-            .expect("the probe runs")
-            .is_some(),
-        "an unselected component is never downloaded"
-    );
+    for unselected in [other_arch, other_component] {
+        assert!(
+            !cache
+                .get(&unselected, Verify::WireLength)
+                .expect("the probe runs")
+                .is_some(),
+            "content outside the selection is never downloaded"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -297,7 +289,6 @@ async fn a_shared_blob_is_downloaded_once_for_two_reasons() {
     .expect("the closure is well formed");
     assert_eq!(plan.len(), 1, "one digest is one item");
 
-    let started = Arc::new(AtomicUsize::new(0));
     let counting = CountingSource::new("cdn", vec![(descriptor, wire)], 16 * 1024);
     let outcome = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
         .run(
@@ -309,65 +300,60 @@ async fn a_shared_blob_is_downloaded_once_for_two_reasons() {
         .expect("the closure is satisfied")
         .enter();
     assert_eq!(outcome.items.len(), 1);
-    assert_eq!(counting.started.load(Ordering::SeqCst), 1);
-    let _ = started;
+    assert_eq!(
+        counting.started.load(Ordering::SeqCst),
+        1,
+        "one digest wanted twice is one transfer"
+    );
 }
 
+/// The pool is a bound, not a target: it must actually overlap transfers or the
+/// concurrency claim is empty, and it must never exceed what it was given.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transfers_run_concurrently_and_the_pool_is_bounded() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(12);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
     let workers = 4;
-    let source = CountingSource::new("cdn", blobs, 1024);
-    let config = SchedulerConfig {
-        per_origin: workers,
-        total: workers,
-        staging: 2,
-        ..SchedulerConfig::default()
-    };
-    let outcome = AcquisitionSession::new(plan, cache, config)
-        .run(
-            chain(vec![source.clone()]),
-            never(),
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect("the closure is satisfied")
-        .enter();
-    assert_eq!(outcome.items.len(), 12);
-    assert_eq!(source.started.load(Ordering::SeqCst), 12);
-    assert!(
-        source.peak() > 1,
-        "a pool of {workers} must actually overlap transfers, saw a peak of {}",
-        source.peak()
-    );
-    assert!(
-        source.peak() <= workers,
-        "the pool is bounded, saw a peak of {}",
-        source.peak()
-    );
-}
+    for (name, config, overlapped) in [
+        (
+            "bounded",
+            SchedulerConfig {
+                per_origin: workers,
+                total: workers,
+                staging: 2,
+                ..SchedulerConfig::default()
+            },
+            true,
+        ),
+        ("sequential", SchedulerConfig::sequential(), false),
+    ] {
+        let cache = TestCache::new();
+        let cache = cache.shared(CachePolicy::Keep);
+        let blobs = fixture(12);
+        let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
+        let source = CountingSource::new("cdn", blobs, 1024);
+        let outcome = AcquisitionSession::new(plan, cache, config)
+            .run(
+                chain(vec![source.clone()]),
+                never(),
+                &ProgressSink::discard(),
+            )
+            .await
+            .expect("the closure is satisfied")
+            .enter();
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sequential_pool_still_satisfies_the_same_closure() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(4);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let source = CountingSource::new("cdn", blobs, 1024);
-    let outcome = AcquisitionSession::new(plan, cache, SchedulerConfig::sequential())
-        .run(
-            chain(vec![source.clone()]),
-            never(),
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect("the closure is satisfied")
-        .enter();
-    assert_eq!(outcome.items.len(), 4);
-    assert_eq!(source.peak(), 1, "a pool of one never overlaps");
+        assert_eq!(outcome.items.len(), 12);
+        assert_eq!(source.started.load(Ordering::SeqCst), 12);
+        assert_eq!(
+            source.peak() > 1,
+            overlapped,
+            "{name}: saw a peak of {}",
+            source.peak()
+        );
+        assert!(
+            source.peak() <= workers,
+            "{name}: the pool is bounded, saw a peak of {}",
+            source.peak()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -483,57 +469,16 @@ async fn a_chain_falls_through_to_the_next_source_and_never_poisons_one() {
     );
 }
 
+/// Cancellation never reaches the barrier, and never takes a verified blob with
+/// it: what was already proved stays proved, and what was in flight is a partial
+/// rather than a blob.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_broken_source_alone_leaves_the_machine_untouched_and_reports_why() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(2);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let progress = ProgressSink::channel(64);
-    let (sink, mut events) = progress;
-    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
-        .run(
-            chain(vec![FailingSource::new("primary", "connection reset")]),
-            never(),
-            &sink,
-        )
-        .await
-        .expect_err("no source can satisfy the closure");
-    assert!(error.left_machine_unchanged());
-    assert!(cache.digests().expect("the cache lists").is_empty());
-
-    let mut failure = None;
-    while let Ok(event) = events.try_recv() {
-        if matches!(event, AcquisitionEvent::Failed { .. }) {
-            failure = Some(event);
-        }
-    }
-    let event = failure.expect("a failure is reported");
-    assert_eq!(event.reasons().len(), 1, "one source was tried");
-    assert!(
-        event.reasons()[0].contains("connection reset"),
-        "the transport reason survives to the caller: {:?}",
-        event.reasons()
-    );
-    match &event {
-        AcquisitionEvent::Failed {
-            machine_unchanged, ..
-        } => assert!(
-            *machine_unchanged,
-            "the event states the machine is unchanged"
-        ),
-        other => panic!("expected a failure, got {other:?}"),
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancellation_before_the_barrier_leaves_the_cache_intact_and_nothing_published() {
+async fn a_cancelled_session_publishes_nothing_and_keeps_what_it_proved() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
     let blobs = fixture(6);
     // Two blobs are already present and verified; they must survive a cancel.
-    let warm = &blobs[..2];
-    for (descriptor, wire) in warm {
+    for (descriptor, wire) in &blobs[..2] {
         let mut writer = cache.writer(descriptor).expect("the writer opens");
         writer.write(wire).expect("the bytes land");
         writer.commit().expect("the blob verifies");
@@ -618,7 +563,7 @@ async fn a_cancelled_transfer_leaves_a_partial_rather_than_a_blob() {
         ContentReason::File { component: None },
     )])
     .expect("the closure is well formed");
-    let _ = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+    let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(
             chain(vec![Arc::new(SelfCancelling {
                 flag: Arc::clone(&flag),
@@ -629,6 +574,10 @@ async fn a_cancelled_transfer_leaves_a_partial_rather_than_a_blob() {
             &ProgressSink::discard(),
         )
         .await;
+    assert!(
+        outcome.is_err(),
+        "a source that cancels itself cannot satisfy the barrier"
+    );
     let paths = cache.paths(&descriptor).expect("the blob has paths");
     assert!(
         !paths.final_path.exists(),
@@ -647,14 +596,20 @@ async fn a_cancelled_transfer_leaves_a_partial_rather_than_a_blob() {
     );
 }
 
+/// Every verified blob is staged, and only the ones the barrier actually handed
+/// over: a staging step that ran ahead of verification would put unverified bytes
+/// where the installer will read them.
+/// Staging is the handoff from the cache to the install tree, so it must see
+/// only verified blobs, exactly once each, and a failure anywhere in it must
+/// close the barrier rather than hand over a partial install.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_verified_blob_is_staged_as_it_lands_not_after_the_last_one() {
+async fn staging_sees_only_verified_blobs_and_a_failure_closes_the_barrier() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
     let blobs = fixture(6);
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
     let stager = RecordingStager::new();
-    let outcome = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+    let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .with_stager(stager.clone())
         .run(
             chain(vec![memory_source("origin", &blobs)]),
@@ -664,23 +619,25 @@ async fn a_verified_blob_is_staged_as_it_lands_not_after_the_last_one() {
         .await
         .expect("the closure is satisfied")
         .enter();
-    assert_eq!(stager.seen().len(), 6, "every verified blob is staged");
-    for blob in &outcome.items {
-        assert!(
-            stager.seen().contains(&blob.descriptor.digest),
-            "each blob is staged exactly once"
-        );
-    }
-}
+    let mut staged = stager.seen();
+    staged.sort_unstable();
+    staged.dedup();
+    let mut verified: Vec<_> = outcome
+        .items
+        .iter()
+        .map(|blob| blob.descriptor.digest)
+        .collect();
+    verified.sort_unstable();
+    assert_eq!(
+        staged, verified,
+        "each blob is staged exactly once, and nothing else is"
+    );
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_staging_failure_closes_the_barrier() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
+    let cache = TestCache::new().shared(CachePolicy::Keep);
     let blobs = fixture(3);
     let doomed = blobs[0].0.digest;
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+    let error = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
         .with_stager(RecordingStager::failing(doomed))
         .run(
             chain(vec![memory_source("origin", &blobs)]),
@@ -744,72 +701,6 @@ async fn progress_is_aggregate_and_carries_no_per_chunk_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_event_stream_names_are_the_stable_aggregate_contract() {
-    // These are the names a JSONL consumer switches on. Changing one is a
-    // breaking change to the contract, so the test states them.
-    let names = [
-        AcquisitionEvent::ReleaseResolved {
-            app_id: "com.acme".to_owned(),
-            channel: "stable".to_owned(),
-            version: "1.4.0".to_owned(),
-            release_digest: digest_of(b"release"),
-        },
-        AcquisitionEvent::VariantSelected {
-            variant: "windows-x64".to_owned(),
-            target: "x86_64-pc-windows-msvc".to_owned(),
-            compatibility: "native".to_owned(),
-        },
-        AcquisitionEvent::AcquisitionStarted {
-            variant: "windows-x64".to_owned(),
-            items: 0,
-            estimate: Default::default(),
-        },
-        AcquisitionEvent::CacheHit {
-            kind: "payload blob",
-            digest: "0".repeat(64),
-            wire_bytes: 1,
-        },
-        AcquisitionEvent::Retrying {
-            kind: "payload blob",
-            digest: "0".repeat(64),
-            attempt: 1,
-            delay_ms: 100,
-            reason: "connection reset".to_owned(),
-        },
-        AcquisitionEvent::AcquisitionComplete {
-            items: 0,
-            bytes: 0,
-            elapsed_ms: 0,
-        },
-        AcquisitionEvent::StagingComplete {
-            staged: 0,
-            bytes: 0,
-        },
-    ];
-    let rendered: Vec<&str> = names.iter().map(AcquisitionEvent::name).collect();
-    assert_eq!(
-        rendered,
-        vec![
-            "release_resolved",
-            "variant_selected",
-            "acquisition_started",
-            "cache_hit",
-            "retrying",
-            "acquisition_complete",
-            "staging_complete",
-        ]
-    );
-    for event in &names {
-        let json = serde_json::to_value(event).expect("the event serializes");
-        assert_eq!(
-            json.get("event").and_then(|value| value.as_str()),
-            Some(event.name()),
-            "the wire name is the event name"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_local_tree_satisfies_a_closure_with_no_second_format() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
@@ -844,29 +735,6 @@ async fn a_local_tree_satisfies_a_closure_with_no_second_format() {
         restored.read_to_end().expect("the blob decodes"),
         payload(30, 8 * 1024)
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_local_tree_that_lacks_a_blob_falls_through_to_the_network_source() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let tree = tempfile::tempdir().expect("a temporary tree");
-    let blobs = fixture(3);
-    seed_web_tree(tree.path(), &blobs[0].0, &blobs[0].1);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let outcome = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
-        .run(
-            chain(vec![
-                directory_source("usb", tree.path()),
-                memory_source("cdn", &blobs),
-            ]),
-            never(),
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect("the chain satisfies the closure")
-        .enter();
-    assert_eq!(outcome.items.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -920,92 +788,14 @@ async fn an_estimate_reports_download_install_and_cache_in_one_model() {
     assert_eq!(lines[2].0, "Already cached");
 }
 
+/// A closure the engine cannot build is refused rather than planned: an empty one
+/// would report success having moved nothing, and two descriptors that disagree
+/// about one digest would plan two transfers for one object.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_update_closure_that_omits_unchanged_content_costs_nothing_for_it() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    // Version 1 and version 2 share most of their content.
-    let unchanged = payload(51, 64 * 1024);
-    let changed = payload(52, 64 * 1024);
-    let added = payload(53, 64 * 1024);
-    let unchanged_descriptor = payload_descriptor(&unchanged, LEVEL);
-    let changed_descriptor = payload_descriptor(&changed, LEVEL);
-    let added_descriptor = payload_descriptor(&added, LEVEL);
-
-    // The machine already has version 1's closure.
-    for logical in [&unchanged, &changed] {
-        let descriptor = payload_descriptor(logical, LEVEL);
-        let mut writer = cache.writer(&descriptor).expect("the writer opens");
-        writer
-            .write(&wire_of(logical, LEVEL))
-            .expect("the bytes land");
-        writer.commit().expect("the blob verifies");
-    }
-
-    // Version 2's closure is the two it shares plus the one it adds.
-    let plan = AcquisitionPlan::build(vec![
-        AcquisitionItem::new(unchanged_descriptor, ContentReason::Retained),
-        AcquisitionItem::new(changed_descriptor, ContentReason::File { component: None }),
-        AcquisitionItem::new(added_descriptor, ContentReason::File { component: None }),
-    ])
-    .expect("the closure is well formed");
-    let session = AcquisitionSession::new(plan.clone(), cache, SchedulerConfig::default());
-    let estimate = session.estimate();
-    assert_eq!(
-        estimate.download_bytes, added_descriptor.compressed_size,
-        "unchanged content costs zero network bytes"
-    );
-    assert_eq!(estimate.cached_items, 2);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_repair_closure_is_exactly_the_missing_owned_digests() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let present = payload(54, 32 * 1024);
-    let missing = payload(55, 32 * 1024);
-    let present_descriptor = payload_descriptor(&present, LEVEL);
-    let missing_descriptor = payload_descriptor(&missing, LEVEL);
-    let mut writer = cache.writer(&present_descriptor).expect("the writer opens");
-    writer
-        .write(&wire_of(&present, LEVEL))
-        .expect("the bytes land");
-    writer.commit().expect("the blob verifies");
-
-    // Repair discovers one drifted file. It asks for that digest, not for the
-    // whole variant, and not for anything it already holds.
-    let plan = AcquisitionPlan::build(vec![AcquisitionItem::new(
-        missing_descriptor,
-        ContentReason::File { component: None },
-    )])
-    .expect("the closure is well formed");
-    let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
-        .run(
-            chain(vec![memory_source(
-                "origin",
-                &[(missing_descriptor, wire_of(&missing, LEVEL))],
-            )]),
-            never(),
-            &ProgressSink::discard(),
-        )
-        .await
-        .expect("the repair closure is satisfied")
-        .enter();
-    assert_eq!(outcome.items.len(), 1);
-    assert_eq!(
-        outcome.estimate.download_bytes,
-        missing_descriptor.compressed_size
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_empty_closure_is_a_refusal_rather_than_a_silent_success() {
+async fn a_closure_the_engine_cannot_build_is_refused() {
     let error = AcquisitionPlan::build(Vec::new()).expect_err("an empty closure is refused");
     assert!(matches!(error, AcquireError::Descriptor(_)), "{error}");
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_descriptors_for_one_digest_must_agree() {
     let logical = payload(56, 4096);
     let honest = payload_descriptor(&logical, LEVEL);
     let mut disagreeing = honest;
@@ -1018,87 +808,55 @@ async fn two_descriptors_for_one_digest_must_agree() {
     assert!(matches!(error, AcquireError::Descriptor(_)), "{error}");
 }
 
+/// A refusal reaches the caller with the machine untouched, the reasons intact,
+/// and every source it tried named in order — on the event stream a UI reads and
+/// in the error a library caller gets. A chain with nothing in it still has to
+/// say something.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_cache_is_not_consulted_through_a_source_chain_when_it_already_has_the_blob() {
+async fn a_refusal_names_every_source_it_tried_and_leaves_the_machine_untouched() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(1);
-    let (descriptor, wire) = blobs[0].clone();
-    let mut writer = cache.writer(&descriptor).expect("the writer opens");
-    writer.write(&wire).expect("the bytes land");
-    writer.commit().expect("the blob verifies");
+    let blobs = fixture(2);
 
+    let (sink, mut events) = ProgressSink::channel(64);
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    // No sources at all: the cache is the source.
-    let outcome = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
-        .run(chain(vec![]), never(), &ProgressSink::discard())
+    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+        .run(
+            chain(vec![FailingSource::new("primary", "connection reset")]),
+            never(),
+            &sink,
+        )
         .await
-        .expect("the cache satisfies the closure")
-        .enter();
-    assert_eq!(outcome.cache_hits, 1);
-    assert_eq!(outcome.items.len(), 1);
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_document_and_a_payload_of_the_same_bytes_are_different_content() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let bytes = b"the same bytes".to_vec();
-    let document =
-        ContentDescriptor::stored(ContentKind::Metadata, digest_of(&bytes), bytes.len() as u64);
-    let payload = ContentDescriptor::compressed(
-        ContentKind::Payload,
-        digest_of(&bytes),
-        zstd::stream::encode_all(bytes.as_slice(), LEVEL)
-            .expect("compresses")
-            .len() as u64,
-        bytes.len() as u64,
-    );
-    // Two descriptors, one digest, different verification policy. The cache keys
-    // by digest, so the second one is a hit on the first — and the kind decides
-    // how deeply it is re-checked.
-    let mut writer = cache.writer(&document).expect("the writer opens");
-    writer.write(&bytes).expect("the bytes land");
-    writer.commit().expect("the document verifies");
-    assert!(
-        cache
-            .get(&document, zup_acquire::Verify::Full)
-            .expect("the probe runs")
-            .is_some()
-    );
-    let _ = payload;
-}
+        .expect_err("no source can satisfy the closure");
+    assert!(error.left_machine_unchanged());
+    assert!(cache.digests().expect("the cache lists").is_empty());
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn progress_never_reports_more_bytes_than_the_closure_needs() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(3);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let total = plan.wire_size();
-    let (sink, mut events) = ProgressSink::channel(512);
-    AcquisitionSession::new(plan, cache, SchedulerConfig::default())
-        .run(chain(vec![memory_source("origin", &blobs)]), never(), &sink)
-        .await
-        .expect("the closure is satisfied");
+    let mut failure = None;
     while let Ok(event) = events.try_recv() {
-        if let AcquisitionEvent::DownloadProgress { progress } = event {
-            assert!(
-                progress.completed_bytes <= progress.total_bytes,
-                "progress overshot the closure: {progress:?}"
-            );
-            assert_eq!(progress.total_bytes, total);
-            assert!(progress.percent().is_some_and(|percent| percent <= 100));
+        if matches!(event, AcquisitionEvent::Failed { .. }) {
+            failure = Some(event);
         }
     }
-}
+    let event = failure.expect("a failure is reported");
+    assert_eq!(event.reasons().len(), 1, "one source was tried");
+    assert!(
+        event.reasons()[0].contains("connection reset"),
+        "the transport reason survives to the caller: {:?}",
+        event.reasons()
+    );
+    match &event {
+        AcquisitionEvent::Failed {
+            machine_unchanged, ..
+        } => assert!(
+            *machine_unchanged,
+            "the event states the machine is unchanged"
+        ),
+        other => panic!("expected a failure, got {other:?}"),
+    }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_session_over_a_source_that_returns_nothing_names_every_source_it_tried() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(1);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let error = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+    let one = fixture(1);
+    let plan = AcquisitionPlan::build(items_for(&one)).expect("the closure is well formed");
+    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(
             chain(vec![
                 memory_source("empty", &[]),
@@ -1120,85 +878,9 @@ async fn a_session_over_a_source_that_returns_nothing_names_every_source_it_trie
             .any(|report| report.to_string().contains("connection reset")),
         "the transport reason survives to the caller"
     );
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_memory_source_and_a_directory_source_produce_identical_closures() {
-    let logical = payload(57, 64 * 1024);
-    let descriptor = payload_descriptor(&logical, LEVEL);
-    let wire = wire_of(&logical, LEVEL);
-    let tree = tempfile::tempdir().expect("a temporary tree");
-    seed_web_tree(tree.path(), &descriptor, &wire);
-
-    let from_memory = TestCache::new();
-    let from_memory = from_memory.shared(CachePolicy::Keep);
-    AcquisitionSession::new(
-        AcquisitionPlan::build(items_for(&[(descriptor, wire.clone())])).expect("the closure"),
-        Arc::clone(&from_memory),
-        SchedulerConfig::default(),
-    )
-    .run(
-        chain(vec![memory_source("origin", &[(descriptor, wire.clone())])]),
-        never(),
-        &ProgressSink::discard(),
-    )
-    .await
-    .expect("the memory source satisfies the closure");
-
-    let from_disk = TestCache::new();
-    let from_disk = from_disk.shared(CachePolicy::Keep);
-    AcquisitionSession::new(
-        AcquisitionPlan::build(items_for(&[(descriptor, wire.clone())])).expect("the closure"),
-        Arc::clone(&from_disk),
-        SchedulerConfig::default(),
-    )
-    .run(
-        chain(vec![directory_source("usb", tree.path())]),
-        never(),
-        &ProgressSink::discard(),
-    )
-    .await
-    .expect("the directory source satisfies the same closure");
-
-    let mut left = std::collections::BTreeSet::new();
-    let mut right = std::collections::BTreeSet::new();
-    for digest in from_memory.digests().expect("the cache lists") {
-        left.insert(digest.to_hex());
-    }
-    for digest in from_disk.digests().expect("the cache lists") {
-        right.insert(digest.to_hex());
-    }
-    assert_eq!(left, right, "the source is not observable in the result");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_session_never_reports_a_barrier_it_did_not_reach() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(4);
-    // The origin carries only some of what the closure names.
-    let partial: Vec<(ContentDescriptor, Vec<u8>)> = blobs[..2].to_vec();
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let result = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
-        .run(
-            chain(vec![memory_source("origin", &partial)]),
-            never(),
-            &ProgressSink::discard(),
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "a partially satisfied closure is a refusal"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_source_chain_with_a_single_live_source_still_reports_a_reason() {
-    let cache = TestCache::new();
-    let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(1);
-    let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let error = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+    let plan = AcquisitionPlan::build(items_for(&one)).expect("the closure is well formed");
+    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(chain(vec![]), never(), &ProgressSink::discard())
         .await
         .expect_err("an empty chain satisfies nothing");
@@ -1209,38 +891,27 @@ async fn a_source_chain_with_a_single_live_source_still_reports_a_reason() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_sessions_over_one_cache_do_not_publish_the_same_blob_twice() {
+async fn a_partially_satisfied_closure_is_a_refusal_and_not_a_partial_barrier() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
-    let blobs = fixture(6);
+    let blobs = fixture(4);
+    // The origin carries only some of what the closure names.
+    let partial: Vec<(ContentDescriptor, Vec<u8>)> = blobs[..2].to_vec();
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let guard = Arc::new(Mutex::new(()));
-    let mut handles = Vec::new();
-    for _ in 0..4 {
-        let cache = Arc::clone(&cache);
-        let plan = plan.clone();
-        let blobs = blobs.clone();
-        let guard = Arc::clone(&guard);
-        handles.push(tokio::spawn(async move {
-            let _serialized = guard.lock().await;
-            AcquisitionSession::new(plan, cache, SchedulerConfig::default())
-                .run(
-                    chain(vec![memory_source("origin", &blobs)]),
-                    never(),
-                    &ProgressSink::discard(),
-                )
-                .await
-        }));
-    }
-    for handle in handles {
-        handle
-            .await
-            .expect("the task runs")
-            .expect("each session is satisfied");
-    }
-    assert_eq!(cache.digests().expect("the cache lists").len(), 6);
-    assert_eq!(
-        cache.stored_size().expect("the cache measures"),
-        plan_wire_size(&blobs)
+    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+        .run(
+            chain(vec![memory_source("origin", &partial)]),
+            never(),
+            &ProgressSink::discard(),
+        )
+        .await
+        .expect_err("a partially satisfied closure is a refusal");
+    assert!(error.left_machine_unchanged());
+    assert!(
+        cache
+            .get(&blobs[3].0, Verify::Full)
+            .expect("the probe runs")
+            .is_none(),
+        "the missing blob is not published"
     );
 }

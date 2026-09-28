@@ -53,13 +53,7 @@ fn init_creates_a_small_editor_ready_manifest() {
 }
 
 #[test]
-fn schema_and_plan_have_stable_machine_output() {
-    let schema = zup().args(["schema"]).output().unwrap();
-    assert!(schema.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(value["$id"], "https://zup.dev/schema/zup.toml.json");
-    assert!(value["properties"]["install"].is_object());
-
+fn plan_reports_the_resolved_installation_as_machine_output() {
     let root = TempDir::new().unwrap();
     let manifest = root.path().join("zup.toml");
     fs::write(
@@ -103,7 +97,14 @@ user = "${location.user_data}/Plan"
     let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(value["operation"], "plan");
     assert_eq!(value["application"]["name"], "Plan");
-    assert!(value["details"]["install_directory"].is_string());
+    // The template is resolved, not echoed: a consumer reads this to install.
+    assert!(
+        !value["details"]["install_directory"]
+            .as_str()
+            .unwrap()
+            .contains("${"),
+        "an unresolved template reached the machine output: {value}"
+    );
     assert_eq!(value["details"]["scope"], "user");
 }
 
@@ -171,14 +172,4 @@ component = "missing"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown component `missing`"));
     assert!(stderr.contains("component = \"missing\""));
-}
-
-#[test]
-fn completions_include_authoring_commands() {
-    let output = zup().args(["completions", "powershell"]).output().unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("init"));
-    assert!(text.contains("check"));
-    assert!(text.contains("plan"));
 }

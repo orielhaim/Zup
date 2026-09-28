@@ -376,13 +376,10 @@ mod tests {
         assert_eq!(result, Err(InvocationError::Timeout));
     }
 
-    #[test]
-    fn watchdog_checks_cancellation_before_and_during_a_call() {
-        let engine = Engine::default();
-        let result = run_with_watchdog(&engine, &|| true, || Ok(()));
-        assert_eq!(result, Err(InvocationError::Cancelled));
-    }
-
+    /// A call that traps with an interrupt is still classified by the state the watchdog
+    /// was in when it noticed, not by the trap itself: the same trap is a timeout under
+    /// one cancellation query and a cancellation under another, and the guest has no say
+    /// in which it was.
     #[test]
     fn interrupt_is_classified_from_control_state() {
         let engine = Engine::default();

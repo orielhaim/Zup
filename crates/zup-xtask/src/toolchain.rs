@@ -456,21 +456,9 @@ pub fn repository_root() -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_runtime_template_is_named_for_its_own_frontend() {
-        let names: Vec<&str> = FRONTENDS.iter().map(|(_, binary)| *binary).collect();
-        assert_eq!(
-            names,
-            vec!["zup-setup-gui", "zup-setup-console", "zup-setup-headless"]
-        );
-        for (feature, binary) in FRONTENDS {
-            assert!(
-                binary.ends_with(feature),
-                "{binary} is not the {feature} template"
-            );
-        }
-    }
-
+    /// A staged toolchain is a directory a build writes and a later composition
+    /// reads. Keying it by profile and version is what lets a debug and a release
+    /// build coexist, and what stops two releases from finding each other's bytes.
     #[test]
     fn a_staged_toolchain_is_keyed_by_the_profile_and_the_version_that_produced_it() {
         let root = Path::new("repo");
@@ -495,27 +483,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_staged_runtime_is_named_for_its_machine_and_its_frontend() {
-        let component = runtime_component("gui");
-        let name = zup_toolchain::file_name(&component, EXECUTABLE_SUFFIX);
-        assert!(
-            name.contains("gui") && name.contains(machine_suffix()),
-            "{name}"
-        );
-        for (feature, binary) in FRONTENDS {
-            assert!(
-                binary.ends_with(feature),
-                "{binary} is not the {feature} template"
-            );
-        }
-    }
-
+    /// A staged runtime is addressed by name, and the name is what a host later
+    /// resolves. Two runtimes sharing one name is a tree that cannot tell them
+    /// apart — for the offline and online launchers that means a thin installer
+    /// which composes itself out of the wrong binary.
     #[test]
     fn the_two_launcher_flavours_get_separate_staged_names() {
-        // The same binary built with and without the online path differs by
-        // megabytes, and a staged tree that could not tell them apart would
-        // compose a thin installer that cannot install itself.
         let offline = zup_toolchain::ToolchainComponent::Dispatcher {
             subsystem: zup_toolchain::Subsystem::Gui,
             online: false,

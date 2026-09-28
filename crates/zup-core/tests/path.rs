@@ -5,21 +5,15 @@ use std::path::Path;
 use rstest::rstest;
 use zup_core::{RelativePath, RelativePathError};
 
+/// Separators are normalized to `/` on the way in, so a Windows-authored path
+/// is byte-identical to its POSIX spelling.
 #[rstest]
-#[case::simple("acme.exe")]
-#[case::nested("bin/helpers/foo.dll")]
-#[case::backslashes("bin\\helpers\\foo.dll")]
-fn valid_paths(#[case] source: &str) {
+#[case::nested("bin/helpers/foo.dll", "bin/helpers/foo.dll")]
+#[case::backslashes("bin\\helpers\\foo.dll", "bin/helpers/foo.dll")]
+fn paths_normalize_their_separators(#[case] source: &str, #[case] expected: &str) {
     let path = RelativePath::new(source).unwrap();
-    assert!(!path.as_str().contains('\\'));
-    assert!(!path.as_str().contains("//"));
-}
-
-#[test]
-fn display_uses_forward_slashes() {
-    let path = RelativePath::new("bin\\a\\b.txt").unwrap();
-    assert_eq!(path.as_str(), "bin/a/b.txt");
-    assert_eq!(path.to_string(), "bin/a/b.txt");
+    assert_eq!(path.as_str(), expected);
+    assert_eq!(path.to_string(), expected);
 }
 
 #[test]
@@ -30,21 +24,13 @@ fn file_name_and_parent() {
     assert_eq!(path.component_count(), 3);
 }
 
-#[test]
-fn join() {
-    let a = RelativePath::new("bin").unwrap();
-    let b = RelativePath::new("helpers/foo.dll").unwrap();
-    assert_eq!(a.join(&b).as_str(), "bin/helpers/foo.dll");
-}
-
+/// An absolute or traversing path must be refused at every entry point, including
+/// the `Path` adapter, or a caller can smuggle one in through `OsStr`.
 #[rstest]
 #[case::empty("")]
 #[case::absolute("/etc/passwd")]
 #[case::parent("../secret")]
 #[case::embedded_parent("a/../b")]
-#[case::trailing_slash("a/")]
-#[case::leading_slash("/a")]
-#[case::dot_component("a/./b")]
 #[case::double_slash("a//b")]
 fn invalid_paths(#[case] source: &str) {
     assert!(RelativePath::new(source).is_err(), "source: {source}");

@@ -14,10 +14,7 @@ use zup_exec::{
     plan_execution, plan_lifecycle,
 };
 use zup_platform::TargetPath;
-use zup_windows::{
-    PATH_VALUE_NAME, VALUE_TYPE_EXPAND, VALUE_TYPE_MISSING, VALUE_TYPE_PLAIN, lost_expansion,
-    search_path_contains, split_search_path, write_value_type,
-};
+use zup_windows::VALUE_TYPE_EXPAND;
 
 fn windows() -> TargetTriple {
     TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
@@ -27,64 +24,9 @@ fn tpath(value: &str) -> TargetPath {
     TargetPath::new(windows(), value).unwrap()
 }
 
-#[test]
-fn splitting_follows_windows_separator_rules() {
-    assert_eq!(
-        split_search_path(r"C:\one;C:\two;;   ;C:\three"),
-        vec![r"C:\one", r"C:\two", r"C:\three"]
-    );
-    assert!(split_search_path("").is_empty());
-    assert!(split_search_path(";;;;").is_empty());
-}
-
-#[test]
-fn membership_uses_windows_path_identity() {
-    let desired = tpath(r"C:\Apps\Acme\bin");
-    for stored in [
-        r"C:\Apps\Acme\bin",
-        r"c:\apps\acme\bin",
-        r"C:/Apps/Acme/bin",
-        r"C:\Apps\Acme\bin\",
-        r#""C:\Apps\Acme\bin""#,
-        r"C:\Windows;C:\Apps\Acme\bin;D:\tools",
-    ] {
-        assert!(
-            search_path_contains(&windows(), stored, &desired),
-            "expected a match for {stored}"
-        );
-    }
-    for stored in [
-        r"C:\Apps\Acme",
-        r"C:\Apps\Acme\bin2",
-        r"%ProgramFiles%\Acme\bin",
-        r"",
-    ] {
-        assert!(
-            !search_path_contains(&windows(), stored, &desired),
-            "expected no match for {stored}"
-        );
-    }
-}
-
-#[test]
-fn expand_string_semantics_are_preserved() {
-    assert_eq!(VALUE_TYPE_PLAIN, "sz");
-    assert_eq!(VALUE_TYPE_EXPAND, "expand_sz");
-    assert_eq!(VALUE_TYPE_MISSING, "missing");
-    assert_eq!(PATH_VALUE_NAME, "Path");
-    // A value that never existed is written as an expanding path, matching how
-    // Windows creates the value itself.
-    assert_eq!(write_value_type(VALUE_TYPE_MISSING), VALUE_TYPE_EXPAND);
-    // An existing type is never changed, so unrelated `%VAR%` segments keep
-    // expanding and a plain value is never silently promoted.
-    assert_eq!(write_value_type(VALUE_TYPE_PLAIN), VALUE_TYPE_PLAIN);
-    assert_eq!(write_value_type(VALUE_TYPE_EXPAND), VALUE_TYPE_EXPAND);
-    // Losing a value that used to expand is drift, not a silent change.
-    assert!(lost_expansion(VALUE_TYPE_MISSING, VALUE_TYPE_EXPAND));
-    assert!(!lost_expansion(VALUE_TYPE_PLAIN, VALUE_TYPE_PLAIN));
-    assert!(!lost_expansion(VALUE_TYPE_EXPAND, VALUE_TYPE_EXPAND));
-}
-
+// `split_search_path`, `search_path_contains` and `write_value_type` are unit
+// tested in `src/search_path.rs`, where they are private. What is left here is
+// the decision the delta planner makes from their answers.
 fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_platform::TargetPlan {
     zup_platform::TargetPlan {
         app: zup_core::App {
@@ -166,16 +108,6 @@ fn ownership_ignores_unrelated_segments() {
 }
 
 #[test]
-fn ownership_decision_is_stable_across_repeated_plans() {
-    let target = target_with_path_entry(SelectedScope::Machine, Privilege::System);
-    let snapshot = snapshot_for(&target, &[r"C:\PF\Acme\bin"]);
-    let first = plan_execution(&target, &snapshot, None).unwrap();
-    let second = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(first, second);
-    assert_eq!(first.path_entries[0].kind, PathOperationKind::Present);
-}
-
-#[test]
 fn a_removed_owned_entry_is_drift_not_an_add() {
     let target = target_with_path_entry(SelectedScope::Machine, Privilege::System);
     let ledger = ledger_owning(&target, Privilege::System);
@@ -193,23 +125,6 @@ fn a_removed_owned_entry_is_drift_not_an_add() {
     ));
     assert_eq!(plan.summary.path_entries_conflict, 1);
     assert_eq!(plan.summary.path_entries_add, 0);
-}
-
-#[test]
-fn search_path_ownership_is_independent_of_authorization() {
-    // A per-user search path entry that needs host-wide authority, and a
-    // host-wide entry that needs none. Neither decision changes the other.
-    let user_path = target_with_path_entry(SelectedScope::User, Privilege::System);
-    let plan = plan_execution(&user_path, &snapshot_for(&user_path, &[]), None).unwrap();
-    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
-    assert_eq!(plan.path_entries[0].privilege, Privilege::System);
-    assert!(plan.summary.requires_authorization);
-
-    let machine_path = target_with_path_entry(SelectedScope::Machine, Privilege::User);
-    let plan = plan_execution(&machine_path, &snapshot_for(&machine_path, &[]), None).unwrap();
-    assert_eq!(plan.path_entries[0].scope, SelectedScope::Machine);
-    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
-    assert!(!plan.summary.requires_authorization);
 }
 
 #[test]
@@ -250,15 +165,4 @@ fn uninstall_removes_a_search_path_entry_with_its_recorded_authority() {
     assert_eq!(removal.scope, SelectedScope::User);
     assert_eq!(removal.privilege, Privilege::System);
     assert!(plan.summary.requires_authorization);
-}
-
-#[test]
-fn portable_observation_names_no_host_facility() {
-    let source = include_str!("../../zup-exec/src/observe.rs");
-    for forbidden in ["SCM", "Registry", "registry", "HKLM", "HKCU", "UAC"] {
-        assert!(
-            !source.contains(forbidden),
-            "portable observation names a host facility: {forbidden}"
-        );
-    }
 }

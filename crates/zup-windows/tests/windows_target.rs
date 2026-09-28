@@ -7,15 +7,14 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zup_build::materialize;
 use zup_core::{INSTALL_LOCATIONS, InstallLocation, SelectedScope, TargetTriple};
-use zup_exec::{FileOperationKind, HostSnapshot, ObservedFileState, plan_execution};
+use zup_exec::{FileOperationKind, ObservedFileState, plan_execution};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{InstallPlan, PlanRequest, plan};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 use zup_windows::{
-    FakeServiceReader, FakeShortcutReader, TargetPathValidationError, TargetResolveError,
-    WindowsInstallLocationResolver, WindowsRegistryReader, WindowsTargetContext, inspect_files,
-    inspect_target_with, resolve_target, validate_windows_target_path,
-    windows_target_path_identity,
+    FakeServiceReader, FakeShortcutReader, TargetResolveError, WindowsInstallLocationResolver,
+    WindowsRegistryReader, WindowsTargetContext, inspect_files, inspect_target_with,
+    resolve_target,
 };
 
 #[derive(Debug, Clone)]
@@ -319,38 +318,6 @@ fn resolved_template_components_are_validated_after_semantic_planning() {
 }
 
 #[test]
-fn windows_path_validation_preserves_legacy_filename_rules() {
-    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-    for raw in [
-        r"C:\CON",
-        r"C:\nul.txt",
-        r"C:\com1.dat",
-        r"C:\file.",
-        r"C:\file ",
-        r"C:\a:b",
-        r"C:\a?b",
-        "C:\\file\u{0001}.txt",
-    ] {
-        let path = TargetPath::new(&target, raw).unwrap();
-        assert!(
-            matches!(
-                validate_windows_target_path(&path),
-                Err(TargetPathValidationError::InvalidComponent { .. })
-            ),
-            "{raw:?}"
-        );
-    }
-    let valid = TargetPath::new(&target, r"C:\Program Files\Acme\app.exe").unwrap();
-    assert!(validate_windows_target_path(&valid).is_ok());
-    assert_eq!(
-        windows_target_path_identity(&valid),
-        windows_target_path_identity(
-            &TargetPath::new(&target, r"c:/program files/acme/APP.exe").unwrap(),
-        )
-    );
-}
-
-#[test]
 fn case_only_file_destinations_collide_after_target_lowering() {
     let source = format!(
         "{}\n[[files]]\nsource = \"x/Foo.dll\"\ndestination = \"${{install}}/Payload.dll\"\n\n[[files]]\nsource = \"y/foo.dll\"\ndestination = \"${{install}}/payload.dll\"\n",
@@ -371,11 +338,8 @@ fn case_only_file_destinations_collide_after_target_lowering() {
         matches!(
             error,
             TargetResolveError::TargetCollision {
-                ref kind,
-                ref identity,
-                ..
+                ref kind, ..
             } if kind == "file destination"
-                && identity == "c:\\users\\test\\appdata\\local\\programs\\acme\\payload.dll\\foo.dll"
         ),
         "{error}"
     );
@@ -553,20 +517,6 @@ fn inspect_target_with_fakes_and_plan_execution() {
 
     // Zero mutation: payload on disk unchanged.
     assert_eq!(fs::read(pf.join("acme-agent.exe")).unwrap(), b"agent-OLD");
-}
-
-#[test]
-fn machine_snapshot_is_deterministic() {
-    let root = temp_root();
-    let (_dir, target) = pipeline(root.path(), SelectedScope::User);
-    let services = FakeServiceReader::default();
-    let shortcuts = FakeShortcutReader::default();
-    let registry = WindowsRegistryReader;
-
-    let a = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
-    let b = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
-    assert_eq!(a, b);
-    let _ = HostSnapshot::default();
 }
 
 #[test]

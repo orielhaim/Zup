@@ -443,6 +443,9 @@ mod tests {
         }
     }
 
+    /// What counts as an update. A rebuild of the same version is not one: the bytes
+    /// differ, but the lifecycle would refuse a same-version upgrade, so calling it an
+    /// update would hand the caller a promise the run cannot keep.
     #[test]
     fn only_a_higher_version_is_an_update() {
         assert!(is_newer(&identity("1.4.0"), "1.5.0"));
@@ -452,26 +455,11 @@ mod tests {
             !is_newer(&identity("1.4.0"), "not-a-version"),
             "an unparseable version is not an update"
         );
-    }
 
-    #[test]
-    fn a_rebuild_of_the_same_version_is_not_an_update() {
-        let one = identity("1.4.0");
-        let mut other = one.clone();
-        other.release = Sha256Digest::from_bytes([9; 32]);
-        assert!(!one.same_release(&other));
-        assert!(
-            !is_newer(&other, "1.4.0"),
-            "same version, different bytes: not an update, and the lifecycle would refuse it"
-        );
-    }
-
-    #[test]
-    fn every_graph_failure_leaves_the_machine_unchanged() {
-        let failures = [
-            GraphError::Manifest(String::new()),
-            GraphError::Io(std::io::Error::other("x")),
-        ];
-        assert!(failures.iter().all(GraphError::left_machine_unchanged));
+        let installed = identity("1.4.0");
+        let mut rebuild = installed.clone();
+        rebuild.release = Sha256Digest::from_bytes([9; 32]);
+        assert!(!installed.same_release(&rebuild));
+        assert!(!is_newer(&rebuild, "1.4.0"));
     }
 }

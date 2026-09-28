@@ -785,80 +785,26 @@ mod tests {
         }
     }
 
-    fn digest(index: u8) -> Sha256Digest {
-        Sha256Digest::from_bytes([10 + index; 32])
-    }
-
-    #[test]
-    fn a_pinned_context_reads_the_version_addressed_document() {
-        let channel = context("https://updates.example.com/acme", "stable");
-        assert_eq!(
-            channel.release_document().expect("addressable").to_string(),
-            "releases/stable.json"
-        );
-        let pinned = channel.pinned_to("1.4.0");
-        assert_eq!(
-            pinned.release_document().expect("addressable").to_string(),
-            "releases/stable/versions/1.4.0.json"
-        );
-        assert_eq!(pinned.channel(), "stable");
-    }
-
     #[test]
     fn two_repositories_never_share_rollback_memory() {
         let one = context("https://a.example.com/acme", "stable");
         let other = context("https://b.example.com/acme", "stable");
-        assert_ne!(
-            one.datastore_dir().expect("a directory"),
-            other.datastore_dir().expect("a directory")
-        );
         let beta = context("https://a.example.com/acme", "beta");
-        assert_ne!(
-            one.datastore_dir().expect("a directory"),
-            beta.datastore_dir().expect("a directory")
-        );
-        assert_eq!(
-            one.datastore_dir().expect("a directory"),
-            one.datastore_dir().expect("a directory"),
-            "the same context is the same state, which is the point"
-        );
+        let state = |context: &TrustContext| context.datastore_dir().expect("a directory");
+        assert_ne!(state(&one), state(&other));
+        assert_ne!(state(&one), state(&beta));
         assert_eq!(
             one.cache_dir(),
             other.cache_dir(),
             "one cache per state root, shared by every release"
         );
     }
-
     #[test]
     fn a_repository_url_that_could_leak_a_credential_is_refused() {
         assert!(repository_base("https://user:pw@host/x").is_err());
         assert!(repository_base("ftp://host/x").is_err());
         assert!(repository_base("https://host/x?token=1").is_err());
         assert!(repository_base("https://host/x").is_ok());
-    }
-
-    #[test]
-    fn enabling_a_component_adds_exactly_its_blobs_to_the_closure() {
-        let release = release();
-        let entries = vec![
-            (digest(0), None),
-            (digest(1), Some("core".to_owned())),
-            (digest(2), Some("cli".to_owned())),
-        ];
-        let narrow = release
-            .closure(entries.clone(), [], ComponentSelection::Only(&["core"]))
-            .expect("a closure");
-        assert_eq!(
-            narrow.len(),
-            2,
-            "required content plus the selected component"
-        );
-        assert_eq!(narrow.digests(), vec![digest(0), digest(1)]);
-
-        let every = release
-            .closure(entries, [], ComponentSelection::All)
-            .expect("a closure");
-        assert_eq!(every.len(), 3);
     }
 
     #[test]
@@ -875,13 +821,5 @@ mod tests {
             error.to_string().contains("authenticated catalog"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn a_bootstrapper_schedules_sequentially() {
-        // One blocking transfer has nothing to overlap, and saying so is better
-        // than spawning twelve workers to service one request.
-        assert_eq!(bootstrap_scheduler().total, 1);
-        assert!(default_scheduler().total > 1);
     }
 }

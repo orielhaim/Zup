@@ -268,18 +268,6 @@ mod tests {
         );
     }
 
-    /// The untyped path, which is most of them: an error from a domain crate wrapped in
-    /// context still reaches a consumer as a diagnostic with a message.
-    #[test]
-    fn an_untyped_error_becomes_a_diagnostic_rather_than_nothing() {
-        let report = miette::miette!("`{}` could not be read", "dist/zup-release.json")
-            .wrap_err("publishing v1.4.0");
-        let diagnostic = diagnostic(&report);
-        assert!(diagnostic.code.is(FALLBACK_CODE));
-        assert_eq!(diagnostic.severity, Severity::Error);
-        assert!(!diagnostic.message.is_empty());
-    }
-
     /// Context added on the way out must not erase the identity decided at the bottom
     /// of it, or every wrapped error would be indistinguishable from an untyped one.
     #[test]

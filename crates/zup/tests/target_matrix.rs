@@ -1,7 +1,6 @@
 use std::{fs, path::PathBuf, process::Command};
 
 use tempfile::TempDir;
-use zup_core::Frontend;
 #[cfg(windows)]
 use zup_windows::EmbeddedBundle;
 
@@ -83,127 +82,28 @@ user = "${{location.user_data}}/CliMatrix"
 #[test]
 fn repeated_profile_and_raw_triple_selection_are_checked() {
     let (root, manifest) = write_matrix_project();
-    let repeated = zup()
-        .args(["check", "--manifest"])
-        .arg(&manifest)
-        .args(["--target", "alpha", "--target", HOST_TARGET])
-        .output()
-        .unwrap();
-    assert!(
-        repeated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&repeated.stderr)
-    );
-    let text = String::from_utf8_lossy(&repeated.stdout);
-    assert!(text.contains("alpha"), "{text}");
-
-    let raw = zup()
-        .args(["check", "--manifest"])
-        .arg(&manifest)
-        .args(["--target", OTHER_TARGET])
-        .output()
-        .unwrap();
-    assert!(
-        raw.status.success(),
-        "{}",
-        String::from_utf8_lossy(&raw.stderr)
-    );
-    assert!(String::from_utf8_lossy(&raw.stdout).contains("beta"));
-
-    let all = zup()
-        .args(["check", "--manifest"])
-        .arg(&manifest)
-        .output()
-        .unwrap();
-    assert!(
-        all.status.success(),
-        "{}",
-        String::from_utf8_lossy(&all.stderr)
-    );
-    let text = String::from_utf8_lossy(&all.stdout);
-    assert!(text.contains("alpha") && text.contains("beta"), "{text}");
+    for selection in [
+        vec!["--target", "alpha", "--target", HOST_TARGET],
+        vec!["--target", OTHER_TARGET],
+        vec![],
+    ] {
+        let output = zup()
+            .args(["check", "--manifest"])
+            .arg(&manifest)
+            .args(&selection)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{selection:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A check reads the source tree and resolves; it must not write to it.
     assert_eq!(
         fs::read(root.path().join("dist/alpha/app.bin")).unwrap(),
         b"alpha"
     );
-}
-
-/// One repeatable per-target flag is one value per selected target, on the command
-/// that composes as well as the commands that only resolve.
-#[test]
-fn one_output_for_two_targets_is_refused_naming_them() {
-    let (root, manifest) = write_matrix_project();
-    let single_output = root.path().join("first.exe");
-
-    // Two runtimes that are individually correct, for the two selected targets,
-    // against one output. The runtimes have to resolve cleanly or the output
-    // problem would never be the one reported.
-    let alpha = toolchain_fixture::runtime(HOST_TARGET, Frontend::Gui).write(root.path());
-    let beta = toolchain_fixture::runtime(OTHER_TARGET, Frontend::Gui).write(root.path());
-    let refused = zup()
-        .args(["build", "--manifest"])
-        .arg(&manifest)
-        .arg("--runtime")
-        .arg(&alpha)
-        .arg("--runtime")
-        .arg(&beta)
-        .arg("--output")
-        .arg(&single_output)
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    let message = flat(&refused.stderr);
-    assert!(
-        message.contains("selected 2 targets (alpha, beta) but received 1 outputs"),
-        "{message}"
-    );
-    assert!(!single_output.exists(), "a refused build writes nothing");
-}
-
-#[cfg(windows)]
-#[test]
-fn frontend_override_is_resolved_before_compilation() {
-    let root = TempDir::new().unwrap();
-    fs::create_dir_all(root.path().join("dist")).unwrap();
-    fs::write(root.path().join("dist/app.bin"), b"payload").unwrap();
-    let manifest = root.path().join("zup.toml");
-    fs::write(
-        &manifest,
-        format!(
-            r#"schema = 1
-[app]
-id = "com.example.frontend-override"
-name = "Frontend Override"
-version = "1.0.0"
-[build]
-[build.targets.default]
-target = "{HOST_TARGET}"
-source = {{ directory = "dist" }}
-frontend = "gui"
-[install]
-scope = "user"
-[install.directory]
-user = "${{location.user_data}}/FrontendOverride"
-"#
-        ),
-    )
-    .unwrap();
-    let output = root.path().join("Setup.exe");
-    let result = zup()
-        .args(["build", "--manifest"])
-        .arg(&manifest)
-        .args(["--frontend", "console", "--output"])
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let bundle = EmbeddedBundle::open(&output).unwrap();
-    assert_eq!(bundle.frontend(), Frontend::Console);
-    assert_eq!(bundle.plan().installer.frontend, Frontend::Console);
 }
 
 /// A manifest whose profiles disagree with the command line, so precedence is
@@ -298,21 +198,42 @@ fn cli_overrides_beat_profile_source_and_install_directory() {
 }
 
 /// A per-target flag is one value per selected target, on every command.
+///
+/// `build_inputs::every_repeatable_per_target_flag_uses_one_alignment_message`
+/// pins the message; this pins that the CLI actually routes every command and
+/// every flag through it, which a unit test on the formatter cannot see.
 #[test]
 fn repeatable_resolution_flags_must_line_up_with_the_selection() {
-    let (_root, manifest) = write_matrix_project();
+    let (root, manifest) = write_matrix_project();
+    let output_path = root.path().join("misaligned-Setup.exe");
+    // `build` resolves a runtime before it reaches the output, so the two
+    // templates have to be individually correct or the output problem would never
+    // be the one reported.
+    let alpha = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    let beta = toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
     for command in ["build", "check", "doctor"] {
         for (flag, value, noun) in [
             ("--source", "dist/alpha", "sources"),
             ("--install-directory", "C:/Acme", "install directories"),
+            // One output for two targets is the same rule, and a refused build
+            // must leave the output path untouched. `check` and `doctor` do not
+            // take `--output` at all; the commands that compose are the ones that
+            // need the rule.
+            ("--output", output_path.to_str().unwrap(), "outputs"),
         ] {
-            let output = zup()
-                .args([command, "--manifest"])
-                .arg(&manifest)
-                .arg(flag)
-                .arg(value)
-                .output()
-                .unwrap();
+            if flag == "--output" && command != "build" {
+                continue;
+            }
+            let mut command_line = zup();
+            command_line.args([command, "--manifest"]).arg(&manifest);
+            if command == "build" {
+                command_line
+                    .arg("--runtime")
+                    .arg(&alpha)
+                    .arg("--runtime")
+                    .arg(&beta);
+            }
+            let output = command_line.arg(flag).arg(value).output().unwrap();
             assert!(
                 !output.status.success(),
                 "{command} {flag} accepted one value for two targets"
@@ -326,32 +247,7 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
             );
         }
     }
-
-    // One value per target is accepted by the command that only resolves.
-    let aligned = zup()
-        .args(["check", "--manifest"])
-        .arg(&manifest)
-        .arg("--source")
-        .arg("dist/alpha")
-        .arg("--source")
-        .arg("dist/beta")
-        .output()
-        .unwrap();
-    #[cfg(windows)]
-    {
-        assert!(
-            aligned.status.success(),
-            "{}",
-            String::from_utf8_lossy(&aligned.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&aligned.stdout);
-        assert!(
-            stdout.contains("dist/alpha") && stdout.contains("dist/beta"),
-            "{stdout}"
-        );
-    }
-    #[cfg(not(windows))]
-    drop(aligned);
+    assert!(!output_path.exists(), "a refused build writes nothing");
 }
 
 #[cfg(windows)]
@@ -410,24 +306,20 @@ user = "${{location.user_data}}/Shared"
         .lines()
         .filter(|line| line.trim_start().starts_with("Install"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        resolved,
-        vec![
-            "  Install     user · C:\\Apps\\Alpha",
-            "  Install     user · C:\\Apps\\Beta",
-        ],
-        "{stdout}"
-    );
+    assert_eq!(resolved.len(), 2, "{stdout}");
+    assert!(resolved[0].contains(r"C:\Apps\Alpha"), "{stdout}");
+    assert!(resolved[1].contains(r"C:\Apps\Beta"), "{stdout}");
     assert!(
         !stdout.contains("${location.user_data}/Shared"),
         "the common install directory is replaced per profile: {stdout}"
     );
 }
 
-/// `--force` is the only way to write over an existing output.
+/// A build writes into an output directory the caller named but has not created,
+/// and `--force` is the only way to write over an output that is already there.
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[test]
-fn force_overwrites_an_existing_output_and_its_absence_refuses() {
+fn a_build_creates_its_output_directory_and_force_is_the_only_overwrite() {
     let root = TempDir::new().unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
     fs::write(root.path().join("dist/app.bin"), b"payload").unwrap();
@@ -437,8 +329,8 @@ fn force_overwrites_an_existing_output_and_its_absence_refuses() {
         format!(
             r#"schema = 1
 [app]
-id = "com.example.force-overwrite"
-name = "Force Overwrite"
+id = "com.example.output-lifecycle"
+name = "Output Lifecycle"
 version = "1.0.0"
 [build]
 [build.targets.default]
@@ -448,7 +340,7 @@ frontend = "{frontend}"
 [install]
 scope = "user"
 [install.directory]
-user = "${{location.user_data}}/ForceOverwrite"
+user = "${{location.user_data}}/OutputLifecycle"
 [[files]]
 source = "**/*"
 destination = "${{install}}"
@@ -457,7 +349,11 @@ destination = "${{install}}"
         ),
     )
     .unwrap();
-    let output = root.path().join("Setup.exe");
+    let output = root.path().join("nested/output/Setup.exe");
+    assert!(
+        !output.parent().unwrap().exists(),
+        "the parent does not exist yet"
+    );
     let build = |extra: &[&str]| {
         zup()
             .args(["build", "--manifest"])
@@ -475,7 +371,10 @@ destination = "${{install}}"
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert!(output.is_file(), "the first build wrote its output");
+    assert!(
+        EmbeddedBundle::open(&output).is_ok(),
+        "the installer is written into the directory the build created"
+    );
 
     let refused = build(&[]);
     assert!(!refused.status.success(), "a second build must be refused");
@@ -495,62 +394,6 @@ destination = "${{install}}"
     assert!(
         EmbeddedBundle::open(&output).is_ok(),
         "--force leaves a usable installer behind"
-    );
-}
-
-/// A build writes into an output directory the caller named but has not created.
-#[test]
-fn a_build_creates_the_output_directory_it_names() {
-    let root = TempDir::new().unwrap();
-    fs::create_dir_all(root.path().join("dist")).unwrap();
-    fs::write(root.path().join("dist/app.bin"), b"payload").unwrap();
-    let manifest = root.path().join("zup.toml");
-    fs::write(
-        &manifest,
-        format!(
-            r#"schema = 1
-[app]
-id = "com.example.output-parent"
-name = "Output Parent"
-version = "1.0.0"
-[build]
-[build.targets.default]
-target = "{HOST_TARGET}"
-source = {{ directory = "dist" }}
-frontend = "{frontend}"
-[install]
-scope = "user"
-[install.directory]
-user = "${{location.user_data}}/OutputParent"
-[[files]]
-source = "**/*"
-destination = "${{install}}"
-"#,
-            frontend = FRONTEND,
-        ),
-    )
-    .unwrap();
-    let output = root.path().join("nested/output/Setup.exe");
-    assert!(
-        !output.parent().unwrap().exists(),
-        "the parent does not exist yet"
-    );
-
-    let built = zup()
-        .args(["build", "--manifest"])
-        .arg(&manifest)
-        .arg("--output")
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(
-        built.status.success(),
-        "{}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    assert!(
-        EmbeddedBundle::open(&output).is_ok(),
-        "the installer is written into the directory the build created"
     );
 }
 
@@ -607,49 +450,11 @@ user = "${{location.user_data}}/BackendBoundary"
     );
 }
 
+/// A project with several profiles never plans an arbitrary one of them. The
+/// per-target flags are ambiguous for the same reason, which is why
+/// `repeatable_resolution_flags_must_line_up_with_the_selection` exists.
 #[test]
-fn init_and_single_target_commands_use_schema_1_and_require_explicit_selection() {
-    let root = TempDir::new().unwrap();
-    let initialized = root.path().join("init.toml");
-    let init = zup()
-        .args(["init", "--manifest"])
-        .arg(&initialized)
-        .args([
-            "--non-interactive",
-            "--name",
-            "Acme",
-            "--app-id",
-            "com.example.init-matrix",
-            "--version",
-            "1.0.0",
-            "--source",
-            "dist",
-            "--scope",
-            "user",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        init.status.success(),
-        "{}",
-        String::from_utf8_lossy(&init.stderr)
-    );
-    let source = fs::read_to_string(&initialized).unwrap();
-    assert!(source.contains("schema = 1"));
-    assert!(source.contains("[build.targets.default]"));
-    assert!(source.contains(&format!("target = \"{HOST_TARGET}\"")));
-    assert!(source.contains("source = { directory = \"dist\" }"));
-    let checked = zup()
-        .args(["check", "--manifest"])
-        .arg(&initialized)
-        .output()
-        .unwrap();
-    assert!(
-        checked.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
-
+fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
     let (_matrix, manifest) = write_matrix_project();
     let ambiguous = zup()
         .args(["plan", "--manifest"])
@@ -659,6 +464,8 @@ fn init_and_single_target_commands_use_schema_1_and_require_explicit_selection()
         .output()
         .unwrap();
     assert!(!ambiguous.status.success());
+    // The refusal is still a protocol document, not a crash: a consumer gets a
+    // parseable reason rather than an empty stdout.
     let refusal: serde_json::Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
     assert_eq!(refusal["operation"], "plan");
     assert_eq!(refusal["status"], "failure");

@@ -197,25 +197,14 @@ scope = "{allowed_str}"
     }
 }
 
-#[test]
-fn either_user_selects_user_directory() {
+#[rstest]
+#[case::user(SelectedScope::User, "${location.user_data}/Programs/Acme")]
+#[case::machine(SelectedScope::Machine, "${location.programs}/Acme")]
+fn either_scope_selects_its_own_directory(#[case] scope: SelectedScope, #[case] directory: &str) {
     let build = build_plan_from(&with(""), &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.scope, SelectedScope::User);
-    assert_eq!(
-        result.install_directory.to_string(),
-        "${location.user_data}/Programs/Acme"
-    );
-}
-
-#[test]
-fn either_machine_selects_machine_directory() {
-    let build = build_plan_from(&with(""), &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::Machine)).unwrap();
-    assert_eq!(
-        result.install_directory.to_string(),
-        "${location.programs}/Acme"
-    );
+    let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
+    assert_eq!(result.scope, scope);
+    assert_eq!(result.install_directory.to_string(), directory);
 }
 
 #[test]
@@ -274,81 +263,43 @@ fn graph_plan(request: PlanRequest) -> Result<InstallPlan, PlanError> {
     plan(&build, &request)
 }
 
-#[test]
-fn defaults_select_required_and_default() {
-    let result = graph_plan(PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(selected_names(&result), ["core", "cli"]);
-}
-
-#[test]
-fn required_component_always_selected() {
+#[rstest]
+#[case::defaults(&[], &[], &["core", "cli"])]
+#[case::enable_pulls_closure(&["developer"], &[], &["core", "cli", "developer"])]
+#[case::disable_default(&[], &["cli"], &["core"])]
+#[case::enable_a_service(&["service"], &[], &["core", "cli", "service"])]
+fn component_overrides_select_the_transitive_closure(
+    #[case] enable: &[&str],
+    #[case] disable: &[&str],
+    #[case] expected: &[&str],
+) {
     let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&[], &["cli"]),
+        components: overrides(enable, disable),
+        ..PlanRequest::new(target(), SelectedScope::User)
     })
     .unwrap();
-    assert_eq!(selected_names(&result), ["core"]);
+    assert_eq!(selected_names(&result), expected);
 }
 
 #[test]
-fn explicit_enable_pulls_transitive_dependencies() {
+fn disabling_a_selected_component_is_refused() {
+    // A required component cannot be switched off, whether it is named
+    // directly or is a dependency of a component the caller enabled.
     let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&["developer"], &[]),
-    })
-    .unwrap();
-    assert_eq!(selected_names(&result), ["core", "cli", "developer"]);
-}
-
-#[test]
-fn explicit_disable_of_default() {
-    let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&[], &["cli"]),
-    })
-    .unwrap();
-    assert_eq!(selected_names(&result), ["core"]);
-}
-
-#[test]
-fn disable_required_errors() {
-    let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&[], &["core"]),
-    });
-    assert!(matches!(
-        result,
-        Err(PlanError::RequiredComponentDisabled { .. })
-    ));
-}
-
-#[test]
-fn disable_required_dependency_conflicts() {
-    let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
         components: overrides(&["developer"], &["core"]),
+        ..PlanRequest::new(target(), SelectedScope::User)
     });
     assert!(matches!(
         result,
         Err(PlanError::RequiredComponentDisabled { .. })
     ));
 
+    // A non-required component an enabled one depends on cannot be either.
     let source = with(
         r#"
 [[components]]
 id = "base"
 name = "Base"
-required = false
 default = true
 
 [[components]]
@@ -362,10 +313,8 @@ requires = ["base"]
     let result = plan(
         &build,
         &PlanRequest {
-            target: target(),
-            scope: SelectedScope::User,
-            install_directory: None,
             components: overrides(&[], &["base"]),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
     );
     assert!(matches!(
@@ -375,31 +324,19 @@ requires = ["base"]
 }
 
 #[test]
-fn enable_and_disable_same_id_errors() {
-    let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&["cli"], &["cli"]),
-    });
-    assert!(matches!(
-        result,
-        Err(PlanError::ComponentBothEnabledAndDisabled { .. })
-    ));
-}
-
-#[test]
-fn unknown_override_errors() {
-    let result = graph_plan(PlanRequest {
-        target: target(),
-        scope: SelectedScope::User,
-        install_directory: None,
-        components: overrides(&["nope"], &[]),
-    });
-    assert!(matches!(
-        result,
-        Err(PlanError::UnknownComponentOverride { .. })
-    ));
+fn contradictory_and_unknown_component_overrides_are_refused() {
+    for (enable, disable) in [(vec!["cli"], vec!["cli"]), (vec!["nope"], vec![])] {
+        let result = graph_plan(PlanRequest {
+            components: overrides(&enable, &disable),
+            ..PlanRequest::new(target(), SelectedScope::User)
+        });
+        let refused = matches!(
+            result,
+            Err(PlanError::ComponentBothEnabledAndDisabled { .. }
+                | PlanError::UnknownComponentOverride { .. })
+        );
+        assert!(refused, "{enable:?}/{disable:?}");
+    }
 }
 
 // --- Conditions ---
@@ -509,6 +446,9 @@ when = 'component("core") && component("cli")'
 
 #[test]
 fn nested_condition_expressions() {
+    // A parenthesised term nested inside `!` and `||`. Both operands are over an
+    // always-selected component, so the expression is true either way; what this
+    // guards is that the parser accepts the nesting at all.
     let source = with(
         r#"
 [[components]]
@@ -528,7 +468,7 @@ when = '!(component("core") && component("core")) || component("core")'
 // --- Files ---
 
 #[test]
-fn inactive_component_files_excluded() {
+fn inactive_component_files_are_excluded_from_the_plan_and_its_summary() {
     let source = with(
         r#"
 [[components]]
@@ -552,11 +492,18 @@ destination = "${install}/b.txt"
 component = "cli"
 "#,
     );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a"), ("dist/b.txt", b"bb")]);
+    let build = build_plan_from(
+        &source,
+        &[("dist/a.txt", b"aaa"), ("dist/b.txt", b"bbbbbb")],
+    );
     let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
     assert_eq!(result.files.len(), 1);
     assert_eq!(result.files[0].source_relative.as_str(), "a.txt");
-    assert_eq!(result.files[0].size, 1);
+    assert_eq!(result.files[0].size, 3);
+    assert_eq!(result.summary.file_count, 1);
+    assert_eq!(result.summary.install_bytes, 3);
+    assert_eq!(result.summary.selected_component_count, 1);
+    assert_eq!(result.summary.resource_count, 0);
 }
 
 #[test]
@@ -589,10 +536,9 @@ destination = "${install}/tools"
 
 // --- Collisions ---
 
-#[test]
-fn duplicate_active_launchers() {
-    let source = with(
-        r#"
+#[rstest]
+#[case::launchers(
+    r#"
 [[launchers]]
 location = "menu"
 name = "Acme"
@@ -603,19 +549,40 @@ location = "menu"
 name = "Acme"
 target = "${install}/b.exe"
 "#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User));
-    assert!(matches!(
-        result,
-        Err(PlanError::ActiveLauncherCollision { .. })
-    ));
-}
+    None
+)]
+#[case::protocols(
+    r#"
+[[components]]
+id = "core"
+name = "Core"
 
-#[test]
-fn same_launchers_in_inactive_components_do_not_collide() {
-    let source = with(
-        r#"
+[[protocols]]
+scheme = "acme"
+executable = "${install}/a.exe"
+when = 'component("core") || component("core")'
+
+[[protocols]]
+scheme = "acme"
+executable = "${install}/b.exe"
+when = 'component("core")'
+"#,
+    None
+)]
+#[case::path_entries(
+    r#"
+[[path]]
+value = "${install}/bin"
+
+[[path]]
+value = "${install}/bin"
+"#,
+    None
+)]
+// Two identical launchers, but the second only becomes active when a
+// non-selected component is enabled.
+#[case::gated_launchers(
+    r#"
 [[components]]
 id = "core"
 name = "Core"
@@ -638,37 +605,48 @@ name = "Acme"
 target = "${install}/b.exe"
 component = "cli"
 "#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.launchers.len(), 1);
-}
+    Some(1)
+)]
+#[case::distinct_resources(
+    r#"
+[[launchers]]
+location = "menu"
+name = "Acme"
+target = "${install}/a.exe"
 
-#[test]
-fn duplicate_active_protocols() {
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
+[[launchers]]
+location = "desktop"
+name = "Acme"
+target = "${install}/a.exe"
 
-[[protocols]]
-scheme = "acme"
-executable = "${install}/a.exe"
-when = 'component("core") || component("core")'
+[[path]]
+value = "${install}/bin"
 
-[[protocols]]
-scheme = "acme"
-executable = "${install}/b.exe"
-when = 'component("core")'
+[[path]]
+value = "${install}/tools"
 "#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
+    Some(4)
+)]
+fn resources_collide_only_while_they_are_both_active(
+    #[case] body: &str,
+    #[case] survivors: Option<usize>,
+) {
+    let build = build_plan_from(&with(body), &[("dist/a.txt", b"a")]);
     let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User));
-    assert!(matches!(
-        result,
-        Err(PlanError::ActiveProtocolCollision { .. })
-    ));
+    let Some(survivors) = survivors else {
+        let error = result.expect_err("expected a collision");
+        let collided = matches!(
+            error,
+            PlanError::ActiveLauncherCollision { .. }
+                | PlanError::ActiveProtocolCollision { .. }
+                | PlanError::ActivePathCollision { .. }
+        );
+        assert!(collided, "expected a collision, got {error:?}");
+        return;
+    };
+    let result = result.unwrap_or_else(|error| panic!("unexpected collision: {error}"));
+    let total = result.launchers.len() + result.path_entries.len() + result.protocols.len();
+    assert_eq!(total, survivors);
 }
 
 #[test]
@@ -687,53 +665,16 @@ id = "Acme.B"
     assert!(parse_and_compile(&source, "default").is_err());
 }
 
-#[test]
-fn duplicate_path_entry() {
-    let source = with(
-        r#"
-[[path]]
-value = "${install}/bin"
-
-[[path]]
-value = "${install}/bin"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User));
-    assert!(matches!(result, Err(PlanError::ActivePathCollision { .. })));
-}
-
-#[test]
-fn no_false_collision_for_distinct_resources() {
-    let source = with(
-        r#"
-[[launchers]]
-location = "menu"
-name = "Acme"
-target = "${install}/a.exe"
-
-[[launchers]]
-location = "desktop"
-name = "Acme"
-target = "${install}/a.exe"
-
-[[path]]
-value = "${install}/bin"
-
-[[path]]
-value = "${install}/tools"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.launchers.len(), 2);
-    assert_eq!(result.path_entries.len(), 2);
-}
-
 // --- Privilege ---
 
-#[test]
-fn user_plan_does_not_require_system_authorization() {
+#[rstest]
+#[case::user(SelectedScope::User, Privilege::User, false)]
+#[case::machine(SelectedScope::Machine, Privilege::System, true)]
+fn scope_decides_the_store_and_privilege_of_registered_resources(
+    #[case] scope: SelectedScope,
+    #[case] privilege: Privilege,
+    #[case] authorized: bool,
+) {
     let source = with(
         r#"
 [[files]]
@@ -744,47 +685,58 @@ destination = "${install}/a.txt"
 location = "desktop"
 name = "Acme"
 target = "${install}/a.txt"
+
+[[path]]
+value = "${install}/bin"
+
+[[protocols]]
+scheme = "acme"
+executable = "${install}/a.txt"
+
+[[file_associations]]
+extension = ".acme"
+id = "Acme.Document"
+executable = "${install}/a.txt"
 "#,
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert!(!result.summary.requires_authorization);
-    assert!(result.files.iter().all(|f| f.privilege == Privilege::User));
+    let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
+    assert_eq!(result.summary.requires_authorization, authorized);
+
+    assert_eq!(result.files[0].privilege, privilege);
+    assert_eq!(result.launchers[0].privilege, privilege);
+
+    // A registration resource belongs to the store the selected scope names,
+    // which is independent of the privilege each resource carries.
+    for store in [
+        &result.path_entries[0].scope,
+        &result.protocols[0].scope,
+        &result.file_associations[0].scope,
+    ] {
+        assert_eq!(store, &scope);
+    }
+    for carried in [
+        &result.path_entries[0].privilege,
+        &result.protocols[0].privilege,
+        &result.file_associations[0].privilege,
+    ] {
+        assert_eq!(carried, &scope.authorization());
+        assert_eq!(carried, &privilege);
+    }
 }
 
 #[test]
-fn machine_plan_requires_system_authorization() {
+fn a_service_makes_a_user_scope_plan_system_authorized() {
+    // The scope says where the application lives. The service says what
+    // authority its registration needs. A per-user install that declares a
+    // service must therefore report system authorization, whether the service
+    // is always selected or gated behind a component.
     let source = with(
         r#"
-[[files]]
-source = "a.txt"
-destination = "${install}/a.txt"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::Machine)).unwrap();
-    assert!(result.summary.requires_authorization);
-    assert!(
-        result
-            .files
-            .iter()
-            .all(|f| f.privilege == Privilege::System)
-    );
-}
-
-#[test]
-fn service_makes_plan_system_authorized() {
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
 [[components]]
 id = "service"
 name = "Service"
 default = false
-requires = ["core"]
 
 [[services]]
 id = "acme-agent"
@@ -795,231 +747,41 @@ component = "service"
 "#,
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let without = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let user = PlanRequest::new(target(), SelectedScope::User);
+
+    let without = plan(&build, &user).unwrap();
+    assert!(without.services.is_empty());
     assert!(!without.summary.requires_authorization);
 
     let with_svc = plan(
         &build,
         &PlanRequest {
-            target: target(),
-            scope: SelectedScope::User,
-            install_directory: None,
             components: overrides(&["service"], &[]),
+            ..user
         },
     )
     .unwrap();
-    assert!(with_svc.summary.requires_authorization);
+    assert_eq!(with_svc.scope, SelectedScope::User);
     assert_eq!(with_svc.services[0].privilege, Privilege::System);
-}
-
-#[test]
-fn a_service_makes_a_user_scope_plan_system_authorized() {
-    // The scope says where the application lives. The service says what
-    // authority its registration needs. A per-user install that declares a
-    // service must therefore report system authorization.
-    let source = with(
-        r#"
-[[services]]
-id = "acme-agent"
-name = "acme-agent"
-binary = "${install}/acme-agent.exe"
-start = "automatic"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.scope, SelectedScope::User);
-    assert!(
-        result
-            .files
-            .iter()
-            .all(|file| file.privilege == Privilege::User)
-    );
-    assert_eq!(result.services[0].privilege, Privilege::System);
-    assert!(result.summary.requires_authorization);
-}
-
-#[test]
-fn registration_ownership_comes_from_the_plan_not_from_privilege() {
-    // Search-path, protocol, and association resources each carry the store
-    // they belong to. That store is the selected scope, and it is independent
-    // of each resource's privilege.
-    let source = with(
-        r#"
-[[path]]
-value = "${install}/bin"
-
-[[protocols]]
-scheme = "acme"
-executable = "${install}/a.txt"
-
-[[file_associations]]
-extension = ".acme"
-id = "Acme.Document"
-executable = "${install}/a.txt"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    for scope in [SelectedScope::User, SelectedScope::Machine] {
-        let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
-        assert_eq!(result.path_entries[0].scope, scope);
-        assert_eq!(result.protocols[0].scope, scope);
-        assert_eq!(result.file_associations[0].scope, scope);
-        assert_eq!(result.path_entries[0].privilege, scope.authorization());
-        assert_eq!(result.protocols[0].privilege, scope.authorization());
-        assert_eq!(result.file_associations[0].privilege, scope.authorization());
-    }
-}
-
-#[test]
-fn scope_authorization_is_a_default_not_a_scope_guarantee() {
-    // Every scope has a default authority, but nothing derives a resource's
-    // privilege from the scope at read time.
-    assert_eq!(SelectedScope::User.authorization(), Privilege::User);
-    assert_eq!(SelectedScope::Machine.authorization(), Privilege::System);
-    assert_ne!(
-        SelectedScope::User.authorization(),
-        SelectedScope::Machine.authorization()
-    );
-}
-
-// --- Summary ---
-
-#[test]
-fn summary_counts_filtered_files_and_bytes() {
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[components]]
-id = "cli"
-name = "CLI"
-default = false
-requires = ["core"]
-
-[[files]]
-source = "a.txt"
-destination = "${install}/a.txt"
-component = "core"
-
-[[files]]
-source = "b.txt"
-destination = "${install}/b.txt"
-component = "cli"
-"#,
-    );
-    let build = build_plan_from(
-        &source,
-        &[("dist/a.txt", b"aaa"), ("dist/b.txt", b"bbbbbb")],
-    );
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.summary.file_count, 1);
-    assert_eq!(result.summary.install_bytes, 3);
-    assert_eq!(result.summary.selected_component_count, 1);
-    assert_eq!(result.summary.resource_count, 0);
+    assert!(with_svc.summary.requires_authorization);
 }
 
 // --- Determinism / serialization ---
 
 #[test]
-fn repeated_plans_are_identical() {
+fn repeated_plans_are_identical_and_fully_resolved() {
     let source = with(
         r#"
 [[components]]
 id = "core"
 name = "Core"
 
-[[files]]
-source = "a.txt"
-destination = "${install}/a.txt"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let request = PlanRequest::new(target(), SelectedScope::Machine);
-    let a = plan(&build, &request).unwrap();
-    let b = plan(&build, &request).unwrap();
-    assert_eq!(a, b);
-    assert_eq!(
-        serde_json::to_string(&a).unwrap(),
-        serde_json::to_string(&b).unwrap()
-    );
-}
-
-#[test]
-fn serde_json_roundtrip() {
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[components]]
-id = "cli"
-name = "CLI"
-requires = ["core"]
-
-[[files]]
-source = "a.txt"
-destination = "${install}/bin/a.txt"
-component = "core"
-
-[[launchers]]
-location = "menu"
-name = "Acme"
-target = "${install}/bin/a.txt"
-component = "core"
-
-[[path]]
-value = "${install}/bin"
-component = "cli"
-
-[[protocols]]
-scheme = "acme"
-executable = "${install}/bin/a.txt"
-args = ["--url", "%1"]
-
-[[file_associations]]
-extension = ".acme"
-id = "Acme.Document"
-executable = "${install}/bin/a.txt"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let original = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    let json = serde_json::to_string_pretty(&original).unwrap();
-    let restored: InstallPlan = serde_json::from_str(&json).unwrap();
-    assert_eq!(original, restored);
-}
-
-#[test]
-fn no_install_or_app_variables_remain() {
-    let source = with(
-        r#"
 [[files]]
 source = "a.txt"
 destination = "${install}/${app.name}/a.txt"
 
 [[path]]
 value = "${install}/bin/${app.version}"
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    let json = serde_json::to_string(&result).unwrap();
-    assert!(!json.contains("${install}"));
-    assert!(!json.contains("${app."));
-    assert!(json.contains("${location."));
-}
-
-#[test]
-fn resource_keys_are_stable() {
-    let source = with(
-        r#"
-[[files]]
-source = "a.txt"
-destination = "${install}/a.txt"
 
 [[services]]
 id = "svc"
@@ -1033,8 +795,22 @@ executable = "${install}/a.exe"
 "#,
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let a = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    let b = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let request = PlanRequest::new(target(), SelectedScope::Machine);
+    let a = plan(&build, &request).unwrap();
+    let b = plan(&build, &request).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(
+        serde_json::to_string(&a).unwrap(),
+        serde_json::to_string(&b).unwrap()
+    );
+
+    // Every authoring-time variable must be resolved out of the plan.
+    let json = serde_json::to_string(&a).unwrap();
+    assert!(!json.contains("${install}"), "json: {json}");
+    assert!(!json.contains("${app."), "json: {json}");
+    assert!(json.contains("${location."), "json: {json}");
+
+    // A resource is identified by what it registers, not by its position.
     assert_eq!(a.files[0].key, b.files[0].key);
     assert_eq!(
         a.services[0].key,

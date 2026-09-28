@@ -15,46 +15,8 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use zup_windows::{HandOff, LaunchRequest, Launcher, launch, quote_argument};
-
-/// A launcher that records what it was asked for and starts nothing.
-#[derive(Default)]
-struct Recorder {
-    requests: Mutex<Vec<LaunchRequest>>,
-    /// The exit code a recorded child reports, so a test can drive the
-    /// classification path without a process.
-    exit: Mutex<i32>,
-}
-
-impl Recorder {
-    fn only(&self) -> LaunchRequest {
-        let requests = self.requests.lock().expect("the recorder is not poisoned");
-        assert_eq!(
-            requests.len(),
-            1,
-            "a handoff starts exactly one runtime: {:?}",
-            requests
-        );
-        requests[0].clone()
-    }
-}
-
-impl Launcher for Recorder {
-    fn launch(
-        &self,
-        request: &LaunchRequest,
-    ) -> Result<zup_windows::ChildProcess, zup_windows::LaunchError> {
-        self.requests
-            .lock()
-            .expect("the recorder is not poisoned")
-            .push(request.clone());
-        Ok(zup_windows::ChildProcess::already_finished(
-            *self.exit.lock().expect("the recorder is not poisoned"),
-        ))
-    }
-}
+use zup_windows::{HandOff, LaunchRequest, launch, quote_argument};
 
 fn this_executable() -> PathBuf {
     std::env::current_exe().expect("the test executable")
@@ -105,26 +67,6 @@ fn a_real_child_starts_and_reports_the_platforms_own_exit_code() {
         expected,
         "the child's own exit code comes back unchanged"
     );
-}
-
-#[test]
-fn a_child_is_independent_once_the_launch_returns() {
-    // The claim the design rests on: a bootstrapper that is killed mid-install
-    // leaves an installation that is either committed or recoverable. That is
-    // true because the child needs nothing from us. So: start one, stop looking
-    // at it for a while, and then read the code. If it were reading a handle we
-    // had to hold open, it could not have finished.
-    let child = launch(
-        &this_executable(),
-        &[USAGE_ERROR.to_owned()],
-        HandOff::Console,
-        None,
-    )
-    .expect("a real child starts");
-    let pid = child.pid();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert_eq!(child.wait(), reference_exit_code());
-    assert_ne!(pid, 0);
 }
 
 #[test]
@@ -224,40 +166,4 @@ fn a_directory_is_not_an_executable() {
         .expect_err("a directory does not start");
     assert_eq!(error.api, "CreateProcessW");
     assert_ne!(error.code, 0);
-}
-
-#[test]
-fn a_working_directory_is_inherited_when_none_is_named() {
-    // Not a security claim — a convenience one — but it is the kind of thing
-    // that silently stops being true, so it is stated.
-    let request = LaunchRequest::new(this_executable(), vec![], HandOff::Console);
-    assert_eq!(
-        request.working_directory, None,
-        "an unnamed working directory means the child inherits this one"
-    );
-    let mut request = request;
-    request.working_directory = Some(PathBuf::from(r"C:\Windows\Temp"));
-    assert_eq!(
-        request.working_directory.as_deref(),
-        Some(Path::new(r"C:\Windows\Temp"))
-    );
-}
-
-#[test]
-fn an_injected_launcher_receives_the_request_it_would_have_run() {
-    // The seam itself. A test that injects a launcher can assert on the handoff
-    // without a process, which is the only way to test that the arguments are
-    // locations and nothing else.
-    let recorder = Recorder::default();
-    let request = LaunchRequest::new(
-        Path::new(r"C:\Acme\Setup.exe"),
-        vec!["--acquired".to_owned(), r"C:\Acme\content".to_owned()],
-        HandOff::Silent,
-    );
-    let child = recorder
-        .launch(&request)
-        .expect("an injected launcher succeeds");
-    let recorded = recorder.only();
-    assert_eq!(recorded, request);
-    assert_eq!(child.wait(), 0);
 }

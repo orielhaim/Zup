@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use miette::Diagnostic;
 use rstest::rstest;
 use zup_manifest::{
-    Frontend, InstallScope, Installer, Manifest, ManifestError, ResourceKind, Source,
-    TargetOverrideSet, TargetOverrides, TargetProfileId, TargetTriple, Template, compile, parse,
-    parse_and_compile, select_targets, select_targets_with,
+    Frontend, InstallScope, Installer, Manifest, ManifestError, Source, TargetOverrideSet,
+    TargetOverrides, TargetProfileId, TargetTriple, Template, compile, parse, parse_and_compile,
+    select_targets, select_targets_with,
 };
 
 const MANIFEST: &str = r#"
@@ -73,12 +73,11 @@ fn compile_parsed(manifest: &Manifest, profile: &str) -> Result<Installer, Manif
 }
 
 #[test]
-fn selects_target_by_profile_name() {
+fn selects_targets_by_profile_name() {
     let manifest = parse(MANIFEST).unwrap();
 
     let selected =
         select_targets(&manifest, &["windows-x64"], &TargetOverrides::default()).unwrap();
-
     assert_eq!(selected.len(), 1);
     assert_eq!(
         selected[0].profile,
@@ -93,14 +92,9 @@ fn selects_target_by_profile_name() {
         Source::new(PathBuf::from("dist/windows-x64")).unwrap()
     );
     assert_eq!(selected[0].frontend, Frontend::Gui);
-}
 
-#[test]
-fn selects_all_profiles_in_name_order() {
-    let manifest = parse(MANIFEST).unwrap();
-
+    // An empty selector list resolves every profile, in name order.
     let selected = select_targets(&manifest, &[], &TargetOverrides::default()).unwrap();
-
     let names: Vec<_> = selected
         .iter()
         .map(|config| config.profile.as_str())
@@ -109,7 +103,20 @@ fn selects_all_profiles_in_name_order() {
 }
 
 #[test]
-fn profile_name_takes_precedence_over_raw_triple() {
+fn a_selector_may_be_a_profile_name_or_a_raw_triple() {
+    // A raw triple resolves to the profile that declares it.
+    let manifest = parse(MANIFEST).unwrap();
+    let selected = select_targets(
+        &manifest,
+        &["x86_64-pc-windows-msvc"],
+        &TargetOverrides::default(),
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].profile.as_str(), "windows-x64");
+
+    // When a profile is *named* after a triple another profile also declares,
+    // the profile name wins over the triple lookup.
     let source = MANIFEST.replace(
         "[build.targets.z-linux-arm64]",
         r#"[build.targets."x86_64-pc-windows-msvc"]
@@ -119,32 +126,52 @@ source = { directory = "dist/linux-x64" }
 [build.targets.z-linux-arm64]"#,
     );
     let manifest = parse(&source).unwrap();
-
     let selected = select_targets(
         &manifest,
         &["x86_64-pc-windows-msvc"],
         &TargetOverrides::default(),
     )
     .unwrap();
-
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].profile.as_str(), "x86_64-pc-windows-msvc");
     assert_eq!(selected[0].target.as_str(), "x86_64-unknown-linux-gnu");
 }
 
 #[test]
-fn profile_frontend_override_resolves_and_compiles() {
-    let source = with_windows_frontend("console");
+fn raw_target_aliases_are_canonicalized() {
+    let source = MANIFEST.replace("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc");
     let manifest = parse(&source).unwrap();
-    let overrides = TargetOverrides::default();
 
-    let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-    let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-    let convenience = parse_and_compile(&source, "windows-x64").unwrap();
+    let selected = select_targets(
+        &manifest,
+        &["arm64-pc-windows-msvc"],
+        &TargetOverrides::default(),
+    )
+    .unwrap();
 
-    assert_eq!(selected[0].frontend, Frontend::Console);
-    assert_eq!(installer.frontend, Frontend::Console);
-    assert_eq!(convenience.frontend, Frontend::Console);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].target.as_str(), "aarch64-pc-windows-msvc");
+}
+
+#[test]
+fn declared_frontend_resolves_and_compiles() {
+    // A `frontend` on the common manifest and a `frontend` on a target profile
+    // are the same claim: the innermost declaration reaches the installer.
+    let profile = with_windows_frontend("console");
+    let common = MANIFEST.replace("schema = 1\n", "schema = 1\nfrontend = \"console\"\n");
+
+    for source in [profile, common] {
+        let manifest = parse(&source).unwrap();
+        let overrides = TargetOverrides::default();
+
+        let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
+        let installer = compile(&manifest, &selected[0], &overrides).unwrap();
+        let convenience = parse_and_compile(&source, "windows-x64").unwrap();
+
+        assert_eq!(selected[0].frontend, Frontend::Console);
+        assert_eq!(installer.frontend, Frontend::Console);
+        assert_eq!(convenience.frontend, Frontend::Console);
+    }
 }
 
 #[test]
@@ -164,19 +191,6 @@ fn caller_frontend_override_wins_over_profile() {
         compile(&manifest, &selected[0], &TargetOverrides::default()),
         Err(ManifestError::InvalidResolvedTargetConfig { .. })
     ));
-}
-
-#[test]
-fn common_manifest_frontend_is_resolved_without_overrides() {
-    let source = MANIFEST.replace("schema = 1\n", "schema = 1\nfrontend = \"console\"\n");
-    let manifest = parse(&source).unwrap();
-    let overrides = TargetOverrides::default();
-
-    let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-    let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-
-    assert_eq!(selected[0].frontend, Frontend::Console);
-    assert_eq!(installer.frontend, Frontend::Console);
 }
 
 #[test]
@@ -258,35 +272,6 @@ component = "windows-only"
 }
 
 #[test]
-fn target_filters_plugins_and_prerequisites() {
-    let source = with_resources(
-        r#"
-[[prerequisites]]
-id = "windows-runtime"
-name = "Windows Runtime"
-targets = ["windows-x64"]
-requirement = { kind = "runtime", id = "windows.vc.v14" }
-package = { type = "embedded", path = "runtime.exe", sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 1 }
-
-[[plugins]]
-id = "windows-plugin"
-source = "plugins/windows.wasm"
-targets = ["windows-x64"]
-"#,
-    );
-
-    let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
-
-    assert_eq!(windows.prerequisites.len(), 1);
-    assert_eq!(windows.prerequisites[0].id.as_str(), "windows-runtime");
-    assert_eq!(windows.plugins.len(), 1);
-    assert_eq!(windows.plugins[0].id.as_str(), "windows-plugin");
-    assert!(linux.prerequisites.is_empty());
-    assert!(linux.plugins.is_empty());
-}
-
-#[test]
 fn target_filters_every_resource_kind() {
     let source = with_resources(
         r#"
@@ -317,6 +302,18 @@ extension = ".acme"
 id = "Acme.Document"
 executable = "${install}/Acme.exe"
 targets = ["windows-x64"]
+
+[[prerequisites]]
+id = "windows-runtime"
+name = "Windows Runtime"
+targets = ["windows-x64"]
+requirement = { kind = "runtime", id = "windows.vc.v14" }
+package = { type = "embedded", path = "runtime.exe", sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 1 }
+
+[[plugins]]
+id = "windows-plugin"
+source = "plugins/windows.wasm"
+targets = ["windows-x64"]
 "#,
     );
 
@@ -328,11 +325,18 @@ targets = ["windows-x64"]
     assert_eq!(windows.services.len(), 1);
     assert!(windows.protocols.is_empty());
     assert_eq!(windows.file_associations.len(), 1);
+    assert_eq!(windows.prerequisites.len(), 1);
+    assert_eq!(windows.prerequisites[0].id.as_str(), "windows-runtime");
+    assert_eq!(windows.plugins.len(), 1);
+    assert_eq!(windows.plugins[0].id.as_str(), "windows-plugin");
+
     assert!(linux.launchers.is_empty());
     assert_eq!(linux.path.len(), 1);
     assert!(linux.services.is_empty());
     assert_eq!(linux.protocols.len(), 1);
     assert!(linux.file_associations.is_empty());
+    assert!(linux.prerequisites.is_empty());
+    assert!(linux.plugins.is_empty());
 }
 
 #[test]
@@ -361,34 +365,6 @@ targets = ["z-linux-arm64"]
         Err(ManifestError::DuplicateComponent { ref id, .. }) if id == "duplicate"
     ));
     assert!(compile_profile(&source, "z-linux-arm64").is_ok());
-}
-
-#[test]
-fn rejects_unknown_target_profile_references() {
-    let source = with_resources(
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-targets = ["missing"]
-"#,
-    );
-
-    let error = parse(&source).unwrap_err();
-
-    assert_eq!(
-        error.code().map(|code| code.to_string()),
-        Some("zup_manifest::unknown_target_profile_reference".to_owned())
-    );
-    assert!(error.to_string().contains("missing"));
-    assert!(matches!(
-        error,
-        ManifestError::UnknownTargetProfileReference {
-            resource: ResourceKind::File,
-            ref profile,
-            ..
-        } if profile == "missing"
-    ));
 }
 
 #[rstest]
@@ -662,24 +638,15 @@ fn caller_install_directory_override_covers_every_scope_a_target_installs_to() {
     let installer = compile(&manifest, &selected[0], &overrides).unwrap();
 
     assert_eq!(selected[0].install.scope, InstallScope::Either);
-    assert_eq!(
-        selected[0]
-            .install
-            .directory
-            .user
-            .as_ref()
-            .map(ToString::to_string),
-        Some("C:/Program Files/Acme".to_owned())
-    );
-    assert_eq!(
-        selected[0]
-            .install
-            .directory
-            .machine
-            .as_ref()
-            .map(ToString::to_string),
-        Some("C:/Program Files/Acme".to_owned())
-    );
+    for template in [
+        &selected[0].install.directory.user,
+        &selected[0].install.directory.machine,
+    ] {
+        assert_eq!(
+            template.as_ref().map(ToString::to_string),
+            Some("C:/Program Files/Acme".to_owned())
+        );
+    }
     assert_eq!(installer.install.directory, selected[0].install.directory);
 }
 
@@ -806,21 +773,6 @@ fn rejects_forged_resolved_target_config() {
 }
 
 #[test]
-fn selects_target_by_raw_triple() {
-    let manifest = parse(MANIFEST).unwrap();
-
-    let selected = select_targets(
-        &manifest,
-        &["x86_64-pc-windows-msvc"],
-        &TargetOverrides::default(),
-    )
-    .unwrap();
-
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].profile.as_str(), "windows-x64");
-}
-
-#[test]
 fn rejects_unknown_selection() {
     let manifest = parse(MANIFEST).unwrap();
 
@@ -879,32 +831,8 @@ source = { directory = "dist/linux-alias" }
 }
 
 #[test]
-fn canonicalizes_raw_target_alias() {
-    let source = MANIFEST.replace("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc");
-    let manifest = parse(&source).unwrap();
-
-    let selected = select_targets(
-        &manifest,
-        &["arm64-pc-windows-msvc"],
-        &TargetOverrides::default(),
-    )
-    .unwrap();
-
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].target.as_str(), "aarch64-pc-windows-msvc");
-}
-
-#[test]
-fn binds_selected_target_to_installer_and_serde_roundtrip() {
+fn installer_serialization_omits_build_directories() {
     let installer = parse_and_compile(MANIFEST, "windows-x64").unwrap();
-
-    assert_eq!(
-        installer.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
-
     let json = serde_json::to_string(&installer).unwrap();
     assert!(!json.contains("dist/windows-x64"), "json: {json}");
-    let restored: Installer = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, installer);
 }

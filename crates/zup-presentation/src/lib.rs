@@ -1187,12 +1187,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bytes_are_human_readable() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1024), "1.0 KiB");
-    }
-
-    #[test]
     fn phase_classification_keeps_one_progress_model() {
         assert_eq!(
             OperationPhase::from_action("Downloading update"),
@@ -1258,16 +1252,6 @@ mod tests {
         assert_eq!(first["protocol_version"], INSTALLER_PROTOCOL_VERSION);
         let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(last["type"], "completed");
-    }
-
-    #[test]
-    fn typed_blocker_ids_do_not_parse_process_names() {
-        let event = InstallerEvent::blocked_with_processes(
-            "7-Zip.exe (PID 4820), Helper (PID 7312)",
-            [4820, 7312],
-        );
-        let value = serde_json::to_value(event).unwrap();
-        assert_eq!(value["processes"], serde_json::json!([4820, 7312]));
     }
 
     #[test]

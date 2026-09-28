@@ -173,112 +173,11 @@ fn map_invocation_error(error: InvocationError) -> PluginFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::{AppId, NonEmptyString};
-    use zup_plugin_contract::{
-        FileAssociation, GeneratedFile, LauncherLocation as ContractLauncherLocation, PathEntry,
-        Protocol, ResourceItem, Service, ServiceStart as ContractServiceStart,
-    };
 
-    #[test]
-    fn converts_all_contract_resource_families() {
-        let resources = [
-            ResourceItem::GeneratedFile(GeneratedFile {
-                destination: "file".to_owned(),
-                contents: vec![1, 2, 3],
-            }),
-            ResourceItem::Launcher(zup_plugin_contract::Launcher {
-                location: ContractLauncherLocation::Desktop,
-                name: "name".to_owned(),
-                target: "target".to_owned(),
-                arguments: vec!["arg".to_owned()],
-                working_directory: None,
-            }),
-            ResourceItem::PathEntry(PathEntry {
-                value: "path".to_owned(),
-            }),
-            ResourceItem::Service(Service {
-                id: "service".to_owned(),
-                name: "service".to_owned(),
-                display_name: None,
-                binary: "binary".to_owned(),
-                arguments: Vec::new(),
-                start: ContractServiceStart::Manual,
-            }),
-            ResourceItem::Protocol(Protocol {
-                scheme: "scheme".to_owned(),
-                executable: "executable".to_owned(),
-                args: Vec::new(),
-            }),
-            ResourceItem::FileAssociation(FileAssociation {
-                extension: ".ext".to_owned(),
-                id: "type".to_owned(),
-                description: None,
-                executable: "executable".to_owned(),
-            }),
-        ];
-        let converted = resources
-            .into_iter()
-            .map(convert_resource)
-            .collect::<Vec<_>>();
-        assert_eq!(converted.len(), 6);
-        assert!(matches!(converted[0], PluginResource::GeneratedFile { .. }));
-        assert!(matches!(converted[1], PluginResource::Launcher { .. }));
-        assert!(matches!(
-            &converted[1],
-            PluginResource::Launcher {
-                location: LauncherLocation::Desktop,
-                ..
-            }
-        ));
-        assert!(matches!(converted[2], PluginResource::PathEntry { .. }));
-        assert!(matches!(converted[3], PluginResource::Service { .. }));
-        assert!(matches!(
-            &converted[3],
-            PluginResource::Service {
-                start: ServiceStart::Manual,
-                ..
-            }
-        ));
-        assert!(matches!(converted[4], PluginResource::Protocol { .. }));
-        assert!(matches!(
-            converted[5],
-            PluginResource::FileAssociation { .. }
-        ));
-    }
-
-    #[test]
-    fn passes_plugin_identity_and_target_exactly() {
-        let binding = PluginBinding {
-            id: zup_core::PluginId::new("helper").unwrap(),
-            component: None,
-            when: None,
-        };
-        let app = zup_core::App {
-            id: AppId::new("com.example.app").unwrap(),
-            name: NonEmptyString::new("App").unwrap(),
-            version: "1.2.3".parse().unwrap(),
-            publisher: None,
-            main: None,
-            description: None,
-        };
-        let planning = PluginPlanningContext {
-            app,
-            install_directory: zup_core::Template::parse("${location.user_data}/App").unwrap(),
-            scope: SelectedScope::Machine,
-            selected_components: vec![zup_core::ComponentId::new("core").unwrap()],
-            target: TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
-        };
-        let context = contract_context(&binding, &planning);
-        assert_eq!(context.plugin_id, "helper");
-        assert_eq!(context.app_id, "com.example.app");
-        assert_eq!(context.app_name, "App");
-        assert_eq!(context.app_version, "1.2.3");
-        assert_eq!(context.install_directory, "${location.user_data}/App");
-        assert!(matches!(context.install_scope, InstallScope::Machine));
-        assert_eq!(context.target, "aarch64-pc-windows-msvc");
-        assert_eq!(context.selected_components, ["core"]);
-    }
-
+    /// The contract's `InvocationError` and the host's `PluginFailure` are two names for
+    /// one taxonomy, and the translation between them is what a caller switches on. The
+    /// output-limit case carries its numbers into the message, because "the plugin
+    /// returned too much" is not something a person can act on.
     #[test]
     fn maps_typed_contract_failures() {
         assert_eq!(

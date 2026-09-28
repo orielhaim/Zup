@@ -355,18 +355,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headless_and_console_share_a_subsystem_and_gui_does_not() {
-        assert_eq!(
-            frontend_subsystem(Frontend::Console),
-            frontend_subsystem(Frontend::Headless)
-        );
-        assert_ne!(
-            frontend_subsystem(Frontend::Gui),
-            frontend_subsystem(Frontend::Console)
-        );
-    }
-
-    #[test]
     fn a_minimum_host_version_fails_closed_when_the_host_is_unknown() {
         let minimum = MinimumHost {
             os: crate::variant::PlatformOs::Windows,

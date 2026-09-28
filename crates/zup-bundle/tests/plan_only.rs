@@ -10,7 +10,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use zup_acquire::{CachePolicy, CatalogEntry, ContentCache, ContentCatalog};
 use zup_build::TargetBuildPlan;
-use zup_bundle::{BundleWriter, PACKAGE_FEATURE_EXTERNAL_PAYLOAD, Package, PayloadSource};
+use zup_bundle::{BundleWriter, Package, PayloadSource};
 use zup_core::{RelativePath, Sha256Digest, hash_reader};
 use zup_manifest::TargetOverrides;
 
@@ -126,7 +126,6 @@ fn a_plan_only_package_carries_the_plan_and_none_of_the_content() {
     assert!(package.blob_count() == 0);
     assert!(zup_bundle::refuse_self_verified(package.is_plan_only()).is_err());
     assert!(zup_bundle::refuse_self_verified(false).is_ok());
-    let _ = PACKAGE_FEATURE_EXTERNAL_PAYLOAD;
 }
 
 #[test]
@@ -214,25 +213,6 @@ fn source_cache_root(root: &Path) -> std::path::PathBuf {
     // The cache is created at `<root>/cache`, and a blob lives under
     // `<cache>/blobs/sha256/...`; this recomputes that without exposing the
     // cache's root to the test.
-    let _ = root;
     let probe = ContentCache::open(root.join("cache"), CachePolicy::Auto).unwrap();
     probe.root().to_path_buf()
-}
-
-#[test]
-fn an_external_package_never_carries_a_partial_blob_index() {
-    // A package that claims external payload and also holds some blobs is the
-    // state that would let a reader believe it has a self-contained copy of
-    // something it does not, so the format refuses it.
-    let root = TempDir::new().unwrap();
-    let plan = plan(root.path());
-    let full = BundleWriter::encode(&plan, &[]).unwrap();
-    let mut tampered = full.clone();
-    // Flip the feature bit in the header without touching the metadata hash.
-    tampered[12] |= 1;
-    let error = Package::parse(&tampered).expect_err("refused");
-    assert!(
-        matches!(error, zup_bundle::PackageError::Invalid),
-        "{error:?}"
-    );
 }

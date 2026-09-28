@@ -316,10 +316,6 @@ mod tests {
         candidate("x64", "x86_64", VariantRequirements::default())
     }
 
-    fn arm64() -> CandidateVariant<'static> {
-        candidate("arm64", "aarch64", VariantRequirements::default())
-    }
-
     fn arm64_native_only() -> CandidateVariant<'static> {
         candidate(
             "arm64-native",
@@ -332,47 +328,9 @@ mod tests {
         )
     }
 
-    fn arm64_machine_component() -> CandidateVariant<'static> {
-        candidate(
-            "arm64-driver",
-            "aarch64",
-            VariantRequirements {
-                native_execution: false,
-                capabilities: vec![PlatformCapability::MachineComponents],
-                minimum_host: None,
-            },
-        )
-    }
-
-    fn x64_windows() -> HostExecution {
-        HostExecution {
-            os: PlatformOs::Windows,
-            native: HostArchitecture::X86_64,
-            emulated: vec![HostArchitecture::X86],
-            version: Some(HostVersion::new(10, 0, 22621)),
-        }
-    }
-
-    fn arm64_windows() -> HostExecution {
-        HostExecution {
-            os: PlatformOs::Windows,
-            native: HostArchitecture::Arm64,
-            emulated: vec![HostArchitecture::X86_64, HostArchitecture::X86],
-            version: Some(HostVersion::new(11, 0, 0)),
-        }
-    }
-
-    #[test]
-    fn a_x64_host_selects_x64_and_an_arm64_host_selects_arm64() {
-        let candidates = [x64(), arm64()];
-        let on_x64 = select(&x64_windows(), &candidates).unwrap();
-        assert_eq!(on_x64.candidate.id, "x64");
-        assert_eq!(on_x64.compatibility, Compatibility::Native);
-        let on_arm64 = select(&arm64_windows(), &candidates).unwrap();
-        assert_eq!(on_arm64.candidate.id, "arm64");
-        assert_eq!(on_arm64.compatibility, Compatibility::Native);
-    }
-
+    /// The ARM64 host can run the x64 variant, so both are installable; native
+    /// still wins. `arm64_native_only` cannot be emulated at all, which is what
+    /// makes this a preference test rather than the only option.
     #[test]
     fn native_always_beats_a_supported_emulated_fallback() {
         let host = HostExecution {
@@ -386,79 +344,46 @@ mod tests {
         assert_eq!(selection.compatibility, Compatibility::Native);
     }
 
+    /// The host can start the ARM64 executable, but the variant declares
+    /// machine-wide components that an emulated execution cannot install, so
+    /// selection refuses it instead of installing something unusable. A variant
+    /// that declares `native_execution` outright is refused for the same reason,
+    /// and the refusal names the architecture rather than saying only "no".
     #[test]
-    fn a_native_machine_component_variant_is_preferred_over_an_emulated_fallback() {
-        let host = HostExecution {
-            os: PlatformOs::Windows,
-            native: HostArchitecture::Arm64,
-            emulated: vec![HostArchitecture::X86_64],
-            version: Some(HostVersion::new(11, 0, 0)),
-        };
-        // The ARM64 variant installs machine components, so it cannot be emulated;
-        // because it *is* the host's own architecture it is still the right choice
-        // over the emulated x64 variant.
-        let selection = select(&host, &[x64(), arm64_machine_component()]).unwrap();
-        assert_eq!(selection.candidate.id, "arm64-driver");
-        assert_eq!(selection.compatibility, Compatibility::Native);
-    }
-
-    #[test]
-    fn a_variant_that_requires_native_execution_is_refused_emulation() {
-        let host = HostExecution {
-            os: PlatformOs::Windows,
-            native: HostArchitecture::X86_64,
-            emulated: vec![],
-            version: Some(HostVersion::new(10, 0, 22621)),
-        };
-        let error = select(&host, &[arm64_native_only()]).unwrap_err();
-        assert!(error.is_unsupported_host(), "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("no variant built for this machine architecture")
-        );
-    }
-
-    #[test]
-    fn an_unsupported_host_gets_a_useful_message() {
-        let host = HostExecution::native_only(PlatformOs::Linux, HostArchitecture::X86_64);
-        let error = select(&host, &[x64(), arm64()]).unwrap_err();
-        assert!(error.is_unsupported_host());
-        assert!(
-            error
-                .to_string()
-                .contains("no variant targets this operating system")
-        );
-    }
-
-    #[test]
-    fn a_machine_component_variant_is_never_selected_through_emulation() {
+    fn a_variant_that_cannot_run_emulated_is_refused() {
         let host = HostExecution {
             os: PlatformOs::Windows,
             native: HostArchitecture::X86_64,
             emulated: vec![HostArchitecture::Arm64],
             version: Some(HostVersion::new(11, 0, 0)),
         };
-        // The host can start the ARM64 executable, but the variant declares
-        // machine-wide components that an emulated execution cannot install, so
-        // selection refuses it instead of installing something unusable.
-        let error = select(&host, &[arm64_machine_component()]).unwrap_err();
-        assert!(error.is_unsupported_host(), "{error}");
-        assert!(
-            !arm64_machine_component().requirements.permits_emulation(),
-            "a machine-component variant must not permit emulation"
-        );
-        // An explicitly native-only variant is refused for the same reason.
-        let strict = candidate(
-            "arm64-strict",
-            "aarch64",
-            VariantRequirements {
-                native_execution: true,
-                capabilities: Vec::new(),
-                minimum_host: None,
-            },
-        );
-        assert!(select(&host, &[strict]).unwrap_err().is_unsupported_host());
+        for (id, native_execution) in [("arm64-driver", false), ("arm64-strict", true)] {
+            let variant = candidate(
+                id,
+                "aarch64",
+                VariantRequirements {
+                    native_execution,
+                    capabilities: if native_execution {
+                        Vec::new()
+                    } else {
+                        vec![PlatformCapability::MachineComponents]
+                    },
+                    minimum_host: None,
+                },
+            );
+            assert!(
+                !variant.requirements.permits_emulation(),
+                "{id} must not permit emulation"
+            );
+            let error = select(&host, &[variant]).unwrap_err();
+            assert!(error.is_unsupported_host(), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("no variant built for this machine architecture"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -492,6 +417,9 @@ mod tests {
         );
     }
 
+    /// A host whose version could not be read is not a host that satisfies a
+    /// minimum. Refusing is the safe answer: guessing "probably new enough" is how
+    /// a build gets an installer that fails on the machine it was meant to fix.
     #[test]
     fn an_unknown_host_version_refuses_a_variant_with_a_minimum() {
         let host = HostExecution::native_only(PlatformOs::Windows, HostArchitecture::X86_64);

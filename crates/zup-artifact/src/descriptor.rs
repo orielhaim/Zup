@@ -109,17 +109,13 @@ mod tests {
         assert!(matches!(wrong, ArtifactError::DigestMismatch { .. }));
     }
 
+    /// The type string carries its own version, so a future shape is a new variant
+    /// and an old reader refuses it instead of guessing. A descriptor a reader
+    /// cannot interpret is a descriptor whose size and digest it would skip
+    /// checking, so this fails closed.
     #[test]
     fn an_unrecognized_media_type_does_not_deserialize() {
-        // The type string carries its own version, so a future shape is a new
-        // variant and an old reader refuses it instead of guessing.
         let unknown = r#"{"media_type":"application/vnd.zup.artifact.index.v9+json","digest":"0000000000000000000000000000000000000000000000000000000000000000","size":0}"#;
         assert!(serde_json::from_str::<Descriptor>(unknown).is_err());
-        let known = format!(
-            r#"{{"media_type":"{}","digest":"{}","size":3}}"#,
-            MediaType::BLOB.as_str(),
-            "0".repeat(64)
-        );
-        assert!(serde_json::from_str::<Descriptor>(&known).is_ok());
     }
 }

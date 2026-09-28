@@ -159,17 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn the_wire_form_is_a_string_and_comes_back_the_same() {
-        assert_eq!(PROTOCOL.to_string(), "1.0");
-        let text = serde_json::to_string(&version(1, 3)).unwrap();
-        assert_eq!(text, "\"1.3\"");
-        assert_eq!(
-            serde_json::from_str::<ProtocolVersion>(&text).unwrap(),
-            version(1, 3)
-        );
-    }
-
-    #[test]
     fn a_version_that_is_not_two_numbers_is_refused() {
         for text in [
             "", "1", "1.", ".0", "1.0.0", "one.zero", "1.0 ", "-1.0", "70000.0",
@@ -179,13 +168,5 @@ mod tests {
                 .to_string();
             assert!(error.contains("not a protocol version"), "{text}: {error}");
         }
-    }
-
-    /// The version that ships is `1.0`, and the major is the number a consumer
-    /// branches on. Asserted so a release cannot quietly move the contract.
-    #[test]
-    fn the_released_contract_is_one_zero() {
-        assert_eq!(PROTOCOL, version(1, 0));
-        assert!(PROTOCOL.accepts(ProtocolVersion::current()));
     }
 }

@@ -397,42 +397,21 @@ mod tests {
         );
         assert_ne!(base.digest(), other_target.digest());
         assert_ne!(base.digest(), other_artifact.digest());
-        assert_eq!(
-            base.digest(),
-            identity().digest(),
-            "an identity is a pure function of its fields"
-        );
     }
 
+    /// A user-scope store is the caller's state root, and a machine-scope store
+    /// is a directory named for the identity that is allowed to write it. Neither
+    /// may be pointed anywhere else, or a caller that passes the wrong base gets
+    /// a store outside any directory it is allowed to touch.
     #[test]
-    fn a_store_path_has_the_expected_shape() {
-        use std::ffi::OsStr;
-        let path = identity().path_under(Path::new("state"));
-        let relative = path.strip_prefix("state").unwrap();
-        let parts: Vec<_> = relative.components().collect();
-        assert_eq!(parts.len(), 4);
-        assert_eq!(
-            parts[0],
-            Component::Normal(OsStr::new(CONTENT_STORE_DIRECTORY))
-        );
-        assert_eq!(parts[1].as_os_str().len(), 64);
-        assert_eq!(parts[2], Component::Normal(OsStr::new("user")));
-        assert_eq!(parts[3].as_os_str().len(), 64);
-    }
-
-    #[test]
-    fn a_user_base_must_be_the_state_root() {
+    fn a_base_must_be_the_one_the_scope_authorizes() {
         let state = Path::new("state");
         assert!(validate_content_store_base(state, SelectedScope::User, state, "sid").is_ok());
         assert!(
             validate_content_store_base(state, SelectedScope::User, Path::new("other"), "sid")
                 .is_err()
         );
-    }
 
-    #[test]
-    fn a_machine_base_must_match_the_authenticated_identity() {
-        let state = Path::new("state");
         let good = PathBuf::from("C:/Temp").join(machine_base_name("S-1-5-21-1"));
         assert!(
             validate_content_store_base(state, SelectedScope::Machine, &good, "S-1-5-21-1").is_ok()

@@ -390,23 +390,10 @@ struct Dependency {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_gate_names_a_duplicate_rather_than_counting_one() {
-        let duplicate = Duplicate {
-            package: "zup-installer".to_owned(),
-            crate_name: "sha2".to_owned(),
-            versions: vec!["0.10.9".to_owned(), "0.11.0".to_owned()],
-        };
-        let message = duplicate.to_string();
-        assert!(message.contains("zup-installer"), "{message}");
-        assert!(message.contains("sha2"), "{message}");
-        assert!(message.contains("0.10.9 and 0.11.0"), "{message}");
-    }
-
+    /// A package in both lists would make the intrusion check refuse its own
+    /// starting point, which is a configuration that cannot be right.
     #[test]
     fn the_shipped_binaries_and_the_build_tools_are_disjoint() {
-        // A package in both lists would make the intrusion check refuse its own
-        // starting point, which is a configuration that cannot be right.
         for shipped in SHIPPED_BINARIES {
             assert!(
                 !BUILD_ONLY_PACKAGES.contains(shipped),

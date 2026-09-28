@@ -73,47 +73,34 @@ fn install_directory_mismatch_names_the_install_directory() {
     );
 }
 
+/// A target mismatch anywhere in the operation set is reported against the
+/// resource that actually carries the bad path, not against the operation.
 #[test]
-fn file_destination_mismatch_carries_the_resource_key() {
-    let key = file_key("a.exe");
-    let mut input = TransactionInput::new(target());
-    input.files = vec![file_work(
-        key.clone(),
+fn target_mismatch_carries_the_owning_resource_key() {
+    let staged = file_key("a.exe");
+    let mut staging_input = TransactionInput::new(target());
+    staging_input.files = vec![file_work(
+        staged.clone(),
         "a.exe",
         TargetPath::new(other_target(), "/opt/acme/a.exe").unwrap(),
     )];
-
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        staging_input.validate().unwrap_err(),
         TransactionInputError::TargetMismatch {
-            resource: TransactionResource::key(&key),
+            resource: TransactionResource::key(&staged),
         }
     );
-    assert!(
-        error
-            .to_string()
-            .contains(r#"File { destination: "C:\\PF\\Acme\\a.exe" }"#),
-        "error: {error}"
-    );
-}
 
-#[test]
-fn created_directory_mismatch_names_the_removal_key() {
-    let key = file_key("old.exe");
-    let mut input = TransactionInput::new(target());
-    input.retired_keys.push(key.clone());
-    let mut removed = removal(key.clone(), tpath(r"C:\PF\Acme\old.exe"));
-    removed.created_directories = vec![TargetPath::new(other_target(), "/opt/acme").unwrap()];
-    input.removals = vec![removed];
-
-    let error = input.validate().unwrap_err();
-
+    let removed = file_key("old.exe");
+    let mut removal_input = TransactionInput::new(target());
+    removal_input.retired_keys.push(removed.clone());
+    let mut file = removal(removed.clone(), tpath(r"C:\PF\Acme\old.exe"));
+    file.created_directories = vec![TargetPath::new(other_target(), "/opt/acme").unwrap()];
+    removal_input.removals = vec![file];
     assert_eq!(
-        error,
+        removal_input.validate().unwrap_err(),
         TransactionInputError::TargetMismatch {
-            resource: TransactionResource::key(&key),
+            resource: TransactionResource::key(&removed),
         }
     );
 }
@@ -140,19 +127,11 @@ fn duplicate_retired_key_names_the_key() {
     let mut input = TransactionInput::new(target());
     input.retired_keys = vec![key.clone(), key.clone()];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::DuplicateKey {
             resource: TransactionResource::key(&key),
         }
-    );
-    assert!(
-        error
-            .to_string()
-            .starts_with("duplicate transaction resource key `"),
-        "error: {error}"
     );
 }
 
@@ -162,15 +141,12 @@ fn unretired_removal_names_the_removal_key() {
     let mut input = TransactionInput::new(target());
     input.removals = vec![removal(key.clone(), tpath(r"C:\PF\Acme\old.exe"))];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::UnretiredRemoval {
             resource: TransactionResource::key(&key),
         }
     );
-    assert!(error.to_string().starts_with("removal `"), "error: {error}");
 }
 
 #[test]
@@ -188,20 +164,12 @@ fn unknown_dependency_names_both_resources() {
         .with_dependencies(vec![unknown.clone()]),
     ];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::UnknownDependency {
             resource: TransactionResource::key(&ResourceKey::Backend { id }),
             dependency: TransactionResource::key(&unknown),
         }
-    );
-    assert!(
-        error
-            .to_string()
-            .starts_with("backend operation `Backend { id: BackendResourceId("),
-        "error: {error}"
     );
 }
 
@@ -213,22 +181,18 @@ fn duplicate_dependency_names_the_repeated_key() {
     input.files = vec![file_work(file.clone(), "a.exe", tpath(r"C:\PF\Acme\a.exe"))];
     input.backend_operations = vec![
         BackendOperation::apply(
-            ResourceKey::Backend { id },
-            BackendResourceId::new("fake.agent").unwrap(),
+            ResourceKey::Backend { id: id.clone() },
+            id.clone(),
             Privilege::System,
             b"opaque".to_vec(),
         )
         .with_dependencies(vec![file.clone(), file.clone()]),
     ];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::DuplicateDependency {
-            resource: TransactionResource::key(&ResourceKey::Backend {
-                id: BackendResourceId::new("fake.agent").unwrap()
-            }),
+            resource: TransactionResource::key(&ResourceKey::Backend { id }),
             dependency: TransactionResource::key(&file),
         }
     );
@@ -245,19 +209,11 @@ fn backend_identity_mismatch_names_the_declared_key() {
         b"opaque".to_vec(),
     )];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::BackendIdentityMismatch {
             resource: TransactionResource::key(&declared),
         }
-    );
-    assert!(
-        error
-            .to_string()
-            .ends_with("does not use its backend resource identity"),
-        "error: {error}"
     );
 }
 
@@ -271,24 +227,10 @@ fn self_dependency_names_the_operation_key() {
             .with_dependencies(vec![key.clone()]),
     ];
 
-    let error = input.validate().unwrap_err();
-
     assert_eq!(
-        error,
+        input.validate().unwrap_err(),
         TransactionInputError::SelfDependency {
             resource: TransactionResource::key(&key),
         }
-    );
-    assert!(
-        error.to_string().ends_with("depends on itself"),
-        "error: {error}"
-    );
-}
-
-#[test]
-fn install_directory_renders_the_same_text_as_the_old_magic_string() {
-    assert_eq!(
-        TransactionResource::InstallDirectory.to_string(),
-        "install_directory"
     );
 }

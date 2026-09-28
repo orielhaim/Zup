@@ -579,14 +579,10 @@ fn parse_accent(value: Option<&str>) -> u32 {
         .unwrap_or(0x2563eb)
 }
 
-/// Selects the palette, then paints the publisher's accent across every role
-/// that renders it.
-///
-/// The accent is applied through `Theme::update` rather than by editing the
-/// global theme in place: components paint from the renderable tokens, and only
-/// `update` copies an edited color onto them. Editing `Theme::global_mut`
-/// leaves Buttons, Checkboxes and Inputs on the default blue while the
-/// hand-built layout below uses the branded one.
+/// The accent goes through `Theme::update` rather than `Theme::global_mut`:
+/// components paint from the renderable tokens, and only `update` copies an
+/// edited color onto them. Editing the global in place leaves Buttons,
+/// Checkboxes and Inputs on the default blue beside a branded heading.
 fn apply_branding(theme_mode: UiTheme, accent: Option<&str>, cx: &mut App) {
     match theme_mode {
         UiTheme::System => Theme::sync_system_appearance(None, cx),
@@ -968,7 +964,6 @@ fn identity_view(identity: &ProductIdentity, theme: &Theme) -> impl IntoElement 
         )
 }
 
-/// A single-column key/value list, skipping rows the manifest did not supply.
 fn detail_rows(rows: impl IntoIterator<Item = (&'static str, String)>) -> impl IntoElement {
     let mut list = DescriptionList::vertical().columns(1);
     for (label, value) in rows {
@@ -1067,9 +1062,6 @@ fn installer_body(
     }
 
     if customizing {
-        // `Form`/`Field` own the label-above-control layout and the muted
-        // description line, so the fields stay consistent as they are added or
-        // removed per manifest.
         let mut form = v_form();
         if install.scopes.len() > 1 {
             let scope_entity = entity.clone();

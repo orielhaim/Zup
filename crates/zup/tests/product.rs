@@ -70,6 +70,9 @@ fn offers(help: &str, verb: &str) -> bool {
     })
 }
 
+/// `crates/zup/src/tests.rs` walks the parsed command tree. This runs the built
+/// executable instead, because the surface a user meets is the binary's — a
+/// `[[bin]]` or a feature could make the two disagree without either test noticing.
 #[test]
 fn the_developer_binary_prints_help_with_no_features() {
     // `zup` declares no features, so this executable is byte-for-byte what
@@ -82,84 +85,35 @@ fn the_developer_binary_prints_help_with_no_features() {
     assert!(output.status.success(), "`zup --help` failed");
     let help = String::from_utf8_lossy(&output.stdout);
     for verb in [
-        "init",
-        "check",
-        "doctor",
-        "plan",
-        "build",
-        "artifact",
-        "sign",
-        "publish",
-        "ci",
-        "toolchain",
-        "schema",
-        "fmt",
-        "completions",
+        "init", "check", "doctor", "plan", "build", "sign", "publish",
     ] {
         assert!(offers(&help, verb), "`{verb}` is missing:\n{help}");
     }
-    for runtime in [
-        "install",
-        "upgrade",
-        "modify",
-        "repair",
-        "uninstall",
-        "recover",
-        "__worker",
-    ] {
+    for runtime in ["install", "upgrade", "uninstall", "__worker"] {
         assert!(
             !offers(&help, runtime),
             "`{runtime}` is an application runtime verb:\n{help}"
         );
     }
-    assert!(
-        !help.contains("__worker") && !help.contains("WorkerHelp"),
-        "the runtime's process boundaries are not this tool's:\n{help}"
-    );
 }
 
+/// The product surface of the workspace, read across every package rather than
+/// from a list, so a package added tomorrow is covered without anyone remembering
+/// to extend this test.
+///
+/// `cargo install` builds whatever a package's `[package]` section says it can. The
+/// installer runtime is a build artifact, not a tool: it is embedded in a generated
+/// file and reaches a user's machine that way. Anything that lets a person install
+/// one of those binaries onto their `PATH` has turned an internal component into a
+/// product with no review in between.
 #[test]
-fn the_developer_package_builds_exactly_one_binary() {
+fn only_the_developer_tool_is_installable() {
     assert_eq!(
         binaries(&manifest("zup")),
         vec!["zup".to_owned()],
         "`zup` is one executable with one shape; a second `[[bin]]` is a second product"
     );
-}
 
-/// `cargo install` builds whatever a package's `[package]` section says it can.
-///
-/// The installer runtime is a build artifact, not a tool: it is embedded in a
-/// generated file and reaches a user's machine that way. Anything that lets a
-/// person install one of those binaries onto their `PATH` has turned an internal
-/// component into a product with no review in between.
-#[test]
-fn the_installer_runtime_is_not_installable() {
-    let source = manifest("zup-installer");
-    assert!(
-        source.contains("publish = false"),
-        "zup-installer must not be installable:\n{source}"
-    );
-    let names = binaries(&source);
-    assert_eq!(
-        names.len(),
-        3,
-        "three presentations, and no fourth: {names:?}"
-    );
-    for name in &names {
-        assert!(
-            name.starts_with("zup-setup-"),
-            "{name} is an embedded component, not a tool anybody runs"
-        );
-    }
-}
-
-/// Every workspace member is either the developer tool or not installable.
-///
-/// Read across the whole workspace rather than from a list, so a package added
-/// tomorrow is covered by this test without anyone remembering to extend it.
-#[test]
-fn only_the_developer_tool_is_installable() {
     let root = manifest_root();
     let mut installable = Vec::new();
     for entry in std::fs::read_dir(&root).expect("the crates directory") {

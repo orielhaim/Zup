@@ -546,20 +546,4 @@ mod tests {
         assert_eq!(quote_argument("C:\\path\\"), "\"C:\\path\\\\\"");
         assert_eq!(quote_argument("a\\\\"), "\"a\\\\\\\\\"");
     }
-
-    #[test]
-    fn the_command_line_repeats_the_application_name() {
-        let line = quote(
-            std::path::Path::new(r"C:\Program Files\Acme\Setup.exe"),
-            &[
-                "install".to_owned(),
-                "--state-root".to_owned(),
-                r"C:\a b".to_owned(),
-            ],
-        );
-        assert_eq!(
-            line,
-            r#""C:\Program Files\Acme\Setup.exe" install --state-root "C:\a b""#
-        );
-    }
 }

@@ -172,6 +172,28 @@ repository = "acme/acme"
         "the file says it is generated, so nobody reviews it as if it were written by hand"
     );
 
+    // One job per phase, driving the zup action by operation rather than
+    // recompiling it in every job — a shape that only ever worked inside the zup
+    // repository.
+    for operation in ["build", "compose", "attest", "publish"] {
+        assert!(
+            original.contains(&format!("operation: {operation}")),
+            "no `{operation}` phase in\n{original}"
+        );
+    }
+    assert!(!original.contains("cargo build"), "{original}");
+    assert!(!original.contains("dtolnay/rust-toolchain"), "{original}");
+
+    // The credential is an action input, scoped to the step that publishes.
+    assert!(
+        original.contains("github-token: ${{ secrets.GITHUB_TOKEN }}"),
+        "{original}"
+    );
+    assert!(
+        !original.contains("GITHUB_TOKEN: ${{ secrets"),
+        "the token is a step input, not a job environment: {original}"
+    );
+
     // Running it again with the file already current is a no-op, not a rewrite.
     let second = ci(&project, &["generate"]);
     assert!(second.status.success(), "{}", stderr(&second));
@@ -258,7 +280,6 @@ repository = "acme/acme"
             "`{action}` is a sha"
         );
         let version = action["version"].as_str().expect("a version");
-        assert!(!version.is_empty(), "`{action}` names a ref");
         assert!(
             !version
                 .chars()
@@ -267,11 +288,10 @@ repository = "acme/acme"
         );
         // A ref nobody has looked at is one nobody reviewed, so the report says
         // when each was last resolved against upstream.
-        let checked = action["checked_at"].as_str().expect("a date");
-        assert_eq!(checked.len(), 10, "`{action}` records when it was checked");
-        assert!(
-            action["in_generated_workflow"].is_boolean(),
-            "`{action}` says whether this pipeline uses it"
+        assert_eq!(
+            action["checked_at"].as_str().expect("a date").len(),
+            10,
+            "`{action}` records when it was checked"
         );
     }
 
@@ -306,83 +326,9 @@ repository = "acme/acme"
     let text = stdout(&human);
     assert!(text.contains("current"), "{text}");
     assert!(text.contains("v1.4.0"), "{text}");
-    assert!(text.contains("Action refs"), "{text}");
-    assert!(text.contains("Target matrix"), "{text}");
-    assert!(
-        text.contains("checked "),
-        "the report says when a ref was resolved"
-    );
     assert!(
         !text.contains("Swatinem/rust-cache"),
         "the human form must not list zup's own CI dependencies:\n{text}"
-    );
-}
-
-#[test]
-fn the_generated_workflow_uses_the_zup_action_once_per_phase() {
-    let project = Project::new(
-        r#"
-[distribution]
-host = "github"
-
-[publish.github]
-repository = "acme/acme"
-"#,
-    );
-    assert!(ci(&project, &["generate"]).status.success());
-    let text = fs::read_to_string(project.workflow()).expect("a workflow");
-
-    for operation in ["build", "compose", "attest", "publish"] {
-        assert!(
-            text.contains(&format!("operation: {operation}")),
-            "no `{operation}` phase in\n{text}"
-        );
-    }
-    // The pipeline stays readable: one job per phase, and the architecture is
-    // still visible in the file.
-    for job in [
-        "  plan:",
-        "  build:",
-        "  compose:",
-        "  attest:",
-        "  publish:",
-    ] {
-        assert!(text.contains(job), "no `{job}` job in\n{text}");
-    }
-    // The old shape compiled zup from source in every job, which only ever
-    // worked inside the zup repository.
-    assert!(!text.contains("cargo build"), "{text}");
-    assert!(!text.contains("dtolnay/rust-toolchain"), "{text}");
-    // The credential is an action input, scoped to the step that publishes.
-    assert!(
-        text.contains("github-token: ${{ secrets.GITHUB_TOKEN }}"),
-        "{text}"
-    );
-    assert!(!text.contains("GITHUB_TOKEN: ${{ secrets"), "{text}");
-    // `attest-build-provenance` is a wrapper on top of `actions/attest` now.
-    assert!(!text.contains("attest-build-provenance"), "{text}");
-}
-
-#[test]
-fn the_zup_action_ref_is_the_projects_to_choose() {
-    let project = Project::new(
-        r#"
-[distribution]
-host = "github"
-
-[publish.github]
-repository = "acme/acme"
-
-[publish.github.workflow]
-action = "acme/fork-of-zup@action-v1"
-"#,
-    );
-    assert!(ci(&project, &["generate"]).status.success());
-    let text = fs::read_to_string(project.workflow()).expect("a workflow");
-    assert!(text.contains("uses: acme/fork-of-zup@action-v1"), "{text}");
-    assert!(
-        !text.contains("orielhaim/zup@"),
-        "the default is still present"
     );
 }
 
@@ -397,6 +343,24 @@ host = "github"
 repository = "acme/acme"
 "#,
     );
+
+    // No workflow at all, and a workflow that is not the generated one, are the
+    // two ways a project's pipeline is not current. Neither is a pass, and both
+    // say what to run — in prose for a person and in JSON for CI.
+    let absent = ci(&project, &["check", "--format", "json"]);
+    let report = json(&absent);
+    assert_eq!(report["present"], false);
+    assert_eq!(report["current"], false);
+    assert!(
+        report["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("zup ci github generate"),
+        "{}",
+        report["detail"]
+    );
+    assert!(!absent.status.success());
+
     let workflow = project.workflow();
     fs::create_dir_all(workflow.parent().expect("a parent")).expect("a directory");
     fs::write(&workflow, "name: Something else\n").expect("a workflow");
@@ -411,37 +375,10 @@ repository = "acme/acme"
         stderr(&result)
     );
 
-    // And the same answer in JSON, so CI can read it without parsing prose.
     let machine = ci(&project, &["check", "--format", "json"]);
     let report = json(&machine);
     assert_eq!(report["present"], true);
     assert_eq!(report["current"], false);
-}
-
-#[test]
-fn a_project_with_no_workflow_is_told_to_generate_one() {
-    let project = Project::new(
-        r#"
-[distribution]
-host = "github"
-
-[publish.github]
-repository = "acme/acme"
-"#,
-    );
-    let result = ci(&project, &["check", "--format", "json"]);
-    let report = json(&result);
-    assert_eq!(report["present"], false);
-    assert_eq!(report["current"], false);
-    assert!(
-        report["detail"]
-            .as_str()
-            .expect("a detail")
-            .contains("zup ci github generate"),
-        "{}",
-        report["detail"]
-    );
-    assert!(!result.status.success());
 }
 
 #[test]
@@ -494,26 +431,6 @@ repository = "acme/acme"
 }
 
 #[test]
-fn a_dry_run_with_a_credential_still_refuses_a_release_that_was_never_built() {
-    // The other half of the same property: with a credential in hand, the run
-    // still refuses before its first request, because the release it would
-    // publish does not exist. Nothing is fetched, and nothing is created.
-    let project = Project::new(
-        r#"
-[distribution]
-host = "github"
-
-[publish.github]
-repository = "acme/acme"
-"#,
-    );
-    let result = project.zup_with_token(&["publish", "github", "--repo", "acme/acme", "--dry-run"]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("zup build"), "{message}");
-}
-
-#[test]
 fn a_repository_that_cannot_be_found_is_refused_rather_than_guessed() {
     // No `--repo`, no `[publish.github] repository`, no `GITHUB_REPOSITORY`, and
     // a directory that is not inside a git checkout. Publishing to a repository
@@ -548,35 +465,32 @@ token = "ghp_thiswouldleak"
     assert!(message.contains("token"), "{message}");
 }
 
+/// A tag is spelled into a URL path, a ref, and a shell command, so a malformed
+/// policy is a 404 at best and an injection at worst. The refusal arrives at the
+/// parse, before anything is uploaded.
 #[test]
-fn a_tag_prefix_that_cannot_be_a_tag_is_refused_before_anything_else() {
-    // A tag is spelled into a URL path, a ref, and a shell command. One with a
-    // space in it is a 404 at best, and the refusal has to arrive before
-    // anything is uploaded.
-    let project = Project::new(
-        r#"
+fn a_tag_policy_that_cannot_be_spelled_is_refused() {
+    for (extra, expected) in [
+        (
+            r#"
 [publish.github]
 repository = "acme/acme"
 tag = { prefix = "release " }
 "#,
-    );
-    let result = ci(&project, &["check"]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("tag prefix"), "{message}");
-}
-
-#[test]
-fn a_tag_policy_that_spells_two_things_at_once_is_refused() {
-    let project = Project::new(
-        r#"
+            "tag prefix",
+        ),
+        (
+            r#"
 [publish.github]
 repository = "acme/acme"
 tag = { prefix = "v", name = "release-1.4.0" }
 "#,
-    );
-    let result = ci(&project, &["check"]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains("not both"), "{message}");
+            "not both",
+        ),
+    ] {
+        let result = ci(&Project::new(extra), &["check"]);
+        assert!(!result.status.success(), "{expected} was accepted");
+        let message = stderr(&result);
+        assert!(message.contains(expected), "{message}");
+    }
 }

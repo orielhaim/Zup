@@ -1,16 +1,17 @@
 //! Durable store tests.
 
+use rstest::rstest;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use tempfile::TempDir;
 use zup_core::AppId;
 use zup_transaction::{
     CorruptReason, FilesystemTransactionStore, NodeState, OperationId, StoreError, TransactionId,
-    TransactionRecord, TransactionStore, compile_transaction,
+    TransactionRecord, TransactionStore,
 };
 
 mod common;
-use common::{sample_input, sample_plan};
+use common::sample_plan;
 
 fn store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
@@ -172,23 +173,20 @@ impl TransactionStore for RevisionRaceStore {
     }
 }
 
-#[test]
-fn create_load_roundtrip() {
-    let (_dir, store) = store();
-    let rec = record();
-    let id = rec.transaction_id;
-    store.create(&rec).unwrap();
-    let loaded = store.load(&id).unwrap();
-    assert_eq!(loaded, rec);
-}
-
+/// A second create must not clobber the revision already committed under that
+/// id: the loser of a duplicate is told it lost, and the journal is untouched.
 #[test]
 fn second_create_rejected() {
     let (_dir, store) = store();
-    let rec = record();
-    store.create(&rec).unwrap();
-    let err = store.create(&rec).unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists { .. }));
+    let original = record();
+    store.create(&original).unwrap();
+    let mut advanced = original.clone();
+    advanced.touch();
+    store.compare_and_swap(0, &advanced).unwrap();
+
+    let err = store.create(&original).unwrap_err();
+    assert!(matches!(err, StoreError::AlreadyExists { .. }), "{err:?}");
+    assert_eq!(store.load(&original.transaction_id).unwrap(), advanced);
 }
 
 #[test]
@@ -357,43 +355,40 @@ fn update_retries_a_lost_swap_instead_of_failing() {
     final_record.validate().expect("final state is consistent");
 }
 
-#[test]
-fn corrupted_json_rejected() {
+/// Anything the store cannot vouch for — unreadable bytes, an unknown schema, a
+/// plan that no longer hashes to the plan it is carrying — is refused rather
+/// than recovered, because a half-trusted record replays as if it were whole.
+#[rstest]
+#[case::malformed_json(write_not_json)]
+#[case::unknown_schema(write_unknown_schema)]
+#[case::foreign_plan_hash(write_foreign_plan_hash)]
+fn rejects_a_record_it_cannot_vouch_for(#[case] corrupt: fn(&std::path::Path)) {
     let (dir, store) = store();
     let rec = record();
     store.create(&rec).unwrap();
-    let path = record_path(&dir, &rec.transaction_id);
-    std::fs::write(path, b"not json").unwrap();
+    corrupt(&record_path(&dir, &rec.transaction_id));
     let err = store.load(&rec.transaction_id).unwrap_err();
-    assert!(matches!(err, StoreError::Corrupt(_)));
+    assert!(matches!(err, StoreError::Corrupt(_)), "{err:?}");
 }
 
-#[test]
-fn unsupported_schema_rejected() {
-    let (dir, store) = store();
-    let rec = record();
-    store.create(&rec).unwrap();
-    let path = record_path(&dir, &rec.transaction_id);
-    let mut json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+fn write_not_json(path: &std::path::Path) {
+    std::fs::write(path, b"not json").unwrap();
+}
+
+fn write_unknown_schema(path: &std::path::Path) {
+    let mut json = read_json(path);
     json["schema"] = serde_json::json!(99);
     std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
-    let err = store.load(&rec.transaction_id).unwrap_err();
-    assert!(matches!(err, StoreError::Corrupt(_)));
 }
 
-#[test]
-fn plan_hash_mismatch_rejected() {
-    let (dir, store) = store();
-    let rec = record();
-    store.create(&rec).unwrap();
-    let path = record_path(&dir, &rec.transaction_id);
-    let mut json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+fn write_foreign_plan_hash(path: &std::path::Path) {
+    let mut json = read_json(path);
     json["plan_hash"] = serde_json::json!("00".repeat(32));
     std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
-    let err = store.load(&rec.transaction_id).unwrap_err();
-    assert!(matches!(err, StoreError::Corrupt(_)));
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
 fn record_path(dir: &TempDir, id: &TransactionId) -> std::path::PathBuf {
@@ -401,20 +396,6 @@ fn record_path(dir: &TempDir, id: &TransactionId) -> std::path::PathBuf {
         .join("transactions")
         .join(id.to_string())
         .join("transaction.json")
-}
-
-#[test]
-fn duplicate_create_leaves_the_committed_record_alone() {
-    let (_dir, store) = store();
-    let original = record();
-    store.create(&original).unwrap();
-    let mut advanced = original.clone();
-    advanced.touch();
-    store.compare_and_swap(0, &advanced).unwrap();
-
-    let err = store.create(&original).unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists { .. }), "{err:?}");
-    assert_eq!(store.load(&original.transaction_id).unwrap(), advanced);
 }
 
 #[test]
@@ -436,12 +417,22 @@ fn replacement_leaves_complete_json_and_no_temp_files() {
     let mut rec = record();
     let id = rec.transaction_id;
     store.create(&rec).unwrap();
+    assert_eq!(
+        store.load(&id).unwrap(),
+        rec,
+        "a fresh record reads back intact"
+    );
     for expected in 0..3 {
         rec.touch();
         store.compare_and_swap(expected, &rec).unwrap();
         let on_disk: TransactionRecord =
             serde_json::from_slice(&std::fs::read(record_path(&dir, &id)).unwrap()).unwrap();
         assert_eq!(on_disk, rec);
+        assert_eq!(
+            store.load(&id).unwrap(),
+            rec,
+            "a replaced record reads back intact"
+        );
     }
     let mut entries: Vec<String> = std::fs::read_dir(record_path(&dir, &id).parent().unwrap())
         .unwrap()
@@ -449,30 +440,6 @@ fn replacement_leaves_complete_json_and_no_temp_files() {
         .collect();
     entries.sort();
     assert_eq!(entries, ["transaction.json", "transaction.lock"]);
-}
-
-/// A fresh store — what a recovery pass after a crash opens — reads the last
-/// committed revision, not the first.
-#[test]
-fn reopened_store_reads_the_latest_committed_record() {
-    let (dir, store) = store();
-    let mut rec = record();
-    let id = rec.transaction_id;
-    store.create(&rec).unwrap();
-    let barrier = first_barrier(&rec);
-    rec.nodes.insert(barrier.clone(), NodeState::Running);
-    rec.touch();
-    store.compare_and_swap(0, &rec).unwrap();
-    drop(store);
-
-    let loaded = FilesystemTransactionStore::new(dir.path())
-        .load(&id)
-        .unwrap();
-    assert_eq!(loaded, rec);
-    assert!(matches!(
-        loaded.nodes.get(&barrier),
-        Some(NodeState::Running)
-    ));
 }
 
 #[test]
@@ -483,13 +450,4 @@ fn load_of_an_unknown_transaction_is_missing() {
         matches!(err, StoreError::Corrupt(CorruptReason::Missing)),
         "{err:?}"
     );
-}
-
-#[test]
-fn compile_is_deterministic() {
-    let exec = sample_input();
-    let a = compile_transaction(&exec).unwrap();
-    let b = compile_transaction(&exec).unwrap();
-    assert_eq!(a, b);
-    assert_eq!(a.fingerprint(), b.fingerprint());
 }

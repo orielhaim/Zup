@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{
@@ -183,36 +184,29 @@ fn can_symlink() -> bool {
 
 // --- The portable policy ---
 
-#[test]
-fn portable_policy_reports_a_regular_file_and_a_missing_path_as_not_links() {
+/// A path that cannot be read as a link is not a link. A missing path is the
+/// interesting one: treating "cannot tell" as "safe" is how a link gets followed.
+#[rstest]
+#[case::a_regular_file("payload.exe", false, false)]
+#[case::a_path_that_does_not_exist("absent.exe", false, false)]
+#[case::a_symlink("link.exe", true, true)]
+fn the_portable_policy_calls_only_a_symlink_a_link(
+    #[case] name: &str,
+    #[case] create: bool,
+    #[case] is_link: bool,
+) {
     let dir = project(&[("payload.exe", PREREQUISITE)]);
-
-    assert!(
-        !PortableSourceFilePolicy
-            .is_link(&dir.path().join("payload.exe"))
-            .unwrap(),
-        "a regular file is not a link"
-    );
-    assert!(
-        !PortableSourceFilePolicy
-            .is_link(&dir.path().join("absent.exe"))
-            .unwrap(),
-        "a path that does not exist is not a link"
-    );
-}
-
-#[test]
-fn portable_policy_reports_a_symlink_as_a_link() {
-    if !can_symlink() {
-        return;
+    let path = dir.path().join(name);
+    if create {
+        if !can_symlink() {
+            return;
+        }
+        symlink_to(&dir.path().join("payload.exe"), &path).unwrap();
     }
-    let dir = project(&[("payload.exe", PREREQUISITE)]);
-    let link = dir.path().join("link.exe");
-    symlink_to(&dir.path().join("payload.exe"), &link).unwrap();
-
-    assert!(
-        PortableSourceFilePolicy.is_link(&link).unwrap(),
-        "a symlink is a link on every host, and the portable policy sees it"
+    assert_eq!(
+        PortableSourceFilePolicy.is_link(&path).unwrap(),
+        is_link,
+        "{name}"
     );
 }
 
@@ -265,34 +259,20 @@ fn every_prerequisite_source_and_ancestor_is_inspected_through_the_injected_poli
     );
 }
 
-#[test]
-fn an_injected_policy_decides_which_prerequisite_sources_are_usable() {
+/// A link anywhere on the path to a prerequisite makes it unusable: the bytes a
+/// link resolves to can change after the digest was recorded.
+#[rstest]
+#[case::the_source_itself("vendor/runtime.exe")]
+#[case::a_directory_holding_it("vendor")]
+fn an_injected_policy_decides_which_prerequisite_path_is_usable(#[case] relative: &str) {
     let (dir, manifest) = prerequisite_project();
-    let source = dir.path().join("vendor/runtime.exe");
+    let linked = dir.path().join(relative);
+
     assert!(materialize_default(dir.path(), &manifest).is_ok());
-
     let error = prerequisite_target(
         dir.path(),
         &manifest,
-        &RecordingPolicy::reporting(&[&source]),
-    )
-    .unwrap_err();
-
-    assert!(
-        matches!(error, BuildError::PrerequisiteSource { .. }),
-        "{error:?}"
-    );
-}
-
-#[test]
-fn an_injected_policy_decides_which_ancestor_is_usable() {
-    let (dir, manifest) = prerequisite_project();
-    let ancestor = dir.path().join("vendor");
-
-    let error = prerequisite_target(
-        dir.path(),
-        &manifest,
-        &RecordingPolicy::reporting(&[&ancestor]),
+        &RecordingPolicy::reporting(&[&linked]),
     )
     .unwrap_err();
 

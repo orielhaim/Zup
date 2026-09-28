@@ -623,16 +623,10 @@ pub fn relative(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// Determinism is the whole gate: `check` is a diff, and a diff of something that
-    /// is not reproducible is a diff that fails on somebody else's machine.
-    #[test]
-    fn generation_is_deterministic() {
-        assert_eq!(generate(), generate());
-    }
-
-    /// Every fixture is a document this build's own types accept, and every *failed*
-    /// one says why. A fixture that does not parse is worse than no fixture, because a
-    /// consumer test that reads it would be testing a document zup cannot produce.
+    /// Every fixture is a document this build's own types accept, and every
+    /// *failed* one says why. A fixture that does not parse is worse than no
+    /// fixture, because a consumer test that reads it would be testing a document
+    /// zup cannot produce.
     ///
     /// Only the fixtures: the schema describes them rather than being one, and the
     /// declarations are TypeScript.

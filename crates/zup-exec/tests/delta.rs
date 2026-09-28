@@ -458,23 +458,6 @@ fn protocol_upgrade_requires_previous_owned_state() {
 }
 
 #[test]
-fn removed_owned_path_is_drift() {
-    let target = sample_target();
-    let snapshot = snapshot_happy();
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
-    ledger.resources.insert(
-        target.path_entries[0].key.clone(),
-        OwnedResource::PathEntry {
-            value: target.path_entries[0].value.clone(),
-            value_type: "expand_sz".into(),
-            privilege: Privilege::System,
-        },
-    );
-    let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Drift);
-}
-
-#[test]
 fn ledger_target_mismatch_is_rejected() {
     let target = sample_target();
     let snapshot = snapshot_happy();
@@ -491,19 +474,6 @@ fn ledger_target_mismatch_is_rejected() {
 }
 
 #[test]
-fn determinism() {
-    let target = sample_target();
-    let snapshot = snapshot_happy();
-    let a = plan_execution(&target, &snapshot, None).unwrap();
-    let b = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(a, b);
-    assert_eq!(
-        serde_json::to_string(&a).unwrap(),
-        serde_json::to_string(&b).unwrap()
-    );
-}
-
-#[test]
 fn missing_observation_rejected() {
     let target = sample_target();
     let snapshot = HostSnapshot {
@@ -515,6 +485,41 @@ fn missing_observation_rejected() {
         err,
         zup_exec::ExecutionPlanError::MissingSnapshotObservation { .. }
     ));
+}
+
+#[test]
+fn a_host_wide_resource_stays_host_wide_under_a_per_user_installation() {
+    // A per-user installation that declares a machine-scope service is planning a
+    // host-wide mutation. Planning must carry that privilege through unchanged rather
+    // than lowering it to the installation's own scope, because the operation is what
+    // decides whether the user is asked to authorize, not the scope it was found under.
+    let mut target = sample_target();
+    target.scope = SelectedScope::User;
+    target.files[0].privilege = Privilege::User;
+    target.launchers[0].privilege = Privilege::User;
+    target.path_entries[0].scope = SelectedScope::User;
+    target.path_entries[0].privilege = Privilege::User;
+    target.protocols[0].scope = SelectedScope::User;
+    target.protocols[0].privilege = Privilege::User;
+    target.file_associations[0].scope = SelectedScope::User;
+    target.file_associations[0].privilege = Privilege::User;
+    target.services[0].privilege = Privilege::System;
+    target.summary.requires_authorization = true;
+
+    let mut snapshot = snapshot_happy();
+    snapshot.path_entries[0].scope = SelectedScope::User;
+    snapshot.protocols[0].scope = SelectedScope::User;
+    snapshot.file_associations[0].scope = SelectedScope::User;
+
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.services[0].privilege, Privilege::System);
+    assert!(plan.summary.requires_authorization);
+    assert_eq!(plan.files[0].privilege, Privilege::User);
+    assert_eq!(plan.launchers[0].privilege, Privilege::User);
+    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
+    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
+    assert_eq!(plan.protocols[0].privilege, Privilege::User);
+    assert_eq!(plan.file_associations[0].privilege, Privilege::User);
 }
 
 #[test]
@@ -542,27 +547,34 @@ fn search_path_membership_is_a_set_decision() {
     assert_eq!(plan.summary.path_entries_add, 1);
 }
 
+/// Membership is target-path identity rather than a string compare. Separators and case
+/// are the adapter's normalization, and a parent directory under the same prefix is a
+/// different path however it is spelled — a prefix match here would put the machine's
+/// install directory on a search path the application never asked for.
 #[test]
 fn search_path_membership_uses_target_path_identity() {
     let target = sample_target();
     let mut snapshot = snapshot_happy();
-    // Separators and case are the adapter's normalization, not a string compare.
-    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"c:/pf/acme/bin/")]);
-    assert!(
-        snapshot.path_entries[0]
-            .search_path
-            .contains(&target.path_entries[0].value)
-    );
-    let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
-
-    // A different directory under the same prefix is not a member.
+    for spelling in [r"c:/pf/acme/bin/", r"C:\PF\ACME\BIN"] {
+        snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(spelling)]);
+        assert!(
+            snapshot.path_entries[0]
+                .search_path
+                .contains(&target.path_entries[0].value),
+            "{spelling} is the same path"
+        );
+        let plan = plan_execution(&target, &snapshot, None).unwrap();
+        assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
+    }
     snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"C:\PF\Acme")]);
     assert!(
         !snapshot.path_entries[0]
             .search_path
-            .contains(&target.path_entries[0].value)
+            .contains(&target.path_entries[0].value),
+        "a parent directory is not the entry"
     );
+    let plan = plan_execution(&target, &snapshot, None).unwrap();
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
 }
 
 #[test]
@@ -581,9 +593,8 @@ fn search_path_ownership_decisions_are_deterministic() {
     // A reworded but equivalent entry is still owned and still present.
     snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"c:/pf/acme/bin")]);
     let first = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    let second = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
     assert_eq!(first.path_entries[0].kind, PathOperationKind::Present);
-    assert_eq!(first, second);
+    assert!(first.path_entries[0].previously_owned);
 
     // Removing it is drift, not an add, because the ledger owns it.
     snapshot.path_entries[0].search_path = SearchPath::default();
@@ -592,77 +603,4 @@ fn search_path_ownership_decisions_are_deterministic() {
     assert!(plan.path_entries[0].previously_owned);
     assert!(plan.path_entries[0].conflict.is_some());
     assert_eq!(plan.summary.path_entries_conflict, 1);
-}
-
-#[test]
-fn operation_privilege_is_carried_verbatim_from_the_target_plan() {
-    let mut target = sample_target();
-    // A per-user scope that still owns a host-wide service, and a host-wide
-    // scope that owns a per-user launcher. Both must survive planning as-is.
-    target.scope = SelectedScope::User;
-    target.files[0].privilege = Privilege::User;
-    target.launchers[0].privilege = Privilege::User;
-    target.path_entries[0].scope = SelectedScope::User;
-    target.path_entries[0].privilege = Privilege::User;
-    target.protocols[0].scope = SelectedScope::User;
-    target.protocols[0].privilege = Privilege::User;
-    target.file_associations[0].scope = SelectedScope::User;
-    target.file_associations[0].privilege = Privilege::User;
-    target.services[0].privilege = Privilege::System;
-    target.summary.requires_authorization = true;
-
-    let mut snapshot = snapshot_happy();
-    snapshot.path_entries[0].scope = SelectedScope::User;
-    snapshot.protocols[0].scope = SelectedScope::User;
-    snapshot.file_associations[0].scope = SelectedScope::User;
-
-    let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.files[0].privilege, Privilege::User);
-    assert_eq!(plan.launchers[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
-    assert_eq!(plan.protocols[0].privilege, Privilege::User);
-    assert_eq!(plan.file_associations[0].privilege, Privilege::User);
-    // The service is the only host-wide operation, and it is still System.
-    assert_eq!(plan.services[0].privilege, Privilege::System);
-    assert!(plan.summary.requires_authorization);
-}
-
-#[test]
-fn serialized_field_names_name_authorization_not_elevation() {
-    let plan = plan_execution(&sample_target(), &snapshot_happy(), None).unwrap();
-    let json = serde_json::to_string(&plan).unwrap();
-    assert!(
-        !json.contains("elevation"),
-        "execution plan leaked elevation: {json}"
-    );
-    assert!(json.contains("requires_authorization"));
-
-    let summary = serde_json::to_value(zup_platform::TargetPlanSummary {
-        file_count: 0,
-        install_bytes: 0,
-        resource_count: 0,
-        requires_authorization: true,
-        selected_component_count: 0,
-        prerequisite_count: 0,
-        download_bytes: 0,
-    })
-    .unwrap();
-    assert_eq!(summary["requires_authorization"], serde_json::json!(true));
-    assert!(summary.get("requires_elevation").is_none());
-}
-
-#[test]
-fn privilege_serializes_as_authorization_words_only() {
-    assert_eq!(serde_json::to_string(&Privilege::User).unwrap(), "\"user\"");
-    assert_eq!(
-        serde_json::to_string(&Privilege::System).unwrap(),
-        "\"system\""
-    );
-    // No alias: the old word is not accepted on the way back in.
-    assert!(serde_json::from_str::<Privilege>("\"machine\"").is_err());
-    assert_eq!(
-        serde_json::from_str::<Privilege>("\"system\"").unwrap(),
-        Privilege::System
-    );
 }

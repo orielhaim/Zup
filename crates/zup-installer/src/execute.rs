@@ -560,8 +560,16 @@ mod tests {
         // The flag has to survive the conversion to the type the process reports
         // through, because that conversion is where a process-wide flag used to be
         // lost, and a lost flag is a consumer told about a failure twice.
-        let reported: miette::Report = ExecutionError::reported(miette::miette!("boom")).into();
+        let reported: miette::Report =
+            ExecutionError::reported(miette::miette!("the install failed")).into();
         assert!(already_reported(&reported));
+        // The same conversion must not swallow the run's own message: the report is
+        // what a person reads, and a flagged report with no reason is a bare word.
+        assert!(
+            reported.to_string().contains("the install failed"),
+            "{reported}"
+        );
+
         let silent: miette::Report = ExecutionError::silent(miette::miette!("boom")).into();
         assert!(!already_reported(&silent));
         // A plain report is silent: nothing has been written for it, which is what
@@ -570,18 +578,9 @@ mod tests {
         assert!(!already_reported(&plain));
     }
 
-    #[test]
-    fn the_failure_survives_the_conversion_to_a_report() {
-        // The message a person reads is the message the run failed with, whether
-        // or not the machine-readable consumer was already told.
-        let error: miette::Report =
-            ExecutionError::reported(miette::miette!("the install failed")).into();
-        assert!(
-            error.to_string().contains("the install failed"),
-            "the report has to carry the run's own message: {error}"
-        );
-    }
-
+    /// The path a run writes its log to is not progress. A consumer that counts phases
+    /// would otherwise have to know which events are phases and which are not, and a
+    /// log path is neither: nothing waits on it and nothing is a step.
     #[test]
     fn a_log_path_is_not_a_phase() {
         assert!(

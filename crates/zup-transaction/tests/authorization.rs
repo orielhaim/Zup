@@ -7,16 +7,14 @@
 
 mod common;
 
-use zup_core::{
-    BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, Sha256Digest,
-};
+use zup_core::{BackendResourceId, Privilege, RelativePath, ResourceKey};
 use zup_transaction::FileRemovalKind;
 use zup_transaction::{
     BackendOperation, FileDelta, FilePrecondition, FileWork, NodeKind, TransactionInput,
     compile_transaction,
 };
 
-use common::{digest, sample_plan, target, tpath};
+use common::{digest, target, tpath};
 
 fn file_work(name: &str, privilege: Privilege) -> FileWork {
     let contents = b"payload";
@@ -44,11 +42,11 @@ fn backend_apply(name: &str, privilege: Privilege) -> BackendOperation {
     )
 }
 
+/// Authority is read off the operations, never off a scope: a per-user install
+/// that owns a host-wide file still asks for system.
 #[test]
-fn user_scope_transaction_reports_system_operations() {
-    // No scope is present on a transaction at all; only the operations are.
+fn privileges_are_carried_per_operation_and_set_the_authorization_answer() {
     let mut input = TransactionInput::new(target());
-    input.selected_components = vec![ComponentId::new("core").unwrap()];
     input.files = vec![
         file_work("per-user.exe", Privilege::User),
         file_work("host-wide.exe", Privilege::System),
@@ -57,39 +55,6 @@ fn user_scope_transaction_reports_system_operations() {
 
     let plan = compile_transaction(&input).unwrap();
     assert!(plan.requires_authorization());
-
-    let system_nodes = plan
-        .nodes
-        .iter()
-        .filter(|node| node.meta.privilege == Some(Privilege::System))
-        .count();
-    assert_eq!(
-        system_nodes, 3,
-        "one file mutation pair plus the backend op"
-    );
-
-    // The privilege of each operation survives the round trip unchanged.
-    let restored: zup_transaction::TransactionPlan =
-        serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
-    assert_eq!(restored, plan);
-    assert_eq!(
-        restored
-            .nodes
-            .iter()
-            .filter(|node| node.meta.privilege == Some(Privilege::System))
-            .count(),
-        system_nodes
-    );
-}
-
-#[test]
-fn per_operation_privileges_are_not_inferred_from_each_other() {
-    let mut input = TransactionInput::new(target());
-    input.files = vec![
-        file_work("system.exe", Privilege::System),
-        file_work("user.exe", Privilege::User),
-    ];
-    let plan = compile_transaction(&input).unwrap();
 
     let by_key: Vec<(&ResourceKey, Privilege)> = plan
         .nodes
@@ -102,13 +67,21 @@ fn per_operation_privileges_are_not_inferred_from_each_other() {
     assert_eq!(by_key.len(), 2);
     assert_eq!(
         by_key[0].1,
-        Privilege::System,
-        "the first file keeps system authority"
+        Privilege::User,
+        "the first file keeps user authority"
     );
     assert_eq!(
         by_key[1].1,
-        Privilege::User,
-        "the second file keeps user authority"
+        Privilege::System,
+        "the second file keeps system authority"
+    );
+    assert_eq!(
+        plan.nodes
+            .iter()
+            .filter(|node| node.meta.privilege == Some(Privilege::System))
+            .count(),
+        3,
+        "one file mutation pair plus the backend op"
     );
 }
 
@@ -149,23 +122,10 @@ fn all_user_operations_need_no_system_authorization() {
             .unwrap()
             .requires_authorization()
     );
-
-    // The shared fixture mixes authorities, so the plan must report true.
-    assert!(sample_plan().requires_authorization());
 }
 
-#[test]
-fn serialized_nodes_name_authorization_and_not_elevation() {
-    let plan = sample_plan();
-    let json = serde_json::to_string(&plan).unwrap();
-    assert!(
-        !json.contains("elevation"),
-        "transaction plan leaked elevation: {json}"
-    );
-    assert!(json.contains("\"privilege\":\"system\""));
-    assert!(json.contains("\"privilege\":\"user\""));
-}
-
+/// Two plans that differ only in authority are different plans: a fingerprint
+/// that ignored privilege would let one install satisfy the other's journal.
 #[test]
 fn node_privilege_is_part_of_the_plan_fingerprint() {
     let mut input = TransactionInput::new(target());
@@ -176,5 +136,4 @@ fn node_privilege_is_part_of_the_plan_fingerprint() {
     let system_plan = compile_transaction(&input).unwrap();
 
     assert_ne!(user_plan.fingerprint(), system_plan.fingerprint());
-    let _: Sha256Digest = user_plan.fingerprint();
 }

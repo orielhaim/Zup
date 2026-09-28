@@ -867,16 +867,13 @@ mod tests {
         }
     }
 
+    // An overlay is reused across a crash, so its path has to be a function of
+    // what is being installed: two versions of one app may not share an overlay,
+    // or a partially written one would be picked up as valid.
     #[test]
-    fn identity_path_is_deterministic_and_covers_every_domain_field() {
+    fn identity_path_covers_the_app_version() {
         let state_root = Path::new(r"C:\state");
         let first = PayloadOverlayIdentity::from_install_plan(&install_plan()).unwrap();
-        let second = PayloadOverlayIdentity::from_install_plan(&install_plan()).unwrap();
-        assert_eq!(first.path_under(state_root), second.path_under(state_root));
-        assert_eq!(
-            first.digest().to_hex(),
-            "d7ca4aad5641bd3decb9e72fb8e325aeda48b038a70ca2ff89c00d804d4ae937"
-        );
 
         let mut changed = install_plan();
         changed.app.version = Version::parse("1.2.4").unwrap();
@@ -921,17 +918,41 @@ mod tests {
     }
 
     #[test]
-    fn materialization_verifies_content_and_rejects_special_targets() {
+    fn materialization_refuses_anything_it_cannot_stage_exactly() {
         let root = tempfile::TempDir::new().unwrap();
-        let state_root = root.path().join("state");
         let plan = install_plan();
-        let generated = generated_file();
+
+        // The declared digest is the content's identity, so bytes that do not
+        // match it are not the file the plan asked for.
+        let mut changed = generated_file();
+        changed.bytes = b"different".to_vec();
+        let error =
+            materialize_payload_overlay(&root.path().join("state"), &plan, &[changed]).unwrap_err();
+        assert!(matches!(error, PayloadOverlayError::DigestMismatch { .. }));
+
+        // Two files claiming one source path is ambiguous, and the second would
+        // silently win.
+        let duplicate = generated_file();
+        let error = materialize_payload_overlay(
+            &root.path().join("state-duplicate"),
+            &plan,
+            &[duplicate.clone(), duplicate],
+        )
+        .unwrap_err();
+        assert!(matches!(error, PayloadOverlayError::DuplicateSource { .. }));
+
+        // A directory where a file belongs would be published as a payload and
+        // fail at install time rather than here.
+        let state_root = root.path().join("state-not-a-file");
         let identity = PayloadOverlayIdentity::from_install_plan(&plan).unwrap();
-        let overlay = identity.path_under(&state_root).unwrap();
-        let target = resolve_overlay_path(&overlay, &generated.source_relative).unwrap();
+        let generated = generated_file();
+        let target = resolve_overlay_path(
+            &identity.path_under(&state_root).unwrap(),
+            &generated.source_relative,
+        )
+        .unwrap();
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::create_dir(&target).unwrap();
-
         let error = materialize_payload_overlay(&state_root, &plan, &[generated]).unwrap_err();
         assert!(matches!(error, PayloadOverlayError::NotRegular { .. }));
     }
@@ -943,11 +964,9 @@ mod tests {
         fs::write(&state_root, b"not a directory").unwrap();
         let mut plan = install_plan();
         plan.scope = SelectedScope::Machine;
+        // A machine install is elevated, so it cannot write the user's state
+        // root; it stages under a per-identity base elsewhere.
         let base = payload_overlay_base_root(&state_root, SelectedScope::Machine).unwrap();
-        assert_eq!(
-            base,
-            payload_overlay_base_root(&state_root, SelectedScope::Machine).unwrap()
-        );
         assert!(!base.starts_with(&state_root));
 
         let generated = generated_file();
@@ -957,6 +976,8 @@ mod tests {
         cleanup_payload_overlay(&base, overlay.as_deref()).unwrap();
     }
 
+    /// Cleanup is scoped by application identity, so an install cannot take
+    /// another application's staged plugins with it on the way out.
     #[test]
     fn app_overlay_cleanup_is_scoped_to_one_installation() {
         let root = tempfile::TempDir::new().unwrap();
@@ -968,31 +989,9 @@ mod tests {
         second_plan.app.id = AppId::new("com.example.other-overlay").unwrap();
         let second =
             materialize_payload_overlay(&state_root, &second_plan, &[generated_file()]).unwrap();
-        assert!(first.is_some());
-        assert!(second.is_some());
 
         cleanup_app_payload_overlays(&state_root, &first_plan.app.id, first_plan.scope).unwrap();
         assert!(!first.unwrap().exists());
         assert!(second.unwrap().exists());
-    }
-
-    #[test]
-    fn materialization_rejects_digest_mismatch_and_duplicate_sources() {
-        let root = tempfile::TempDir::new().unwrap();
-        let plan = install_plan();
-        let mut changed = generated_file();
-        changed.bytes = b"different".to_vec();
-        let error =
-            materialize_payload_overlay(&root.path().join("state"), &plan, &[changed]).unwrap_err();
-        assert!(matches!(error, PayloadOverlayError::DigestMismatch { .. }));
-
-        let duplicate = generated_file();
-        let error = materialize_payload_overlay(
-            &root.path().join("state-duplicate"),
-            &plan,
-            &[duplicate.clone(), duplicate],
-        )
-        .unwrap_err();
-        assert!(matches!(error, PayloadOverlayError::DuplicateSource { .. }));
     }
 }

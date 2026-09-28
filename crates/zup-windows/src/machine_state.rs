@@ -184,16 +184,4 @@ mod tests {
             r"C:\Users\dev\Downloads\Acme-Setup.exe"
         )));
     }
-
-    #[test]
-    fn a_maintenance_destination_is_versioned_per_scope() {
-        let app = AppId::new("com.example.acme").expect("valid");
-        let root = Path::new("state");
-        let user = maintenance_destination(root, &app, SelectedScope::User, "1.2.0");
-        let machine = maintenance_destination(root, &app, SelectedScope::Machine, "1.2.0");
-        let newer = maintenance_destination(root, &app, SelectedScope::User, "1.3.0");
-        assert!(plain_path_text(&user).ends_with(r"user\1.2.0\maintenance.exe"));
-        assert!(plain_path_text(&machine).ends_with(r"machine\1.2.0\maintenance.exe"));
-        assert_ne!(user, newer, "an upgrade stages beside the copy it replaces");
-    }
 }

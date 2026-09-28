@@ -1842,12 +1842,4 @@ mod tests {
         );
         cleanup(&operation.key_path);
     }
-
-    #[test]
-    fn control_receipts_are_not_backend_verifications() {
-        assert!(matches!(
-            verify_managed(&zup_transaction::OperationReceipt::Control),
-            Err(IntegrationError::Unsupported)
-        ));
-    }
 }

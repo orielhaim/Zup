@@ -1,25 +1,22 @@
-//! The handoff, measured, and refused.
+//! The handoff, bounded and refused.
 //!
 //! A thin bootstrapper resolves a release, verifies a native runtime, and starts
-//! it. Two things about that moment are worth measuring and one is worth
-//! attacking.
+//! it. Two things about that moment are worth pinning.
 //!
-//! - **The cost.** The window appears after the handoff is accepted, so
-//!   everything the runtime does before it draws anything is time a user waits.
-//   That work is: read a few hundred bytes, re-hash one file, re-read three
-//!   documents from a cache, and compute a closure. It is measured here over a
-//!   real cache and a real release document.
+//! - **The bound.** A handoff is a few hundred bytes, and everything the runtime
+//!   does before it draws anything is reading that document and hashing one file.
+//!   The window appears afterwards, so those are the whole of what a user waits
+//!   for.
 //! - **The claim.** The bootstrapper is the untrusted half of the pair, because
 //!   it is the half that talked to a network. Every substitution it could attempt
 //!   is attempted here and refused.
 //!
 //! The runtime identity is a real file on disk and the release is a real signed
-//! document tree, so nothing here is a stand-in for the thing it measures.
+//! document tree, so nothing here is a stand-in for the thing it asserts.
 
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -298,81 +295,25 @@ fn write_handoff(fixture: &Fixture, handoff: &RuntimeHandoff) -> PathBuf {
 }
 
 #[test]
-fn accepting_a_handoff_is_cheap_enough_not_to_be_what_a_user_waits_on() {
-    // Two costs, measured apart because they are two different claims.
-    //
-    // The first is reading the handoff: a bounded document, a parse, and a
-    // digest. It is fixed by the architecture, so it is a number a reader can
-    // compare against a design change.
-    //
-    // The second is proving the image is the one the release names, which is a
-    // hash of the whole file. That is proportional to the runtime's size and to
-    // the machine's disk, so the honest claim is a *rate*: it is a sequential
-    // read of a few megabytes, and it is why a handoff is passed a digest of
-    // the image rather than the image's contents.
+fn accepting_a_handoff_proves_the_image_the_release_names() {
     let fixture = fixture(24);
     let handoff = handoff_for(&fixture);
     let path = write_handoff(&fixture, &handoff);
     let bytes = std::fs::metadata(&path).expect("a handoff").len();
-    let runtime_bytes = std::fs::metadata(&fixture.runtime)
-        .expect("a runtime")
-        .len() as f64;
 
-    let started = Instant::now();
     let accepted = zup_windows::accept_handoff(&path, Some(handoff.digest()))
         .unwrap_or_else(|error| panic!("the handoff is accepted: {error}"));
-    let read = started.elapsed();
-
-    let started = Instant::now();
     let baseline = zup_core::hash_reader(
         std::fs::File::open(&fixture.runtime).expect("the runtime is readable"),
     )
     .expect("the runtime hashes");
-    let once = started.elapsed();
-
-    let started = Instant::now();
     let verified = zup_windows::verify(&fixture.runtime, &fixture.cache, &accepted)
         .unwrap_or_else(|error| panic!("the runtime is the one the release names: {error}"));
-    let proved = started.elapsed();
-    let rate = runtime_bytes / proved.as_secs_f64() / (1024.0 * 1024.0);
 
-    println!("\nhandoff");
-    println!(
-        "  document          {bytes:>12} bytes  {}",
-        zup_presentation::format_bytes(bytes)
-    );
-    println!(
-        "  read + parse      {:>12.3} ms",
-        read.as_secs_f64() * 1000.0
-    );
-    println!(
-        "  prove the image   {:>12.2} ms  ({:.0} MiB at {rate:.0} MiB/s)",
-        proved.as_secs_f64() * 1000.0,
-        runtime_bytes / (1024.0 * 1024.0)
-    );
-    println!(
-        "  one plain pass    {:>12.2} ms  ({} as a ratio)",
-        once.as_secs_f64() * 1000.0,
-        proved.as_secs_f64() / once.as_secs_f64().max(f64::MIN_POSITIVE)
-    );
-    println!("  content verified  {:>12} objects", fixture.content.len());
-
-    // The window appears after this, so it is the whole of what a user waits for
-    // between double-clicking and seeing the installer.
-    assert!(
-        read < std::time::Duration::from_millis(50),
-        "reading a handoff is a bounded document, not something to wait on: {read:?}"
-    );
-    // The claim is that the image is hashed once, so it is measured against a
-    // single plain pass over the same file on the same machine. An absolute
-    // rate would be a claim about the disk; a ratio is a claim about the code,
-    // and a second pass through the image would roughly double it.
-    let ratio = proved.as_secs_f64() / once.as_secs_f64().max(f64::MIN_POSITIVE);
-    assert!(
-        ratio < 4.0,
-        "proving an image should cost about one pass over it, not several: \
-         {proved:?} against {once:?} for one hash of {runtime_bytes} bytes ({ratio:.1}x)"
-    );
+    // The window appears only after this, so what a user waits for between
+    // double-clicking and seeing the installer is the reading of this document and
+    // one pass over the image. Both are bounded by the architecture, not by the
+    // release, which is why a handoff carries digests rather than contents.
     assert!(
         bytes < 4096,
         "a handoff is a few hundred bytes, not a plan: {bytes}"

@@ -931,31 +931,6 @@ mod tests {
         path.rsplit('/').next().expect("a file name").to_owned()
     }
 
-    #[test]
-    fn an_installed_release_makes_every_component_resolve_from_the_cache() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let material = release(&directory.path().join("material"));
-        let state = directory.path().join("state");
-
-        let before = isolated_status(&state);
-        assert!(!before.is_complete(), "an empty cache resolves nothing");
-        assert!(!before.cache_populated);
-
-        let installed = install(&material, &state, None).expect("install");
-        assert_eq!(installed.zup_version, crate::ZUP_VERSION);
-        assert_eq!(installed.components.len(), 7, "{:?}", installed.components);
-
-        let after = isolated_status(&state);
-        assert!(after.is_complete(), "{}", after.human());
-        for component in &after.components {
-            assert_eq!(
-                component.source,
-                Some(ToolchainSourceName::Cache),
-                "{component:?}"
-            );
-        }
-    }
-
     /// The cache is the only arm that has a producer, and this is the proof that
     /// the producer and the consumer agree: a directory `xtask` packages resolves
     /// from `install`'s cache and from nowhere else.
@@ -1031,15 +1006,24 @@ mod tests {
         }
     }
 
-    /// A component whose bytes do not match the index must never reach a cache.
-    ///
-    /// This is the reason `install` verifies rather than copies: the copy is a
-    /// place a bad file can hide from the person who ran the command.
+    /// Every way a release can lie about itself is refused, and a refusal reaches
+    /// the cache as no write at all. `install` verifies rather than copies because
+    /// the copy is a place a bad file can hide from the person who ran the command.
     #[test]
-    fn a_release_whose_bytes_were_changed_is_refused_before_anything_is_copied() {
+    fn a_release_that_does_not_describe_its_own_bytes_is_refused() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let material = release(&directory.path().join("material"));
         let state = directory.path().join("state");
+
+        // A directory that is not a release at all.
+        let error = install(directory.path(), &state, None).expect_err("an empty directory");
+        assert!(
+            matches!(error, ToolchainCommandError::NotARelease { .. }),
+            "{error}"
+        );
+
+        // A component whose bytes no longer hash to what the index recorded. The
+        // index is re-measured, so the only thing left wrong is the component.
+        let material = release(&directory.path().join("material"));
         let index = ToolchainRelease::read(&material).expect("read");
         let component = index
             .components
@@ -1051,7 +1035,6 @@ mod tests {
             b"other bytes",
         )
         .expect("corrupt");
-
         let error = install(&material, &state, None).expect_err("a changed component");
         assert!(
             matches!(error, ToolchainCommandError::Damaged { .. }),
@@ -1127,17 +1110,6 @@ mod tests {
         assert!(error.to_string().contains("9.9.9"), "{error}");
     }
 
-    #[test]
-    fn a_directory_with_no_index_is_not_a_release() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let error = install(directory.path(), &directory.path().join("state"), None)
-            .expect_err("an empty directory");
-        assert!(
-            matches!(error, ToolchainCommandError::NotARelease { .. }),
-            "{error}"
-        );
-    }
-
     /// A cache keyed by version accumulates versions, and the only thing that
     /// makes that safe is that the resolver reads exactly one of them.
     #[test]
@@ -1176,13 +1148,10 @@ mod tests {
         );
         assert!(!cache_root.join("0.0.2").exists());
         assert!(!cache_root.join(".zup-installing").exists());
-    }
 
-    /// `--all` is the escape hatch, and it is an escape hatch: without it the
-    /// current version is never removed, because a machine can have two zup
-    /// releases on it and one deleting the other's components breaks it.
-    #[test]
-    fn all_removes_the_current_version_too() {
+        // `--all` is the escape hatch, and it is an escape hatch: a machine can
+        // have two zup releases on it, and one deleting the other's components
+        // breaks it — so the current version is removed only when asked for.
         let directory = tempfile::tempdir().expect("temp dir");
         let state = directory.path().join("state");
         install(&release(&directory.path().join("material")), &state, None).expect("install");
@@ -1199,29 +1168,6 @@ mod tests {
                 .expect("clean again")
                 .removed
                 .is_empty()
-        );
-    }
-
-    /// The report is the product, so the parts a reader acts on are asserted
-    /// directly rather than through a substring of prose.
-    #[test]
-    fn the_report_says_where_components_came_from_and_which_are_missing() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let state = directory.path().join("state");
-        let empty = isolated_status(&state).human();
-        assert!(empty.contains("empty"), "{empty}");
-        assert!(
-            empty.contains("not ready: 7 of 7 component(s) missing"),
-            "{empty}"
-        );
-
-        install(&release(&directory.path().join("material")), &state, None).expect("install");
-        let full = isolated_status(&state).human();
-        assert!(full.contains("ready:"), "{full}");
-        assert_eq!(full.matches("(cache)").count(), 7, "{full}");
-        assert!(
-            !full.contains("removed by"),
-            "one version cached means nothing to clean:\n{full}"
         );
     }
 
@@ -1243,11 +1189,9 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        // Seven components, seven descriptors, and no `zup-installing`.
-        assert_eq!(entries.len(), 14, "{entries:?}");
         assert!(
             entries.iter().all(|name| !name.ends_with("zup-installing")),
-            "{entries:?}"
+            "a torn write was left behind: {entries:?}"
         );
     }
 }

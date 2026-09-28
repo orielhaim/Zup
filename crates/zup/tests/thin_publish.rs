@@ -321,12 +321,14 @@ fn the_two_thin_installers_authenticate_two_different_documents() {
     );
 }
 
+/// A thin artifact resolves a release through a trust block, so a manifest with
+/// no anchor and a `--channel` that disagrees with the manifest are both refused
+/// here rather than on a user's machine, and the refusal names what is wrong.
 #[test]
-fn a_thin_release_whose_channel_disagrees_with_the_manifest_is_refused() {
-    // The launcher and the release it installs would read different documents,
-    // and a publisher who could not see that would ship a broken installer.
-    let project = Project::new();
-    let (result, _) = project.stage_with(&[std::ffi::OsString::from("--channel"), "beta".into()]);
+fn a_thin_release_without_a_matching_trust_anchor_is_refused() {
+    let mismatched = Project::new();
+    let (result, _) =
+        mismatched.stage_with(&[std::ffi::OsString::from("--channel"), "beta".into()]);
     assert!(
         !result.status.success(),
         "a mismatched channel must be refused"
@@ -334,10 +336,7 @@ fn a_thin_release_whose_channel_disagrees_with_the_manifest_is_refused() {
     let message = stderr(&result);
     assert!(message.contains("beta"), "{message}");
     assert!(message.contains("stable"), "{message}");
-}
 
-#[test]
-fn a_thin_release_without_a_trust_anchor_is_refused() {
     // A thin artifact with no trust block cannot resolve anything, and
     // discovering that on a user's machine is the worst place to discover it.
     let project = Project::new();
@@ -374,10 +373,10 @@ destination = "${{install}}"
         !result.status.success(),
         "a thin release needs a trust anchor"
     );
-    let message = stderr(&result);
     assert!(
-        message.contains("[updates]"),
-        "the refusal names what is missing: {message}"
+        stderr(&result).contains("[updates]"),
+        "the refusal names what is missing: {}",
+        stderr(&result)
     );
 }
 
@@ -385,9 +384,7 @@ destination = "${{install}}"
 fn a_thin_release_names_the_launcher_it_resolved() {
     // A thin installer *is* a launcher plus a trust block, so which launcher the
     // release was composed with is the difference between a file that installs
-    // itself and one that cannot. `--dispatcher` is the escape hatch for a
-    // publisher composing with one they built themselves, and the refusal has to
-    // name the launcher the manifest actually asked for.
+    // itself and one that cannot.
     let project = Project::new();
     let output = project.path().join("web");
     let result = Command::new(env!("CARGO_BIN_EXE_zup"))

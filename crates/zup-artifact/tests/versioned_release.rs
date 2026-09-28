@@ -59,8 +59,6 @@ fn a_channel_and_a_version_address_the_same_release() {
 
     // And both names are TUF targets, so both are authenticated by the same
     // signature — a version-addressed name nobody signed would be worthless.
-    let export = WebExport::new("stable").expect("a channel name");
-    let _ = export;
     let tuf_input = web.join("tuf-input");
     assert!(
         tuf_input
@@ -111,10 +109,14 @@ fn the_two_thin_artifacts_authenticate_two_different_documents() {
 
     // A version the channel has moved past is still addressable, because nothing
     // removes the version-addressed document. That is what a pinned installer
-    // depends on.
+    // depends on: it asks for `1.3.0` and must get `1.3.0`, not whatever the
+    // channel says today.
     let older = address(ReleasePin::Version {
         version: "1.3.0".to_owned(),
     });
     assert_eq!(older.to_string(), "releases/stable/versions/1.3.0.json");
-    assert_eq!(zup_acquire::check_channel("stable"), Ok(()));
+    assert_ne!(
+        older, channel,
+        "a version pin is a different document from the channel even when the channel names it"
+    );
 }

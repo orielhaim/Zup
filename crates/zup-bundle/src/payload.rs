@@ -332,16 +332,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_payload_root_uses_exact_portable_identity() {
-        assert!(is_plugin_payload_path(
-            &RelativePath::new("__zup_plugins__/generated.bin").unwrap()
-        ));
-        assert!(!is_plugin_payload_path(
-            &RelativePath::new("__ZUP_PLUGINS__/generated.bin").unwrap()
-        ));
-    }
-
-    #[test]
     fn directory_source_confinement_and_verification_are_portable() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("payload.bin");

@@ -81,45 +81,9 @@ fn package_create_read_and_write_round_trip_without_an_executable() {
     }
 }
 
-#[test]
-fn package_index_and_payload_source_are_public_package_data() {
-    let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
-    let package = Package::parse(&bytes).unwrap();
-    let index = package.index_info();
-    assert_eq!(
-        index.index_size() as usize,
-        60 + { u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize }
-    );
-    assert_eq!(index.blob_count(), 1);
-    let index_bytes = package.index_bytes().unwrap();
-    assert_eq!(Package::parse_index(&index_bytes).unwrap(), index);
-
-    let path = RelativePath::new("a.bin").unwrap();
-    let entry = package
-        .plan()
-        .entries
-        .iter()
-        .find(|entry| entry.path == path)
-        .unwrap();
-    let mut reader = package
-        .payload_source()
-        .open(&path, &entry.sha256, entry.size)
-        .unwrap();
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data).unwrap();
-    assert_eq!(data, b"duplicate payload");
-}
-
-#[test]
-fn package_tampering_is_rejected_before_payload_access() {
-    let root = TempDir::new().unwrap();
-    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
-    let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
-    bytes[60 + metadata_len] ^= 1;
-    assert!(Package::parse(&bytes).is_err());
-}
-
+/// A package that was parsed clean and whose bytes are then swapped on disk is caught
+/// by `verify`. This is a different claim from parse-time refusal: the reader already
+/// holds an open handle, and the only thing that can still catch the swap is a re-read.
 #[test]
 fn package_verify_rechecks_file_contents() {
     let root = TempDir::new().unwrap();
@@ -134,18 +98,12 @@ fn package_verify_rechecks_file_contents() {
 }
 
 #[test]
-fn package_auto_source_reads_a_standalone_package() {
+fn package_tampering_is_rejected_before_payload_access() {
     let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
-    let package_path = root.path().join("package.zup");
-    fs::write(&package_path, bytes).unwrap();
-    let source = AutoPayloadSource::from_path(&package_path).unwrap();
-    let path = RelativePath::new("a.bin").unwrap();
-    let (size, digest) = hash_reader(&b"duplicate payload"[..]).unwrap();
-    let mut reader = source.open(&path, &digest, size).unwrap();
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data).unwrap();
-    assert_eq!(data, b"duplicate payload");
+    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+    bytes[60 + metadata_len] ^= 1;
+    assert!(Package::parse(&bytes).is_err());
 }
 
 #[test]
@@ -212,46 +170,32 @@ fn reserved_payload_is_never_satisfied_by_a_directory_base() {
     ));
 }
 
-#[test]
-fn reserved_payload_root_does_not_case_fold() {
-    let root = TempDir::new().unwrap();
-    let base = root.path().join("base");
-    fs::create_dir_all(base.join("__ZUP_PLUGINS__")).unwrap();
-    fs::write(
-        base.join("__ZUP_PLUGINS__/generated.bin"),
-        b"case-sensitive identity",
-    )
-    .unwrap();
-    let source = AutoPayloadSource::from_path(base).unwrap();
-    let relative = RelativePath::new("__ZUP_PLUGINS__/generated.bin").unwrap();
-    let (size, digest) = hash_reader(&b"case-sensitive identity"[..]).unwrap();
-    let mut reader = source.open(&relative, &digest, size).unwrap();
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, b"case-sensitive identity");
-}
-
+/// A header is the only thing read before a reader has any content, so every field it
+/// carries is checked before the metadata behind it is touched. The metadata length is
+/// the one a hostile package sets to something enormous, and a format that trusted it
+/// would allocate on a number it did not write.
 #[test]
 fn malformed_package_headers_are_rejected() {
     assert!(matches!(
         Package::parse(b"not a package"),
         Err(PackageError::Io(_)) | Err(PackageError::Invalid)
     ));
-    let root = TempDir::new().unwrap();
-    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
-    let mismatch = PACKAGE_SCHEMA + 1;
-    bytes[8..12].copy_from_slice(&mismatch.to_le_bytes());
-    assert!(matches!(Package::parse(bytes), Err(PackageError::Invalid)));
-}
 
-#[test]
-fn oversized_metadata_is_rejected_from_the_header() {
-    let mut bytes = vec![0u8; 60];
-    bytes[..8].copy_from_slice(b"ZUPBNDL\0");
-    bytes[8..12].copy_from_slice(&PACKAGE_SCHEMA.to_le_bytes());
-    bytes[20..28].copy_from_slice(&(256u64 * 1024 * 1024 + 1).to_le_bytes());
+    let root = TempDir::new().unwrap();
+    let mut wrong_schema = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let mismatch = PACKAGE_SCHEMA + 1;
+    wrong_schema[8..12].copy_from_slice(&mismatch.to_le_bytes());
     assert!(matches!(
-        Package::parse(bytes),
+        Package::parse(wrong_schema),
+        Err(PackageError::Invalid)
+    ));
+
+    let mut oversized = vec![0u8; 60];
+    oversized[..8].copy_from_slice(b"ZUPBNDL\0");
+    oversized[8..12].copy_from_slice(&PACKAGE_SCHEMA.to_le_bytes());
+    oversized[20..28].copy_from_slice(&(256u64 * 1024 * 1024 + 1).to_le_bytes());
+    assert!(matches!(
+        Package::parse(oversized),
         Err(PackageError::MetadataTooLarge { .. })
     ));
 }

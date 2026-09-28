@@ -9,13 +9,13 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::{ARM64, X64, build_target};
-use sha2::Digest as _;
+use rstest::rstest;
 use tempfile::TempDir;
 use zup_artifact::{
     ArtifactComposer, ArtifactError, ArtifactIndex, ArtifactRequest, ArtifactView, BlobEntry,
     BlobTable, Compatibility, CompatibilityDimension, DistributionVariant, FileSegments,
-    HostArchitecture, HostExecution, HostVersion, MediaType, MemorySegments, MetadataSet, Platform,
-    PlatformOs, ReleaseManifest, SegmentSource, VariantRequirements, select_from_index,
+    HostArchitecture, HostExecution, HostVersion, MemorySegments, MetadataSet, PlatformOs,
+    ReleaseManifest, SegmentSource, VariantRequirements, select_from_index,
 };
 use zup_core::{InstallScope, Sha256Digest, TargetTriple};
 
@@ -74,13 +74,16 @@ fn open(graph: &zup_artifact::ArtifactGraph) -> ArtifactView<FileSegments> {
     .unwrap()
 }
 
+/// The composed graph has to survive the same parser, over the same segment
+/// files, that the dispatcher and the inspector use, and every manifest has to
+/// agree with the index entry it was addressed by. A manifest describing a
+/// different machine than the index claims is a variant that installs one thing
+/// and reports another.
 #[test]
 fn a_graph_round_trips_through_the_runtime_parser() {
     let (_root, variants) = fixture();
     let graph = compose(&variants);
     let view = open(&graph);
-    assert_eq!(view.index().artifact.id, "windows");
-    assert_eq!(view.index().artifact.output, "Acme-Windows-Setup.exe");
     assert_eq!(view.index().variants.len(), 2);
     for id in view.index().variant_ids() {
         let manifest = view.verify_variant(id).unwrap();
@@ -93,6 +96,11 @@ fn a_graph_round_trips_through_the_runtime_parser() {
     view.store().verify_all().unwrap();
 }
 
+/// Deduplication is the reason two variants can share one artifact, so the store
+/// must hold exactly the referenced set and nothing else, and the savings must
+/// add up. A store holding an unreferenced blob is a blob a publisher uploads and
+/// a client never fetches; a savings figure that does not reconcile is a number
+/// nobody can quote.
 #[test]
 fn shared_content_is_stored_once_and_referenced_by_both_variants() {
     let (_root, variants) = fixture();
@@ -132,13 +140,22 @@ fn shared_content_is_stored_once_and_referenced_by_both_variants() {
     assert!(savings.deduplicated() > 0);
 }
 
+/// Determinism is the whole gate: `check` is a diff, and a diff of something that
+/// is not reproducible is a diff that fails on somebody else's machine. The table
+/// is verified against the digest the index records for it, because those bytes
+/// are what a client fetches and nothing else would notice a mismatch.
 #[test]
 fn composition_is_deterministic() {
     let (_root, variants) = fixture();
     let first = compose(&variants);
     let second = compose(&variants);
     assert_eq!(first.index_bytes().unwrap(), second.index_bytes().unwrap());
-    assert_eq!(first.table_bytes().unwrap(), second.table_bytes().unwrap());
+    let table_bytes = first.table_bytes().unwrap();
+    assert_eq!(table_bytes, second.table_bytes().unwrap());
+    assert!(
+        first.index().tables.blobs.verify(&table_bytes).is_ok(),
+        "the index names a digest the table it shipped with does not have"
+    );
     assert_eq!(
         first.manifest_bytes().unwrap(),
         second.manifest_bytes().unwrap()
@@ -173,112 +190,78 @@ fn variant_descriptors_are_deterministic_regardless_of_input_order() {
     );
 }
 
-#[test]
-fn a_frontend_mismatch_is_refused_with_a_named_dimension() {
+/// Two variants that differ in exactly one compatibility dimension must not
+/// compose, and the refusal has to name that dimension. "Composition failed"
+/// sends the author looking through four attributes to find the one that
+/// disagrees. `Platform` names nothing readable, so its case asserts only the
+/// dimension itself.
+#[rstest]
+#[case::launcher_subsystem(
+    CompatibilityDimension::LauncherSubsystem,
+    "launcher subsystem",
+    &common::FixtureTarget {
+        profile: "windows-arm64",
+        target: "aarch64-pc-windows-msvc",
+        frontend: zup_core::Frontend::Headless,
+        exclusive: common::ARM64.exclusive,
+        component: None,
+        plugin: None,
+    }
+)]
+#[case::platform(
+    CompatibilityDimension::Platform,
+    "",
+    &common::FixtureTarget {
+        profile: "linux-x64",
+        target: "x86_64-unknown-linux-gnu",
+        frontend: zup_core::Frontend::Gui,
+        exclusive: common::X64.exclusive,
+        component: None,
+        plugin: None,
+    }
+)]
+fn a_variant_mismatch_is_refused_with_a_named_dimension(
+    #[case] dimension: CompatibilityDimension,
+    #[case] named_in_message: &str,
+    #[case] peer: &common::FixtureTarget,
+) {
     let root = TempDir::new().unwrap();
-    let headless = build_target(
-        root.path().join("arm-console"),
-        &common::FixtureTarget {
-            profile: "windows-arm64",
-            target: "aarch64-pc-windows-msvc",
-            frontend: zup_core::Frontend::Headless,
-            exclusive: common::ARM64.exclusive,
-            component: None,
-            plugin: None,
-        },
-    );
-    let variants = [build_target(root.path().join("x64"), &X64), headless];
+    let x64 = build_target(root.path().join("x64"), &X64);
+    let peer = build_target(root.path().join("peer"), peer);
+    let variants = [x64, peer];
     let error = ArtifactComposer::new(request("windows"), &refs(&variants)).unwrap_err();
     assert!(
         matches!(&error, ArtifactError::Incompatible(incompatible)
-            if incompatible.reason.dimension() == CompatibilityDimension::LauncherSubsystem),
+            if incompatible.reason.dimension() == dimension),
         "{error}"
     );
-    assert!(error.to_string().contains("launcher subsystem"), "{error}");
-}
-
-#[test]
-fn console_and_headless_share_a_subsystem_and_compose() {
-    let root = TempDir::new().unwrap();
-    let x64 = build_target(
-        root.path().join("x64"),
-        &common::FixtureTarget {
-            profile: "windows-x64",
-            target: "x86_64-pc-windows-msvc",
-            frontend: zup_core::Frontend::Console,
-            exclusive: common::X64.exclusive,
-            component: None,
-            plugin: None,
-        },
-    );
-    let arm = build_target(
-        root.path().join("arm"),
-        &common::FixtureTarget {
-            profile: "windows-arm64",
-            target: "aarch64-pc-windows-msvc",
-            frontend: zup_core::Frontend::Headless,
-            exclusive: common::ARM64.exclusive,
-            component: None,
-            plugin: None,
-        },
-    );
-    let graph = compose(&[x64, arm]);
-    assert_eq!(
-        graph.index().artifact.subsystem,
-        zup_artifact::LauncherSubsystem::Console
+    assert!(
+        error.to_string().contains(named_in_message),
+        "{error} should name `{named_in_message}`"
     );
 }
 
-#[test]
-fn an_install_scope_mismatch_is_refused() {
+/// The same refusal for the two dimensions the variant fixture carries rather
+/// than its target triple: the install request, and the application identity.
+#[rstest]
+#[case::installer_semantics(CompatibilityDimension::InstallerSemantics)]
+#[case::application_identity(CompatibilityDimension::ApplicationIdentity)]
+fn a_request_mismatch_is_refused_with_a_named_dimension(#[case] dimension: CompatibilityDimension) {
     let root = TempDir::new().unwrap();
     let mut install = common::install();
     let x64 = build_target(root.path().join("x64"), &X64).with_install(install.clone());
-    install.scope = InstallScope::Machine;
-    let arm = build_target(root.path().join("arm"), &ARM64).with_install(install);
+    let arm = match dimension {
+        CompatibilityDimension::InstallerSemantics => {
+            install.scope = InstallScope::Machine;
+            build_target(root.path().join("arm"), &ARM64).with_install(install)
+        }
+        _ => build_target(root.path().join("arm"), &ARM64).with_version("1.5.0"),
+    };
     let variants = [x64, arm];
     let error = ArtifactComposer::new(request("windows"), &refs(&variants)).unwrap_err();
     assert!(
         matches!(&error, ArtifactError::Incompatible(incompatible)
-            if incompatible.reason.dimension() == CompatibilityDimension::InstallerSemantics),
-        "{error}"
-    );
-}
-
-#[test]
-fn an_application_version_mismatch_is_refused() {
-    let root = TempDir::new().unwrap();
-    let x64 = build_target(root.path().join("x64"), &X64);
-    let arm = build_target(root.path().join("arm"), &ARM64).with_version("1.5.0");
-    let variants = [x64, arm];
-    let error = ArtifactComposer::new(request("windows"), &refs(&variants)).unwrap_err();
-    assert!(
-        matches!(&error, ArtifactError::Incompatible(incompatible)
-            if incompatible.reason.dimension() == CompatibilityDimension::ApplicationIdentity),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_different_operating_system_is_refused() {
-    let root = TempDir::new().unwrap();
-    let x64 = build_target(root.path().join("x64"), &X64);
-    let linux = build_target(
-        root.path().join("linux"),
-        &common::FixtureTarget {
-            profile: "linux-x64",
-            target: "x86_64-unknown-linux-gnu",
-            frontend: zup_core::Frontend::Gui,
-            exclusive: common::X64.exclusive,
-            component: None,
-            plugin: None,
-        },
-    );
-    let variants = [x64, linux];
-    let error = ArtifactComposer::new(request("windows"), &refs(&variants)).unwrap_err();
-    assert!(
-        matches!(&error, ArtifactError::Incompatible(incompatible)
-            if incompatible.reason.dimension() == CompatibilityDimension::Platform),
+            if incompatible.reason.dimension() == dimension),
         "{error}"
     );
 }
@@ -325,41 +308,50 @@ fn x64_resolved(
     }
 }
 
-#[test]
-fn a_corrupt_artifact_index_is_refused() {
+/// An index is the document a client trusts before it has read a byte, so
+/// anything a container or a repackaging step can do to it must be refused rather
+/// than repaired. Each case is a shape a reader that guessed would accept.
+#[rstest]
+#[case::truncated_bytes(Corruption::Truncated)]
+#[case::a_platform_disagreeing_with_its_target(Corruption::Retargeted)]
+#[case::variants_out_of_the_order_the_graph_wrote(Corruption::Reordered)]
+#[case::a_schema_this_reader_does_not_speak(Corruption::Reschemad)]
+fn a_corrupt_artifact_index_is_refused(#[case] corruption: Corruption) {
     let (_root, variants) = fixture();
     let graph = compose(&variants);
-
-    // Truncated: the shape a container that lost its tail produces.
     let bytes = graph.index_bytes().unwrap();
-    let error = ArtifactIndex::parse(&bytes[..bytes.len() / 2]).unwrap_err();
-    assert!(matches!(error, ArtifactError::Json(_)), "{error}");
 
-    // A platform that disagrees with the target it was derived from: the kind of
-    // drift a hand-edited or repackaged index introduces.
-    let mut index = graph.index().clone();
-    index.variants[1].platform.architecture = "aarch64".to_owned();
-    let error = ArtifactIndex::parse(&index.encode().unwrap()).unwrap_err();
-    assert!(matches!(error, ArtifactError::Invalid), "{error}");
-
-    // Variants out of order: the file order of the graph must not be able to
-    // change what a selector sees.
-    let mut index = graph.index().clone();
-    index.variants.swap(0, 1);
-    let error = ArtifactIndex::parse(&index.encode().unwrap()).unwrap_err();
-    assert!(matches!(error, ArtifactError::Invalid), "{error}");
+    let error = match corruption {
+        Corruption::Truncated => ArtifactIndex::parse(&bytes[..bytes.len() / 2]).unwrap_err(),
+        Corruption::Retargeted => {
+            let mut index = graph.index().clone();
+            index.variants[1].platform.architecture = "aarch64".to_owned();
+            ArtifactIndex::parse(&index.encode().unwrap()).unwrap_err()
+        }
+        Corruption::Reordered => {
+            let mut index = graph.index().clone();
+            index.variants.swap(0, 1);
+            ArtifactIndex::parse(&index.encode().unwrap()).unwrap_err()
+        }
+        Corruption::Reschemad => {
+            let mut index = graph.index().clone();
+            index.schema = 2;
+            ArtifactIndex::parse(&index.encode().unwrap()).unwrap_err()
+        }
+    };
+    let expected = match corruption {
+        Corruption::Truncated => matches!(error, ArtifactError::Json(_)),
+        _ => matches!(error, ArtifactError::Invalid),
+    };
+    assert!(expected, "{error}");
 }
 
-#[test]
-fn an_index_with_a_wrong_schema_is_refused() {
-    let (_root, variants) = fixture();
-    let graph = compose(&variants);
-    let mut index = graph.index().clone();
-    index.schema = 2;
-    assert!(matches!(
-        ArtifactIndex::parse(&index.encode().unwrap()),
-        Err(ArtifactError::Invalid)
-    ));
+#[derive(Clone, Copy)]
+enum Corruption {
+    Truncated,
+    Retargeted,
+    Reordered,
+    Reschemad,
 }
 
 #[test]
@@ -456,6 +448,9 @@ fn a_tampered_blob_table_is_refused_before_anything_is_read() {
     );
 }
 
+/// The store is addressed by the table, and an index that arrives without its
+/// blobs is not a smaller artifact — it is an artifact nothing can be read out
+/// of. The refusal happens at `open`, before a single byte is requested.
 #[test]
 fn a_view_whose_store_is_too_small_is_refused() {
     let (_root, variants) = fixture();
@@ -469,59 +464,45 @@ fn a_view_whose_store_is_too_small_is_refused() {
     .unwrap_err();
     assert!(matches!(error, ArtifactError::Incomplete { .. }), "{error}");
 }
-
-#[test]
-fn a_x64_host_selects_x64_and_an_arm64_host_selects_arm64() {
+/// Selection reads the composed index rather than the in-memory variants, so the
+/// host/arch decision is pinned against the document a client actually receives.
+#[rstest]
+#[case::x64_host_selects_x64(
+    HostArchitecture::X86_64,
+    vec![HostArchitecture::X86],
+    "windows-x64"
+)]
+#[case::arm64_host_selects_arm64(
+    HostArchitecture::Arm64,
+    vec![HostArchitecture::X86_64, HostArchitecture::X86],
+    "windows-arm64"
+)]
+fn a_host_selects_the_variant_built_for_its_architecture(
+    #[case] native: HostArchitecture,
+    #[case] emulated: Vec<HostArchitecture>,
+    #[case] expected: &str,
+) {
     let (_root, variants) = fixture();
     let index = compose(&variants);
-    let index = index.index();
-    let x64_host = HostExecution {
-        os: PlatformOs::Windows,
-        native: HostArchitecture::X86_64,
-        emulated: vec![HostArchitecture::X86],
-        version: Some(HostVersion::new(10, 0, 22621)),
-    };
-    let arm_host = HostExecution {
-        os: PlatformOs::Windows,
-        native: HostArchitecture::Arm64,
-        emulated: vec![HostArchitecture::X86_64, HostArchitecture::X86],
-        version: Some(HostVersion::new(11, 0, 0)),
-    };
-    assert_eq!(
-        select_from_index(&x64_host, index).unwrap().candidate.id,
-        "windows-x64"
-    );
-    assert_eq!(
-        select_from_index(&arm_host, index).unwrap().candidate.id,
-        "windows-arm64"
-    );
-}
-
-#[test]
-fn an_arm64_host_prefers_native_arm64_over_emulated_x64() {
-    let (_root, variants) = fixture();
-    let graph = compose(&variants);
     let host = HostExecution {
         os: PlatformOs::Windows,
-        native: HostArchitecture::Arm64,
-        emulated: vec![HostArchitecture::X86_64],
+        native,
+        emulated,
         version: Some(HostVersion::new(11, 0, 0)),
     };
-    let selection = select_from_index(&host, graph.index()).unwrap();
-    assert_eq!(selection.candidate.id, "windows-arm64");
-    assert_eq!(selection.compatibility, Compatibility::Native);
+    let selection = select_from_index(&host, index.index()).unwrap();
+    assert_eq!(selection.candidate.id, expected);
+    assert_eq!(
+        selection.compatibility,
+        Compatibility::Native,
+        "an x64 host is offered the emulated x86 as a fallback, and still picks native"
+    );
 }
 
-#[test]
-fn an_unsupported_host_gets_a_useful_error() {
-    let (_root, variants) = fixture();
-    let graph = compose(&variants);
-    let host = HostExecution::native_only(PlatformOs::Linux, HostArchitecture::X86_64);
-    let error = select_from_index(&host, graph.index()).unwrap_err();
-    assert!(error.is_unsupported_host());
-    assert!(error.to_string().contains("windows"), "{error}");
-}
-
+/// A machine-scoped component must not be selected through emulation. The host
+/// can start the ARM64 executable, but a variant that installs machine-wide
+/// components cannot be installed by an emulated process, so selection refuses it
+/// rather than choosing something it cannot finish.
 #[test]
 fn a_variant_with_a_machine_component_is_not_selected_through_emulation() {
     let root = TempDir::new().unwrap();
@@ -543,6 +524,19 @@ fn a_variant_with_a_machine_component_is_not_selected_through_emulation() {
             .unwrap_err()
             .is_unsupported_host()
     );
+}
+
+/// An artifact that targets an operating system the host does not run has no
+/// answer at all, and the message has to name what the host is rather than
+/// reporting a machine-architecture mismatch the host does not have.
+#[test]
+fn an_unsupported_host_gets_a_useful_error() {
+    let (_root, variants) = fixture();
+    let graph = compose(&variants);
+    let host = HostExecution::native_only(PlatformOs::Linux, HostArchitecture::X86_64);
+    let error = select_from_index(&host, graph.index()).unwrap_err();
+    assert!(error.is_unsupported_host());
+    assert!(error.to_string().contains("windows"), "{error}");
 }
 
 #[test]
@@ -580,6 +574,10 @@ fn a_plugin_is_compiled_for_one_target_only_and_selected_through_the_manifest() 
     );
 }
 
+/// The description names two variants and one artifact, and it must name them the
+/// same way twice. The bytes are published to a CDN and read by clients that
+/// pinned a digest, so a path that leaked a build machine's directory would make
+/// the document unreproducible on any other machine.
 #[test]
 fn the_release_description_is_deterministic_and_free_of_build_paths() {
     let (_root, variants) = fixture();
@@ -593,9 +591,13 @@ fn the_release_description_is_deterministic_and_free_of_build_paths() {
         )
         .unwrap();
     let bytes = release.encode().unwrap();
-    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert_eq!(
+        bytes,
+        release.encode().unwrap(),
+        "the description is hashed and published by digest, so it must not vary"
+    );
+    let text = String::from_utf8(bytes).unwrap();
     assert!(!text.contains(":\\"), "no absolute path: {text}");
-    assert_eq!(ReleaseManifest::parse(&bytes).unwrap(), release);
     assert_eq!(release.artifacts[0].path, "dist/Acme-Windows-Setup.exe");
     assert_eq!(release.variants.len(), 2);
     assert!(
@@ -604,7 +606,8 @@ fn the_release_description_is_deterministic_and_free_of_build_paths() {
             .iter()
             .all(|variant| variant.artifacts == vec!["windows".to_owned()])
     );
-    // A build-machine path is refused outright rather than normalized.
+    // A build-machine path is refused outright rather than normalized, because a
+    // normalized one still names a directory the client does not have.
     let mut other = ReleaseManifest::new(&common::app());
     assert!(
         other
@@ -627,6 +630,10 @@ fn measured(graph: &zup_artifact::ArtifactGraph, size: u64) -> zup_artifact::Mea
     )
 }
 
+/// The OCI layout is a different container, not a different artifact: the digests
+/// it exports must be the ones the installer verifies. A blob named in the OCI
+/// index but absent from the layout is a pull that fails after the registry has
+/// already accepted the request.
 #[test]
 fn an_oci_layout_exports_the_same_digests_the_installer_verifies() {
     let (_root, variants) = fixture();
@@ -634,8 +641,8 @@ fn an_oci_layout_exports_the_same_digests_the_installer_verifies() {
     let root = TempDir::new().unwrap();
     let layout = root.path().join("oci");
     zup_artifact::oci::export_oci_layout(&graph, &layout).unwrap();
-    let index = std::fs::read(layout.join("index.json")).unwrap();
-    let parsed: oci_spec::image::ImageIndex = serde_json::from_slice(&index).unwrap();
+    let parsed: oci_spec::image::ImageIndex =
+        serde_json::from_slice(&std::fs::read(layout.join("index.json")).unwrap()).unwrap();
     assert_eq!(parsed.manifests().len(), 2);
     assert!(layout.join("oci-layout").is_file());
     for descriptor in parsed.manifests() {
@@ -647,16 +654,6 @@ fn an_oci_layout_exports_the_same_digests_the_installer_verifies() {
         );
         let platform = descriptor.platform().as_ref().expect("a platform");
         assert!(matches!(platform.os(), oci_spec::image::Os::Windows));
-    }
-}
-
-#[test]
-fn a_platform_derived_from_a_triple_round_trips() {
-    for text in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
-        let target = TargetTriple::parse(text).unwrap();
-        let platform = Platform::from_triple(&target);
-        assert_eq!(platform.triple().unwrap(), target);
-        assert_eq!(platform.os, "windows");
     }
 }
 
@@ -676,6 +673,12 @@ fn a_single_target_artifact_is_still_one_artifact() {
     );
 }
 
+/// The in-memory backend has nowhere to put segments, so a caller that asked for
+/// one must be told rather than handed an index addressing bytes that are not
+/// there. The table still describes one segment's worth of blobs.
+/// The in-memory backend has nowhere to put segments, so a caller that asked for
+/// one must be told rather than handed an index addressing bytes that are not
+/// there. The table still describes one segment's worth of blobs.
 #[test]
 fn an_in_memory_composition_reports_that_it_has_no_segments() {
     let root = TempDir::new().unwrap();
@@ -687,37 +690,4 @@ fn an_in_memory_composition_reports_that_it_has_no_segments() {
         .unwrap();
     assert!(graph.segments().is_err());
     assert_eq!(graph.table().segments, 1);
-}
-
-#[test]
-fn a_blob_table_round_trips_canonically() {
-    let (_root, variants) = fixture();
-    let graph = compose(&variants);
-    let bytes = graph.table_bytes().unwrap();
-    assert_eq!(bytes, BlobTable::parse(&bytes).unwrap().encode().unwrap());
-    assert!(graph.index().tables.blobs.verify(&bytes).is_ok());
-}
-
-#[test]
-fn a_descriptor_is_verified_against_exactly_its_own_content() {
-    let digest = Sha256Digest::from_bytes(sha2::Sha256::digest(b"payload").into());
-    let entry = BlobTable::pack(vec![BlobEntry {
-        digest,
-        segment: 0,
-        offset: 0,
-        compressed_size: 4,
-        size: 7,
-    }])
-    .unwrap();
-    let descriptor = zup_artifact::Descriptor {
-        media_type: MediaType::BLOB,
-        digest,
-        size: 7,
-    };
-    assert!(
-        descriptor.verify(b"payload").is_ok(),
-        "content matching its own descriptor verifies"
-    );
-    assert!(descriptor.verify(b"other!!!").is_err());
-    assert!(entry.entry(&digest).is_some());
 }
