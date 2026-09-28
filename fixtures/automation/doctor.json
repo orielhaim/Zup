@@ -1,0 +1,58 @@
+{
+  "protocol": "1.0",
+  "operation": "doctor",
+  "status": "failure",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.doctor.not_ready",
+      "message": "1 check(s) failed across 1 target(s)",
+      "source": null,
+      "help": null
+    }
+  ],
+  "summary": "not ready: 1 of 1 target(s) can be built",
+  "details": {
+    "kind": "doctor",
+    "manifest": "zup.toml",
+    "host": "x86_64-pc-windows-msvc",
+    "ready": false,
+    "checks": 3,
+    "targets": [
+      {
+        "profile": "default",
+        "target": "x86_64-pc-windows-msvc",
+        "status": "fail",
+        "checks": [
+          {
+            "kind": "canonical_target",
+            "status": "pass",
+            "message": "canonical target is `x86_64-pc-windows-msvc`",
+            "path": null
+          },
+          {
+            "kind": "update_root",
+            "status": "skip",
+            "message": "no [updates] section; no trusted update root is embedded",
+            "path": "zup.toml"
+          },
+          {
+            "kind": "output_parent",
+            "status": "fail",
+            "message": "output parent is not writable",
+            "path": "dist"
+          }
+        ]
+      }
+    ]
+  }
+}

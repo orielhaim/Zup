@@ -6,16 +6,40 @@
 //! *to an installed application*, because the executable that does those things
 //! is a different one and lives on the user's own machine.
 //!
-//! The `about` text is the first line anybody reads of this tool, so it says what
-//! the tool is rather than what technology it is made of.
+//! The `about` text is the first line anybody reads of this tool, so it says what the
+//! tool is rather than what technology it is made of.
+//!
+//! # Two kinds of command
+//!
+//! Every command is classified once, here, and the classification is what decides
+//! whether it takes `--format`:
+//!
+//! - **Operation commands** do something to a project and report a result. They take
+//!   [`OutputArg`], and they can report it in the versioned machine contract described
+//!   in `zup-automation`. `build`, `check`, `doctor`, `plan`, `artifact inspect`,
+//!   `publish stage`, `publish github`, `sign prepare`, `sign verify`, `toolchain
+//!   install`, `toolchain status` and `toolchain clean`.
+//! - **Raw-output commands** write a document that *is* their product, in a format the
+//!   caller asked for by choosing the command. `schema` writes a JSON Schema;
+//!   `completions` writes a shell script. Wrapping either in an automation result
+//!   would produce a JSON document inside a JSON document for no reason a consumer
+//!   could use.
+//!
+//! Deciding this in the parser rather than discovering it later is the point: a
+//! command that grows a `--format` flag by accident, or a consumer that has to guess
+//! whether `zup schema --format json` is a protocol document, are both the failure
+//! this classification prevents.
 
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, ValueHint};
+use zup_automation::AutomationResult;
 use zup_core::Frontend;
 use zup_presentation::OutputFormat;
 
 use crate::project::TargetOverrideArgs;
+use crate::report::Reporter;
+use crate::toolchain_cli::ToolchainVerb;
 
 /// The description shown at the top of `zup --help`.
 const ABOUT: &str = "Build and distribute zup installers";
@@ -38,29 +62,119 @@ pub fn parser() -> clap::Command {
 }
 
 /// Parse `argv`, exiting the way a CLI exits on `--help` or a usage error.
+///
+/// # The parse-error boundary
+///
+/// `clap` owns this point, and zup does not build a second parser to see past it.
+/// There are two things that can go wrong here, and they are not the same thing:
+///
+/// - **The invocation names an operation and a machine format** — `zup build --format
+///   json --nonsense`. The operation is known, so a structured result is possible and
+///   [`parse_error`] emits one: `status: "failure"`, a diagnostic with the code
+///   `zup.cli.invalid_invocation`, and the clap message as its help. A caller that
+///   asked for a document gets a document.
+/// - **The invocation does not name an operation at all** — `--format json` on its own,
+///   or an unknown verb. There is nothing to report a result *about*, and a document
+///   naming a made-up operation would be a worse answer than a usage message. Clap
+///   prints its message on stderr and the process exits nonzero, which is the right
+///   answer and is the documented boundary.
+///
+/// The rule is therefore: zup speaks the protocol for a command it could have run, and
+/// speaks clap for a command line it could not.
 pub fn parse() -> Cli {
-    let matches = parser().get_matches();
-    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match parser().try_get_matches_from(&arguments) {
+        Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit()),
+        Err(error) => {
+            // See the boundary documented above. A command line that still names an
+            // operation gets a structured answer; anything else gets clap's usage
+            // message, which is the right answer for an invocation with no operation
+            // to report a result *about*.
+            if parse_error(&error, arguments).is_none() {
+                error.exit();
+            }
+            std::process::exit(process_exit_code_for_invocation(&error));
+        }
+    }
 }
 
 /// Run one command.
 pub fn dispatch(cli: Cli) -> miette::Result<()> {
+    let toolchain = cli.toolchain;
     match cli.command {
         Some(Commands::Init(args)) => crate::init::run(args),
-        Some(Commands::Check(args)) => crate::check::run_check(args),
-        Some(Commands::Doctor(args)) => crate::doctor::run(args, cli.toolchain),
-        Some(Commands::Plan(args)) => crate::check::run_plan(args),
-        Some(Commands::Build(args)) => crate::build::run(args, cli.toolchain),
-        Some(Commands::Sign(args)) => crate::signing::run(args),
+        Some(Commands::Check(args)) => {
+            operation(args.format, zup_automation::OPERATION_CHECK, || {
+                crate::check::run_check(args)
+            })
+        }
+        Some(Commands::Doctor(args)) => {
+            operation(args.format, zup_automation::OPERATION_DOCTOR, || {
+                crate::doctor::run(args, toolchain)
+            })
+        }
+        Some(Commands::Plan(args)) => {
+            operation(args.format, zup_automation::OPERATION_PLAN, || {
+                crate::check::run_plan(args)
+            })
+        }
+        Some(Commands::Build(args)) => {
+            operation(args.format, zup_automation::OPERATION_BUILD, || {
+                crate::build::run(args, toolchain)
+            })
+        }
+        Some(Commands::Sign(args)) => {
+            let root = args.location.release_dir;
+            match args.command {
+                SignVerb::Prepare(args) => {
+                    operation(args.format, zup_automation::OPERATION_SIGN_PREPARE, || {
+                        crate::signing::run_prepare(root, args)
+                    })
+                }
+                SignVerb::Verify(args) => {
+                    operation(args.format, zup_automation::OPERATION_SIGN_VERIFY, || {
+                        crate::signing::run_verify(root, args)
+                    })
+                }
+            }
+        }
         Some(Commands::Artifact(args)) => match args.command {
-            ArtifactVerb::Inspect(args) => crate::inspect_artifact::run(args),
+            ArtifactVerb::Inspect(args) => operation(
+                args.format,
+                zup_automation::OPERATION_ARTIFACT_INSPECT,
+                || crate::inspect_artifact::run(args),
+            ),
         },
         Some(Commands::Publish(args)) => match args.command {
-            PublishVerb::Stage(args) => crate::publish::run_stage(args, cli.toolchain),
-            PublishVerb::Github(args) => crate::publish::run_github(args),
+            PublishVerb::Stage(args) => {
+                operation(args.format, zup_automation::OPERATION_PUBLISH_STAGE, || {
+                    crate::publish::run_stage(args, toolchain)
+                })
+            }
+            PublishVerb::Github(args) => operation(
+                args.format,
+                zup_automation::OPERATION_PUBLISH_GITHUB,
+                || crate::publish::run_github(args),
+            ),
+        },
+        Some(Commands::Toolchain(args)) => match args.command {
+            ToolchainVerb::Install(args) => operation(
+                args.format,
+                zup_automation::OPERATION_TOOLCHAIN_INSTALL,
+                || crate::toolchain_cli::run_install(args, toolchain),
+            ),
+            ToolchainVerb::Status(args) => operation(
+                args.format,
+                zup_automation::OPERATION_TOOLCHAIN_STATUS,
+                || crate::toolchain_cli::run_status(args, toolchain),
+            ),
+            ToolchainVerb::Clean(args) => operation(
+                args.format,
+                zup_automation::OPERATION_TOOLCHAIN_CLEAN,
+                || crate::toolchain_cli::run_clean(args),
+            ),
         },
         Some(Commands::Ci(args)) => crate::ci::run(args),
-        Some(Commands::Toolchain(args)) => crate::toolchain_cli::run(args, cli.toolchain),
         Some(Commands::Schema(args)) => crate::manifest_tools::run_schema(args),
         Some(Commands::Fmt(args)) => crate::manifest_tools::run_fmt(args),
         Some(Commands::Completions(args)) => crate::manifest_tools::run_completions(args),
@@ -72,6 +186,176 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Run one operation command and report it, whichever way it ended.
+///
+/// The single place a command's outcome becomes output, for three reasons. It is where
+/// the stream opens, so no command can forget to. It is where a failure becomes a
+/// result rather than a bare error, so a `--format json` caller always gets a document.
+/// And it is where the exit code and the document are decided together, so the two can
+/// never disagree: a failure writes a failure result *and* returns the error `main`
+/// turns into a nonzero exit.
+fn operation(
+    format: OutputArg,
+    name: &'static str,
+    body: impl FnOnce() -> miette::Result<AutomationResult>,
+) -> miette::Result<()> {
+    let reporter = Reporter::new(format);
+    reporter.begin(name);
+    let result = match body() {
+        Ok(result) => result,
+        Err(error) => {
+            reporter.finish(
+                AutomationResult::new(name)
+                    .failed()
+                    .with_diagnostic(crate::failure::failure(name, &error, "")),
+            );
+            return Err(error);
+        }
+    };
+    if let Err(error) = result.validate() {
+        // A result zup produced and cannot itself use is a defect in the producer, and
+        // saying so is more useful than emitting it.
+        reporter.finish(AutomationResult::new(name).failed().with_diagnostic(
+            zup_automation::Diagnostic::error("zup.internal.invalid_result", error.to_string()),
+        ));
+        return Err(miette::miette!(
+            "{name} produced a result that does not satisfy the protocol"
+        ));
+    }
+    let failed = result.status == zup_automation::Status::Failure;
+    reporter.finish(result.clone());
+    if failed {
+        return Err(refusal(&result));
+    }
+    Ok(())
+}
+
+/// The error `main` renders and turns into a nonzero exit, for a result that already
+/// says what went wrong.
+///
+/// Built from the result rather than from a second source, so the stderr message and
+/// the document cannot disagree about which operation failed or why.
+fn refusal(result: &AutomationResult) -> miette::Report {
+    let detail = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let summary = result
+        .summary
+        .clone()
+        .unwrap_or_else(|| format!("`{}` failed", result.operation));
+    let message = if detail.is_empty() {
+        summary
+    } else {
+        format!("{summary}: {detail}")
+    };
+    // The first diagnostic's code, so the exit path keeps the identity the document
+    // has rather than inventing one.
+    let code = result.diagnostics.first().map_or(
+        zup_automation::Identifier::fixed(zup_automation::FALLBACK_CODE),
+        |d| d.code.clone(),
+    );
+    let report = crate::failure::identified(code, message);
+    for diagnostic in &result.diagnostics {
+        if let Some(help) = &diagnostic.help {
+            return report.wrap_err(help.clone());
+        }
+    }
+    report
+}
+
+/// The result of a command line clap refused, when the command line still named a
+/// command and a machine format.
+///
+/// Only ever called from [`parse`]'s error arm, and only for the first case: an
+/// invocation that identifies an operation. Everything else is clap's.
+fn parse_error(error: &clap::Error, arguments: Vec<std::ffi::OsString>) -> Option<()> {
+    let format = requested_format(&arguments)?;
+    let operation = requested_operation(&arguments)?;
+    let reporter = Reporter::new(format);
+    reporter.begin(operation);
+    let diagnostic = zup_automation::Diagnostic::error(
+        "zup.cli.invalid_invocation",
+        error.render().to_string().trim().to_owned(),
+    )
+    .with_help(
+        "Run `zup --help`, or `zup <command> --help`, for the arguments this command accepts.",
+    );
+    reporter.finish(
+        AutomationResult::new(operation)
+            .failed()
+            .with_diagnostic(diagnostic),
+    );
+    Some(())
+}
+
+/// The exit code a refused command line reports.
+///
+/// A usage error is `3` in the same table a domain failure uses, so a caller that
+/// switches on the exit code does not have to learn a second numbering because a
+/// workflow mistyped a flag.
+pub fn process_exit_code_for_invocation(error: &clap::Error) -> i32 {
+    use clap::error::ErrorKind;
+    match error.kind() {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 0,
+        _ => 3,
+    }
+}
+
+/// The `--format` a command line asked for, if it asked for a machine one.
+///
+/// Deliberately a scan of `argv` and not a second parser: a partial parse of a command
+/// line clap has already refused is the one place a second parser would be acceptable,
+/// and even here all it does is find a flag whose value is one of three words. It
+/// cannot disagree with clap about anything, because clap is not asked.
+fn requested_format(arguments: &[std::ffi::OsString]) -> Option<OutputArg> {
+    let mut words = arguments
+        .iter()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy());
+    while let Some(argument) = words.next() {
+        let inline = argument.strip_prefix("--format=");
+        let value: &str = match inline {
+            Some(value) => value,
+            None if argument == "--format" => &words.next()?,
+            None => continue,
+        };
+        return value.parse::<OutputArg>().ok();
+    }
+    None
+}
+
+/// The command a command line named, from the verb list rather than from a guess.
+///
+/// Read from the parser's own subcommand table, so a command that does not exist is
+/// `None` and the caller falls back to clap's usage message — which is the documented
+/// boundary for an invocation with no operation in it.
+fn requested_operation(arguments: &[std::ffi::OsString]) -> Option<&'static str> {
+    /// The subcommands that take a machine format, in the parser's own order.
+    ///
+    /// A fixed table rather than a search of the help text: a name read out of a
+    /// derived string is a name the compiler cannot check, and this one goes into
+    /// the document as an operation.
+    const VERBS: &[&str] = &[
+        "check",
+        "doctor",
+        "plan",
+        "build",
+        "sign",
+        "artifact",
+        "publish",
+        "toolchain",
+    ];
+    arguments.iter().skip(1).find_map(|argument| {
+        let word = argument.to_string_lossy();
+        VERBS.iter().copied().find(|verb| *verb == word.as_ref())
+    })
 }
 
 /// Every authoring and distribution operation.
@@ -145,6 +429,9 @@ pub struct InitCommand {
 pub struct CheckCommand {
     #[command(flatten)]
     pub project: ProjectSelection,
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
 }
 
 /// Show what installing this project would do.
@@ -164,9 +451,9 @@ pub struct PlanCommand {
     /// Remove a component from the plan.
     #[arg(long = "disable", value_name = "ID")]
     pub disable: Vec<String>,
-    /// Write the plan as JSON.
-    #[arg(long)]
-    pub json: bool,
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
 }
 
 /// Which manifest, and which of its target profiles.
@@ -222,6 +509,9 @@ impl Default for ProjectSelection {
 pub struct BuildCommand {
     #[command(flatten)]
     pub project: ProjectSelection,
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// Where to write the artifacts, one per artifact or per target.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub output: Vec<PathBuf>,
@@ -283,8 +573,8 @@ pub struct ReleaseLocation {
 ///
 /// Two verbs, not a maze. `prepare` writes down what needs signing and in what
 /// order; the project's own signer does the signing; `verify` reads the result
-/// back, proves it, and rewrites the release description with the identity that
-/// will actually be published. Nothing here holds a credential — a PFX, a
+/// back, proves it, and rewrites the release description with the identity that will
+/// actually be published. Nothing here holds a credential — a PFX, a
 /// password, a client secret, or a token — so this is safe to run in a pipeline
 /// that has a signing step and nothing else.
 #[derive(Debug, Args)]
@@ -307,6 +597,9 @@ pub enum SignVerb {
 /// Write the list of files that require a signature.
 #[derive(Debug, Args)]
 pub struct SignPrepareCommand {
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// The publisher whose signature every signable must carry.
     #[arg(long, value_name = "SUBJECT")]
     pub subject: Option<String>,
@@ -331,6 +624,9 @@ pub struct SignPrepareCommand {
 /// Verify signatures and finalize the release.
 #[derive(Debug, Args)]
 pub struct SignVerifyCommand {
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// Report what is wrong with each file without failing.
     #[arg(long)]
     pub report_only: bool,
@@ -354,7 +650,7 @@ pub struct SignVerifyCommand {
     pub online_revocation: bool,
 }
 
-/// What to do with an artifact.
+/// What to do about an artifact.
 #[derive(Debug, Subcommand)]
 pub enum ArtifactVerb {
     /// Describe what an artifact contains and how it verifies.
@@ -367,9 +663,9 @@ pub struct ArtifactInspectCommand {
     /// The artifact to inspect.
     #[arg(value_name = "ARTIFACT", value_hint = ValueHint::FilePath)]
     pub artifact: PathBuf,
-    /// Readable text or the versioned JSON report.
+    /// Readable text, or the versioned machine result.
     #[arg(long, value_enum, default_value = "human")]
-    pub format: FormatArg,
+    pub format: OutputArg,
 }
 
 /// Publish a release.
@@ -395,6 +691,9 @@ pub enum PublishVerb {
 /// Stage everything a static origin serves and a TUF repository signs.
 #[derive(Debug, Args)]
 pub struct PublishStageCommand {
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// The manifest to read.
     #[arg(long, default_value = crate::DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
     pub manifest: PathBuf,
@@ -425,8 +724,8 @@ pub struct PublishStageCommand {
     /// Where the thin installers are written.
     ///
     /// They are not part of the web tree: the tree is what a static origin
-    /// serves, and an installer is what a person downloads. So they default to the
-    /// directory beside it, and a publisher who wants them served alongside the
+    /// serves, and an installer is what a person downloads. So they default to
+    /// the directory beside it, and a publisher who wants them served alongside the
     /// graph says so.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub thin_output: Option<PathBuf>,
@@ -473,6 +772,9 @@ pub struct PublishStageCommand {
 /// needed for the ordinary one.
 #[derive(Debug, Args)]
 pub struct PublishGithubCommand {
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// The manifest to read.
     #[arg(long, default_value = crate::DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
     pub manifest: PathBuf,
@@ -512,12 +814,13 @@ pub struct PublishGithubCommand {
     /// Where the provider's receipt is written.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub receipt: Option<PathBuf>,
-    /// Readable text or the versioned JSON report.
-    #[arg(long, value_enum, default_value = "human")]
-    pub format: GithubFormatArg,
 }
 
 /// Print the authoritative JSON Schema.
+///
+/// A raw-output command: the schema *is* the product, and it is written in the format
+/// the caller came for. Wrapping it in an automation result would be a JSON document
+/// inside a JSON document.
 #[derive(Debug, Args, Default)]
 pub struct SchemaCommand {
     /// Where to write it, or stdout when absent.
@@ -537,6 +840,9 @@ pub struct FmtCommand {
 }
 
 /// Generate shell completions for zup.
+///
+/// A raw-output command, for the same reason `schema` is one: a completion script is
+/// not a result, and a shell sourcing one inside a JSON string would be useless.
 #[derive(Debug, Args)]
 pub struct CompletionsCommand {
     /// The shell to generate for.
@@ -544,20 +850,47 @@ pub struct CompletionsCommand {
     pub shell: clap_complete::Shell,
 }
 
-/// Readable text or a versioned JSON report.
+/// How one command reports itself.
+///
+/// One type for every operation command, on purpose. Four identical enums named after
+/// four commands is a way for `--format json` to mean something slightly different in
+/// each of them, which is exactly the inconsistency the machine contract exists to
+/// remove. `human` is prose and is not stable; the other two are the versioned
+/// contract in `zup-automation`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum FormatArg {
+pub enum OutputArg {
+    /// Prose for a person. Never parsed, and free to change.
     #[default]
     Human,
+    /// Exactly one `AutomationResult` on stdout.
     Json,
+    /// A `StreamEvent` per line, ending with the same result `json` would write.
+    Jsonl,
 }
 
-/// Readable text or a versioned JSON report, for publishing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum GithubFormatArg {
-    #[default]
-    Human,
-    Json,
+impl std::str::FromStr for OutputArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "human" => Ok(Self::Human),
+            "json" => Ok(Self::Json),
+            "jsonl" => Ok(Self::Jsonl),
+            other => Err(format!(
+                "unknown output format `{other}`; expected human, json or jsonl"
+            )),
+        }
+    }
+}
+
+impl From<OutputArg> for OutputFormat {
+    fn from(value: OutputArg) -> Self {
+        match value {
+            OutputArg::Human => Self::Human,
+            OutputArg::Json => Self::Json,
+            OutputArg::Jsonl => Self::Jsonl,
+        }
+    }
 }
 
 /// Who an application installs for.
@@ -592,24 +925,6 @@ impl From<FrontendArg> for Frontend {
             FrontendArg::Gui => Self::Gui,
             FrontendArg::Console => Self::Console,
             FrontendArg::Headless => Self::Headless,
-        }
-    }
-}
-
-/// The format a machine-readable result is written in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OutputArg {
-    Human,
-    Json,
-    Jsonl,
-}
-
-impl From<OutputArg> for OutputFormat {
-    fn from(value: OutputArg) -> Self {
-        match value {
-            OutputArg::Human => Self::Human,
-            OutputArg::Json => Self::Json,
-            OutputArg::Jsonl => Self::Jsonl,
         }
     }
 }

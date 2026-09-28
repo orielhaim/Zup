@@ -43,6 +43,7 @@ bytes = "1"
 futures-util = "0.3"
 
 # Workspace crates
+zup-automation = { path = "crates/zup-automation" }
 zup-core = { path = "crates/zup-core" }
 zup-pe = { path = "crates/zup-pe" }
 zup-dispatch = { path = "crates/zup-dispatch" }
@@ -99,6 +100,7 @@ toml_edit = "0.25"
 
 # Manifest authoring
 schemars = "1.2"
+ts-rs = "12"
 toml = "1.1"
 url = "2"
 serde_spanned = "1.1"

@@ -1,0 +1,21 @@
+[package]
+name = "zup-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The versioned machine contract zup's developer CLI reports to CI, the GitHub Action and future integrations"
+
+[features]
+default = []
+bindings = ["dep:schemars", "dep:ts-rs"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars = { workspace = true, optional = true }
+ts-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+schemars.workspace = true
+ts-rs.workspace = true

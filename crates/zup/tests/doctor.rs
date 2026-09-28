@@ -110,7 +110,7 @@ fn single_target_project(target: &str) -> TempDir {
     project
 }
 
-/// Run `zup doctor` with the JSON report on stdout, one flag per input.
+/// Run `zup doctor` with the machine result on stdout, one flag per input.
 fn run_doctor(manifest: &Path, inputs: &[(&str, &Path)]) -> Output {
     let mut command = zup();
     command
@@ -123,14 +123,23 @@ fn run_doctor(manifest: &Path, inputs: &[(&str, &Path)]) -> Output {
     command.output().unwrap()
 }
 
-fn report(output: &Output) -> Value {
+/// The whole document: the versioned envelope every operation command writes.
+fn document(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
-            "doctor stdout is not one JSON report: {error}\n{}\n{}",
+            "doctor stdout is not one JSON result: {error}\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+/// The doctor's own `details`, which is where the check table lives.
+fn report(output: &Output) -> Value {
+    let document = document(output);
+    assert_eq!(document["operation"], "doctor", "{document}");
+    assert_eq!(document["details"]["kind"], "doctor", "{document}");
+    document["details"].clone()
 }
 
 /// The check rows for one profile, in report order.
@@ -143,6 +152,17 @@ fn checks(output: &Output, profile: &str) -> Vec<Value> {
         .unwrap_or_else(|| panic!("no report for profile {profile}"))["checks"]
         .as_array()
         .expect("checks is an array")
+        .clone()
+}
+
+/// One profile's target row.
+fn target_of(output: &Output, profile: &str) -> Value {
+    report(output)["targets"]
+        .as_array()
+        .expect("targets is an array")
+        .iter()
+        .find(|target| target["profile"] == profile)
+        .unwrap_or_else(|| panic!("no report for profile {profile}"))
         .clone()
 }
 
@@ -210,8 +230,7 @@ fn healthy_single_target_passes_every_required_check() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report = report(&output);
-    assert_eq!(report["version"], 1);
-    assert_eq!(report["status"], "pass");
+    assert_eq!(report["ready"], true);
     assert_eq!(report["host"], HOST_TARGET);
     assert_eq!(report["targets"].as_array().unwrap().len(), 1);
 
@@ -222,8 +241,6 @@ fn healthy_single_target_passes_every_required_check() {
         .collect::<BTreeSet<_>>();
     assert_eq!(kinds, only_kinds());
     for check in &rows {
-        assert_eq!(check["profile"], "default", "{check}");
-        assert_eq!(check["target"], HOST_TARGET, "{check}");
         assert!(
             check["message"]
                 .as_str()
@@ -253,7 +270,7 @@ fn healthy_single_target_passes_every_required_check() {
             "{}",
             message(find(&rows, "build_backend"))
         );
-        assert_eq!(report["status"], "pass");
+        assert_eq!(report["ready"], true);
     }
 }
 
@@ -274,7 +291,7 @@ fn a_runtime_that_is_not_a_component_is_reported_without_stopping_other_checks()
     );
     assert!(!output.status.success());
     let report = report(&output);
-    assert_eq!(report["status"], "fail");
+    assert_eq!(report["ready"], false);
     let rows = checks(&output, "default");
     let template = find(&rows, "runtime_template");
     assert_eq!(template["status"], "fail", "{template}");
@@ -411,8 +428,8 @@ destination = "${{install}}"
 
     let alpha = checks(&output, "alpha");
     let beta = checks(&output, "beta");
-    assert_eq!(alpha[0]["target"], HOST_TARGET);
-    assert_eq!(beta[0]["target"], OTHER_TARGET);
+    assert_eq!(target_of(&output, "alpha")["target"], HOST_TARGET);
+    assert_eq!(target_of(&output, "beta")["target"], OTHER_TARGET);
     for rows in [&alpha, &beta] {
         assert_eq!(
             rows.iter()
@@ -629,34 +646,55 @@ source = "plugins/helper.wasm"
 }
 
 #[test]
-fn json_report_is_versioned_and_byte_stable() {
+fn the_result_is_versioned_and_byte_stable() {
     let project = single_target_project(HOST_TARGET);
     let runtime = setup_runtime(project.path(), HOST_TARGET);
     let manifest = project.path().join("zup.toml");
     let first = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     let second = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     assert_eq!(first.stdout, second.stdout, "the report is deterministic");
+    // The human report moves to stderr rather than disappearing: stdout is the
+    // protocol, and a CI log that swallowed the table would be useless to the person
+    // reading it.
+    let stderr = String::from_utf8_lossy(&first.stderr);
     assert!(
-        first.stderr.is_empty(),
-        "a passing report writes nothing to stderr: {}",
-        String::from_utf8_lossy(&first.stderr)
+        stderr.contains("ready: all 1 target(s) can be built"),
+        "{stderr}"
     );
+    let document = document(&first);
+    // The document names the contract it belongs to, so a consumer gates on a version
+    // rather than on a shape it has to recognise.
+    assert_eq!(document["protocol"], zup_automation::PROTOCOL.to_string());
+    assert_eq!(document["operation"], "doctor");
+    assert_eq!(document["status"], "success");
+    for field in [
+        "protocol",
+        "operation",
+        "status",
+        "application",
+        "targets",
+        "artifacts",
+        "release_manifest",
+        "publication",
+        "diagnostics",
+        "summary",
+        "details",
+    ] {
+        assert!(
+            document.get(field).is_some(),
+            "{field} missing in {document}"
+        );
+    }
     let report = report(&first);
-    assert_eq!(report["version"], 1);
-    // The document declares its own schema version, and it is the constant the
-    // library exposes, so a consumer gates on a number rather than a shape.
-    assert_eq!(report["version"], zup::doctor::REPORT_VERSION);
-    let text = String::from_utf8_lossy(&first.stdout);
-    assert!(
-        text.contains(&format!("\"version\": {}", zup::doctor::REPORT_VERSION)),
-        "the version is the first field of the document: {text}"
-    );
-    for field in ["version", "manifest", "host", "status", "targets"] {
+    for field in ["manifest", "host", "ready", "checks", "targets"] {
         assert!(report.get(field).is_some(), "{field} missing in {report}");
     }
     for target in report["targets"].as_array().unwrap() {
+        for field in ["profile", "target", "status", "checks"] {
+            assert!(target.get(field).is_some(), "{field} missing in {target}");
+        }
         for check in target["checks"].as_array().unwrap() {
-            for field in ["profile", "target", "kind", "status", "message", "path"] {
+            for field in ["kind", "status", "message", "path"] {
                 assert!(check.get(field).is_some(), "{field} missing in {check}");
             }
             assert!(["pass", "fail", "skip"].contains(&check["status"].as_str().unwrap()));
@@ -675,9 +713,9 @@ fn an_unsupported_target_still_reports_every_independent_check() {
     );
     assert!(!result.status.success());
     let report = report(&result);
-    assert_eq!(report["status"], "fail");
+    assert_eq!(report["ready"], false);
     let rows = checks(&result, "default");
-    assert_eq!(rows[0]["target"], UNSUPPORTED_TARGET);
+    assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
     assert_eq!(statuses(&rows, "manifest_compile"), only("pass"));
     assert_eq!(statuses(&rows, "source_payload"), only("pass"));
     assert_eq!(statuses(&rows, "frontend"), only("pass"));
@@ -840,9 +878,24 @@ fn a_manifest_that_cannot_be_read_is_a_hard_error() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("zup.toml"), "{stderr}");
-    let stdout = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
+    let document = document(&output);
+    assert_eq!(document["status"], "failure");
     assert!(
-        stdout.get("targets").is_none(),
-        "no report is invented for a manifest that cannot be parsed: {stdout}"
+        document["details"].is_null(),
+        "no report is invented for a manifest that cannot be parsed: {document}"
+    );
+    let diagnostic = &document["diagnostics"][0];
+    assert_eq!(diagnostic["severity"], "error");
+    assert!(
+        diagnostic["source"]["file"]
+            .as_str()
+            .is_some_and(|file| file.ends_with("zup.toml")),
+        "the diagnostic points at the file it could not read: {diagnostic}"
+    );
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("missing field `app`")),
+        "{diagnostic}"
     );
 }

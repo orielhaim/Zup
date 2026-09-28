@@ -1,10 +1,12 @@
 //! Repository automation for zup.
 //!
-//! Seven jobs: keep one authoritative package matrix, keep the portable stack
+//! Eight jobs: keep one authoritative package matrix, keep the portable stack
 //! free of Windows-only code, name the build inputs the artifact tests require,
 //! keep the GitHub Actions zup's workflows depend on pinned and current, stage and
 //! package the toolchain a release ships, prove that release works from outside
-//! this repository, and refuse a dependency graph that grew by accident.
+//! this repository, refuse a dependency graph that grew by accident, and keep the
+//! automation contract's generated artifacts in step with the Rust types they come
+//! from.
 //!
 //! The first three read the workspace from disk and never shell out to cargo, so
 //! they behave identically on every host and need no network. `pins` is the
@@ -15,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod automation;
 pub mod boundary;
 pub mod cleanroom;
 pub mod dispatcher;

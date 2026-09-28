@@ -4,12 +4,10 @@ import {
   attestSubjects,
   isAlreadyCompressed,
   ManifestError,
-  manifestArtifacts,
   parseManifest,
   shouldUploadDirect,
 } from '../src/artifacts.js'
-import type { SigningEvidence } from '../src/result.js'
-import { coversBytes } from '../src/result.js'
+import type { SigningEvidence } from '../src/protocol.js'
 
 /** What a platform adapter hands over once it has verified a signature. */
 const SIGNED: SigningEvidence[] = [
@@ -20,7 +18,14 @@ const SIGNED: SigningEvidence[] = [
   { fact: 'timestamp', value: 'rfc3161' },
 ]
 
-/** A manifest as `zup build --release-manifest` and `zup sign verify` write it. */
+/**
+ * A manifest as `zup build --release-manifest` and `zup sign verify` write it.
+ *
+ * Hand-written, and deliberately so. The manifest is zup-artifact's own document,
+ * not the automation protocol's, and the action reads it because the *release*
+ * needs reading — attestation is the one thing zup does not own. A fixture here
+ * that came from the protocol's generator would be testing the wrong document.
+ */
 const MANIFEST: ReleaseManifestDocument = {
   schema: 1,
   application: { id: 'com.acme.app', name: 'Acme', version: '1.4.0' },
@@ -41,8 +46,8 @@ const MANIFEST: ReleaseManifestDocument = {
       kind: 'single',
       mode: 'offline',
       path: 'Acme-Windows-x64-Setup.exe',
-      // Signing appends a certificate table, so the built identity and the
-      // published one are different files for every signed artifact.
+      // Signing appends a certificate table, so the built identity and the published
+      // one are different files for every signed artifact.
       built: { digest: 'a'.repeat(64), size: 248_512_896 },
       finalized: { digest: 'b'.repeat(64), size: 249_123_456, evidence: SIGNED },
     },
@@ -60,9 +65,9 @@ const MANIFEST: ReleaseManifestDocument = {
       mode: 'offline',
       path: 'Acme-Windows-x64.zup',
       built: { digest: 'f'.repeat(64), size: 104_857_600 },
-      // Finalized with no signature: a real published identity, and nothing in
-      // it that says who produced it. `finalized` and `signed` are different
-      // questions, and this artifact answers the first and not the second.
+      // Finalized with no signature: a real published identity, and nothing in it
+      // that says who produced it. `finalized` and `signed` are different questions,
+      // and this artifact answers the first and not the second.
       finalized: { digest: '0'.repeat(64), size: 104_857_600, evidence: [] },
     },
   ],
@@ -107,26 +112,6 @@ describe('parseManifest', () => {
   })
 })
 
-describe('manifestArtifacts', () => {
-  it('projects the manifest onto the result shape', () => {
-    const artifacts = manifestArtifacts(MANIFEST)
-    expect(artifacts.map((entry) => entry.path)).toEqual([
-      'Acme-Windows-x64-Setup.exe',
-      'Acme-Windows-Setup.exe',
-      'Acme-Windows-x64.zup',
-    ])
-    // The published identity, not the built one.
-    expect(artifacts[0]?.digest).toBe('b'.repeat(64))
-    expect(artifacts[0]?.size).toBe(249_123_456)
-    expect(coversBytes(artifacts[0]?.evidence)).toBe(true)
-    // A finalized release with no signature is not a signed one, and the
-    // envelope says so rather than leaving the field out.
-    expect(artifacts[2]?.digest).toBe('0'.repeat(64))
-    expect(artifacts[2]?.evidence).toEqual([])
-    expect(coversBytes(artifacts[2]?.evidence)).toBe(false)
-  })
-})
-
 /**
  * The io the subject walk needs, in a form a test controls.
  *
@@ -158,17 +143,26 @@ describe('attestSubjects', () => {
   })
 
   it('carries the published digest, not the built one', async () => {
-    // The built digest names pre-signature bytes, and attesting those would
-    // attach provenance to a file that no downloader ever receives.
+    // The built digest names pre-signature bytes, and attesting those would attach
+    // provenance to a file that no downloader ever receives.
     const subjects = await attestSubjects(path, MANIFEST, 'dist', [], io)
     const installer = subjects.find((entry) => entry.name.endsWith('Acme-Windows-Setup.exe'))
     expect(installer?.digest).toBe('d'.repeat(64))
   })
 
+  it('attests an unsigned-but-finalized artifact, because it is a real release', () => {
+    // Nothing here is "skip it because it is unsigned" — a finalized artifact with
+    // no signature is one a downloader receives, and refusing to attest it would
+    // leave a hole in the chain the manifest itself was about to fill.
+    const finalized = MANIFEST.artifacts[2]?.finalized
+    expect(finalized?.evidence).toEqual([])
+    expect(finalized?.digest).toBe('0'.repeat(64))
+  })
+
   it('refuses a file that changed after the release was finalized', async () => {
-    // Re-derived rather than read. Attaching provenance to bytes the release
-    // does not claim is the failure attestation exists to prevent, so this is a
-    // refusal and not a warning.
+    // Re-derived rather than read. Attaching provenance to bytes the release does
+    // not claim is the failure attestation exists to prevent, so this is a refusal
+    // and not a warning.
     const published = ON_DISK['Acme-Windows-Setup.exe'] as string
     ON_DISK['Acme-Windows-Setup.exe'] = '7'.repeat(64)
     try {
@@ -188,8 +182,8 @@ describe('attestSubjects', () => {
   })
 
   it('does not glob the release directory', async () => {
-    // The whole point: an intermediate per-target artifact that compose merged
-    // away must not be attested, because nobody will ever download it.
+    // The whole point: an intermediate per-target artifact that compose merged away
+    // must not be attested, because nobody will ever download it.
     const subjects = await attestSubjects(path, MANIFEST, 'dist', [], io)
     expect(subjects.map((entry) => entry.name)).not.toContain('dist/variants/x64/Acme.exe')
   })
@@ -200,8 +194,8 @@ describe('attestSubjects', () => {
   })
 
   it('refuses an extra path that does not exist', async () => {
-    // An attestation of a file nobody receives is a claim nothing can check, and
-    // a silently smaller subject set is worse than a failure.
+    // An attestation of a file nobody receives is a claim nothing can check, and a
+    // silently smaller subject set is worse than a failure.
     await expect(attestSubjects(path, MANIFEST, 'dist', ['missing.txt'], io)).rejects.toThrow(
       ManifestError,
     )
@@ -251,8 +245,8 @@ describe('compression', () => {
   })
 
   it('never uploads a directory directly', () => {
-    // The service rejects `skipArchive` for more than one path, and a directory
-    // is not one path.
+    // The service rejects `skipArchive` for more than one path, and a directory is
+    // not one path.
     expect(shouldUploadDirect(['/w/dist'])).toBe(false)
     expect(shouldUploadDirect(['/w/a.exe', '/w/b.exe'])).toBe(false)
     expect(shouldUploadDirect(['/w/dist/notes.txt'])).toBe(false)

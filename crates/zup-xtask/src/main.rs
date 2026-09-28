@@ -52,6 +52,15 @@ xtask verify-dependency-graph [--root <dir>]
     package reaches two versions of one external crate, and when development
     tooling has reached the graph of a binary that ships to users.
 
+xtask automation generate [--root <dir>]
+    Write the artifacts derived from the automation contract: the JSON Schema, the
+    Action's TypeScript declarations, and the golden protocol fixtures. Never runs
+    inside a build.
+
+xtask automation check [--root <dir>]
+    Report every generated file that no longer matches the Rust types it came from.
+    This is the CI gate; `generate` is the fix.
+
 options:
     --root <dir>         workspace to inspect (default: this repository)
     --online             reach GitHub to report newer releases
@@ -125,6 +134,7 @@ fn run() -> Result<ExitCode, String> {
         "github-action-pins" => action_pins(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
         "verify-dependency-graph" => dependency_graph(&mut arguments),
+        "automation" => automation(&mut arguments),
         "release" => release(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }
@@ -286,6 +296,48 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
     eprintln!(
         "xtask: {} finding(s)",
         findings.duplicates.len() + findings.intrusions.len()
+    );
+    Ok(ExitCode::from(1))
+}
+
+/// Generate the automation contract's derived files, or report that they have drifted.
+fn automation(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let Some(subcommand) = arguments.next() else {
+        return Err("automation needs `generate` or `check`\n\n".to_owned() + USAGE);
+    };
+    let subcommand = match subcommand.as_str() {
+        "generate" => "automation generate",
+        "check" => "automation check",
+        unknown => {
+            return Err(format!(
+                "unknown automation subcommand `{unknown}`\n\n{USAGE}"
+            ));
+        }
+    };
+    let options = parse(arguments, subcommand, &["--root"])?;
+    let root = options
+        .root
+        .unwrap_or_else(zup_xtask::toolchain::repository_root);
+    let files = zup_xtask::automation::generate();
+    if subcommand == "automation generate" {
+        let written = zup_xtask::automation::write(&root, &files)?;
+        for path in written {
+            println!("wrote {path}");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let stale = zup_xtask::automation::drift(&root, &files);
+    if stale.is_empty() {
+        println!("automation: {} generated file(s) are current", files.len());
+        return Ok(ExitCode::SUCCESS);
+    }
+    for path in stale {
+        eprintln!("xtask: {path}");
+    }
+    eprintln!(
+        "xtask: {} generated file(s) no longer match the Rust types; \
+         run `cargo xtask automation generate`",
+        files.len()
     );
     Ok(ExitCode::from(1))
 }

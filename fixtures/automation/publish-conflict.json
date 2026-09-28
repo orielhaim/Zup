@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0",
+  "operation": "publish.github",
+  "status": "failure",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.publish.asset_conflict",
+      "message": "Acme-Windows-Setup.exe already exists on v1.4.0 with different bytes",
+      "source": null,
+      "help": null
+    }
+  ],
+  "summary": "v1.4.0 was not published",
+  "details": {
+    "kind": "publish.github",
+    "dry_run": false,
+    "receipt": null,
+    "failures": [
+      {
+        "phase": "Uploading",
+        "step": "Acme-Windows-Setup.exe",
+        "detail": "the host refused a replacement on a published release"
+      }
+    ]
+  }
+}

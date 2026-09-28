@@ -8,6 +8,7 @@
  */
 
 import type { RunnerEnvironment } from './platform.js'
+import type { LineFramer, WholeStream } from './stream.js'
 
 /** A command to run, with no shell anywhere in the picture. */
 export interface CommandSpec {
@@ -22,6 +23,12 @@ export interface CommandSpec {
    * was intended, so every environment here is built from scratch.
    */
   env: Record<string, string>
+  /**
+   * Read stdout through this as it arrives, rather than waiting for the process to
+   * exit. Every byte is also collected, so a consumer that only wants the whole
+   * output can ignore it.
+   */
+  stdout?: LineFramer | WholeStream | undefined
   /** Stream the child's output to the workflow log. */
   stream?: boolean
   /** Values to replace in the log with `***`. */

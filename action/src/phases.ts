@@ -2,9 +2,9 @@
  * The phases, in the order they run, and how each one is invoked.
  *
  * Release logic stays in the CLI. This module builds argument vectors and reads
- * envelopes; it does not decide how a target is built, what a release is, or what
- * gets attested. A phase that reimplemented release logic here would be a second
- * publisher with a second set of bugs, against a host that misbehaves.
+ * protocol documents; it does not decide how a target is built, what a release is,
+ * or what gets attested. A phase that reimplemented release logic here would be a
+ * second publisher with a second set of bugs, against a host that misbehaves.
  *
  * ```text
  * build -> compose -> sign (the project's own step) -> finalize -> attest -> publish
@@ -21,12 +21,21 @@
  * `finalize` closes the first two. It reads the signing plan, checks every
  * signature, and rewrites the release description with the identity that will
  * actually be published.
+ *
+ * # Phases are the action's; operations are zup's
+ *
+ * A phase is a step in a workflow, and a workflow's vocabulary is its own. An
+ * operation is what zup said it did, and zup's vocabulary is in
+ * `zup-automation`. `operationFor` is the whole translation, and it is one table
+ * rather than a naming convention — `attest` has no zup operation at all, because
+ * zup does not talk to Sigstore, and a phase whose operation is `undefined` is a
+ * fact the table states rather than a gap the code has to notice.
  */
 
 import type { Inputs } from './inputs.js'
-import type { OperationResult } from './result.js'
+import type { Operation } from './protocol.js'
 
-/** The zup operations this action can invoke. */
+/** The workflow steps this action can run. */
 export type Phase = 'build' | 'compose' | 'finalize' | 'attest' | 'publish'
 
 /** The release manifest file name zup writes. */
@@ -34,6 +43,32 @@ export const RELEASE_MANIFEST_NAME = 'zup-release.json'
 
 /** The signing plan file name zup writes beside the release manifest. */
 export const SIGNING_PLAN_NAME = 'zup-signing.json'
+
+/** The machine format every phase runs with. */
+export const FORMAT_JSONL = 'jsonl'
+
+/**
+ * The zup operation a phase runs, or `undefined` when it runs no zup command.
+ *
+ * `attest` is undefined on purpose: Sigstore attestation is GitHub's OIDC token
+ * exchange and Sigstore's signature format. What zup owns is which bytes are worth
+ * attesting, and it says so in the release description, which the action reads
+ * itself.
+ */
+export function operationFor(phase: Phase): Operation | undefined {
+  switch (phase) {
+    case 'build':
+      return 'build'
+    case 'compose':
+      return 'publish.stage'
+    case 'finalize':
+      return 'sign.verify'
+    case 'attest':
+      return undefined
+    case 'publish':
+      return 'publish.github'
+  }
+}
 
 /**
  * Which zup commands a workflow `operation` expands to.
@@ -72,9 +107,17 @@ export function argumentsFor(phase: Phase, inputs: Inputs): string[] {
 }
 
 function phaseArguments(phase: Phase, inputs: Inputs): string[] {
+  const operation = operationFor(phase)
+  if (operation === undefined) {
+    return []
+  }
+  return [...commandFor(phase, inputs), '--format', FORMAT_JSONL]
+}
+
+function commandFor(phase: Phase, inputs: Inputs): string[] {
   switch (phase) {
     case 'build': {
-      const args = ['build', '--format', 'json']
+      const args = ['build']
       for (const target of inputs.targets) {
         args.push('--target', target)
       }
@@ -85,12 +128,10 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
       args.push('--release-manifest', releaseManifestPath(inputs.releaseDir))
       return args
     }
-    case 'compose': {
-      const args = [
+    case 'compose':
+      return [
         'publish',
         'stage',
-        '--format',
-        'json',
         '--output',
         `${inputs.releaseDir}/web`,
         '--packages',
@@ -98,11 +139,6 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
         '--release-dir',
         inputs.releaseDir,
       ]
-      if (inputs.dryRun) {
-        args.push('--dry-run')
-      }
-      return args
-    }
     case 'finalize': {
       const args = ['sign', 'verify', '--release-dir', inputs.releaseDir]
       if (inputs.allowUnsigned) {
@@ -113,18 +149,10 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
       }
       return args
     }
-    case 'attest':
-      // `attest` is not a zup subcommand. zup does not talk to Sigstore and should
-      // not: OIDC token exchange is GitHub's and the signature format is
-      // Sigstore's. What zup owns is which bytes are worth attesting, and it says
-      // so in the release manifest, which the action reads itself.
-      return []
     case 'publish': {
       const args = [
         'publish',
         'github',
-        '--format',
-        'json',
         '--release-dir',
         inputs.releaseDir,
         '--web',
@@ -148,10 +176,17 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
         args.push('--prerelease')
       }
       if (inputs.dryRun) {
+        // Only here. `zup publish stage` has no `--dry-run`: staging writes into
+        // the project's own release directory, which a dry run is expected to
+        // leave alone because the whole release is disposable. Passing the flag
+        // anyway used to be refused by the parser, so a dry-run `release` failed
+        // in its second phase.
         args.push('--dry-run')
       }
       return args
     }
+    case 'attest':
+      return []
   }
 }
 
@@ -173,42 +208,4 @@ export function needsToken(phase: Phase): boolean {
 /** Whether a phase produces a release directory worth uploading. */
 export function producesArtifacts(phase: Phase): boolean {
   return phase === 'build' || phase === 'compose' || phase === 'finalize'
-}
-
-/** Merge two results of one `release` run into the one that is reported. */
-export function mergeResults(
-  phases: Phase[],
-  results: Map<Phase, OperationResult>,
-): OperationResult | undefined {
-  let merged: OperationResult | undefined
-  for (const phase of phases) {
-    const result = results.get(phase)
-    if (result === undefined) {
-      continue
-    }
-    if (merged === undefined) {
-      merged = { ...result, operation: 'release' }
-      continue
-    }
-    // Bound to a `const` so the narrowing survives into the callbacks below: a
-    // `let` is not narrowed inside a closure, and the artifact merge is two
-    // closures.
-    const previous = merged
-    merged = {
-      ...previous,
-      operation: 'release',
-      success: previous.success && result.success,
-      targets: [...new Set([...previous.targets, ...result.targets])],
-      artifacts: [
-        ...new Map(previous.artifacts.map((a) => [a.path, a])).values(),
-        ...result.artifacts.filter((a) => !previous.artifacts.some((b) => b.path === a.path)),
-      ],
-      diagnostics: [...previous.diagnostics, ...result.diagnostics],
-      releaseManifest: result.releaseManifest ?? previous.releaseManifest,
-      appVersion: result.appVersion ?? previous.appVersion,
-      release: result.release ?? previous.release,
-      summary: result.summary ?? previous.summary,
-    }
-  }
-  return merged
 }

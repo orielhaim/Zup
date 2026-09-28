@@ -1,26 +1,14 @@
 name: zup
 description: >-
-  Build, compose, attest and publish a zup release. Installs the zup CLI, runs
-  the phase you asked for, and reports the result as annotations, a job summary
-  and typed outputs.
+  Build, compose, sign, attest and publish a zup release. Installs the zup CLI,
+  runs the phase you asked for, and reports the result as annotations, a job
+  summary and typed outputs.
 author: zup
 
-# `node24` is the current GitHub Actions runtime and implies a minimum runner of
-# 2.327.1, which `runs.minimum` below states rather than leaving a self-hosted
-# runner owner to discover it as a mysterious failure.
-#
-# `main` is a single checked-in bundle with every dependency inlined, so the action
-# needs no `node_modules` and no install step. `bun run check:dist` in action/
-# proves it matches action/src, and CI runs that. The path is relative to *this*
-# file, which is why it includes `action/`.
-#
-# The two largest dependencies — Sigstore and the artifact service's Twirp client —
-# are behind dynamic imports, so a build that neither attests nor uploads never
-# initializes them.
 runs:
   using: node24
   main: action/dist/index.js
-  minimum: '2.327.1'
+  minimum: "2.327.1"
 
 branding:
   icon: package
@@ -31,10 +19,12 @@ inputs:
     description: >-
       What this step does. `setup` installs zup and stops. `build` runs
       `zup build`. `compose` folds per-target output into one release with
-      `zup publish stage`. `attest` attests the artifacts a release manifest
-      names, and implies `attest: true`. `publish` publishes an
-      already-composed release with `zup publish github`. `release` runs build,
-      compose, attest and publish in that order, and attests only when
+      `zup publish stage`. `finalize` runs `zup sign verify`, which checks every
+      signature and rewrites the release description with the identity that will
+      be published. `attest` attests the artifacts a release manifest names, and
+      implies `attest: true`. `publish` publishes an already-composed and
+      finalized release with `zup publish github`. `release` runs build, compose,
+      finalize, attest and publish in that order, and attests only when
       `attest: true`.
     required: false
     default: build
@@ -44,7 +34,7 @@ inputs:
       Directory holding `zup.toml`. Relative paths resolve against the
       workspace.
     required: false
-    default: '.'
+    default: "."
 
   zup-version:
     description: >-
@@ -102,19 +92,19 @@ inputs:
   draft:
     description: Leave the release a draft.
     required: false
-    default: 'false'
+    default: "false"
 
   prerelease:
     description: Mark the release a prerelease.
     required: false
-    default: 'false'
+    default: "false"
 
   dry-run:
     description: >-
       Plan and verify without writing anything. Still needs a credential for the
       publication checks, and does not need write permissions.
     required: false
-    default: 'false'
+    default: "false"
 
   upload-workflow-artifacts:
     description: >-
@@ -122,7 +112,7 @@ inputs:
       can collect it. Off by default: a release can be gigabytes, and nobody
       expects a build step to spend artifact storage without being asked.
     required: false
-    default: 'false'
+    default: "false"
 
   workflow-artifact-name:
     description: >-
@@ -144,7 +134,7 @@ inputs:
       attestations. A requested attestation that cannot be created is an error
       rather than a skip.
     required: false
-    default: 'false'
+    default: "false"
 
   attest-paths:
     description: >-
@@ -160,7 +150,7 @@ inputs:
       running code that may have come from a fork. Off by default, and refusing
       is the point — see the action's documentation for the safe pattern.
     required: false
-    default: 'false'
+    default: "false"
 
   receipt:
     description: >-
@@ -182,15 +172,18 @@ outputs:
   zup-version:
     description: The zup version that was installed or used.
   app-version:
-    description: The application's version, from the release manifest.
+    description: The application's version, from zup's result.
   artifact-paths:
     description: >-
       JSON array of the artifacts a build produced, each with `path`, `size` and
       `digest`. Paths are relative to `release-dir`.
   release-manifest:
-    description: The release manifest, relative to `project-path`.
+    description: The release description, relative to `project-path`.
   release-id:
-    description: The GitHub release id.
+    description: >-
+      The provider's own reference for the release, as a string. GitHub's are
+      19-digit snowflakes, which no consumer using a JavaScript number could hold
+      exactly.
   release-url:
     description: The release page.
   publish-receipt:

@@ -26,8 +26,37 @@ to build, what to attest and how to publish a release is made by the Rust CLI.
   adapter produces `latest.json`, a `.sig`, a `latest.yml` or a `.blockmap`, they
   appear in the release manifest and the action publishes and attests them
   without a line changing.
-- **It does not parse human output.** It runs `zup --format json` and reads one
-  versioned envelope, which is also what a CI system that is not GitHub reads.
+- **It does not parse human output.** It runs zup with `--format jsonl` and reads
+  the versioned protocol stream, which is also what a CI system that is not GitHub
+  reads; see [the automation protocol](automation.md).
+
+## Where its types come from
+
+The action has no hand-written copy of zup's result envelope. Its declarations are
+generated from the same Rust DTOs the JSON Schema is generated from:
+
+```text
+crates/zup-automation/            the contract
+schema/automation-v1.schema.json  for a consumer that is not TypeScript
+action/src/protocol.generated.ts  what the action imports
+fixtures/automation/*             golden documents the action's tests read
+```
+
+```bash
+cargo xtask automation generate   # regenerate after changing a DTO
+cargo xtask automation check      # CI fails when they drift
+```
+
+The decoder in `action/src/protocol.ts` is hand-written, on purpose: it is where the
+ignore-what-you-do-not-know rule lives, and a generated decoder would know none of
+it. What it implements is three rules — refuse a different protocol major, ignore
+what you do not know, and refuse a document that says nothing usable — and they are
+in [the automation protocol](automation.md) because they are the contract rather than
+this consumer's private policy.
+
+The action's own types are the exceptions, and they are named as such: which
+*workflow step* ran, what to attest, and where the workflow artifact went. `attest`
+in particular has no zup operation at all — see [Operations](#operations).
 
 ## Why a JavaScript action
 
@@ -115,13 +144,32 @@ attest → publish` readable in the diff.
 | `setup` | nothing — installs zup and puts it on `PATH` |
 | `build` | `zup build` |
 | `compose` | `zup publish stage`, folding per-target output into one release |
+| `finalize` | `zup sign verify`, then reads the release description it rewrote |
 | `attest` | reads the release manifest and attests the final bytes it names |
 | `publish` | `zup publish github` |
-| `release` | build → compose → attest → publish, in that order |
+| `release` | build → compose → finalize → attest → publish, in that order |
 
 `release` is a loop over the same phases a hand-written pipeline runs, not a
 separate code path. Attestation is only part of it when `attest: true` is set;
 `operation: attest` already implies it.
+
+**A phase is a workflow step; an operation is what zup said it did.** The two
+vocabularies are not the same, and the translation is one table in
+`action/src/phases.ts`:
+
+| phase | zup operation |
+| --- | --- |
+| `build` | `build` |
+| `compose` | `publish.stage` |
+| `finalize` | `sign.verify` |
+| `attest` | *none* |
+| `publish` | `publish.github` |
+
+`attest` has no operation because zup does not talk to Sigstore. The OIDC token
+exchange is GitHub's and the signature format is Sigstore's; what zup owns is which
+bytes are worth attesting, and it says so in the release description, which the
+action reads itself. A `zup attest` verb would be a second signer with a second set
+of bugs.
 
 ## Examples
 
@@ -389,17 +437,47 @@ annotation commands, including source positions:
 ```json
 {
   "severity": "error",
-  "code": "zup_manifest::unknown_target_profile_reference",
+  "code": "zup.manifest.unknown_target",
   "message": "resource references unknown target profile `x64`",
   "help": "use an exact profile id declared under [build.targets]",
-  "source": { "file": "zup.toml", "startLine": 12, "startColumn": 3, "endLine": 12, "endColumn": 9 }
+  "source": { "file": "zup.toml", "start_line": 12, "start_column": 3, "end_line": 12, "end_column": 9 }
 }
 ```
 
 becomes an error annotation on `zup.toml` at line 12, visible in the workflow's
-file view. miette's rendering is not reformatted; the action only decides which
-level and which region. Human terminal output is still streamed and grouped for
-whoever is reading the log.
+file view. A relative path is resolved against `project-path`, because GitHub
+resolves an annotation path against the workspace root and an annotation on a path
+that does not resolve is invisible.
+
+A diagnostic arrives twice — streamed as it is found, and again in the final
+result — and is annotated **once**. Telling the reader the same fact twice is worse
+than not telling them at all.
+
+A warning on a successful result is a warning annotation, not a failure.
+`zup check` reporting that two targets cannot be composed into one artifact is a
+fact about how the release has to be built, not a broken project; see
+[severity and status](automation.md#severity-and-status-agree).
+
+## A failing zup is read, not scraped
+
+When zup exits nonzero, the action reads the failure **out of the protocol document**
+rather than out of stderr:
+
+```text
+zup publish github --dry-run  →  exit 1
+                              →  the stream's last line is a `completed` event
+                              →  its result says `status: "failure"` and carries
+                                 the diagnostic with its code and location
+```
+
+Every diagnostic in that result is annotated, the phase is reported as failed, and
+the summary keeps whatever was produced before the failure — a build that composed
+four artifacts and then failed to publish is the case somebody most needs a record
+of.
+
+This is why the phases run `--format jsonl` rather than `--format json`. The stream
+also gives the action something to read *while* zup is working; the exit code and
+the document are read together, which is the only way they can be made to agree.
 
 ## Logs and the job summary
 
@@ -441,10 +519,14 @@ summary, which is what makes it reviewable.
 | `zup-version` | the zup version that was installed or used |
 | `app-version` | the application's version |
 | `artifact-paths` | JSON array of `{path, size, digest}` |
-| `release-manifest` | the release manifest, relative to `project-path` |
-| `release-id` | the GitHub release id |
+| `release-manifest` | the release description, relative to `project-path` |
+| `release-id` | the provider's release reference |
 | `release-url` | the release page |
 | `publish-receipt` | the publisher's receipt, relative to `project-path` |
+
+`release-id` is a string, not a number. It is the provider's own reference, and
+whether it fits in a JavaScript `number` is the provider's business — GitHub's are
+19-digit snowflakes and will not, indefinitely.
 
 `artifact-paths` is JSON rather than a newline-joined list because a caller that
 needs to iterate needs to parse, and JSON survives a path with a space in it.
@@ -557,7 +639,7 @@ coverage, and they need no runner and no network.
 bun install --frozen-lockfile
 bun run typecheck          # src with no Bun types; tests with them
 bun run biome              # lint and format
-bun test                   # 143 unit tests
+bun test                   # 178 unit tests, over the Rust-generated fixtures
 bun run build              # one ESM file
 git diff --exit-code -- action/dist
 bun run metadata           # action.yml matches the implementation
@@ -569,11 +651,27 @@ is a single ESM file, contains no `Bun.*` API, bakes in no absolute path from th
 build machine, resolves its `zup-path` input, and writes a job summary. It cannot
 be skipped.
 
-`e2e` then invokes the action as `uses: ./` on `ubuntu-latest`, `windows-latest`,
-`macos-15`, `ubuntu-24.04-arm` and `windows-11-arm`, against a locally built zup
-through `zup-path`, covering setup, build, outputs, a project path containing a
-space, the job summary, and a failing zup failing the step. `tool-bootstrap` is
-opt-in because it needs a published zup release and reaches the network.
+`bun test` is a compatibility gate, not just coverage. The protocol tests read the
+golden fixtures from `fixtures/automation/` on disk — the documents zup's own Rust
+serializes — so a change to a DTO that the action's decoder has not been taught
+fails here, naming the field, rather than in somebody's release workflow.
+
+`real-zup` then invokes the action as `uses: ./` on `windows-latest` and
+`windows-11-arm`, against a zup **built from this commit** through `zup-path`. It
+covers setup, the CLI on `PATH`, a successful operation and its outputs, a project
+path containing a space, a summary that carries the result without dumping the
+document, and a failing zup failing the step with a diagnostic *code* in the
+summary.
+
+Real zup, not a stub, and that is the whole point. A stub that emits a hand-written
+document proves the action against a document somebody typed — which is how the
+action and the CLI came to disagree about the shape of a result in the first place.
+Building from this commit also means the protocol under test is the one in the tree,
+not the one in the newest release.
+
+`tool-bootstrap` is opt-in because it needs a published zup release and reaches the
+network. It covers the one path a `zup-path` binary cannot: the download, its
+digest verification, and the tool cache.
 
 ### GitHub Action dependency pins
 

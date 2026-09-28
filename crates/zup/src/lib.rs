@@ -14,12 +14,14 @@
 //! products, and Cargo features were being asked to choose between them.
 
 mod artifacts;
+pub mod automation;
 mod build;
 mod build_inputs;
 mod check;
 pub mod ci;
 mod cli;
 pub mod doctor;
+pub mod failure;
 mod init;
 mod inspect_artifact;
 mod manifest_tools;
@@ -27,6 +29,7 @@ mod packages;
 mod project;
 mod publish;
 mod publish_github;
+pub mod report;
 mod signing;
 mod toolchain;
 pub mod toolchain_cli;
@@ -36,6 +39,7 @@ use std::path::{Path, PathBuf};
 use zup_presentation::ProcessOutcome;
 
 pub use crate::cli::{FrontendArg, OutputArg, ScopeArg};
+pub use crate::report::Reporter;
 pub use crate::toolchain::{ToolchainResolver, ToolchainSource, missing_component_message};
 
 /// The manifest every authoring command defaults to.

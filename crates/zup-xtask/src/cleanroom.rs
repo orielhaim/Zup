@@ -333,10 +333,14 @@ fn capture(program: &Path, work: &Path, arguments: &[&str]) -> Result<Outcome, S
     let output = command
         .output()
         .map_err(|error| format!("run `{}`: {error}", program.display()))?;
+    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
+    // Appended rather than concatenated with `+`: the two streams are two different
+    // losses and joining them with an operator that needs both to be `String` says they
+    // are one.
+    captured.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(Outcome {
         success: output.status.success(),
-        output: String::from_utf8_lossy(&output.stdout).into_owned()
-            + &String::from_utf8_lossy(&output.stderr),
+        output: captured,
     })
 }
 

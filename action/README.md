@@ -24,11 +24,12 @@ src/
   main.ts        the entry point, and nothing else
   workflow.ts    read inputs, install zup, run the phases, report
   inputs.ts      the input table, its parsing, and argument tokenization
-  phases.ts      which zup commands each operation expands to
-  result.ts      the versioned machine-result envelope zup emits
+  phases.ts      which zup command each workflow phase runs
+  protocol.ts    decoding zup's automation protocol
+  stream.ts      chunk-safe line framing for the protocol stream
   tool.ts        installing the CLI, and verifying the bytes
   platform.ts    runner identity, and the asset name it maps to
-  artifacts.ts   reading the release manifest, and deciding what to attest
+  artifacts.ts   reading the release description, and deciding what to attest
   security.ts    refusing a mutation on a dangerous trigger
   summary.ts     the job summary
   ports.ts       every effect the action has, as an interface
@@ -40,6 +41,17 @@ scripts/
 dist/            the committed bundle: one file
 tests/           unit tests, run by bun test
 ```
+
+There is no hand-written copy of zup's result envelope here.
+`src/protocol.generated.ts` is generated from the same Rust DTOs as
+`schema/automation-v1.schema.json`, by `cargo xtask automation generate`; `bun run
+biome` excludes it and CI fails on drift. The decoder beside it is hand-written,
+because that is where the ignore-what-you-do-not-know rule lives. See
+[`../docs/automation.md`](../docs/automation.md).
+
+The tests read the golden documents from `fixtures/automation/` on disk — the ones
+zup's own Rust serializes — so `bun test` is a compatibility gate rather than only
+coverage.
 
 The split between `ports.ts` and everything else is the one that matters for the
 tests. Every effect — running a process, reading a file, downloading bytes,

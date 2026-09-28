@@ -33,12 +33,21 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueHint};
-use serde::Serialize;
+use zup_automation::{
+    AutomationResult, Details, Identifier, LogLevel, ToolchainCleanDetails,
+    ToolchainInstallDetails, ToolchainStatusDetails,
+};
 use zup_toolchain::{ToolchainComponent, ToolchainRelease};
 
+use crate::cli::OutputArg;
+use crate::report::Reporter;
 use crate::toolchain::{ToolchainResolver, ToolchainSource, describe};
 
 /// The operations `zup toolchain` performs.
+///
+/// Each verb is its own zup operation in the machine contract rather than three shapes
+/// of one, because a setup tool wants to branch on "which of these happened" and
+/// `toolchain.status` is a different question from `toolchain.install`.
 #[derive(Debug, Args)]
 pub struct ToolchainCommand {
     #[command(subcommand)]
@@ -70,9 +79,9 @@ pub struct ToolchainInstallCommand {
     /// The state root whose cache to populate.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
-    /// Readable text or the versioned JSON report.
+    /// Readable text, or the versioned machine result.
     #[arg(long, value_enum, default_value = "human")]
-    pub format: FormatArg,
+    pub format: OutputArg,
 }
 
 /// Report the toolchain a build on this machine would use.
@@ -81,14 +90,17 @@ pub struct ToolchainStatusCommand {
     /// The state root to read the cache from.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
-    /// Readable text or the versioned JSON report.
+    /// Readable text, or the versioned machine result.
     #[arg(long, value_enum, default_value = "human")]
-    pub format: FormatArg,
+    pub format: OutputArg,
 }
 
 /// Remove cached toolchains.
 #[derive(Debug, Args)]
 pub struct ToolchainCleanCommand {
+    /// Readable text, or the versioned machine result.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: OutputArg,
     /// The state root whose cache to clean.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -103,20 +115,8 @@ pub struct ToolchainCleanCommand {
     pub dry_run: bool,
 }
 
-/// Readable text or a versioned JSON report.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum FormatArg {
-    #[default]
-    Human,
-    Json,
-}
-
-/// Version of the `zup toolchain` report shape.
-pub const REPORT_VERSION: u32 = 1;
-
 /// One component's state, as `status` reports it.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub struct ComponentStatus {
     /// The component, in the wording every refusal uses.
     pub component: String,
@@ -130,9 +130,20 @@ pub struct ComponentStatus {
     pub problem: Option<String>,
 }
 
+impl ToolchainSourceName {
+    /// The wire name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Override => "override",
+            Self::Root => "root",
+            Self::Cache => "cache",
+            Self::Staged => "staged",
+        }
+    }
+}
+
 /// The name of a resolver arm, for a report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolchainSourceName {
     Override,
     Root,
@@ -152,9 +163,8 @@ impl From<ToolchainSource> for ToolchainSourceName {
 }
 
 /// The whole cache, for one zup version.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ToolchainStatus {
-    pub version: u32,
     /// The zup release these components have to come from.
     pub zup_version: String,
     /// The build host's canonical target triple.
@@ -265,40 +275,86 @@ pub enum ToolchainCommandError {
 }
 
 /// Run `zup toolchain`.
-pub fn run(args: ToolchainCommand, toolchain_root: Option<PathBuf>) -> miette::Result<()> {
-    match args.command {
-        ToolchainVerb::Install(install) => run_install(install, toolchain_root),
-        ToolchainVerb::Status(status) => run_status(status, toolchain_root),
-        ToolchainVerb::Clean(clean) => run_clean(clean),
+///
+/// Dispatched by the CLI's shared operation wrapper rather than here, because each
+/// verb is a different zup operation in the machine contract and each one therefore
+/// opens its own stream and reports its own result.
+impl ToolchainCommand {
+    /// The verb, for a caller that wants to branch on it without matching twice.
+    pub const fn operation(&self) -> &'static str {
+        match self.command {
+            ToolchainVerb::Install(_) => zup_automation::OPERATION_TOOLCHAIN_INSTALL,
+            ToolchainVerb::Status(_) => zup_automation::OPERATION_TOOLCHAIN_STATUS,
+            ToolchainVerb::Clean(_) => zup_automation::OPERATION_TOOLCHAIN_CLEAN,
+        }
     }
 }
 
 /// Copy a release's components into this machine's cache.
-fn run_install(
+pub fn run_install(
     args: ToolchainInstallCommand,
     toolchain_root: Option<PathBuf>,
-) -> miette::Result<()> {
-    let source = args
-        .source
-        .canonicalize()
-        .map_err(|source| miette::miette!("{}: {source}", args.source.display()))?;
+) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
+    let source = args.source.canonicalize().map_err(|source| {
+        crate::failure::error(
+            "zup.toolchain.source_unreadable",
+            format!("{}: {source}", args.source.display()),
+        )
+    })?;
     let state_root = args
         .state_root
         .clone()
         .unwrap_or_else(crate::toolchain_state_root);
-    let installed = install(&source, &state_root, toolchain_root)
-        .map_err(|error| miette::miette!("{error}"))?;
-    match args.format {
-        FormatArg::Human => print!("{}", installed.human()),
-        FormatArg::Json => println!("{}", json(&installed)?),
+    let installed = install(&source, &state_root, toolchain_root).map_err(failure)?;
+    reporter.log(LogLevel::Info, installed.human());
+    let count = installed.components.len();
+    Ok(
+        AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_INSTALL)
+            .with_details(Details::ToolchainInstall(ToolchainInstallDetails {
+                zup_version: installed.zup_version.clone(),
+                source: crate::automation::project_path(std::path::Path::new(&installed.source)),
+                cache: installed.cache.clone(),
+                components: installed.components.clone(),
+            }))
+            .with_summary(format!(
+                "Installed {count} toolchain component(s) for zup {}",
+                installed.zup_version
+            )),
+    )
+}
+
+/// A toolchain failure, with the code its variant means.
+///
+/// The variants are already the taxonomy; a code per variant is what lets a setup tool
+/// react to "you have the wrong zup" differently from "the archive is damaged" without
+/// reading the message.
+fn failure(error: ToolchainCommandError) -> miette::Report {
+    use ToolchainCommandError as Error;
+    match &error {
+        Error::NotARelease { .. } => {
+            crate::failure::error("zup.toolchain.not_a_release", error.to_string())
+        }
+        Error::Damaged { .. } => {
+            crate::failure::error("zup.toolchain.release_damaged", error.to_string())
+        }
+        Error::WrongVersion { .. } => crate::failure::error_with_help(
+            "zup.toolchain.wrong_version",
+            error.to_string(),
+            "A toolchain is usable only by the zup release that produced it.",
+        ),
+        Error::Incomplete { .. } => crate::failure::error_with_help(
+            "zup.toolchain.cache_incomplete",
+            error.to_string(),
+            crate::doctor::TOOLCHAIN_HINT,
+        ),
+        Error::Io { .. } => crate::failure::error("zup.toolchain.io", error.to_string()),
     }
-    Ok(())
 }
 
 /// What an install did.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    pub version: u32,
     pub zup_version: String,
     /// The release the bytes came from.
     pub source: String,
@@ -320,10 +376,6 @@ impl Installed {
         out.push_str("\n`zup build` will find them without being told where they are.");
         out
     }
-}
-
-fn json<T: Serialize>(value: &T) -> miette::Result<String> {
-    serde_json::to_string_pretty(value).map_err(|error| miette::miette!("report: {error}"))
 }
 
 /// Verify a release directory and copy its components into the cache.
@@ -426,7 +478,6 @@ pub fn install(
     }
 
     Ok(Installed {
-        version: REPORT_VERSION,
         zup_version: index.zup_version,
         source: crate::plain_path(source),
         cache: crate::plain_path(&cache),
@@ -478,7 +529,15 @@ fn copy_component(from: &Path, to: &Path) -> Result<(), ToolchainCommandError> {
 }
 
 /// Report what a build on this machine would resolve, and from where.
-fn run_status(args: ToolchainStatusCommand, toolchain_root: Option<PathBuf>) -> miette::Result<()> {
+///
+/// A status report that describes an unusable toolchain is a *failure result*, not an
+/// error with no document: the report is the output, the status is the verdict, and a
+/// setup tool needs both.
+pub fn run_status(
+    args: ToolchainStatusCommand,
+    toolchain_root: Option<PathBuf>,
+) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
     let report = status(
         &args
             .state_root
@@ -486,25 +545,56 @@ fn run_status(args: ToolchainStatusCommand, toolchain_root: Option<PathBuf>) -> 
             .unwrap_or_else(crate::toolchain_state_root),
         toolchain_root,
     );
-    match args.format {
-        FormatArg::Human => print!("{}", report.human()),
-        FormatArg::Json => println!("{}", json(&report)?),
+    reporter.log(LogLevel::Info, report.human());
+    let missing = report
+        .components
+        .iter()
+        .filter(|component| !component.found)
+        .count();
+    let mut result = AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_STATUS)
+        .with_details(Details::ToolchainStatus(ToolchainStatusDetails {
+            zup_version: report.zup_version.clone(),
+            host: report.host.clone(),
+            cache: report.cache.clone(),
+            complete: report.is_complete(),
+            components: report
+                .components
+                .iter()
+                .map(|component| zup_automation::ToolchainComponentStatus {
+                    component: component.component.clone(),
+                    found: component.found,
+                    source: component
+                        .source
+                        .map(|source| Identifier::fixed(source.as_str())),
+                    path: component.path.clone(),
+                    problem: component.problem.clone(),
+                })
+                .collect(),
+        }))
+        .with_summary(if report.is_complete() {
+            format!(
+                "every toolchain component is present and verified ({})",
+                crate::ZUP_VERSION
+            )
+        } else {
+            format!(
+                "not ready: {missing} of {} component(s) missing",
+                report.components.len()
+            )
+        });
+    if !report.is_complete() {
+        result = result.failed().with_diagnostic(
+            zup_automation::Diagnostic::error(
+                "zup.toolchain.component_missing",
+                format!(
+                    "{missing} of {} component(s) a build needs are missing",
+                    report.components.len()
+                ),
+            )
+            .with_help(crate::doctor::TOOLCHAIN_HINT),
+        );
     }
-    // A status report that describes an unusable toolchain is a successful
-    // command reporting failure, the way `doctor` behaves: the report is the
-    // output, and the exit code is the verdict.
-    if report.is_complete() {
-        return Ok(());
-    }
-    Err(miette::miette!(
-        "toolchain: {} of {} component(s) missing",
-        report
-            .components
-            .iter()
-            .filter(|component| !component.found)
-            .count(),
-        report.components.len()
-    ))
+    Ok(result)
 }
 
 /// Build the report.
@@ -553,7 +643,6 @@ fn report(
         })
         .collect();
     ToolchainStatus {
-        version: REPORT_VERSION,
         zup_version: crate::ZUP_VERSION.to_owned(),
         host: zup_plugin_contract::HOST_TARGET.to_owned(),
         cache: crate::plain_path(&cache),
@@ -571,21 +660,38 @@ fn host_components() -> Vec<ToolchainComponent> {
 }
 
 /// Remove cached toolchains this executable cannot use.
-fn run_clean(args: ToolchainCleanCommand) -> miette::Result<()> {
+pub fn run_clean(args: ToolchainCleanCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
     let state_root = args
         .state_root
         .clone()
         .unwrap_or_else(crate::toolchain_state_root);
-    let report =
-        clean(&state_root, args.all, args.dry_run).map_err(|error| miette::miette!("{error}"))?;
-    println!("{}", report.human());
-    Ok(())
+    let report = clean(&state_root, args.all, args.dry_run).map_err(failure)?;
+    reporter.log(LogLevel::Info, report.human());
+    let removed = report.removed.len();
+    Ok(
+        AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_CLEAN)
+            .with_details(Details::ToolchainClean(ToolchainCleanDetails {
+                cache: report.cache.clone(),
+                dry_run: report.dry_run,
+                removed: report.removed.clone(),
+                kept: report.kept.clone(),
+            }))
+            .with_summary(format!(
+                "{} {removed} cached version(s) from {}",
+                if report.dry_run {
+                    "Would remove"
+                } else {
+                    "Removed"
+                },
+                report.cache
+            )),
+    )
 }
 
 /// What a clean removed, or would remove.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cleaned {
-    pub version: u32,
     /// The directory that was cleaned.
     pub cache: String,
     /// True when nothing was changed.
@@ -680,7 +786,6 @@ pub fn clean(
         kept.push(crate::ZUP_VERSION.to_owned());
     }
     Ok(Cleaned {
-        version: REPORT_VERSION,
         cache: crate::plain_path(&cache_root),
         dry_run,
         removed,

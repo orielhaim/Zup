@@ -86,6 +86,10 @@ pub const PORTABLE_CORE: &[&str] = &[
     // every platform. It knows nothing about Authenticode, `codesign`, a
     // certificate store or a TSA; those are integrations.
     "zup-signing",
+    // The developer CLI's machine contract. Portable because a CI system on Linux, a
+    // generated TypeScript declaration and a Windows build all have to agree about the
+    // same bytes, and a contract only one of them can compile is not a contract.
+    "zup-automation",
 ];
 
 /// Crates whose domain is a platform file format.

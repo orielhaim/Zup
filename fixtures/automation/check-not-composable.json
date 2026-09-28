@@ -1,0 +1,42 @@
+{
+  "protocol": "1.0",
+  "operation": "check",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [
+    {
+      "profile": "windows-x64",
+      "target": "x86_64-pc-windows-msvc"
+    },
+    {
+      "profile": "windows-arm64",
+      "target": "aarch64-pc-windows-msvc"
+    }
+  ],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "code": "zup.check.not_composable",
+      "message": "windows-x64, windows-arm64 cannot be composed: the architectures differ",
+      "source": null,
+      "help": "Build them separately with `zup build --target <profile>`."
+    }
+  ],
+  "summary": "Acme is valid · 2 file(s) across 2 target(s)",
+  "details": {
+    "kind": "check",
+    "variants": 2,
+    "composition": {
+      "composable": false,
+      "dimension": "architecture",
+      "detail": "windows-x64, windows-arm64 cannot be composed: the architectures differ"
+    }
+  }
+}

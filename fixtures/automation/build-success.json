@@ -1,0 +1,41 @@
+{
+  "protocol": "1.0",
+  "operation": "build",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [
+    {
+      "profile": "windows-x64",
+      "target": "x86_64-pc-windows-msvc"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "Acme-Windows-Setup.exe",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "size": 248512896,
+      "kind": "single",
+      "mode": "offline",
+      "id": "windows-x64",
+      "target": "x86_64-pc-windows-msvc",
+      "variants": null,
+      "signing": null
+    }
+  ],
+  "release_manifest": "dist/zup-release.json",
+  "publication": null,
+  "diagnostics": [],
+  "summary": "Built 1 artifact for 1 target",
+  "details": {
+    "kind": "build",
+    "signing_plan": "dist/zup-signing.json",
+    "pending_signatures": 1
+  }
+}

@@ -293,6 +293,11 @@ Start with the one that matches the question.
 - [GitHub distribution](docs/github-distribution.md) — releases as a host.
 - [updates](docs/updates.md) — the update channel model.
 
+**Integrating**
+
+- [the automation protocol](docs/automation.md) — `--format human|json|jsonl`, the
+  result envelope, the stream, and the version rules CI and the Action are held to.
+
 **Trust**
 
 - [security model](docs/security.md) — what zup trusts, what it refuses, and

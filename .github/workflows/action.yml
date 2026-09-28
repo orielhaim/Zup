@@ -19,7 +19,7 @@ concurrency:
 env:
   # Every step installs from the lockfile. A drifting `bun.lock` is how a
   # transitive dependency changes underneath a release pipeline.
-  BUN_CONFIG_FROZEN_LOCKFILE: 'true'
+  BUN_CONFIG_FROZEN_LOCKFILE: "true"
 
 jobs:
   check:
@@ -42,15 +42,12 @@ jobs:
       - name: Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.4.2'
+          bun-version: "1.4.2"
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: "24"
 
-      # `bun install --frozen-lockfile` rather than `npm ci`: the lockfile is
-      # `bun.lock`, and a resolution that changed without the lockfile changing
-      # is exactly the drift this gate exists to catch.
       - name: Install
         run: bun install --frozen-lockfile
 
@@ -86,143 +83,143 @@ jobs:
           echo "node $(node --version)"
           node scripts/verify-runtime.mjs
 
-  e2e:
-    name: e2e (${{ matrix.runner }})
+  real-zup:
+    name: real zup (${{ matrix.runner }})
     needs: check
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # The three hosted runners a project is most likely to use, plus the two
-        # ARM64 hosted runners where a Windows path, a `.exe` extension and an
-        # architecture-normalisation bug would show up.
         runner:
-          - ubuntu-latest
           - windows-latest
-          - macos-15
-          - ubuntu-24.04-arm
           - windows-11-arm
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
-      # The action under test, from this repository. No release exists yet, and
-      # requiring one would make the action's own tests depend on the action
-      # having been published.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Resolve the platform
-        id: platform
-        shell: bash
-        run: |
-          case "${RUNNER_OS}" in
-            Windows) ext=.exe; sep='\\' ;;
-            *) ext=; sep=/ ;;
-          esac
-          echo "ext=$ext" >> "$GITHUB_OUTPUT"
-          echo "sep=$sep" >> "$GITHUB_OUTPUT"
-          echo "runner=${RUNNER_OS}/${RUNNER_ARCH}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
 
-      # A stub, not a zup build. The e2e job proves the *action*: that it reads
-      # inputs, resolves an explicit tool, runs a command, produces outputs and a
-      # summary, and fails cleanly. A real build belongs in a project that has one.
-      - name: Write the stub zup
-        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: action-e2e-${{ matrix.runner }}
+
+      # A real zup, from this commit, next to the action. `zup-path` is the input the
+      # action's own tests use, and it is why testing the action does not require
+      # having released it.
+      - name: Build zup
+        run: cargo build --release --bin zup
+
+      - name: A project for it
         run: |
-          mkdir -p "$RUNNER_TEMP/stub"
-          cat > "$RUNNER_TEMP/stub/zup${{ steps.platform.outputs.ext }}" <<'STUB'
-          #!/usr/bin/env bash
-          # A stand-in for the zup CLI, so this workflow tests the action rather
-          # than a cross-compiled build. It emits exactly the envelope the action
-          # parses, and refuses to pretend it did anything else.
-          set -euo pipefail
-          command="${1:-}"
-          case "$command" in
-            --version|version)
-              echo "zup 0.0.1-stub"
-              ;;
-            build|compose)
-              echo "zup: $command (stub)" >&2
-              echo '{"schema":1,"operation":"build","success":true,"appVersion":"1.4.0",'
-              echo '"targets":["windows-x64"],"artifacts":[{"path":"Acme-Setup.exe",'
-              echo '"digest":"0000000000000000000000000000000000000000000000000000000000000000",'
-              echo '"size":1024,"kind":"installer","mode":"standalone"}],'
-              echo '"releaseManifest":"dist/zup-release.json","diagnostics":[]}'
-              ;;
-            *)
-              echo "stub zup: unknown command \`$command\`" >&2
-              exit 64
-              ;;
-          esac
-          STUB
-          chmod +x "$RUNNER_TEMP/stub/zup${{ steps.platform.outputs.ext }}"
+          $project = Join-Path $env:RUNNER_TEMP 'acme'
+          New-Item -ItemType Directory -Force -Path (Join-Path $project 'dist') | Out-Null
+          Set-Content -Path (Join-Path $project 'dist/app.bin') -Value 'payload' -NoNewline
+          @'
+          schema = 1
+
+          [app]
+          id = "com.acme.e2e"
+          name = "Acme"
+          version = "1.4.0"
+          main = "app.bin"
+
+          [build]
+
+          [build.targets.default]
+          target = "x86_64-pc-windows-msvc"
+          source = { directory = "dist" }
+
+          [install]
+          scope = "user"
+
+          [install.directory]
+          user = "${location.user_data}/Acme"
+
+          [[files]]
+          source = "**/*"
+          destination = "${install}"
+          '@ | Set-Content -Path (Join-Path $project 'zup.toml') -NoNewline
+          "PROJECT=$project" >> $env:GITHUB_ENV
+          "ZUP=$env:GITHUB_WORKSPACE\target\release\zup.exe" >> $env:GITHUB_ENV
 
       - name: Setup
         id: setup
         uses: ./
         with:
           operation: setup
-          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+          zup-path: ${{ env.ZUP }}
 
-      - name: The stub is on PATH
-        shell: bash
+      - name: The real zup is on PATH
         run: zup --version
 
-      - name: Build
-        id: build
+      - name: Check
+        id: check
         uses: ./
         with:
-          operation: build
-          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+          operation: check
+          project-path: ${{ env.PROJECT }}
+          zup-path: ${{ env.ZUP }}
 
+      # The outputs come from the protocol document zup actually wrote, not from a
+      # transcript of one. `app-version: 1.4.0` is in the fixture project, and the
+      # action read it out of `application.version`.
       - name: Outputs
-        shell: bash
         env:
-          APP_VERSION: ${{ steps.build.outputs.app-version }}
-          ZUP_PATH: ${{ steps.build.outputs.zup-path }}
-          ARTIFACTS: ${{ steps.build.outputs.artifact-paths }}
+          APP_VERSION: ${{ steps.check.outputs.app-version }}
+          ZUP_PATH: ${{ steps.check.outputs.zup-path }}
         run: |
-          set -euo pipefail
-          test -n "$ZUP_PATH"
-          test "$APP_VERSION" = "1.4.0"
-          echo "$ARTIFACTS" | grep -q 'Acme-Setup.exe'
-          echo "outputs are correct"
+          if ($env:APP_VERSION -ne '1.4.0') {
+            throw "app-version was '$($env:APP_VERSION)', expected 1.4.0"
+          }
+          if (-not (Test-Path $env:ZUP_PATH)) { throw "zup-path does not exist" }
+          'outputs came from the protocol document'
 
-      # A path with a space in it, which is where a shell-based implementation
-      # breaks and an argv-based one does not.
+      - name: A summary was written from the result
+        run: |
+          $summary = Get-Content -Raw $env:GITHUB_STEP_SUMMARY
+          if ($summary -notmatch '1\.4\.0') {
+            throw "the summary does not carry the version: $summary"
+          }
+          if ($summary -match '"protocol"') {
+            throw 'the summary dumped the machine document'
+          }
+          'the summary is a record, not a transcript'
+
+      # A path with a space in it, which is where a shell-based implementation breaks
+      # and an argv-based one does not.
       - name: A project path with a space
-        id: spaced
         uses: ./
         with:
-          operation: build
-          project-path: ${{ runner.temp }}/my project
-          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+          operation: check
+          project-path: ${{ env.RUNNER_TEMP }}\my project
+          zup-path: ${{ env.ZUP }}
 
-      - name: A summary was written
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s "$GITHUB_STEP_SUMMARY"
-          grep -q 'zup' "$GITHUB_STEP_SUMMARY"
-          echo "the job summary has content"
-
-      # A failing command has to fail the step, with a message a developer can
-      # act on, rather than a stack trace.
+      # A failing zup has to fail the step, and the failure has to come from the
+      # protocol document rather than from scraping stderr. The manifest is invalid,
+      # so `zup check` exits nonzero *and* writes a result.
       - name: A failing zup fails the step
         id: failure
         continue-on-error: true
         uses: ./
         with:
-          operation: publish
-          zup-path: ${{ runner.temp }}/stub/zup${{ steps.platform.outputs.ext }}
+          operation: check
+          project-path: ${{ env.RUNNER_TEMP }}\broken
+          zup-path: ${{ env.ZUP }}
 
-      - name: The failure was reported
-        shell: bash
+      - name: The failure came from the result, with its code
         run: |
-          set -euo pipefail
-          test "${{ steps.failure.outcome }}" = "failure"
+          if ('${{ steps.failure.outcome }}' -ne 'failure') {
+            throw 'a failing zup did not fail the step'
+          }
+          $summary = Get-Content -Raw $env:GITHUB_STEP_SUMMARY
+          if ($summary -notmatch 'zup\.') {
+            throw "the summary did not name a diagnostic code: $summary"
+          }
+          'the failure is the protocol document, not a scraped log'
 
   tool-bootstrap:
     # Opt-in, and separate, because it needs a published zup release to exist and

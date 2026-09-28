@@ -1,0 +1,63 @@
+{
+  "protocol": "1.0",
+  "operation": "sign.verify",
+  "status": "failure",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [
+    {
+      "path": "Acme-Windows-Setup.exe",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "size": 248512896,
+      "kind": "single",
+      "mode": "offline",
+      "id": "windows-x64",
+      "target": "x86_64-pc-windows-msvc",
+      "variants": null,
+      "signing": {
+        "state": "unsigned",
+        "evidence": []
+      }
+    }
+  ],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.signing.untrusted_chain",
+      "message": "the certificate does not chain to a root this machine trusts",
+      "source": null,
+      "help": null
+    }
+  ],
+  "summary": "1 of 1 check failed; the release was not finalized",
+  "details": {
+    "kind": "sign.verify",
+    "plan": "dist/zup-signing.json",
+    "subjects": [
+      {
+        "path": "Acme-Windows-Setup.exe",
+        "role": "outer_artifact",
+        "stage": "post_compose",
+        "variants": [],
+        "verified": false,
+        "detail": "the signature is present but the chain is not trusted",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "size": 248512896
+      }
+    ],
+    "finalized": 0,
+    "unsigned": 0
+  }
+}

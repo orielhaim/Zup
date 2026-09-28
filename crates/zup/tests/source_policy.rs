@@ -150,13 +150,13 @@ fn stderr(output: &Output) -> String {
 }
 
 fn checks(output: &Output, profile: &str) -> Vec<Value> {
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
-            "doctor stdout is not one JSON report: {error}\n{}",
+            "doctor stdout is not one JSON result: {error}\n{}",
             String::from_utf8_lossy(&output.stdout)
         )
     });
-    report["targets"]
+    document["details"]["targets"]
         .as_array()
         .expect("targets is an array")
         .iter()

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-
-import type { OperationResult } from '../src/result.js'
-import { formatBytes, renderSummary, type Summary } from '../src/summary.js'
+import type { Phase } from '../src/phases.js'
+import { parseResult } from '../src/protocol.js'
+import { formatBytes, mergeResults, renderSummary, type Summary } from '../src/summary.js'
 import type { ResolvedTool } from '../src/tool.js'
+import { fixture } from './protocol-fixtures.js'
 
 const TOOL: ResolvedTool = {
   path: '/opt/hostedtoolcache/zup/1.4.0/x64/zup-linux-x64',
@@ -11,41 +12,23 @@ const TOOL: ResolvedTool = {
   identity: { platform: 'linux', arch: 'x64' },
 }
 
-function result(overrides: Partial<OperationResult> = {}): OperationResult {
-  return {
-    schema: 1,
-    operation: 'build',
-    success: true,
-    appVersion: '1.4.0',
-    targets: ['windows-x64', 'windows-arm64'],
-    artifacts: [
-      {
-        path: 'Acme-Windows-Setup.exe',
-        digest: 'a'.repeat(64),
-        size: 248_512_896,
-        kind: 'installer',
-        mode: 'standalone',
-      },
-      {
-        path: 'Acme-Web-Setup.exe',
-        digest: 'b'.repeat(64),
-        size: 2_097_152,
-        kind: 'installer',
-        mode: 'standalone',
-      },
-    ],
-    releaseManifest: 'dist/zup-release.json',
-    diagnostics: [],
-    ...overrides,
-  }
+/** The results a `release` run produces, straight from the fixtures zup generated. */
+function releaseResults(): Map<Phase, ReturnType<typeof parseResult>> {
+  return new Map<Phase, ReturnType<typeof parseResult>>([
+    ['build', parseResult(fixture('build-success'))],
+    ['compose', parseResult(fixture('publish-stage'))],
+    ['publish', parseResult(fixture('publish-success'))],
+  ])
 }
 
 function summary(overrides: Partial<Summary> = {}): Summary {
+  const results = releaseResults()
   return {
     operation: 'release',
     tool: TOOL,
-    performed: ['build', 'compose', 'attest', 'publish'],
-    result: result(),
+    performed: ['build', 'compose', 'publish'],
+    results,
+    result: mergeResults(['build', 'compose', 'publish'], results),
     failure: undefined,
     dryRun: false,
     ...overrides,
@@ -77,19 +60,25 @@ describe('build summary', () => {
     const text = renderSummary(summary())
     expect(text).toContain('## zup')
     expect(text).toContain('| Version | 1.4.0 |')
-    expect(text).toContain('| Targets | windows-x64, windows-arm64 |')
+    expect(text).toContain('| Targets | windows-x64 |')
     expect(text).toContain('| Artifacts | 2 |')
   })
 
-  it('lists each artifact with its size and a truncated digest', () => {
+  it('lists each artifact with its size, its signature and a truncated digest', () => {
     const text = renderSummary(summary())
     expect(text).toContain('Acme-Windows-Setup.exe')
     expect(text).toContain('237 MiB')
-    expect(text).toContain('Acme-Web-Setup.exe')
-    expect(text).toContain('2.0 MiB')
+    expect(text).toContain('Acme-Windows-x64.zup')
+    expect(text).toContain('18.0 MiB')
     // A 64-character hex string defeats a table a human reads.
     expect(text).toContain(`${'a'.repeat(16)}…`)
     expect(text).not.toContain('a'.repeat(64))
+  })
+
+  it('marks an artifact nobody has looked at, rather than calling it unsigned', () => {
+    // `—` rather than a tick: the release has not been signed *by this action's
+    // account of it*, and claiming either answer would be a claim.
+    expect(renderSummary(summary())).toContain('| — |')
   })
 
   it('reports where the zup CLI came from', () => {
@@ -104,44 +93,27 @@ describe('build summary', () => {
     expect(text).toContain('linux-x64, download')
   })
 
-  it('links the release manifest so the digests are reachable', () => {
+  it('names the release description so the digests are reachable', () => {
     expect(renderSummary(summary())).toContain('dist/zup-release.json')
   })
 
-  it('does not dump internal JSON', () => {
+  it('does not dump the machine document', () => {
+    // A summary that dumps the protocol is why people stop opening summaries.
     const text = renderSummary(summary())
-    expect(text).not.toContain('"schema"')
+    expect(text).not.toContain('"protocol"')
     expect(text).not.toContain('"artifacts":')
   })
 
   it('carries no timestamp, so two runs of the same build look the same', () => {
-    // Volatile output makes a summary impossible to diff and impossible to
-    // snapshot, for no benefit.
-    const text = renderSummary(summary())
-    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T/u)
+    // Volatile output makes a summary impossible to diff and impossible to snapshot,
+    // for no benefit.
+    expect(renderSummary(summary())).not.toMatch(/\d{4}-\d{2}-\d{2}T/u)
   })
 })
 
 describe('release summary', () => {
   it('reports the release, its repository, its state and its URL', () => {
-    const text = renderSummary(
-      summary({
-        operation: 'publish',
-        result: result({
-          operation: 'publish',
-          release: {
-            repository: 'acme/acme',
-            host: 'github.com',
-            tag: 'v1.4.0',
-            releaseId: 1234,
-            state: 'published',
-            url: 'https://github.com/acme/acme/releases/tag/v1.4.0',
-            immutable: true,
-            assets: [{ name: 'Acme.exe', size: 10, digest: 'c'.repeat(64), state: 'uploaded' }],
-          },
-        }),
-      }),
-    )
+    const text = renderSummary(summary({ operation: 'publish' }))
     expect(text).toContain('| Release | `v1.4.0` |')
     expect(text).toContain('| Repository | acme/acme |')
     expect(text).toContain('| Status | published |')
@@ -152,45 +124,35 @@ describe('release summary', () => {
 
   it('says "no" for immutability rather than omitting the row', () => {
     // An absent row reads as "not reported"; a false one is a fact.
+    const published = parseResult(fixture('publish-success'), 'publish.github')
     const text = renderSummary(
       summary({
-        result: result({
-          release: {
-            repository: 'acme/acme',
-            host: 'github.com',
-            tag: 'v1.4.0',
-            releaseId: 1,
-            state: 'draft',
-            immutable: false,
-            assets: [],
-          },
-        }),
+        result: {
+          ...published,
+          publication: { ...published.publication!, immutable: false },
+        },
       }),
     )
     expect(text).toContain('| Immutable | no |')
   })
 
   it('omits immutability when the host did not report it', () => {
+    const published = parseResult(fixture('publish-success'), 'publish.github')
     const text = renderSummary(
       summary({
-        result: result({
-          release: {
-            repository: 'acme/acme',
-            host: 'ghe.acme.internal',
-            tag: 'v1.4.0',
-            releaseId: 1,
-            state: 'published',
-            assets: [],
-          },
-        }),
+        result: { ...published, publication: { ...published.publication!, immutable: null } },
       }),
     )
     expect(text).not.toContain('Immutable')
   })
 
   it('shows a dash rather than an empty cell for an unknown version', () => {
-    const text = renderSummary(summary({ result: result({ appVersion: undefined }) }))
-    expect(text).toContain('| Version | — |')
+    // A toolchain report has no application: it is about this machine, not a
+    // project. `—` says "there is none" rather than inventing a version.
+    const status = parseResult(fixture('toolchain-status'), 'toolchain.status')
+    expect(renderSummary(summary({ result: status, results: new Map() }))).toContain(
+      '| Version | — |',
+    )
   })
 })
 
@@ -200,19 +162,26 @@ describe('failure summary', () => {
       summary({
         operation: 'build',
         failure: {
-          message: 'zup build exited with code 101: no such file or directory',
-          remedy: 'Read the output above.',
+          message: 'zup build failed (exit code 1): zup.manifest.unknown_target: no profile',
+          remedy: 'Every diagnostic above is annotated with its code and location.',
         },
       }),
     )
     expect(text).toContain('**build failed.**')
-    expect(text).toContain('exited with code 101')
-    expect(text).toContain('Read the output above.')
+    expect(text).toContain('zup.manifest.unknown_target')
+    expect(text).toContain('Every diagnostic above is annotated')
   })
 
-  it('omits the artifact table, which would be noise on a failure', () => {
-    const text = renderSummary(summary({ failure: { message: 'm', remedy: 'r' } }))
-    expect(text).not.toContain('Acme-Windows-Setup.exe')
+  it('keeps the artifact table, because a partial release is the case worth a record', () => {
+    // Four installers and then a signature failure is exactly the release somebody
+    // needs to look at tomorrow. Dropping the table is how that becomes a
+    // one-line "failed".
+    const build = parseResult(fixture('build-success'), 'build')
+    const text = renderSummary(
+      summary({ failure: { message: 'm', remedy: 'r' }, result: build, results: new Map() }),
+    )
+    expect(text).toContain('Acme-Windows-Setup.exe')
+    expect(text).toContain('dist/zup-release.json')
   })
 
   it('still reports which zup was in use', () => {
@@ -220,5 +189,13 @@ describe('failure summary', () => {
     const text = renderSummary(summary({ failure: { message: 'm', remedy: 'r' } }))
     expect(text).toContain('zup CLI')
     expect(text).toContain('1.4.0 (cache)')
+  })
+
+  it('says the step failed when it failed before any phase ran', () => {
+    const text = renderSummary(
+      summary({ result: undefined, results: new Map(), failure: { message: 'm', remedy: 'r' } }),
+    )
+    expect(text).not.toContain('| Version |')
+    expect(text).toContain('**release failed.**')
   })
 })

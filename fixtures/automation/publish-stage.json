@@ -1,0 +1,58 @@
+{
+  "protocol": "1.0",
+  "operation": "publish.stage",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [
+    {
+      "profile": "windows-x64",
+      "target": "x86_64-pc-windows-msvc"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "Acme-Windows-x64.zup",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "size": 18874368,
+      "kind": "package",
+      "mode": "package",
+      "id": "windows-x64",
+      "target": "x86_64-pc-windows-msvc",
+      "variants": null,
+      "signing": null
+    }
+  ],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [],
+  "summary": "Staged 4 objects · 1 variant",
+  "details": {
+    "kind": "publish.stage",
+    "web_root": "dist/web",
+    "channel": "stable",
+    "objects": 4,
+    "object_bytes": 18874368,
+    "variants": 1,
+    "tuf_inputs": 2,
+    "release_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "packages": [
+      {
+        "variant": "windows-x64",
+        "names": [
+          "Acme-Windows-x64.zup"
+        ],
+        "size": 18874368,
+        "blob_count": 4
+      }
+    ],
+    "thin_installers": [],
+    "release_manifest": "dist/zup-release.json"
+  }
+}

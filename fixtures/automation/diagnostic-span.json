@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0",
+  "operation": "check",
+  "status": "failure",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.manifest.unknown_target",
+      "message": "the build target matrix must contain at least one profile",
+      "source": {
+        "file": "zup.toml",
+        "start_line": 4,
+        "start_column": 1,
+        "end_line": null,
+        "end_column": null
+      },
+      "help": "declare a profile under [build.targets.<profile>]"
+    }
+  ],
+  "summary": "Nothing was checked",
+  "details": {
+    "kind": "check",
+    "variants": 0,
+    "composition": null
+  }
+}

@@ -31,6 +31,7 @@ import type {
   Log,
   SourceLocation,
 } from './ports.js'
+import { WholeStream } from './stream.js'
 import type { ReleaseAsset, ReleaseSource } from './tool.js'
 
 /**
@@ -145,14 +146,24 @@ export function redact(message: string, secrets: readonly string[]): string {
 /** A process runner that never touches a shell. */
 export class SpawnRunner {
   async run(spec: CommandSpec): Promise<CommandResult> {
+    const framed = spec.stdout
     if (spec.stream) {
-      // `getExecOutput` streams *and* captures, so one call does both.
+      // `getExecOutput` streams *and* captures, so one call does both. The listener
+      // sees the same bytes the log does, as they arrive, which is the point: a
+      // build that reports a failing check in the first second is a build somebody
+      // can stop.
       const output = await exec.getExecOutput(spec.program, spec.args, {
         cwd: spec.cwd,
         env: spec.env,
         ...(spec.silent === undefined ? {} : { silent: spec.silent }),
+        ...(framed === undefined
+          ? {}
+          : { listeners: { stdout: (data: Buffer) => framed.push(new Uint8Array(data)) } }),
         ignoreReturnCode: true,
       })
+      // A stream that ended without a trailing newline still has a last line, and
+      // for `--format jsonl` that line is the result the whole run was for.
+      framed?.end()
       return { code: output.exitCode, stdout: output.stdout, stderr: output.stderr }
     }
     return new Promise((resolve, reject) => {
@@ -165,16 +176,22 @@ export class SpawnRunner {
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
-      let stdout = ''
       let stderr = ''
+      let stdout = ''
+      const framed =
+        spec.stdout ??
+        new WholeStream((text) => {
+          stdout = text
+        })
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf8')
+        framed.push(new Uint8Array(chunk))
       })
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf8')
       })
       child.on('error', reject)
       child.on('close', (code) => {
+        framed.end()
         // A signalled process has a null code. Reporting 1 rather than 0 is the
         // difference between "zup failed" and "zup succeeded and printed nothing".
         resolve({ code: code ?? 1, stdout, stderr })

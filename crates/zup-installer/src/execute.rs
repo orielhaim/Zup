@@ -7,7 +7,7 @@
 
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
-use zup_presentation::{AutomationEvent, AutomationResult, OutputFormat, ProcessOutcome};
+use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{
     CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeEvent, RuntimeRequest,
 };
@@ -237,7 +237,7 @@ pub fn execute_frontend(
     let mut receiver = events.subscribe();
     if output == OutputFormat::Jsonl {
         let started =
-            AutomationEvent::started(&application, &version, crate::state::action_name(action));
+            InstallerEvent::started(&application, &version, crate::state::action_name(action));
         println!(
             "{}",
             serde_json::to_string(&started).map_err(|error| miette::miette!("output: {error}"))?
@@ -304,7 +304,7 @@ pub fn execute_frontend(
             }
         }
         OutputFormat::Json => {
-            let mut result = AutomationResult::new(process, application, version);
+            let mut result = InstallerResult::new(process, application, version);
             result.scope = scope;
             result.install_directory = install_directory;
             result.log_path = log_path.lock().expect("log path state").clone();
@@ -328,7 +328,7 @@ pub fn execute_frontend(
         }
         OutputFormat::Jsonl => {
             if !terminal_seen {
-                let event = AutomationEvent::Completed { outcome: process };
+                let event = InstallerEvent::Completed { outcome: process };
                 println!(
                     "{}",
                     serde_json::to_string(&event).map_err(|error| ExecutionError::silent(
@@ -368,7 +368,7 @@ fn report_failure(
     match output {
         OutputFormat::Human => {}
         OutputFormat::Json => {
-            let mut result = AutomationResult::new(process, application, version);
+            let mut result = InstallerResult::new(process, application, version);
             result.scope = scope;
             result.install_directory = install_directory.map(ToOwned::to_owned);
             result.log_path = log_path.map(ToOwned::to_owned);
@@ -380,7 +380,7 @@ fn report_failure(
         }
         OutputFormat::Jsonl => {
             if !terminal_seen {
-                let event = AutomationEvent::Failed {
+                let event = InstallerEvent::Failed {
                     outcome: process,
                     code: process.code(),
                     message: message.clone(),
@@ -441,48 +441,45 @@ pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
 /// A runtime event that carries no information a consumer can act on becomes no
 /// events: a log path is a place to look after the fact, not a phase, and a
 /// download's byte count is detail the `Progress` event already summarises.
-pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
+pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
     match event {
         RuntimeEvent::StateChanged { state } => {
             if *state == zup_runtime::RuntimeState::Cancelled {
-                vec![AutomationEvent::Cancelling {
+                vec![InstallerEvent::Cancelling {
                     state: "safe_boundary".into(),
                 }]
             } else {
-                vec![AutomationEvent::Phase {
+                vec![InstallerEvent::Phase {
                     state: state_name(*state).into(),
                 }]
             }
         }
-        RuntimeEvent::WaitingForAuthorization => vec![AutomationEvent::Phase {
+        RuntimeEvent::WaitingForAuthorization => vec![InstallerEvent::Phase {
             state: "waiting_for_authorization".into(),
         }],
-        RuntimeEvent::WorkerConnected => vec![AutomationEvent::Phase {
+        RuntimeEvent::WorkerConnected => vec![InstallerEvent::Phase {
             state: "worker_connected".into(),
         }],
-        RuntimeEvent::PreflightStarted => vec![AutomationEvent::Phase {
+        RuntimeEvent::PreflightStarted => vec![InstallerEvent::Phase {
             state: "preflight".into(),
         }],
         RuntimeEvent::ResourceBlocked { detail, pids } => {
-            vec![AutomationEvent::blocked_with_processes(
-                detail,
-                pids.clone(),
-            )]
+            vec![InstallerEvent::blocked_with_processes(detail, pids.clone())]
         }
-        RuntimeEvent::StagingStarted { id } => vec![AutomationEvent::Phase {
+        RuntimeEvent::StagingStarted { id } => vec![InstallerEvent::Phase {
             state: format!("staging:{id}"),
         }],
-        RuntimeEvent::StagingProgress { id, detail } => vec![AutomationEvent::Phase {
+        RuntimeEvent::StagingProgress { id, detail } => vec![InstallerEvent::Phase {
             state: format!("staging:{id}:{detail}"),
         }],
-        RuntimeEvent::OperationStarted { id } => vec![AutomationEvent::Phase {
+        RuntimeEvent::OperationStarted { id } => vec![InstallerEvent::Phase {
             state: format!("operation:{id}"),
         }],
         RuntimeEvent::Progress {
             completed,
             total,
             action,
-        } => vec![AutomationEvent::progress(
+        } => vec![InstallerEvent::progress(
             &zup_presentation::ProgressPresentation::new(*completed, *total, action),
         )],
         RuntimeEvent::PrerequisiteCheck {
@@ -490,7 +487,7 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
             name,
             satisfied,
             version,
-        } => vec![AutomationEvent::PrerequisiteCheck {
+        } => vec![InstallerEvent::PrerequisiteCheck {
             id: id.clone(),
             name: name.clone(),
             satisfied: *satisfied,
@@ -500,24 +497,24 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
             id,
             completed,
             total,
-        } => vec![AutomationEvent::PrerequisiteDownload {
+        } => vec![InstallerEvent::PrerequisiteDownload {
             id: id.clone(),
             completed: *completed,
             total: *total,
         }],
         RuntimeEvent::PrerequisiteInstall { id, name } => {
-            vec![AutomationEvent::PrerequisiteInstall {
+            vec![InstallerEvent::PrerequisiteInstall {
                 id: id.clone(),
                 name: name.clone(),
             }]
         }
         RuntimeEvent::RebootRequired { id, exit_code } => {
-            vec![AutomationEvent::RebootRequired {
+            vec![InstallerEvent::RebootRequired {
                 id: id.clone(),
                 exit_code: *exit_code,
             }]
         }
-        RuntimeEvent::RollingBack => vec![AutomationEvent::Phase {
+        RuntimeEvent::RollingBack => vec![InstallerEvent::Phase {
             state: "rolling_back".into(),
         }],
         RuntimeEvent::Completed { outcome } => {
@@ -526,7 +523,7 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
             } else {
                 ProcessOutcome::from_message(outcome)
             };
-            vec![AutomationEvent::Completed { outcome }]
+            vec![InstallerEvent::Completed { outcome }]
         }
         RuntimeEvent::Failed { kind, message } => {
             // The event carries a typed `kind`, so the exit code is chosen from
@@ -540,7 +537,7 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<AutomationEvent> {
                 "authorization_required" => ProcessOutcome::AuthorizationRequired,
                 _ => ProcessOutcome::from_message(message),
             };
-            vec![AutomationEvent::Failed {
+            vec![InstallerEvent::Failed {
                 outcome,
                 code: outcome.code(),
                 message: message.clone(),

@@ -1,0 +1,56 @@
+{
+  "protocol": "1.0",
+  "operation": "artifact.inspect",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [
+    {
+      "profile": "windows-x64",
+      "target": "x86_64-pc-windows-msvc"
+    }
+  ],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [],
+  "summary": "Acme 1.4.0 · 1 variant(s) · 18.0 MiB on disk",
+  "details": {
+    "kind": "artifact.inspect",
+    "artifact": "Acme-Windows-Setup.exe",
+    "artifact_kind": "universal",
+    "artifact_mode": "offline",
+    "pin": "1.4.0",
+    "subsystem": "console",
+    "variants": [
+      {
+        "id": "windows-x64",
+        "target": "x86_64-pc-windows-msvc",
+        "frontend": "gui",
+        "logical_size": 248512896,
+        "file_count": 1,
+        "prerequisite_count": 0,
+        "plugin_count": 0,
+        "native_execution": true
+      }
+    ],
+    "content": {
+      "logical_size": 248512896,
+      "stored_size": 18874368,
+      "content_size": 18874368,
+      "shared_size": 0,
+      "exclusive_size": 18874368,
+      "unique_blob_count": 4,
+      "file_size": 18874368
+    },
+    "trust": {
+      "authenticode": "no certificate table",
+      "index": "valid",
+      "content_digests": "valid",
+      "variants": "complete"
+    }
+  }
+}

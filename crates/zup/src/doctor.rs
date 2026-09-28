@@ -14,25 +14,27 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, ValueEnum, ValueHint};
-use serde::Serialize;
+use clap::{Args, ValueHint};
+use zup_automation::{AutomationResult, Details, LogLevel};
 use zup_core::{ResolvedTargetConfig, Sha256Digest, hash_reader};
 use zup_plugin_contract::{PluginEngine, WASMTIME_VERSION};
 
 use crate::build_inputs::{self, BackendSupport, BuildInputs};
-
-/// Version of the `zup doctor` report shape.
-///
-/// Bump this whenever a field is added, removed, or retyped, so a consumer can
-/// tell two report documents apart before it reads them.
-pub const REPORT_VERSION: u32 = 1;
+use crate::cli::OutputArg;
+use crate::report::Reporter;
 
 /// The remedy `doctor` names when a toolchain component is unusable.
 ///
 /// Not a Cargo command. A developer who installed `zup` does not have a
 /// workspace, and telling them to run `cargo build` in one would be advice that
 /// only works inside this repository.
-const TOOLCHAIN_HINT: &str = "Build the zup toolchain for this version and stage it beside \
+/// The remedy named when a toolchain component is unusable.
+///
+/// Not a Cargo command. A developer who installed `zup` does not have a
+/// workspace, and telling them to run `cargo build` in one would be advice that
+/// only works inside this repository. Shared with the build, which refuses for the
+/// same reason and would otherwise repeat the sentence.
+pub const TOOLCHAIN_HINT: &str = "Build the zup toolchain for this version and stage it beside \
                              `zup`, or point zup at one with `zup --toolchain <dir>`";
 
 /// Build readiness without writing anything.
@@ -59,8 +61,9 @@ pub struct DoctorCommand {
     /// Target profile name or canonical target triple. Repeatable; empty selects all.
     #[arg(long, value_name = "PROFILE_OR_TARGET")]
     pub target: Vec<String>,
+    /// Readable text, or the versioned machine result.
     #[arg(long, value_enum, default_value = "human")]
-    pub format: FormatArg,
+    pub format: OutputArg,
 }
 
 impl Default for DoctorCommand {
@@ -74,36 +77,13 @@ impl Default for DoctorCommand {
             install_directory: Vec::new(),
             frontend: None,
             target: Vec::new(),
-            format: FormatArg::Human,
-        }
-    }
-}
-
-/// Machine-readable shape of a readiness report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FormatArg {
-    Human,
-    Json,
-}
-
-impl FormatArg {
-    const fn is_json(self) -> bool {
-        matches!(self, Self::Json)
-    }
-}
-
-impl From<FormatArg> for zup_presentation::OutputFormat {
-    fn from(value: FormatArg) -> Self {
-        match value {
-            FormatArg::Human => Self::Human,
-            FormatArg::Json => Self::Json,
+            format: OutputArg::Human,
         }
     }
 }
 
 /// Result of one readiness check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
     /// The check passed.
     Pass,
@@ -114,8 +94,7 @@ pub enum CheckStatus {
 }
 
 /// What one readiness check examined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckKind {
     /// The canonical target triple the profile resolves to.
     CanonicalTarget,
@@ -161,7 +140,7 @@ impl CheckKind {
 }
 
 /// One readiness check for one target profile.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Check {
     pub profile: String,
     pub target: String,
@@ -173,7 +152,7 @@ pub struct Check {
 }
 
 /// Readiness of one selected target profile.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TargetReport {
     pub profile: String,
     pub target: String,
@@ -188,9 +167,12 @@ impl TargetReport {
 }
 
 /// A complete readiness report for the selected targets.
-#[derive(Debug, Clone, Serialize)]
+///
+/// The command's own model and the one the human view renders. `crate::automation`
+/// projects it onto the protocol's `DoctorDetails`, which is the only serialized
+/// shape: a second one here would be a document with two owners.
+#[derive(Debug, Clone)]
 pub struct DoctorReport {
-    pub version: u32,
     pub manifest: String,
     /// The canonical target triple of the build host.
     pub host: String,
@@ -272,26 +254,44 @@ fn display(path: &Path) -> String {
 }
 
 /// Report whether this project is ready to build.
-pub fn run(args: DoctorCommand, toolchain_root: Option<PathBuf>) -> miette::Result<()> {
+///
+/// Returns the machine result and *also* fails, because readiness is a verdict and the
+/// process's exit code is how a shell learns it. The result is the report: a caller
+/// that asked for `--format json` gets the findings and the exit code, not one or the
+/// other.
+pub fn run(
+    args: DoctorCommand,
+    toolchain_root: Option<PathBuf>,
+) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
     let report = inspect(&args, &crate::resolver(toolchain_root))?;
-    if args.format.is_json() {
-        let json = serde_json::to_string_pretty(&report)
-            .map_err(|error| miette::miette!("report: {error}"))?;
-        println!("{json}");
-    } else {
-        print!("{}", report.human());
+    reporter.log(LogLevel::Info, report.human());
+    let details = crate::automation::doctor(&report);
+    let mut result = AutomationResult::new(zup_automation::OPERATION_DOCTOR)
+        .with_details(Details::Doctor(details.clone()))
+        .with_summary(format!(
+            "{}: {}",
+            if report.is_ready() {
+                "ready"
+            } else {
+                "not ready"
+            },
+            if report.is_ready() {
+                format!("all {} target(s) can be built", report.targets.len())
+            } else {
+                format!(
+                    "{} failing check(s) across {} target(s)",
+                    report.failures(),
+                    report.targets.len()
+                )
+            }
+        ));
+    if !report.is_ready() {
+        result = result
+            .failed()
+            .with_diagnostic(crate::automation::doctor_diagnostic(&report));
     }
-    if report.is_ready() {
-        return Ok(());
-    }
-    // The report above is the output. The error carries only the count, and the
-    // exit code carries the verdict, so a consumer of `--format json` gets one
-    // document rather than a document and a second envelope.
-    Err(miette::miette!(
-        "build readiness: {} check(s) failed across {} target(s)",
-        report.failures(),
-        report.targets.len()
-    ))
+    Ok(result)
 }
 
 /// Checks that need a materialized build plan for this target.
@@ -386,7 +386,6 @@ fn inspect(
         .map(|(index, config)| inspection.check_target(index, config))
         .collect::<Vec<_>>();
     Ok(DoctorReport {
-        version: REPORT_VERSION,
         manifest: manifest_name,
         host: zup_plugin_contract::HOST_TARGET.to_owned(),
         status: if targets.iter().all(TargetReport::is_ready) {

@@ -27,6 +27,7 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 toml_edit.workspace = true
 zup-acquire.workspace = true
+zup-automation.workspace = true
 zup-artifact.workspace = true
 zup-build.workspace = true
 zup-core.workspace = true

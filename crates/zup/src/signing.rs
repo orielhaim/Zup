@@ -54,6 +54,9 @@
 
 use std::path::{Path, PathBuf};
 
+use zup_automation::{
+    AutomationResult, ByteCount, Details, Diagnostic, Digest, Identifier, LogLevel, SignSubject,
+};
 use zup_signing::{
     Measured as FileMeasured, SIGNING_PLAN_NAME, SigningPlan, SigningReason, SigningRole,
     SigningStage, SigningStep, SigningSubject, TimestampRequirement, covers_bytes, publisher,
@@ -61,16 +64,8 @@ use zup_signing::{
 };
 use zup_windows::signing::{SignaturePolicy, Timestamp};
 
-use crate::cli::{SignCommand, SignPrepareCommand, SignVerb, SignVerifyCommand};
-
-/// Run one `zup sign` invocation.
-pub fn run(args: SignCommand) -> miette::Result<()> {
-    let root = args.location.release_dir;
-    match args.command {
-        SignVerb::Prepare(args) => prepare(&root, args),
-        SignVerb::Verify(args) => verify(&root, args),
-    }
-}
+use crate::cli::{SignPrepareCommand, SignVerifyCommand};
+use crate::report::Reporter;
 
 fn manifest_path(root: &Path) -> PathBuf {
     root.join(zup_artifact::RELEASE_MANIFEST_NAME)
@@ -83,34 +78,44 @@ fn plan_path(root: &Path) -> PathBuf {
 fn read_manifest(root: &Path) -> miette::Result<zup_artifact::ReleaseManifest> {
     let path = manifest_path(root);
     let bytes = std::fs::read(&path).map_err(|error| {
-        miette::miette!(
-            "`{}` could not be read: {error}; run `zup build` first",
-            path.display()
+        crate::failure::error_with_help(
+            "zup.signing.manifest_missing",
+            format!("`{}` could not be read: {error}", path.display()),
+            "Run `zup build` first; the release description names the files to sign.",
         )
     })?;
     zup_artifact::ReleaseManifest::parse(&bytes).map_err(|error| {
-        miette::miette!("`{}` is not a release description: {error}", path.display())
+        crate::failure::error(
+            "zup.signing.manifest_invalid",
+            format!("`{}` is not a release description: {error}", path.display()),
+        )
     })
 }
 
 fn read_plan(root: &Path) -> miette::Result<SigningPlan> {
     let path = plan_path(root);
     let bytes = std::fs::read(&path).map_err(|error| {
-        miette::miette!(
-            "`{}` could not be read: {error}; run `zup build` first, or `zup sign prepare`",
-            path.display()
+        crate::failure::error_with_help(
+            "zup.signing.plan_missing",
+            format!("`{}` could not be read: {error}", path.display()),
+            "Run `zup build` first, or `zup sign prepare`.",
         )
     })?;
-    SigningPlan::parse(&bytes)
-        .map_err(|error| miette::miette!("`{}` is not a signing plan: {error}", path.display()))
+    SigningPlan::parse(&bytes).map_err(|error| {
+        crate::failure::error(
+            "zup.signing.plan_invalid",
+            format!("`{}` is not a signing plan: {error}", path.display()),
+        )
+    })
 }
 
 /// Write the signing plan, from the release description beside it.
 ///
 /// `prepare` re-derives rather than re-reads, so a plan can be regenerated after
 /// an artifact was replaced and cannot describe a release that no longer exists.
-fn prepare(root: &Path, args: SignPrepareCommand) -> miette::Result<()> {
-    let release = read_manifest(root)?;
+pub fn run_prepare(root: PathBuf, args: SignPrepareCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
+    let release = read_manifest(&root)?;
     let mut requirement = if args.allow_untrusted_chain || args.allow_missing_timestamp {
         zup_signing::SigningRequirement::development()
     } else {
@@ -125,8 +130,13 @@ fn prepare(root: &Path, args: SignPrepareCommand) -> miette::Result<()> {
 
     let mut plan = SigningPlan::new(&release.application, requirement);
     for (variant, _) in embedded_by_variant(&release) {
-        plan.push(runtime_step(root, &release, &variant)?)
-            .map_err(|error| miette::miette!("signing plan: {error}"))?;
+        plan.push(runtime_step(&root, &release, &variant)?)
+            .map_err(|error| {
+                crate::failure::error(
+                    "zup.signing.plan_rejected",
+                    format!("signing plan: {error}"),
+                )
+            })?;
     }
     for artifact in &release.artifacts {
         plan.push(SigningStep::new(
@@ -142,20 +152,78 @@ fn prepare(root: &Path, args: SignPrepareCommand) -> miette::Result<()> {
                 variants: artifact.variants.clone(),
             },
         ))
-        .map_err(|error| miette::miette!("signing plan: {error}"))?;
+        .map_err(|error| {
+            crate::failure::error(
+                "zup.signing.plan_rejected",
+                format!("signing plan: {error}"),
+            )
+        })?;
     }
 
-    let path = plan_path(root);
-    zup_windows::write_durable(
-        &path,
-        &plan
-            .encode()
-            .map_err(|error| miette::miette!("signing plan: {error}"))?,
+    let path = plan_path(&root);
+    let encoded = plan.encode().map_err(|error| {
+        crate::failure::error(
+            "zup.signing.plan_unencodable",
+            format!("signing plan: {error}"),
+        )
+    })?;
+    zup_windows::write_durable(&path, &encoded).map_err(|error| {
+        crate::failure::error(
+            "zup.signing.plan_unwritable",
+            format!("`{}`: {error}", path.display()),
+        )
+    })?;
+    reporter.log(LogLevel::Info, render(&plan));
+    let subjects = plan
+        .steps
+        .iter()
+        .map(|step| subject_of(step, false, String::new(), None))
+        .collect::<Vec<_>>();
+    let count = subjects.len();
+    Ok(
+        AutomationResult::new(zup_automation::OPERATION_SIGN_PREPARE)
+            .with_application(crate::automation::application(&release.application))
+            .with_artifacts(crate::automation::artifacts(&release))
+            .with_release_manifest(crate::automation::project_path(&manifest_path(&root)))
+            .with_details(Details::SignPrepare(zup_automation::SignPrepareDetails {
+                plan: crate::automation::project_path(&path),
+                subjects,
+            }))
+            .with_summary(format!(
+                "{} file(s) require a signature; sign them, then run `zup sign verify`",
+                count
+            )),
     )
-    .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+}
 
-    print!("{}", render(&plan));
-    Ok(())
+/// One signing step, as the protocol reports it.
+fn subject_of(
+    step: &SigningStep,
+    verified: bool,
+    detail: String,
+    measured: Option<(Digest, ByteCount)>,
+) -> SignSubject {
+    let (digest, size) = match measured {
+        Some(pair) => (Some(pair.0), Some(pair.1)),
+        None => (
+            Some(Digest::sha256(step.subject.digest.to_hex())),
+            Some(ByteCount::new(step.subject.size)),
+        ),
+    };
+    SignSubject {
+        path: crate::automation::release_path(&step.subject.path),
+        role: Identifier::fixed(step.role.as_str()),
+        stage: Identifier::fixed(step.stage.as_str()),
+        variants: step.subject.variants.clone(),
+        verified,
+        detail: if detail.is_empty() {
+            "awaiting a signature".to_owned()
+        } else {
+            detail
+        },
+        digest,
+        size,
+    }
 }
 
 /// The plan, as a person reads it.
@@ -291,12 +359,15 @@ struct Finding {
     path: String,
     detail: String,
     ok: bool,
+    /// Measured from the bytes on disk, when they could be read.
+    measured: Option<(zup_core::Sha256Digest, u64)>,
 }
 
 /// Verify every signature and finalize the release description.
-fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
-    let mut release = read_manifest(root)?;
-    let plan = read_plan(root)?;
+pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
+    let mut release = read_manifest(&root)?;
+    let plan = read_plan(&root)?;
     let policy = policy(&plan, args.online_revocation);
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -307,11 +378,15 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
     let mut signed_runtimes: std::collections::BTreeMap<String, zup_core::Sha256Digest> =
         std::collections::BTreeMap::new();
     for file in &plan.steps {
-        let path = file.subject.resolve(root);
+        let path = file.subject.resolve(&root);
         match zup_windows::signing::verify(&path, &policy) {
             Ok(verified) => {
-                let measured = FileMeasured::of(&path)
-                    .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+                let measured = FileMeasured::of(&path).map_err(|error| {
+                    crate::failure::error(
+                        "zup.signing.subject_unreadable",
+                        format!("`{}`: {error}", path.display()),
+                    )
+                })?;
                 signed_runtimes.insert(file.subject.path.clone(), measured.digest);
                 findings.push(Finding {
                     path: file.subject.path.clone(),
@@ -323,6 +398,7 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                         measured.size
                     ),
                     ok: true,
+                    measured: Some((measured.digest, measured.size)),
                 });
                 // A post-compose subject is the published file, so it is
                 // finalized here and nowhere else: the digest and size recorded
@@ -332,8 +408,13 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                 if file.role == SigningRole::OuterArtifact {
                     let id = artifact_id(&release, &file.subject.path)?;
                     release
-                        .finalize(root, &id, &measured, verified.evidence())
-                        .map_err(|error| miette::miette!("`{}`: {error}", file.subject.path))?;
+                        .finalize(&root, &id, &measured, verified.evidence())
+                        .map_err(|error| {
+                            crate::failure::error(
+                                "zup.signing.finalize_failed",
+                                format!("`{}`: {error}", file.subject.path),
+                            )
+                        })?;
                 }
             }
             Err(error) if args.allow_unsigned => {
@@ -342,23 +423,31 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                 // the bytes as they stand. What must never happen is finalizing
                 // something that is *not* what it claims to be, so the file is
                 // still measured and the refusal is reported as a fact.
-                match unsigned_finalize(&mut release, root, file) {
+                match unsigned_finalize(&mut release, &root, file) {
                     Ok(detail) => findings.push(Finding {
                         path: file.subject.path.clone(),
                         detail,
                         ok: true,
+                        measured: measured_of(&root, file),
                     }),
                     Err(problem) => findings.push(Finding {
                         path: file.subject.path.clone(),
                         detail: format!("{error}; and it cannot be finalized unsigned: {problem}"),
                         ok: false,
+                        measured: measured_of(&root, file),
                     }),
                 }
             }
             Err(error) => findings.push(Finding {
                 path: file.subject.path.clone(),
-                detail: error.to_string(),
+                detail: signing_diagnostic_code(&error)
+                    .map_or_else(
+                        || crate::failure::error("zup.signing.failed", error.to_string()),
+                        |code| crate::failure::error(code, error.to_string()),
+                    )
+                    .to_string(),
                 ok: false,
+                measured: measured_of(&root, file),
             }),
         }
     }
@@ -370,7 +459,7 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
     // have to be read back out of it, and compared against the *signed* runtime
     // rather than against the plan's pre-signature digest.
     for step in plan.post_compose().collect::<Vec<_>>() {
-        let path = step.subject.resolve(root);
+        let path = step.subject.resolve(&root);
         if !path.is_file() {
             continue;
         }
@@ -384,6 +473,7 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                          container does not travel with the executable extracted from it"
                     ),
                     ok: false,
+                    measured: measured_of(&root, step),
                 });
                 continue;
             };
@@ -399,11 +489,17 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                         path: step.subject.path.clone(),
                         detail: format!("embeds the signed runtime for `{variant}`"),
                         ok: true,
+                        measured: measured_of(&root, step),
                     });
-                    if let Some(evidence) = signed_evidence_of(root, embedded) {
+                    if let Some(evidence) = signed_evidence_of(&root, embedded) {
                         release
                             .note_runtime_evidence(&variant, evidence)
-                            .map_err(|error| miette::miette!("`{variant}`: {error}"))?;
+                            .map_err(|error| {
+                                crate::failure::error(
+                                    "zup.signing.evidence_rejected",
+                                    format!("`{variant}`: {error}"),
+                                )
+                            })?;
                     }
                 }
                 Ok(digest) => findings.push(Finding {
@@ -415,11 +511,13 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                         signed.to_hex()
                     ),
                     ok: false,
+                    measured: measured_of(&root, step),
                 }),
                 Err(error) => findings.push(Finding {
                     path: step.subject.path.clone(),
                     detail: format!("variant `{variant}`: {error}"),
                     ok: false,
+                    measured: measured_of(&root, step),
                 }),
             }
         }
@@ -429,56 +527,157 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
         if plan.embeds(step).is_empty()
             && step.subject.variants.len() == 1
             && let Some(variant) = step.subject.variants.first()
-            && let Some(evidence) = signed_evidence_of(root, step)
+            && let Some(evidence) = signed_evidence_of(&root, step)
         {
             release
                 .note_runtime_evidence(variant, evidence)
-                .map_err(|error| miette::miette!("`{variant}`: {error}"))?;
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.signing.evidence_rejected",
+                        format!("`{variant}`: {error}"),
+                    )
+                })?;
         }
     }
 
     for finding in &findings {
-        println!(
-            "{} {}",
-            if finding.ok { "ok  " } else { "FAIL" },
-            finding.path
-        );
-        println!("       {}", finding.detail);
+        // Streamed as it is found rather than at the end: verifying a large release
+        // takes minutes, and a pipeline watching it wants the first failure while the
+        // rest is still running.
+        let diagnostic = Diagnostic::error("zup.signing.failed", finding.detail.clone())
+            .with_help(format!("`{}`", finding.path));
+        if finding.ok {
+            reporter.log(
+                LogLevel::Info,
+                format!("ok   {}\n     {}", finding.path, finding.detail),
+            );
+        } else {
+            reporter.diagnostic(&diagnostic);
+            reporter.log(
+                LogLevel::Error,
+                format!("FAIL {}\n     {}", finding.path, finding.detail),
+            );
+        }
     }
 
-    let failed: Vec<&Finding> = findings.iter().filter(|finding| !finding.ok).collect();
-    if !failed.is_empty() {
-        if args.report_only {
-            println!(
-                "\n{} file(s) failed verification; the release was not finalized.",
-                failed.len()
-            );
-            return Ok(());
-        }
-        return Err(miette::miette!(
-            "{} of {} check(s) failed; the release was not finalized",
-            failed.len(),
+    let subjects = plan
+        .steps
+        .iter()
+        .map(|step| {
+            let finding = findings
+                .iter()
+                .find(|finding| finding.path == step.subject.path);
+            subject_of(
+                step,
+                finding.is_some_and(|finding| finding.ok),
+                finding.map_or_else(String::new, |finding| finding.detail.clone()),
+                finding.and_then(|finding| {
+                    finding.measured.map(|(digest, size)| {
+                        (Digest::sha256(digest.to_hex()), ByteCount::new(size))
+                    })
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    let failed = findings.iter().filter(|finding| !finding.ok).count();
+    let path = manifest_path(&root);
+    let mut result = AutomationResult::new(zup_automation::OPERATION_SIGN_VERIFY)
+        .with_application(crate::automation::application(&release.application))
+        .with_targets(
+            release
+                .variants
+                .iter()
+                .map(|variant| {
+                    zup_automation::Target::new(variant.id.clone(), variant.target.to_string())
+                })
+                .collect(),
+        )
+        .with_artifacts(crate::automation::artifacts(&release))
+        .with_release_manifest(crate::automation::project_path(&path));
+
+    if failed > 0 {
+        // A failure here is a report, not a refusal: `--report-only` exists so a
+        // pipeline can see every finding before it decides to stop, and the exit code
+        // is the same either way because the release is not finalized in both cases.
+        let _ = args.report_only;
+        let mut result = result.failed().with_summary(format!(
+            "{failed} of {} check(s) failed; the release was not finalized",
             findings.len()
         ));
+        for finding in findings.iter().filter(|finding| !finding.ok) {
+            result = result.with_diagnostic(
+                Diagnostic::error("zup.signing.failed", finding.detail.clone())
+                    .with_help(format!("`{}`", finding.path)),
+            );
+        }
+        result = result.with_details(Details::SignVerify(zup_automation::SignVerifyDetails {
+            plan: crate::automation::project_path(&plan_path(&root)),
+            subjects,
+            finalized: 0,
+            unsigned: 0,
+        }));
+        return Ok(result);
     }
 
     if !release.is_finalized() {
-        return Err(miette::miette!(
-            "the release has no finalized identity for: {}",
-            release.unfinalized().join(", ")
+        return Err(crate::failure::error_with_help(
+            "zup.signing.unfinalized",
+            format!(
+                "the release has no finalized identity for: {}",
+                release.unfinalized().join(", ")
+            ),
+            "Every subject in the plan must be verified or explicitly allowed unsigned.",
         ));
     }
 
-    let path = manifest_path(root);
-    zup_windows::write_durable(
-        &path,
-        &release
-            .encode()
-            .map_err(|error| miette::miette!("release description: {error}"))?,
-    )
-    .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+    let encoded = release.encode().map_err(|error| {
+        crate::failure::error(
+            "zup.signing.manifest_unencodable",
+            format!("release description: {error}"),
+        )
+    })?;
+    zup_windows::write_durable(&path, &encoded).map_err(|error| {
+        crate::failure::error(
+            "zup.signing.manifest_unwritable",
+            format!("`{}`: {error}", path.display()),
+        )
+    })?;
 
-    println!("\nFinalized {} artifact(s):", release.artifacts.len());
+    let unsigned = release.unsigned();
+    reporter.log(LogLevel::Info, finalize_text(&release, &unsigned, &path));
+    if !unsigned.is_empty() {
+        reporter.log(
+            LogLevel::Warning,
+            format!(
+                "\n! {} artifact(s) are unsigned: {}\n  Windows SmartScreen will warn about them. \
+                 See docs/signing.md.",
+                unsigned.len(),
+                unsigned.join(", ")
+            ),
+        );
+    }
+    result = result.with_details(Details::SignVerify(zup_automation::SignVerifyDetails {
+        plan: crate::automation::project_path(&plan_path(&root)),
+        subjects,
+        finalized: count(release.artifacts.len()),
+        unsigned: count(unsigned.len()),
+    }));
+    Ok(result)
+}
+
+/// A count that is structurally small, and so is inside the range every consumer holds
+/// exactly.
+fn count(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// What a person reads after a successful verification.
+fn finalize_text(
+    release: &zup_artifact::ReleaseManifest,
+    unsigned: &[&str],
+    path: &Path,
+) -> String {
+    let mut out = format!("\nFinalized {} artifact(s):", release.artifacts.len());
     for artifact in &release.artifacts {
         let Some(finalized) = &artifact.finalized else {
             continue;
@@ -500,27 +699,54 @@ fn verify(root: &Path, args: SignVerifyCommand) -> miette::Result<()> {
                 publisher(evidence).unwrap_or("unknown publisher")
             ),
         };
-        println!(
-            "  {} · sha256:{} · {} bytes{note}",
+        out.push_str(&format!(
+            "\n  {} · sha256:{} · {} bytes{note}",
             artifact.path,
             finalized.digest().to_hex(),
             finalized.size()
-        );
+        ));
     }
-    let unsigned = release.unsigned();
-    if !unsigned.is_empty() {
-        println!(
-            "\n! {} artifact(s) are unsigned: {}",
-            unsigned.len(),
-            unsigned.join(", ")
-        );
-        println!("  Windows SmartScreen will warn about them. See docs/signing.md.");
-    }
-    println!(
-        "\n`{}` now describes the bytes that will be published.",
+    let _ = unsigned;
+    out.push_str(&format!(
+        "\n\n`{}` now describes the bytes that will be published.",
         path.display()
-    );
-    Ok(())
+    ));
+    out
+}
+
+/// Measure a subject from the bytes on disk, when they can be read.
+///
+/// Verification has already refused or accepted the file by this point; this is only
+/// so a report can carry the identity it is talking about, and a file that vanished
+/// between the two is a `None` rather than a second failure.
+fn measured_of(root: &Path, step: &SigningStep) -> Option<(zup_core::Sha256Digest, u64)> {
+    let path = step.subject.resolve(root);
+    FileMeasured::of(&path)
+        .ok()
+        .map(|measured| (measured.digest, measured.size))
+}
+
+/// A code for the failure the platform reported, when it names one.
+///
+/// `zup_windows::signing`'s errors are the platform's own wording, so a code is
+/// chosen from the words rather than parsed out of a string. Anything unrecognised
+/// falls back to `zup.signing.failed`, which is still better than a code per possible
+/// platform message.
+fn signing_diagnostic_code(
+    error: &zup_windows::signing::VerificationError,
+) -> Option<&'static str> {
+    let message = error.to_string().to_ascii_lowercase();
+    Some(if message.contains("chain") || message.contains("trust") {
+        "zup.signing.untrusted_chain"
+    } else if message.contains("timestamp") {
+        "zup.signing.timestamp_missing"
+    } else if message.contains("publisher") || message.contains("subject") {
+        "zup.signing.unexpected_publisher"
+    } else if message.contains("missing") || message.contains("not found") {
+        "zup.signing.subject_missing"
+    } else {
+        "zup.signing.failed"
+    })
 }
 
 /// The signing evidence of a subject whose file is already on disk and was
@@ -559,15 +785,27 @@ fn unsigned_finalize(
 ) -> miette::Result<String> {
     let path = step.subject.resolve(root);
     if !path.is_file() {
-        return Err(miette::miette!("`{}` does not exist", path.display()));
+        return Err(crate::failure::error(
+            "zup.signing.subject_missing",
+            format!("`{}` does not exist", path.display()),
+        ));
     }
-    let measured = FileMeasured::of(&path)
-        .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+    let measured = FileMeasured::of(&path).map_err(|error| {
+        crate::failure::error(
+            "zup.signing.subject_unreadable",
+            format!("`{}`: {error}", path.display()),
+        )
+    })?;
     if step.role == SigningRole::OuterArtifact {
         let id = artifact_id(release, &step.subject.path)?;
         release
             .finalize(root, &id, &measured, Vec::new())
-            .map_err(|error| miette::miette!("`{}`: {error}", step.subject.path))?;
+            .map_err(|error| {
+                crate::failure::error(
+                    "zup.signing.finalize_failed",
+                    format!("`{}`: {error}", step.subject.path),
+                )
+            })?;
     }
     Ok(format!(
         "unsigned · sha256:{} · {} bytes",
@@ -591,7 +829,12 @@ fn artifact_id(release: &zup_artifact::ReleaseManifest, path: &str) -> miette::R
         .iter()
         .find(|artifact| artifact.path == path)
         .map(|artifact| artifact.id.clone())
-        .ok_or_else(|| miette::miette!("`{path}` is not an artifact in this release"))
+        .ok_or_else(|| {
+            crate::failure::error(
+                "zup.signing.subject_not_an_artifact",
+                format!("`{path}` is not an artifact in this release"),
+            )
+        })
 }
 
 /// The digest of the native runtime a composed artifact actually embeds.
@@ -604,17 +847,29 @@ fn embedded_runtime_digest(
     variant: &str,
 ) -> miette::Result<zup_core::Sha256Digest> {
     let composed = zup_windows::UniversalArtifact::open(artifact).map_err(|error| {
-        miette::miette!(
-            "`{}` is not a composed artifact: {error}; a single-target installer is its own runtime",
-            artifact.display()
+        crate::failure::error(
+            "zup.signing.not_a_composed_artifact",
+            format!(
+                "`{}` is not a composed artifact: {error}; a single-target installer is its own \
+                 runtime",
+                artifact.display()
+            ),
         )
     })?;
-    let bytes = composed
-        .embedded_runtime(variant)
-        .map_err(|error| miette::miette!("`{}`: {error}", artifact.display()))?;
+    let bytes = composed.embedded_runtime(variant).map_err(|error| {
+        crate::failure::error(
+            "zup.signing.artifact_unreadable",
+            format!("`{}`: {error}", artifact.display()),
+        )
+    })?;
     zup_core::hash_reader(bytes.as_slice())
         .map(|(_, digest)| digest)
-        .map_err(|error| miette::miette!("`{}`: {error}", artifact.display()))
+        .map_err(|error| {
+            crate::failure::error(
+                "zup.signing.embedded_runtime_unreadable",
+                format!("`{}`: {error}", artifact.display()),
+            )
+        })
 }
 
 #[cfg(test)]

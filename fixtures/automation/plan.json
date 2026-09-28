@@ -1,0 +1,28 @@
+{
+  "protocol": "1.0",
+  "operation": "plan",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [
+    {
+      "profile": "windows-x64",
+      "target": "x86_64-pc-windows-msvc"
+    }
+  ],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [],
+  "summary": "3 change(s) · 237.0 MiB under ${location.user_data}/Acme",
+  "details": {
+    "kind": "plan",
+    "scope": "user",
+    "install_directory": "${location.user_data}/Acme",
+    "estimated_bytes": 248512896,
+    "change_count": 3
+  }
+}

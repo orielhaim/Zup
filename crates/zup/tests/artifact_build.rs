@@ -338,14 +338,16 @@ fn inspect_describes_the_built_artifact_in_text_and_json() {
         "json".as_ref(),
     ]);
     assert!(json.status.success(), "{}", stderr(&json));
-    let report: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
-    assert_eq!(report["report_version"], 1);
-    assert_eq!(report["kind"], "universal");
-    assert_eq!(report["mode"], "offline");
+    let document: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(document["operation"], "artifact.inspect");
+    assert_eq!(document["status"], "success");
+    let report = &document["details"];
+    assert_eq!(report["artifact_kind"], "universal");
+    assert_eq!(report["artifact_mode"], "offline");
     assert_eq!(report["pin"], "1.4.0");
     assert_eq!(report["subsystem"], "console");
-    assert_eq!(report["application"], "Universal");
-    assert_eq!(report["application_version"], "1.4.0");
+    assert_eq!(document["application"]["name"], "Universal");
+    assert_eq!(document["application"]["version"], "1.4.0");
     assert_eq!(
         report["trust"]["authenticode"], "no certificate table",
         "a structural answer, not a trust answer: a linker emits no certificate table"

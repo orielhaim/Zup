@@ -461,7 +461,7 @@ fn run_graph_transition(
             crate::cli::OutputArg::Jsonl => {
                 println!(
                     "{}",
-                    serde_json::to_string(&zup_presentation::AutomationEvent::Completed {
+                    serde_json::to_string(&zup_presentation::InstallerEvent::Completed {
                         outcome: zup_presentation::ProcessOutcome::Success,
                     })
                     .map_err(|error| miette::miette!("output: {error}"))?

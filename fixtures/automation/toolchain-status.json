@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0",
+  "operation": "toolchain.status",
+  "status": "failure",
+  "application": null,
+  "targets": [],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.toolchain.component_missing",
+      "message": "1 of 7 components are missing, so a build here cannot compose anything",
+      "source": null,
+      "help": null
+    }
+  ],
+  "summary": "not ready: 1 of 7 component(s) missing",
+  "details": {
+    "kind": "toolchain.status",
+    "zup_version": "0.0.1",
+    "host": "x86_64-pc-windows-msvc",
+    "cache": "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1",
+    "complete": false,
+    "components": [
+      {
+        "component": "runtime gui for x86_64-pc-windows-msvc",
+        "found": false,
+        "source": null,
+        "path": null,
+        "problem": "no copy was found in any search location"
+      }
+    ]
+  }
+}

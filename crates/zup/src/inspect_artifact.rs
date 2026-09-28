@@ -7,17 +7,18 @@
 
 use serde::{Deserialize, Serialize};
 use zup_artifact::ArtifactError;
+use zup_automation::{Application, AutomationResult, Details, LogLevel, Target};
 use zup_windows::UniversalArtifact;
 
-/// Version of the inspection report.
-pub const REPORT_VERSION: u32 = 1;
+use crate::report::Reporter;
 
 /// Everything worth knowing about one artifact.
+///
+/// The command's own report, and the human view's model of it. The machine result
+/// carries a projection — the same facts, shaped for a consumer that wants the content
+/// accounting and the trust questions without a prose rendering around them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Inspection {
-    /// Version of this report shape.
-    pub report_version: u32,
     /// The artifact this report describes.
     pub artifact: String,
     pub application: String,
@@ -35,7 +36,6 @@ pub struct Inspection {
 
 /// One variant inside an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InspectedVariant {
     pub id: String,
     pub target: String,
@@ -51,7 +51,6 @@ pub struct InspectedVariant {
 
 /// What the artifact costs, and what composing it saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InspectedContent {
     /// Every variant's content, counted once per variant.
     pub logical_size: u64,
@@ -76,7 +75,6 @@ pub struct InspectedContent {
 /// that collapsed them into one word would be claiming the second from evidence
 /// for the first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InspectedTrust {
     /// Whether the image carries an Authenticode structure, and whether its
     /// embedded digest covers these bytes.
@@ -110,17 +108,40 @@ pub enum InspectError {
 /// Every content digest is verified, so a report never describes content the
 /// artifact cannot actually produce.
 /// Describe a built artifact, in the format the caller asked for.
-pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<()> {
-    let report = inspect(&args.artifact).map_err(|error| miette::miette!("{error}"))?;
-    match args.format {
-        crate::cli::FormatArg::Human => print!("{}", report.human()),
-        crate::cli::FormatArg::Json => {
-            let text = serde_json::to_string_pretty(&report)
-                .map_err(|error| miette::miette!("{error}"))?;
-            println!("{text}");
-        }
-    }
-    Ok(())
+pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
+    let report = inspect(&args.artifact).map_err(|error| {
+        crate::failure::error(
+            "zup.artifact.unreadable",
+            format!("`{}`: {error}", args.artifact.display()),
+        )
+    })?;
+    reporter.log(LogLevel::Info, report.human());
+    Ok(
+        AutomationResult::new(zup_automation::OPERATION_ARTIFACT_INSPECT)
+            .with_application(Application {
+                id: args.artifact.display().to_string(),
+                name: report.application.clone(),
+                version: report.application_version.clone(),
+            })
+            .with_targets(
+                report
+                    .variants
+                    .iter()
+                    .map(|variant| Target::new(variant.id.clone(), variant.target.clone()))
+                    .collect(),
+            )
+            .with_details(Details::ArtifactInspect(crate::automation::inspection(
+                &report,
+            )))
+            .with_summary(format!(
+                "{} {} · {} variant(s) · {} on disk",
+                report.application,
+                report.application_version,
+                report.variants.len(),
+                zup_presentation::format_bytes(report.content.file_size)
+            )),
+    )
 }
 
 /// Read one artifact and describe it.
@@ -177,8 +198,7 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
     let authenticode = authenticode(path);
     let file_size = std::fs::metadata(path)?.len();
     Ok(Inspection {
-        report_version: REPORT_VERSION,
-        artifact: path.display().to_string(),
+        artifact: crate::automation::release_path(&crate::plain_path(path)),
         application: index.artifact.application.name.to_string(),
         application_version: index.artifact.application.version.to_string(),
         kind: index.artifact.kind.as_str().to_owned(),

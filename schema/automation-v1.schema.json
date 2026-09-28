@@ -1,0 +1,1713 @@
+{
+  "$id": "https://zup.dev/schema/automation-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "zup automation protocol",
+  "description": "What zup's developer CLI writes to stdout under `--format json` and `--format jsonl`. A consumer accepts a document whose `protocol` shares its major version, and ignores fields, event types, operation names, artifact kinds and diagnostic codes it does not know. A different major is refused. Nothing here is closed: no definition sets `additionalProperties: false`.",
+  "oneOf": [
+    {
+      "title": "final result — the whole of a `--format json` stdout",
+      "$ref": "#/$defs/AutomationResult"
+    },
+    {
+      "title": "stream message — one line of a `--format jsonl` stream",
+      "$ref": "#/$defs/StreamEvent"
+    }
+  ],
+  "$defs": {
+    "AutomationResult": {
+      "properties": {
+        "protocol": {
+          "description": "The contract this document is written to.",
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "operation": {
+          "description": "The operation that ran, in zup's own vocabulary.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "status": {
+          "description": "Whether it did what it was asked.",
+          "$ref": "#/$defs/Status"
+        },
+        "application": {
+          "description": "The application, when the command read a manifest.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "The reverse-DNS identifier, e.g. `com.acme.desktop`.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The display name.",
+              "type": "string"
+            },
+            "version": {
+              "description": "The version, as the manifest spells it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "version"
+          ]
+        },
+        "targets": {
+          "description": "The targets the operation selected.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Target"
+          }
+        },
+        "artifacts": {
+          "description": "The files the operation produced.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          }
+        },
+        "release_manifest": {
+          "description": "The release description, project-relative, when one was written.",
+          "type": "string"
+        },
+        "publication": {
+          "description": "Where a release went, when one was published.",
+          "type": "object",
+          "properties": {
+            "provider": {
+              "description": "The provider, e.g. `github`.",
+              "type": "string"
+            },
+            "subject": {
+              "description": "Where it went, in the provider's own terms: `owner/name`, or\n`host/owner/name` on an installation that is not the public one.",
+              "type": "string"
+            },
+            "tag": {
+              "description": "The tag the release answers to.",
+              "type": "string"
+            },
+            "id": {
+              "description": "The provider's identifier for it, when it has one.\n\nA string because whether a provider's id fits in a double is the provider's\nbusiness. Encoding it as a number is how a release id silently becomes\n`1.2345678901234568e18` somewhere between the host and a log line.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "description": "`published`, `draft`, `prerelease`, `deleted`, or whatever the provider says.",
+              "$ref": "#/$defs/Identifier"
+            },
+            "url": {
+              "description": "The address a person can open, when there is one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "immutable": {
+              "description": "Whether the host refuses to replace these bytes. `null` when it did not say.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "assets": {
+              "description": "The files the release carries.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PublicationAsset"
+              }
+            },
+            "receipt": {
+              "description": "The provider's own receipt, project-relative, when one was written.\n\nNamed rather than inlined: the receipt is the provider's document in the\nprovider's shape, and a contract that absorbed it would have to version it\nseparately. A machine consumer that wants the tag, the state and the asset\nnames does not need to read it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "provider",
+            "subject",
+            "tag",
+            "state",
+            "assets"
+          ]
+        },
+        "diagnostics": {
+          "description": "Everything zup wants the reader to know. Present on success too.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "summary": {
+          "description": "One line a human would have read. Never parsed.",
+          "type": "string"
+        },
+        "details": {
+          "description": "The operation's own result, beyond what every integration needs.",
+          "oneOf": [
+            {
+              "description": "`zup build`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "build"
+                }
+              },
+              "$ref": "#/$defs/BuildDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup check`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "check"
+                }
+              },
+              "$ref": "#/$defs/CheckDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup plan`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "plan"
+                }
+              },
+              "$ref": "#/$defs/PlanDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup doctor`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "doctor"
+                }
+              },
+              "$ref": "#/$defs/DoctorDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup publish stage`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "publish.stage"
+                }
+              },
+              "$ref": "#/$defs/PublishStageDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup publish github`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "publish.github"
+                }
+              },
+              "$ref": "#/$defs/PublishDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup sign prepare`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "sign.prepare"
+                }
+              },
+              "$ref": "#/$defs/SignPrepareDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup sign verify`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "sign.verify"
+                }
+              },
+              "$ref": "#/$defs/SignVerifyDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup toolchain install`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "toolchain.install"
+                }
+              },
+              "$ref": "#/$defs/ToolchainInstallDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup toolchain status`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "toolchain.status"
+                }
+              },
+              "$ref": "#/$defs/ToolchainStatusDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup toolchain clean`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "toolchain.clean"
+                }
+              },
+              "$ref": "#/$defs/ToolchainCleanDetails",
+              "required": [
+                "kind"
+              ]
+            },
+            {
+              "description": "`zup artifact inspect`.",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "artifact.inspect"
+                }
+              },
+              "$ref": "#/$defs/ArtifactInspectDetails",
+              "required": [
+                "kind"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "operation",
+        "status",
+        "application",
+        "targets",
+        "artifacts",
+        "release_manifest",
+        "publication",
+        "diagnostics",
+        "summary",
+        "details"
+      ],
+      "description": "The final result of one zup operation.\n\nEvery field is always written. The nullable ones carry `null` rather than being\nomitted, so a consumer reads `result.publication` and gets `null` instead of having\nto distinguish \"not applicable\" from \"produced by an older zup\", and so a validator\ncan require all eleven.",
+      "type": "object"
+    },
+    "ProtocolVersion": {
+      "description": "MAJOR.MINOR. A consumer accepts any version with the same major and refuses any other.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "Identifier": {
+      "description": "A lowercase dotted identifier. The vocabulary is open: an unknown operation name, artifact kind, mode, publication state or diagnostic code is an additive change, and a consumer displays it rather than refusing it.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*(\\.[a-z][a-z0-9]*(-[a-z0-9]+)*)*$"
+    },
+    "Status": {
+      "description": "Whether the operation did what it was asked.",
+      "oneOf": [
+        {
+          "description": "It did, and the diagnostics that came with it did not stop it.",
+          "type": "string",
+          "const": "success"
+        },
+        {
+          "description": "It did not. The diagnostics say why, and the process exited nonzero.",
+          "type": "string",
+          "const": "failure"
+        }
+      ]
+    },
+    "Target": {
+      "description": "One selected target profile, and the machine it resolves to.",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "description": "The profile name from `[build.targets]`.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The canonical target triple the profile resolves to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "target"
+      ]
+    },
+    "Artifact": {
+      "description": "A file a zup operation produced, or a provider published.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Release-relative, `/`-separated. Never a build-machine absolute path.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The digest of the bytes as they stand now.",
+          "$ref": "#/$defs/Digest"
+        },
+        "size": {
+          "description": "The size of those bytes.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "kind": {
+          "description": "What the artifact is: `single`, `universal`, `thin`, `package`, `document`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "mode": {
+          "description": "How it behaves: `offline`, `thin`, `package`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "id": {
+          "description": "The declared artifact id, when the manifest named one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "The target triple, for an artifact that serves exactly one machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variants": {
+          "description": "The variant ids this artifact carries, for one that serves several.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "signing": {
+          "description": "What is known about its signature, once signing has been attempted.\n\n`null` means nobody has looked, which is a different fact from an empty list\nmeaning \"looked, and there is no signature\". An unsigned release is a real\nrelease: it is finalized, it has a published identity, and nothing proves who\nproduced it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SigningState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "digest",
+        "size",
+        "kind",
+        "mode"
+      ]
+    },
+    "Digest": {
+      "description": "The algorithm behind a digest, and the value it produced.\n\nTwo fields rather than a `sha256:<hex>` string, because a consumer has to be able\nto compare the algorithm to decide whether a comparison means anything. A prefixed\nstring is one field a consumer has to split and get right for every value.",
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "description": "The digest algorithm, lowercased. `sha256` is the only one zup emits today.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The digest, lowercase hex.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "value"
+      ]
+    },
+    "ByteCount": {
+      "description": "A byte count, bounded so that a consumer holding it in a 64-bit float represents it exactly. A larger value is refused rather than rounded.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "SigningState": {
+      "description": "How far signing got for one artifact.",
+      "type": "object",
+      "properties": {
+        "state": {
+          "description": "`unsigned`, `signed`, or `unverified` when a signature exists but has not been\naccepted against a policy.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "evidence": {
+          "description": "The facts the platform established, in the order it established them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SigningEvidence"
+          }
+        }
+      },
+      "required": [
+        "state",
+        "evidence"
+      ]
+    },
+    "SigningEvidence": {
+      "description": "What was established about a file's signature.\n\nA list rather than a state word, because the facts fail separately and mean\ndifferent things: a signature can cover the bytes without the platform trusting the\nchain, and either can hold without a publisher. A single `signed`/`unsigned` field\ncannot say which, so it would either overstate or say nothing.\n\n`fact` is open on purpose. Today's vocabulary is `signature_covers_bytes`,\n`platform_trust_accepted`, `publisher`, `certificate` and `timestamp`; a new fact is\nan additive change, and a consumer that displays an unknown one is doing the right\nthing. `value` is the platform's own wording, because translating it would be zup\nmaking a claim the platform did not.",
+      "type": "object",
+      "properties": {
+        "fact": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact",
+        "value"
+      ]
+    },
+    "PublicationAsset": {
+      "description": "One file a published release carries.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The name the release carries it under. Flat, because that is how a host\naddresses an asset.",
+          "type": "string"
+        },
+        "size": {
+          "description": "Its size on the host.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "digest": {
+          "description": "The digest zup published, when it published one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "description": "`uploaded`, `existing`, `replaced`, or whatever the provider reported.",
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "name",
+        "size",
+        "state"
+      ]
+    },
+    "Diagnostic": {
+      "description": "One thing zup wants a developer to know.",
+      "type": "object",
+      "properties": {
+        "severity": {
+          "description": "How loudly zup is saying it.",
+          "$ref": "#/$defs/Severity"
+        },
+        "code": {
+          "description": "A stable identifier, e.g. `zup.manifest.unknown_target`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "message": {
+          "description": "The one-sentence statement of what is wrong.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where it is wrong, when zup knows.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "help": {
+          "description": "The line a developer can act on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ]
+    },
+    "Severity": {
+      "description": "How loudly zup is saying something.",
+      "oneOf": [
+        {
+          "description": "The operation cannot do what it was asked.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "The operation finished, and something about the result deserves attention.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Something a person may want to know. Never fails anything.",
+          "type": "string",
+          "const": "notice"
+        }
+      ]
+    },
+    "DiagnosticSource": {
+      "description": "Where a diagnostic points.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "The file, as the diagnostic names it. Usually project-relative.",
+          "type": "string"
+        },
+        "start_line": {
+          "description": "1-based.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "start_column": {
+          "description": "1-based.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "end_line": {
+          "description": "1-based, inclusive.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "end_column": {
+          "description": "1-based, inclusive.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file"
+      ]
+    },
+    "BuildDetails": {
+      "description": "What a build produced that is not an artifact.",
+      "type": "object",
+      "properties": {
+        "signing_plan": {
+          "description": "The signing plan, project-relative, when one was written.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending_signatures": {
+          "description": "How many files the plan says an external signer has to touch.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pending_signatures"
+      ]
+    },
+    "Composition": {
+      "description": "Whether a set of targets can become one artifact.",
+      "type": "object",
+      "properties": {
+        "composable": {
+          "description": "Whether they can.",
+          "type": "boolean"
+        },
+        "dimension": {
+          "description": "The dimension that refused, when it did.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {
+          "description": "The one-line reason, in zup's words.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "composable",
+        "detail"
+      ]
+    },
+    "CheckDetails": {
+      "description": "What a check established.",
+      "type": "object",
+      "properties": {
+        "variants": {
+          "description": "How many variant descriptions the selected targets resolved into.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "composition": {
+          "description": "Whether the selected targets can be composed into one artifact, and why not when\nthey cannot. `None` means fewer than two were selected, which is not a finding.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Composition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "variants"
+      ]
+    },
+    "PlanDetails": {
+      "description": "What an install plan would do.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "`user` or `machine`.",
+          "type": "string"
+        },
+        "install_directory": {
+          "description": "Where it would install, when the project chose a directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "estimated_bytes": {
+          "description": "What it would write.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "change_count": {
+          "description": "How many individual changes it holds.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scope",
+        "estimated_bytes",
+        "change_count"
+      ]
+    },
+    "DoctorTarget": {
+      "description": "One profile's readiness.\n\nNo `Default`: a `status` is an [`Identifier`], and an empty string is not one. That\nis the point of the type — a consumer that switches on `status` gets a value it can\nmatch, and a producer cannot forget to set it.",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "description": "The profile name.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The triple it resolves to.",
+          "type": "string"
+        },
+        "status": {
+          "description": "`pass`, `fail` or `skip`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "checks": {
+          "description": "Every check that ran, in report order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DoctorCheck"
+          }
+        }
+      },
+      "required": [
+        "profile",
+        "target",
+        "status",
+        "checks"
+      ]
+    },
+    "DoctorCheck": {
+      "description": "One readiness check.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "The check's kind, e.g. `manifest_compile`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "status": {
+          "description": "`pass`, `fail` or `skip`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "message": {
+          "description": "What it found.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file it examined, when it examined one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "status",
+        "message"
+      ]
+    },
+    "DoctorDetails": {
+      "description": "What `zup doctor` found.\n\nThe whole check table crosses the wire, green rows included. A readiness check that\nwas *skipped* is not the same fact as one that *passed* — it says the answer was\nnever obtained — so a consumer that could only see the failures would report a\nproject as ready on the strength of checks that never ran.",
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "description": "The manifest it read, project-relative.",
+          "type": "string"
+        },
+        "host": {
+          "description": "The build host's canonical target triple.",
+          "type": "string"
+        },
+        "ready": {
+          "description": "Whether every selected target is ready to build.",
+          "type": "boolean"
+        },
+        "checks": {
+          "description": "How many checks ran.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "targets": {
+          "description": "Per-profile verdicts and the checks underneath each.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DoctorTarget"
+          }
+        }
+      },
+      "required": [
+        "manifest",
+        "host",
+        "ready",
+        "checks",
+        "targets"
+      ]
+    },
+    "StagedPackage": {
+      "description": "One transport package.",
+      "type": "object",
+      "properties": {
+        "variant": {
+          "description": "The variant it carries.",
+          "type": "string"
+        },
+        "names": {
+          "description": "The files, by flat asset name. Several when a package was sharded.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "size": {
+          "description": "How big they are together.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "blob_count": {
+          "description": "How many content objects went in.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "variant",
+        "names",
+        "size",
+        "blob_count"
+      ]
+    },
+    "PublishStageDetails": {
+      "description": "What a staged release holds.",
+      "type": "object",
+      "properties": {
+        "web_root": {
+          "description": "The staged web tree, project-relative.",
+          "type": "string"
+        },
+        "channel": {
+          "description": "The channel the tree answers to.",
+          "type": "string"
+        },
+        "objects": {
+          "description": "How many distinct content objects the tree carries.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "object_bytes": {
+          "description": "How big they are together.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "variants": {
+          "description": "How many variants the release describes.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tuf_inputs": {
+          "description": "How many documents `tuftool` is meant to sign.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "release_digest": {
+          "description": "The digest of the release descriptor, so a consumer can prove which release the\ntree is without reading it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packages": {
+          "description": "One transport package per variant, when `--packages` was asked for.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StagedPackage"
+          }
+        },
+        "thin_installers": {
+          "description": "The two thin installers, when `--thin` was asked for.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          }
+        },
+        "release_manifest": {
+          "description": "The release description folded from a build matrix, when `--release-dir` was\ngiven.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "web_root",
+        "channel",
+        "objects",
+        "object_bytes",
+        "variants",
+        "tuf_inputs",
+        "packages",
+        "thin_installers"
+      ]
+    },
+    "PublishFailure": {
+      "description": "One step a publication could not complete.",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "description": "The provider's phase name.",
+          "type": "string"
+        },
+        "step": {
+          "description": "The file or check it was on.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Why.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "step",
+        "detail"
+      ]
+    },
+    "PublishDetails": {
+      "description": "What a publication did, beyond the release it produced.",
+      "type": "object",
+      "properties": {
+        "dry_run": {
+          "description": "Whether nothing was written.",
+          "type": "boolean"
+        },
+        "receipt": {
+          "description": "Where the provider's receipt went, project-relative.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failures": {
+          "description": "The steps that failed, which is what a failed publication needs and what a\nsuccessful one does not.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublishFailure"
+          }
+        }
+      },
+      "required": [
+        "dry_run",
+        "failures"
+      ]
+    },
+    "SignSubject": {
+      "description": "One file signing has an opinion about.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Release-relative path, `/`-separated.",
+          "type": "string"
+        },
+        "role": {
+          "description": "`native_runtime` or `outer_artifact`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "stage": {
+          "description": "`pre_compose` or `post_compose`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "variants": {
+          "description": "The variants it belongs to.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verified": {
+          "description": "Whether the check passed. `false` is a report, not a refusal: `--report-only`\nexists so a pipeline can see every failure before it decides to stop.",
+          "type": "boolean"
+        },
+        "detail": {
+          "description": "What was established, in one line.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The digest measured from the bytes on disk, when they could be read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "description": "The size of those bytes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ByteCount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "role",
+        "stage",
+        "variants",
+        "verified",
+        "detail"
+      ]
+    },
+    "SignPrepareDetails": {
+      "description": "What an external signer has to touch.",
+      "type": "object",
+      "properties": {
+        "plan": {
+          "description": "The plan that was written, project-relative.",
+          "type": "string"
+        },
+        "subjects": {
+          "description": "The subjects, in signing order. Order is the plan's: a runtime is signed before\nthe artifact that embeds it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignSubject"
+          }
+        }
+      },
+      "required": [
+        "plan",
+        "subjects"
+      ]
+    },
+    "SignVerifyDetails": {
+      "description": "What verification concluded, per file.",
+      "type": "object",
+      "properties": {
+        "plan": {
+          "description": "The plan that was read, project-relative.",
+          "type": "string"
+        },
+        "subjects": {
+          "description": "Every subject, verified or not.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignSubject"
+          }
+        },
+        "finalized": {
+          "description": "How many artifacts now carry a finalized published identity.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "unsigned": {
+          "description": "How many are finalized but carry no signature.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "plan",
+        "subjects",
+        "finalized",
+        "unsigned"
+      ]
+    },
+    "ToolchainInstallDetails": {
+      "description": "What a toolchain install copied.",
+      "type": "object",
+      "properties": {
+        "zup_version": {
+          "description": "The zup release the bytes came from.",
+          "type": "string"
+        },
+        "source": {
+          "description": "The directory they were read from.",
+          "type": "string"
+        },
+        "cache": {
+          "description": "The directory they now live in.",
+          "type": "string"
+        },
+        "components": {
+          "description": "The component file names, sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "zup_version",
+        "source",
+        "cache",
+        "components"
+      ]
+    },
+    "ToolchainComponentStatus": {
+      "description": "One toolchain component's state.",
+      "type": "object",
+      "properties": {
+        "component": {
+          "description": "The component, in the wording every refusal uses.",
+          "type": "string"
+        },
+        "found": {
+          "description": "Whether a usable copy was found.",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "Which arm of the search produced it: `override`, `root`, `cache` or `staged`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "The file, when one was found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "problem": {
+          "description": "Why it was refused, when it was.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "component",
+        "found"
+      ]
+    },
+    "ToolchainStatusDetails": {
+      "description": "What a build here would resolve.",
+      "type": "object",
+      "properties": {
+        "zup_version": {
+          "description": "The zup release these components have to come from.",
+          "type": "string"
+        },
+        "host": {
+          "description": "The build host's canonical target triple.",
+          "type": "string"
+        },
+        "cache": {
+          "description": "Where this version's cache lives on this machine.\n\nAbsolute, and the one path in this contract that is: it answers \"where would a\nbuild here look\", which is the question this operation exists to answer, and\nnothing reads it back. It is for display and for matching against a machine's\nown state — never a release identity.",
+          "type": "string"
+        },
+        "complete": {
+          "description": "Whether every component a build needs is usable.",
+          "type": "boolean"
+        },
+        "components": {
+          "description": "One entry per component, in the order a build asks for them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolchainComponentStatus"
+          }
+        }
+      },
+      "required": [
+        "zup_version",
+        "host",
+        "cache",
+        "complete",
+        "components"
+      ]
+    },
+    "ToolchainCleanDetails": {
+      "description": "What a clean removed, or would remove.",
+      "type": "object",
+      "properties": {
+        "cache": {
+          "description": "The directory that was cleaned.",
+          "type": "string"
+        },
+        "dry_run": {
+          "description": "True when nothing was changed.",
+          "type": "boolean"
+        },
+        "removed": {
+          "description": "One entry per removed version or file.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kept": {
+          "description": "The versions that were left alone.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "cache",
+        "dry_run",
+        "removed",
+        "kept"
+      ]
+    },
+    "InspectedVariant": {
+      "description": "One variant inside an artifact.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "frontend": {
+          "type": "string"
+        },
+        "logical_size": {
+          "description": "The size this variant's content is worth, counting shared bytes.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "file_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "prerequisite_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "plugin_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "native_execution": {
+          "description": "Whether the variant refuses to run under a compatibility layer.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "target",
+        "frontend",
+        "logical_size",
+        "file_count",
+        "prerequisite_count",
+        "plugin_count",
+        "native_execution"
+      ]
+    },
+    "InspectedContent": {
+      "description": "What an artifact costs.",
+      "type": "object",
+      "properties": {
+        "logical_size": {
+          "description": "Every variant's content, counted once per variant.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "stored_size": {
+          "description": "The distinct content the artifact actually stores.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "content_size": {
+          "description": "The distinct content before compression.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "shared_size": {
+          "description": "Bytes more than one variant needs.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "exclusive_size": {
+          "description": "Bytes only one variant needs.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "unique_blob_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "file_size": {
+          "description": "Bytes the file on disk occupies.",
+          "$ref": "#/$defs/ByteCount"
+        }
+      },
+      "required": [
+        "logical_size",
+        "stored_size",
+        "content_size",
+        "shared_size",
+        "exclusive_size",
+        "unique_blob_count",
+        "file_size"
+      ]
+    },
+    "InspectedTrust": {
+      "description": "What can be proven about an artifact's trust.\n\nEach field is one *question*, and the words in it are the answer to that question\nand no other. \"The Authenticode digest matches\" and \"Windows trusts this publisher\"\nare different facts about different authorities, and a report that collapsed them\ninto one word would be claiming the second from evidence for the first.",
+      "type": "object",
+      "properties": {
+        "authenticode": {
+          "description": "Whether the image carries a signature structure whose digest covers these bytes.",
+          "type": "string"
+        },
+        "index": {
+          "description": "Whether the index parses and agrees with the content beside it.",
+          "type": "string"
+        },
+        "content_digests": {
+          "description": "Whether every advertised content digest verifies, `named` when the artifact\ncarries none to verify.",
+          "type": "string"
+        },
+        "variants": {
+          "description": "Whether every variant the index names is complete.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authenticode",
+        "index",
+        "content_digests",
+        "variants"
+      ]
+    },
+    "ArtifactInspectDetails": {
+      "description": "What an artifact contains.\n\nThe whole report, because inspection is the one operation whose product *is* the\ndetail: a caller asking what a file contains wants the content accounting and the\ntrust questions, not a summary of them.",
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "description": "The file that was inspected, as it was named on the command line.",
+          "type": "string"
+        },
+        "artifact_kind": {
+          "description": "`single`, `universal` or `thin`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "artifact_mode": {
+          "description": "`offline` or `online`.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "pin": {
+          "description": "Whether the artifact always installs one version or follows a channel.",
+          "type": "string"
+        },
+        "subsystem": {
+          "description": "The launcher experience it presents.",
+          "type": "string"
+        },
+        "variants": {
+          "description": "One entry per variant it carries.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InspectedVariant"
+          }
+        },
+        "content": {
+          "description": "What the artifact costs, and what composing it saved.",
+          "$ref": "#/$defs/InspectedContent"
+        },
+        "trust": {
+          "description": "What can be proven about its trust, one field per question.",
+          "$ref": "#/$defs/InspectedTrust"
+        }
+      },
+      "required": [
+        "artifact",
+        "artifact_kind",
+        "artifact_mode",
+        "pin",
+        "subsystem",
+        "variants",
+        "content",
+        "trust"
+      ]
+    },
+    "StreamEvent": {
+      "description": "One line of a stream.",
+      "oneOf": [
+        {
+          "description": "The first line. Names the protocol, the tool and the operation.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "version"
+            }
+          },
+          "$ref": "#/$defs/StreamVersion",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A step began.",
+          "type": "object",
+          "properties": {
+            "phase": {
+              "description": "A short, stable name for the step.",
+              "type": "string"
+            },
+            "message": {
+              "description": "The sentence a person would have read.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "phase"
+            }
+          },
+          "required": [
+            "type",
+            "phase",
+            "message"
+          ]
+        },
+        {
+          "description": "A counter moved.",
+          "type": "object",
+          "properties": {
+            "completed": {
+              "description": "Items finished.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "total": {
+              "description": "Items in total. Always greater than zero: a progress event with no total has\nnothing to be a fraction of, and a consumer that rendered it would be\nshowing a number that means nothing.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "label": {
+              "description": "The label a person would have read.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "progress"
+            }
+          },
+          "required": [
+            "type",
+            "completed",
+            "total",
+            "label"
+          ]
+        },
+        {
+          "description": "Something a reader should know now rather than at the end.",
+          "type": "object",
+          "properties": {
+            "diagnostic": {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            "type": {
+              "type": "string",
+              "const": "diagnostic"
+            }
+          },
+          "required": [
+            "type",
+            "diagnostic"
+          ]
+        },
+        {
+          "description": "A file was produced.",
+          "type": "object",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/Artifact"
+            },
+            "type": {
+              "type": "string",
+              "const": "artifact"
+            }
+          },
+          "required": [
+            "type",
+            "artifact"
+          ]
+        },
+        {
+          "description": "A release went somewhere.",
+          "type": "object",
+          "properties": {
+            "publication": {
+              "$ref": "#/$defs/Publication"
+            },
+            "type": {
+              "type": "string",
+              "const": "publication"
+            }
+          },
+          "required": [
+            "type",
+            "publication"
+          ]
+        },
+        {
+          "description": "Human output that would have gone to a terminal.\n\nExists so a build's logs can be *shown* without being *suppressed*: in\n`--format jsonl` the child's and zup's own human lines come out here, and a\nconsumer that ignores them still has a complete stream.",
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/LogLevel"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "log"
+            }
+          },
+          "required": [
+            "type",
+            "level",
+            "message"
+          ]
+        },
+        {
+          "description": "The last line. The authoritative result.\n\nBoxed because the result is three orders of magnitude larger than any other\nevent, and a stream that carries thousands of progress lines would otherwise\npay for it on every line. Invisible on the wire.",
+          "type": "object",
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/AutomationResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "required": [
+            "type",
+            "result"
+          ]
+        }
+      ]
+    },
+    "StreamVersion": {
+      "description": "The first line of every stream, and the only place the tool version appears.",
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "description": "The contract this stream is written to.",
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "zup": {
+          "description": "The zup release producing it.",
+          "type": "string"
+        },
+        "operation": {
+          "description": "The operation that is about to run.",
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "protocol",
+        "zup",
+        "operation"
+      ]
+    },
+    "Publication": {
+      "description": "Where a release went, and what state it is in.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "The provider, e.g. `github`.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "Where it went, in the provider's own terms: `owner/name`, or\n`host/owner/name` on an installation that is not the public one.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "The tag the release answers to.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The provider's identifier for it, when it has one.\n\nA string because whether a provider's id fits in a double is the provider's\nbusiness. Encoding it as a number is how a release id silently becomes\n`1.2345678901234568e18` somewhere between the host and a log line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "`published`, `draft`, `prerelease`, `deleted`, or whatever the provider says.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "url": {
+          "description": "The address a person can open, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "immutable": {
+          "description": "Whether the host refuses to replace these bytes. `null` when it did not say.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "assets": {
+          "description": "The files the release carries.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicationAsset"
+          }
+        },
+        "receipt": {
+          "description": "The provider's own receipt, project-relative, when one was written.\n\nNamed rather than inlined: the receipt is the provider's document in the\nprovider's shape, and a contract that absorbed it would have to version it\nseparately. A machine consumer that wants the tag, the state and the asset\nnames does not need to read it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "subject",
+        "tag",
+        "state",
+        "assets"
+      ]
+    },
+    "LogLevel": {
+      "description": "How a routed human line is marked.",
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    }
+  }
+}

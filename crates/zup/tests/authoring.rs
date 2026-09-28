@@ -90,7 +90,8 @@ user = "${location.user_data}/Plan"
             manifest.to_str().unwrap(),
             "--state-root",
             root.path().join("state").to_str().unwrap(),
-            "--json",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -100,8 +101,10 @@ user = "${location.user_data}/Plan"
         String::from_utf8_lossy(&plan.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-    assert_eq!(value["preview"]["application"], "Plan");
-    assert!(value["transaction"]["install_directory"]["path"].is_string());
+    assert_eq!(value["operation"], "plan");
+    assert_eq!(value["application"]["name"], "Plan");
+    assert!(value["details"]["install_directory"].is_string());
+    assert_eq!(value["details"]["scope"], "user");
 }
 
 #[test]

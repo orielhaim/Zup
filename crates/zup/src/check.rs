@@ -8,60 +8,110 @@
 
 use std::path::Path;
 
+use zup_automation::{
+    AutomationResult, ByteCount, CheckDetails, Composition, Details, Diagnostic, Identifier,
+    LogLevel, PlanDetails,
+};
 use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
 
 use crate::cli::{CheckCommand, PlanCommand};
 use crate::project::{self, LoadedProject};
+use crate::report::Reporter;
 
 /// Validate a project and the files it will ship.
-pub fn run_check(args: CheckCommand) -> miette::Result<()> {
+pub fn run_check(args: CheckCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
     let loaded = project::load_for_build(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
     )?;
     let mut variants = Vec::with_capacity(loaded.selected_targets.len());
+    let mut files = 0usize;
     for (config, plan) in loaded.selected_targets.iter().zip(&loaded.build.targets) {
         // A check that stopped at the manifest would report a project with a
         // broken plugin as valid, which is the one thing a check must never do.
         // The plugin compile is in memory and writes nothing.
         if !plan.installer.plugins.is_empty() {
             zup_plugin_build::compile_plugins(plan).map_err(|error| {
-                miette::miette!("plugin check for `{}`: {error}", config.profile)
+                crate::failure::error_with_help(
+                    "zup.check.plugin_compile_failed",
+                    format!("plugin check for `{}`: {error}", config.profile),
+                    "Fix the plugin source, or remove it from the profile.",
+                )
             })?;
         }
-        println!(
-            "✓ {} is valid ({})",
-            plan.installer.app.name, config.profile
+        reporter.log(
+            LogLevel::Info,
+            format!(
+                "✓ {} is valid ({})\n  Target      {}\n  Source      {}\n  Install     {} · {}\n  \
+                 Components  {}\n  Files       {}\n  Plugins     {}",
+                plan.installer.app.name,
+                config.profile,
+                config.target,
+                config.source.directory.display(),
+                config.install.scope,
+                project::install_directory_text(&config.install),
+                plan.installer.components.len(),
+                plan.files.len(),
+                plan.installer.plugins.len(),
+            ),
         );
-        println!("  Target      {}", config.target);
-        println!("  Source      {}", config.source.directory.display());
-        println!(
-            "  Install     {} · {}",
-            config.install.scope,
-            project::install_directory_text(&config.install)
-        );
-        println!("  Components  {}", plan.installer.components.len());
-        println!("  Files       {}", plan.files.len());
-        println!("  Plugins     {}", plan.installer.plugins.len());
+        files += plan.files.len();
         variants.push(
-            zup_artifact::DistributionVariant::resolve(config, plan, &[], None)
-                .map_err(|error| miette::miette!("variant `{}`: {error}", config.profile))?,
+            zup_artifact::DistributionVariant::resolve(config, plan, &[], None).map_err(
+                |error| {
+                    crate::failure::error(
+                        "zup.check.variant_invalid",
+                        format!("variant `{}`: {error}", config.profile),
+                    )
+                },
+            )?,
         );
     }
-    report_composition(&loaded, &variants);
-    Ok(())
+    let composition = composition(&loaded, &variants);
+    if let Some(composition) = &composition {
+        reporter.log(LogLevel::Info, composition_text(composition));
+    }
+    // A warning, not an error: the project is valid and `zup check` succeeds. What
+    // cannot be composed is a fact about how the release has to be built, and turning
+    // it into an error would make a green project read as a broken one.
+    let diagnostics = match &composition {
+        Some(composition) if !composition.composable => vec![
+            Diagnostic::warning("zup.check.not_composable", composition.detail.clone())
+                .with_help("Build them separately with `zup build --target <profile>`."),
+        ],
+        _ => Vec::new(),
+    };
+    let result = AutomationResult::new(zup_automation::OPERATION_CHECK)
+        .with_application(crate::automation::application(&loaded.manifest.app))
+        .with_targets(crate::automation::targets(&loaded.selected_targets))
+        .with_diagnostics(diagnostics)
+        .with_details(Details::Check(CheckDetails {
+            variants: variants.len(),
+            composition,
+        }))
+        .with_summary(format!(
+            "{} is valid · {} file(s) across {} target(s)",
+            loaded.manifest.app.name,
+            files,
+            variants.len()
+        ));
+    Ok(result)
 }
 
-/// Say whether the selected targets can be one artifact, and what it would save.
+/// Whether the selected targets can become one artifact.
 ///
-/// Composition is refused loudly rather than suggested quietly, because a project
-/// that silently ships two installers where one would do has a problem nobody was
-/// told about.
-fn report_composition(loaded: &LoadedProject, variants: &[zup_artifact::DistributionVariant]) {
+/// `None` when fewer than two were selected: that is not a finding, it is the ordinary
+/// case, and a report that said "cannot be composed" about one target would be
+/// reporting a problem nobody has.
+fn composition(
+    loaded: &LoadedProject,
+    variants: &[zup_artifact::DistributionVariant],
+) -> Option<Composition> {
     if variants.len() < 2 {
-        return;
+        return None;
     }
     let borrowed = variants.iter().collect::<Vec<_>>();
     let names = loaded
@@ -69,42 +119,59 @@ fn report_composition(loaded: &LoadedProject, variants: &[zup_artifact::Distribu
         .iter()
         .map(|config| config.profile.to_string())
         .collect::<Vec<_>>()
-        .join("\n              ");
-    match zup_artifact::check_compatibility(&borrowed) {
-        Err(incompatible) => {
-            println!("\n✗ {} cannot be composed", names.replace('\n', ", "));
-            println!("  {}", incompatible.reason.dimension().as_str());
-            println!("  {}", incompatible.reason.detail());
-            println!("  Build them separately with `zup build --target <profile>`");
-        }
-        Ok(()) => match crate::artifacts::composition_report(&borrowed) {
-            Ok(savings) => {
-                println!("\n✓ Can be composed as one Windows universal installer");
-                println!("\n  Estimated:");
-                println!(
-                    "    standalone total    {}",
-                    zup_presentation::format_bytes(savings.standalone_size)
-                );
-                println!(
-                    "    unique content      {}",
-                    zup_presentation::format_bytes(savings.standalone_size - savings.shared_size)
-                );
-                println!(
-                    "    shared content      {} ({} blobs)",
-                    zup_presentation::format_bytes(savings.shared_size),
-                    savings.unique_blob_count
-                );
-            }
-            Err(refusal) => {
-                println!("\n✗ cannot be composed ({})", refusal.dimension.as_str());
-                println!("  {}", refusal.message);
-            }
+        .join(", ");
+    // Composition is refused loudly rather than suggested quietly, because a project
+    // that silently ships two installers where one would do has a problem nobody was
+    // told about.
+    Some(match zup_artifact::check_compatibility(&borrowed) {
+        Err(incompatible) => Composition {
+            composable: false,
+            dimension: Some(Identifier::fixed(incompatible.reason.dimension().as_str())),
+            detail: format!(
+                "{names} cannot be composed: {}",
+                incompatible.reason.detail()
+            ),
         },
+        Ok(()) => match crate::artifacts::composition_report(&borrowed) {
+            Ok(savings) => Composition {
+                composable: true,
+                dimension: None,
+                detail: format!(
+                    "one Windows universal installer · {} shared of {} standalone across {} \
+                     blobs",
+                    zup_presentation::format_bytes(savings.shared_size),
+                    zup_presentation::format_bytes(savings.standalone_size),
+                    savings.unique_blob_count
+                ),
+            },
+            Err(refusal) => Composition {
+                composable: false,
+                dimension: Some(Identifier::fixed(refusal.dimension.as_str())),
+                detail: refusal.message.clone(),
+            },
+        },
+    })
+}
+
+/// What a person reads for a composition finding.
+fn composition_text(composition: &Composition) -> String {
+    if composition.composable {
+        return format!(
+            "\n✓ Can be composed as one artifact\n  {}",
+            composition.detail
+        );
     }
+    let dimension = composition
+        .dimension
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    format!("\n✗ {}\n  {}", composition.detail, dimension)
 }
 
 /// Show what installing this project would do, without changing anything.
-pub fn run_plan(args: PlanCommand) -> miette::Result<()> {
+pub fn run_plan(args: PlanCommand) -> miette::Result<AutomationResult> {
+    let reporter = Reporter::new(args.format);
     let loaded = project::load_single_project(
         &args.project.manifest,
         &args.project.target,
@@ -117,10 +184,10 @@ pub fn run_plan(args: PlanCommand) -> miette::Result<()> {
     let installer = &loaded.build.targets[0].installer;
     let scope = SelectedScope::from(args.scope);
     let state_root = zup_windows::resolve_state_root(args.state_root, scope)
-        .map_err(|error| miette::miette!("{error}"))?;
+        .map_err(|error| crate::failure::error("zup.plan.state_root", format!("{error}")))?;
     let prior = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
-        .map_err(|error| miette::miette!("ledger: {error}"))?;
+        .map_err(|error| crate::failure::error("zup.plan.ledger", format!("ledger: {error}")))?;
     let mut request = zup_plan::PlanRequest::new(config.target.clone(), scope);
     // `plan` plans one target, so the repeatable `--install-directory` has one
     // value in scope. More than one is a mistake the shared alignment check
@@ -134,19 +201,24 @@ pub fn run_plan(args: PlanCommand) -> miette::Result<()> {
         installer.install.allow_directory_override,
     )?;
     for raw in &args.enable {
-        let id = zup_core::ComponentId::new(raw)
-            .map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        let id = zup_core::ComponentId::new(raw).map_err(|error| {
+            crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))
+        })?;
         request.components.enable.insert(id);
     }
     for raw in &args.disable {
-        let id = zup_core::ComponentId::new(raw)
-            .map_err(|error| miette::miette!("component {raw}: {error}"))?;
+        let id = zup_core::ComponentId::new(raw).map_err(|error| {
+            crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))
+        })?;
         request.components.disable.insert(id);
     }
-    let install = zup_plan::plan(&loaded.build, &request).map_err(miette::Report::new)?;
+    let install = zup_plan::plan(&loaded.build, &request)
+        .map_err(|error| crate::failure::error("zup.plan.refused", error.to_string()))?;
     let target =
         zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
-            .map_err(|error| miette::miette!("target: {error}"))?;
+            .map_err(|error| {
+                crate::failure::error("zup.plan.target", format!("target: {error}"))
+            })?;
     let transaction = zup_windows::plan_target_lifecycle(
         LifecycleAction::Install,
         &installer.app.id,
@@ -154,27 +226,33 @@ pub fn run_plan(args: PlanCommand) -> miette::Result<()> {
         Some(&target),
         &state_root,
     )
-    .map_err(|error| miette::miette!("transaction plan: {error}"))?;
+    .map_err(|error| {
+        crate::failure::error("zup.plan.transaction", format!("transaction plan: {error}"))
+    })?;
     let mut preview = zup_presentation::PlanPreview::from_transaction_plan(&transaction, scope)
         .with_prerequisites(&install);
     preview.application = installer.app.name.to_string();
     preview.version = installer.app.version.to_string();
     preview.install_directory = target.install_directory.to_string();
-    if args.json {
-        let value = serde_json::json!({
-            "preview": preview,
-            "transaction": transaction,
-            "target": target,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value)
-                .map_err(|error| miette::miette!("output: {error}"))?
-        );
-    } else {
-        println!("{}", preview.human());
-    }
-    Ok(())
+    reporter.log(LogLevel::Info, preview.human());
+    let changes = preview
+        .groups
+        .iter()
+        .flat_map(|group| group.changes.iter())
+        .count();
+    Ok(AutomationResult::new(zup_automation::OPERATION_PLAN)
+        .with_application(crate::automation::application(&installer.app))
+        .with_targets(crate::automation::targets(&loaded.selected_targets))
+        .with_details(Details::Plan(PlanDetails {
+            scope: scope.to_string(),
+            install_directory: Some(target.install_directory.to_string()),
+            estimated_bytes: ByteCount::new(preview.estimated_bytes),
+            change_count: changes,
+        }))
+        .with_summary(format!(
+            "Install {} {} into {}",
+            installer.app.name, installer.app.version, target.install_directory
+        )))
 }
 
 /// The install directory a plan should use.

@@ -22,7 +22,7 @@ use clap::{Args, Subcommand, ValueHint};
 use std::io::IsTerminal as _;
 use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
-use zup_presentation::{AutomationEvent, AutomationResult, OutputFormat, ProcessOutcome};
+use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::ExecutionPolicy;
 
 use zup_acquire::CachePolicy;
@@ -105,7 +105,7 @@ pub fn run(context: RuntimeContext, args: UpdateArgs) -> miette::Result<()> {
     if output == OutputFormat::Jsonl && !machine_run {
         println!(
             "{}",
-            serde_json::to_string(&AutomationEvent::started(
+            serde_json::to_string(&InstallerEvent::started(
                 installer.app.id.as_str(),
                 ledger.version.to_string(),
                 "update",
@@ -114,7 +114,7 @@ pub fn run(context: RuntimeContext, args: UpdateArgs) -> miette::Result<()> {
         );
         println!(
             "{}",
-            serde_json::to_string(&AutomationEvent::Phase {
+            serde_json::to_string(&InstallerEvent::Phase {
                 state: "resolving".into(),
             })
             .map_err(|error| miette::miette!("output: {error}"))?
@@ -348,7 +348,7 @@ fn up_to_date(
     match output {
         OutputFormat::Human => println!("up to date ({version})"),
         OutputFormat::Json => {
-            let mut result = AutomationResult::new(ProcessOutcome::Success, application, version);
+            let mut result = InstallerResult::new(ProcessOutcome::Success, application, version);
             result.scope = Some(scope);
             println!(
                 "{}",
@@ -361,17 +361,13 @@ fn up_to_date(
             if machine_run {
                 println!(
                     "{}",
-                    serde_json::to_string(&AutomationEvent::started(
-                        application,
-                        version,
-                        "update"
-                    ))
-                    .map_err(|error| miette::miette!("output: {error}"))?
+                    serde_json::to_string(&InstallerEvent::started(application, version, "update"))
+                        .map_err(|error| miette::miette!("output: {error}"))?
                 );
             }
             println!(
                 "{}",
-                serde_json::to_string(&AutomationEvent::Completed {
+                serde_json::to_string(&InstallerEvent::Completed {
                     outcome: ProcessOutcome::Success,
                 })
                 .map_err(|error| miette::miette!("output: {error}"))?
@@ -392,7 +388,7 @@ fn update_available(
         OutputFormat::Human => println!("update available: {current} → {available}"),
         OutputFormat::Json => {
             let mut result =
-                AutomationResult::new(ProcessOutcome::Success, application, available.clone());
+                InstallerResult::new(ProcessOutcome::Success, application, available.clone());
             result.scope = Some(scope);
             result.message = Some(format!("update available from {current}"));
             println!(
@@ -405,11 +401,11 @@ fn update_available(
         OutputFormat::Jsonl => {
             for state in ["available", "completed"] {
                 let event = if state == "available" {
-                    AutomationEvent::Phase {
+                    InstallerEvent::Phase {
                         state: state.into(),
                     }
                 } else {
-                    AutomationEvent::Completed {
+                    InstallerEvent::Completed {
                         outcome: ProcessOutcome::Success,
                     }
                 };

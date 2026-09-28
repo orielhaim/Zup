@@ -1,30 +1,34 @@
 import { describe, expect, it } from 'bun:test'
 import {
   argumentsFor,
-  mergeResults,
   needsToken,
+  operationFor,
   type Phase,
   phasesFor,
   producesArtifacts,
   releaseManifestPath,
+  signingPlanPath,
 } from '../src/phases.js'
-import type { OperationResult } from '../src/result.js'
-import { inputs, result } from './fixtures.js'
+import { parseResult } from '../src/protocol.js'
+import { mergeResults } from '../src/summary.js'
+import { inputs } from './fixtures.js'
+import { fixture } from './protocol-fixtures.js'
 
 describe('phasesFor', () => {
   it('maps each operation to the phases it runs', () => {
     expect(phasesFor('setup')).toEqual([])
     expect(phasesFor('build')).toEqual(['build'])
     expect(phasesFor('compose')).toEqual(['compose'])
+    expect(phasesFor('finalize')).toEqual(['finalize'])
     expect(phasesFor('attest')).toEqual(['attest'])
     expect(phasesFor('publish')).toEqual(['publish'])
   })
 
   it('orders release as build, compose, finalize, attest, publish', () => {
     // The order is the contract: finalizing before signing would record
-    // pre-signature digests, attesting before finalizing would attest bytes that
-    // no longer exist, and publishing before attesting would release something
-    // with no provenance.
+    // pre-signature digests, attesting before finalizing would attest bytes that no
+    // longer exist, and publishing before attesting would release something with no
+    // provenance.
     expect(phasesFor('release')).toEqual(['build', 'compose', 'finalize', 'attest', 'publish'])
   })
 
@@ -33,22 +37,42 @@ describe('phasesFor', () => {
   })
 })
 
+describe('operationFor', () => {
+  it("names the zup operation each phase runs, in zup's vocabulary", () => {
+    // The two vocabularies are not the same, and conflating them is how the action
+    // and the CLI came to disagree about what a step did.
+    expect(operationFor('build')).toBe('build')
+    expect(operationFor('compose')).toBe('publish.stage')
+    expect(operationFor('finalize')).toBe('sign.verify')
+    expect(operationFor('publish')).toBe('publish.github')
+  })
+
+  it('has no operation for attest, because zup does not talk to Sigstore', () => {
+    // zup owns which bytes are worth attesting and says so in the release
+    // description. The token exchange and the signature format are GitHub's and
+    // Sigstore's, so a `zup attest` verb would be a second signer with a second set
+    // of bugs.
+    expect(operationFor('attest')).toBeUndefined()
+  })
+})
+
 describe('argumentsFor', () => {
-  it('builds the zup build command', () => {
+  it('builds the zup build command in the streaming format', () => {
+    // `jsonl` rather than `json`, because a build that reports a failing check in
+    // the first second is a build somebody can stop.
     expect(argumentsFor('build', inputs())).toEqual([
       'build',
-      '--format',
-      'json',
       '--output',
       'dist',
       '--release-manifest',
       'dist/zup-release.json',
+      '--format',
+      'jsonl',
     ])
   })
 
   it('passes each target as its own argument', () => {
     const args = argumentsFor('build', inputs({ targets: ['x64', 'arm64'] }))
-    expect(args).toContain('--target')
     expect(args.filter((entry) => entry === '--target')).toHaveLength(2)
     expect(args).toEqual(expect.arrayContaining(['x64', 'arm64']))
   })
@@ -62,31 +86,42 @@ describe('argumentsFor', () => {
     expect(argumentsFor('compose', inputs({ releaseDir: 'out' }))).toEqual([
       'publish',
       'stage',
-      '--format',
-      'json',
       '--output',
       'out/web',
       '--packages',
       'out/packages',
       '--release-dir',
       'out',
+      '--format',
+      'jsonl',
     ])
+  })
+
+  it('does not pass --dry-run to `publish stage`, which has no such flag', () => {
+    // It used to. A dry-run `release` therefore failed in its second phase with a
+    // usage error, and the error named a flag the developer had never typed.
+    const args = argumentsFor('compose', inputs({ dryRun: true }))
+    expect(args).not.toContain('--dry-run')
+  })
+
+  it('passes --dry-run to `publish github`, which does', () => {
+    // The publication is the only step that writes somewhere else, so it is the
+    // only step a dry run has to hold back.
+    expect(argumentsFor('publish', inputs({ dryRun: true }))).toContain('--dry-run')
   })
 
   it('publishes with the release directory, web tree and packages', () => {
     const args = argumentsFor('publish', inputs())
-    expect(args.slice(0, 3)).toEqual(['publish', 'github', '--format'])
+    expect(args.slice(0, 2)).toEqual(['publish', 'github'])
     expect(args).toEqual(expect.arrayContaining(['--release-dir', 'dist', '--web', 'dist/web']))
     expect(args).toEqual(expect.arrayContaining(['--packages', 'dist/packages']))
   })
 
   it('passes the publication flags only when they were asked for', () => {
     const plain = argumentsFor('publish', inputs())
-    expect(plain).not.toContain('--draft')
-    expect(plain).not.toContain('--prerelease')
-    expect(plain).not.toContain('--dry-run')
-    expect(plain).not.toContain('--tag')
-    expect(plain).not.toContain('--repo')
+    for (const flag of ['--draft', '--prerelease', '--dry-run', '--tag', '--repo', '--receipt']) {
+      expect(plain).not.toContain(flag)
+    }
 
     const full = argumentsFor(
       'publish',
@@ -99,14 +134,20 @@ describe('argumentsFor', () => {
     expect(full).toEqual(expect.arrayContaining(['--repo', 'acme/acme']))
   })
 
+  it('passes the signing flags to `sign verify`', () => {
+    const args = argumentsFor('finalize', inputs({ allowUnsigned: true, onlineRevocation: true }))
+    expect(args).toEqual(
+      expect.arrayContaining(['sign', 'verify', '--allow-unsigned', '--online-revocation']),
+    )
+    expect(argumentsFor('finalize', inputs())).not.toContain('--allow-unsigned')
+  })
+
   it('passes a custom receipt through', () => {
     const args = argumentsFor('publish', inputs({ receipt: 'out/receipt.json' }))
     expect(args).toEqual(expect.arrayContaining(['--receipt', 'out/receipt.json']))
   })
 
   it('runs no zup command for attest, which reads a document', () => {
-    // zup does not talk to Sigstore. It says which bytes are worth attesting, and
-    // `@actions/attest` does the rest.
     expect(argumentsFor('attest', inputs())).toEqual([])
   })
 
@@ -128,9 +169,9 @@ describe('argumentsFor', () => {
       const args = argumentsFor(phase, hostile)
       // Nothing was split on whitespace, so a semicolon can only ever be a
       // character inside one argument.
-      expect(args.some((entry) => entry === ';')).toBe(false)
-      expect(args.some((entry) => entry === 'rm')).toBe(false)
-      expect(args.some((entry) => entry === '&&')).toBe(false)
+      for (const fragment of [';', 'rm', '&&', '`']) {
+        expect(args).not.toContain(fragment)
+      }
     }
   })
 })
@@ -138,26 +179,18 @@ describe('argumentsFor', () => {
 describe('advanced arguments', () => {
   it('appends advanced arguments last, so a typed input can be overridden', () => {
     const args = argumentsFor('build', inputs({ args: ['--force'] }))
-    expect(args[args.length - 1]).toBe('--force')
+    expect(args.at(-1)).toBe('--force')
     expect(args).toContain('build')
   })
 
   it('leaves the arguments unchanged when there are none', () => {
-    expect(argumentsFor('build', inputs())).toEqual([
-      'build',
-      '--format',
-      'json',
-      '--output',
-      'dist',
-      '--release-manifest',
-      'dist/zup-release.json',
-    ])
+    expect(argumentsFor('build', inputs()).at(-1)).toBe('jsonl')
   })
 })
 
 describe('phase properties', () => {
   it('gives the token to exactly one phase', () => {
-    const withToken = (['setup', 'build', 'compose', 'attest', 'publish', 'release'] as const)
+    const withToken = (['build', 'compose', 'finalize', 'attest', 'publish', 'release'] as const)
       .flatMap(phasesFor)
       .filter(needsToken)
     expect(new Set(withToken)).toEqual(new Set(['publish']))
@@ -167,9 +200,10 @@ describe('phase properties', () => {
     expect(phasesFor('release').filter(producesArtifacts)).toEqual(['build', 'compose', 'finalize'])
   })
 
-  it('names the release manifest under the release directory', () => {
+  it('names the release description and the signing plan under the release directory', () => {
     expect(releaseManifestPath('dist')).toBe('dist/zup-release.json')
     expect(releaseManifestPath('out/nested')).toBe('out/nested/zup-release.json')
+    expect(signingPlanPath('dist')).toBe('dist/zup-signing.json')
   })
 })
 
@@ -178,59 +212,59 @@ describe('mergeResults', () => {
     expect(mergeResults(['build'], new Map())).toBeUndefined()
   })
 
-  it('combines targets and artifacts across a release', () => {
+  it('unions the fields the phases reported, keeping the later artifact', () => {
+    // The later value has to win: `sign verify` rewrites the release description
+    // with the *published* digests, and a summary showing the pre-signature ones
+    // would show bytes no downloader receives.
     const merged = mergeResults(
       ['build', 'compose', 'publish'],
-      new Map<Phase, OperationResult>([
-        [
-          'build',
-          result({
-            targets: ['x64'],
-            artifacts: [{ path: 'a', digest: 'a', size: 1, kind: 'k', mode: 'm' }],
-          }),
-        ],
-        ['compose', result({ operation: 'compose', targets: ['arm64'] })],
-        [
-          'publish',
-          result({
-            operation: 'publish',
-            release: {
-              repository: 'acme/acme',
-              host: 'github.com',
-              tag: 'v1.4.0',
-              releaseId: 1,
-              state: 'published',
-              assets: [],
-            },
-          }),
-        ],
+      new Map<Phase, ReturnType<typeof parseResult>>([
+        ['build', parseResult(fixture('build-success'))],
+        ['compose', parseResult(fixture('publish-stage'))],
+        ['publish', parseResult(fixture('publish-success'))],
       ]),
     )
-    expect(merged?.targets).toEqual(['x64', 'arm64'])
-    expect(merged?.artifacts).toHaveLength(1)
-    expect(merged?.release?.tag).toBe('v1.4.0')
-    expect(merged?.operation).toBe('release')
+    expect(merged?.application?.version).toBe('1.4.0')
+    expect(merged?.targets.map((target) => target.profile)).toEqual(['windows-x64'])
+    expect(merged?.artifacts.map((artifact) => artifact.path)).toEqual([
+      'Acme-Windows-Setup.exe',
+      'Acme-Windows-x64.zup',
+    ])
+    expect(merged?.publication?.tag).toBe('v1.4.0')
+    expect(merged?.release_manifest).toBe('dist/zup-release.json')
+  })
+
+  it('claims no operation of its own, because zup has no word for a workflow', () => {
+    const merged = mergeResults(
+      ['build'],
+      new Map<Phase, ReturnType<typeof parseResult>>([
+        ['build', parseResult(fixture('build-success'))],
+      ]),
+    )
+    // An empty string rather than `release`: the field says what zup did, and no zup
+    // operation is called `release`.
+    expect(merged?.operation).toBe('')
   })
 
   it('fails the whole run when any phase failed', () => {
     const merged = mergeResults(
-      ['build', 'compose'],
-      new Map<Phase, OperationResult>([
-        ['build', result({ success: true })],
-        ['compose', result({ operation: 'compose', success: false })],
+      ['build', 'publish'],
+      new Map<Phase, ReturnType<typeof parseResult>>([
+        ['build', parseResult(fixture('build-success'))],
+        ['publish', parseResult(fixture('publish-conflict'))],
       ]),
     )
-    expect(merged?.success).toBe(false)
+    expect(merged?.status).toBe('failure')
   })
 
   it('de-duplicates a target two phases both reported', () => {
     const merged = mergeResults(
-      ['build', 'compose'],
-      new Map<Phase, OperationResult>([
-        ['build', result({ targets: ['x64'] })],
-        ['compose', result({ operation: 'compose', targets: ['x64', 'arm64'] })],
+      ['build', 'publish'],
+      new Map<Phase, ReturnType<typeof parseResult>>([
+        ['build', parseResult(fixture('build-success'))],
+        ['publish', parseResult(fixture('publish-success'))],
       ]),
     )
-    expect(merged?.targets).toEqual(['x64', 'arm64'])
+    expect(merged?.targets).toHaveLength(1)
   })
 })

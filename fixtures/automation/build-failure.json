@@ -1,0 +1,31 @@
+{
+  "protocol": "1.0",
+  "operation": "build",
+  "status": "failure",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [],
+  "release_manifest": null,
+  "publication": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "zup.manifest.unknown_target",
+      "message": "artifact `windows` includes `linux`, which is not among the selected targets",
+      "source": {
+        "file": "zup.toml",
+        "start_line": null,
+        "start_column": null,
+        "end_line": null,
+        "end_column": null
+      },
+      "help": "declare it under [build.targets.linux], or build it in its own matrix job"
+    }
+  ],
+  "summary": "Nothing was built",
+  "details": null
+}

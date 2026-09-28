@@ -982,11 +982,40 @@ impl ProcessOutcome {
     }
 }
 
-pub const AUTOMATION_PROTOCOL_VERSION: u32 = 1;
+// # The installed application's machine protocol
+//
+// `--output json` and `--output jsonl` on a generated installer report through
+// [`InstallerEvent`] and [`InstallerResult`]. This is the *runtime's* protocol — what
+// happened while installing, modifying, repairing, updating or uninstalling an
+// application on a user's own machine — and it is deliberately not the same protocol
+// as `zup build --format json`.
+//
+// Two protocols, two products, two consumers. The developer CLI's contract lives in
+// `zup-automation` and speaks about operations, artifacts, targets and release
+// results; this one speaks about an outcome, a process exit code and a plan, because
+// that is what a runtime has. Merging them would give both a compromise, and would
+// make a change to an installer's progress reporting a change to a CI contract.
+//
+// The names say which is which. `InstallerEvent` and `InstallerResult` are the installed
+// application's; `zup_automation::StreamEvent` and `zup_automation::AutomationResult`
+// are the developer CLI's. Neither crate depends on the other.
 
+/// The version of the installed application's protocol.
+///
+/// Its own counter, unrelated to `zup_automation::PROTOCOL`. They are two protocols
+/// and a shared number would be a shared compatibility question, which they do not
+/// have.
+pub const INSTALLER_PROTOCOL_VERSION: u32 = 1;
+
+/// One event in the installed application's `--output jsonl` stream.
+///
+/// `started`, then whatever the operation reported, then `completed` or `failed`. The
+/// consumer is a wrapper script or an enterprise deployment tool, and the vocabulary
+/// is deliberately about *progress* rather than about artifacts: a runtime has no
+/// build to describe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum AutomationEvent {
+pub enum InstallerEvent {
     Started {
         protocol_version: u32,
         application: String,
@@ -1039,14 +1068,14 @@ pub enum AutomationEvent {
     },
 }
 
-impl AutomationEvent {
+impl InstallerEvent {
     pub fn started(
         application: impl Into<String>,
         version: impl Into<String>,
         action: impl Into<String>,
     ) -> Self {
         Self::Started {
-            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            protocol_version: INSTALLER_PROTOCOL_VERSION,
             application: application.into(),
             version: version.into(),
             action: action.into(),
@@ -1083,10 +1112,14 @@ impl AutomationEvent {
     }
 }
 
-pub type WireEvent = AutomationEvent;
-
+/// The final result of one installed-application operation.
+///
+/// `outcome` and `code` are the two things a deployment tool branches on, and both
+/// are in here rather than left to the process's exit status, because a wrapper that
+/// has to read a message to learn why an install failed is a wrapper that will read
+/// the wrong message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AutomationResult {
+pub struct InstallerResult {
     pub protocol_version: u32,
     pub outcome: ProcessOutcome,
     pub code: i32,
@@ -1099,14 +1132,14 @@ pub struct AutomationResult {
     pub drift: Vec<String>,
 }
 
-impl AutomationResult {
+impl InstallerResult {
     pub fn new(
         outcome: ProcessOutcome,
         application: impl Into<String>,
         version: impl Into<String>,
     ) -> Self {
         Self {
-            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            protocol_version: INSTALLER_PROTOCOL_VERSION,
             outcome,
             code: outcome.code(),
             application: application.into(),
@@ -1125,15 +1158,15 @@ impl AutomationResult {
 
     pub fn to_jsonl<I>(events: I) -> Result<String, serde_json::Error>
     where
-        I: IntoIterator<Item = AutomationEvent>,
+        I: IntoIterator<Item = InstallerEvent>,
     {
         let events = events.into_iter().collect::<Vec<_>>();
         let valid_start = matches!(
             events.first(),
-            Some(AutomationEvent::Started {
+            Some(InstallerEvent::Started {
                 protocol_version,
                 ..
-            }) if *protocol_version == AUTOMATION_PROTOCOL_VERSION
+            }) if *protocol_version == INSTALLER_PROTOCOL_VERSION
         );
         if !valid_start {
             return Err(serde_json::Error::custom(
@@ -1148,8 +1181,6 @@ impl AutomationResult {
         Ok(output)
     }
 }
-
-pub type ProcessResult = AutomationResult;
 
 #[cfg(test)]
 mod tests {
@@ -1213,25 +1244,25 @@ mod tests {
     #[test]
     fn automation_jsonl_is_explicit_and_versioned() {
         let events = [
-            AutomationEvent::started("Acme", "1.0.0", "install"),
-            AutomationEvent::progress(&ProgressPresentation::new(1, 2, "Installing files")),
-            AutomationEvent::Completed {
+            InstallerEvent::started("Acme", "1.0.0", "install"),
+            InstallerEvent::progress(&ProgressPresentation::new(1, 2, "Installing files")),
+            InstallerEvent::Completed {
                 outcome: ProcessOutcome::Success,
             },
         ];
-        let output = AutomationResult::to_jsonl(events).unwrap();
+        let output = InstallerResult::to_jsonl(events).unwrap();
         let lines = output.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 3);
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["type"], "started");
-        assert_eq!(first["protocol_version"], AUTOMATION_PROTOCOL_VERSION);
+        assert_eq!(first["protocol_version"], INSTALLER_PROTOCOL_VERSION);
         let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(last["type"], "completed");
     }
 
     #[test]
     fn typed_blocker_ids_do_not_parse_process_names() {
-        let event = AutomationEvent::blocked_with_processes(
+        let event = InstallerEvent::blocked_with_processes(
             "7-Zip.exe (PID 4820), Helper (PID 7312)",
             [4820, 7312],
         );
@@ -1241,7 +1272,7 @@ mod tests {
 
     #[test]
     fn automation_jsonl_rejects_unversioned_starts() {
-        let error = AutomationResult::to_jsonl([AutomationEvent::Completed {
+        let error = InstallerResult::to_jsonl([InstallerEvent::Completed {
             outcome: ProcessOutcome::Success,
         }])
         .unwrap_err();
@@ -1250,7 +1281,7 @@ mod tests {
 
     #[test]
     fn blocked_output_exposes_process_ids() {
-        let event = AutomationEvent::blocked(
+        let event = InstallerEvent::blocked(
             "blocked by running applications: Acme.exe (PID 4820), Helper (PID 7312)",
         );
         let value = serde_json::to_value(event).unwrap();

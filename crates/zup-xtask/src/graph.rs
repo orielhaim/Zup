@@ -72,6 +72,11 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     "zup-publish-github",
     "zup-distribute-github",
     "zup-xtask",
+    // The developer CLI's machine contract. It reaches the CLI and the repository's own
+    // tooling, and it must never reach an installer: the wire DTOs are a description of
+    // a developer's build, and a user installing an application has no build to
+    // describe.
+    "zup-automation",
 ];
 
 /// Check the workspace's graphs.

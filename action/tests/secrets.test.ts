@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import type { SourceLocation } from '../src/ports.js'
 import { redact } from '../src/runtime.js'
 import { annotate, buildEnvironment, INHERITED, TOKEN_VARIABLES } from '../src/workflow.js'
-import { context, inputs, recordingLog, SECRET } from './fixtures.js'
+import { context, inputs, recordingLog, result, SECRET } from './fixtures.js'
 
 /**
  * The secret-isolation acceptance criterion, as executable assertions.
@@ -33,8 +33,8 @@ describe('secret isolation', () => {
   })
 
   it('gives the publish subprocess the token, under both variable names', () => {
-    // zup reads `GH_TOKEN` then `GITHUB_TOKEN`. Both are set so a developer's
-    // local `gh auth` cannot shadow a job-scoped token with a stale one.
+    // zup reads `GH_TOKEN` then `GITHUB_TOKEN`. Both are set so a developer's local
+    // `gh auth` cannot shadow a job-scoped token with a stale one.
     const env = buildEnvironment('publish', inputs({ token: SECRET }), context())
     expect(env['GH_TOKEN']).toBe(SECRET)
     expect(env['GITHUB_TOKEN']).toBe(SECRET)
@@ -49,9 +49,8 @@ describe('secret isolation', () => {
   it('never forwards the parent PATH, which is not in the allowlist', () => {
     // A PATH a developer set by hand is a PATH the action did not choose. zup still
     // gets a working one from the runner's own variables.
-    expect(
-      buildEnvironment('build', inputs(), context({ PATH: '/poisoned' }))['PATH'],
-    ).toBeUndefined()
+    const env = buildEnvironment('build', inputs(), context({ PATH: '/poisoned' }))
+    expect(Object.hasOwn(env, 'PATH')).toBe(false)
   })
 
   it('passes through the variables a build genuinely needs', () => {
@@ -65,22 +64,21 @@ describe('secret isolation', () => {
     // The structural assertion: a variable nobody thought about cannot reach a
     // build, because the build's environment is a fresh object populated from
     // `INHERITED` alone.
+    const allowed: readonly string[] = [...INHERITED, ...TOKEN_VARIABLES]
     const env = buildEnvironment('build', inputs(), context())
     for (const key of Object.keys(env)) {
-      expect([...INHERITED, 'ZUP_DRY_RUN', ...TOKEN_VARIABLES]).toContain(key)
+      expect(allowed).toContain(key)
     }
   })
 
-  it('marks a dry run in the environment rather than in a flag', () => {
-    // A flag the action chose is a flag zup might not have; an environment variable
-    // named `ZUP_DRY_RUN` is the CLI's own contract, so the two cannot disagree.
-    expect(buildEnvironment('publish', inputs({ dryRun: true }), context())['ZUP_DRY_RUN']).toBe(
-      '1',
+  it('passes a dry run as a flag, not as a variable zup does not read', () => {
+    // There was a `ZUP_DRY_RUN` here. Nothing in zup read it, so the action believed
+    // it was asking for something and zup was not being asked. A dry run's whole
+    // value is that it does not write, and a variable nobody reads does not write
+    // and does not stop either.
+    expect(buildEnvironment('publish', inputs({ dryRun: true }), context())).not.toHaveProperty(
+      'ZUP_DRY_RUN',
     )
-  })
-
-  it('does not mark a normal run as a dry run', () => {
-    expect(buildEnvironment('publish', inputs(), context())['ZUP_DRY_RUN']).toBeUndefined()
   })
 })
 
@@ -99,8 +97,8 @@ describe('redaction', () => {
   })
 
   it('ignores an empty secret, which would otherwise match everywhere', () => {
-    // `split('')` joins every character: an empty token would turn a whole
-    // message into asterisks.
+    // `split('')` joins every character: an empty token would turn a whole message
+    // into asterisks.
     expect(redact('hello', [''])).toBe('hello')
   })
 
@@ -110,37 +108,41 @@ describe('redaction', () => {
   })
 })
 
+/** A diagnostic shaped by hand, because the point is the annotation not the parse. */
+function diagnostic(overrides: Record<string, unknown> = {}) {
+  return {
+    severity: 'error',
+    code: 'zup.manifest.unknown_target',
+    message: 'resource references unknown target profile `x64`',
+    help: 'use an exact profile id declared under [build.targets]',
+    source: null,
+    ...overrides,
+  } as NonNullable<ReturnType<typeof result>['diagnostics']>[number]
+}
+
 describe('annotations', () => {
   it('maps a diagnostic with a source location onto the annotation', () => {
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'build',
-        success: false,
-        targets: [],
-        artifacts: [],
+      result({
+        status: 'failure',
         diagnostics: [
-          {
-            severity: 'error',
-            code: 'zup_manifest::unknown_target_profile_reference',
-            message: 'resource references unknown target profile `x64`',
-            help: 'use an exact profile id declared under [build.targets]',
+          diagnostic({
             source: {
               file: 'zup.toml',
-              startLine: 12,
-              startColumn: 3,
-              endLine: 12,
-              endColumn: 9,
+              start_line: 12,
+              start_column: 3,
+              end_line: 12,
+              end_column: 9,
             },
-          },
+          }),
         ],
-      },
+      }),
       log,
       '/w',
     )
     const line = lines.find((entry) => entry.startsWith('annotate error')) ?? ''
-    expect(line).toContain('zup_manifest::unknown_target_profile_reference')
+    expect(line).toContain('zup.manifest.unknown_target')
     expect(line).toContain('use an exact profile id')
     const location = JSON.parse(line.slice(line.indexOf('{'))) as SourceLocation
     expect(location).toEqual({
@@ -155,18 +157,13 @@ describe('annotations', () => {
   it('maps each severity to its own annotation level', () => {
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'build',
-        success: true,
-        targets: [],
-        artifacts: [],
+      result({
         diagnostics: [
-          { severity: 'error', code: 'a', message: 'e' },
-          { severity: 'warning', code: 'b', message: 'w' },
-          { severity: 'notice', code: 'c', message: 'n' },
+          diagnostic({ severity: 'error', code: 'a', message: 'e' }),
+          diagnostic({ severity: 'warning', code: 'b', message: 'w' }),
+          diagnostic({ severity: 'notice', code: 'c', message: 'n' }),
         ],
-      },
+      }),
       log,
       '/w',
     )
@@ -175,26 +172,33 @@ describe('annotations', () => {
     expect(lines.some((line) => line.startsWith('annotate notice'))).toBe(true)
   })
 
+  it('annotates the same diagnostic once, however many times it arrives', () => {
+    // A diagnostic is streamed as it is found and repeated in the final result.
+    // Telling the reader the same fact twice is worse than not telling them.
+    const { log, lines } = recordingLog()
+    const repeated = diagnostic()
+    annotate(result({ diagnostics: [repeated, repeated, repeated] }), log, '/w')
+    expect(lines.filter((line) => line.startsWith('annotate '))).toHaveLength(1)
+  })
   it('resolves a project-relative path against the project', () => {
-    // An annotation on a path the runner cannot resolve is invisible, and a
-    // project in a subdirectory is the common case.
+    // An annotation on a path the runner cannot resolve is invisible, and a project
+    // in a subdirectory is the common case.
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'build',
-        success: false,
-        targets: [],
-        artifacts: [],
+      result({
+        status: 'failure',
         diagnostics: [
-          {
-            severity: 'error',
-            code: 'a',
-            message: 'e',
-            source: { file: 'zup.toml', startLine: 1 },
-          },
+          diagnostic({
+            source: {
+              file: 'zup.toml',
+              start_line: 1,
+              start_column: null,
+              end_line: null,
+              end_column: null,
+            },
+          }),
         ],
-      },
+      }),
       log,
       '/w/apps/desktop',
     )
@@ -204,21 +208,20 @@ describe('annotations', () => {
   it('leaves an absolute path alone', () => {
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'build',
-        success: false,
-        targets: [],
-        artifacts: [],
+      result({
+        status: 'failure',
         diagnostics: [
-          {
-            severity: 'error',
-            code: 'a',
-            message: 'e',
-            source: { file: '/abs/zup.toml', startLine: 1 },
-          },
+          diagnostic({
+            source: {
+              file: '/abs/zup.toml',
+              start_line: 1,
+              start_column: null,
+              end_line: null,
+              end_column: null,
+            },
+          }),
         ],
-      },
+      }),
       log,
       '/w',
     )
@@ -228,21 +231,20 @@ describe('annotations', () => {
   it('leaves a windows absolute path alone', () => {
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'build',
-        success: false,
-        targets: [],
-        artifacts: [],
+      result({
+        status: 'failure',
         diagnostics: [
-          {
-            severity: 'error',
-            code: 'a',
-            message: 'e',
-            source: { file: 'C:\\w\\zup.toml', startLine: 1 },
-          },
+          diagnostic({
+            source: {
+              file: 'C:\\w\\zup.toml',
+              start_line: 1,
+              start_column: null,
+              end_line: null,
+              end_column: null,
+            },
+          }),
         ],
-      },
+      }),
       log,
       'C:\\w',
     )
@@ -252,24 +254,21 @@ describe('annotations', () => {
   it('annotates a diagnostic with no location at all', () => {
     const { log, lines } = recordingLog()
     annotate(
-      {
-        schema: 1,
-        operation: 'publish',
-        success: false,
-        targets: [],
-        artifacts: [],
+      result({
+        status: 'failure',
+        operation: 'publish.github',
         diagnostics: [
-          {
-            severity: 'error',
-            code: 'github::PublishedConflict',
+          diagnostic({
+            code: 'zup.publish.asset_conflict',
             message: 'v1.4.0 is already published with a different set of assets',
-          },
+            help: null,
+          }),
         ],
-      },
+      }),
       log,
       '/w',
     )
-    expect(lines[0]).toContain('github::PublishedConflict')
+    expect(lines[0]).toContain('zup.publish.asset_conflict')
     expect(lines[0]).toContain('{}')
   })
 })

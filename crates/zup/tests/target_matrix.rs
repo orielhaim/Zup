@@ -654,16 +654,24 @@ fn init_and_single_target_commands_use_schema_1_and_require_explicit_selection()
     let ambiguous = zup()
         .args(["plan", "--manifest"])
         .arg(&manifest)
-        .arg("--json")
+        .arg("--format")
+        .arg("json")
         .output()
         .unwrap();
     assert!(!ambiguous.status.success());
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("exactly one target"));
+    let refusal: serde_json::Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert_eq!(refusal["operation"], "plan");
+    assert_eq!(refusal["status"], "failure");
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("exactly one target"),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stderr)
+    );
 
     let explicit = zup()
         .args(["plan", "--manifest"])
         .arg(&manifest)
-        .args(["--target", "alpha", "--json"])
+        .args(["--target", "alpha", "--format", "json"])
         .output()
         .unwrap();
     assert!(
@@ -672,5 +680,5 @@ fn init_and_single_target_commands_use_schema_1_and_require_explicit_selection()
         String::from_utf8_lossy(&explicit.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-    assert_eq!(value["target"]["target"], HOST_TARGET);
+    assert_eq!(value["targets"][0]["target"], HOST_TARGET);
 }

@@ -92,6 +92,9 @@ jobs:
           cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json
 
+      - name: Automation contract
+        run: cargo xtask automation check
+
       # The whole reason the developer CLI and the installer runtime are two
       # packages: a role must be a package, not a Cargo feature. This checks that
       # each runtime frontend builds alone, that no frontend can reach the build

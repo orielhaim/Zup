@@ -86,24 +86,24 @@ pub fn command() -> clap::Command {
 /// formats go to stdout, because stdout is the channel an automation system is
 /// reading and a failure it cannot parse is a failure it will misreport.
 fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) {
-    use zup_presentation::{AutomationEvent, AutomationResult, DiagnosticPresentation};
+    use zup_presentation::{DiagnosticPresentation, InstallerEvent, InstallerResult};
 
     let outcome = ProcessOutcome::from_message(&error.to_string());
     match output {
         zup_presentation::OutputFormat::Human => {}
         zup_presentation::OutputFormat::Json => {
-            let mut result = AutomationResult::new(outcome, "", "");
+            let mut result = InstallerResult::new(outcome, "", "");
             result.message = Some(error.to_string());
             if let Ok(value) = result.to_json() {
                 println!("{value}");
             }
         }
         zup_presentation::OutputFormat::Jsonl => {
-            let started = AutomationEvent::started("", "", "unknown");
+            let started = InstallerEvent::started("", "", "unknown");
             if let Ok(value) = serde_json::to_string(&started) {
                 println!("{value}");
             }
-            let event = AutomationEvent::Failed {
+            let event = InstallerEvent::Failed {
                 outcome,
                 code: outcome.code(),
                 message: error.to_string(),

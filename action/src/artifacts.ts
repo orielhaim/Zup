@@ -23,9 +23,8 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-
 import type { AttestationSubject } from './ports.js'
-import type { ArtifactResult, SigningEvidence } from './result.js'
+import type { SigningEvidence } from './protocol.js'
 
 /** The manifest's own shape, as far as this needs it. */
 export interface ReleaseManifestDocument {
@@ -120,25 +119,6 @@ export function parseManifest(text: string, path: string): ReleaseManifestDocume
     )
   }
   return manifest
-}
-
-/** The manifest's artifacts as the result envelope models them. */
-export function manifestArtifacts(manifest: ReleaseManifestDocument): ArtifactResult[] {
-  return manifest.artifacts.map((artifact) => {
-    // The published identity. For an unfinalized release there is none, and the
-    // envelope reports the built digest as the size and digest because that is
-    // all the document says — but with no evidence, so nothing claims a
-    // signature. `parseManifest` refuses such a document outright.
-    const final = artifact.finalized
-    return {
-      path: artifact.path,
-      digest: final?.digest ?? artifact.built.digest,
-      size: final?.size ?? artifact.built.size,
-      kind: artifact.kind,
-      mode: artifact.mode,
-      evidence: final?.evidence ?? [],
-    }
-  })
 }
 
 /**

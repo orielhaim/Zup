@@ -27,7 +27,7 @@ use tokio::sync::mpsc::Receiver;
 
 use zup_acquire::{AcquisitionEvent, format_bytes};
 
-use crate::{AutomationEvent, OperationPhase, ProcessOutcome};
+use crate::{InstallerEvent, OperationPhase, ProcessOutcome};
 
 /// Report acquisition events on a background thread.
 ///
@@ -99,17 +99,17 @@ pub fn acquisition_thread(events: Receiver<AcquisitionEvent>) -> AcquisitionThre
 /// right answer for a `CacheHit` in a large closure: the total is already on the
 /// `acquisition_started` estimate, and one line per cache hit would be one line
 /// per file in an install.
-pub fn automation_events(event: &AcquisitionEvent) -> Vec<AutomationEvent> {
+pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
     match event {
-        AcquisitionEvent::ReleaseResolved { version, .. } => vec![AutomationEvent::Phase {
+        AcquisitionEvent::ReleaseResolved { version, .. } => vec![InstallerEvent::Phase {
             state: format!("resolved {version}"),
         }],
-        AcquisitionEvent::VariantSelected { variant, .. } => vec![AutomationEvent::Phase {
+        AcquisitionEvent::VariantSelected { variant, .. } => vec![InstallerEvent::Phase {
             state: format!("variant {variant}"),
         }],
         AcquisitionEvent::AcquisitionStarted {
             items, estimate, ..
-        } => vec![AutomationEvent::Progress {
+        } => vec![InstallerEvent::Progress {
             phase: OperationPhase::Download,
             completed: 0,
             total: *items,
@@ -120,7 +120,7 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<AutomationEvent> {
                 format_bytes(estimate.cached_bytes)
             ),
         }],
-        AcquisitionEvent::DownloadProgress { progress } => vec![AutomationEvent::Progress {
+        AcquisitionEvent::DownloadProgress { progress } => vec![InstallerEvent::Progress {
             phase: OperationPhase::Download,
             completed: progress.completed_bytes,
             total: progress.total_bytes,
@@ -130,20 +130,20 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<AutomationEvent> {
             items,
             bytes,
             elapsed_ms,
-        } => vec![AutomationEvent::Phase {
+        } => vec![InstallerEvent::Phase {
             state: format!("acquired {items} objects in {elapsed_ms}ms"),
         }]
         .into_iter()
-        .chain(std::iter::once(AutomationEvent::Phase {
+        .chain(std::iter::once(InstallerEvent::Phase {
             state: format_bytes(*bytes),
         }))
         .collect(),
         AcquisitionEvent::Retrying {
             attempt, reason, ..
-        } => vec![AutomationEvent::Phase {
+        } => vec![InstallerEvent::Phase {
             state: format!("retry {attempt}: {reason}"),
         }],
-        AcquisitionEvent::Cancelled { .. } => vec![AutomationEvent::Cancelling {
+        AcquisitionEvent::Cancelled { .. } => vec![InstallerEvent::Cancelling {
             state: "acquisition".to_owned(),
         }],
         AcquisitionEvent::Failed {
@@ -160,7 +160,7 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<AutomationEvent> {
                 detail.push_str(" · ");
                 detail.push_str(&reasons.join(" · "));
             }
-            vec![AutomationEvent::Failed {
+            vec![InstallerEvent::Failed {
                 outcome: ProcessOutcome::Failure,
                 code: i32::from(*machine_unchanged),
                 message: detail,
@@ -226,7 +226,7 @@ mod tests {
             release_digest: zup_core::Sha256Digest::from_bytes([1; 32]),
         });
         assert!(
-            matches!(events.as_slice(), [AutomationEvent::Phase { state }] if state.contains("1.4.0"))
+            matches!(events.as_slice(), [InstallerEvent::Phase { state }] if state.contains("1.4.0"))
         );
         let events = automation_events(&AcquisitionEvent::VariantSelected {
             variant: "x64".to_owned(),
@@ -234,7 +234,7 @@ mod tests {
             compatibility: "native".to_owned(),
         });
         assert!(
-            matches!(events.as_slice(), [AutomationEvent::Phase { state }] if state.contains("x64"))
+            matches!(events.as_slice(), [InstallerEvent::Phase { state }] if state.contains("x64"))
         );
     }
 
@@ -263,7 +263,7 @@ mod tests {
         });
         assert!(matches!(
             events.as_slice(),
-            [AutomationEvent::Failed { code: 1, message, .. }] if message.contains("the CDN reset twice")
+            [InstallerEvent::Failed { code: 1, message, .. }] if message.contains("the CDN reset twice")
         ));
     }
 
@@ -282,7 +282,7 @@ mod tests {
         });
         assert!(matches!(
             events.as_slice(),
-            [AutomationEvent::Progress { label, total: 3, .. }]
+            [InstallerEvent::Progress { label, total: 3, .. }]
                 if label.contains("1.00 MiB") && label.contains("4.00 MiB") && label.contains("512 KiB")
         ));
     }

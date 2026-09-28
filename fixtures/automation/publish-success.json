@@ -1,0 +1,57 @@
+{
+  "protocol": "1.0",
+  "operation": "publish.github",
+  "status": "success",
+  "application": {
+    "id": "com.acme.desktop",
+    "name": "Acme",
+    "version": "1.4.0"
+  },
+  "targets": [],
+  "artifacts": [
+    {
+      "path": "Acme-Windows-Setup.exe",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "size": 248512896,
+      "kind": "single",
+      "mode": "offline",
+      "id": "windows-x64",
+      "target": "x86_64-pc-windows-msvc",
+      "variants": null,
+      "signing": null
+    }
+  ],
+  "release_manifest": "dist/zup-release.json",
+  "publication": {
+    "provider": "github",
+    "subject": "acme/acme",
+    "tag": "v1.4.0",
+    "id": "1234567890123456789",
+    "state": "published",
+    "url": "https://github.com/acme/acme/releases/tag/v1.4.0",
+    "immutable": true,
+    "assets": [
+      {
+        "name": "Acme-Windows-Setup.exe",
+        "size": 248512896,
+        "digest": {
+          "algorithm": "sha256",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "state": "uploaded"
+      }
+    ],
+    "receipt": "dist/github-publish.json"
+  },
+  "diagnostics": [],
+  "summary": "Published v1.4.0 with 1 asset",
+  "details": {
+    "kind": "publish.github",
+    "dry_run": false,
+    "receipt": "dist/github-publish.json",
+    "failures": []
+  }
+}

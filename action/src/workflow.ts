@@ -16,7 +16,6 @@ import {
   attestSubjects,
   digestOfFile,
   ManifestError,
-  manifestArtifacts,
   parseManifest,
   type ReleaseManifestDocument,
   shouldUploadDirect,
@@ -24,8 +23,8 @@ import {
 import { InputError, type Inputs, readInputs } from './inputs.js'
 import {
   argumentsFor,
-  mergeResults,
   needsToken,
+  operationFor,
   type Phase,
   phasesFor,
   producesArtifacts,
@@ -33,7 +32,14 @@ import {
 } from './phases.js'
 import { UnsupportedRunnerError } from './platform.js'
 import type { GithubContext, Log } from './ports.js'
-import { coversBytes, type OperationResult, parseResult, ResultFormatError } from './result.js'
+import {
+  type AutomationResult,
+  conformance,
+  coversBytes,
+  type Diagnostic,
+  ProtocolError,
+  parseEvent,
+} from './protocol.js'
 import {
   checkoutIsFromFork,
   context,
@@ -46,7 +52,8 @@ import {
   ZupReleaseSource,
 } from './runtime.js'
 import { checkSafety } from './security.js'
-import { renderSummary, type Summary } from './summary.js'
+import { LineFramer } from './stream.js'
+import { mergeResults, renderSummary, type Summary } from './summary.js'
 import { type ResolvedTool, resolveTool, ToolError, toolDirectory } from './tool.js'
 
 /**
@@ -125,7 +132,7 @@ const TOKEN_VARIABLES = ['GH_TOKEN', 'GITHUB_TOKEN'] as const
 /** What the step did, so the summary and the outputs can report it. */
 interface Outcome {
   performed: Phase[]
-  result: OperationResult | undefined
+  results: Map<Phase, AutomationResult>
   tool: ResolvedTool
   attestation: { requested: boolean; performed: boolean; subjects: number } | undefined
   failure: { message: string; remedy: string } | undefined
@@ -249,18 +256,15 @@ async function execute(
   const filesystem = new NodeFileSystem()
   const runner = new SpawnRunner()
   const phases = phasesFor(inputs.operation)
-  const results = new Map<Phase, OperationResult>()
+  const results = new Map<Phase, AutomationResult>()
+  const annotator = new Annotator(log, inputs.projectPath)
   const performed: Phase[] = []
   let attestation: Outcome['attestation']
 
   for (const phase of phases) {
     log.startGroup(titleFor(phase))
     try {
-      const result = await runPhase(phase, inputs, tool, log, github, runner, filesystem)
-      if (result !== undefined) {
-        results.set(phase, result)
-        annotate(result, log, inputs.projectPath)
-      }
+      await runPhase(phase, inputs, tool, log, github, runner, filesystem, results, annotator)
       performed.push(phase)
 
       if (phase === 'attest') {
@@ -275,7 +279,7 @@ async function execute(
       log.endGroup()
       return {
         performed,
-        result: mergeResults(phases, results),
+        results,
         tool,
         attestation,
         failure: { message, remedy: remedyFor(error) },
@@ -284,16 +288,17 @@ async function execute(
     log.endGroup()
   }
 
-  return {
-    performed,
-    result: mergeResults(phases, results),
-    tool,
-    attestation,
-    failure: undefined,
-  }
+  return { performed, results, tool, attestation, failure: undefined }
 }
 
-/** One phase: a zup invocation, or reading the manifest. */
+/**
+ * One phase.
+ *
+ * Two shapes, and the difference is which process answers the question. A zup
+ * phase reads the protocol stream the command wrote. `attest` runs no zup command
+ * at all — zup does not talk to Sigstore — so it reads the release description
+ * itself, which is the document that says which bytes a downloader will receive.
+ */
 async function runPhase(
   phase: Phase,
   inputs: Inputs,
@@ -302,48 +307,36 @@ async function runPhase(
   github: GithubContext,
   runner: SpawnRunner,
   filesystem: NodeFileSystem,
-): Promise<OperationResult | undefined> {
-  // `finalize` runs `zup sign verify` and then *reads* the result, rather than
-  // parsing a report the command prints. The release description is the document
-  // that says which bytes will be published, and it is the one every later phase
-  // acts on, so reading it here means the summary reports the identities a
-  // downloader will actually get rather than a transcript of the verification.
-  if (phase === 'attest' || phase === 'finalize') {
-    if (phase === 'finalize') {
-      const outcome = await runZup(phase, inputs, tool, log, github, runner)
-      if (outcome.code !== 0) {
-        throw new CommandFailure(phase, outcome.code, outcome.stderr)
-      }
-    }
-    const manifest = await readReleaseManifest(inputs, filesystem)
-    const artifacts = manifestArtifacts(manifest.document)
-    const unsigned = artifacts.filter((artifact) => !coversBytes(artifact.evidence))
+  results: Map<Phase, AutomationResult>,
+  annotator: Annotator,
+): Promise<void> {
+  if (phase === 'attest') {
+    const { relative, document } = await readReleaseManifest(inputs, filesystem)
+    const unsigned = document.artifacts.filter(
+      (artifact) => !coversBytes(artifact.finalized?.evidence),
+    )
     log.info(
-      `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} in the release manifest` +
+      `${document.artifacts.length} artifact${document.artifacts.length === 1 ? '' : 's'} in ` +
+        `\`${relative}\`` +
         (unsigned.length > 0
           ? `, ${unsigned.length} with no signature: ${unsigned.map((a) => a.path).join(', ')}`
           : ''),
     )
-    return {
-      schema: 1,
-      operation: phase,
-      success: true,
-      appVersion: manifest.document.application.version,
-      targets: manifest.document.variants.map((variant) => variant.target),
-      artifacts,
-      releaseManifest: manifest.relative,
-      diagnostics: [],
-    }
+    return
   }
-
-  const outcome = await runZup(phase, inputs, tool, log, github, runner)
-  if (outcome.code !== 0) {
-    throw new CommandFailure(phase, outcome.code, outcome.stderr)
-  }
-  return parseResult(outcome.stdout, phase)
+  const result = await runZup(phase, inputs, tool, log, github, runner, annotator)
+  results.set(phase, result)
+  annotate(result, log, inputs.projectPath, annotator)
 }
 
-/** Run one phase's zup command. */
+/**
+ * Run one phase's zup command and read the stream it wrote.
+ *
+ * The exit code and the document are read together, which is the only way they can
+ * be made to agree: a nonzero exit is a failure *with* its diagnostics rather than a
+ * stderr scrape, so a machine-format run that failed still says which check failed
+ * and where.
+ */
 async function runZup(
   phase: Phase,
   inputs: Inputs,
@@ -351,20 +344,128 @@ async function runZup(
   log: Log,
   github: GithubContext,
   runner: SpawnRunner,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+  annotator: Annotator,
+): Promise<AutomationResult> {
+  const operation = operationFor(phase)
   const args = argumentsFor(phase, inputs)
   log.debug(`zup ${args.join(' ')}`)
 
-  // Streaming is right for a build: a developer watching a compile wants to see it
-  // compile. The structured result still comes back on stdout, because
-  // `getExecOutput` streams and captures the same run.
-  return runner.run({
+  // A framer rather than a string: a build reports a failing check in the first
+  // second, and a step that only speaks at the end cannot be stopped.
+  let result: AutomationResult | undefined
+  const framer = new LineFramer((line) => {
+    const event = parseEvent(line)
+    if (event === undefined) {
+      return
+    }
+    if (event.type === 'completed') {
+      result = event.result
+      return
+    }
+    reportEvent(event, log, annotator)
+  })
+
+  const outcome = await runner.run({
     program: tool.path,
     args,
     cwd: inputs.projectPath,
     env: buildEnvironment(phase, inputs, github),
     stream: true,
+    stdout: framer,
   })
+
+  if (result === undefined) {
+    // No `completed` line. A run that failed before it could write one is a zup
+    // bug or a zup that is too old for this action; both are worth saying plainly
+    // rather than reporting an empty success.
+    throw new ProtocolError(
+      `the stream ended without a result (exit code ${outcome.code})`,
+      outcome.stdout,
+    )
+  }
+  const problem = conformance(result)
+  if (problem !== undefined) {
+    throw new ProtocolError(problem, outcome.stdout)
+  }
+  if (outcome.code !== 0 && result.status !== 'failure') {
+    // zup exited nonzero and said it succeeded. The document and the exit code are
+    // one answer, and this is the state where they are not.
+    throw new ProtocolError(
+      `\`${result.operation}\` exited with code ${outcome.code} but reported success`,
+      outcome.stdout,
+    )
+  }
+  if (operation !== undefined && result.operation !== operation) {
+    throw new ProtocolError(
+      `expected a \`${operation}\` result and got \`${result.operation}\``,
+      outcome.stdout,
+    )
+  }
+  if (outcome.code !== 0) {
+    // A failure zup described. The document says which check failed and where; the
+    // exit code only says that it did. Reporting the document is the whole reason
+    // `--format jsonl` writes a result even when the run failed.
+    throw new ReportedFailure(result, outcome.code)
+  }
+  return result
+}
+
+/**
+ * A zup command that failed and said why.
+ *
+ * Carries the result rather than a formatted message, so the caller can annotate
+ * the diagnostics and the summary can show the artifacts that were produced before
+ * the failure rather than nothing at all.
+ */
+export class ReportedFailure extends Error {
+  constructor(
+    readonly result: AutomationResult,
+    readonly code: number,
+  ) {
+    const reasons = result.diagnostics
+      .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+      .join('; ')
+    super(
+      `zup ${result.operation} failed (exit code ${code})${
+        reasons.length > 0 ? `: ${reasons}` : ''
+      }`,
+    )
+    this.name = 'ReportedFailure'
+  }
+}
+
+/** What one streamed line tells the reader, and nothing more. */
+function reportEvent(
+  event: NonNullable<ReturnType<typeof parseEvent>>,
+  log: Log,
+  annotator: Annotator,
+): void {
+  switch (event.type) {
+    case 'phase':
+    case 'log':
+      log.info(event.message)
+      return
+    case 'progress':
+      log.info(`${event.label} ${event.completed}/${event.total}`)
+      return
+    case 'diagnostic':
+      annotator.one(event.diagnostic)
+      return
+    case 'artifact':
+      log.info(`${event.artifact.path} · ${event.artifact.digest.value.slice(0, 16)}…`)
+      return
+    case 'publication':
+      log.info(
+        `${event.publication.provider} ${event.publication.subject} ${event.publication.tag} ` +
+          `(${event.publication.state})`,
+      )
+      return
+    case 'version':
+      log.debug(`zup ${event.zup} speaks protocol ${event.protocol}`)
+      return
+    case 'completed':
+      return
+  }
 }
 
 /**
@@ -388,11 +489,10 @@ export function buildEnvironment(
       environment[name] = value
     }
   }
-  // The CLI's own contract, checked by the CLI, so the action and zup cannot
-  // disagree about whether this is a dry run.
-  if (inputs.dryRun) {
-    environment['ZUP_DRY_RUN'] = '1'
-  }
+  // A dry run is a flag on the command, not an environment variable. There was a
+  // `ZUP_DRY_RUN` here that nothing in zup read: the action believed it was asking
+  // for something and zup was not being asked, so a dry-run release published
+  // anyway. One contract, on the command line, where the parser can refuse it.
   if (inputs.token !== undefined && needsToken(phase)) {
     for (const name of TOKEN_VARIABLES) {
       environment[name] = inputs.token
@@ -461,7 +561,7 @@ async function upload(
   log: Log,
   github: GithubContext,
   filesystem: NodeFileSystem,
-  result: OperationResult | undefined,
+  result: AutomationResult | undefined,
 ): Promise<void> {
   const directory = filesystem.resolve(inputs.projectPath, inputs.releaseDir)
   if (!(await filesystem.exists(directory))) {
@@ -489,29 +589,79 @@ async function upload(
     )
   }
   for (const artifact of result?.artifacts ?? []) {
-    log.debug(`${artifact.path} ${artifact.digest}`)
+    log.debug(`${artifact.path} sha256:${artifact.digest.value}`)
   }
 }
 
-/** Turn a result's diagnostics into annotations. */
-export function annotate(result: OperationResult, log: Log, projectPath: string): void {
-  for (const diagnostic of result.diagnostics) {
+/**
+ * Turning diagnostics into annotations, once each.
+ *
+ * A diagnostic that arrives mid-stream is annotated as it arrives, and the same
+ * diagnostic arrives again in the final result. Telling the reader the same fact
+ * twice is worse than not telling them at all, so the annotator remembers what it
+ * has already said. Per run rather than per module: a second step in the same
+ * process is a different run against a different log.
+ */
+export class Annotator {
+  readonly #seen = new Set<string>()
+
+  constructor(
+    private readonly log: Log,
+    private readonly projectPath: string,
+  ) {}
+
+  one(diagnostic: Diagnostic): void {
+    const key = this.#identity(diagnostic)
+    if (this.#seen.has(key)) {
+      return
+    }
+    this.#seen.add(key)
+    const source = diagnostic.source
     const location =
-      diagnostic.source === undefined
+      source === null
         ? undefined
         : {
-            file: absolute(diagnostic.source.file, projectPath),
-            startLine: diagnostic.source.startLine,
-            startColumn: diagnostic.source.startColumn,
-            endLine: diagnostic.source.endLine,
-            endColumn: diagnostic.source.endColumn,
+            file: absolute(source.file, this.projectPath),
+            startLine: source.start_line ?? undefined,
+            startColumn: source.start_column ?? undefined,
+            endLine: source.end_line ?? undefined,
+            endColumn: source.end_column ?? undefined,
           }
     const message =
-      diagnostic.help === undefined
-        ? diagnostic.message
-        : `${diagnostic.message}\n${diagnostic.help}`
-    log.annotate(diagnostic.severity, `${diagnostic.code}: ${message}`, location)
+      diagnostic.help === null ? diagnostic.message : `${diagnostic.message}\n${diagnostic.help}`
+    this.log.annotate(diagnostic.severity, `${diagnostic.code}: ${message}`, location)
   }
+
+  all(diagnostics: readonly Diagnostic[]): void {
+    for (const diagnostic of diagnostics) {
+      this.one(diagnostic)
+    }
+  }
+
+  /// The same message about two different lines is two problems, so the location
+  /// is part of what makes a diagnostic the same diagnostic.
+  #identity(diagnostic: Diagnostic): string {
+    const source = diagnostic.source
+    return [diagnostic.code, diagnostic.message, source?.file ?? '', source?.start_line ?? ''].join(
+      ' ',
+    )
+  }
+}
+
+/**
+ * Turn a result's diagnostics into annotations.
+ *
+ * The annotator is passed rather than created so a run annotates each diagnostic
+ * once across the stream and the final result; a caller with no state to keep gets
+ * a fresh one, which is the same behaviour with less to say.
+ */
+export function annotate(
+  result: AutomationResult,
+  log: Log,
+  projectPath: string,
+  annotator: Annotator = new Annotator(log, projectPath),
+): void {
+  annotator.all(result.diagnostics)
 }
 
 function absolute(file: string, projectPath: string): string {
@@ -526,11 +676,11 @@ function absolute(file: string, projectPath: string): string {
 
 /** Declare the outputs and write the summary. */
 function report(inputs: Inputs, outcome: Outcome, log: Log): void {
-  const result = outcome.result
+  const result = mergeResults(outcome.performed, outcome.results)
   log.setOutput('zup-path', outcome.tool.path)
   log.setOutput('zup-version', outcome.tool.version)
-  if (result?.appVersion !== undefined) {
-    log.setOutput('app-version', result.appVersion)
+  if (result?.application !== null && result?.application !== undefined) {
+    log.setOutput('app-version', result.application.version)
   }
   if (result?.artifacts.length) {
     // JSON, not a newline-joined list: JSON is the one form that survives a path
@@ -541,21 +691,25 @@ function report(inputs: Inputs, outcome: Outcome, log: Log): void {
         result.artifacts.map((artifact) => ({
           path: artifact.path,
           size: artifact.size,
-          digest: artifact.digest,
+          digest: artifact.digest.value,
         })),
       ),
     )
   }
-  if (result?.releaseManifest !== undefined) {
-    log.setOutput('release-manifest', result.releaseManifest)
+  const manifest = result?.release_manifest ?? undefined
+  if (manifest !== undefined) {
+    log.setOutput('release-manifest', manifest)
   }
-  if (result?.release !== undefined && result.release.releaseId > 0) {
-    log.setOutput('release-id', String(result.release.releaseId))
+  const publication = result?.publication
+  if (publication !== null && publication !== undefined) {
+    if (publication.id !== null && publication.id.length > 0) {
+      log.setOutput('release-id', publication.id)
+    }
+    if (publication.url !== null) {
+      log.setOutput('release-url', publication.url)
+    }
   }
-  if (result?.release?.url !== undefined) {
-    log.setOutput('release-url', result.release.url)
-  }
-  if (inputs.receipt !== undefined && result?.release !== undefined) {
+  if (inputs.receipt !== undefined && publication !== null && publication !== undefined) {
     log.setOutput('publish-receipt', inputs.receipt)
   }
 
@@ -563,6 +717,7 @@ function report(inputs: Inputs, outcome: Outcome, log: Log): void {
     operation: inputs.operation,
     tool: outcome.tool,
     performed: outcome.performed,
+    results: outcome.results,
     result,
     failure: outcome.failure,
     dryRun: inputs.dryRun,
@@ -582,19 +737,6 @@ function titleFor(phase: Phase): string {
       return 'Attest'
     case 'publish':
       return 'Publish'
-  }
-}
-
-/** A zup command that exited non-zero. */
-export class CommandFailure extends Error {
-  constructor(
-    readonly phase: Phase,
-    readonly code: number,
-    readonly stderr: string,
-  ) {
-    const detail = stderr.trim().split('\n').slice(-3).join(' ').slice(0, 400)
-    super(`zup ${phase} exited with code ${code}${detail.length > 0 ? `: ${detail}` : ''}`)
-    this.name = 'CommandFailure'
   }
 }
 
@@ -635,11 +777,11 @@ export function remedyFor(error: unknown): string {
   if (error instanceof InputError || error instanceof ManifestError) {
     return error.remedy
   }
-  if (error instanceof CommandFailure) {
-    return 'Read the output above: zup printed why. Rerun with `ACTIONS_STEP_DEBUG: true` for the exact command line.'
+  if (error instanceof ReportedFailure) {
+    return 'Every diagnostic above is annotated with its code and location. Rerun with `ACTIONS_STEP_DEBUG: true` for the exact command line.'
   }
   if (
-    error instanceof ResultFormatError ||
+    error instanceof ProtocolError ||
     error instanceof MissingOutput ||
     error instanceof MissingManifest ||
     error instanceof UnsupportedRunnerError ||

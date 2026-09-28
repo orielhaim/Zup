@@ -1,6 +1,6 @@
 import type { Inputs } from '../src/inputs.js'
 import type { GithubContext, Log } from '../src/ports.js'
-import type { OperationResult } from '../src/result.js'
+import type { AutomationResult } from '../src/protocol.js'
 
 /** A credential that must never appear in an environment a test inspects. */
 export const SECRET = 'ghp_this_must_never_appear'
@@ -115,16 +115,28 @@ export function recordingLog(): { log: Log; lines: string[] } {
   }
 }
 
-/** A successful operation result, for a test that only cares about one field. */
-export function result(overrides: Partial<OperationResult> = {}): OperationResult {
+/**
+ * A successful operation result, for a test that only cares about one field.
+ *
+ * Shaped by hand, unlike the protocol tests: these tests are about the *action's*
+ * logic — what it merges, what it renders — and a document zup never emitted would
+ * make a failure ambiguous between "the action is wrong" and "the input was wrong".
+ * The documents zup really emits live in `protocol-fixtures.ts` and are read from
+ * disk there.
+ */
+export function result(overrides: Partial<AutomationResult> = {}): AutomationResult {
   return {
-    schema: 1,
+    protocol: '1.0',
     operation: 'build',
-    success: true,
-    appVersion: '1.4.0',
+    status: 'success',
+    application: { id: 'com.acme.desktop', name: 'Acme', version: '1.4.0' },
     targets: [],
     artifacts: [],
+    release_manifest: null,
+    publication: null,
     diagnostics: [],
+    summary: null,
+    details: null,
     ...overrides,
   }
 }

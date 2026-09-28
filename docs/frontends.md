@@ -211,11 +211,13 @@ still builds and tests natively on Linux; see
 [architecture](architecture.md#the-target-matrix-and-the-backend-boundary) for
 the boundary that keeps it portable and for the CI job that verifies it.
 
-`zup doctor` uses `--format`, with the values `human` and `json`. The lifecycle
-commands use `--output`, with the values `human`, `json`, and `jsonl`; `zup plan`
-uses `--json`. `--format json` prints one versioned report, `version: 1`, with a
-`profile`, `target`, `kind`, `status`, `message`, and `path` field per check. The
-shape is stable, so automation can read `status` and `path` without parsing prose.
+Every operation command takes `--format human | json | jsonl`: prose, one versioned
+result, or the protocol stream. `zup doctor --format json` writes one result whose
+`details` carries the whole check table, with `kind`, `status`, `message` and `path`
+per row — including the rows that were *skipped*, because a skipped check is a
+question that was never answered and a report that showed only the failures would
+call a project ready on the strength of checks that never ran. See
+[the automation protocol](automation.md) for the envelope and the version rules.
 
 ## Keeping the graphs apart
 
