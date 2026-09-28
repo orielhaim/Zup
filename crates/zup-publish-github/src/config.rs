@@ -4,7 +4,7 @@
 //! needs", and it is deliberately the only place the two meet.
 //!
 //! `zup-manifest` owns the *shape* of a `[publish.github]` table and knows
-//! nothing about a release id, an API, or a credential — the same way it owns the
+//! nothing about a release id, an API, or a credential - the same way it owns the
 //! shape of `[build.artifacts]` and knows nothing about a PE. `zup-publish-github`
 //! owns the *meaning* and reads these types. Neither owns the other half, and
 //! the manifest cannot be extended to name a provider the CLI does not support,

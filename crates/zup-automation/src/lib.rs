@@ -3,8 +3,8 @@
 //! # What this crate is
 //!
 //! The DTOs, and only the DTOs: one final result per operation, one diagnostic
-//! shape, one artifact shape, one event stream. Every producer — `zup build`,
-//! `zup publish github`, `zup sign verify`, `zup doctor`, `zup toolchain status` —
+//! shape, one artifact shape, one event stream. Every producer - `zup build`,
+//! `zup publish github`, `zup sign verify`, `zup doctor`, `zup toolchain status` -
 //! reports through these types, so a CI system, a release pipeline and the official
 //! GitHub Action read one document shape rather than one per command.
 //!
@@ -67,7 +67,7 @@
 //! above `2^53 - 1` rather than emitting a number whose meaning differs between
 //! languages. Counts that are structurally small (line numbers, item totals) are
 //! `u32`, which is inside the safe range by construction. Identifiers that a provider
-//! owns — a release id — are strings, because whether it fits in a double is the
+//! owns - a release id - are strings, because whether it fits in a double is the
 //! provider's business, not zup's.
 //!
 //! # Paths

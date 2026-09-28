@@ -2,7 +2,7 @@
 //!
 //! A channel document moves. That is the whole point of a channel: it is where
 //! "the current release" is published. It is also why a version-labelled
-//! installer cannot use one — the installer would install whatever the channel
+//! installer cannot use one - the installer would install whatever the channel
 //! said on the day it ran, which is not what "version 1.4.0" means to anybody.
 //!
 //! So the same body is published under both names. The version-addressed one
@@ -58,7 +58,7 @@ fn a_channel_and_a_version_address_the_same_release() {
     assert_eq!(release.version, "1.4.0");
 
     // And both names are TUF targets, so both are authenticated by the same
-    // signature — a version-addressed name nobody signed would be worthless.
+    // signature - a version-addressed name nobody signed would be worthless.
     let tuf_input = web.join("tuf-input");
     assert!(
         tuf_input

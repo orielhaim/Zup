@@ -46,8 +46,8 @@ pub enum EvidenceFact {
     ///
     /// The strongest statement that can be made from the file alone: the
     /// embedded digest matches the bytes the release publishes. It says nothing
-    /// about whether the signing chain is *trusted* — a self-signed development
-    /// certificate produces this and nothing more — which is what
+    /// about whether the signing chain is *trusted* - a self-signed development
+    /// certificate produces this and nothing more - which is what
     /// [`EvidenceFact::PlatformTrustAccepted`] is for.
     SignatureCoversBytes,
     /// The platform's own trust policy accepted the signing chain.
@@ -104,8 +104,8 @@ impl SigningEvidence {
 ///
 /// The one question a release description has to be able to answer, and the one
 /// that cannot be answered by the absence of a flag: an unsigned release is
-/// *finalized* — it has a real published identity, because nothing changed the
-/// bytes — and it is not signed, and no consumer of the document may conclude
+/// *finalized* - it has a real published identity, because nothing changed the
+/// bytes - and it is not signed, and no consumer of the document may conclude
 /// otherwise.
 pub fn covers_bytes(evidence: &[SigningEvidence]) -> bool {
     value_of(evidence, EvidenceFact::SignatureCoversBytes).is_some()
@@ -154,7 +154,7 @@ impl Measured {
 /// The fields are private because the value is only obtainable one way:
 /// [`finalize`], which measures the file. A published identity is a measurement,
 /// not a transcription of what a signing tool said it did, and a type whose
-/// fields were public could be built by copying someone else's digest — which is
+/// fields were public could be built by copying someone else's digest - which is
 /// the failure the whole finalization step exists to prevent.
 ///
 /// A *parsed* release description is the one exception, and it is a different
@@ -196,7 +196,7 @@ impl FinalizedArtifact {
 /// has already happened.** `claimed` is what the caller measured immediately
 /// after verifying the signature, and this function measures again. They must
 /// agree, or the file changed between the two and the identity either one
-/// describes is not the identity of the bytes on disk — which is the one thing a
+/// describes is not the identity of the bytes on disk - which is the one thing a
 /// published release must never be.
 ///
 /// Passing an *unsigned* release through here is legitimate and is how an
@@ -298,8 +298,8 @@ mod tests {
     }
 
     /// The distinction the whole type exists for: an unsigned release is
-    /// finalized — it has a real published identity, because nothing changed the
-    /// bytes — and it is not signed.
+    /// finalized - it has a real published identity, because nothing changed the
+    /// bytes - and it is not signed.
     #[test]
     fn an_unsigned_release_is_finalized_and_reports_that_it_is_not_signed() {
         let (directory, path) = write(b"unsigned!");

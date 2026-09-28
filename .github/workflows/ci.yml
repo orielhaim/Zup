@@ -34,9 +34,6 @@ jobs:
         with:
           key: windows-full
 
-      # Every tool version is pinned. An unpinned `cargo-nextest` is the same
-      # class of problem as an unpinned action: a red build nobody can reproduce
-      # from the same commit.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146,cargo-machete,cargo-deny@0.20.0
@@ -47,11 +44,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      # A build composes a real installer, so the composition and runtime tests
-      # need real components. `cargo xtask toolchain build` produces all seven —
-      # three runtime templates and four launchers — and stages them beside `zup`
-      # with the descriptors the toolchain resolver checks. Debug is the profile
-      # `cargo test` runs in, and the resolver searches beside the test binary.
       - name: Toolchain
         run: cargo xtask toolchain build
 
@@ -64,17 +56,9 @@ jobs:
       - name: Unused dependencies
         run: cargo machete
 
-      # Advisories, licences, sources and yanked versions. `deny.toml` is the
-      # policy; this is the check that the policy is still satisfied, which is a
-      # different question from whether the policy is written down.
       - name: Supply chain policy
         run: cargo deny check
 
-      # The gate that actually holds the line. `cargo deny` can only see one
-      # resolved version per crate, so a workspace that reached two versions of
-      # one dependency is invisible to it — and so is development tooling
-      # reaching a binary that ships. Both are checked here, and findings print
-      # the path rather than a count.
       - name: Dependency graph
         run: cargo xtask verify-dependency-graph
 
@@ -95,10 +79,6 @@ jobs:
       - name: Automation contract
         run: cargo xtask automation check
 
-      # The whole reason the developer CLI and the installer runtime are two
-      # packages: a role must be a package, not a Cargo feature. This checks that
-      # each runtime frontend builds alone, that no frontend can reach the build
-      # plane, and that the developer CLI is the only installable binary.
       - name: Role boundaries
         shell: pwsh
         run: ./scripts/verify-frontend-features.ps1
@@ -117,13 +97,6 @@ jobs:
         with:
           key: clean-room
 
-      # The product's own acceptance test, and the only job that answers the
-      # question a person who just downloaded zup actually has: does `zup build`
-      # work with no checkout, no `target/`, no staged runtime and no `xtask`?
-      #
-      # It is a separate job rather than a step in `windows` on purpose. That job
-      # has a populated `target/` and a staged toolchain in it, and a run there
-      # can only prove what this repository can already prove.
       - name: Toolchain
         run: cargo xtask toolchain build
 
@@ -151,15 +124,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
 
-      # A size budget is a claim about a release image. Measured on a debug build
-      # it is a claim about debuginfo, so the release profile is not optional
-      # here — and it is why this is its own job rather than another step.
       - name: Toolchain (release)
         run: cargo xtask toolchain build --profile release
 
-      # Deferred, not weakened. The test is `#[ignore]`d in the default run and
-      # requested here explicitly, so it stays checked on every PR against a real
-      # release image instead of being quietly dropped.
       - name: Bootstrapper budget
         run: cargo nextest run -p zup-dispatch --all-features --run-ignored -E 'test(a_thin_bootstrapper)'
 

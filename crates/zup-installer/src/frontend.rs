@@ -1,7 +1,7 @@
 //! Choosing a presentation, without conditional compilation at the call site.
 //!
 //! A build of the runtime has one frontend. Which one is a compile-time fact, so
-//! the callers of a surface should not each carry a `cfg` to find out — they ask
+//! the callers of a surface should not each carry a `cfg` to find out - they ask
 //! for a surface and get either the real one or a refusal that names what is
 //! missing.
 

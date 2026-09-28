@@ -22,8 +22,8 @@ use crate::state;
 /// Assess the declared prerequisites and stage the ones that are missing.
 ///
 /// `bundle` is the package this image carries, and it is what supplies an embedded
-/// prerequisite's bytes. Without one — a planner previewing a lifecycle, or a
-/// graph transition whose content comes from a verified cache — an embedded
+/// prerequisite's bytes. Without one - a planner previewing a lifecycle, or a
+/// graph transition whose content comes from a verified cache - an embedded
 /// prerequisite is a refusal rather than a guess, because there is nowhere honest
 /// to read it from.
 pub fn prepare(

@@ -10,15 +10,15 @@
 //!    dot, no reserved device name. This is the intersection of what every
 //!    release host, every filesystem, and every URL path segment accept, chosen
 //!    so publication identity never depends on a host's discretion.
-//! 2. **Derived, never authored.** A name is computed from what the file *is* —
-//!    its role and the thing it describes — so two builds of the same release
+//! 2. **Derived, never authored.** A name is computed from what the file *is* -
+//!    its role and the thing it describes - so two builds of the same release
 //!    produce the same names, and a manifest can be checked against a host
 //!    without anybody keeping a list.
 //!
 //! # Documents
 //!
-//! Release *documents* — the release descriptor, a content catalog, a variant
-//! manifest, signed metadata — live in a tree with `/`-separated paths, because
+//! Release *documents* - the release descriptor, a content catalog, a variant
+//! manifest, signed metadata - live in a tree with `/`-separated paths, because
 //! that is what a static origin serves and what TUF target names look like. A
 //! release host that accepts a flat asset name cannot serve those paths
 //! directly, so each document has a flat name derived from its path, under a
@@ -214,7 +214,7 @@ pub fn package_name(application: &str, variant: &str) -> String {
 /// The suffix a sharded package piece carries.
 ///
 /// A three-digit suffix sorts correctly as a string up to a thousand pieces,
-/// which is four terabytes of transport at GitHub's per-asset limit — far past
+/// which is four terabytes of transport at GitHub's per-asset limit - far past
 /// the point where a different layout would matter, and a layout that changes is
 /// a format version, not a silent widening.
 pub const SHARD_DIGITS: usize = 3;

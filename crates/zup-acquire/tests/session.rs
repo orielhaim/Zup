@@ -687,7 +687,7 @@ async fn progress_is_aggregate_and_carries_no_per_chunk_events() {
     assert_eq!(terminal, Some("acquisition_complete"));
     // The claim is that progress is sampled on an interval rather than emitted
     // per transfer event. The bound comes from the *session's own* elapsed time,
-    // which is the window the sampler ran in — measuring the drain loop instead
+    // which is the window the sampler ran in - measuring the drain loop instead
     // would make the bound a function of how fast this test reads a queue, which
     // has nothing to do with the claim.
     let bound = elapsed_ms / 100 + 2;
@@ -809,7 +809,7 @@ async fn a_closure_the_engine_cannot_build_is_refused() {
 }
 
 /// A refusal reaches the caller with the machine untouched, the reasons intact,
-/// and every source it tried named in order — on the event stream a UI reads and
+/// and every source it tried named in order - on the event stream a UI reads and
 /// in the error a library caller gets. A chain with nothing in it still has to
 /// say something.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

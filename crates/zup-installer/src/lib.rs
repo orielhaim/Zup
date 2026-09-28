@@ -4,8 +4,8 @@
 //! installation persists. It is a composition root, not an engine: it owns the
 //! lifecycle command surface, the presentation frontends, the maintenance
 //! handoffs between processes, and the wiring that turns an embedded or verified
-//! package into a transaction. The engines it drives — planning, transaction,
-//! execution, protocol, acquisition, update — live in their own crates and know
+//! package into a transaction. The engines it drives - planning, transaction,
+//! execution, protocol, acquisition, update - live in their own crates and know
 //! nothing about a command line.
 //!
 //! What it deliberately does not know: how a `zup.toml` is written, how a source

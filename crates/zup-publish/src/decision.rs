@@ -1,7 +1,7 @@
 //! What to do about a file a host already has.
 //!
 //! Publishing is a retry, and a retry is what has to be safe. The interesting
-//! question is never "did my upload return 200" — it is "what does the host
+//! question is never "did my upload return 200" - it is "what does the host
 //! actually hold under this name right now", and then "is that the same file".
 //!
 //! So the decision is a pure function of two things: the product the plan

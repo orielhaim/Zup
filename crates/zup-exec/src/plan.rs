@@ -47,7 +47,7 @@ pub enum ExecutionPlanError {
     LedgerMismatch,
 }
 
-/// Compare desired and observed state. Pure — zero I/O.
+/// Compare desired and observed state. Pure - zero I/O.
 pub fn plan_execution(
     target: &TargetPlan,
     snapshot: &HostSnapshot,

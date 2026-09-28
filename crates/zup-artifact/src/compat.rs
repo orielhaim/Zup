@@ -167,7 +167,7 @@ impl Incompatibility {
 /// A refusal to compose two variants, naming both sides and the dimension.
 ///
 /// `reason` is boxed because it carries two full `Platform` values, which would
-/// otherwise make this error — and therefore every function that can return one —
+/// otherwise make this error - and therefore every function that can return one -
 /// several times larger than the failures around it.
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -340,7 +340,7 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     }
     if policy.signing.is_none() {
         // Nothing will change the bytes, so there is no reason to hand the tree
-        // to another job and collect it again — a release can be gigabytes, and
+        // to another job and collect it again - a release can be gigabytes, and
         // uploading it twice to measure it is the expensive way to learn that.
         // Finalizing here is the same check, on the same bytes, for free.
         out.push_str(
@@ -383,7 +383,7 @@ fn composed_artifact(policy: &WorkflowPolicy) -> &'static str {
 /// The job runs on the compose runner, which is a Windows host, because both the
 /// signing tool and `zup sign verify` are. A project signing from a hosted x64
 /// runner while building ARM64 artifacts elsewhere is the ordinary arrangement,
-/// and this is the job where the two meet — which is also why a centrally hosted
+/// and this is the job where the two meet - which is also why a centrally hosted
 /// x64 signing job is the shape a cross-architecture release needs.
 ///
 /// It is generated only when a signing command is configured. Without one there
@@ -415,7 +415,7 @@ fn sign(policy: &WorkflowPolicy, out: &mut String) {
     // The command is the project's, and it runs in the release directory with
     // `zup-signing.json` beside it. The plan names every file, in signing order;
     // honouring that order is the project's job, and the finalize step below
-    // proves it did — including that a composed artifact embeds the runtime that
+    // proves it did - including that a composed artifact embeds the runtime that
     // was signed, not a different one.
     let _ = writeln!(
         out,
@@ -477,7 +477,7 @@ fn attest(policy: &WorkflowPolicy, upstream: &[&str], out: &mut String) {
     // Only what a project says is worth attesting, plus the manifest that names the
     // hashes: attesting every icon would produce an attestation store nobody reads.
     // `attest: true` rather than an `actions/attest` step, so the subject list comes
-    // from the release manifest rather than a glob a human wrote — and the action
+    // from the release manifest rather than a glob a human wrote - and the action
     // refuses an unfinalized manifest, so the subjects are the signed bytes.
     let _ = writeln!(
         out,

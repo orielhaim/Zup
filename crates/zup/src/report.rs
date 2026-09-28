@@ -17,7 +17,7 @@
 //! # Why stderr, and not suppression
 //!
 //! A build's logs are the reason a person opens a CI run at all. Moving them to stderr
-//! costs a machine consumer nothing — it is reading stdout — and costs a human nothing
+//! costs a machine consumer nothing - it is reading stdout - and costs a human nothing
 //! either, because a terminal shows both. The alternative, refusing to print anything
 //! in machine mode, would mean a pipeline that swallowed a compiler error nobody could
 //! see.
@@ -26,7 +26,7 @@
 //!
 //! `--format json` writes exactly one document, and it is the last thing written. That
 //! is what lets a consumer read a whole run's output, get one `AutomationResult`, and
-//! not have to find the end of it — and it is what makes "stdout is a protocol" a
+//! not have to find the end of it - and it is what makes "stdout is a protocol" a
 //! statement a test can make rather than a convention.
 
 use std::io::Write;
@@ -109,7 +109,7 @@ impl Reporter {
     /// A diagnostic, as it is found rather than at the end.
     ///
     /// A `--format json` consumer gets it in the final document like every other, and
-    /// a `--format jsonl` consumer gets it now — which is the difference between a
+    /// a `--format jsonl` consumer gets it now - which is the difference between a
     /// manifest error appearing in the first second and after a ten-minute build.
     pub fn diagnostic(self, diagnostic: &Diagnostic) {
         if self.format != OutputArg::Jsonl {

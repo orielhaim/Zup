@@ -92,7 +92,7 @@ describe('dangerous triggers', () => {
       fromFork: true,
     })
     expect(verdict.allowed).toBe(true)
-    // Not refused by the trigger — the token is what limits it, and the action
+    // Not refused by the trigger - the token is what limits it, and the action
     // does not claim otherwise. The assertion is that it does not silently
     // pretend the publish will work.
     expect(verdict.reason).toBe('')

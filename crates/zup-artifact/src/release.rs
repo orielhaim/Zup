@@ -104,7 +104,7 @@ pub struct SingleTarget {
 ///
 /// The digest and size live in two places on purpose. `built` is what
 /// composition produced; `finalized` is what will be published. Signing changes
-/// PE bytes — it appends a certificate table and rewrites the checksum — so for
+/// PE bytes - it appends a certificate table and rewrites the checksum - so for
 /// every signed artifact the two differ, and a manifest that published the
 /// `built` pair under `finalized`'s name would describe bytes nobody can obtain.
 ///
@@ -285,7 +285,7 @@ impl ReleaseManifest {
     ///
     /// The digest is recomputed from the bytes on disk rather than copied from
     /// the description that claimed them, because the merge is the last place a
-    /// digest can be wrong before the release is signed and published — and a
+    /// digest can be wrong before the release is signed and published - and a
     /// release whose manifest disagrees with its files is not verifiable at all.
     ///
     /// A merged record keeps any finalization the incoming description carried
@@ -466,7 +466,7 @@ impl ReleaseManifest {
             // A per-target installer *is* its own runtime: the file a person runs
             // is the file that becomes the maintenance executable, the elevated
             // worker, and the uninstall runner. So its digest is recorded here and
-            // the same signature covers both roles — there is no second executable
+            // the same signature covers both roles - there is no second executable
             // to carry separately.
             runtime: Some(ReleaseRuntime {
                 digest: measured.digest,
@@ -570,15 +570,15 @@ impl ReleaseManifest {
     ///
     /// `claimed` is the measurement the caller took at the moment it verified
     /// the signature, and this method measures the file again. `root` is the
-    /// release root the artifact's own `path` is relative to — the caller is
+    /// release root the artifact's own `path` is relative to - the caller is
     /// handed it rather than having it guessed from a file path, because
     /// `dist/Acme-Setup.exe` and the release root are different lengths and
     /// inferring one from the other resolves to a directory that does not
     /// exist.
     ///
     /// `evidence` is the *result* of verifying the signature, not a claim that
-    /// one exists. This crate cannot evaluate an Authenticode signature — it is
-    /// portable, and Authenticode is not — so the platform adapter verifies it
+    /// one exists. This crate cannot evaluate an Authenticode signature - it is
+    /// portable, and Authenticode is not - so the platform adapter verifies it
     /// and hands over what it found. What this method adds is the part that is
     /// portable and that a signature check alone does not give: the published
     /// identity is a measurement rather than a transcription of what the signer

@@ -3,9 +3,9 @@
 //! # Why a build produces them
 //!
 //! A project that hosts its release on GitHub needs its content to travel as
-//! something GitHub can hold. Not one asset per content object — that is over
+//! something GitHub can hold. Not one asset per content object - that is over
 //! the per-release asset limit, unreadable in the release UI, and a
-//! provider-specific copy of a data model the acquisition engine already owns —
+//! provider-specific copy of a data model the acquisition engine already owns -
 //! and not an installer, because a package is not something anyone runs.
 //!
 //! So a staged release produces one package per variant, and the package is a
@@ -18,7 +18,7 @@
 //!
 //! After acquisition, every object inside is an ordinary verified CAS object at
 //! a path derived from its digest. Nothing downstream can tell whether it came
-//! from a package, a CDN, or a directory on a share — which is what makes
+//! from a package, a CDN, or a directory on a share - which is what makes
 //! moving a project from GitHub-only distribution to a real CDN a configuration
 //! change rather than a content migration.
 //!

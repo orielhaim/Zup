@@ -131,7 +131,7 @@ async fn run_worker_inner(
     }
 
     // 4. Parent SID check: server process user SID must match initiating SID
-    //    embedded in bootstrap. (Worker SID may differ — over-the-shoulder UAC.)
+    //    embedded in bootstrap. (Worker SID may differ - over-the-shoulder UAC.)
     let (mut reader, mut writer) = frame_client(client.into_inner());
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
@@ -175,7 +175,7 @@ async fn run_worker_inner(
         }
         _ => return Err(WorkerError::Protocol("expected ParentHello".into())),
     }
-    // Authenticated — only now may mutation state be created.
+    // Authenticated - only now may mutation state be created.
 
     // 7. Read ExecuteTransaction (one only).
     let exec_env = tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.recv())

@@ -10,8 +10,8 @@
 //! content without a second trust mechanism bolted on. Every blob inside the
 //! package is verified against a digest from the release's own content catalog
 //! before it is published into the cache, so a package descriptor that has been
-//! tampered with can cause a wrong-blob attempt and a wasted download — both
-//! caught — and cannot cause unverified content to be installed.
+//! tampered with can cause a wrong-blob attempt and a wasted download - both
+//! caught - and cannot cause unverified content to be installed.
 //!
 //! Publishing it as its own document is still worth doing, for one reason: when
 //! the project *does* sign its release (through TUF), the descriptor is one more

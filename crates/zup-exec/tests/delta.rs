@@ -549,7 +549,7 @@ fn search_path_membership_is_a_set_decision() {
 
 /// Membership is target-path identity rather than a string compare. Separators and case
 /// are the adapter's normalization, and a parent directory under the same prefix is a
-/// different path however it is spelled — a prefix match here would put the machine's
+/// different path however it is spelled - a prefix match here would put the machine's
 /// install directory on a search path the application never asked for.
 #[test]
 fn search_path_membership_uses_target_path_identity() {

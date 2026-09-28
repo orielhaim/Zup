@@ -1,7 +1,7 @@
 //! The command line must hold under generated arguments.
 //!
-//! This parser is the one in the product defined by another implementation —
-//! `CommandLineToArgvW` in `shell32` — and the installer hands it
+//! This parser is the one in the product defined by another implementation -
+//! `CommandLineToArgvW` in `shell32` - and the installer hands it
 //! user-controlled strings, so a disagreement is not a wrong answer, it is the
 //! wrong *files*.
 //!
@@ -112,7 +112,7 @@ fn check(line: &str) {
 /// exists for: `quote_arg` once quoted on `' '`, `\t`, `\n` and `\v` while
 /// `split_command_line` split on `char::is_whitespace()`, so a carriage return,
 /// a form feed or a non-breaking space formatted **unquoted** and read back as
-/// two arguments — a path that resolves somewhere else.
+/// two arguments - a path that resolves somewhere else.
 #[test]
 fn unusual_whitespace_in_an_argument_survives_the_round_trip() {
     for separator in ['\r', '\u{c}', '\u{b}', '\u{a0}', '\u{2028}', '\u{3000}'] {

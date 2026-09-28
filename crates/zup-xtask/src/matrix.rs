@@ -98,7 +98,7 @@ pub const PORTABLE_CORE: &[&str] = &[
 /// image, a resource table and an Authenticode digest are facts about bytes, and
 /// reading them is the same work on every host. What they do *not* include is
 /// WinVerifyTrust, `UpdateResourceW`, or any other host's judgement about a file
-/// — those are the Windows adapter's, and a file-format crate that grew one would
+/// - those are the Windows adapter's, and a file-format crate that grew one would
 /// stop being portable in the way that matters.
 pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe"];
 

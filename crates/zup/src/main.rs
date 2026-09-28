@@ -1,6 +1,6 @@
 fn main() -> std::process::ExitCode {
-    // Diagnostics are read by people who copy identifiers out of them — a target
-    // triple, a digest, a path — and the default 80-column handler breaks those
+    // Diagnostics are read by people who copy identifiers out of them - a target
+    // triple, a digest, a path - and the default 80-column handler breaks those
     // across lines at hyphens. There is no terminal to wrap for in a build log,
     // so the width is unbounded.
     // Setting the hook twice is a programming error, not a runtime condition, and

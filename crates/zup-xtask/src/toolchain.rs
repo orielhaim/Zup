@@ -189,7 +189,7 @@ const LAUNCHER_PROFILE: &[(&str, &str)] = &[
 /// The profile is part of the path because the resolver's staged-directory search
 /// starts beside the executable it is running as, and a release `zup` and a debug
 /// `zup` do not sit in the same directory. Reading the profile out of the target
-/// tree instead — "use release if `target/release` exists" — would stage a
+/// tree instead - "use release if `target/release` exists" - would stage a
 /// toolchain one of the two could not see, which is the kind of failure that
 /// disappears the next time anybody runs a release build.
 pub fn staging_directory(root: &Path, profile: &str, version: &str) -> PathBuf {
@@ -485,7 +485,7 @@ mod tests {
 
     /// A staged runtime is addressed by name, and the name is what a host later
     /// resolves. Two runtimes sharing one name is a tree that cannot tell them
-    /// apart — for the offline and online launchers that means a thin installer
+    /// apart - for the offline and online launchers that means a thin installer
     /// which composes itself out of the wrong binary.
     #[test]
     fn the_two_launcher_flavours_get_separate_staged_names() {

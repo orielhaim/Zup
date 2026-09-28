@@ -3,7 +3,7 @@
 //!
 //! One source, two artifacts, one command: `cargo xtask automation generate`. The JSON
 //! Schema is what a consumer in a language that is not TypeScript reads, and it is
-//! derived rather than authored for the same reason the manifest schema is — a
+//! derived rather than authored for the same reason the manifest schema is - a
 //! document nobody derives from the types drifts, and the drift is invisible until a
 //! consumer is built against a shape zup stopped producing.
 //!
@@ -89,11 +89,11 @@ fn document() -> Value {
         "oneOf".into(),
         json!([
             {
-                "title": "final result — the whole of a `--format json` stdout",
+                "title": "final result - the whole of a `--format json` stdout",
                 "$ref": "#/$defs/AutomationResult"
             },
             {
-                "title": "stream message — one line of a `--format jsonl` stream",
+                "title": "stream message - one line of a `--format jsonl` stream",
                 "$ref": "#/$defs/StreamEvent"
             },
         ]),
@@ -105,8 +105,8 @@ fn document() -> Value {
 /// Fold one generated root into the shared definition table.
 ///
 /// `$defs` is a flat namespace in every schema, and a type reachable from both roots
-/// must be defined once. The envelope *is* reachable from the stream — a `completed`
-/// line carries one — so the second root's `$defs` already contains it, and its body
+/// must be defined once. The envelope *is* reachable from the stream - a `completed`
+/// line carries one - so the second root's `$defs` already contains it, and its body
 /// differs from the inlined root only by the `$schema` and `title` the generator adds
 /// to a root. Those two keys are therefore dropped before the two are compared; a
 /// difference in anything else is a schema that validates one shape two ways, which is

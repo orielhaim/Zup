@@ -33,7 +33,7 @@ pub struct Behaviour {
     /// Fail the next N upload attempts this way, then behave.
     ///
     /// A count rather than a flag, because the interesting case is "the first
-    /// attempt fails and leaves a remnant behind, the second succeeds" — which a
+    /// attempt fails and leaves a remnant behind, the second succeeds" - which a
     /// boolean cannot express.
     pub upload_failures: u32,
     /// Leave an empty `starter` asset behind when an upload fails.
@@ -347,7 +347,7 @@ fn serve(
     let path = raw.trim_start_matches('/');
     let mut writer = stream;
     // Log and read the behaviour under the lock, then release it. The arms below
-    // take the lock themselves, and a `Mutex` is not reentrant — holding it
+    // take the lock themselves, and a `Mutex` is not reentrant - holding it
     // across a dispatch that locks again is a deadlock rather than a test.
     let behaviour = {
         let mut guard = state.lock().expect("the state is not poisoned");
@@ -379,7 +379,7 @@ fn serve(
         );
     }
     if method == "GET" && path.starts_with("repos/") && path.matches('/').count() == 2 {
-        // `GET /repos/{owner}/{repo}` — and the upload host is the same
+        // `GET /repos/{owner}/{repo}` - and the upload host is the same
         // listener, so the path shape is what distinguishes the two.
         return write_json(
             &mut writer,

@@ -379,7 +379,7 @@ impl UiModel {
                 InstallOutcome::Busy { operation } => {
                     // Not an error state. The installation is fine, somebody else
                     // is working on it, and the right thing to offer is the
-                    // surface they started from with a message — not a red
+                    // surface they started from with a message - not a red
                     // dialog suggesting something went wrong.
                     self.diagnostic = Some(DiagnosticPresentation::from_message(
                         &format!("{operation} is already running for this installation"),

@@ -230,7 +230,7 @@ fn state_store_checks_integrity_and_resume_identity() {
 }
 
 /// The target is part of a bootstrap's identity, so state written for one machine is
-/// not resumable on another — neither through the recovery entry point nor through the
+/// not resumable on another - neither through the recovery entry point nor through the
 /// store's own resume query.
 #[test]
 fn state_from_another_target_is_neither_resumed_nor_recovered() {

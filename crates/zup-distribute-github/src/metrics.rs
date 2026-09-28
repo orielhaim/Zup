@@ -13,7 +13,7 @@
 //!   range it had already started answering.
 //!
 //! A fallback is not a failure. It is the documented behaviour of a host that
-//! does not do ranges, and it is correct — it is only slower, and the point of
+//! does not do ranges, and it is correct - it is only slower, and the point of
 //! counting it is that "slower" should be a number rather than an impression.
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -45,7 +45,7 @@
 //!
 //! So an uncertain upload is never a bare retry. The sequence is: list the release's
 //! assets, look for a `starter` entry with this name, remove exactly that one, and
-//! only then retry — bounded, with backoff. A *valid* asset is never removed, including
+//! only then retry - bounded, with backoff. A *valid* asset is never removed, including
 //! when the HTTP request that uploaded it failed after the server processed it, because
 //! the reconciliation is exactly what tells the two apart.
 
@@ -308,8 +308,8 @@ pub async fn publish(
 
 /// Write the receipt where a crash cannot leave half of one.
 ///
-/// A temp sibling, a flush, and a rename. Not because a receipt is precious — it
-/// is a report — but because a half-written receipt is *worse* than none: a
+/// A temp sibling, a flush, and a rename. Not because a receipt is precious - it
+/// is a report - but because a half-written receipt is *worse* than none: a
 /// re-run parses it to decide whether the release is already published, and a
 /// truncated one either refuses a resumable draft or, read loosely, claims the
 /// release went live when it did not.
@@ -586,7 +586,7 @@ fn staged<'a>(
 /// One asset upload, with reconciliation and a bounded retry.
 ///
 /// The reconciliation is the point. An upload that fails ambiguously may have
-/// succeeded, so the next thing is never "send it again" — it is "ask what the
+/// succeeded, so the next thing is never "send it again" - it is "ask what the
 /// host holds under this name". A `starter` entry is a failed remnant and is
 /// removed; anything else is left alone, because a valid asset that a retry
 /// clobbered would be worse than the original failure.
@@ -678,7 +678,7 @@ async fn upload_one(
 ///
 /// Returns whether a remnant was removed, so the caller can tell "the upload
 /// failed and left nothing behind" from "the upload failed and I cleaned up
-/// after it" — which are different situations for the next run.
+/// after it" - which are different situations for the next run.
 async fn reconcile(
     client: &GithubClient,
     release: &Release,
@@ -811,7 +811,7 @@ fn integrity(release: &Release, receipt: &mut GithubReceipt, report: &mut Report
                 .push(Notice::warn("github immutable release", "not enabled"));
             report.notice(Notice::warn(
                 "github immutable release",
-                "not enabled — Settings → Releases → Enable release immutability",
+                "not enabled - Settings → Releases → Enable release immutability",
             ));
         }
         None => {

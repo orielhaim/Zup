@@ -2,14 +2,14 @@
 //!
 //! The resolver searches four places in a fixed order (see [`crate::toolchain`]).
 //! Three of them are somebody's decision: a flag, an environment variable, a
-//! staged directory beside the executable. The fourth is the **cache** — the
-//! installed toolchain for this exact zup version — and until this command
+//! staged directory beside the executable. The fourth is the **cache** - the
+//! installed toolchain for this exact zup version - and until this command
 //! existed, nothing in the product produced it. A resolver arm with no producer
 //! is a documented feature that never works.
 //!
-//! So this is the producer. `install` takes a release directory — the one thing
+//! So this is the producer. `install` takes a release directory - the one thing
 //! `cargo xtask toolchain package` writes and `cargo xtask release clean-room`
-//! verifies — and copies its components into the cache. It verifies the release
+//! verifies - and copies its components into the cache. It verifies the release
 //! index first, and verifies the copy afterwards, because a cache populated from
 //! bytes nobody checked is a cache that hands a build a component it should
 //! refuse.
@@ -67,9 +67,9 @@ pub enum ToolchainVerb {
 
 /// Install a release into the toolchain cache.
 ///
-/// Takes a directory, not a URL. Resolution is offline by design — a build that
+/// Takes a directory, not a URL. Resolution is offline by design - a build that
 /// silently depends on a remote host being reachable is a build a release
-/// engineer discovers is broken during an outage — so the producer of a cache
+/// engineer discovers is broken during an outage - so the producer of a cache
 /// entry is a person who already has the bytes.
 #[derive(Debug, Args)]
 pub struct ToolchainInstallCommand {
@@ -382,7 +382,7 @@ impl Installed {
 ///
 /// The order is: read the index, refuse a foreign version, verify every named
 /// file, copy, then re-verify the copy. The last step is the one that matters
-/// most — a copy that lands truncated, or a partial copy left by a crash, is
+/// most - a copy that lands truncated, or a partial copy left by a crash, is
 /// exactly the failure a build should refuse rather than compose an installer
 /// from.
 pub fn install(
@@ -503,7 +503,7 @@ fn copy_component(from: &Path, to: &Path) -> Result<(), ToolchainCommandError> {
         })?;
         // Flush before publishing, so a rename cannot make a component visible
         // before its bytes are on the medium. The directory entry is not flushed
-        // — Windows has no portable way to do that — and the descriptor beside it
+        // - Windows has no portable way to do that - and the descriptor beside it
         // would catch a component that lost its tail.
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -797,7 +797,7 @@ pub fn clean(
 ///
 /// A crash between creating a directory and filling it leaves one, and a release
 /// that was interrupted the same way leaves a `.zup-installing` temp. Both are
-/// unambiguous — nothing else in that directory is a file — and both are
+/// unambiguous - nothing else in that directory is a file - and both are
 /// unreachable by the resolver, so removing them is never wrong.
 fn stray_files(cache_root: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(cache_root) else {
@@ -833,8 +833,8 @@ mod tests {
 
     /// A component's bytes: a PE image that agrees with its descriptor.
     ///
-    /// The resolver reads a component two ways — the descriptor beside it and the
-    /// file's own header — and refuses it if either disagrees. A fixture of plain
+    /// The resolver reads a component two ways - the descriptor beside it and the
+    /// file's own header - and refuses it if either disagrees. A fixture of plain
     /// bytes would pass the first and fail the second, so a test that installed
     /// one and asserted "a build will find it" would be asserting something the
     /// build refuses.
@@ -975,7 +975,7 @@ mod tests {
             );
         }
 
-        // A named root that holds the components wins over the cache — that is
+        // A named root that holds the components wins over the cache - that is
         // what the flag is for. A named root that holds *nothing* falls through,
         // because the search is a fixed precedence with first match, and a root
         // that cannot answer one component is not a reason to refuse the other
@@ -1151,7 +1151,7 @@ mod tests {
 
         // `--all` is the escape hatch, and it is an escape hatch: a machine can
         // have two zup releases on it, and one deleting the other's components
-        // breaks it — so the current version is removed only when asked for.
+        // breaks it - so the current version is removed only when asked for.
         let directory = tempfile::tempdir().expect("temp dir");
         let state = directory.path().join("state");
         install(&release(&directory.path().join("material")), &state, None).expect("install");

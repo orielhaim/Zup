@@ -1,6 +1,6 @@
 //! The lifecycle an end user performs, end to end against a real installer.
 //!
-//! Everything here runs a composed `Setup.exe` — the file a person double-clicks —
+//! Everything here runs a composed `Setup.exe` - the file a person double-clicks -
 //! and then the `maintenance.exe` the installation persists. What is proved is the
 //! part a user and an operator depend on: the verbs exist and succeed, the
 //! installation survives its own source tree being deleted, Apps & Features points
@@ -163,8 +163,8 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
 
 #[test]
 fn an_uninstall_leaves_an_apps_and_features_entry_it_did_not_write() {
-    // A person who edits an entry in Apps & Features — a custom uninstall string,
-    // a renamed entry — has expressed an intent. Deleting their edit is a data
+    // A person who edits an entry in Apps & Features - a custom uninstall string,
+    // a renamed entry - has expressed an intent. Deleting their edit is a data
     // loss, and the entry outlives the application.
     let (app, payload) = application("drift");
     let state = State::new();

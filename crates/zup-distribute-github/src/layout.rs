@@ -25,7 +25,7 @@
 //! `releases/latest/download/...` is a redirect. It is followed, current
 //! redirects and all, and the stable release URL is what zup records as a
 //! source's identity. A signed URL with an expiry in it is a fetch target for
-//! this transfer and nothing else — caching one as an address would make a
+//! this transfer and nothing else - caching one as an address would make a
 //! temporary credential into a permanent identity.
 //!
 //! Nothing about the redirect decides what is installed. The release a client

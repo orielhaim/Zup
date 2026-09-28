@@ -12,9 +12,9 @@
 //! Everything else is a local curve with jitter, because N clients that all
 //! back off by exactly the same amount are N clients that retry in lockstep.
 //!
-//! `backon` supplies the exponential curve and the jitter. The decisions below —
+//! `backon` supplies the exponential curve and the jitter. The decisions below -
 //! what counts as retryable, what the ceiling is, and when to give up on an
-//! origin entirely — are zup's, because they are policy rather than arithmetic.
+//! origin entirely - are zup's, because they are policy rather than arithmetic.
 
 use std::time::Duration;
 

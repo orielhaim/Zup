@@ -355,8 +355,8 @@ fn update_retries_a_lost_swap_instead_of_failing() {
     final_record.validate().expect("final state is consistent");
 }
 
-/// Anything the store cannot vouch for — unreadable bytes, an unknown schema, a
-/// plan that no longer hashes to the plan it is carrying — is refused rather
+/// Anything the store cannot vouch for - unreadable bytes, an unknown schema, a
+/// plan that no longer hashes to the plan it is carrying - is refused rather
 /// than recovered, because a half-trusted record replays as if it were whole.
 #[rstest]
 #[case::malformed_json(write_not_json)]

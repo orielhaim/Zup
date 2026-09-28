@@ -2,8 +2,8 @@
 //!
 //! This crate owns the normalized Installer IR and the core domain types
 //! used to describe installation intent: identifiers, templates, conditions,
-//! components, and resource collections. It also owns the resolved inventory —
-//! `BuildPlan` and `TargetBuildPlan` — because the build plane produces those and
+//! components, and resource collections. It also owns the resolved inventory -
+//! `BuildPlan` and `TargetBuildPlan` - because the build plane produces those and
 //! the runtime consumes them, and a type both halves must name cannot live in
 //! either half's crate.
 //!

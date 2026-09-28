@@ -24,7 +24,7 @@
 //!
 //! A hand-written `Debug` impl is one derive away from not working:
 //! `#[derive(Debug)]` on any struct holding a `Token` prints the value, and nothing in
-//! the type system objects. `SecretString` makes that impossible — its `Debug` prints
+//! the type system objects. `SecretString` makes that impossible - its `Debug` prints
 //! `[REDACTED]`, it has no `Display`, and the only way out is
 //! [`ExposeSecret::expose_secret`]. Redacting `Debug` says nothing about the wire, so
 //! the `Authorization` header is still built by hand and still marked sensitive.
@@ -137,7 +137,7 @@ pub fn discover(environ: &dyn Environment) -> Result<Token, GithubError> {
 /// Find a credential, with the `gh` fallback supplied by the caller.
 ///
 /// The fallback is a parameter because it is the only part of discovery that is not a
-/// pure function of the environment — it shells out — and a test that cannot control
+/// pure function of the environment - it shells out - and a test that cannot control
 /// it is a test whose result depends on whether the developer has the `gh` CLI
 /// installed.
 pub fn discover_with(

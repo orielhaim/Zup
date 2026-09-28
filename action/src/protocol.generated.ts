@@ -11,7 +11,7 @@
 // appear that is not declared.
 //
 // The decoder that reads a document into these types is `src/protocol.ts`, and it is
-// hand-written on purpose — it is where the ignore-what-you-do-not-know rule lives.
+// hand-written on purpose - it is where the ignore-what-you-do-not-know rule lives.
 
 
 export type ProtocolVersion = string;
@@ -548,7 +548,7 @@ host: string,
  * Absolute, and the one path in this contract that is: it answers "where would a
  * build here look", which is the question this operation exists to answer, and
  * nothing reads it back. It is for display and for matching against a machine's
- * own state — never a release identity.
+ * own state - never a release identity.
  */
 cache: string, 
 /**

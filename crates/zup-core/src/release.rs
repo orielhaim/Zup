@@ -1,7 +1,7 @@
 //! The exact release an installation was produced from.
 //!
 //! A version number is not identity. Two builds can carry the same `1.4.0` and
-//! install different bytes on the same machine — a different target, a
+//! install different bytes on the same machine - a different target, a
 //! different component selection, a rebuild that changed a single resource. An
 //! upgrade, a repair, or a recovery that trusts the version alone will happily
 //! act on the wrong graph, so every claim that has to survive a restart is a

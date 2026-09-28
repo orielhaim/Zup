@@ -5,11 +5,11 @@
   "description": "What zup's developer CLI writes to stdout under `--format json` and `--format jsonl`. A consumer accepts a document whose `protocol` shares its major version, and ignores fields, event types, operation names, artifact kinds and diagnostic codes it does not know. A different major is refused. Nothing here is closed: no definition sets `additionalProperties: false`.",
   "oneOf": [
     {
-      "title": "final result — the whole of a `--format json` stdout",
+      "title": "final result - the whole of a `--format json` stdout",
       "$ref": "#/$defs/AutomationResult"
     },
     {
-      "title": "stream message — one line of a `--format jsonl` stream",
+      "title": "stream message - one line of a `--format jsonl` stream",
       "$ref": "#/$defs/StreamEvent"
     }
   ],
@@ -760,7 +760,7 @@
       ]
     },
     "DoctorTarget": {
-      "description": "One profile's readiness.\n\nNo `Default`: a `status` is an [`Identifier`], and an empty string is not one. That\nis the point of the type — a consumer that switches on `status` gets a value it can\nmatch, and a producer cannot forget to set it.",
+      "description": "One profile's readiness.\n\nNo `Default`: a `status` is an [`Identifier`], and an empty string is not one. That\nis the point of the type - a consumer that switches on `status` gets a value it can\nmatch, and a producer cannot forget to set it.",
       "type": "object",
       "properties": {
         "profile": {
@@ -821,7 +821,7 @@
       ]
     },
     "DoctorDetails": {
-      "description": "What `zup doctor` found.\n\nThe whole check table crosses the wire, green rows included. A readiness check that\nwas *skipped* is not the same fact as one that *passed* — it says the answer was\nnever obtained — so a consumer that could only see the failures would report a\nproject as ready on the strength of checks that never ran.",
+      "description": "What `zup doctor` found.\n\nThe whole check table crosses the wire, green rows included. A readiness check that\nwas *skipped* is not the same fact as one that *passed* - it says the answer was\nnever obtained - so a consumer that could only see the failures would report a\nproject as ready on the strength of checks that never ran.",
       "type": "object",
       "properties": {
         "manifest": {
@@ -1222,7 +1222,7 @@
           "type": "string"
         },
         "cache": {
-          "description": "Where this version's cache lives on this machine.\n\nAbsolute, and the one path in this contract that is: it answers \"where would a\nbuild here look\", which is the question this operation exists to answer, and\nnothing reads it back. It is for display and for matching against a machine's\nown state — never a release identity.",
+          "description": "Where this version's cache lives on this machine.\n\nAbsolute, and the one path in this contract that is: it answers \"where would a\nbuild here look\", which is the question this operation exists to answer, and\nnothing reads it back. It is for display and for matching against a machine's\nown state - never a release identity.",
           "type": "string"
         },
         "complete": {

@@ -3,7 +3,7 @@
 //! Acquisition is bounded work that a user can interrupt, and the same
 //! question is asked in three places: the scheduler between items, a source
 //! between chunks, and a retry loop between attempts. A trait keeps the
-//! dependency direction right — the engine owns the answer, the callers ask —
+//! dependency direction right - the engine owns the answer, the callers ask -
 //! and matches the existing `zup-transaction` and `zup-plan` seams rather than
 //! introducing a second cancellation model.
 

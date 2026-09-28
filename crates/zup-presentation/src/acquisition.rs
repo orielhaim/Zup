@@ -153,7 +153,7 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
             ..
         } => {
             // A failure before the barrier is reported as a failure, and the
-            // guarantee that nothing was touched is stated rather than inferred —
+            // guarantee that nothing was touched is stated rather than inferred -
             // a consumer can assert it, and a human reading the log can trust it.
             let mut detail = message.clone();
             if !reasons.is_empty() {

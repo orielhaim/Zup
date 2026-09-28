@@ -40,7 +40,7 @@ import type { ReleaseAsset, ReleaseSource } from './tool.js'
  * `core.setSecret` masks a value in the runner's own log but not in a workflow
  * command emitted before the masking list exists, and it is not something a test can
  * assert against. So this keeps its own list and scrubs every message it writes.
- * Defence in depth, not a replacement — and the reason the property is testable
+ * Defence in depth, not a replacement - and the reason the property is testable
  * without a runner.
  */
 export class ToolkitLog implements Log {
@@ -355,7 +355,7 @@ export class ZupReleaseSource implements ReleaseSource {
   /**
    * The SHA-256 zup recorded when it published, read from the release's own
    * `zup-release.json`. A CLI release is a zup release like any other, so the
-   * manifest already names the digest of the executable — nothing had to be
+   * manifest already names the digest of the executable - nothing had to be
    * invented for CI to verify it.
    */
   private async digestFromManifest(
@@ -410,7 +410,7 @@ function stripAlgorithm(value: string | undefined): string | undefined {
  * a `.zup` package. It has one surprise worth knowing: **the service names the
  * artifact after the file**, ignoring the name that was passed. A matrix that must
  * distinguish `installer-x64` from `installer-arm64` therefore needs distinct *file*
- * names, not distinct artifact names. That is reported rather than worked around —
+ * names, not distinct artifact names. That is reported rather than worked around -
  * the caller gets the name the service used.
  */
 export class ToolkitArtifactUploader {
@@ -461,8 +461,8 @@ export class ToolkitArtifactUploader {
  * `attest-build-provenance` is now only a wrapper on top of it, and using the
  * package is what keeps the attestation format, the transparency-log entry and the
  * verification path correct without zup reimplementing Sigstore and OIDC. It also
- * pulls in a protobuf runtime and a noble crypto library — about two megabytes a
- * workflow which never sets `attest: true` should not pay to initialize — so the
+ * pulls in a protobuf runtime and a noble crypto library - about two megabytes a
+ * workflow which never sets `attest: true` should not pay to initialize - so the
  * import is dynamic. The OIDC token is fetched rather than supplied, because the
  * audience and the claims are the service's to choose.
  */

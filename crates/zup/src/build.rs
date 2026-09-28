@@ -3,8 +3,8 @@
 //! Two shapes of output, one code path. A run that names a `--target` builds that
 //! target's own installer. A run that names `--artifact`, or `--universal`, or
 //! nothing at all, composes the artifacts the project declares. Everything either
-//! shape needs — the payload, the plugins, the runtime template for each target,
-//! the release description — is prepared once and shared.
+//! shape needs - the payload, the plugins, the runtime template for each target,
+//! the release description - is prepared once and shared.
 //!
 //! The runtime template is not the developer's problem. `zup build` asks the
 //! toolchain resolver for the template each target needs, and a contributor
@@ -28,7 +28,7 @@ use crate::toolchain::{self, ToolchainResolver};
 /// The domain answer, in domain terms: the release description a consumer verifies
 /// against, and the two documents written beside it. `zup build` knows this before it
 /// knows anything about JSON, and the adapter that turns it into an
-/// [`AutomationResult`] is one function away in `crate::automation` — so a build that
+/// [`AutomationResult`] is one function away in `crate::automation` - so a build that
 /// fails halfway still says what it managed to write, and a caller never has to go
 /// looking in `dist/` for what happened.
 pub struct BuildOutcome {
@@ -816,9 +816,9 @@ fn signing_plan(
     let mut plan = zup_signing::SigningPlan::new(&release.application, requirement);
 
     // Pre-compose: every runtime an artifact embeds, named by the file it was
-    // composed from. A build does not copy the runtime into the release root — the
+    // composed from. A build does not copy the runtime into the release root - the
     // toolchain owns those bytes and a release pipeline stages the *signed* copy
-    // there before composing — so the path recorded is the one verification will
+    // there before composing - so the path recorded is the one verification will
     // look at, and it is written by whatever signed it.
     for (variant, _carriers) in embedded_by_variant(release) {
         let path = format!("runtime/{variant}.exe");

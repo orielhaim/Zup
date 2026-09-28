@@ -63,7 +63,7 @@ impl BlobTable {
     /// same content always produces the same table and the same byte layout.
     ///
     /// Repeats are collapsed, because a table names every *unique* blob and a
-    /// duplicate is one object stored twice — and because `validate` refuses a
+    /// duplicate is one object stored twice - and because `validate` refuses a
     /// table that names a digest twice, so a `pack` that kept them would hand
     /// back something its own `parse` rejects. Two entries for one digest that
     /// disagree about size are a different mistake and are refused rather than
@@ -314,7 +314,7 @@ mod tests {
     }
 
     /// A payload with two identical files produces two plan entries with one
-    /// digest, and `pack` used to keep both — handing back a table its own
+    /// digest, and `pack` used to keep both - handing back a table its own
     /// `parse` refuses. A pack that cannot be re-read is not a pack.
     #[test]
     fn one_digest_stored_twice_is_one_entry() {

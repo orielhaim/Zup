@@ -25,7 +25,7 @@
 //!
 //! [`zup.codes`](https://docs.rs) aside, the fallback is [`FALLBACK_CODE`]. An older or
 //! internal error with no typed metadata still reaches a consumer as a real diagnostic
-//! with a real message — it just cannot be matched on, which is the honest outcome.
+//! with a real message - it just cannot be matched on, which is the honest outcome.
 
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +82,7 @@ impl Diagnostic {
     /// An error with a code and a message, and nothing else.
     ///
     /// The code is `&'static str` on purpose. A code is something a consumer matches
-    /// on, so it has to be a name somebody chose deliberately and can grep for — not a
+    /// on, so it has to be a name somebody chose deliberately and can grep for - not a
     /// formatted string assembled at the call site, and not a Rust type or module name
     /// that a reorganization would rename out from under every integration.
     pub fn error(code: &'static str, message: impl Into<String>) -> Self {

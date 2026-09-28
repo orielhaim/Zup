@@ -7,7 +7,7 @@
 //!
 //! That last line is the whole design. A consumer gets a live UX from the events before
 //! it and one authoritative snapshot from the final one, and it never has to
-//! reconstruct final state by folding events — which is the thing that breaks when a
+//! reconstruct final state by folding events - which is the thing that breaks when a
 //! producer adds an event, drops one, or emits them in a different order.
 //!
 //! # The vocabulary
@@ -140,7 +140,7 @@ pub enum StreamEvent {
     ///
     /// Decode-only. It exists so a consumer inside the same major can keep reading a
     /// stream a newer zup produced; serializing it would be zup claiming to have sent
-    /// a message it did not, so nothing constructs it — which is also why it is not in
+    /// a message it did not, so nothing constructs it - which is also why it is not in
     /// the generated TypeScript, where a union member that can never arrive would be a
     /// case every consumer had to write.
     #[cfg_attr(feature = "bindings", schemars(skip))]

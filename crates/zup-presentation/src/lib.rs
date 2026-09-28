@@ -678,7 +678,7 @@ impl PlanPreview {
                 let location = change
                     .location
                     .as_deref()
-                    .map(|value| format!(" — {value}"))
+                    .map(|value| format!(" - {value}"))
                     .unwrap_or_default();
                 let _ = writeln!(
                     output,
@@ -895,7 +895,7 @@ pub enum ProcessOutcome {
     /// Another operation holds this installation's lock.
     ///
     /// Its own code, because a scheduled retry has to be able to tell "somebody
-    /// else is installing this right now" from "this installation is broken" —
+    /// else is installing this right now" from "this installation is broken" -
     /// the first is not a failure of anything and the second is. Collapsing them
     /// into `1` is how a second unattended installer turns a five-second wait
     /// into an alert.
@@ -923,7 +923,7 @@ impl ProcessOutcome {
     ///
     /// A last resort, used where a typed value has already been flattened into a
     /// `miette` report. Everywhere a typed outcome or a typed event kind is
-    /// available the caller uses that instead — this function reads English, and
+    /// available the caller uses that instead - this function reads English, and
     /// reading English is how "another operation is running" becomes a failure
     /// with code 1 and an alert at three in the morning.
     pub fn from_message(message: &str) -> Self {
@@ -985,9 +985,9 @@ impl ProcessOutcome {
 // # The installed application's machine protocol
 //
 // `--output json` and `--output jsonl` on a generated installer report through
-// [`InstallerEvent`] and [`InstallerResult`]. This is the *runtime's* protocol — what
+// [`InstallerEvent`] and [`InstallerResult`]. This is the *runtime's* protocol - what
 // happened while installing, modifying, repairing, updating or uninstalling an
-// application on a user's own machine — and it is deliberately not the same protocol
+// application on a user's own machine - and it is deliberately not the same protocol
 // as `zup build --format json`.
 //
 // Two protocols, two products, two consumers. The developer CLI's contract lives in

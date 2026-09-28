@@ -4,7 +4,7 @@
 //! Both are properties of the *binary* and the *package*, not of any function, so
 //! they are checked against the built executable and the manifests themselves. A
 //! test that called the parser directly would keep passing after a `[[bin]]` was
-//! added, or after a second package became installable — and either of those is
+//! added, or after a second package became installable - and either of those is
 //! exactly the regression this pair exists to catch.
 
 use std::{
@@ -71,7 +71,7 @@ fn offers(help: &str, verb: &str) -> bool {
 }
 
 /// `crates/zup/src/tests.rs` walks the parsed command tree. This runs the built
-/// executable instead, because the surface a user meets is the binary's — a
+/// executable instead, because the surface a user meets is the binary's - a
 /// `[[bin]]` or a feature could make the two disagree without either test noticing.
 #[test]
 fn the_developer_binary_prints_help_with_no_features() {

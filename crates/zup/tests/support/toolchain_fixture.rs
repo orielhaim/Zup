@@ -87,7 +87,7 @@ fn machine_of(target: &str) -> u16 {
 ///
 /// The header is the only independent statement a build host can make about a
 /// component it cannot run, so the fixture has to say the same thing the
-/// descriptor does — otherwise the two disagree and the resolver refuses the
+/// descriptor does - otherwise the two disagree and the resolver refuses the
 /// component for a reason the test never intended.
 fn image(component: &ToolchainComponent) -> Vec<u8> {
     let (machine, subsystem): (u16, u16) = match component {

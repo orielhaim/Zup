@@ -442,7 +442,7 @@ mod tests {
 
     /// A guest has two ways to make the host read an unbounded amount of its own memory:
     /// a plan that declares a file larger than the limit, and a refusal whose code is.
-    /// Both are counted, and both are refused rather than truncated — a truncated plan is
+    /// Both are counted, and both are refused rather than truncated - a truncated plan is
     /// a plan the host would act on.
     #[rstest]
     #[case::a_generated_file_larger_than_the_limit(

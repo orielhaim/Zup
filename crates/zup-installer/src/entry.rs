@@ -2,8 +2,8 @@
 //!
 //! A template binary is a file people copy, and a file people copy accumulates
 //! divergent copies of whatever it contained. So each of the three is three lines
-//! long and everything they have in common — the error report, the graphical
-//! error dialog, the exit code — is decided here, once.
+//! long and everything they have in common - the error report, the graphical
+//! error dialog, the exit code - is decided here, once.
 
 use std::process::ExitCode;
 

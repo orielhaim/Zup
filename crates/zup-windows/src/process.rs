@@ -23,8 +23,8 @@
 //! On Windows a child is independent once `CreateProcess` returns. The child
 //! does not read anything from this process, and the installation it performs is
 //! journalled and committed by the transaction engine in the child's own
-//! context. So waiting here is a *presentation* choice — to forward an exit code
-//! and to keep a console attached — and never a correctness one. A bootstrapper
+//! context. So waiting here is a *presentation* choice - to forward an exit code
+//! and to keep a console attached - and never a correctness one. A bootstrapper
 //! that is killed mid-install leaves an installation that is either committed or
 //! recoverable, which is the same guarantee the offline artifact has always had.
 
@@ -154,7 +154,7 @@ pub struct ChildProcess {
     /// this decided the child's outcome itself, which is not a test-only
     /// capability: an interface whose return type an implementor cannot construct
     /// is not an interface. A dry run, a recorded launcher, and a test are three
-    /// answers to the same question — what *would* you start — and they all need
+    /// answers to the same question - what *would* you start - and they all need
     /// to hand back a child.
     reported: Option<i32>,
 }
@@ -299,8 +299,8 @@ pub fn launch(
             {
                 let handle = unsafe { GetStdHandle(which) };
                 if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-                    // A process with no console — a service, a scheduled task, a
-                    // session with no interactive desktop — has no standard
+                    // A process with no console - a service, a scheduled task, a
+                    // session with no interactive desktop - has no standard
                     // handles. That is not a failure: the child gets what this
                     // process has, which is nothing, and the caller finds out by
                     // the child's own output. Indexing into a list that is empty

@@ -20,8 +20,8 @@ pub trait CacheFileSystem: Send + Sync {
     /// once the destination content survives a crash.
     fn publish_replace(&self, from: &Path, to: &Path) -> Result<(), std::io::Error>;
 
-    /// Report whether `path` is a link — a symlink, a reparse point, or the
-    /// local equivalent — that the cache must not write through or read across.
+    /// Report whether `path` is a link - a symlink, a reparse point, or the
+    /// local equivalent - that the cache must not write through or read across.
     ///
     /// A path that does not exist is not a link.
     fn is_link(&self, path: &Path) -> Result<bool, std::io::Error>;
@@ -30,7 +30,7 @@ pub trait CacheFileSystem: Send + Sync {
 /// `std::fs`-backed adapter: rename publication and symlink detection.
 ///
 /// On a platform where `rename` replaces its destination this publishes
-/// atomically. Where it does not — Windows — the existing entry is removed
+/// atomically. Where it does not - Windows - the existing entry is removed
 /// first, which is a window a crash can be caught in; a production Windows
 /// host injects the durable adapter instead. A cache that is caught in that
 /// window simply has one missing blob, which the next acquisition re-fetches.

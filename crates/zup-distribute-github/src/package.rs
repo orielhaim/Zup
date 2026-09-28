@@ -19,7 +19,7 @@
 //! and the acquisition engine reads a package the way it reads any other
 //! physical representation of the same objects. After import, a blob is an
 //! ordinary verified CAS object at a path derived from its digest, and nothing
-//! downstream — selection, repair, update, the installer lifecycle — can tell
+//! downstream - selection, repair, update, the installer lifecycle - can tell
 //! whether it arrived from a per-blob CDN, a GitHub package, an offline
 //! artefact, or a directory on a share.
 //!
@@ -484,7 +484,7 @@ const MAX_LAYOUT_PASSES: usize = 8;
 
 /// Call the sink once per piece, in order.
 ///
-/// The logical package is three regions — header, metadata, frames — and a piece
+/// The logical package is three regions - header, metadata, frames - and a piece
 /// is a contiguous range across them, so a piece is built by taking each region's
 /// intersection with the range rather than by buffering the whole package.
 fn emit(
@@ -609,8 +609,8 @@ impl PackageHeader {
 ///
 /// The acquisition path does not use this: it hands the frame to the cache in its
 /// wire form and lets the cache decode, bound, and verify in one pass. It is here
-/// for a reader that needs to inspect a frame without storing it — a `zup doctor`
-/// content check, a benchmark — and it is the reference for what the cache does.
+/// for a reader that needs to inspect a frame without storing it - a `zup doctor`
+/// content check, a benchmark - and it is the reference for what the cache does.
 pub fn decode_frame(
     compressed: &[u8],
     expected: Sha256Digest,

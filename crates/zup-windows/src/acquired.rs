@@ -16,7 +16,7 @@
 //! release authenticates the runtime digest for each of its variants, and the
 //! release's own fingerprint was verified before a byte was downloaded. So a
 //! bootstrapper that substitutes a release must produce a release that names
-//! *this* image's digest — which requires a SHA-256 preimage. One that
+//! *this* image's digest - which requires a SHA-256 preimage. One that
 //! substitutes a payload must produce blobs that hash to the digests in the
 //! authenticated catalog. One that substitutes a target or a variant is caught
 //! by comparing the release against the target and frontend compiled into this
@@ -127,7 +127,7 @@ pub fn own_digest(executable: &Path) -> Result<Sha256Digest, std::io::Error> {
 /// Read a handoff and check that this process is the one it names.
 ///
 /// `expected` is the digest the caller was told to expect, which the caller
-/// learned from the bootstrapper — so it is a *consistency* check between two
+/// learned from the bootstrapper - so it is a *consistency* check between two
 /// processes, not the authority. The authority is `handoff.runtime` matched
 /// against the authenticated release, which this function then does.
 pub fn accept_handoff(
@@ -159,7 +159,7 @@ impl std::fmt::Debug for VerifiedHandoff {
     /// The manifest is summarised by its digest rather than printed.
     ///
     /// A derived `Debug` would dump every byte of every installed file's plan,
-    /// which is megabytes of hex on a panic — and the bytes are already proved by
+    /// which is megabytes of hex on a panic - and the bytes are already proved by
     /// the digest, so printing them adds nothing a reader could use.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -183,9 +183,9 @@ pub fn verify(
     handoff: &RuntimeHandoff,
 ) -> Result<VerifiedHandoff, HandoffRejection> {
     // The document is addressed by the digest of its own bytes, and its
-    // fingerprint is recomputed from the body. Those are different numbers — a
+    // fingerprint is recomputed from the body. Those are different numbers - a
     // release document names its own fingerprint as a field, so it cannot also
-    // be the hash of its own encoding — and checking both is what makes the
+    // be the hash of its own encoding - and checking both is what makes the
     // cache key a location rather than an authority.
     let release = read_document(cache, handoff.document, "release descriptor")?;
     let descriptor = ReleaseDescriptor::parse(&release)

@@ -2,8 +2,8 @@
 //!
 //! This is the one adapter that connects the acquisition engine to the
 //! transaction engine, and it is deliberately tiny. The lifecycle asks for a
-//! portable path, a digest, and a length — the same three things it asked of an
-//! embedded package or a build directory — and this type answers them out of a
+//! portable path, a digest, and a length - the same three things it asked of an
+//! embedded package or a build directory - and this type answers them out of a
 //! content-addressed cache that the release graph authenticated.
 //!
 //! The security argument does not live here. A caller supplies the cache and a
@@ -53,8 +53,8 @@ impl AcquiredPayloadSource {
 
     /// Read a whole blob, for a prerequisite package or a plugin image.
     ///
-    /// These are not lifecycle payload — they are staged and executed by their
-    /// own engines — so they are read whole rather than streamed.
+    /// These are not lifecycle payload - they are staged and executed by their
+    /// own engines - so they are read whole rather than streamed.
     pub fn read_blob(&self, digest: &Sha256Digest) -> Result<Vec<u8>, PayloadError> {
         self.verified(digest)?
             .read_to_end()

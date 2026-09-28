@@ -2,8 +2,8 @@
 //!
 //! This crate is the whole of what `zup-acquire` does not want to know: a
 //! connection pool, timeouts, redirects, range requests, and a retry policy. It
-//! contributes exactly one thing to the engine — an [`HttpSource`] that fills the
-//! verified cache — and it makes no claim about where content came from, because
+//! contributes exactly one thing to the engine - an [`HttpSource`] that fills the
+//! verified cache - and it makes no claim about where content came from, because
 //! the cache already proved that.
 //!
 //! # What the network is
@@ -25,7 +25,7 @@
 //! - `reqwest` 0.13 is already the workspace version and already provides
 //!   HTTP/2 over one pooled connection. Several immutable objects over one
 //!   connection is the multiplexed behaviour this design wants, so HTTP/3 is not
-//!   a milestone requirement — and `reqwest` still treats its HTTP/3 API as
+//!   a milestone requirement - and `reqwest` still treats its HTTP/3 API as
 //!   unstable, so adopting it early would be adopting churn.
 //! - `tough` 0.24 brings its own compatible HTTP stack for TUF metadata. Two
 //!   major `reqwest` versions in one binary is not a price worth paying for a

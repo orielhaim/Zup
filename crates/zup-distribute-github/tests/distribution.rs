@@ -1,7 +1,7 @@
 //! Reading a release back out of GitHub, end to end.
 //!
 //! Everything a GitHub-hosted thin installer does: pick a package, fetch it, put
-//! verified objects in the cache — and, for every way a host can answer, still do
+//! verified objects in the cache - and, for every way a host can answer, still do
 //! all three correctly.
 
 mod common;
@@ -155,7 +155,7 @@ fn release(origin: &Origin, layout: ReleaseLayout, blobs: &[Blob], shard_bytes: 
 ///
 /// The source is shared by `Arc` because a scheduler holds one and every worker
 /// borrows it, and because the range observation and the counters live behind the
-/// same handles — which is what lets a test watch a transfer it did not own.
+/// same handles - which is what lets a test watch a transfer it did not own.
 async fn open_source(
     release: &Release,
     blobs: &[Blob],

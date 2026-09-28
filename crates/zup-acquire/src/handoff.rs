@@ -151,8 +151,8 @@ pub struct RuntimeHandoff {
     /// key rather than an authority: pointing it at a different document
     /// selects bytes whose recomputed `release` fingerprint is not the `release`
     /// above, and the check fails. Two digests are needed because a release
-    /// document names its own fingerprint as a field — it cannot also be the hash
-    /// of its own encoding — while a cache can only be keyed by a hash.
+    /// document names its own fingerprint as a field - it cannot also be the hash
+    /// of its own encoding - while a cache can only be keyed by a hash.
     pub document: Sha256Digest,
     /// The content catalog that release names.
     pub catalog: Sha256Digest,
@@ -231,7 +231,7 @@ impl RuntimeHandoff {
     /// This handoff's own fingerprint.
     ///
     /// A file whose bytes hash to this is the handoff the process was meant to
-    /// be handed. It is not a signature — nothing here needs one, because the
+    /// be handed. It is not a signature - nothing here needs one, because the
     /// document is not the authority; `runtime` is.
     pub fn digest(&self) -> Sha256Digest {
         let body = HandoffBody {

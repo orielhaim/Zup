@@ -4,7 +4,7 @@
  * A log is a stream; a summary is a record. Somebody looking at a release six months
  * later reads the summary and does not read the log.
  *
- * The raw JSON is deliberately absent — a summary that dumps the machine document is
+ * The raw JSON is deliberately absent - a summary that dumps the machine document is
  * why people stop opening summaries. Two tables and a status line carry everything,
  * and `release-manifest` is an output for the cases that need the document.
  */
@@ -117,12 +117,12 @@ export function renderSummary(summary: Summary): string {
   const application = result?.application
 
   lines.push(
-    row('Version', application?.version ?? (result === undefined ? 'not built' : '—')),
+    row('Version', application?.version ?? (result === undefined ? 'not built' : '-')),
     row(
       'Targets',
       result !== undefined && result.targets.length > 0
         ? result.targets.map((target) => target.profile).join(', ')
-        : '—',
+        : '-',
     ),
     row('Artifacts', String(result?.artifacts.length ?? 0)),
   )
@@ -157,7 +157,7 @@ function artifactTable(artifacts: readonly Artifact[]): string {
   const lines = ['| Artifact | Size | Signed | SHA-256 |', '| --- | ---: | :---: | --- |']
   for (const artifact of artifacts) {
     lines.push(
-      `| \`${artifact.path}\` | ${formatBytes(artifact.size)} | ${isSigned(artifact) ? '✓' : '—'} | \`${artifact.digest.value.slice(0, 16)}…\` |`,
+      `| \`${artifact.path}\` | ${formatBytes(artifact.size)} | ${isSigned(artifact) ? '✓' : '-'} | \`${artifact.digest.value.slice(0, 16)}…\` |`,
     )
   }
   return lines.join('\n')
@@ -166,7 +166,7 @@ function artifactTable(artifacts: readonly Artifact[]): string {
 function publicationRows(publication: NonNullable<AutomationResult['publication']>): string[] {
   const rows = [
     row('Release', `\`${publication.tag}\``),
-    row('Repository', publication.subject.length > 0 ? publication.subject : '—'),
+    row('Repository', publication.subject.length > 0 ? publication.subject : '-'),
     row('Status', publication.state),
   ]
   if (publication.immutable !== null) {
@@ -213,7 +213,7 @@ function failure(summary: Summary): string {
 /** Bytes in binary units, so a summary number matches what Explorer shows. */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
-    return '—'
+    return '-'
   }
   if (bytes < 1024) {
     return `${bytes} B`

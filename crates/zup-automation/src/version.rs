@@ -2,8 +2,8 @@
 //!
 //! A wire contract that ships with its producer does not need a negotiation protocol,
 //! a feature discovery handshake, or a SemVer parser. It needs a number in the
-//! document and one comparison. Everything else — what a minor may add, what a major
-//! may break, which unknown values a consumer skips — is a consequence of where that
+//! document and one comparison. Everything else - what a minor may add, what a major
+//! may break, which unknown values a consumer skips - is a consequence of where that
 //! comparison sits.
 //!
 //! ```text

@@ -102,7 +102,7 @@ impl RetentionState {
     /// How long the policy exempts the objects it retains.
     ///
     /// `None` for a policy that retains nothing, and for a name this build does
-    /// not recognize — which `validate` already refuses, so the fallback only
+    /// not recognize - which `validate` already refuses, so the fallback only
     /// matters for a record read from somewhere hostile.
     pub fn window(&self) -> Option<Duration> {
         CachePolicy::from_name(&self.policy).and_then(CachePolicy::auto_retention)

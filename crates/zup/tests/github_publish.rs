@@ -1,7 +1,7 @@
 //! `zup ci github` and `zup publish github`, end to end against the real binary.
 //!
 //! These are the two commands a maintainer actually types, and the things worth
-//! proving about them are not "the code runs" — the unit tests cover that — but
+//! proving about them are not "the code runs" - the unit tests cover that - but
 //! four properties a user depends on:
 //!
 //! 1. **The committed pipeline is reproducible.** `generate` writes the file,
@@ -173,7 +173,7 @@ repository = "acme/acme"
     );
 
     // One job per phase, driving the zup action by operation rather than
-    // recompiling it in every job — a shape that only ever worked inside the zup
+    // recompiling it in every job - a shape that only ever worked inside the zup
     // repository.
     for operation in ["build", "compose", "attest", "publish"] {
         assert!(
@@ -256,7 +256,7 @@ repository = "acme/acme"
     assert_eq!(report["profiles"].as_array().expect("profiles").len(), 2);
 
     // Every target names the runner it lands on, and says whether that runner's
-    // own architecture matches — a cross-compiled target is a different thing
+    // own architecture matches - a cross-compiled target is a different thing
     // from a native one and a report that did not say so would be misleading.
     for profile in report["profiles"].as_array().expect("profiles") {
         let runner = profile["runner"].as_str().expect("a runner");
@@ -346,7 +346,7 @@ repository = "acme/acme"
 
     // No workflow at all, and a workflow that is not the generated one, are the
     // two ways a project's pipeline is not current. Neither is a pass, and both
-    // say what to run — in prose for a person and in JSON for CI.
+    // say what to run - in prose for a person and in JSON for CI.
     let absent = ci(&project, &["check", "--format", "json"]);
     let report = json(&absent);
     assert_eq!(report["present"], false);

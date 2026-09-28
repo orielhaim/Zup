@@ -27,7 +27,7 @@
  * A phase is a step in a workflow, and a workflow's vocabulary is its own. An
  * operation is what zup said it did, and zup's vocabulary is in
  * `zup-automation`. `operationFor` is the whole translation, and it is one table
- * rather than a naming convention — `attest` has no zup operation at all, because
+ * rather than a naming convention - `attest` has no zup operation at all, because
  * zup does not talk to Sigstore, and a phase whose operation is `undefined` is a
  * fact the table states rather than a gap the code has to notice.
  */

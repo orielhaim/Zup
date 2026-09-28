@@ -4,7 +4,7 @@
 //! `Acme-Setup.exe`, a script that runs `install --yes`, the Apps & Features
 //! entry, and a framework updater all mean the same thing: make this machine
 //! match this package. Which lifecycle that is depends on what the machine
-//! already has, and the machine already knows — so the runtime reads its own
+//! already has, and the machine already knows - so the runtime reads its own
 //! ledger and resolves the verb, rather than asking the caller to get it right.
 //!
 //! The three sources of a package, in the order they are preferred:
@@ -16,7 +16,7 @@
 //!    content with it.
 //! 3. **A plan the image was compiled with and a release graph to fill.** A thin
 //!    runtime carries the plan and none of the content, because the content came
-//!    from — and comes again from — a release graph.
+//!    from - and comes again from - a release graph.
 //!
 //! There is no fourth source. A runtime does not read `zup.toml`, does not walk
 //! a source tree, and does not compile a manifest. If this image carries no
@@ -317,7 +317,7 @@ fn run_handoff(
 /// The embedded package is the runtime's own copy of the plan, and it is the only
 /// thing a runtime-only process knows: there is no manifest beside it and no
 /// source directory. The update configuration embedded in that plan is where the
-/// repository, the channel, and the trusted root come from — which is the point of
+/// repository, the channel, and the trusted root come from - which is the point of
 /// inlining them: a machine that lost the installer file can still repair itself,
 /// because the identity of what it installed travels with it.
 ///
@@ -410,7 +410,7 @@ fn run_graph_transition(
 
     // A repair restores what the machine owns. The ledger holds each owned
     // resource's digest, so the closure is the intersection of what drifted and
-    // what the release carries — which is also the ownership check, because a
+    // what the release carries - which is also the ownership check, because a
     // digest in neither cannot be asked for.
     if let Request::Named(LifecycleAction::Repair { force_files }) = request {
         let drifted = drifted_digests(&state_root, &build.installer, scope, force_files)?;
@@ -835,8 +835,8 @@ pub fn prepare_embedded_transition_with_cancellation(
 /// Turn an embedded package and a machine's record into an executable plan.
 ///
 /// The plugin executor is a parameter rather than a construction so that a
-/// lifecycle which never plans a plugin — an uninstall, which removes files by
-/// ownership rather than by re-planning — never loads the component engine at
+/// lifecycle which never plans a plugin - an uninstall, which removes files by
+/// ownership rather than by re-planning - never loads the component engine at
 /// all. That is a startup-time saving on the one path a user waits for least, and
 /// it is also a smaller attack surface on the one path that runs while another
 /// process is holding the application's files open.

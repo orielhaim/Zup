@@ -114,7 +114,7 @@ export function identifyRunner(environ: RunnerEnvironment): RunnerIdentity {
  *
  * The name is the release contract rather than a preference: `zup publish github`
  * uploads `zup-<platform>-<arch>` for the CLI and this resolves against that same name.
- * The `.exe` matters too — a `zup` without it on a Windows runner is a file the shell
+ * The `.exe` matters too - a `zup` without it on a Windows runner is a file the shell
  * will not run and the cache will happily store.
  */
 export function toolAsset(identity: RunnerIdentity): ToolAsset {

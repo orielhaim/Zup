@@ -1,8 +1,8 @@
 /**
  * Installing the zup CLI, and proving the bytes are the right bytes.
  *
- * A zup release records every asset's SHA-256 in its receipt and release manifest —
- * a format zup already produces — so verification uses that rather than a
+ * A zup release records every asset's SHA-256 in its receipt and release manifest -
+ * a format zup already produces - so verification uses that rather than a
  * `checksums.txt` that would exist only for CI. When GitHub also reports a digest of
  * its own, both are compared; a disagreement means the bytes changed after
  * publication, which is the event worth refusing to run over.
@@ -169,7 +169,7 @@ export interface ToolDependencies {
     headers: { accept: 'application/octet-stream' },
     label: asset.name,
   })
-  // A truncated response — a proxy, a flaky network — is caught before anything is
+  // A truncated response - a proxy, a flaky network - is caught before anything is
   // written or executed.
   if (
     downloaded.contentLength !== undefined &&

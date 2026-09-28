@@ -50,8 +50,8 @@ fn payload(seed: u64, size: usize) -> Vec<u8> {
 /// random bytes would fail that for the wrong reason. The test binary is a real
 /// x86_64 console PE, which is exactly what a native runtime is.
 ///
-/// `salt` produces a *different* image that is still a valid PE — appending to
-/// the end of an image leaves its headers intact — so a substitution is a genuine
+/// `salt` produces a *different* image that is still a valid PE - appending to
+/// the end of an image leaves its headers intact - so a substitution is a genuine
 /// second file rather than the same bytes under a second name.
 fn runtime_image(root: &Path, name: &str, salt: u64) -> PathBuf {
     let path = root.join(name);

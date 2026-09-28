@@ -449,7 +449,7 @@ fn a_tampered_blob_table_is_refused_before_anything_is_read() {
 }
 
 /// The store is addressed by the table, and an index that arrives without its
-/// blobs is not a smaller artifact — it is an artifact nothing can be read out
+/// blobs is not a smaller artifact - it is an artifact nothing can be read out
 /// of. The refusal happens at `open`, before a single byte is requested.
 #[test]
 fn a_view_whose_store_is_too_small_is_refused() {

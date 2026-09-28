@@ -23,8 +23,8 @@ pub trait BootstrapFileSystem: Send + Sync {
     /// once the destination content survives a crash.
     fn publish_replace(&self, from: &Path, to: &Path) -> Result<(), std::io::Error>;
 
-    /// Report whether `path` is a link — a symlink, a reparse point, or the
-    /// local equivalent — that bootstrap must not write through or read across.
+    /// Report whether `path` is a link - a symlink, a reparse point, or the
+    /// local equivalent - that bootstrap must not write through or read across.
     ///
     /// A path that does not exist is not a link.
     fn is_link(&self, path: &Path) -> Result<bool, std::io::Error>;

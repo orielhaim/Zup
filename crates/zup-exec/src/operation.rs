@@ -274,7 +274,7 @@ pub struct ExecutionSummary {
 
 /// Full v1 file-and-resource delta between desired and observed state.
 ///
-/// Deterministic linear decisions — no execution DAG yet.
+/// Deterministic linear decisions - no execution DAG yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
     pub selected_components: Vec<zup_core::ComponentId>,

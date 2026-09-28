@@ -116,7 +116,7 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
     //
     // The scope comes from the artifact's own trust block rather than from a
     // constant here. A thin artifact carries no variant manifest, so the scope the
-    // application's plan declares has nowhere else to travel — and a launcher
+    // application's plan declares has nowhere else to travel - and a launcher
     // that defaulted it would install a `machine`-scoped application into the
     // user's profile and call it a success.
     #[cfg(feature = "online")]

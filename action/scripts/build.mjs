@@ -53,4 +53,4 @@ const normalized = source
 if (normalized !== source) {
   await Bun.write(expected, normalized)
 }
-console.log(`dist/index.js — ${(await Bun.file(expected).arrayBuffer()).byteLength} bytes`)
+console.log(`dist/index.js - ${(await Bun.file(expected).arrayBuffer()).byteLength} bytes`)

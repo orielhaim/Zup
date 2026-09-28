@@ -4,7 +4,7 @@
 //! name surrogate, which covers a symbolic link and a directory junction but not
 //! a cloud placeholder, a deduplicated entry, or any other reparse point that
 //! presents as a plain file and is read straight through. This adapter refuses
-//! every entry carrying `FILE_ATTRIBUTE_REPARSE_POINT` — the same attribute the
+//! every entry carrying `FILE_ATTRIBUTE_REPARSE_POINT` - the same attribute the
 //! bootstrap filesystem seam uses to refuse a write through one.
 
 use std::io;

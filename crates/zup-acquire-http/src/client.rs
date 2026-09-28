@@ -237,8 +237,8 @@ impl HttpClient {
     ///
     /// The acquisition path only ever issues `GET`s of immutable objects, which
     /// is why [`HttpClient::get`] and [`HttpClient::get_range`] are all it
-    /// needed. A caller that has to speak a request API — a versioned API
-    /// header, a `POST`, a `DELETE`, a multi-gigabyte body — supplies the parts
+    /// needed. A caller that has to speak a request API - a versioned API
+    /// header, a `POST`, a `DELETE`, a multi-gigabyte body - supplies the parts
     /// through [`Request`] rather than reaching for [`HttpClient::inner`], and so
     /// keeps everything the policy is for: a bounded redirect chain, HTTPS on
     /// every hop, and a configured credential that never leaves the host it was
@@ -362,7 +362,7 @@ impl HttpClient {
 
 /// Read a file as a stream of chunks.
 ///
-/// The alternative — reading a release asset into memory to send it — turns a
+/// The alternative - reading a release asset into memory to send it - turns a
 /// two gigabyte upload into a two gigabyte allocation, so the body is a stream
 /// and the file handle is opened per attempt, which is also what makes an
 /// upload retryable.
@@ -619,8 +619,8 @@ impl Response {
 
     /// Read the whole body, bounded by `limit`.
     ///
-    /// For a response that is small by construction — a JSON document, an error
-    /// body — and never for a release asset. The bound is a ceiling rather than a
+    /// For a response that is small by construction - a JSON document, an error
+    /// body - and never for a release asset. The bound is a ceiling rather than a
     /// hint: a server that sends more than the caller will accept is refused
     /// rather than truncated, because a truncated JSON document parses into
     /// something that looks true.

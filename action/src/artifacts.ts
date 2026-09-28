@@ -8,7 +8,7 @@
  *
  * A glob over the build directory is wrong twice: it picks up the per-target
  * intermediates that compose merged away, and it picks up whatever else is in the
- * directory — including a signing key somebody left there, which would then be
+ * directory - including a signing key somebody left there, which would then be
  * published as an attested subject.
  *
  * The manifest is always attested too. It names every other digest, so an
@@ -192,7 +192,7 @@ export async function attestSubjects(
 /**
  * Whether a payload is already compressed.
  *
- * The rule is deliberately narrow — a directory always needs the zip, and an
+ * The rule is deliberately narrow - a directory always needs the zip, and an
  * unknown extension gets the zip, because a wrong guess here is a broken download.
  */
 export function isAlreadyCompressed(path: string): boolean {

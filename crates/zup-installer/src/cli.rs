@@ -11,7 +11,7 @@
 //!
 //! - **Public.** What a person or an automation system is expected to run, and
 //!   what `--help` lists.
-//! - **Internal.** Process boundaries the runtime spawns itself — the elevated
+//! - **Internal.** Process boundaries the runtime spawns itself - the elevated
 //!   worker, the uninstall runner, explicit recovery, the upgrade verb a
 //!   framework updater contract needs. Hidden, because naming them in help is an
 //!   invitation to depend on an implementation detail, and because showing them
@@ -208,7 +208,7 @@ pub struct LifecycleArgs {
     ///
     /// This is how a dispatcher hands over: it resolved an authenticated release,
     /// filled a cache, and verified the runtime it is now running as. The cache is
-    /// a location, not an authority — every blob still has to hash to a digest the
+    /// a location, not an authority - every blob still has to hash to a digest the
     /// authenticated release named.
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub acquired: Option<PathBuf>,

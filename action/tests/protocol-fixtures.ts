@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
  * Read from disk rather than transcribed into this file, because a hand-written
  * copy of a document the *other side* produces is the exact thing this protocol
  * exists to remove. If zup changes a field, these tests fail until the fixture
- * changes with it — which is the compatibility gate, and it is a real one.
+ * changes with it - which is the compatibility gate, and it is a real one.
  *
  * Every test in this suite that claims "the action reads what zup writes" is
  * standing on these files.

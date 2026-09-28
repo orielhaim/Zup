@@ -10,8 +10,8 @@
 //! - **Reading** an image's own resources is how a program finds the artifact it
 //!   was built into.
 //!
-//! A build-time inspector answers a different question — what format and machine
-//! an arbitrary template is — and belongs in `zup-build`, which is portable.
+//! A build-time inspector answers a different question - what format and machine
+//! an arbitrary template is - and belongs in `zup-build`, which is portable.
 //!
 //! # What this crate is and is not allowed to know
 //!
@@ -279,7 +279,7 @@ fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, Pe
             .unwrap(),
     );
 
-    // The certificate table's directory entry is `{ u32 address; u32 size }` — the
+    // The certificate table's directory entry is `{ u32 address; u32 size }` - the
     // size sits 4 bytes after the address, because both are 32-bit fields even
     // though the *stride* between directory entries is 8. And the address is a
     // file offset, not an RVA: the table is not mapped into memory and is not

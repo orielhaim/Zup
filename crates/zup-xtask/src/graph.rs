@@ -311,8 +311,8 @@ fn cargo_metadata(root: &Path) -> Result<Metadata, String> {
 /// `cargo metadata` spells this three ways depending on how many kinds the edge
 /// has: an empty string for a normal dependency, a bare `"dev"` string for one
 /// dev kind, and an array of `{kind, target}` otherwise. An edge that is
-/// *both* normal and dev — a package that uses a crate in production and
-/// exercises it in its tests — is not dev-only, and skipping it would hide a real
+/// *both* normal and dev - a package that uses a crate in production and
+/// exercises it in its tests - is not dev-only, and skipping it would hide a real
 /// dependency.
 fn is_dev_only(dep_kinds: &serde_json::Value) -> bool {
     let kinds: Vec<&str> = match dep_kinds {
@@ -334,9 +334,9 @@ fn is_dev_only(dep_kinds: &serde_json::Value) -> bool {
 /// `0.0.1` instead of on a package:
 ///
 /// - `registry+https://…/index#sha2@0.11.0`
-/// - `path+file:///…/crates/zup-core#0.0.1` — the name is the *last path
+/// - `path+file:///…/crates/zup-core#0.0.1` - the name is the *last path
 ///   segment*, and only the version sits after the `#`
-/// - `some-name 1.2.3 (path+…)` — older cargo
+/// - `some-name 1.2.3 (path+…)` - older cargo
 fn name_of(id: &str) -> &str {
     // `registry+…#name@version`: the name is inside the fragment, before the `@`.
     if let Some((_, fragment)) = id.rsplit_once('#')

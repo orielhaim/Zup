@@ -29,7 +29,7 @@ fn bootstrap() -> WorkerBootstrap {
 
 /// The only message a worker will act on is an `ExecuteBootstrap` whose target
 /// matches the one it was started for. Everything else about the bootstrap
-/// string — the plan hash, the session, the pipe — is already bound by the
+/// string - the plan hash, the session, the pipe - is already bound by the
 /// handshake this replays.
 #[test]
 fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {

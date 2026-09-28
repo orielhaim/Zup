@@ -345,8 +345,8 @@ impl GithubClient {
             })?;
         if declared != size {
             // The size came from a digest-and-measure pass. If the file changed
-            // underneath it, everything downstream — the cache, the attestation,
-            // the plan — is describing bytes that no longer exist, so this is
+            // underneath it, everything downstream - the cache, the attestation,
+            // the plan - is describing bytes that no longer exist, so this is
             // refused rather than uploaded.
             return Err(GithubError::Size {
                 name: name.to_owned(),
@@ -448,7 +448,7 @@ impl GithubClient {
     ///
     /// Asset uploads are the one exception, and deliberately so. A retry of an
     /// upload restarts the whole transfer, and GitHub's documented failure mode
-    /// for a failed upload leaves a `starter` asset that takes the name hostage —
+    /// for a failed upload leaves a `starter` asset that takes the name hostage -
     /// so a retry is only safe after the host has been asked what it now holds.
     /// That reconciliation belongs to the publisher, which is the only layer that
     /// can do it, and it cannot happen here.

@@ -58,7 +58,7 @@ pub enum HttpError {
     /// The caller's sink refused a chunk.
     ///
     /// The cache is the only sink that exists today, and its refusals are a bound
-    /// or a digest mismatch — both of which mean the content is not what was
+    /// or a digest mismatch - both of which mean the content is not what was
     /// promised, which is a fact about the origin rather than about this client.
     #[error("origin {origin} could not accept the content: {reason}")]
     Body { origin: String, reason: String },

@@ -6,7 +6,7 @@
 //! 2. If there is a partial, ask for the remaining range and require a correct
 //!    `206` with a `Content-Range` that lines up. A server that refuses the
 //!    range, or answers with a mismatched one, makes the partial be discarded
-//!    and the transfer restart — which is what a CDN without range support
+//!    and the transfer restart - which is what a CDN without range support
 //!    requires, and it costs a full download rather than a wrong file.
 //! 3. Stream the body into the writer, bounded by the descriptor's wire length.
 //! 4. Commit. The cache decompresses, hashes, and publishes only if the digest
@@ -77,7 +77,7 @@ impl HttpSource {
     ///
     /// A document is a release descriptor, a catalog, or a variant manifest. It
     /// is small, it is authenticated by a digest the caller already has, and it
-    /// must be in memory before it can be parsed — so it is read whole and
+    /// must be in memory before it can be parsed - so it is read whole and
     /// checked against the caller's descriptor afterwards.
     pub async fn fetch_document(
         &self,
@@ -256,7 +256,7 @@ impl HttpSource {
                     // not merely be abandoned: abandoning keeps it, and the next
                     // attempt would ask for the same range and be refused the
                     // same way. Deleting it is what makes the documented
-                    // fallback — a full download — actually happen.
+                    // fallback - a full download - actually happen.
                     request.discard();
                     return Err((
                         HttpError::RangeUnsupported {

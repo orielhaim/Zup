@@ -4,7 +4,7 @@
 //! native runtime template, and a dispatcher for a universal artifact. Those bytes
 //! have a version, a machine, and a presentation, and an installer composed from
 //! the wrong combination is an installer that does not work on the machine it was
-//! built for — sometimes on any machine.
+//! built for - sometimes on any machine.
 //!
 //! A file name is not a compatibility check. `zup-setup-gui.exe` is a name, and
 //! the same name is written by every zup release that ever had a GUI template. So
@@ -142,8 +142,8 @@ pub const DISPATCHER_TARGET: &str = "i686-pc-windows-msvc";
 /// Every component a build host needs, in one order.
 ///
 /// One function rather than a list spelled at each use. Three callers would
-/// otherwise keep three lists — the staging step that produces them, a readiness
-/// report that names them, and a cache that has to hold all of them — and the
+/// otherwise keep three lists - the staging step that produces them, a readiness
+/// report that names them, and a cache that has to hold all of them - and the
 /// moment one of the three gains a component the other two quietly stop covering
 /// it. The order is presentation: runtimes first, then launchers, because that is
 /// the order a reader cares about them in.
@@ -186,7 +186,7 @@ pub const RELEASE_INDEX_NAME: &str = "zup-toolchain.json";
 ///
 /// One document and one directory. A developer installing zup gets a tree they can
 /// point a build at, and the index is what says which tree is the right one for
-/// this exact version — so "did I get the toolchain that goes with this CLI" is
+/// this exact version - so "did I get the toolchain that goes with this CLI" is
 /// answered by reading one file rather than by installing six things and hoping.
 ///
 /// The index deliberately holds **no component identity**. Each component's

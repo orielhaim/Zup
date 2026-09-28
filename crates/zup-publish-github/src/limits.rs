@@ -3,7 +3,7 @@
 //! Every number here is a documented GitHub limit, not a preference. They are
 //! collected in one place because a limit that is checked somewhere other than
 //! where it is stated is a limit nobody can reason about, and because the
-//! interesting one — the per-asset ceiling — is the difference between "refuse
+//! interesting one - the per-asset ceiling - is the difference between "refuse
 //! before creating a release" and "upload nine gigabytes and then fail".
 //!
 //! # The numbers, and what each one is for

@@ -1,8 +1,8 @@
 //! Resolving an authenticated release graph, and nothing else.
 //!
 //! This crate is the seam between TUF and the acquisition engine. It answers one
-//! question — *which release graph, and which content does this machine need
-//! from it* — and it answers it the same way for a first install, an update, a
+//! question - *which release graph, and which content does this machine need
+//! from it* - and it answers it the same way for a first install, an update, a
 //! modify, and a repair.
 //!
 //! ```text
@@ -31,7 +31,7 @@
 //! timestamp/snapshot/targets metadata, and rollback detection is only possible
 //! *across processes* if it survives one. So the datastore is a directory under
 //! the machine's state root, namespaced by everything that can change the answer
-//! — application, repository, channel, and the trust anchor's own digest — and it
+//! - application, repository, channel, and the trust anchor's own digest - and it
 //! is never deleted because a fetch failed. A publisher who cannot be reached
 //! must not be able to reset a client's rollback memory.
 
@@ -172,7 +172,7 @@ impl TrustContext {
     ///
     /// This is what a version-labelled thin installer is. It reads the immutable
     /// version-addressed release document, so a later publication of the channel
-    /// cannot move it — which is the entire difference between the two thin
+    /// cannot move it - which is the entire difference between the two thin
     /// artifacts and the reason they are two files.
     pub fn pinned_to(mut self, version: &str) -> Self {
         self.pin = ReleasePin::Version {
@@ -369,7 +369,7 @@ impl ResolvedRelease {
     }
 
     /// Every digest the variant can install, for a caller that needs the
-    /// superset rather than a selection — an offline-repair retention set, for
+    /// superset rather than a selection - an offline-repair retention set, for
     /// example.
     pub fn full_content(&self) -> Vec<Sha256Digest> {
         self.variant.content.clone()

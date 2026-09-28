@@ -5,7 +5,7 @@
 //! `miette` renders diagnostics beautifully and is not a wire contract: its JSON
 //! report handler is a rendering of a Rust error type, and it changes when the error
 //! type, the crate layout or the handler's own defaults change. So it stays exactly
-//! where it is — the thing that produces a good terminal message and a source span —
+//! where it is - the thing that produces a good terminal message and a source span -
 //! and this module reads the four things zup promises on the wire out of it:
 //!
 //! ```text
@@ -24,7 +24,7 @@
 //!
 //! From [`Coded`], and only from [`Coded`]. A code is a published identifier, so it is
 //! a `&'static str` chosen at the call site where somebody decided what the failure
-//! *means* — not a formatted string, not a `Debug` rendering, and never a Rust type or
+//! *means* - not a formatted string, not a `Debug` rendering, and never a Rust type or
 //! module name. `zup_manifest::UnknownTarget` is not a code: it is renamed the day
 //! somebody reorganises a module, and every integration that matched on it would break
 //! on a change no operator could see.
@@ -193,7 +193,7 @@ fn code_of(source: &dyn miette::Diagnostic) -> Identifier {
 /// identity.
 ///
 /// A `miette` report is a chain because `wrap_err` produces one, and a command that
-/// adds context at each layer is doing the right thing — the identity is what was
+/// adds context at each layer is doing the right thing - the identity is what was
 /// decided at the bottom of it, not at the top.
 fn find_coded(report: &miette::Report) -> Option<&Coded> {
     if let Some(coded) = report.downcast_ref::<Coded>() {
@@ -214,7 +214,7 @@ fn find_coded(report: &miette::Report) -> Option<&Coded> {
 ///
 /// `read_span` is how miette answers "which line is that offset on", and asking it
 /// rather than counting newlines is what makes a span in a file the error never opened
-/// land on the right line — and it is where the file's name comes from, because a
+/// land on the right line - and it is where the file's name comes from, because a
 /// `SourceCode` has no name of its own and only the span it produced does. A
 /// diagnostic with no source code, no label, or a span it cannot read is a diagnostic
 /// with no location, which is a normal outcome rather than a failure to report.

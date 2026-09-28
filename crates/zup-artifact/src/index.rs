@@ -207,7 +207,7 @@ impl ArtifactDescriptor {
     /// Reject a descriptor whose own claims disagree.
     ///
     /// A thin artifact with no trust block cannot resolve anything, and an
-    /// offline artifact carrying one is a sign a build wired the wrong request —
+    /// offline artifact carrying one is a sign a build wired the wrong request -
     /// neither is worth discovering on a user's machine.
     pub fn validate(&self) -> Result<(), &'static str> {
         match (&self.mode, &self.trust) {

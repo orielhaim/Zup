@@ -1,6 +1,6 @@
 //! The exit codes and messages the command line promises.
 //!
-//! The two checks that gate a repository — the boundary check and the pin check —
+//! The two checks that gate a repository - the boundary check and the pin check -
 //! are covered here end to end, because a gate that cannot fail is a gate nobody
 //! reads. The usage errors are pinned because a silently-ignored argument is how a
 //! typo in a `--matrix` name builds the wrong thing.

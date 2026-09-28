@@ -315,7 +315,7 @@ fn comments_do_not_trip_a_rule() {
 }
 
 /// Every token the ban table lists must fire when it appears inside a string
-/// literal, in the spelling a real manifest would use — a registry path, a shell
+/// literal, in the spelling a real manifest would use - a registry path, a shell
 /// verb, a pipe endpoint, a redistributable name. The table is the whole check;
 /// this walks it in the shapes that are easiest to miss.
 #[test]
@@ -446,7 +446,7 @@ fn the_enforcer_still_may_not_depend_on_a_windows_crate() {
 
 /// An unclassified member is a package no matrix claims, so nothing verifies it
 /// and nothing knows which host it builds on. Excluding it is the deliberate way
-/// to say "not mine" — but only if the exclusion is actually honoured.
+/// to say "not mine" - but only if the exclusion is actually honoured.
 #[rstest]
 #[case::a_package_no_matrix_claims(&[], 1)]
 #[case::the_same_package_explicitly_excluded(&["crates/zup-scratch"], 0)]

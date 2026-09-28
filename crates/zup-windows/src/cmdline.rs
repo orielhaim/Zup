@@ -21,7 +21,7 @@ pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
 /// The set of characters that force quoting is *every* character
 /// `split_command_line` would treat as a separator, which is `char::is_whitespace`
 /// plus the quote itself. Quoting more than the platform strictly requires is
-/// always safe — `CommandLineToArgvW` accepts quotes anywhere — while quoting
+/// always safe - `CommandLineToArgvW` accepts quotes anywhere - while quoting
 /// less is not, and a hardcoded list of "the whitespace characters" is a list
 /// somebody enumerated rather than one the reader agreed to. A carriage return, a
 /// form feed, or a non-breaking space is whitespace to `split_command_line` and

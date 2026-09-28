@@ -3,7 +3,7 @@
 //! This is the end-to-end claim the whole online story rests on: one
 //! `zup build` produces a graph, `zup publish stage` turns that graph into a
 //! directory a static host can serve, and a client reads the same closure back
-//! out of it — with nothing but a digest as proof that the bytes it received
+//! out of it - with nothing but a digest as proof that the bytes it received
 //! are the bytes that were built.
 //!
 //! No HTTP, no TUF, and no platform API is involved. That is the point: the
@@ -402,7 +402,7 @@ fn a_staged_runtime_is_addressable_content_a_client_can_verify_before_running() 
             runtime.size
         );
         // It is content, so it goes through the same verification as anything
-        // else — which is the only reason a bootstrapper may execute it.
+        // else - which is the only reason a bootstrapper may execute it.
         assert!(runtime.kind().is_executable());
     }
 }

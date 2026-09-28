@@ -13,7 +13,7 @@
 //!
 //! It installs nothing. It touches no registry, creates no service, elevates
 //! nothing, and runs no prerequisite. Every one of those is inside the selected
-//! native runtime, under the transaction engine, in its own architecture — which
+//! native runtime, under the transaction engine, in its own architecture - which
 //! is why this program can be small enough to run under an emulation layer on a
 //! machine whose native variant is something else.
 //!
@@ -62,7 +62,7 @@ const SEED_NAME: &str = "local source";
 ///
 /// `scope` is the installation scope the artifact's trust block declares, which
 /// the bootstrapper knows from the artifact rather than from a command line
-/// argument — a user double-clicking the artifact never chose one. It is the same
+/// argument - a user double-clicking the artifact never chose one. It is the same
 /// scope the launcher passes to the runtime it starts, and the same scope that
 /// decides which state root this process reads, so a thin install lands where the
 /// project said it would.
@@ -83,8 +83,8 @@ pub fn run(
 
 /// Run the thin path, starting the runtime through `launcher`.
 ///
-/// The seam exists so the whole path — resolve, select, acquire, verify, stage,
-/// hand over — can be exercised without a child process, which is the only way to
+/// The seam exists so the whole path - resolve, select, acquire, verify, stage,
+/// hand over - can be exercised without a child process, which is the only way to
 /// assert on the thing that matters most about the handoff: exactly which
 /// executable is started, with exactly which arguments, and with which
 /// inheritance. Those are properties of a value, and a value has to be

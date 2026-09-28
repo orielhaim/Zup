@@ -542,7 +542,7 @@ fn interrupted_rollback_never_rolls_forward() {
 
 /// A node found `Running` was interrupted mid-apply, so the side effect may or
 /// may not have landed. The reconcile answer decides: retry, adopt, or stop and
-/// ask a human — and whichever it is, the side effect must not happen twice.
+/// ask a human - and whichever it is, the side effect must not happen twice.
 #[rstest]
 #[case::not_applied_retries(
     ReconcileResult::NotApplied,

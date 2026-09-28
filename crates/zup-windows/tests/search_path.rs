@@ -2,8 +2,8 @@
 //! portable delta planner.
 //!
 //! The planner only ever sees a `SearchPath` of target-normalized entries and
-//! asks whether one is a member. Everything host-specific — the `;` separator,
-//! quoting, case identity, `%VAR%` references, `REG_SZ` vs `REG_EXPAND_SZ` —
+//! asks whether one is a member. Everything host-specific - the `;` separator,
+//! quoting, case identity, `%VAR%` references, `REG_SZ` vs `REG_EXPAND_SZ` -
 //! belongs here.
 
 use std::collections::BTreeMap;

@@ -9,7 +9,7 @@
 //! What is *not* here, on purpose: whether Windows trusts the chain, whether the
 //! publisher is the one a project expects, whether a timestamp is acceptable,
 //! and whether the file is safe to run. Those are answers from a machine's trust
-//! store, not properties of the file, and they belong in the Windows adapter —
+//! store, not properties of the file, and they belong in the Windows adapter -
 //! which is also the only place that can ask `WinVerifyTrust`. See
 //! `zup-windows::signing`.
 //!
@@ -46,7 +46,7 @@
 //! and the image digest are all computed by
 //! [`google/authenticode-rs`](https://docs.rs/authenticode), the maintained
 //! implementation of exactly this format. This crate contributes the one thing
-//! that crate does not have — the image layout, read once and bounds-checked —
+//! that crate does not have - the image layout, read once and bounds-checked -
 //! and a view that hands the certificate table to the walk without loading a
 //! gigabyte of image to do it. It does not keep a second parser "for safety": a
 //! format implemented twice is a format with two answers, and only the tests
@@ -197,7 +197,7 @@ pub struct EmbeddedSignature {
 /// The blob is the file's own content, and three different questions are asked of
 /// it: is it there, does the digest it carries cover these bytes, and does it
 /// carry a countersignature. All three are structural, and all three are
-/// answered from the certificate table rather than from a platform API — which is
+/// answered from the certificate table rather than from a platform API - which is
 /// what lets a Linux build host answer them.
 pub fn signature_blob(path: &Path) -> Option<Vec<u8>> {
     let table = table_bytes(path).ok()??;
@@ -210,7 +210,7 @@ pub fn signature_blob(path: &Path) -> Option<Vec<u8>> {
 /// The `SignerInfo` inside the blob says *which* certificate signed, by issuer and
 /// serial number, and the blob carries the certificates. A file's certificate
 /// table therefore answers "who signed this" on its own, on any platform, with no
-/// certificate store involved — which matters because a store for a timestamped
+/// certificate store involved - which matters because a store for a timestamped
 /// file also holds the timestamping authority's certificate, and "the first
 /// certificate Windows hands back" is the TSA's.
 ///
@@ -329,7 +329,7 @@ fn render(name: &[RelativeDistinguishedName]) -> String {
 ///
 /// Reads only the table, which is a few kilobytes, out of a file that may be a
 /// gigabyte: the header says where the table is and the rest of the image is
-/// irrelevant to it. An image with no table is `Ok(None)` — a fact about the
+/// irrelevant to it. An image with no table is `Ok(None)` - a fact about the
 /// image, not a failure.
 pub fn certificates(path: &Path) -> Result<Option<Vec<Certificate>>, PeError> {
     match table_bytes(path)? {
@@ -449,8 +449,8 @@ fn read_table(table: &[u8]) -> Result<Table, PeError> {
 /// The certificate table, presented to the `authenticode` crate as if it were a
 /// whole image.
 ///
-/// The crate's `AttributeCertificateIterator` reads exactly two things — the
-/// image bytes and the certificate table's range — and the table is the only part
+/// The crate's `AttributeCertificateIterator` reads exactly two things - the
+/// image bytes and the certificate table's range - and the table is the only part
 /// of the image it needs. Presenting the table as an image whose certificate
 /// table is its entire length is therefore a way of handing the walk a few
 /// kilobytes instead of a gigabyte, not a different answer. The section and
@@ -487,7 +487,7 @@ impl PeTrait for CertificateTableView<'_> {
 ///
 /// `authenticode` 0.6 depends on `digest` 0.10 and zup is on `sha2` 0.11, which
 /// implements `digest` 0.11. Two incompatible releases of one trait, so the
-/// bridge is a local newtype — and not an `impl Update for Sha256`, which the
+/// bridge is a local newtype - and not an `impl Update for Sha256`, which the
 /// orphan rule would refuse in any case. The duplicate `digest` this leaves in
 /// the graph is upstream's version skew rather than a second hash implementation,
 /// and it costs one crate.

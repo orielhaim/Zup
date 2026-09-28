@@ -15,7 +15,7 @@
 //!
 //! It is deliberately a set of small functions rather than a trait. There is no second
 //! implementation to make generic over, and a trait here would be an abstraction with
-//! one implementor and three call sites — which is how a `From` impl ends up in the
+//! one implementor and three call sites - which is how a `From` impl ends up in the
 //! domain crate and the boundary quietly stops existing.
 //!
 //! The rule every function here follows: a build-machine absolute path is never a

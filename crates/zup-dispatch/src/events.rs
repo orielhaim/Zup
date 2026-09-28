@@ -1,7 +1,7 @@
 //! What the bootstrapper says while it works.
 //!
 //! A windowed bootstrapper has no console, so these lines are not for a person
-//! looking at it — they are for a log, and for the headless case where the
+//! looking at it - they are for a log, and for the headless case where the
 //! bootstrapper's own stdout is the machine-readable stream. Both forms speak the
 //! acquisition event set unchanged, so the events a consumer sees before the
 //! handoff are the same events, with the same names, as the ones it sees after

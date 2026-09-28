@@ -27,7 +27,7 @@
 //! 2. Every file carries a signature, and the signature covers *its* bytes.
 //! 3. The signature is from the expected publisher, when one was named.
 //! 4. The signature carries an RFC 3161 timestamp, unless the plan says
-//!    otherwise — which only a development plan does.
+//!    otherwise - which only a development plan does.
 //! 5. For a composed artifact, the native runtime embedded inside it is
 //!    byte-for-byte the runtime the plan named, and that runtime is signed.
 //!
@@ -229,7 +229,7 @@ fn subject_of(
 /// The plan, as a person reads it.
 ///
 /// Deterministic and derived entirely from the plan, so two machines that built
-/// the same release print the same thing — which is what makes a CI log diffable.
+/// the same release print the same thing - which is what makes a CI log diffable.
 /// The subject names are the release's own (`windows-x64`, a variant id), not a
 /// crate or a type, because the reader of this output is a person deciding what to
 /// hand to their signing service.
@@ -277,7 +277,7 @@ fn render(plan: &SigningPlan) -> String {
 /// A composed artifact's runtime lives at `runtime/<variant>.exe` beside the
 /// artifacts, because a build does not copy the toolchain's template into the
 /// release: a release pipeline stages the *signed* copy there, and composes from
-/// that. A missing file is a fact worth reporting rather than an error here —
+/// that. A missing file is a fact worth reporting rather than an error here -
 /// the pipeline may not have staged it yet, and `verify` is where absence is
 /// fatal.
 fn runtime_step(
@@ -773,7 +773,7 @@ fn signed_evidence_of(
 /// Finalize one file that carries no signature.
 ///
 /// The identity is the bytes, re-measured from the file rather than copied from
-/// the build, so an unsigned release is as verifiable as a signed one — the only
+/// the build, so an unsigned release is as verifiable as a signed one - the only
 /// difference is that nothing proves who produced it. A runtime that is unsigned
 /// cannot be "verified", so it is finalized against its own bytes and reported
 /// plainly; an outer artifact is finalized through the manifest so the release
@@ -908,8 +908,8 @@ mod tests {
         assert_eq!(policy.subject.as_deref(), Some("Acme"));
     }
 
-    /// A development requirement is one decision — a self-signed chain and no
-    /// TSA — so it cannot produce a policy that demands a timestamp it has already
+    /// A development requirement is one decision - a self-signed chain and no
+    /// TSA - so it cannot produce a policy that demands a timestamp it has already
     /// stopped requiring. The two old flags could be passed separately and reach
     /// that contradiction; the single `TimestampRequirement` cannot.
     #[test]

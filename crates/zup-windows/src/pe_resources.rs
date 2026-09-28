@@ -3,7 +3,7 @@
 //! A PE resource table is a file format, and `zup-pe` reads it as one. *Changing*
 //! one is not: `UpdateResourceW` and `FindResourceW` are the loader's
 //! interpretation of a file it is willing to map, and the loader is Windows. The
-//! split is the same one that runs through the signing code — structure belongs
+//! split is the same one that runs through the signing code - structure belongs
 //! to the format, and anything that asks the host to believe the file belongs at
 //! the platform boundary.
 //!

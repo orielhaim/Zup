@@ -481,7 +481,7 @@ destination = "${{install}}"
 /// One check failing must not hide the others. `doctor`'s value is that a person
 /// sees everything wrong with a project in one report, so each of these breaks a
 /// different single thing and asserts that the checks which do not depend on it
-/// still report — passing where they can, skipping where the break made the
+/// still report - passing where they can, skipping where the break made the
 /// question unanswerable.
 #[test]
 fn one_broken_thing_leaves_every_independent_check_reporting() {
@@ -682,7 +682,7 @@ source = "plugins/helper.wasm"
 }
 
 /// The document names the contract it belongs to, so a consumer gates on a version
-/// rather than on a shape it has to recognise — and the same report twice is
+/// rather than on a shape it has to recognise - and the same report twice is
 /// byte-identical, so a CI diff means something changed.
 #[test]
 fn the_result_is_versioned_and_byte_stable() {
@@ -765,8 +765,8 @@ fn the_report_honors_a_cli_source_override() {
     assert_eq!(statuses(&rows, "output_parent"), only("pass"));
 }
 
-/// `doctor` reports, it never writes. Every `--output` state a build can be in —
-/// derivable, parent missing, already present — is a diagnostic here, and none of
+/// `doctor` reports, it never writes. Every `--output` state a build can be in -
+/// derivable, parent missing, already present - is a diagnostic here, and none of
 /// them touches the filesystem.
 #[test]
 fn doctor_reports_every_output_state_and_never_writes() {

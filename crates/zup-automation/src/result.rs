@@ -4,7 +4,7 @@
 //!
 //! A consumer that has to learn a different shape per command has to learn N shapes and
 //! still has to handle the Nth+1 that somebody adds. So the fields a general
-//! integration needs — did it work, what was built, what failed, where do I look — are
+//! integration needs - did it work, what was built, what failed, where do I look - are
 //! in the envelope, and everything specific to one command is in
 //! [`Details`].
 //!
@@ -22,7 +22,7 @@
 //! [`AutomationResult::validate`] is the consumer's half of the contract, and it is
 //! deliberately unforgiving about the fields a consumer reads without checking. A
 //! document that parses but cannot be used is the failure mode that produces a summary
-//! with `—` in it and no error anywhere.
+//! with `-` in it and no error anywhere.
 
 use serde::{Deserialize, Serialize};
 
@@ -212,7 +212,7 @@ impl AutomationResult {
     /// A conformance check rather than a parser: a Rust deserializer already guarantees
     /// the types, and what it cannot guarantee is that the document says something. A
     /// success with an error diagnostic, a failure with no diagnostic, an artifact with
-    /// an ungrammatical digest — each is a document a consumer would act on wrongly.
+    /// an ungrammatical digest - each is a document a consumer would act on wrongly.
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.status == Status::Failure && self.diagnostics.is_empty() {
             return Err(ContractError::FailureWithoutDiagnostic {
@@ -431,8 +431,8 @@ pub struct PlanDetails {
 /// What `zup doctor` found.
 ///
 /// The whole check table crosses the wire, green rows included. A readiness check that
-/// was *skipped* is not the same fact as one that *passed* — it says the answer was
-/// never obtained — so a consumer that could only see the failures would report a
+/// was *skipped* is not the same fact as one that *passed* - it says the answer was
+/// never obtained - so a consumer that could only see the failures would report a
 /// project as ready on the strength of checks that never ran.
 #[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -452,7 +452,7 @@ pub struct DoctorDetails {
 /// One profile's readiness.
 ///
 /// No `Default`: a `status` is an [`Identifier`], and an empty string is not one. That
-/// is the point of the type — a consumer that switches on `status` gets a value it can
+/// is the point of the type - a consumer that switches on `status` gets a value it can
 /// match, and a producer cannot forget to set it.
 #[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -700,7 +700,7 @@ pub struct ToolchainStatusDetails {
     /// Absolute, and the one path in this contract that is: it answers "where would a
     /// build here look", which is the question this operation exists to answer, and
     /// nothing reads it back. It is for display and for matching against a machine's
-    /// own state — never a release identity.
+    /// own state - never a release identity.
     pub cache: String,
     /// Whether every component a build needs is usable.
     pub complete: bool,

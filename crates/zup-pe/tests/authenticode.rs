@@ -4,7 +4,7 @@
 //! toolchain and signed by `Set-AuthenticodeSignature` with a throwaway
 //! self-signed certificate. That matters: a fixture built by hand proves only
 //! that the parser agrees with the fixture's author, whereas a fixture a *real
-//! signer* produced proves the parser agrees with the signing ecosystem — the
+//! signer* produced proves the parser agrees with the signing ecosystem - the
 //! certificate table's offset, the entry's declared length, the padding, and the
 //! digest the signature claims over the image.
 //!
@@ -142,7 +142,7 @@ fn the_image_digest_excludes_the_checksum_and_the_certificate_directory() {
     //
     // Zeroing the directory entry here would be the obvious test and it is
     // wrong. An entry reading "no table" tells the rule there is nothing to
-    // subtract, so the table's bytes would be hashed and the digest would move —
+    // subtract, so the table's bytes would be hashed and the digest would move -
     // for a reason that has nothing to do with the exclusion under test.
     // Relocating the table is no better: whatever the table used to occupy
     // becomes covered bytes, so the digest moves for the same reason.

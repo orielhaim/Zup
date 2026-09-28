@@ -22,9 +22,9 @@ use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
 
 /// Materialize selected target sources with [`PortableSourceFilePolicy`].
 ///
-/// A build that must refuse host-specific indirections — a Windows build, where
+/// A build that must refuse host-specific indirections - a Windows build, where
 /// a reparse point can redirect a prerequisite read without presenting as a
-/// symlink — calls [`materialize_with_policy`] with a policy that can see them.
+/// symlink - calls [`materialize_with_policy`] with a policy that can see them.
 pub fn materialize<S>(
     manifest_path: &Path,
     manifest: &Manifest,
@@ -491,7 +491,7 @@ fn discover(
         let source_relative = match RelativePath::from_path(relative_os) {
             Ok(path) => path,
             Err(err) => {
-                // Root entry itself has empty relative path — skip.
+                // Root entry itself has empty relative path - skip.
                 if relative_os.as_os_str().is_empty() {
                     continue;
                 }

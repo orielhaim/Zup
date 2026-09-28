@@ -64,7 +64,7 @@ pub const RESERVATION_STALE: std::time::Duration = std::time::Duration::from_sec
 /// Re-hashing every payload blob on every read would double the cost of every
 /// install for a threat that requires write access to a per-user directory the
 /// process already owns. The default therefore validates identity where it
-/// matters — the length always, and the digest for anything executable,
+/// matters - the length always, and the digest for anything executable,
 /// structural, or small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Verify {
@@ -421,8 +421,8 @@ impl ContentCache {
     /// How long a writer's claim on a blob survives before another acquisition
     /// may take it.
     ///
-    /// A claim is an optimization — two writers of one digest produce identical
-    /// bytes — so the only cost of getting this wrong is a refused transfer.
+    /// A claim is an optimization - two writers of one digest produce identical
+    /// bytes - so the only cost of getting this wrong is a refused transfer.
     /// Lowering it lets a machine recover quickly from an installer that was
     /// killed mid-write.
     pub fn set_reservation_stale(&mut self, stale: std::time::Duration) {
@@ -1160,9 +1160,9 @@ impl BlobWriter {
 
 impl Drop for BlobWriter {
     fn drop(&mut self) {
-        // A writer that goes away without a decision — because it was dropped
+        // A writer that goes away without a decision - because it was dropped
         // mid-transfer, or because a process was killed between two
-        // instructions — leaves a partial. If that partial is worth continuing,
+        // instructions - leaves a partial. If that partial is worth continuing,
         // record where it got to so the next process does not start from zero.
         // `abandon` and `commit` both settle deliberately and set the flag, so
         // this only runs for an interrupted transfer.
@@ -1355,7 +1355,7 @@ fn link_checked_prefixes(path: &Path) -> Result<Vec<PathBuf>, CacheError> {
 /// Walk the blob tree, reconstructing each digest from its fan-out directory
 /// and its file name.
 ///
-/// A blob's name is split across two levels — `blobs/sha256/<ab>/<rest>` — so a
+/// A blob's name is split across two levels - `blobs/sha256/<ab>/<rest>` - so a
 /// walk has to carry the prefix down. Anything that is not exactly a digest is
 /// not content: a partial, a resume record, and a writer's claim all live in the
 /// same directory and none of them may be counted or pruned as a blob.

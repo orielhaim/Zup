@@ -47,7 +47,7 @@
 //!
 //! GitHub does not document HTTP Range support for release assets. This crate
 //! probes once, uses ranged reads when the host answers with a correct `206`,
-//! falls back to whole pieces when it does not, and counts which happened — so
+//! falls back to whole pieces when it does not, and counts which happened - so
 //! [`metrics`] can tell you whether the optimisation is real for your project
 //! rather than assuming it is.
 

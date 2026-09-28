@@ -23,9 +23,9 @@
 //! from, or who verifies it. Everything a provider would otherwise have to be
 //! told lives in three small pieces instead of one large trait:
 //!
-//! - [`HostLimits`](plan::HostLimits) — what a host can hold.
-//! - [`RemoteAsset`](decision::RemoteAsset) — what a host currently reports.
-//! - [`classify`](decision::classify) — what to do about the difference.
+//! - [`HostLimits`](plan::HostLimits) - what a host can hold.
+//! - [`RemoteAsset`](decision::RemoteAsset) - what a host currently reports.
+//! - [`classify`](decision::classify) - what to do about the difference.
 //!
 //! # What this crate refuses to know
 //!
@@ -33,7 +33,7 @@
 //! discussion category, no host name. A GitHub release id has no meaning here,
 //! and a release plan that carried one would have to be rewritten the moment a
 //! project moved to another forge. Provider state belongs in a provider receipt
-//! — see [`PublishReceipt`](receipt::PublishReceipt) for the neutral shape and
+//! - see [`PublishReceipt`](receipt::PublishReceipt) for the neutral shape and
 //! `zup-publish-github` for the one that carries the ids.
 //!
 //! # Roles, and why a file is not a role

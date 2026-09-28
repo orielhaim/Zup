@@ -2,7 +2,7 @@
 //!
 //! Two commands with different failure modes. `check` is a gate: it runs in every CI
 //! job, is offline by default, and fails the build, because the failure it prevents
-//! is silent — a workflow on `actions/checkout@v4` produces a green build running
+//! is silent - a workflow on `actions/checkout@v4` produces a green build running
 //! unmaintained code. `refresh` is an edit: it reaches the network and changes a
 //! file, and it must never run inside a build, because a ref that moved under
 //! somebody who only regenerated a matrix is a supply-chain change they did not make.
@@ -266,7 +266,7 @@ fn committed_workflows(root: &Path) -> Vec<Problem> {
                 .iter()
                 .find(|pin| pin.repository == repository.trim())
             else {
-                // A workflow may use an action zup does not track — a project's own
+                // A workflow may use an action zup does not track - a project's own
                 // action, a fixture. That is not this lock's business.
                 continue;
             };
@@ -275,7 +275,7 @@ fn committed_workflows(root: &Path) -> Vec<Problem> {
             }
             // Drift is the failure a version ref makes possible: a developer bumped
             // one file in a hurry, or a bot bumped a subset. A full commit SHA in a
-            // workflow is reported too, and differently — it is not drift, it is a
+            // workflow is reported too, and differently - it is not drift, it is a
             // file that no longer matches the repository's convention.
             let remedy = if locked.is_series() && looks_like_a_series(revision) {
                 format!("expected `@{}`", locked.version)
@@ -341,7 +341,7 @@ fn report_online(current: &PinLock) -> (Vec<Outdated>, Vec<Moved>) {
             });
         }
         // A tag that no longer points where it did is a supply-chain event. A
-        // *branch* that moved is a channel doing its job, so it is not a finding —
+        // *branch* that moved is a channel doing its job, so it is not a finding -
         // the lock still records where it points, which is the useful part.
         if let Some((commit, kind)) = resolve(&pin.repository, &pin.version)
             && !kind.moves_by_design()
@@ -526,9 +526,9 @@ fn list_tags(repository: &str) -> Option<Vec<String>> {
 /// Where a ref lives upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefKind {
-    /// `refs/tags/<name>` — a release, or an alias that points at releases.
+    /// `refs/tags/<name>` - a release, or an alias that points at releases.
     Tag,
-    /// `refs/heads/<name>` — a branch. `dtolnay/rust-toolchain@stable` is one.
+    /// `refs/heads/<name>` - a branch. `dtolnay/rust-toolchain@stable` is one.
     Branch,
 }
 
@@ -803,7 +803,7 @@ mod tests {
     }
 
     /// A `uses:` line is what the lock is checked against, so a reference read out
-    /// of one must be the whole reference — with a comment tolerated, because
+    /// of one must be the whole reference - with a comment tolerated, because
     /// nothing writes one but somebody will add one, and a `run:` line must yield
     /// nothing rather than a misread.
     #[test]
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(uses_reference("        run: zup build"), None);
     }
 
-    /// A SHA is not a *different series*, and the report has to say so —
+    /// A SHA is not a *different series*, and the report has to say so -
     /// otherwise the remedy names a ref the file obviously does not use.
     #[test]
     fn only_a_major_series_looks_like_a_series() {

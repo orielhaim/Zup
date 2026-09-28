@@ -2,7 +2,7 @@
 //!
 //! The runtime ships as three binaries because a person meets three situations: a
 //! window, a terminal, and an automation system. What makes them different is not
-//! their internals but their contract — a window asks questions, a terminal
+//! their internals but their contract - a window asks questions, a terminal
 //! answers them, and an automation system states the answer and reads a document.
 //! These tests hold each of those contracts, because the failure mode is silent:
 //! a front end that asks a question a redirected terminal cannot answer hangs

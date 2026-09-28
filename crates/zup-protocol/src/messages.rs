@@ -28,7 +28,7 @@ pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 /// parent's response depends on it: a busy installation is a retry and an
 /// authentication failure is a refusal, and a parent that could not tell them
 /// apart offers the user the wrong advice. An unrecognized kind is a protocol
-/// error and never a default — a newer worker talking to an older parent has to be
+/// error and never a default - a newer worker talking to an older parent has to be
 /// refused rather than reported as something the user did wrong.
 pub mod failure {
     /// Another operation holds this installation's lock.
@@ -73,7 +73,7 @@ pub struct WireEnvelope {
 ///
 /// `ExecuteTransaction` is boxed because it is by far the largest message, and an
 /// unboxed variant would put its size on the stack of every `match` over this
-/// enum — including the ones that only handle `Cancel` or `Pong`. `Box<T>` is
+/// enum - including the ones that only handle `Cancel` or `Pong`. `Box<T>` is
 /// transparent to serde, so the wire shape is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -128,7 +128,7 @@ pub struct ExecuteTransaction {
     pub target: TargetTriple,
     /// Canonical JSON of `zup_transaction::TransactionPlan`.
     pub plan_json: String,
-    /// SHA-256 hex of `plan_json` — must match launch-time `expected_plan_hash`.
+    /// SHA-256 hex of `plan_json` - must match launch-time `expected_plan_hash`.
     pub plan_hash: String,
     pub app_id: String,
     pub app_version: String,

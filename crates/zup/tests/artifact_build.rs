@@ -288,7 +288,7 @@ fn a_universal_build_writes_one_file_containing_every_selected_target() {
     // The comparison is between the two shapes' *content*, so the launcher's one
     // time cost is subtracted from the composed side. A universal artifact needs
     // one dispatcher and two standalone installers need none, so including it
-    // would measure the launcher rather than the composition — and the launcher is
+    // would measure the launcher rather than the composition - and the launcher is
     // the same file in both cases once the second variant exists.
     let launcher = fs::metadata(console_dispatcher()).unwrap().len();
     let content = file.saturating_sub(launcher);

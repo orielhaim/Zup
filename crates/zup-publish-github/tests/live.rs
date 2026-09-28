@@ -90,7 +90,7 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
         "and reported a default branch, which is what a tag would be created from"
     );
     // `immutable_releases` is `None` on a server too old to have the field, and
-    // "not reported" is not "not enabled" — so only the value, never the absence,
+    // "not reported" is not "not enabled" - so only the value, never the absence,
     // is asserted.
     if let Some(immutable) = info.immutable_releases {
         eprintln!(

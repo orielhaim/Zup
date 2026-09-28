@@ -30,7 +30,7 @@
 //! So range is probed, not assumed. A correct `206` with a `Content-Range` that
 //! lines up means the byte range was really served and the transfer is small. A
 //! `200` means the host sent the whole object, and the source reads the frame out
-//! of it — correct, slower, and never a failure. A `206` with a `Content-Range`
+//! of it - correct, slower, and never a failure. A `206` with a `Content-Range`
 //! that does *not* line up is a refusal, not a fallback: the host disagrees
 //! about what byte `n` is, and reading the wrong bytes is worse than reading all
 //! of them.
@@ -192,7 +192,7 @@ impl GithubContentSource {
     /// Two strategies, and the choice is recorded either way. A frame goes into
     /// the cache as the wire form it already is: the cache bounds a transfer by
     /// the catalog's declared wire length, and on commit decodes the whole frame
-    /// and checks the digest of what came out — so publishing through it is what
+    /// and checks the digest of what came out - so publishing through it is what
     /// verifies, not a step this source repeats in order to be sure. Decoding
     /// here and handing over the result would cost a second full pass over every
     /// blob in the project and assert nothing extra.
@@ -201,7 +201,7 @@ impl GithubContentSource {
     ///
     /// Chunks go into the cache as they arrive. Reading a response whole first
     /// would mean a connection that drops at ninety percent of a ninety-megabyte
-    /// blob costs all ninety megabytes, because nothing reached the disk — and a
+    /// blob costs all ninety megabytes, because nothing reached the disk - and a
     /// resumable writer that is fed only at the end of a transfer cannot resume.
     /// So the resume offset is the writer's, and each attempt asks for exactly the
     /// bytes the cache does not have.
@@ -262,7 +262,7 @@ impl GithubContentSource {
                     Ranged::Mismatch { declared, response } => {
                         // A 206 whose range does not line up. The host and this
                         // client disagree about what byte `from` is, so the bytes
-                        // cannot be trusted at all — the whole object is the only
+                        // cannot be trusted at all - the whole object is the only
                         // correct answer.
                         //
                         // And the host is not asked again for the rest of this
@@ -491,8 +491,8 @@ fn cancelled(source: &str, descriptor: &ContentDescriptor) -> SourceError {
 /// A cache refusal as the `io::Error` a body sink reports.
 ///
 /// The `CacheError` is not in the message: a sink that refused is either a bound
-/// or a mismatch, and the caller reports the surrounding fact — which blob, which
-/// piece — which is more use than the reason the writer has already decided to
+/// or a mismatch, and the caller reports the surrounding fact - which blob, which
+/// piece - which is more use than the reason the writer has already decided to
 /// keep private.
 fn io(error: zup_acquire::CacheError) -> std::io::Error {
     std::io::Error::other(error.to_string())

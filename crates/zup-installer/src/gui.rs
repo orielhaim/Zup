@@ -1,7 +1,7 @@
 //! The graphical frontend: a window, a progress bar, and a cancel button.
 //!
-//! The window is a view. Every decision it can produce — install, modify, repair,
-//! uninstall, update, cancel — is turned into the same engine request a command
+//! The window is a view. Every decision it can produce - install, modify, repair,
+//! uninstall, update, cancel - is turned into the same engine request a command
 //! line would produce, on a thread that owns no UI state, so a window and a
 //! script install the same bytes through the same transaction.
 
@@ -27,7 +27,7 @@ use crate::update;
 ///
 /// Apps & Features invokes the maintenance copy with `--scope` and
 /// `--state-root`; a person double-clicks the installer with neither. Honouring
-/// the two is not a convenience — a machine-scope modify that ignored the scope
+/// the two is not a convenience - a machine-scope modify that ignored the scope
 /// it was registered with would open the window on the wrong installation.
 pub struct Launch {
     /// Show the maintenance surface even if the path does not say so.

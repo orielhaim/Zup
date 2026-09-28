@@ -15,7 +15,7 @@ use crate::report::Reporter;
 /// Everything worth knowing about one artifact.
 ///
 /// The command's own report, and the human view's model of it. The machine result
-/// carries a projection — the same facts, shaped for a consumer that wants the content
+/// carries a projection - the same facts, shaped for a consumer that wants the content
 /// accounting and the trust questions without a prose rendering around them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inspection {
@@ -234,7 +234,7 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
 /// take it for a trust answer. The certificate table's presence and the image
 /// digest are properties of the bytes; whether Windows trusts the chain is
 /// `zup sign verify`'s question, which asks the platform. So this reports
-/// "digest matches" and never "signed" — a word that would be read as a claim
+/// "digest matches" and never "signed" - a word that would be read as a claim
 /// about a trust store this command never consulted.
 fn authenticode(path: &std::path::Path) -> String {
     let signature = match zup_pe::embedded_signature(path) {

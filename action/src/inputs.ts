@@ -2,8 +2,8 @@
  * The action's inputs.
  *
  * The criterion for what belongs here is *execution*, not *application semantics*.
- * Everything that describes what an application is — its name, its installer
- * metadata, its update channels, which repository it publishes to — lives in
+ * Everything that describes what an application is - its name, its installer
+ * metadata, its update channels, which repository it publishes to - lives in
  * `zup.toml`, versioned with the project and reviewable next to the build that
  * consumes it. An input that duplicates a manifest field is a second source of truth
  * that can disagree with the first.
@@ -12,9 +12,9 @@
  * operation this step is, where the project is, which zup to install, and the one
  * credential.
  *
- * `RAW` is the single place an input name is spelled, so the set is enumerable —
+ * `RAW` is the single place an input name is spelled, so the set is enumerable -
  * which is what `action/scripts/check-metadata.mjs` needs to prove `action.yml` and
- * this file agree — and renaming an input is one edit rather than a search.
+ * this file agree - and renaming an input is one edit rather than a search.
  */
 
 import * as core from '@actions/core'
@@ -241,14 +241,14 @@ function number(name: string): number | undefined {
  * Split an advanced-arguments input into argv.
  *
  * Never a shell. The action spawns zup with an argument vector, so a value
- * containing `;`, `|`, `&&` or a backtick is just a string — there is no interpreter
+ * containing `;`, `|`, `&&` or a backtick is just a string - there is no interpreter
  * to give it meaning. That is the whole security property, and it is why this
  * function is allowed to be small.
  *
  * The two quoting rules are genuinely different. POSIX: single quotes are literal,
  * double quotes allow `\"`, and a backslash escapes the next character outside single
  * quotes. Windows: quotes group, and a backslash is a *path separator*, not an
- * escape — `C:\Program Files\zup\zup.exe` is one argument containing no escapes at
+ * escape - `C:\Program Files\zup\zup.exe` is one argument containing no escapes at
  * all, and treating `\` as an escape there would silently delete it.
  */
 export function tokenize(input: string, platform: NodeJS.Platform = process.platform): string[] {
@@ -264,7 +264,7 @@ export function tokenize(input: string, platform: NodeJS.Platform = process.plat
     const character = input[index] as string
 
     // A backslash is an escape on POSIX and data on Windows, except where it
-    // precedes a quote — the one case CommandLineToArgvW also treats as an escape,
+    // precedes a quote - the one case CommandLineToArgvW also treats as an escape,
     // which is what makes a path containing `\"` survive.
     if (character === '\\') {
       const next = input[index + 1]

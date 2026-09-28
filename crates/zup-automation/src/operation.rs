@@ -42,7 +42,7 @@ pub const OPERATION_ARTIFACT_INSPECT: &str = "artifact.inspect";
 ///
 /// The full set, for the checks that are about the set rather than about one name:
 /// `--help` text, a compatibility gate, a consumer that wants to know what it might
-/// meet. Not a closed vocabulary on the wire — [`Operation`] is a string, and a newer
+/// meet. Not a closed vocabulary on the wire - [`Operation`] is a string, and a newer
 /// zup may send a name that is not in here.
 pub const ALL_OPERATIONS: &[&str] = &[
     OPERATION_BUILD,

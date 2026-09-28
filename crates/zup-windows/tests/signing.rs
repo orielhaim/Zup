@@ -49,8 +49,8 @@ fn fixture(name: &str) -> PathBuf {
 /// A signature from a self-signed certificate is a *sound* signature from an
 /// untrusted chain, and the two facts have to be reported separately.
 ///
-/// `WinVerifyTrust` answers both halves in one call — it recomputes the message
-/// digest and builds the chain — so this is the only place a caller sees them
+/// `WinVerifyTrust` answers both halves in one call - it recomputes the message
+/// digest and builds the chain - so this is the only place a caller sees them
 /// arrive together and has to record them apart. `trusted_chain: false` with the
 /// image still `Signed` is exactly the case a single boolean would mishandle, and
 /// exactly the case a developer hits on day one.
@@ -207,7 +207,7 @@ fn bytes_that_changed_after_signing_are_reported_as_a_bad_digest() {
 }
 
 /// The evidence a verified file produces is what a release description records,
-/// and it has to name the publisher and the timestamp — because those are the
+/// and it has to name the publisher and the timestamp - because those are the
 /// two facts a downloader acts on and a digest cannot express.
 #[test]
 fn verified_evidence_records_the_publisher_and_the_timestamp() {

@@ -149,7 +149,7 @@ fn windows_adapter_reports_a_junction_a_regular_file_and_a_missing_path() {
 
 /// `std::fs` reports a directory junction as a symlink, so the default policy
 /// already refuses this tree. What it cannot see is a reparse point whose tag is
-/// not a name surrogate, which is why a Windows build injects the adapter — and
+/// not a name surrogate, which is why a Windows build injects the adapter - and
 /// neither policy may write through the junction on its way to the refusal.
 #[test]
 fn a_prerequisite_reached_through_a_junction_is_refused_by_every_policy() {

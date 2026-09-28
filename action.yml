@@ -73,7 +73,7 @@ inputs:
   github-token:
     description: >-
       The credential used by `publish` and `release`. Masked immediately, and
-      present only in the environment of the `zup publish github` process — never
+      present only in the environment of the `zup publish github` process - never
       in a build, which may run Tauri, Electron, Cargo build scripts and npm
       scripts. Builds need no credential at all.
     required: false
@@ -148,7 +148,7 @@ inputs:
       Permit `publish` and `release` on `pull_request_target` and `workflow_run`,
       where the job holds the base repository's secrets and write token while
       running code that may have come from a fork. Off by default, and refusing
-      is the point — see the action's documentation for the safe pattern.
+      is the point - see the action's documentation for the safe pattern.
     required: false
     default: "false"
 

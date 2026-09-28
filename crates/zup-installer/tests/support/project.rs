@@ -3,12 +3,12 @@
 //! The runtime's tests need the file an end user double-clicks, and they have to
 //! build it themselves. A test that depended on the developer CLI to produce its
 //! fixture would be a test of the compiler, in a package that is supposed to have
-//! nothing to do with the compiler — and a build-plane dev-dependency here would
+//! nothing to do with the compiler - and a build-plane dev-dependency here would
 //! put the very boundary this package exists to hold back into its own graph.
 //!
 //! So the plan is written out literally and embedded into a real runtime template
 //! from the staged toolchain. That is the same package an `Acme-Setup.exe` carries,
-//! produced without a manifest and without a source tree — which is exactly the
+//! produced without a manifest and without a source tree - which is exactly the
 //! position the runtime is in when it runs on a user's machine.
 
 #![allow(dead_code)]
@@ -117,7 +117,7 @@ impl State {
     ///
     /// Built one segment at a time, because a path containing a forward slash is
     /// the same path to the filesystem and a different string to everything that
-    /// compares paths — which is exactly what a registry assertion does.
+    /// compares paths - which is exactly what a registry assertion does.
     pub fn maintenance(&self, app: &AppSpec) -> PathBuf {
         self.root
             .path()
@@ -217,7 +217,7 @@ pub fn succeed(exe: &Path, state: &State, verb: &str, extra: &[&str]) -> std::pr
 /// A plugin the installer will run at install time.
 ///
 /// The source is a build-machine path recorded in the plan. The runtime never
-/// reads it — the compiled artifact is what ships — which is the property the
+/// reads it - the compiled artifact is what ships - which is the property the
 /// generated-file lifecycle test exists to prove.
 pub struct PluginSpec {
     pub id: String,
@@ -279,7 +279,7 @@ pub fn compose_with(
 ///
 /// The corruption is one byte inside the package's data region, not the
 /// executable's header: a launcher whose package will not parse is the failure a
-/// user can actually meet — a truncated download, a partial copy, a bad sector —
+/// user can actually meet - a truncated download, a partial copy, a bad sector -
 /// and a fixture that only broke the PE would be testing something else.
 pub fn compose_with_corrupt_package(app: &AppSpec, frontend: Frontend) -> Setup {
     let scratch = TempDir::new().expect("a build scratch directory");

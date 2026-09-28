@@ -7,7 +7,7 @@
 //!
 //! It is not, and no longer contains, the application runtime. Installing,
 //! modifying, repairing, updating and uninstalling an application happen in the
-//! generated installer — a different package, with its own command surface, that
+//! generated installer - a different package, with its own command surface, that
 //! ships to end users and cannot see a manifest, a source tree, or a publisher.
 //! Keeping those two things in one binary was why `cargo run` used to need a
 //! feature flag to say `--help`: one executable was pretending to be two

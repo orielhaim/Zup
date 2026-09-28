@@ -50,8 +50,8 @@ describe('formatBytes', () => {
   })
 
   it('refuses to render a number it cannot trust', () => {
-    expect(formatBytes(-1)).toBe('—')
-    expect(formatBytes(Number.NaN)).toBe('—')
+    expect(formatBytes(-1)).toBe('-')
+    expect(formatBytes(Number.NaN)).toBe('-')
   })
 })
 
@@ -76,9 +76,9 @@ describe('build summary', () => {
   })
 
   it('marks an artifact nobody has looked at, rather than calling it unsigned', () => {
-    // `—` rather than a tick: the release has not been signed *by this action's
+    // `-` rather than a tick: the release has not been signed *by this action's
     // account of it*, and claiming either answer would be a claim.
-    expect(renderSummary(summary())).toContain('| — |')
+    expect(renderSummary(summary())).toContain('| - |')
   })
 
   it('reports where the zup CLI came from', () => {
@@ -148,10 +148,10 @@ describe('release summary', () => {
 
   it('shows a dash rather than an empty cell for an unknown version', () => {
     // A toolchain report has no application: it is about this machine, not a
-    // project. `—` says "there is none" rather than inventing a version.
+    // project. `-` says "there is none" rather than inventing a version.
     const status = parseResult(fixture('toolchain-status'), 'toolchain.status')
     expect(renderSummary(summary({ result: status, results: new Map() }))).toContain(
-      '| Version | — |',
+      '| Version | - |',
     )
   })
 })

@@ -16,7 +16,7 @@
 //! `url.<base>.insteadOf` rewrite, a conditional include that applies only inside a
 //! worktree, or the `.git` *file* a linked worktree uses to point at the real
 //! directory. Git resolves all four; an INI reader resolves none and gets the right
-//! answer for the wrong reason on the ones it does handle — which is worse than
+//! answer for the wrong reason on the ones it does handle - which is worse than
 //! failing, because a release published to the wrong repository does not announce
 //! itself.
 //!
@@ -351,7 +351,7 @@ fn git_remotes(working_directory: &Path) -> Vec<(String, String)> {
 
 /// The directory to pass to `git -C`.
 ///
-/// A repository root, or the working directory as given — `git -C` inside a
+/// A repository root, or the working directory as given - `git -C` inside a
 /// subdirectory still reports that repository's remotes, so the marker scan is an
 /// optimisation rather than a requirement.
 fn git_root(working_directory: &Path) -> Option<PathBuf> {

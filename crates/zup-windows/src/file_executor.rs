@@ -101,7 +101,7 @@ pub enum WindowsFileExecutorError {
     #[error("ownership/drift during rollback of `{path}`: {reason}")]
     RollbackDrift { path: String, reason: String },
 
-    #[error("unsupported operation `{id}` — fail closed")]
+    #[error("unsupported operation `{id}` - fail closed")]
     Unsupported { id: String },
 
     #[error("I/O error at `{path}`: {source}")]
@@ -569,7 +569,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         // Flushed, not just written. A staged payload is what a later commit
         // barrier moves into the install location, and a power cut between the
         // write and the rename would otherwise leave a destination holding bytes
-        // that were never on the medium — an installed file that hashes to
+        // that were never on the medium - an installed file that hashes to
         // nothing anybody can reproduce. The size and digest are checked right
         // after, so the file is also known to be complete before it is published.
         out.sync_all().map_err(|source| {

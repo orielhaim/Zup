@@ -6,7 +6,7 @@
 //! ranges, a host that answers `200` and sends the whole object anyway, and a
 //! host that answers `206` with a range that does not line up. Only the first is
 //! an optimisation, and the second is the documented case GitHub does not promise
-//! — so the fixture has to be able to be all three.
+//! - so the fixture has to be able to be all three.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};

@@ -1,8 +1,8 @@
 //! Recovery from an interrupted transaction.
 //!
 //! Recovery is a capability, not a command. The engine reconciles a transaction
-//! whose record exists but whose work stopped — because the machine lost power,
-//! because a prerequisite demanded a reboot, because a worker was killed — and it
+//! whose record exists but whose work stopped - because the machine lost power,
+//! because a prerequisite demanded a reboot, because a worker was killed - and it
 //! does so from the record it wrote before it started. A person should not have
 //! to read a transaction identifier out of a log and type it into a setup file to
 //! get their machine back.

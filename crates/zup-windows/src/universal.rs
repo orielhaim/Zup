@@ -267,7 +267,7 @@ impl UniversalArtifact {
         let layout = UniversalLayout::new(index.variants.len(), 0);
         let table_bytes = crate::pe_resources::read_resource(&executable, layout.table())?;
         // A thin artifact names each variant's runtime so a client knows what the
-        // graph will hand it, but it does not carry one — the runtime is the
+        // graph will hand it, but it does not carry one - the runtime is the
         // thing the artifact exists to fetch, and embedding it would make the
         // installer the application. An offline artifact carries it, because it
         // has to be able to execute what it holds.

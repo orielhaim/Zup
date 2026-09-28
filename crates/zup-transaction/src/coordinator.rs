@@ -583,7 +583,7 @@ fn commit_node<S: TransactionStore>(
 }
 
 /// Cross into `next` durably, leaving the phase alone where the record cannot
-/// legally reach it — another actor may already have moved past it.
+/// legally reach it - another actor may already have moved past it.
 fn commit_phase<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,

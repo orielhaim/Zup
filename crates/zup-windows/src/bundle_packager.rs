@@ -477,13 +477,13 @@ pub fn build_self_contained_executable(
 /// Build a **thin** native runtime: the plan, and none of the content.
 ///
 /// This is the executable a thin installer fetches and hands control to. It
-/// knows exactly what it would install — application identity, components, file
-/// destinations, prerequisites, plugin bindings — so it can plan and execute a
+/// knows exactly what it would install - application identity, components, file
+/// destinations, prerequisites, plugin bindings - so it can plan and execute a
 /// lifecycle with no manifest, and it holds none of the bytes, because the bytes
 /// come from a verified content-addressed cache the release graph
 /// authenticated.
 ///
-/// The alternative — embedding the payload — is what an offline artifact does,
+/// The alternative - embedding the payload - is what an offline artifact does,
 /// and it makes the runtime the entire application. Which is the reason a thin
 /// installer built that way would not be thin.
 pub fn build_plan_only_executable(

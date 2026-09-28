@@ -8,8 +8,8 @@
 //! So the build asks for a *semantic component* and the resolver finds the bytes.
 //! Resolution is a fixed precedence, first match wins:
 //!
-//! 1. an explicit `--runtime` / `--dispatcher` path — a developer's escape hatch
-//! 2. an explicit toolchain root — `--toolchain`, or `ZUP_TOOLCHAIN`
+//! 1. an explicit `--runtime` / `--dispatcher` path - a developer's escape hatch
+//! 2. an explicit toolchain root - `--toolchain`, or `ZUP_TOOLCHAIN`
 //! 3. the installed toolchain cache for this exact zup version
 //! 4. a toolchain staged beside this executable, versioned then unversioned
 //!
@@ -292,7 +292,7 @@ pub fn other_cached_versions_for_self(state_root: &Path) -> Vec<String> {
 /// `online` is asked for only by a thin artifact. A thin artifact's launcher
 /// resolves a release over the network before it can start a runtime, so
 /// composing one from the offline launcher would produce an installer that
-/// refuses to install itself on a user's machine — a failure with no build-time
+/// refuses to install itself on a user's machine - a failure with no build-time
 /// symptom, which is exactly the class this whole contract exists to catch.
 pub fn dispatcher_for(
     subsystem: zup_artifact::LauncherSubsystem,

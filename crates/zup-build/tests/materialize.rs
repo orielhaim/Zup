@@ -236,7 +236,7 @@ fn a_glob_matches_the_depth_it_names(#[case] expected: &[&str], #[case] pattern:
 
 /// A pattern that matches nothing is a typo far more often than it is an
 /// intention, so it fails by default. `allow_empty` is how an author says they
-/// meant it — and that flag has to be honoured, or an optional component could
+/// meant it - and that flag has to be honoured, or an optional component could
 /// never be declared for a build that does not produce it.
 #[rstest]
 #[case::by_default("bni/**/*.exe", false)]

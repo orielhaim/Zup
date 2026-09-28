@@ -1,8 +1,8 @@
 //! What one piece of content is, and what it costs to move.
 //!
 //! A [`ContentDescriptor`] is the unit an acquisition session schedules. It
-//! carries the identity a release graph authenticates — digest, compressed
-//! size, logical size, and content kind — plus the scheduler's view of how
+//! carries the identity a release graph authenticates - digest, compressed
+//! size, logical size, and content kind - plus the scheduler's view of how
 //! urgent it is. Nothing here knows how the bytes travel.
 
 use std::cmp::Ordering;

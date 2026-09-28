@@ -291,7 +291,7 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
 }
 
 /// A lock marker left behind by an uninstall must not be removable while
-/// somebody holds it, and removing an absent one must not be an error — an
+/// somebody holds it, and removing an absent one must not be an error - an
 /// uninstall that fails because it ran twice is worse than useless.
 #[test]
 fn a_lock_marker_is_removed_only_when_nobody_holds_it() {

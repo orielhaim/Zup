@@ -28,7 +28,7 @@ pub struct InstallLedger {
     /// the same `1.4.0` and install different bytes on the same machine.
     ///
     /// It is absent for an installation that was not produced from a release
-    /// graph — a development run from a manifest, for instance — and its absence
+    /// graph - a development run from a manifest, for instance - and its absence
     /// is why those installations report that they have no release identity
     /// rather than pretending to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

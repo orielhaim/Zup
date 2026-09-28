@@ -490,7 +490,7 @@ fn a_release_identity_that_could_not_describe_an_installation_is_refused(
 }
 
 /// The runtime is what control is eventually handed to, so it is named as
-/// content the engine fetches, verified, and schedules first — not treated as
+/// content the engine fetches, verified, and schedules first - not treated as
 /// something already present.
 #[test]
 fn a_release_names_a_runtime_as_content_so_it_is_verified_before_it_runs() {

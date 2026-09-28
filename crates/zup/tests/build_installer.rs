@@ -9,7 +9,7 @@
 //!
 //! A build that composes a real installer needs a real runtime template, and the
 //! resolver finds the one staged beside the test binary. A test that needs a
-//! template for a machine this host is not — or one that is deliberately wrong —
+//! template for a machine this host is not - or one that is deliberately wrong -
 //! writes a component of its own, descriptor and all, so the production check is
 //! exercised rather than bypassed.
 
@@ -222,7 +222,7 @@ fn a_file_that_is_not_a_component_is_refused() {
 
 /// A component whose bytes were replaced after the descriptor was written is
 /// refused. A name and a descriptor can both be intact while the file is not the
-/// one they describe — which is what a partial copy, a truncated download, or
+/// one they describe - which is what a partial copy, a truncated download, or
 /// somebody's stray edit looks like.
 #[test]
 fn a_component_whose_bytes_were_replaced_is_refused() {

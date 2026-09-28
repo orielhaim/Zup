@@ -128,7 +128,7 @@ pub enum ObservedServiceState {
     },
 }
 
-/// Running/stopped is diagnostics only — not desired configuration.
+/// Running/stopped is diagnostics only - not desired configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceRuntimeState {

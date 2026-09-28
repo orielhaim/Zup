@@ -2,7 +2,7 @@
 //!
 //! This is the developer-facing half of the online story: from one build, the
 //! bytes a static host serves and the documents a TUF repository signs. Nothing
-//! here needs a server that understands components, targets, or installation —
+//! here needs a server that understands components, targets, or installation -
 //! the origin is a file tree, because every object in it is named by its
 //! identity.
 //!
@@ -157,7 +157,7 @@ pub struct ReleaseFile {
 ///
 /// A runtime is not payload. Composition keeps it as a descriptor and the
 /// offline artifact carries it as its own region, so it is not in the composed
-/// store — but an online machine has to fetch it, which means it has to be an
+/// store - but an online machine has to fetch it, which means it has to be an
 /// addressable object too. It is written as its raw bytes: compressing
 /// executable code buys nothing, and the client verifies the digest of the image
 /// it is about to run.

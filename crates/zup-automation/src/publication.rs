@@ -1,7 +1,7 @@
 //! The publication, provider-neutrally.
 //!
-//! `PublishReport` is a good model of what a publication *did* — phases, steps, bytes
-//! moved, notices about release integrity — and it stays exactly that, inside
+//! `PublishReport` is a good model of what a publication *did* - phases, steps, bytes
+//! moved, notices about release integrity - and it stays exactly that, inside
 //! `zup-publish`, where the publisher writes it. It is not a wire contract: a consumer
 //! that wanted to learn a release URL should not have to walk a provider's phase list,
 //! and a contract shaped like a phase list freezes the provider's step order into
@@ -9,7 +9,7 @@
 //!
 //! So this is the projection: where it went, under what name, in what state, at what
 //! address, with which files. `provider` and `subject` are strings rather than enums
-//! for the same reason everything else here is an open vocabulary — `github` and
+//! for the same reason everything else here is an open vocabulary - `github` and
 //! `github.example.internal` are both legal, and a third provider is an additive
 //! change.
 //!

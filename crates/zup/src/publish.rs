@@ -228,7 +228,7 @@ fn stage_text(
     )
 }
 
-/// The commands that sign the staged tree, which `tuftool` — not zup — runs.
+/// The commands that sign the staged tree, which `tuftool` - not zup - runs.
 fn tuf_instructions(root: &Path) -> String {
     format!(
         "\nPublish the tree as static files, then sign the release graph:\n  tuftool update \
@@ -267,8 +267,8 @@ fn resolve_runtimes(
 
 /// Build the native runtime a thin release serves.
 ///
-/// The plan is *proved* here — every declared file is read and checked against
-/// its own size and digest — so a plan whose files do not exist is refused at
+/// The plan is *proved* here - every declared file is read and checked against
+/// its own size and digest - so a plan whose files do not exist is refused at
 /// publish time rather than at install time on a user's machine.
 fn plan_only_runtime(
     template: &Path,
@@ -363,7 +363,7 @@ fn stage_thin_installers(
         .collect();
 
     // A thin artifact carries no variant manifest, so the scope the application
-    // declares has nowhere else to travel — the launcher reads it from the trust
+    // declares has nowhere else to travel - the launcher reads it from the trust
     // block. `either` is refused rather than defaulted: a bootstrapper a person
     // double-clicked cannot ask them, and silently choosing one is how a
     // per-machine application ends up in a user's profile.
@@ -447,8 +447,8 @@ fn stage_thin_installers(
         LogLevel::Info,
         format!(
             "\nThin installers\n{}\n\nThe two differ only in which document they authenticate:\n  \
-             version  releases/{}/versions/{}.json — the release it was built for\n  channel  \
-             releases/{}.json — whatever the channel currently says",
+             version  releases/{}/versions/{}.json - the release it was built for\n  channel  \
+             releases/{}.json - whatever the channel currently says",
             written
                 .iter()
                 .map(|(label, file)| {
@@ -467,7 +467,7 @@ fn stage_thin_installers(
         ),
     );
     // The two installers are release products, so they are artifacts of the
-    // operation — a consumer asked what a stage produced gets them by name rather
+    // operation - a consumer asked what a stage produced gets them by name rather
     // than by looking in a directory.
     Ok(written
         .into_iter()

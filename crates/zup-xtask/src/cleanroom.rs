@@ -22,8 +22,8 @@
 //! ```
 //!
 //! The environment is scrubbed rather than inherited. `ZUP_TOOLCHAIN` is the
-//! obvious one — it is exactly the variable that could make a broken release look
-//! like a working one — but `CARGO_HOME`, `RUSTUP_HOME`, and every `CARGO_*`
+//! obvious one - it is exactly the variable that could make a broken release look
+//! like a working one - but `CARGO_HOME`, `RUSTUP_HOME`, and every `CARGO_*`
 //! variable go too, because a `cargo run` that works and a downloaded binary that
 //! does not are different problems and this has to be able to tell them apart.
 
@@ -196,8 +196,8 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
 ///
 /// A downloaded `zup` resolves its runtime templates and launchers out of the
 /// directory it was unpacked into. That is a strong claim and the one most
-/// likely to rot: a resolver that gained an ambient arm — a `%PATH%` entry, a
-/// component sitting beside the project, a machine-global directory — would
+/// likely to rot: a resolver that gained an ambient arm - a `%PATH%` entry, a
+/// component sitting beside the project, a machine-global directory - would
 /// still work in this repository, where `target/` is full of real components,
 /// and would compose a different installer on a user's machine.
 ///
@@ -288,7 +288,7 @@ fn plain(path: &Path) -> std::path::PathBuf {
 ///
 /// A predicate rather than a literal list so the test can ask the same question
 /// the function does, without the test having to mutate the process's own
-/// environment to do it — which would be an `unsafe` block in a crate that
+/// environment to do it - which would be an `unsafe` block in a crate that
 /// forbids one, and a data race with every other test in the same binary.
 fn inherited(name: &str) -> bool {
     if name.starts_with("CARGO") || name.starts_with("RUST") {

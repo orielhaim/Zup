@@ -2,7 +2,7 @@
  * The action's entry point: read inputs, resolve zup, run the phases, report.
  *
  * The environment of every subprocess is built from scratch, and the publish token
- * appears in exactly one of them. Not "is scrubbed from the others" — *absent* from
+ * appears in exactly one of them. Not "is scrubbed from the others" - *absent* from
  * the others, because a scrub is a list of things somebody remembered to remove,
  * and a build that grows a new variable tomorrow is otherwise a credential leak.
  * That is why `buildEnvironment` takes the token as an explicit `undefined` for
@@ -216,8 +216,8 @@ async function install(inputs: Inputs, log: Log, github: GithubContext): Promise
           cacheFile: async (staged, fileName, cacheVersion, arch) => {
             const directory = await toolCache.cacheFile(staged, fileName, cacheVersion, arch)
             if (process.platform !== 'win32') {
-              // `cacheFile` copies rather than moves — a move can fail on Windows
-              // when antivirus holds a handle — so the staged copy is still there.
+              // `cacheFile` copies rather than moves - a move can fail on Windows
+              // when antivirus holds a handle - so the staged copy is still there.
               // Removing it keeps a large download from lingering in `RUNNER_TEMP`.
               await rm(staged, { force: true }).catch(() => undefined)
             }
@@ -296,7 +296,7 @@ async function execute(
  *
  * Two shapes, and the difference is which process answers the question. A zup
  * phase reads the protocol stream the command wrote. `attest` runs no zup command
- * at all — zup does not talk to Sigstore — so it reads the release description
+ * at all - zup does not talk to Sigstore - so it reads the release description
  * itself, which is the document that says which bytes a downloader will receive.
  */
 async function runPhase(
@@ -521,7 +521,7 @@ async function readReleaseManifest(
 /**
  * Whether this run should create attestations.
  *
- * `operation: attest` *is* the request — a job whose whole purpose is attestation
+ * `operation: attest` *is* the request - a job whose whole purpose is attestation
  * should not also have to set a boolean. `attest: true` adds the phase to
  * `operation: release`, where the other phases are a build and a publication and
  * attestation is one more thing to opt into.

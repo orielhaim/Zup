@@ -153,7 +153,7 @@ export function parseResult(stdout: string, expected?: Operation): AutomationRes
  *
  * `undefined` for a line that is not an event, which is a line zup did not write:
  * a blank line, or output from something else. The stream is read line by line for
- * exactly this reason — a line that cannot be read is skipped and the next one is
+ * exactly this reason - a line that cannot be read is skipped and the next one is
  * still read, rather than ending the run.
  */
 export function parseEvent(line: string): StreamEvent | undefined {
@@ -381,7 +381,7 @@ function readDiagnostic(value: unknown): Diagnostic {
  * the discrimination wrong, and the action reads the keys it knows and ignores the
  * rest. That is rule 2 applied rather than described. The cast is checked from the
  * outside by `conformance`, which requires `details.kind` to name the operation the
- * envelope claims — a payload for a different operation is refused, not narrowed.
+ * envelope claims - a payload for a different operation is refused, not narrowed.
  */
 function readDetails(value: unknown): Details | null {
   if (value === null || value === undefined) {
@@ -395,7 +395,7 @@ function readDetails(value: unknown): Details | null {
  *
  * The consumer's half of the contract, and deliberately the same three checks zup
  * runs on itself. A document that parses but cannot be used is the failure mode
- * that produces a summary with `—` in it and no error anywhere.
+ * that produces a summary with `-` in it and no error anywhere.
  */
 export function conformance(result: AutomationResult): string | undefined {
   if (result.status === 'failure' && result.diagnostics.length === 0) {
@@ -445,7 +445,7 @@ function list(value: unknown): unknown[] {
  * How much of an unreadable output to quote back.
  *
  * Small on purpose. There are two of these in a parse failure and a fixed suffix,
- * so 80 keeps the whole message under four lines of a workflow log — long enough to
+ * so 80 keeps the whole message under four lines of a workflow log - long enough to
  * see which document broke and where, short enough that a reader reaches the
  * remedy rather than scrolling.
  */

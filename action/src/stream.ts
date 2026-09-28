@@ -48,7 +48,7 @@ export class LineFramer implements Framed {
     let newline = this.#buffer.indexOf('\n')
     while (newline !== -1) {
       // `\r` because a Windows child writes CRLF. A bare trailing carriage return
-      // would still parse as JSON, so leaving it in would be harmless — and a line
+      // would still parse as JSON, so leaving it in would be harmless - and a line
       // reader that cannot say why it strips is one nobody trusts.
       const line = this.#buffer.slice(0, newline).replace(/\r$/u, '')
       this.#buffer = this.#buffer.slice(newline + 1)
@@ -81,7 +81,7 @@ export class LineFramer implements Framed {
  *
  * The `--format json` case, where the contract is *one* document. Splitting it into
  * lines would invent a requirement zup does not have, so this one does not frame
- * anything — but it does decode across chunk boundaries, because the failure it
+ * anything - but it does decode across chunk boundaries, because the failure it
  * prevents is identical.
  */
 export class WholeStream implements Framed {

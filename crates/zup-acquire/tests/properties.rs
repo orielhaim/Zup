@@ -4,7 +4,7 @@
 //!
 //! The untrusted name every source and every cache resolves against a root. It is
 //! given names from a manifest, a catalog, an HTTP response and a release
-//! description — none of which the machine wrote. So the property is an
+//! description - none of which the machine wrote. So the property is an
 //! implication rather than a character list:
 //!
 //! > If `parse` accepts a path, then no segment of it can leave the root it is
@@ -22,7 +22,7 @@
 //!    TUF repository, so a parse that loses a field publishes something other
 //!    than what it read.
 //! 2. **A catalog is a set.** Sorted and deduplicated, whatever order the bytes
-//!    arrived in — a repeat would make the scheduler plan two transfers for one
+//!    arrived in - a repeat would make the scheduler plan two transfers for one
 //!    object.
 
 use proptest::prelude::*;

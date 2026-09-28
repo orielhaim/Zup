@@ -23,8 +23,8 @@
 //!
 //! Bounded, and bounded per origin rather than as one global number, because the
 //! thing that actually limits a transfer is the connection pool of the thing
-//! serving it. Work is taken from a queue in scheduler order — priority first,
-//! then smallest first — so a 2 KiB document the installer is blocked on is not
+//! serving it. Work is taken from a queue in scheduler order - priority first,
+//! then smallest first - so a 2 KiB document the installer is blocked on is not
 //! sitting behind a 4 GiB payload blob.
 
 use std::collections::VecDeque;

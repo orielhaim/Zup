@@ -47,7 +47,7 @@ pub const PACKAGE_SCHEMA: u32 = 1;
 ///
 /// The flag is load-bearing rather than cosmetic. Without it a reader has to
 /// assume every named digest is present, and with it a reader that finds no blob
-/// index knows it must be handed a source — there is no in-between state in
+/// index knows it must be handed a source - there is no in-between state in
 /// which a plan claims content the package does not have.
 pub const PACKAGE_FEATURE_EXTERNAL_PAYLOAD: u64 = 1 << 0;
 const HEADER_LEN: u64 = 60;
@@ -975,8 +975,8 @@ fn parse_metadata(
         }
         referenced.insert(artifact.blob);
     }
-    // An external-payload package carries no blob index at all. A partial one —
-    // some content in the plan, some outside it — is the state that would let a
+    // An external-payload package carries no blob index at all. A partial one -
+    // some content in the plan, some outside it - is the state that would let a
     // reader believe it has a self-contained copy of something it does not.
     if external {
         if !metadata.blobs.is_empty() {
@@ -1270,9 +1270,9 @@ impl BundleWriter {
 
     /// Produce a package that carries its plan and none of its payload.
     ///
-    /// This is the thin runtime image. The plan is canonical and complete — the
+    /// This is the thin runtime image. The plan is canonical and complete - the
     /// application identity, the component definitions, the file destinations,
-    /// the prerequisites, the plugin bindings — so the runtime can plan and
+    /// the prerequisites, the plugin bindings - so the runtime can plan and
     /// execute a lifecycle with no manifest and no other architecture's bytes.
     /// The content itself is named by digest and comes from a verified cache.
     ///
@@ -1358,7 +1358,7 @@ impl BundleWriter {
     ///
     /// This is what a runtime does at install time: it has the plan the release
     /// authenticated, and it needs a `Package` so the content source can be
-    /// addressed by path and digest. It proves nothing and copies nothing — the
+    /// addressed by path and digest. It proves nothing and copies nothing - the
     /// plan is already canonical, and the digests it names are the keys the
     /// verified cache is addressed by. `artifacts` is only the plugin *metadata*,
     /// whose AOT bytes come from the cache rather than from here.

@@ -271,7 +271,7 @@ pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
 ///
 /// The key is `(application, scope)`. Two installs of different applications do
 /// not block each other, and a user-scope and a machine-scope install of the same
-/// application do not either — they are different installations with different
+/// application do not either - they are different installations with different
 /// ledgers, different install directories, and different uninstall entries, and
 /// serialising them would make an unrelated second install wait for no reason.
 ///
@@ -291,8 +291,8 @@ pub struct InstallationLock {
 /// What one installation's lock is for.
 ///
 /// A value rather than two format strings, because the key is written in four
-/// places — a parent session, an elevated worker, a bootstrap phase, and an
-/// uninstall — and four spellings of one lock key is four chances for a parent
+/// places - a parent session, an elevated worker, a bootstrap phase, and an
+/// uninstall - and four spellings of one lock key is four chances for a parent
 /// and its worker to disagree about which installation they are serializing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockScope {

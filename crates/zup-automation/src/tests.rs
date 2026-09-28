@@ -113,7 +113,7 @@ fn an_older_consumer_refuses_a_semantic_change() {
     );
 
     // A missing required final field. `diagnostics` is a `Vec` with no default, so a
-    // document that omits it is not a result document at all — and the generated
+    // document that omits it is not a result document at all - and the generated
     // schema says the same, which is why both are asserted.
     let mut missing = encode(&build());
     missing
@@ -127,7 +127,7 @@ fn an_older_consumer_refuses_a_semantic_change() {
 
     // A digest is a string, so the wire form cannot refuse it; `validate` is where a
     // short digest is caught. A size, however, is a number, and 2^53+1 is one no
-    // consumer can hold exactly — that one is refused on the way in.
+    // consumer can hold exactly - that one is refused on the way in.
     let mut short_digest = build();
     short_digest.artifacts[0].digest = Digest::sha256("nope");
     assert!(

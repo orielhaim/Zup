@@ -16,7 +16,7 @@
 //!
 //! The interesting way to break this is a *child* that writes to stdout. zup spawns
 //! two: `git remote -v` and `gh auth token`. Both are captured through a pipe today,
-//! which is why these tests pass — but "today" is not a property, and a future
+//! which is why these tests pass - but "today" is not a property, and a future
 //! `Stdio::inherit()` is exactly the kind of change that is easy to make and
 //! invisible in review. So [`noisy_children`] puts a program on `PATH` under the
 //! name of each child that writes a kilobyte of junk, runs the command that spawns
@@ -238,7 +238,7 @@ fn a_raw_output_command_writes_its_product_and_no_envelope() {
 fn noisy_children() -> TempDir {
     let directory = TempDir::new().expect("a directory on PATH");
     // `robocopy` is on every Windows host, writes a banner to stdout, and ignores
-    // arguments it does not understand — which is exactly the shape of the problem.
+    // arguments it does not understand - which is exactly the shape of the problem.
     // Copied under both names so whichever child zup reaches first, it reaches this.
     let source = PathBuf::from(std::env::var("SystemRoot").expect("SystemRoot"))
         .join("System32")
@@ -346,7 +346,7 @@ fn a_credential_zup_read_is_never_written_to_its_own_output() {
     // inherits its credential. zup's own contract is that `gh` *does* read the token
     // from the environment, so this is not a property zup can enforce on the child.
     // What it can enforce, and what this test pins, is that a token zup read does not
-    // reach zup's own stdout or stderr — where a CI log would keep it forever.
+    // reach zup's own stdout or stderr - where a CI log would keep it forever.
     //
     // The run is stopped at the release description, which is the first thing after
     // credential discovery, so no network happens and the assertion is about the

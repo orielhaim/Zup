@@ -42,23 +42,21 @@ dist/            the committed bundle: one file
 tests/           unit tests, run by bun test
 ```
 
-There is no hand-written copy of zup's result envelope here.
 `src/protocol.generated.ts` is generated from the same Rust DTOs as
-`schema/automation-v1.schema.json`, by `cargo xtask automation generate`; `bun run
-biome` excludes it and CI fails on drift. The decoder beside it is hand-written,
-because that is where the ignore-what-you-do-not-know rule lives. See
+`schema/automation-v1.schema.json`, by `cargo xtask automation generate`. The
+decoder beside it is hand-written, because that is where the
+ignore-what-you-do-not-know rule lives. See
 [`../docs/automation.md`](../docs/automation.md).
 
-The tests read the golden documents from `fixtures/automation/` on disk — the ones
-zup's own Rust serializes — so `bun test` is a compatibility gate rather than only
+The tests read the golden documents from `fixtures/automation/` on disk - the ones
+zup's own Rust serializes - so `bun test` is a compatibility gate rather than only
 coverage.
 
 The split between `ports.ts` and everything else is the one that matters for the
-tests. Every effect — running a process, reading a file, downloading bytes,
-writing a line of output — goes through an interface, and `runtime.ts` is the only
-file that touches `process.env`, `child_process`, `node:fs` or the network. That
-is what lets the tests assert "the build subprocess does not receive the token" as
-a fact about the code rather than as a fact about a log line.
+tests. Every effect goes through an interface, and `runtime.ts` is the only file
+that touches `process.env`, `child_process`, `node:fs` or the network. That is
+what lets the tests assert "the build subprocess does not receive the token" as a
+fact about the code rather than as a fact about a log line.
 
 ```bash
 bun install --frozen-lockfile

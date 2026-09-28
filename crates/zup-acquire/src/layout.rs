@@ -13,7 +13,7 @@
 //!
 //! Nothing under `blobs/` ever changes: the name is the digest, so an origin
 //! may cache it forever, a client may resume into it, and a mirror may hold it
-//! without being trusted. The server understands none of it — it is a static
+//! without being trusted. The server understands none of it - it is a static
 //! file tree.
 
 use serde::{Deserialize, Serialize};

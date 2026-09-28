@@ -194,7 +194,7 @@ async fn publish(
 /// stage` plus `tuftool` would: the same layout, the same document set, the
 /// same `link_target` step.
 ///
-/// Sharing a directory across two calls is how a rollback is staged — the same
+/// Sharing a directory across two calls is how a rollback is staged - the same
 /// repository, re-signed at a lower metadata version.
 async fn publish_at(
     directory: &Path,

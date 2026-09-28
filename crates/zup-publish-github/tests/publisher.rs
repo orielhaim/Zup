@@ -1,8 +1,8 @@
 //! The publication state machine, against a host that misbehaves.
 //!
 //! These are the tests the whole crate exists for. Everything GitHub documents
-//! about how a release upload can fail — and a few things it does not document but
-//! reliably does — are simulated here, and each one has an assertion about what
+//! about how a release upload can fail - and a few things it does not document but
+//! reliably does - are simulated here, and each one has an assertion about what
 //! the publisher did about it.
 
 mod common;
@@ -697,7 +697,7 @@ mod discovery {
     }
 
     /// The order a repository is chosen in: an explicit `--repo`, then the
-    /// environment, then a remote — and never a guess between two of them.
+    /// environment, then a remote - and never a guess between two of them.
     #[test]
     fn a_repository_is_chosen_by_precedence() {
         let working = |config: &str| {
@@ -849,7 +849,7 @@ mod credentials {
     }
 
     /// A credential comes from the environment before anything else, `GH_TOKEN`
-    /// before `GITHUB_TOKEN`, and the `gh` process is the last resort — it must
+    /// before `GITHUB_TOKEN`, and the `gh` process is the last resort - it must
     /// never run while the environment already has an answer.
     #[test]
     fn a_credential_comes_from_the_environment_before_anything_else() {
@@ -937,7 +937,7 @@ mod credentials {
         // carries, so this is the boundary a credential must not cross.
         //
         // The `reason` and `message` fields are caller-supplied text and are
-        // rendered as given — the invariant is that *this crate* never writes a
+        // rendered as given - the invariant is that *this crate* never writes a
         // token into one, which the next test proves by construction.
         let errors = [
             GithubError::NoToken,

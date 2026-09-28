@@ -151,7 +151,7 @@ const LINUX_ASSET: ReleaseAsset = {
  * The runner this test pretends to be on.
  *
  * Passed in rather than set on `process.env`, so the tool resolver has no ambient
- * environment to read — which is what makes every case here reachable without a
+ * environment to read - which is what makes every case here reachable without a
  * runner.
  */
 const LINUX_X64 = { RUNNER_OS: 'linux', RUNNER_ARCH: 'X64' }

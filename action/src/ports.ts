@@ -128,7 +128,7 @@ export interface ArtifactUpload {
   retentionDays: number | undefined
   /**
    * Whether the payload is a single already-compressed file. zup's outputs mostly
-   * do not compress — a `.exe`, a `.zup` transport package, a `.tar.zst` — so
+   * do not compress - a `.exe`, a `.zup` transport package, a `.tar.zst` - so
    * zipping them spends CPU and storage to make the file bigger.
    */
   direct: boolean

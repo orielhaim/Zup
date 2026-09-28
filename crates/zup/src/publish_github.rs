@@ -82,7 +82,7 @@ pub struct Options {
 /// names the files a person downloads, the staged web tree names the documents a
 /// client authenticates, and the package directory names the transport objects.
 /// A file that belongs to two roles is uploaded once, and the plan's validation
-/// refuses a name that appears in two roles with different bytes — which is the
+/// refuses a name that appears in two roles with different bytes - which is the
 /// one way this could produce a release nobody can verify.
 pub fn build_plan(
     manifest: &zup_manifest::Manifest,
@@ -95,7 +95,7 @@ pub fn build_plan(
     // A release is finalized when every artifact's published identity is a
     // measurement of the bytes that will actually go out. An unfinalized
     // description still carries pre-sign digests, and publishing it would put a
-    // manifest on the internet that no download can satisfy — a release nobody
+    // manifest on the internet that no download can satisfy - a release nobody
     // can verify, published by a tool that could have said no.
     //
     // This is a refusal and not a warning because a published release is not a

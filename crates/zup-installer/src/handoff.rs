@@ -19,7 +19,7 @@
 //!
 //! Step 3 is what binds the rest. A release authenticates the runtime digest for
 //! each of its variants, and the release's own fingerprint was verified before a
-//! byte was downloaded — so a substituted release would have to name *this*
+//! byte was downloaded - so a substituted release would have to name *this*
 //! image's digest, which requires a SHA-256 preimage.
 //!
 //! What the dispatcher *does* supply is a location: where the cache is. A hostile

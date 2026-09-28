@@ -378,7 +378,7 @@ fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, Str
     println!("  release           {}", outcome.release.display());
     println!();
     println!("zup init, check, doctor and build all work with no checkout, no target/,");
-    println!("no staged runtime and no xtask — only the release material.");
+    println!("no staged runtime and no xtask - only the release material.");
     Ok(ExitCode::SUCCESS)
 }
 

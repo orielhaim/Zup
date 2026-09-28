@@ -95,7 +95,7 @@ pub fn default_install_scope(scope: InstallScope) -> SelectedScope {
 /// | newer | older | refused, with the versions named |
 ///
 /// Same version resolving to `modify` is deliberate. A rebuild of the same
-/// version is not an upgrade — the lifecycle would refuse it as one — but the
+/// version is not an upgrade - the lifecycle would refuse it as one - but the
 /// user's intent was to make the machine match this package, and that is what
 /// modify does.
 pub fn resolve_applied_action(

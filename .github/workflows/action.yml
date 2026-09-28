@@ -6,9 +6,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-# `contents: read` is the ceiling for this workflow. It typechecks, lints, tests
-# and builds an action; it never publishes, never creates a release, and never
-# needs a token it was not granted.
 permissions:
   contents: read
 
@@ -17,8 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Every step installs from the lockfile. A drifting `bun.lock` is how a
-  # transitive dependency changes underneath a release pipeline.
   BUN_CONFIG_FROZEN_LOCKFILE: "true"
 
 jobs:
@@ -33,12 +28,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # Two runtimes, on purpose.
-      #
-      # Bun builds and tests the action. Node 24 *runs* it, because that is the
-      # runtime GitHub uses. The step below that pins Node's major version is the
-      # one that matters: a bundle Bun is happy with and Node cannot load is a
-      # green CI run and a broken release in somebody else's workflow.
       - name: Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -63,10 +52,6 @@ jobs:
       - name: Bundle
         run: bun run build
 
-      # The reason this workflow exists. `action/dist` is checked in, because
-      # GitHub runs an action from the repository without installing anything, so
-      # a stale bundle is a released action running code that no longer matches
-      # its source. This step is the only thing standing between that and main.
       - name: Dist is current
         run: |
           git diff --exit-code -- action/dist
@@ -75,9 +60,6 @@ jobs:
       - name: Metadata
         run: bun run metadata
 
-      # The bundle, under Node. Not under Bun — that is the whole point. It
-      # proves the artifact is a single ESM file, contains no `Bun.*` API, bakes
-      # in no build-machine path, and actually runs to completion.
       - name: The bundle runs on Node 24
         run: |
           echo "node $(node --version)"
@@ -107,9 +89,6 @@ jobs:
         with:
           key: action-e2e-${{ matrix.runner }}
 
-      # A real zup, from this commit, next to the action. `zup-path` is the input the
-      # action's own tests use, and it is why testing the action does not require
-      # having released it.
       - name: Build zup
         run: cargo build --release --bin zup
 
@@ -164,9 +143,6 @@ jobs:
           project-path: ${{ env.PROJECT }}
           zup-path: ${{ env.ZUP }}
 
-      # The outputs come from the protocol document zup actually wrote, not from a
-      # transcript of one. `app-version: 1.4.0` is in the fixture project, and the
-      # action read it out of `application.version`.
       - name: Outputs
         env:
           APP_VERSION: ${{ steps.check.outputs.app-version }}
@@ -189,8 +165,6 @@ jobs:
           }
           'the summary is a record, not a transcript'
 
-      # A path with a space in it, which is where a shell-based implementation breaks
-      # and an argv-based one does not.
       - name: A project path with a space
         uses: ./
         with:
@@ -198,9 +172,6 @@ jobs:
           project-path: ${{ env.RUNNER_TEMP }}\my project
           zup-path: ${{ env.ZUP }}
 
-      # A failing zup has to fail the step, and the failure has to come from the
-      # protocol document rather than from scraping stderr. The manifest is invalid,
-      # so `zup check` exits nonzero *and* writes a result.
       - name: A failing zup fails the step
         id: failure
         continue-on-error: true
@@ -222,9 +193,6 @@ jobs:
           'the failure is the protocol document, not a scraped log'
 
   tool-bootstrap:
-    # Opt-in, and separate, because it needs a published zup release to exist and
-    # reaches the network. The e2e job above covers the action itself; this covers
-    # the one path a `zup-path` stub cannot.
     name: tool bootstrap
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -2,7 +2,7 @@
 //!
 //! A fresh install, an update, a modify, and a repair differ in exactly two
 //! things: which component set is asked for, and which lifecycle verb runs
-//! afterwards. They are otherwise the same call — resolve an authenticated
+//! afterwards. They are otherwise the same call - resolve an authenticated
 //! release, select the machine's variant, compute the closure, fill a verified
 //! cache, cross the barrier, and hand a bound identity to the transaction engine.
 //!
@@ -283,7 +283,7 @@ pub fn repair_closure(
 ) -> Result<AcquisitionPlan, GraphError> {
     // Only content the release carries can be reacquired, and only content the
     // plan names is content this machine installed. A digest in neither is a
-    // defect in the ledger, not something to fetch — and refusing it is what
+    // defect in the ledger, not something to fetch - and refusing it is what
     // stops a repair from being talked into installing something it does not own.
     let known = drifted
         .iter()
@@ -324,7 +324,7 @@ pub fn repair_closure(
 /// The variant manifest, checked against the release's own claims.
 ///
 /// TUF already proved the manifest's digest, and the release's fingerprint
-/// already described it. This checks that the two documents *agree* — a graph
+/// already described it. This checks that the two documents *agree* - a graph
 /// whose manifest names a different target or frontend than the release claims
 /// is a defect in the release, and a defect is a refusal, not a re-derivation.
 pub fn parse_manifest(resolved: &ResolvedRelease) -> Result<VariantManifest, GraphError> {
@@ -383,7 +383,7 @@ async fn barrier(
 ///
 /// The plan is the one the graph authenticated, and the digests it names are the
 /// keys the cache is addressed by, so a content map is the only translation
-/// needed — there is no second index to keep in step.
+/// needed - there is no second index to keep in step.
 pub fn payload_source(
     acquired: &Acquired,
 ) -> Result<zup_bundle::AcquiredPayloadSource, GraphError> {

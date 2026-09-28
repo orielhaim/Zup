@@ -17,7 +17,7 @@ use super::cli;
 /// the verb from the machine's own record. An interrupted transaction is reconciled from
 /// the record the engine wrote before it started, so a person never reads a transaction
 /// identifier out of a log. Both explicit forms exist, hidden, for a contract that has
-/// to name one — a framework updater, an automation system.
+/// to name one - a framework updater, an automation system.
 #[test]
 fn the_public_surface_is_the_lifecycle_an_end_user_needs() {
     assert_eq!(

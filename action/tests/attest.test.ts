@@ -23,7 +23,7 @@ const SIGNED: SigningEvidence[] = [
  *
  * Hand-written, and deliberately so. The manifest is zup-artifact's own document,
  * not the automation protocol's, and the action reads it because the *release*
- * needs reading — attestation is the one thing zup does not own. A fixture here
+ * needs reading - attestation is the one thing zup does not own. A fixture here
  * that came from the protocol's generator would be testing the wrong document.
  */
 const MANIFEST: ReleaseManifestDocument = {
@@ -151,7 +151,7 @@ describe('attestSubjects', () => {
   })
 
   it('attests an unsigned-but-finalized artifact, because it is a real release', () => {
-    // Nothing here is "skip it because it is unsigned" — a finalized artifact with
+    // Nothing here is "skip it because it is unsigned" - a finalized artifact with
     // no signature is one a downloader receives, and refusing to attest it would
     // leave a hole in the chain the manifest itself was about to fill.
     const finalized = MANIFEST.artifacts[2]?.finalized

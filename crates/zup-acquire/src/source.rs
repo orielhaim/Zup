@@ -2,7 +2,7 @@
 //!
 //! An [`ArtifactSource`] is one place a verified blob might already be. The
 //! acquisition session does not know which places those are, does not care how
-//! bytes travel, and does not learn where a blob ended up coming from — the
+//! bytes travel, and does not learn where a blob ended up coming from - the
 //! cache already proved it.
 //!
 //! This is the whole reason an offline artifact, a network, a USB stick, and a
@@ -59,8 +59,8 @@ pub trait ArtifactSource: Send + Sync {
 
     /// Whether this source could serve the blob at all.
     ///
-    /// This is a cheap structural answer — a local file that exists, an
-    /// in-memory map that has the digest — and is allowed to say yes
+    /// This is a cheap structural answer - a local file that exists, an
+    /// in-memory map that has the digest - and is allowed to say yes
     /// optimistically. It is what lets a session skip a source entirely rather
     /// than opening a connection to be told nothing.
     fn contains(&self, descriptor: &ContentDescriptor) -> bool;

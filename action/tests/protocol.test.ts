@@ -143,7 +143,7 @@ describe('parseResult', () => {
 
   it('reads a refused publication as a failure with the step that refused', () => {
     // The exit code and the document agree here, and the document says which asset
-    // and which provider step — which a stderr scrape could not.
+    // and which provider step - which a stderr scrape could not.
     const result = parseResult(fixture('publish-conflict'), 'publish.github')
     expect(result.status).toBe('failure')
     expect(result.diagnostics[0]?.code).toBe('zup.publish.asset_conflict')

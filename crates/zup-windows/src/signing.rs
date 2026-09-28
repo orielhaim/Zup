@@ -2,7 +2,7 @@
 //!
 //! # Why this is not in `zup-pe`
 //!
-//! A PE image may carry a signature, and reading one is a file-format question —
+//! A PE image may carry a signature, and reading one is a file-format question -
 //! `zup-pe` answers it, on any platform, with a maintained parser. Whether
 //! *Windows* accepts that signature is a different question with a different
 //! authority: it is a judgement by the verifying machine about its own
@@ -14,9 +14,9 @@
 //!
 //! So the split is by authority, not by convenience:
 //!
-//! - `zup-pe::authenticode` — is there a signature structure, and does its
+//! - `zup-pe::authenticode` - is there a signature structure, and does its
 //!   digest match these bytes? A fact about the file.
-//! - `zup-windows::signing` — does Windows trust the chain, whose is it, and is
+//! - `zup-windows::signing` - does Windows trust the chain, whose is it, and is
 //!   it timestamped? A fact about the machine.
 //!
 //! And the release policy is stated in terms of the second, because that is the
@@ -46,8 +46,8 @@
 //! inside the signature blob. The scan therefore proves **presence** and nothing
 //! more: it does not check the timestamp token, its digest algorithm, or its
 //! ordering against the signing certificate. Integrity of the countersignature is
-//! `WinVerifyTrust`'s answer; this check exists to enforce a *policy* — "no
-//! production artifact ships without an RFC 3161 timestamp" — for which presence
+//! `WinVerifyTrust`'s answer; this check exists to enforce a *policy* - "no
+//! production artifact ships without an RFC 3161 timestamp" - for which presence
 //! is the right granularity. The legacy Authenticode timestamp is detected
 //! separately so a policy can refuse it by name rather than silently accept it.
 
@@ -119,7 +119,7 @@ pub enum Timestamp {
     /// Only the legacy Authenticode timestamp is present: `signtool /t <server>`.
     ///
     /// Detected so a policy can refuse it by name. It is not a weaker claim than
-    /// it sounds — the countersignature is still inside the signed bytes — but it
+    /// it sounds - the countersignature is still inside the signed bytes - but it
     /// is not what current Windows guidance asks for.
     LegacyOnly,
     /// No countersignature at all. The signature stops validating when the
@@ -401,8 +401,8 @@ pub enum VerificationError {
 mod platform {
     //! The one call that answers the question this module exists for.
     //!
-    //! Everything else — the certificate table, the signature structure, the
-    //! digest, the publisher, the timestamp — is read by `zup-pe` from the file
+    //! Everything else - the certificate table, the signature structure, the
+    //! digest, the publisher, the timestamp - is read by `zup-pe` from the file
     //! itself, and would give the same answer on any host. What is left is
     //! `WinVerifyTrust`, which asks the verifying machine's trust store, and which
     //! no amount of parsing can stand in for.
@@ -432,7 +432,7 @@ mod platform {
     /// little-endian, then the last eight bytes as written.
     ///
     /// The first `Data1` word is `0xaac56b`, so the first two bytes on the wire
-    /// are `0x6b, 0xc5` — **`0xc5`, not `0x56`**. Getting that byte wrong does not
+    /// are `0x6b, 0xc5` - **`0xc5`, not `0x56`**. Getting that byte wrong does not
     /// come back as "untrusted": `WinVerifyTrust` cannot find a policy provider
     /// for the action id and answers `TRUST_E_PROVIDER_UNKNOWN` for *every* file,
     /// signed or not, which is a very quiet way to ship a verification gate that
@@ -686,7 +686,7 @@ mod platform {
     ///
     /// The attribute OIDs a subject is almost always made of, with the
     /// conventional short names. Anything else keeps its OID, which is worse than
-    /// pretty and better than ambiguous — and `zup-signing`'s publisher policy
+    /// pretty and better than ambiguous - and `zup-signing`'s publisher policy
     /// matches a fragment, so a name a person can read is a name a person can
     /// configure.
     fn short_name(rendered: &str) -> String {

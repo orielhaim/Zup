@@ -115,6 +115,6 @@ const HEADER: &str = "\
 // appear that is not declared.
 //
 // The decoder that reads a document into these types is `src/protocol.ts`, and it is
-// hand-written on purpose — it is where the ignore-what-you-do-not-know rule lives.
+// hand-written on purpose - it is where the ignore-what-you-do-not-know rule lives.
 
 ";

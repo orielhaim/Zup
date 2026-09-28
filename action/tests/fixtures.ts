@@ -119,7 +119,7 @@ export function recordingLog(): { log: Log; lines: string[] } {
  * A successful operation result, for a test that only cares about one field.
  *
  * Shaped by hand, unlike the protocol tests: these tests are about the *action's*
- * logic — what it merges, what it renders — and a document zup never emitted would
+ * logic - what it merges, what it renders - and a document zup never emitted would
  * make a failure ambiguous between "the action is wrong" and "the input was wrong".
  * The documents zup really emits live in `protocol-fixtures.ts` and are read from
  * disk there.

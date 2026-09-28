@@ -3,7 +3,7 @@
 //! Operation names, artifact kinds, artifact modes, publication states and diagnostic
 //! codes are all the same shape of thing: a lowercase, dotted, forward-only vocabulary
 //! that zup extends and never renames. Enumerating them in Rust would make every
-//! extension a wire break, which is exactly backwards — the vocabulary is supposed to
+//! extension a wire break, which is exactly backwards - the vocabulary is supposed to
 //! grow, and a consumer that meets a value it does not know is required to keep going.
 //!
 //! What *is* enforced is the grammar, because an unvalidated string on a wire is an
@@ -161,7 +161,7 @@ fn is_segment(segment: &str) -> bool {
         let separator = character == '_' || character == '-';
         if separator {
             // A separator may only join two words, so it cannot be first, last or
-            // doubled — and `unknown__target` is two words with an empty one between
+            // doubled - and `unknown__target` is two words with an empty one between
             // them, which is a typo rather than a name.
             if previous_separator {
                 return false;

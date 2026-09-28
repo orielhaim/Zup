@@ -1,14 +1,14 @@
 //! The crash matrix: every crash point, recovered.
 //!
-//! The other crash tests in this package are hand-picked cases — a crash after
+//! The other crash tests in this package are hand-picked cases - a crash after
 //! `Prepared` persisted, a crash after `Running` persisted, a crash after an
 //! apply but before `Applied` persisted. Each names a situation somebody thought
 //! of, which is exactly what a matrix replaces.
 //!
 //! So this file derives the crash points instead. For each executor call in turn
-//! it kills the transaction **at that call** — with a panic, because a panic is
+//! it kills the transaction **at that call** - with a panic, because a panic is
 //! the difference between the coordinator rolling back and the process
-//! disappearing — and then recovers whatever the store still holds. A crash can
+//! disappearing - and then recovers whatever the store still holds. A crash can
 //! only ever leave the machine in a state that was durably written, so the
 //! crashes this file injects *are* the universe of crash points. A crash state
 //! this file does not test is one this file never produced, not one it forgot.
@@ -21,7 +21,7 @@
 //! Recovery is allowed to be conservative. What it may not do is end unsettled,
 //! leave a rolled-back transaction with applied work still recorded as applied,
 //! report a phase its own node states contradict, or settle into a record that
-//! fails validation — that last one trades an unfinished transaction for a corrupt
+//! fails validation - that last one trades an unfinished transaction for a corrupt
 //! one, which is worse than either.
 
 mod common;
@@ -272,7 +272,7 @@ fn sweep(label: &str, input: zup_transaction::TransactionInput) {
 /// All three plans, in one test.
 ///
 /// One test rather than three because injecting a crash means panicking, and
-/// suppressing the panic output means replacing the process-wide hook — which
+/// suppressing the panic output means replacing the process-wide hook - which
 /// three tests running in parallel would race on. The label in every message
 /// says which plan a failure came from.
 #[test]

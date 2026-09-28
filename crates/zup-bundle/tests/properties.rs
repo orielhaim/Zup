@@ -12,7 +12,7 @@
 //!    and then cannot be read has two disagreeing implementations of one format.
 //!
 //! What a property may say is narrow. "Does not panic" is nearly free; the
-//! properties worth having are *implications* — a document that parsed re-encodes
+//! properties worth having are *implications* - a document that parsed re-encodes
 //! to itself, a name that was accepted cannot leave a root. A property that
 //! restates the parser proves nothing.
 
@@ -74,7 +74,7 @@ fn check(data: &[u8]) {
         // one. It is not true: a Zstandard frame has a header and a checksum, so
         // a tiny or incompressible blob is *larger* compressed. An invariant that
         // reads like a compression-ratio assumption and is really a framing
-        // detail is worse than none — it fails on correct input and teaches the
+        // detail is worse than none - it fails on correct input and teaches the
         // next reader something false.
         let _ = index.size(position);
     }

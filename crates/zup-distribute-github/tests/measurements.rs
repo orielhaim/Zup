@@ -15,7 +15,7 @@
 //! | what a resume saves     | what a dropped connection costs a user on a large blob         |
 //!
 //! The numbers are computed from a fixture that shares content the way a real
-//! multi-architecture release does — one runtime, many shared assets — because a
+//! multi-architecture release does - one runtime, many shared assets - because a
 //! fixture with no sharing would make per-variant packages look like a flat copy
 //! of the project.
 
@@ -199,7 +199,7 @@ async fn a_two_architecture_release_is_a_handful_of_assets_and_the_union_of_its_
     // not deduplicate across variants. Two variants that share most of their
     // content still publish both copies, because each package is a separate asset
     // on a host with no cross-asset storage. What deduplicates is the *asset
-    // count* — the alternative is one asset per content object, which is the thing
+    // count* - the alternative is one asset per content object, which is the thing
     // that breaks.
     //
     // So the honest numbers are: the release holds each variant's content once,
@@ -232,7 +232,7 @@ async fn a_two_architecture_release_is_a_handful_of_assets_and_the_union_of_its_
     );
 
     // A cold install on one architecture costs its frames, plus one read to find
-    // where they are — not the whole release, and not the other architecture.
+    // where they are - not the whole release, and not the other architecture.
     let root = tempfile::tempdir().expect("a temporary directory");
     let (_, _, x64) = variants().into_iter().next().expect("a variant");
     let served = install(&layout, &packed[0].descriptor, &x64, root.path()).await;
@@ -265,7 +265,7 @@ async fn a_warm_cache_transfers_nothing_and_still_costs_one_read_to_open_the_pac
     let served_after_cold = origin.served();
 
     // Same cache, same blobs. No content crosses the wire the second time, which
-    // is what makes an update check cheap — but opening the package is not free,
+    // is what makes an update check cheap - but opening the package is not free,
     // because the source has to learn where the frames are and the index lives in
     // the package. One small read, and no more.
     let warm = install(&layout, &packed[0].descriptor, &blobs, root.path()).await;
@@ -306,7 +306,7 @@ async fn the_range_optimisation_is_worth_what_it_costs_or_it_is_not_worth_anythi
 
     // And the shape of the fallback, which is the number a project needs to know
     // before choosing this distribution mode. A host that ignores `Range` sends
-    // the whole piece for every blob, so the cost is *blobs × piece* — correct,
+    // the whole piece for every blob, so the cost is *blobs × piece* - correct,
     // and potentially an order of magnitude more than the content. The counters
     // exist so this is something a project measures rather than discovers on a
     // user's connection.

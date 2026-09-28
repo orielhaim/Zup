@@ -28,8 +28,8 @@ pub enum MachineStateError {
 
 /// Create `path` if it is missing and return it in its canonical form.
 ///
-/// Canonical rather than merely absolute because everything downstream — the
-/// ledger, the transaction store, the installation lock — treats a state root as
+/// Canonical rather than merely absolute because everything downstream - the
+/// ledger, the transaction store, the installation lock - treats a state root as
 /// an identity, and two spellings of one directory are two identities to them.
 pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
     std::fs::create_dir_all(path).map_err(|source| MachineStateError::Io {

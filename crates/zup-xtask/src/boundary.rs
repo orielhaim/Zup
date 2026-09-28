@@ -28,8 +28,8 @@
 //!
 //! [`matrix::Vocabulary`] decides whether the concept tables apply at all. A
 //! `Domain` package is held to all of them. A `FileFormat` package is held to
-//! every *structural* rule — no Windows dependency, no `cfg(windows)`, no
-//! `std::os::windows`, no Win32 namespace — and to neither concept table,
+//! every *structural* rule - no Windows dependency, no `cfg(windows)`, no
+//! `std::os::windows`, no Win32 namespace - and to neither concept table,
 //! because a crate whose domain is a Windows file format must name that format
 //! to be about it at all. `RCDATA` in `zup-pe` is the format's resource type,
 //! not a Windows concept leaking into a portable model.
@@ -834,7 +834,7 @@ mod tests {
 
     /// The classification comes from the matrix, so a package cannot acquire the
     /// file-format relaxation by anything written next to the code it silences.
-    /// An unclassified package gets the strict rules, not none — the default is
+    /// An unclassified package gets the strict rules, not none - the default is
     /// the whole point, so it is what this pins.
     #[test]
     fn the_vocabulary_is_the_matrixs_and_an_unclaimed_package_gets_the_strict_one() {

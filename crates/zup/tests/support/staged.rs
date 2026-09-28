@@ -3,7 +3,7 @@
 //! Some tests write a component's bytes into a real PE, or read a real launcher's
 //! size, and a synthetic header is not enough for either. Those tests need the
 //! components `cargo xtask toolchain build` produced, which the toolchain resolver
-//! would find on its own — but a test that has to name the launcher's size on the
+//! would find on its own - but a test that has to name the launcher's size on the
 //! command line has to know where it is.
 //!
 //! So the search is spelled out here, next to the name the resolver uses, and the

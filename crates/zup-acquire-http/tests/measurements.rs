@@ -7,8 +7,8 @@
 //! enough to justify existing.
 //!
 //! These are measurements, not thresholds. They print a report under `--nocapture`
-//! and assert only the relationships the architecture claims — a ratio, a zero, a
-//! count — because absolute timings belong to the machine that produced them.
+//! and assert only the relationships the architecture claims - a ratio, a zero, a
+//! count - because absolute timings belong to the machine that produced them.
 
 mod common;
 
@@ -198,7 +198,7 @@ fn an_update_with_mostly_unchanged_content_costs_almost_nothing() {
 /// per-transfer scheduling dominates is the shape of a real installer: many
 /// files, not one big one. The timing is printed rather than asserted, because
 /// absolute numbers belong to the machine that produced them; the correctness of
-/// both pools is asserted, and the overlap itself is observed where it can be —
+/// both pools is asserted, and the overlap itself is observed where it can be -
 /// in the number of transfers live at once.
 #[test]
 fn a_bounded_pool_overlaps_transfers() {

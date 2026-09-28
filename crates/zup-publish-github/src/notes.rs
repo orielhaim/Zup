@@ -95,8 +95,8 @@ pub struct DownloadRow {
 /// The section zup appends to a generated body.
 ///
 /// Small on purpose. A release page is read by a person deciding whether to
-/// download something, and a table of every asset — including every internal
-/// transport object — is noise. So the table lists what a person would install.
+/// download something, and a table of every asset - including every internal
+/// transport object - is noise. So the table lists what a person would install.
 pub fn download_section(rows: &[DownloadRow]) -> String {
     if rows.is_empty() {
         return String::new();

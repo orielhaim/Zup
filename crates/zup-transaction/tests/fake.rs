@@ -1,7 +1,7 @@
 //! Comprehensive fake executor for failure-injection tests.
 //!
-//! Records the order of every executor call so ordering guarantees — prepare
-//! before mutation, verify before commit — are asserted, not assumed.
+//! Records the order of every executor call so ordering guarantees - prepare
+//! before mutation, verify before commit - are asserted, not assumed.
 
 #![allow(dead_code)]
 

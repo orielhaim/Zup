@@ -60,7 +60,11 @@ when = 'component("full")'
 targets = ["windows-x64"]
 ```
 
-`id` identifies the binding and `source` is a project-relative path to the component. The optional `component`, `when`, and `targets` fields shown above attach the plugin's resources to a component, gate it on a condition, and limit it to one or more target profiles. A `when` expression is built only from `component("<id>")`, `!`, `&&`, `||`, and parentheses. A component is compiled for the build host triple, and the installer runtime refuses any component whose embedded target is not the package target.
+`id` identifies the binding and `source` is a project-relative path. The optional
+`component`, `when`, and `targets` fields attach the plugin's resources to a
+component, gate it on a condition, and limit it to target profiles. A `when`
+expression is built only from `component("<id>")`, `!`, `&&`, `||`, and
+parentheses.
 
 ## Build the example
 
@@ -91,29 +95,47 @@ cargo build -p zup-installer --no-default-features --features headless --bin zup
 cargo xtask toolchain build
 ```
 
-`zup build` resolves and hashes the source, rejects a core module, validates
-zero imports and the exact planner export and signature, AOT-compiles the
-component, verifies the AOT output, and embeds it with its target, WIT, engine,
-size, and digest metadata. The plugin path is already written in the manifest,
-and the runtime template comes from the toolchain beside `zup` rather than from
-`--runtime`.
+zup builds and tests the runtime.
 
-`zup-installer`'s three features — `gui`, `console`, `headless` — select the
-frontend its binaries provide, and the runtime carries no plugin compiler at
-all. The template is named for the frontend the manifest resolves to, so
-`--frontend headless` needs `zup-setup-headless` built from `zup-installer`, not
-a launcher. See [installer frontends](frontends.md).
+`zup build` resolves and hashes the source, rejects a core module, validates zero
+imports and the exact planner export and signature, AOT-compiles the component,
+verifies the AOT output, and embeds it with its target, WIT, engine, size, and
+digest metadata. The runtime template comes from the toolchain beside `zup` rather
+than from `--runtime`.
 
 ## Runtime and safety
 
-The installer runtime loads only the verified AOT component embedded in the bundle and uses the Wasmtime runtime with Component Model support only. It does not provide WASI, environment, clock, filesystem, network, randomness, UI, or other host imports, and it never JITs a plugin: an AOT component is the only thing it can load.
+The installer runtime loads only the verified AOT component embedded in the bundle
+and uses the Wasmtime runtime with Component Model support only. It provides no
+WASI, environment, clock, filesystem, network, randomness, or UI imports, and it
+never JITs a plugin: an AOT component is the only thing it can load.
 
-AOT bytes are native-code artifacts and are trusted only to the same extent as the containing Setup package; bundle hashes detect corruption, while release authenticity comes from Authenticode/TUF. Bundle self-hashes do not prove publisher provenance.
+AOT bytes are native-code artifacts and are trusted only to the same extent as the
+containing Setup package; bundle hashes detect corruption, while release authenticity
+comes from Authenticode/TUF. Bundle self-hashes do not prove publisher provenance.
 
-The loader requires the package target, the requested target, and its own compile target to be the same triple, and refuses an artifact whose Wasmtime version, engine fingerprint, plugin API version, or AOT format version does not match the runtime. See [architecture](architecture.md#target-binding) for the same check on the bootstrap plan and the process protocol.
+The loader requires the package target, the requested target, and its own compile
+target to be the same triple, and refuses an artifact whose Wasmtime version,
+engine fingerprint, plugin API version, or AOT format version does not match. See
+[architecture](architecture.md#target-binding) for the same check on the bootstrap
+plan and the process protocol.
 
-The sandbox disables nondeterministic and concurrent WebAssembly features and limits each invocation to 100,000,000 fuel, a 250 ms deadline, a 1 MiB stack, 512 memory pages (32 MiB), four memories, four tables, 10,000 table elements, and eight instances. A plan is limited to 4,096 resources and 8 MiB of output, and generated-file bytes count toward that 8 MiB rather than getting a separate per-file budget. One component is limited to 64 MiB of AOT bytes, and one bundle to 128 plugin components and 256 MiB of uncompressed AOT data.
+The sandbox disables nondeterministic and concurrent WebAssembly features and
+limits each invocation to 100,000,000 fuel, a 250 ms deadline, a 1 MiB stack, 512
+memory pages (32 MiB), four memories, four tables, 10,000 table elements, and eight
+instances. A plan is limited to 4,096 resources and 8 MiB of output, and
+generated-file bytes count toward that 8 MiB rather than getting a separate
+per-file budget. One component is limited to 64 MiB of AOT bytes, and one bundle to
+128 plugin components and 256 MiB of uncompressed AOT data.
 
-Failures stay typed. A component reports the WIT's own `plugin-error`, a record of `code` and `message`. The runtime reports `Setup`, `Trap`, `FuelExhausted`, `MemoryLimit`, `Cancelled`, `Timeout`, `OutputLimit`, `ResourceLimit`, `InvalidOutput`, and `Internal`; a resource-count violation is a `ResourceLimit` naming the resource and its limit. A returned generated file is hashed and merged into the ordinary installation plan, so install, ownership, repair, upgrade, and uninstall use the same transaction and ledger path as manifest files.
+Failures stay typed. A component reports the WIT's own `plugin-error`; the runtime
+reports `Setup`, `Trap`, `FuelExhausted`, `MemoryLimit`, `Cancelled`, `Timeout`,
+`OutputLimit`, `ResourceLimit`, `InvalidOutput`, and `Internal`. A returned
+generated file is hashed and merged into the ordinary installation plan, so install,
+ownership, repair, upgrade, and uninstall use the same transaction and ledger path
+as manifest files.
 
-This milestone has no plugin-provided privileged actions or custom action API. Declarative resources use the host's existing ownership and elevation rules. New capabilities require a separate, versioned WIT world; they must not be added implicitly to the planner world.
+There are no plugin-provided privileged actions or custom action API. Declarative
+resources use the host's existing ownership and elevation rules. New capabilities
+require a separate, versioned WIT world; they must not be added implicitly to the
+planner world.

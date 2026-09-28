@@ -2,8 +2,8 @@
 //!
 //! This is the claim the whole online story makes, so it is tested the way a
 //! user meets it: one command, on a real project, producing the files a person
-//! would double-click. What it proves is not that the code runs — the unit tests
-//! cover that — but the three promises a thin installer makes.
+//! would double-click. What it proves is not that the code runs - the unit tests
+//! cover that - but the three promises a thin installer makes.
 //!
 //! 1. **It is thin.** Four megabytes of content plus a full TUF root fits in a
 //!    file barely larger than the launcher it is made of, because the file
@@ -213,7 +213,7 @@ fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
     );
 
     // The thin installers are thin. The content is fetched from the release, so a
-    // file is the launcher, a trust block, and an index — and nothing else. The
+    // file is the launcher, a trust block, and an index - and nothing else. The
     // claim is relative to the launcher rather than to a byte count, because the
     // launcher's size is a build-profile decision and the ratio between them is
     // the design property.

@@ -48,7 +48,7 @@ const ABOUT: &str = "Build and distribute zup installers";
 #[derive(Debug, Parser)]
 #[command(name = "zup", version, about = ABOUT, disable_help_subcommand = true)]
 pub struct Cli {
-    /// Read zup's own binaries — runtime templates, dispatchers — from this
+    /// Read zup's own binaries - runtime templates, dispatchers - from this
     /// directory instead of the ones installed for this zup release.
     #[arg(long, global = true, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub toolchain: Option<PathBuf>,
@@ -68,12 +68,12 @@ pub fn parser() -> clap::Command {
 /// `clap` owns this point, and zup does not build a second parser to see past it.
 /// There are two things that can go wrong here, and they are not the same thing:
 ///
-/// - **The invocation names an operation and a machine format** — `zup build --format
+/// - **The invocation names an operation and a machine format** - `zup build --format
 ///   json --nonsense`. The operation is known, so a structured result is possible and
 ///   [`parse_error`] emits one: `status: "failure"`, a diagnostic with the code
 ///   `zup.cli.invalid_invocation`, and the clap message as its help. A caller that
 ///   asked for a document gets a document.
-/// - **The invocation does not name an operation at all** — `--format json` on its own,
+/// - **The invocation does not name an operation at all** - `--format json` on its own,
 ///   or an unknown verb. There is nothing to report a result *about*, and a document
 ///   naming a made-up operation would be a worse answer than a usage message. Clap
 ///   prints its message on stderr and the process exits nonzero, which is the right
@@ -334,7 +334,7 @@ fn requested_format(arguments: &[std::ffi::OsString]) -> Option<OutputArg> {
 /// The command a command line named, from the verb list rather than from a guess.
 ///
 /// Read from the parser's own subcommand table, so a command that does not exist is
-/// `None` and the caller falls back to clap's usage message — which is the documented
+/// `None` and the caller falls back to clap's usage message - which is the documented
 /// boundary for an invocation with no operation in it.
 fn requested_operation(arguments: &[std::ffi::OsString]) -> Option<&'static str> {
     /// The subcommands that take a machine format, in the parser's own order.
@@ -574,8 +574,8 @@ pub struct ReleaseLocation {
 /// Two verbs, not a maze. `prepare` writes down what needs signing and in what
 /// order; the project's own signer does the signing; `verify` reads the result
 /// back, proves it, and rewrites the release description with the identity that will
-/// actually be published. Nothing here holds a credential — a PFX, a
-/// password, a client secret, or a token — so this is safe to run in a pipeline
+/// actually be published. Nothing here holds a credential - a PFX, a
+/// password, a client secret, or a token - so this is safe to run in a pipeline
 /// that has a signing step and nothing else.
 #[derive(Debug, Args)]
 pub struct SignCommand {

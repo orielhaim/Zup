@@ -1,7 +1,7 @@
 //! Starting a real child, and refusing to start a wrong one.
 //!
-//! The handoff's security properties are properties of a *value* — which
-//! executable, which arguments, which inheritance — so they are tested against
+//! The handoff's security properties are properties of a *value* - which
+//! executable, which arguments, which inheritance - so they are tested against
 //! the value. The properties that are not properties of a value are that a child
 //! actually starts, that its exit code comes back, and that it is independent
 //! once `CreateProcessW` returns. Those are tested against real processes, on
@@ -49,7 +49,7 @@ fn reference_exit_code() -> i32 {
 fn a_real_child_starts_and_reports_the_platforms_own_exit_code() {
     // Two real processes, the same program, two launchers. If the codes agree,
     // then the handoff is forwarding the child's outcome rather than inventing
-    // one, and the child is genuinely independent of this process — `std::process`
+    // one, and the child is genuinely independent of this process - `std::process`
     // waited for its own child in the same call, and this one finished anyway.
     let expected = reference_exit_code();
     assert_ne!(expected, 0, "the probe must fail, or it proves nothing");
@@ -74,7 +74,7 @@ fn a_silent_handoff_starts_no_window_and_still_runs() {
     // The GUI handoff's claim is that the user sees one window: no console, no
     // inherited handles, and the child still runs. A real child proves the third
     // half, which is the half that would break if the empty handle list were
-    // wrong — `bInheritHandles` is set even with nothing to inherit, because the
+    // wrong - `bInheritHandles` is set even with nothing to inherit, because the
     // list is what constrains it.
     let child = launch(
         &this_executable(),
@@ -158,8 +158,8 @@ fn a_missing_executable_names_the_api_and_the_win32_code() {
 
 #[test]
 fn a_directory_is_not_an_executable() {
-    // A staged runtime that turned into a directory — a half-finished write, an
-    // interrupted unpack — must be refused rather than started, and the refusal
+    // A staged runtime that turned into a directory - a half-finished write, an
+    // interrupted unpack - must be refused rather than started, and the refusal
     // has to be distinguishable from "no such file".
     let directory = tempfile::tempdir().expect("a temporary directory");
     let error = launch(directory.path(), &[], HandOff::Console, None)

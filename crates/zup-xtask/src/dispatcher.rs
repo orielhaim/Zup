@@ -5,13 +5,13 @@
 //! closure, so `cargo test` never builds it. That is the right trade for a
 //! package whose size is a design constraint, and the wrong trade for the
 //! composition tests, which have nothing to compose into without one. So it is
-//! built as its own step — `cargo xtask toolchain build`, which CI runs before
-//! the tests — and a test that needs one says so instead of quietly passing
+//! built as its own step - `cargo xtask toolchain build`, which CI runs before
+//! the tests - and a test that needs one says so instead of quietly passing
 //! without testing anything.
 //!
 //! Everything here is host-neutral path arithmetic. Which machine the
 //! dispatcher targets, and how a staged dispatcher is named, are answered by
-//! `zup-toolchain` — the contract the developer-side resolver enforces — so a
+//! `zup-toolchain` - the contract the developer-side resolver enforces - so a
 //! test harness and a build can never disagree about which file a component is.
 
 use std::path::{Path, PathBuf};
@@ -58,7 +58,7 @@ pub struct Missing {
 ///
 /// The machine is in the name on purpose. `cargo build` writes `zup-dispatch.exe`
 /// for the *host*, so an installed image that kept that name would be silently
-/// replaced by a wider one the next time anybody built the workspace — and every
+/// replaced by a wider one the next time anybody built the workspace - and every
 /// composition test would then fail on a machine-width rule that has nothing to
 /// do with what it is testing. The name comes from the toolchain contract rather
 /// than from being spelled here a second time, because a harness that guesses a
@@ -126,9 +126,9 @@ fn profile_directory(executable: &Path) -> PathBuf {
 /// The two places a staged toolchain may be, in the order the resolver prefers
 /// them.
 ///
-/// `cargo xtask toolchain build` stages into `<profile>/toolchain/<version>/` —
+/// `cargo xtask toolchain build` stages into `<profile>/toolchain/<version>/` -
 /// one directory per zup release, so a stale toolchain beside `zup` can never be
-/// half-used with a fresh one — and a project that installs the toolchain next to
+/// half-used with a fresh one - and a project that installs the toolchain next to
 /// the executable gets the flat layout. Searching only the first is what makes
 /// every composition test fail with a missing template the moment the toolchain
 /// gains a version directory; searching only the second is what nobody installs.

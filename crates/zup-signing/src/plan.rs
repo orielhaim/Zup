@@ -2,7 +2,7 @@
 //! the signature has to satisfy.
 //!
 //! The plan is the *only* thing zup hands an external signer. It is deliberately
-//! narrow — a list of files, an expected identity, and requirements — because a
+//! narrow - a list of files, an expected identity, and requirements - because a
 //! document that carried the whole build plan would be a document nobody reads
 //! and a place for a manifest to drift out of agreement with the release it
 //! describes. See the crate documentation for why signing is a file contract
@@ -118,7 +118,7 @@ pub struct SigningSubject {
     /// is expected to change it, and that change is the point. Verification
     /// checks that a post-compose subject's bytes changed and that a
     /// pre-compose subject's *embedded* form still hashes to the value a
-    /// post-compose artifact carries — not that this field survived signing.
+    /// post-compose artifact carries - not that this field survived signing.
     pub digest: Sha256Digest,
     /// The size of those bytes.
     pub size: u64,
@@ -144,8 +144,8 @@ impl SigningSubject {
 /// One variant, and that is the honest state of the world: SHA-256 everywhere in
 /// zup, and current guidance for every platform zup can name. The type exists so
 /// the requirement is *stated* in the document a signer reads rather than assumed
-/// — a signer that chose differently would produce a release whose final digest
-/// zup cannot reproduce — and so the choice has somewhere to go when it changes.
+/// - a signer that chose differently would produce a release whose final digest
+/// zup cannot reproduce - and so the choice has somewhere to go when it changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DigestAlgorithm {

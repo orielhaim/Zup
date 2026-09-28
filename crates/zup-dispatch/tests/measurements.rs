@@ -16,7 +16,7 @@
 //! installed plan is available to measure against.
 //!
 //! Absolute timings belong to the machine that produced them, so this asserts
-//! relationships — a ratio, an ordering, a zero — and prints the numbers under
+//! relationships - a ratio, an ordering, a zero - and prints the numbers under
 //! `--nocapture`.
 
 #![cfg(all(feature = "online", windows))]
@@ -160,7 +160,7 @@ fn launcher(name: &str) -> PathBuf {
 /// release image; producing one is a full release build of this package, which is
 /// minutes whose only product is a measurement. And run without that image the
 /// test still **fails**, naming the command that produces one, rather than
-/// skipping — a size budget that quietly stops being checked is worse than one
+/// skipping - a size budget that quietly stops being checked is worse than one
 /// that is checked twice a month.
 #[test]
 #[ignore = "needs a release-profile toolchain; see the doc comment"]
@@ -200,8 +200,8 @@ fn a_thin_bootstrapper_is_the_launcher_plus_the_online_stack() {
         online < 8 * 1024 * 1024,
         "a thin bootstrapper must stay under 8 MiB; it is {online} bytes"
     );
-    // The launcher itself — the part that inspects the host, selects a variant,
-    // stages it, and starts it — is under a quarter of the online image. That is
+    // The launcher itself - the part that inspects the host, selects a variant,
+    // stages it, and starts it - is under a quarter of the online image. That is
     // worth stating because it is the reason the two are not separate products:
     // the online path is the launcher plus a network stack, not a second
     // implementation of the launcher.

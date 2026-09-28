@@ -160,7 +160,7 @@ fn an_uninstall_removes_by_ownership_and_never_loads_the_plugin_executor() {
     let build = plan_with_plugin(root.path());
     let (executor, planned) = RecordingExecutor::new(build.installer.target.clone());
     // The target cannot be lowered on a host without the Windows backend, so this
-    // fixture is expected to fail — and it must fail without ever asking the
+    // fixture is expected to fail - and it must fail without ever asking the
     // plugin executor anything, which is the property under test.
     let result = prepare_embedded_request(
         EmbeddedPreparation {

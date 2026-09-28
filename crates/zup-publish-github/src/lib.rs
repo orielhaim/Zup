@@ -47,7 +47,7 @@
 //! never written to `zup.toml`, never embedded in a release, never printed, and never
 //! stored in a receipt. A token that reached a committed manifest would reach every
 //! fork of the project, which is why the manifest has no field for one and the type
-//! that holds a token stores it in a [`secrecy::SecretString`] — `Debug` prints
+//! that holds a token stores it in a [`secrecy::SecretString`] - `Debug` prints
 //! `[REDACTED]`, `Display` does not exist, and the value is only reachable through an
 //! `expose_secret` call that reads like the dangerous thing it is.
 //!
@@ -57,7 +57,7 @@
 //! one value with a hostname in it. github.com is a default; `GITHUB_API_URL` and
 //! `GITHUB_SERVER_URL` are honoured when they are set, which is what makes an
 //! Enterprise installation work without a code change. Features a given server version
-//! may not have — immutable releases above all — are feature-detected and reported as
+//! may not have - immutable releases above all - are feature-detected and reported as
 //! "not reported" rather than as "not enabled".
 
 #![forbid(unsafe_code)]
