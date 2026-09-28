@@ -3281,28 +3281,13 @@ The feature itself is important regardless of crate choice.
 
 ---
 
-# 107. `fs_transaction`
+# 107. `atomic-write-file`
 
-**Role:** candidate filesystem transaction/recovery primitive.
+**Role:** atomic replacement of the transaction record.
 
-`fs_transaction` provides crash-oriented filesystem operations using write-ahead journaling and supports operations such as writes, moves, removals and recovery.
+Each transaction's `transaction.json` is a full snapshot written to a temp sibling, flushed, and renamed over the destination, so readers see either the old or the new complete record.
 
-Its concepts align strongly with `zup`.
-
-However, `zup` transactions extend beyond filesystem state, so this crate cannot by itself be the transaction engine.
-
-Possible architecture:
-
-```text
-zup transaction coordinator
-├── filesystem transaction layer
-├── registry receipts
-├── service receipts
-├── launcher receipts
-└── system-integration receipts
-```
-
-Because transaction correctness is central to `zup`, this dependency deserves source-level auditing before adoption.
+Transaction semantics — receipts, rollback, reconciliation, revisions, and locking — belong to `zup-transaction`; this crate only supplies the single-file atomic write.
 
 ---
 

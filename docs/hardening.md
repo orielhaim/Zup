@@ -186,16 +186,14 @@ could not tell a retry from a give-up.
 
 | Property | Claimed | By |
 | --- | --- | --- |
-| A reader sees the whole file or the previous one | yes | temp file plus `MoveFileExW` |
+| A reader sees the whole file or the previous one | yes | flushed temp file plus rename |
 | A killed process leaves a consistent tree | yes | by construction |
 | The bytes are on the medium before anything points at them | yes | the temp file is flushed before the rename |
 | The directory entry is durable | **no** | Windows cannot open a directory for `FlushFileBuffers` |
 
-The journal used to skip the file flush, on the grounds that crash atomicity came
-from the rename. That is true of a *process* crash and false of a power cut, and
-the journal is exactly the file whose contents decide which of two states a
-machine is in. The doc comment on `JournalFs` states each of the four rows
-separately rather than implying a blanket guarantee.
+The transaction record is written with `atomic-write-file`, which flushes the
+temp file before renaming it, because the record decides which of two states a
+machine is in.
 
 The same reasoning moved through the rest of the system: staged payloads are
 `sync_all`ed, the pre-replace backup goes through `copy_new_durable` rather than

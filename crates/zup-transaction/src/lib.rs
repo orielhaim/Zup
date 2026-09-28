@@ -1,4 +1,4 @@
-//! Transaction graph, durable journal, and recovery engine for zup.
+//! Transaction graph, durable record, and recovery engine for zup.
 //!
 //! ```text
 //! TransactionInput → TransactionPlan → TransactionRecord → TransactionCoordinator
@@ -12,16 +12,13 @@ mod coordinator;
 mod executor;
 mod id;
 mod input;
-mod journal_fs;
 mod plan;
 mod record;
 mod store;
 
 pub use coordinator::{TransactionCoordinator, TransactionError, TransactionOutcome, recover};
-pub use executor::{
-    CancellationProbe, NeverCancel, OperationExecutor, OperationReceipt, ReconcileResult,
-};
-pub use id::OperationId;
+pub use executor::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
+pub use id::{OperationId, TransactionId};
 pub use input::{
     BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
     FileRemovalKind, FileWork, MAX_BACKEND_DEPENDENCIES, MAX_BACKEND_PAYLOAD_BYTES,
@@ -36,7 +33,3 @@ pub use record::{
     TransactionPhase, TransactionRecord,
 };
 pub use store::{FilesystemTransactionStore, TransactionStore};
-pub use uuid::Uuid;
-
-/// Runtime identity of one transaction execution attempt.
-pub type TransactionId = id::TransactionId;

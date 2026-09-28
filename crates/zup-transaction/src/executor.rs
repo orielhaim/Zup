@@ -125,12 +125,3 @@ pub trait OperationExecutor {
 pub trait CancellationProbe {
     fn is_cancelled(&self) -> bool;
 }
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NeverCancel;
-
-impl CancellationProbe for NeverCancel {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}

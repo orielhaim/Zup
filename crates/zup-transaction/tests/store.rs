@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex};
 use tempfile::TempDir;
 use zup_core::AppId;
 use zup_transaction::{
-    FilesystemTransactionStore, NodeState, OperationId, StoreError, TransactionId,
+    CorruptReason, FilesystemTransactionStore, NodeState, OperationId, StoreError, TransactionId,
     TransactionRecord, TransactionStore, compile_transaction,
 };
 
@@ -27,55 +27,6 @@ fn record() -> TransactionRecord {
         "1.4.0".parse().unwrap(),
         plan,
     )
-}
-
-/// The store never leaves a journal behind, and that is the reason it has no
-/// recovery pass.
-///
-/// This is a checked fact rather than a comment, because the question keeps being
-/// asked: `fs_transaction` ships a `recover` entry point and this store never
-/// calls it, which reads like a missing crash-recovery path. It is not. The store
-/// applies **one** op per change set, and `fs_transaction` documents that a set
-/// of one is already indivisible — `write_atomic` is all-or-nothing by
-/// construction — and so skips the journal rather than write, flush and delete a
-/// second file to restate a promise the single op already carries. A change set
-/// that grew to several ops would start writing a journal, and then this store
-/// *would* owe a recovery pass.
-///
-/// So the test asserts both halves: no journal exists after a create and a swap,
-/// and `recover` confirms there is nothing to roll forward. If someone makes a
-/// change set of several ops, the first assertion fails and names the obligation.
-#[test]
-fn a_store_write_leaves_no_journal_to_recover() {
-    use fs_transaction::exec::block_on;
-    use fs_transaction::fs::StdFs;
-    use fs_transaction::journal::{Journal, Recovered};
-
-    let (dir, store) = store();
-    let mut record = record();
-    store.create(&record).expect("create");
-    record.revision = 1;
-    store
-        .compare_and_swap(0, &record)
-        .expect("a compare-and-swap");
-
-    let journal = Journal::default().path_in(dir.path());
-    assert!(
-        !journal.exists(),
-        "`{}` exists after two single-op writes; the store owes a recovery pass it does not \
-         perform",
-        journal.display()
-    );
-    // `StdFs` rather than the store's own `JournalFs`, because the question here is
-    // whether a journal *exists*, and that does not depend on which reader looks.
-    // The store's reader is exercised by every other test in this file.
-    let recovered = block_on(Journal::default().recover(&StdFs, dir.path()))
-        .expect("recovering a store that never journaled");
-    assert_eq!(
-        recovered,
-        Recovered::Nothing,
-        "recovery found something a two-write store never journaled"
-    );
 }
 
 /// The plan's mutating nodes, which a caller may move to `Running` in any order.
@@ -411,11 +362,7 @@ fn corrupted_json_rejected() {
     let (dir, store) = store();
     let rec = record();
     store.create(&rec).unwrap();
-    let path = dir
-        .path()
-        .join("transactions")
-        .join(rec.transaction_id.to_string())
-        .join("transaction.json");
+    let path = record_path(&dir, &rec.transaction_id);
     std::fs::write(path, b"not json").unwrap();
     let err = store.load(&rec.transaction_id).unwrap_err();
     assert!(matches!(err, StoreError::Corrupt(_)));
@@ -426,11 +373,7 @@ fn unsupported_schema_rejected() {
     let (dir, store) = store();
     let rec = record();
     store.create(&rec).unwrap();
-    let path = dir
-        .path()
-        .join("transactions")
-        .join(rec.transaction_id.to_string())
-        .join("transaction.json");
+    let path = record_path(&dir, &rec.transaction_id);
     let mut json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     json["schema"] = serde_json::json!(99);
@@ -444,11 +387,7 @@ fn plan_hash_mismatch_rejected() {
     let (dir, store) = store();
     let rec = record();
     store.create(&rec).unwrap();
-    let path = dir
-        .path()
-        .join("transactions")
-        .join(rec.transaction_id.to_string())
-        .join("transaction.json");
+    let path = record_path(&dir, &rec.transaction_id);
     let mut json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     json["plan_hash"] = serde_json::json!("00".repeat(32));
@@ -457,18 +396,93 @@ fn plan_hash_mismatch_rejected() {
     assert!(matches!(err, StoreError::Corrupt(_)));
 }
 
+fn record_path(dir: &TempDir, id: &TransactionId) -> std::path::PathBuf {
+    dir.path()
+        .join("transactions")
+        .join(id.to_string())
+        .join("transaction.json")
+}
+
 #[test]
-fn survives_reopening_store() {
-    let (dir, _store) = store();
-    let rec = record();
+fn duplicate_create_leaves_the_committed_record_alone() {
+    let (_dir, store) = store();
+    let original = record();
+    store.create(&original).unwrap();
+    let mut advanced = original.clone();
+    advanced.touch();
+    store.compare_and_swap(0, &advanced).unwrap();
+
+    let err = store.create(&original).unwrap_err();
+    assert!(matches!(err, StoreError::AlreadyExists { .. }), "{err:?}");
+    assert_eq!(store.load(&original.transaction_id).unwrap(), advanced);
+}
+
+#[test]
+fn cas_with_a_non_successor_revision_is_refused_without_writing() {
+    let (_dir, store) = store();
+    let mut rec = record();
+    store.create(&rec).unwrap();
+    rec.revision = 5;
+    let err = store.compare_and_swap(0, &rec).unwrap_err();
+    assert!(matches!(err, StoreError::Corrupt(_)), "{err:?}");
+    assert_eq!(store.load(&rec.transaction_id).unwrap().revision, 0);
+}
+
+/// Every replacement leaves exactly one complete JSON document and no temp
+/// siblings for a later reader to trip over.
+#[test]
+fn replacement_leaves_complete_json_and_no_temp_files() {
+    let (dir, store) = store();
+    let mut rec = record();
     let id = rec.transaction_id;
-    {
-        let store = FilesystemTransactionStore::new(dir.path());
-        store.create(&rec).unwrap();
+    store.create(&rec).unwrap();
+    for expected in 0..3 {
+        rec.touch();
+        store.compare_and_swap(expected, &rec).unwrap();
+        let on_disk: TransactionRecord =
+            serde_json::from_slice(&std::fs::read(record_path(&dir, &id)).unwrap()).unwrap();
+        assert_eq!(on_disk, rec);
     }
-    let store = FilesystemTransactionStore::new(dir.path());
-    let loaded = store.load(&id).unwrap();
-    assert_eq!(loaded.transaction_id, id);
+    let mut entries: Vec<String> = std::fs::read_dir(record_path(&dir, &id).parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["transaction.json", "transaction.lock"]);
+}
+
+/// A fresh store — what a recovery pass after a crash opens — reads the last
+/// committed revision, not the first.
+#[test]
+fn reopened_store_reads_the_latest_committed_record() {
+    let (dir, store) = store();
+    let mut rec = record();
+    let id = rec.transaction_id;
+    store.create(&rec).unwrap();
+    let barrier = first_barrier(&rec);
+    rec.nodes.insert(barrier.clone(), NodeState::Running);
+    rec.touch();
+    store.compare_and_swap(0, &rec).unwrap();
+    drop(store);
+
+    let loaded = FilesystemTransactionStore::new(dir.path())
+        .load(&id)
+        .unwrap();
+    assert_eq!(loaded, rec);
+    assert!(matches!(
+        loaded.nodes.get(&barrier),
+        Some(NodeState::Running)
+    ));
+}
+
+#[test]
+fn load_of_an_unknown_transaction_is_missing() {
+    let (_dir, store) = store();
+    let err = store.load(&TransactionId::new_v7()).unwrap_err();
+    assert!(
+        matches!(err, StoreError::Corrupt(CorruptReason::Missing)),
+        "{err:?}"
+    );
 }
 
 #[test]
