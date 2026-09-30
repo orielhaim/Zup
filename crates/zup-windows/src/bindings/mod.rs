@@ -7,15 +7,12 @@
     non_snake_case,
     non_camel_case_types,
     non_upper_case_globals,
-    dead_code,
     clippy::all
 )]
 
-include!(concat!(env!("OUT_DIR"), "/known_folders.rs"));
+include!(concat!(env!("OUT_DIR"), "/win32.rs"));
 
 pub use Windows::Win32::{CoTaskMemFree, SHGetKnownFolderPath};
-
-// --- Known Folder GUIDs ---
 
 /// `FOLDERID_ProgramFiles`
 pub const FOLDERID_ProgramFiles: GUID = GUID {
@@ -23,14 +20,6 @@ pub const FOLDERID_ProgramFiles: GUID = GUID {
     data2: 0xc1bf,
     data3: 0x494e,
     data4: [0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a],
-};
-
-/// `FOLDERID_LocalAppData`
-pub const FOLDERID_LocalAppData: GUID = GUID {
-    data1: 0xF1B32785,
-    data2: 0x6FBA,
-    data3: 0x4FCF,
-    data4: [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91],
 };
 
 /// `FOLDERID_ProgramData`
@@ -57,34 +46,10 @@ pub const FOLDERID_CommonStartMenu: GUID = GUID {
     data4: [0xAA, 0x7C, 0xE7, 0x4B, 0x8B, 0xE3, 0xB0, 0x67],
 };
 
-/// `FOLDERID_Desktop` (current user)
-pub const FOLDERID_Desktop: GUID = GUID {
-    data1: 0xB4BFCC3A,
-    data2: 0xDB2C,
-    data3: 0x424C,
-    data4: [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41],
-};
-
 /// `FOLDERID_PublicDesktop`
 pub const FOLDERID_PublicDesktop: GUID = GUID {
     data1: 0xC4AA340D,
     data2: 0xF20F,
     data3: 0x4863,
     data4: [0xAF, 0xEF, 0xF8, 0x7E, 0xF2, 0xE6, 0xBA, 0x25],
-};
-
-/// `FOLDERID_Programs` (current user Start Menu → Programs)
-pub const FOLDERID_Programs: GUID = GUID {
-    data1: 0xA77F5D77,
-    data2: 0x2E2B,
-    data3: 0x44C3,
-    data4: [0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51],
-};
-
-/// `FOLDERID_CommonPrograms` (common Start Menu → Programs)
-pub const FOLDERID_CommonPrograms: GUID = GUID {
-    data1: 0x0139D44E,
-    data2: 0x6AFE,
-    data3: 0x49F2,
-    data4: [0x86, 0x90, 0x3D, 0xAF, 0xCA, 0xE6, 0xFF, 0xB8],
 };

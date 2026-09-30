@@ -264,7 +264,7 @@ pub fn run(
     toolchain_root: Option<PathBuf>,
 ) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
-    let report = inspect(&args, &crate::resolver(toolchain_root))?;
+    let report = inspect(&args, &crate::resolver(toolchain_root)?)?;
     reporter.log(LogLevel::Info, report.human());
     let details = crate::automation::doctor(&report);
     let mut result = AutomationResult::new(zup_automation::OPERATION_DOCTOR)

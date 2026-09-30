@@ -2142,6 +2142,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys 0.5.0",
+]
+
+[[package]]
 name = "dirs"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8363,17 +8372,6 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
@@ -9515,12 +9513,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.259.0"
+version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d0246511d901aacf25d2dc9111f0054947de5e093fe662099e709ff7530dc3"
+checksum = "e1e9692da9ef627c5ee12b45378f68ac2689ce306f88078f5cf849b7c3444ed8"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.259.0",
+ "wasmparser 0.260.0",
 ]
 
 [[package]]
@@ -9537,14 +9535,14 @@ dependencies = [
 
 [[package]]
 name = "wasm-metadata"
-version = "0.259.0"
+version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7bf119eb01f4a246864c10bd87c8f26c566350abb25aa4d5273c415bbab338"
+checksum = "8b777ac62b820a7e0fd6b1d6beb2712bfa15a89f611e6cd792ec60468f66d6fa"
 dependencies = [
  "anyhow",
  "indexmap",
- "wasm-encoder 0.259.0",
- "wasmparser 0.259.0",
+ "wasm-encoder 0.260.0",
+ "wasmparser 0.260.0",
 ]
 
 [[package]]
@@ -9600,9 +9598,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.259.0"
+version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f7c12eac7bb587801590f6a67ff0bc84d0748513864b71108e4b311cc3df694"
+checksum = "4c94519d78304dc4a4bb5925eda6ff153bf06167467cff9233dc9593bae28fdd"
 dependencies = [
  "bitflags 2.13.2",
  "hashbrown 0.17.1",
@@ -9843,22 +9841,22 @@ dependencies = [
 
 [[package]]
 name = "wast"
-version = "259.0.0"
+version = "260.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c69beba8d9da07af9a0971b559149a2ac4729895b55144de4fddbf5a02660648"
+checksum = "17573754cde137d26852892330414efb6d1d33480adcd10e8825d092b2132229"
 dependencies = [
  "bumpalo",
  "leb128fmt",
  "memchr",
  "unicode-width 0.2.2",
- "wasm-encoder 0.259.0",
+ "wasm-encoder 0.260.0",
 ]
 
 [[package]]
 name = "wat"
-version = "1.259.0"
+version = "1.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6eec44b0c80391b20fb7ad9ea440c72c5d382385bdf74444bb18321c425017e"
+checksum = "5f56de9341c410d04121da51dd16c11d095cb6a914bd2b2850cd3c60558c0c15"
 dependencies = [
  "wast",
 ]
@@ -10974,9 +10972,9 @@ dependencies = [
 
 [[package]]
 name = "wit-component"
-version = "0.259.0"
+version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092f783dee3253265fcde131475055f8c275ac0176a9c0396db1dc7b5544bfb4"
+checksum = "389106e4fbac7c5bbece1496c442d2aceb1926c18884a3ad76f7559c160b8883"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -10985,11 +10983,11 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "wasm-encoder 0.259.0",
- "wasm-metadata 0.259.0",
- "wasmparser 0.259.0",
+ "wasm-encoder 0.260.0",
+ "wasm-metadata 0.260.0",
+ "wasmparser 0.260.0",
  "wat",
- "wit-parser 0.259.0",
+ "wit-parser 0.260.0",
 ]
 
 [[package]]
@@ -11013,9 +11011,9 @@ dependencies = [
 
 [[package]]
 name = "wit-parser"
-version = "0.259.0"
+version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6390f4f02493ce678d509c859cf1698e38929fb75c8012a6ee2f7d6b6cb66cd7"
+checksum = "3152a979bbe19638bb0655cc919d5a68ba1b7b2258f8f43f7c74430004ae7f5e"
 dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
@@ -11027,7 +11025,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "unicode-ident",
- "wasmparser 0.259.0",
+ "wasmparser 0.260.0",
 ]
 
 [[package]]
@@ -11201,14 +11199,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
+ "syn 3.0.6",
+ "synstructure",
 ]
 
 [[package]]
@@ -11422,7 +11420,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
- "synstructure 0.14.0",
+ "synstructure",
 ]
 
 [[package]]
@@ -11579,8 +11577,8 @@ dependencies = [
  "toml_edit 0.25.15+spec-1.1.0",
  "wat",
  "windows-registry 0.100.0",
- "wit-component 0.259.0",
- "wit-parser 0.259.0",
+ "wit-component 0.260.0",
+ "wit-parser 0.260.0",
  "zstd",
  "zup-acquire",
  "zup-artifact",
@@ -11815,8 +11813,8 @@ dependencies = [
  "wat",
  "windows 0.62.2",
  "windows-registry 0.100.0",
- "wit-component 0.259.0",
- "wit-parser 0.259.0",
+ "wit-component 0.260.0",
+ "wit-parser 0.260.0",
  "zup-acquire",
  "zup-artifact",
  "zup-bootstrap",
@@ -11905,8 +11903,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "wat",
- "wit-component 0.259.0",
- "wit-parser 0.259.0",
+ "wit-component 0.260.0",
+ "wit-parser 0.260.0",
  "zup-build",
  "zup-bundle",
  "zup-core",
@@ -11923,8 +11921,8 @@ dependencies = [
  "thiserror 2.0.21",
  "wasmtime",
  "wat",
- "wit-component 0.259.0",
- "wit-parser 0.259.0",
+ "wit-component 0.260.0",
+ "wit-parser 0.260.0",
 ]
 
 [[package]]
@@ -11939,8 +11937,8 @@ dependencies = [
  "thiserror 2.0.21",
  "wasmtime",
  "wat",
- "wit-component 0.259.0",
- "wit-parser 0.259.0",
+ "wit-component 0.260.0",
+ "wit-parser 0.260.0",
  "zup-build",
  "zup-bundle",
  "zup-core",
@@ -12223,6 +12221,7 @@ dependencies = [
 name = "zup-windows"
 version = "0.0.1"
 dependencies = [
+ "directories",
  "futures-util",
  "lnks",
  "proptest",

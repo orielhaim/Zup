@@ -86,7 +86,8 @@ impl AppSpec {
 
     /// The install directory this application resolves to on this machine.
     pub fn install_directory(&self) -> PathBuf {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("a user data directory"))
+        zup_windows::user_data()
+            .expect("a user data directory")
             .join("Programs")
             .join(
                 self.install_directory

@@ -88,6 +88,7 @@ fn precompiled(app_id: &str, install_name: &str) -> Vec<u8> {
         &resolve,
         world,
         wit_component::StringEncoding::UTF8,
+        false,
     )
     .expect("the module carries component metadata");
     let component = wit_component::ComponentEncoder::default()

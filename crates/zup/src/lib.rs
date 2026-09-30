@@ -67,21 +67,28 @@ pub fn command() -> clap::Command {
     cli::parser()
 }
 
-/// The state root a build's toolchain cache lives under.
+/// The state root a developer's toolchain cache lives under.
 ///
 /// A developer's machine has exactly one zup state root per scope, and the
 /// toolchain cache belongs beside everything else zup keeps there rather than in
-/// a directory of its own invention.
-pub fn toolchain_state_root() -> PathBuf {
+/// a directory of its own invention. Fallible rather than defaulted: a cache
+/// search that silently fell back to the working directory would find a
+/// developer's staged toolchain on a colleague's machine and nothing on a
+/// clean one, which reads as a missing component rather than as a machine that
+/// could not name its own directories.
+pub fn toolchain_state_root() -> miette::Result<PathBuf> {
     zup_windows::default_state_root(zup_core::SelectedScope::User)
-        .unwrap_or_else(|_| PathBuf::from("."))
+        .map_err(|error| failure::error("zup.toolchain.state_root", error.to_string()))
 }
 
 /// The resolver a build and a readiness report share.
-pub fn resolver(toolchain_root: Option<PathBuf>) -> ToolchainResolver {
-    let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zup"));
-    ToolchainResolver::new(ZUP_VERSION.to_owned(), executable, toolchain_state_root())
-        .with_root(toolchain_root)
+pub fn resolver(toolchain_root: Option<PathBuf>) -> miette::Result<ToolchainResolver> {
+    let executable = std::env::current_exe()
+        .map_err(|error| failure::error("zup.toolchain.executable", error.to_string()))?;
+    Ok(
+        ToolchainResolver::new(ZUP_VERSION.to_owned(), executable, toolchain_state_root()?)
+            .with_root(toolchain_root),
+    )
 }
 
 /// A build-machine path, without the Windows verbatim prefix.

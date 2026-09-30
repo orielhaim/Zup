@@ -69,7 +69,7 @@ pub fn run(args: PreviewCommand, toolchain: Option<PathBuf>) -> miette::Result<(
     let _lines = std::io::LineWriter::new(std::io::stdout());
     let manifest = find_manifest(&args.manifest)?;
     let (events, inbox) = Event::channel();
-    let mut session = Session::open(manifest, args.target, Arc::new(crate::resolver(toolchain)))
+    let mut session = Session::open(manifest, args.target, Arc::new(crate::resolver(toolchain)?))
         .map_err(|error| failure::error("zup.preview", error.to_string()))?;
     session.watch(events.clone());
     Event::attach_terminal(events)

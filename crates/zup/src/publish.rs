@@ -47,9 +47,9 @@ pub fn run_stage(
         &selection.manifest,
         &selection.target,
         &selection.overrides(),
-        &crate::resolver(toolchain_root.clone()),
+        &crate::resolver(toolchain_root.clone())?,
     )?;
-    let resolver = crate::resolver(toolchain_root);
+    let resolver = crate::resolver(toolchain_root)?;
     let runtimes = resolve_runtimes(&loaded, &resolver)?;
 
     // A thin release's runtime is not the template: it is the template with this

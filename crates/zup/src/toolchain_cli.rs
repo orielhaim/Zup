@@ -290,6 +290,18 @@ impl ToolchainCommand {
     }
 }
 
+/// The state root a toolchain command reads, for every verb.
+///
+/// The flag and the default answer one question, so they are answered in one
+/// place: three verbs each deciding it separately is three places a fix has to
+/// land.
+fn state_root(named: Option<PathBuf>) -> miette::Result<PathBuf> {
+    match named {
+        Some(root) => Ok(root),
+        None => crate::toolchain_state_root(),
+    }
+}
+
 /// Copy a release's components into this machine's cache.
 pub fn run_install(
     args: ToolchainInstallCommand,
@@ -302,10 +314,7 @@ pub fn run_install(
             format!("{}: {source}", args.source.display()),
         )
     })?;
-    let state_root = args
-        .state_root
-        .clone()
-        .unwrap_or_else(crate::toolchain_state_root);
+    let state_root = state_root(args.state_root.clone())?;
     let installed = install(&source, &state_root, toolchain_root).map_err(failure)?;
     reporter.log(LogLevel::Info, installed.human());
     let count = installed.components.len();
@@ -538,13 +547,7 @@ pub fn run_status(
     toolchain_root: Option<PathBuf>,
 ) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
-    let report = status(
-        &args
-            .state_root
-            .clone()
-            .unwrap_or_else(crate::toolchain_state_root),
-        toolchain_root,
-    );
+    let report = status(&state_root(args.state_root.clone())?, toolchain_root);
     reporter.log(LogLevel::Info, report.human());
     let missing = report
         .components
@@ -662,10 +665,7 @@ fn host_components() -> Vec<ToolchainComponent> {
 /// Remove cached toolchains this executable cannot use.
 pub fn run_clean(args: ToolchainCleanCommand) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
-    let state_root = args
-        .state_root
-        .clone()
-        .unwrap_or_else(crate::toolchain_state_root);
+    let state_root = state_root(args.state_root.clone())?;
     let report = clean(&state_root, args.all, args.dry_run).map_err(failure)?;
     reporter.log(LogLevel::Info, report.human());
     let removed = report.removed.len();

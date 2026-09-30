@@ -19,6 +19,7 @@ path = "src/bin/test_worker.rs"
 required-features = ["test-launcher"]
 
 [dependencies]
+directories.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
 serde.workspace = true
 serde_json.workspace = true

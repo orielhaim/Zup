@@ -132,8 +132,8 @@ is namespaced by the trusted root's digest, the repository's fingerprint, and th
 channel, so two repositories or two channels cannot poison each other's rollback
 memory, and trusted metadata is never deleted on failure.
 
-For machine installs, the invoking user's `%LOCALAPPDATA%\zup` is the update state
-root, so metadata and verified content are writable before the existing lifecycle
+For machine installs, the invoking user's own state root is the update state root,
+so metadata and verified content are writable before the existing lifecycle
 requests elevation.
 
 Target bytes stay in a private `.partial` file in the per-user content cache until

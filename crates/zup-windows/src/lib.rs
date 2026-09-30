@@ -13,9 +13,9 @@ mod durable;
 mod file_executor;
 mod fs_bindings;
 mod host;
+mod host_dirs;
 mod inspect;
 mod integration;
-mod known_folders;
 mod ledger;
 mod lowering;
 mod machine_state;
@@ -80,12 +80,14 @@ pub use host::{
     HostError, MachineSupport, NativeMachine, ProcessMachines, emulated_architectures,
     host_execution, host_version, machine_support, native_machine, process_machines,
 };
+pub use host_dirs::{
+    HostDirError, WindowsInstallLocationResolver, shared_data, user_data, user_desktop,
+};
 pub use inspect::{InspectError, inspect_files, inspect_target, inspect_target_with};
 pub use integration::{
     IntegrationError, apply_managed, apply_owned_removal, inspect_uninstall_registration,
     notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
 };
-pub use known_folders::WindowsInstallLocationResolver;
 pub use ledger::{InstallLedgerStore, LedgerError, ReleaseRecord};
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,

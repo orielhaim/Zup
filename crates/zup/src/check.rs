@@ -29,7 +29,7 @@ pub fn run_check(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
-        &crate::resolver(toolchain_root),
+        &crate::resolver(toolchain_root)?,
     )?;
     let mut variants = Vec::with_capacity(loaded.selected_targets.len());
     let mut files = 0usize;
@@ -183,7 +183,7 @@ pub fn run_plan(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
-        &crate::resolver(toolchain_root),
+        &crate::resolver(toolchain_root)?,
     )?;
     let config = loaded
         .selected_targets

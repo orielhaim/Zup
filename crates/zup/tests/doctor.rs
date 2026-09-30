@@ -207,7 +207,8 @@ fn plugin_component() -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", PLUGIN_WIT).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
+    // `false` matches the encoder below, which leaves canonical names off.
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
         .unwrap()

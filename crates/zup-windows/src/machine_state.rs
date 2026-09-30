@@ -4,11 +4,14 @@
 //! state root a scope owns, the shape a path is written to disk as, and the name
 //! the persisted maintenance executable is given all belong to the Windows
 //! backend, because a different backend answers them differently and because the
-//! developer CLI has no business implementing any of them.
+//! developer CLI has no business implementing any of them. Which directory a
+//! scope's state sits *in* is `host_dirs`' question, not this one's.
 
 use std::path::{Path, PathBuf};
 
 use zup_core::{AppId, SelectedScope};
+
+use crate::host_dirs::{self, HostDirError};
 
 /// The directory name every zup state root ends in.
 const STATE_FOLDER: &str = "zup";
@@ -16,8 +19,8 @@ const STATE_FOLDER: &str = "zup";
 /// Failures produced while resolving machine state.
 #[derive(Debug, thiserror::Error)]
 pub enum MachineStateError {
-    #[error("{0} is not available")]
-    Environment(&'static str),
+    #[error(transparent)]
+    HostDir(#[from] HostDirError),
     #[error("state root `{path}`: {source}")]
     Io {
         path: PathBuf,
@@ -32,37 +35,23 @@ pub enum MachineStateError {
 /// ledger, the transaction store, the installation lock - treats a state root as
 /// an identity, and two spellings of one directory are two identities to them.
 pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
-    std::fs::create_dir_all(path).map_err(|source| MachineStateError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    path.canonicalize().map_err(|source| MachineStateError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    std::fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
+    canonical(path)
 }
 
 /// The state root a scope owns when the caller names none.
 ///
-/// A user install owns `%LOCALAPPDATA%\zup`; a machine install owns
-/// `%PROGRAMDATA%\zup`. The machine root is only canonicalized, never created:
-/// writing into `ProgramData` is the elevated worker's job, and a check that runs
-/// before elevation has no business making the directory.
+/// A user install owns `<user data>/zup`; a machine install owns
+/// `<shared data>/zup`. The machine root is only canonicalized, never created:
+/// writing into the machine-wide data root is the elevated worker's job, and a
+/// check that runs before elevation has no business making the directory.
 pub fn default_state_root(scope: SelectedScope) -> Result<PathBuf, MachineStateError> {
-    let variable = match scope {
-        SelectedScope::User => "LOCALAPPDATA",
-        SelectedScope::Machine => "PROGRAMDATA",
-    };
-    let base = std::env::var_os(variable)
-        .map(PathBuf::from)
-        .ok_or(MachineStateError::Environment(variable))?;
-    let root = base.join(STATE_FOLDER);
-    if scope == SelectedScope::Machine {
-        base.canonicalize()
-            .map(|base| base.join(STATE_FOLDER))
-            .map_err(|source| MachineStateError::Io { path: root, source })
-    } else {
-        ensure_state_root(&root)
+    match scope {
+        SelectedScope::User => ensure_state_root(&host_dirs::user_data()?.join(STATE_FOLDER)),
+        SelectedScope::Machine => {
+            let base = host_dirs::shared_data()?;
+            canonical(&base).map(|base| base.join(STATE_FOLDER))
+        }
     }
 }
 
@@ -84,16 +73,24 @@ pub fn resolve_state_root(
                     Ok(path)
                 }
             } else {
-                Ok(std::env::current_dir()
-                    .map_err(|source| MachineStateError::Io {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .join(path))
+                std::env::current_dir()
+                    .map_err(|source| io_error(&path, source))
+                    .map(|directory| directory.join(path))
             }
         }
         Some(path) => ensure_state_root(&path),
         None => default_state_root(scope),
+    }
+}
+
+fn canonical(path: &Path) -> Result<PathBuf, MachineStateError> {
+    path.canonicalize().map_err(|source| io_error(path, source))
+}
+
+fn io_error(path: &Path, source: std::io::Error) -> MachineStateError {
+    MachineStateError::Io {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
@@ -154,6 +151,7 @@ pub fn maintenance_destination(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_dirs::{shared_data, user_data};
 
     #[test]
     fn the_extended_length_prefix_is_not_part_of_an_installed_path() {
@@ -168,6 +166,41 @@ mod tests {
         assert_eq!(
             plain_path_text(Path::new(r"C:\Program Files\Acme")),
             r"C:\Program Files\Acme"
+        );
+    }
+
+    /// The scopes differ in more than which base directory they sit in: the user
+    /// root is created on demand, and the machine root is only read.
+    #[test]
+    fn the_default_state_root_depends_on_the_scope_and_never_on_the_environment() {
+        let user = default_state_root(SelectedScope::User).expect("a user state root");
+        assert_eq!(
+            user,
+            user_data()
+                .expect("a user data directory")
+                .canonicalize()
+                .expect("the user data root exists")
+                .join("zup"),
+            "a user install's state lives in the user's own data directory"
+        );
+        assert!(
+            user.is_dir(),
+            "a user state root is created: {}",
+            user.display()
+        );
+
+        let machine = default_state_root(SelectedScope::Machine).expect("a machine state root");
+        assert_eq!(
+            machine,
+            shared_data()
+                .expect("a shared data directory")
+                .canonicalize()
+                .expect("the shared data root exists")
+                .join("zup")
+        );
+        assert!(
+            !machine.exists(),
+            "creating the machine root is the elevated worker's job, not a check's"
         );
     }
 

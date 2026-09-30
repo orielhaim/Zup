@@ -13,7 +13,7 @@ use zup_platform::{
     TargetService, TemplateResolveError, resolve_template_path,
 };
 
-use crate::known_folders::WindowsInstallLocationResolver;
+use crate::host_dirs::WindowsInstallLocationResolver;
 use crate::lowering::{
     TargetPathValidationError, validate_windows_target_path, windows_target_path_identity,
 };

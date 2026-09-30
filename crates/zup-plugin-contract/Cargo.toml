@@ -18,5 +18,5 @@ wasmtime.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 wat = "1"
-wit-component = { version = "=0.259.0", features = ["dummy-module"] }
-wit-parser = "=0.259.0"
+wit-component = { version = "=0.260.0", features = ["dummy-module"] }
+wit-parser = "=0.260.0"

@@ -169,12 +169,9 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
         }
     };
     let scope = scope_of(&manifest);
-    let state_root = match options.state_root.clone() {
-        Some(root) => root,
-        None => match default_state_root(scope) {
-            Ok(root) => root,
-            Err(detail) => return Outcome::Refused { detail },
-        },
+    let state_root = match state_root(options.state_root.as_deref(), scope) {
+        Ok(root) => root,
+        Err(detail) => return Outcome::Refused { detail },
     };
     let identity = ContentStoreIdentity::new(
         index.artifact.application.id.clone(),
@@ -250,15 +247,20 @@ fn artifact_digest(artifact: &UniversalArtifact) -> zup_core::Sha256Digest {
     artifact.view().index().tables.blobs.digest
 }
 
-fn default_state_root(scope: zup_core::SelectedScope) -> Result<PathBuf, String> {
-    let variable = match scope {
-        zup_core::SelectedScope::User => "LOCALAPPDATA",
-        zup_core::SelectedScope::Machine => "PROGRAMDATA",
-    };
-    let base = std::env::var_os(variable).ok_or_else(|| {
-        format!("{variable} is not set, so there is nowhere to record the installation")
-    })?;
-    Ok(PathBuf::from(base).join("zup"))
+/// The state root this dispatch writes into.
+///
+/// A launcher has no idea what the machine calls its directories, and asking it
+/// was three copies of the same environment-variable probe that could disagree
+/// with the runtime it starts. Both paths are the backend's question now.
+pub(crate) fn state_root(
+    named: Option<&Path>,
+    scope: zup_core::SelectedScope,
+) -> Result<PathBuf, String> {
+    match named {
+        Some(root) => Ok(root.to_path_buf()),
+        None => zup_windows::default_state_root(scope)
+            .map_err(|error| format!("{error}, so there is nowhere to record the installation")),
+    }
 }
 
 /// Start the selected variant's native runtime and wait for it.

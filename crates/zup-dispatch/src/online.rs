@@ -106,7 +106,7 @@ pub fn run_with(
             detail: detail.to_owned(),
         };
     }
-    let state_root = match resolve_state_root(request, scope) {
+    let state_root = match crate::state_root(request.state_root.as_deref(), scope) {
         Ok(root) => root,
         Err(detail) => return Outcome::Refused { detail },
     };
@@ -149,23 +149,6 @@ pub fn run_with(
     drop(sink);
     emitter.join();
     outcome
-}
-
-fn resolve_state_root(
-    request: &BootstrapRequest,
-    scope: zup_core::SelectedScope,
-) -> Result<PathBuf, String> {
-    if let Some(root) = &request.state_root {
-        return Ok(root.clone());
-    }
-    let variable = match scope {
-        zup_core::SelectedScope::User => "LOCALAPPDATA",
-        zup_core::SelectedScope::Machine => "PROGRAMDATA",
-    };
-    let base = std::env::var_os(variable).ok_or_else(|| {
-        format!("{variable} is not set, so there is nowhere to record the installation")
-    })?;
-    Ok(PathBuf::from(base).join("zup"))
 }
 
 /// Everything the thin path was told, in one value.

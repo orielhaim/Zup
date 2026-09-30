@@ -534,6 +534,29 @@ fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
     }
 }
 
+/// The resolver and the state root are the same question asked two ways, so they
+/// are answered from the same place: a user install's state lives in the user
+/// data directory that `${location.user_data}` resolves to, whatever the machine
+/// happens to call that directory.
+#[test]
+fn the_user_state_root_and_the_user_data_location_are_one_directory() {
+    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let user_data = WindowsInstallLocationResolver
+        .resolve(InstallLocation::UserData, SelectedScope::User, &target)
+        .unwrap();
+    let state = zup_windows::default_state_root(SelectedScope::User).unwrap();
+    // A state root is canonicalized, because the ledger treats two spellings of
+    // one directory as two identities, so the location is compared the same way.
+    let expected = PathBuf::from(user_data.as_str())
+        .join("zup")
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        expected, state,
+        "zup's own state sits in the same user data root an installed application uses"
+    );
+}
+
 mod transaction_fingerprint {
     use std::path::Path;
 

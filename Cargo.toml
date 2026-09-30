@@ -87,6 +87,7 @@ petgraph = "0.8"
 # Build / filesystem
 atomic-write-file = "0.3"
 walkdir = "2"
+directories = "6"
 globset = "0.4"
 sha2 = "0.11"
 wasmtime = { version = "49.0", default-features = false, features = [

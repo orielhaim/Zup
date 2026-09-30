@@ -82,7 +82,7 @@ fn execute(
     reporter: &Reporter,
     toolchain_root: Option<PathBuf>,
 ) -> miette::Result<BuildOutcome> {
-    let resolver = crate::resolver(toolchain_root);
+    let resolver = crate::resolver(toolchain_root)?;
     let loaded = project::load_for_build(
         &args.project.manifest,
         &args.project.target,
