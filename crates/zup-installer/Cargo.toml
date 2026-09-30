@@ -47,6 +47,7 @@ required-features = ["gui"]
 [dependencies]
 clap = { workspace = true }
 miette.workspace = true
+opener.workspace = true
 semver.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

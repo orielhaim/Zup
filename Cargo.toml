@@ -96,6 +96,8 @@ wasmtime = { version = "49.0", default-features = false, features = [
   "std",
 ] }
 
+opener = "0.9"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

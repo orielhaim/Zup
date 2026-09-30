@@ -500,8 +500,10 @@ fn act(
         }
         HostDecision::Cancel => active.lock().expect("the running operation").cancel(),
         HostDecision::OpenLog => {
-            if let Some(path) = state.log_path() {
-                open_log(path);
+            if let Some(path) = state.log_path()
+                && let Err(error) = opener::open(path)
+            {
+                state.fail(format!("open the session log: {error}"), false);
             }
         }
         HostDecision::CopyDiagnostics => {
@@ -741,17 +743,6 @@ fn block_on(future: impl std::future::Future<Output = miette::Result<()>>) -> mi
         .build()
         .map_err(|error| miette::miette!("start the session runtime: {error}"))?
         .block_on(future)
-}
-
-fn open_log(path: &str) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-    }
 }
 
 /// What "Copy diagnostics" puts on the clipboard.
