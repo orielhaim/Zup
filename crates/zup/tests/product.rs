@@ -36,12 +36,76 @@ fn manifest(package: &str) -> String {
 /// Scoped to the `[[bin]]` sections, because `name =` also appears in `[package]`
 /// and in `default-run`, and a parser that matched those would report a package
 /// name as a binary.
-fn binaries(source: &str) -> Vec<String> {
+/// The binaries a default `cargo install` of `source` would actually build.
+///
+/// A binary behind a `required-features` that is not a default feature is not
+/// one: `cargo install` does not pass that feature, so nothing it produces is
+/// runnable. A test fixture gated that way is not a product, and treating it as
+/// one would push the fixture out of the crate that needs it.
+fn installable_binaries(source: &str) -> Vec<String> {
+    let defaults = default_features(source);
     let mut names = Vec::new();
-    let mut inside = false;
+    let mut name: Option<String> = None;
+    let mut required: Vec<String> = Vec::new();
+    let mut building = false;
     for line in source.lines() {
         let line = line.trim();
         if line == "[[bin]]" {
+            building = true;
+            name = None;
+            required.clear();
+            continue;
+        }
+        if line.starts_with('[') {
+            if building {
+                finish_bin(&mut names, name.take(), &required, &defaults);
+            }
+            building = false;
+            continue;
+        }
+        if !building {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "name" => name = Some(value.trim().trim_matches('"').to_owned()),
+            "required-features" => required.extend(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .split(',')
+                    .map(|feature| feature.trim().trim_matches('"').to_owned())
+                    .filter(|feature| !feature.is_empty()),
+            ),
+            _ => {}
+        }
+    }
+    finish_bin(&mut names, name, &required, &defaults);
+    names
+}
+
+fn finish_bin(
+    names: &mut Vec<String>,
+    name: Option<String>,
+    required: &[String],
+    defaults: &[String],
+) {
+    if let Some(name) = name
+        && required.iter().all(|feature| defaults.contains(feature))
+    {
+        names.push(name);
+    }
+}
+
+/// The features a default `cargo install` turns on.
+fn default_features(source: &str) -> Vec<String> {
+    let mut features = Vec::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "[features]" {
             inside = true;
             continue;
         }
@@ -49,14 +113,21 @@ fn binaries(source: &str) -> Vec<String> {
             inside = false;
             continue;
         }
-        if inside
-            && let Some(rest) = line.strip_prefix("name")
-            && let Some(value) = rest.trim().strip_prefix('=')
-        {
-            names.push(value.trim().trim_matches('"').to_owned());
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if inside && name.trim() == "default" {
+            features.extend(
+                value
+                    .trim()
+                    .trim_matches(['[', ']'])
+                    .split(',')
+                    .map(|feature| feature.trim().trim_matches('"').to_owned())
+                    .filter(|feature| !feature.is_empty()),
+            );
         }
     }
-    names
+    features
 }
 
 /// Whether `help` offers `verb` as a command, rather than mentioning it in prose.
@@ -109,7 +180,7 @@ fn the_developer_binary_prints_help_with_no_features() {
 #[test]
 fn only_the_developer_tool_is_installable() {
     assert_eq!(
-        binaries(&manifest("zup")),
+        installable_binaries(&manifest("zup")),
         vec!["zup".to_owned()],
         "`zup` is one executable with one shape; a second `[[bin]]` is a second product"
     );
@@ -130,7 +201,7 @@ fn only_the_developer_tool_is_installable() {
         if source.contains("publish = false") {
             continue;
         }
-        if !binaries(&source).is_empty() {
+        if !installable_binaries(&source).is_empty() {
             installable.push(name);
         }
     }

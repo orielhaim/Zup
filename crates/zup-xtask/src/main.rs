@@ -49,8 +49,9 @@ xtask release clean-room [--material <dir>] [--work <dir>]
 
 xtask verify-dependency-graph [--root <dir>]
     Refuse a dependency graph that grew by accident. Fails when a workspace
-    package reaches two versions of one external crate, and when development
-    tooling has reached the graph of a binary that ships to users.
+    package reaches two versions of one external crate, when development tooling
+    has reached the graph of a binary that ships to users, and when a published
+    UI crate has reached a crate that exists only in this repository.
 
 xtask automation generate [--root <dir>]
     Write the artifacts derived from the automation contract: the JSON Schema, the
@@ -293,9 +294,12 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
     for intrusion in &findings.intrusions {
         eprintln!("xtask: {intrusion}");
     }
+    for crossing in &findings.crossings {
+        eprintln!("xtask: {crossing}");
+    }
     eprintln!(
         "xtask: {} finding(s)",
-        findings.duplicates.len() + findings.intrusions.len()
+        findings.duplicates.len() + findings.intrusions.len() + findings.crossings.len()
     );
     Ok(ExitCode::from(1))
 }

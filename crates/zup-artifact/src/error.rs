@@ -81,6 +81,37 @@ pub enum ArtifactError {
 
     #[error(transparent)]
     Package(#[from] zup_bundle::PackageError),
+
+    #[error("`{found}` is not the start of a preset package")]
+    PresetMagic { found: String },
+
+    #[error("this preset package is schema {found}; this build reads schema {expected}")]
+    PresetSchema { expected: u32, found: u32 },
+
+    #[error("this preset package is {found} bytes; its header accounts for {expected}")]
+    PresetTruncated { expected: u64, found: u64 },
+
+    #[error("this preset package is {found} bytes; its header accounts for {expected}")]
+    PresetTrailing { expected: u64, found: u64 },
+
+    #[error("this preset package cannot be used: {0}")]
+    PresetMetadata(String),
+
+    #[error("a preset binary is {size} bytes; the limit is {limit}")]
+    BinaryTooLarge { size: u64, limit: u64 },
+
+    #[error("a preset package would carry {count} binaries; the limit is {limit}")]
+    TooManyPresetBinaries { count: usize, limit: usize },
+
+    #[error("the preset binary for `{target}` is damaged ({digest}): {reason}")]
+    PresetCorrupt {
+        target: String,
+        digest: String,
+        reason: String,
+    },
+
+    #[error("this preset package has no binary for `{target}`; it carries: {available}")]
+    PresetTargetUnavailable { target: String, available: String },
 }
 
 impl From<Incompatible> for ArtifactError {

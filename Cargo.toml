@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["crates/zup-ui-gpui"]
+# `fixtures/aurora` is deliberately not a member: it is a preset, and a preset
+# outside this workspace is the only shape a third-party author has, so packing
+# one from here has to go through a path dependency rather than a workspace edge.
+exclude = ["fixtures/aurora"]
 default-members = ["crates/zup"]
 
 [workspace.package]
@@ -64,6 +67,13 @@ zup-distribute-github = { path = "crates/zup-distribute-github" }
 zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
 zup-presentation = { path = "crates/zup-presentation" }
+zup-ui-protocol = { path = "crates/zup-ui-protocol", version = "0.1.0" }
+zup-ui-host = { path = "crates/zup-ui-host" }
+zup-ui-compose = { path = "crates/zup-ui-compose" }
+zup-preview = { path = "crates/zup-preview" }
+zup-ui-dev = { path = "crates/zup-ui-dev" }
+zup-ui-sdk = { path = "crates/zup-ui-sdk", version = "0.1.0" }
+zup-ui-ipc = { path = "crates/zup-ui-ipc", version = "0.1.0" }
 zup-windows = { path = "crates/zup-windows" }
 zup-update = { path = "crates/zup-update" }
 zup-plugin-contract = { path = "crates/zup-plugin-contract" }

@@ -22,6 +22,7 @@ zup-acquire.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-signing.workspace = true
+zup-ui-protocol.workspace = true
 
 [dev-dependencies]
 zup-build.workspace = true

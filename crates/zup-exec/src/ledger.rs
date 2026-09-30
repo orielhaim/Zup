@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use zup_core::ReleaseIdentity;
 use zup_core::{
     AppId, BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, SelectedScope,
-    ServiceStart, Sha256Digest, TargetTriple,
+    ServiceStart, Sha256Digest, TargetTriple, UiRuntime,
 };
 use zup_platform::{CommandSpec, TargetPath};
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 1;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
@@ -33,6 +33,13 @@ pub struct InstallLedger {
     /// rather than pretending to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<ReleaseIdentity>,
+    /// The window this installation presents, as durable runtime facts.
+    ///
+    /// `None` for an installation with no window. Always written, never defaulted
+    /// on read: a ledger that omitted the field would be indistinguishable from
+    /// one that recorded no window, and a graphical installation that has lost
+    /// this has lost the ability to open at all.
+    pub ui: Option<UiRuntime>,
     pub committed_transaction: String,
     #[serde(with = "resource_map")]
     pub resources: BTreeMap<ResourceKey, OwnedResource>,
@@ -75,6 +82,7 @@ impl InstallLedger {
             selected_components: Vec::new(),
             install_directory: None,
             release: None,
+            ui: None,
             committed_transaction: String::new(),
             resources: BTreeMap::new(),
         }
@@ -87,6 +95,11 @@ impl InstallLedger {
     /// on one has to say so rather than guess.
     pub fn release_identity(&self) -> Option<&ReleaseIdentity> {
         self.release.as_ref()
+    }
+
+    /// The window this installation presents, if it has one.
+    pub fn ui(&self) -> Option<&UiRuntime> {
+        self.ui.as_ref()
     }
 }
 

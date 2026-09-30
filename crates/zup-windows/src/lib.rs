@@ -44,6 +44,8 @@ mod universal;
 mod worker;
 mod worker_rt;
 
+pub mod ui_runtime;
+
 pub use acquired::{
     AcquiredBundle, AcquiredRelease, HandoffRejection, VerifiedHandoff, accept_handoff, open_cache,
     own_digest, subsystem, verify, write_handoff,
@@ -62,7 +64,8 @@ pub use cmdline::{
 pub use content_store::{
     CONTENT_STORE_DIRECTORY, ContentStoreError, ContentStoreIdentity, MAINTENANCE_EXECUTABLE_NAME,
     MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, content_store_base, ensure_directory,
-    maintenance_directory, remove_store, validate_content_store_base, verify_directory_chain,
+    maintenance_directory, maintenance_root, preset_executable_name, remove_store,
+    validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{
     DurableError, InstallationLock, LockScope, copy_new_durable, create_durable, move_durable,

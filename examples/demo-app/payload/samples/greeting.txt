@@ -1,0 +1,9 @@
+greeting, world
+===============
+
+A sample data file, installed by the "Sample data" component. That component is
+on by default, so a default install writes this and deselecting it does not.
+
+Delete this file after installing and press Repair from the maintenance window:
+Repair restores what drifted, so it comes back. Delete it and press Uninstall
+instead and it does not, because the whole directory goes.

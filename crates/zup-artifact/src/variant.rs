@@ -221,6 +221,7 @@ pub struct DistributionVariant {
     plan: PortableBuildPlan,
     requirements: VariantRequirements,
     runtime: Option<Descriptor>,
+    preset: Option<Descriptor>,
     sources: VariantSources,
     logical_size: u64,
 }
@@ -229,14 +230,18 @@ impl DistributionVariant {
     /// Resolve one target profile into a variant from a materialized build plan
     /// and its compiled plugins.
     ///
-    /// `runtime` is the native maintenance runtime image for this target. It is
-    /// required for an offline universal artifact, where a selected variant has
-    /// to be executable without anything else present.
+    /// `natives` are the binaries a composed installer carries that no build plan
+    /// can describe: the maintenance runtime it starts, and the preset whose
+    /// window it opens. They are named here rather than left implicit because
+    /// both are things a variant may legitimately not have - a thin artifact
+    /// carries no runtime, and a console frontend carries no preset - and a
+    /// required one would produce an installer that fails on a user's machine
+    /// with no build-time symptom.
     pub fn resolve(
         config: &zup_core::ResolvedTargetConfig,
         plan: &zup_core::TargetBuildPlan,
         plugins: &[CompiledPluginArtifact],
-        runtime: Option<(MediaType, Vec<u8>)>,
+        natives: &[(MediaType, Vec<u8>)],
     ) -> Result<Self, ArtifactError> {
         if plan.installer.target != config.target {
             return Err(ArtifactError::Invalid);
@@ -247,6 +252,18 @@ impl DistributionVariant {
         }
         for prerequisite in &plan.prerequisites {
             sources = sources.with_file(prerequisite.sha256, prerequisite.source.clone());
+        }
+        // The window's assets are content the composed store has to hold and a
+        // client has to fetch, so their bytes are sourced exactly as payload
+        // bytes are. A plan read back out of a package carries no source, and
+        // that plan is not something to compose from: composition is the build
+        // plane, and a window whose content it cannot read is a build that would
+        // fail on the machine rather than here.
+        for asset in &plan.ui_assets {
+            let Some(source) = asset.source.clone() else {
+                return Err(ArtifactError::Invalid);
+            };
+            sources = sources.with_file(asset.sha256, source);
         }
         for artifact in plugins {
             let digest = artifact.metadata().blob;
@@ -293,21 +310,36 @@ impl DistributionVariant {
             installer: plan.installer.clone(),
             entries,
             prerequisite_artifacts,
+            ui_assets: plan
+                .ui_assets
+                .iter()
+                .map(|asset| zup_core::UiAsset {
+                    name: asset.name.clone(),
+                    size: asset.size,
+                    sha256: asset.sha256,
+                })
+                .collect(),
             plugins: plugin_artifacts,
             total_size: plan.total_size,
         };
-        let runtime = match runtime {
-            Some((media_type, bytes)) => {
-                let descriptor = Descriptor::of(media_type, &bytes);
-                // The runtime image is content the composer must be able to read
-                // again, so it is registered beside the payload like every other
-                // blob, keyed by its own digest.
-                sources = sources.with_bytes(descriptor.digest, bytes);
-                Some(descriptor)
+        let mut runtime = None;
+        let mut preset = None;
+        for (media_type, bytes) in natives {
+            let descriptor = Descriptor::of(*media_type, bytes);
+            // A native image is content the composer must be able to read again,
+            // so it is registered beside the payload like every other blob, keyed
+            // by its own digest.
+            sources = sources.with_bytes(descriptor.digest, bytes.clone());
+            match media_type {
+                MediaType::Runtime => runtime = Some(descriptor),
+                MediaType::Preset => preset = Some(descriptor),
+                other => {
+                    let _ = other;
+                    return Err(ArtifactError::Invalid);
+                }
             }
-            None => None,
-        };
-        let logical_size = logical_size(&portable, runtime.as_ref());
+        }
+        let logical_size = logical_size(&portable, runtime.as_ref(), preset.as_ref());
         Ok(Self {
             id: config.profile.to_string(),
             profile: config.profile.clone(),
@@ -319,6 +351,7 @@ impl DistributionVariant {
             plan: portable,
             requirements: VariantRequirements::default(),
             runtime,
+            preset,
             sources,
             logical_size,
         })
@@ -405,6 +438,15 @@ impl DistributionVariant {
         self.runtime.as_ref()
     }
 
+    /// The native preset image, when this variant carries one.
+    ///
+    /// A GUI variant has one: it is the window the installer opens. A console or
+    /// headless variant has none, and saying so is a fact about the variant
+    /// rather than a failure.
+    pub fn preset(&self) -> Option<&Descriptor> {
+        self.preset.as_ref()
+    }
+
     pub fn sources(&self) -> &VariantSources {
         &self.sources
     }
@@ -429,6 +471,7 @@ impl DistributionVariant {
                     .map(|artifact| artifact.blob),
             )
             .chain(self.plan.plugins.iter().map(|artifact| artifact.blob))
+            .chain(self.plan.ui_assets.iter().map(|asset| asset.sha256))
             .collect();
         digests.sort_unstable();
         digests.dedup();
@@ -455,7 +498,11 @@ impl DistributionVariant {
     }
 }
 
-fn logical_size(plan: &PortableBuildPlan, runtime: Option<&Descriptor>) -> u64 {
+fn logical_size(
+    plan: &PortableBuildPlan,
+    runtime: Option<&Descriptor>,
+    preset: Option<&Descriptor>,
+) -> u64 {
     let content = plan
         .entries
         .iter()
@@ -471,10 +518,11 @@ fn logical_size(plan: &PortableBuildPlan, runtime: Option<&Descriptor>) -> u64 {
                 .try_fold(sum, |sum, artifact| sum.checked_add(artifact.aot_size))
         })
         .unwrap_or(u64::MAX);
-    match runtime {
-        Some(runtime) => content.saturating_add(runtime.size),
-        None => content,
-    }
+
+    runtime
+        .into_iter()
+        .chain(preset)
+        .fold(content, |sum, native| sum.saturating_add(native.size))
 }
 
 /// Content accounting a selector and a report can rely on without reading the
@@ -501,6 +549,7 @@ pub struct VariantDescriptor {
     pub manifest: Descriptor,
     pub requirements: VariantRequirements,
     pub runtime: Option<Descriptor>,
+    pub preset: Option<Descriptor>,
     pub content: VariantDescriptorContent,
     pub logical_size: u64,
 }
@@ -515,6 +564,7 @@ pub struct VariantManifest {
     pub platform: Platform,
     pub frontend: Frontend,
     pub runtime: Option<Descriptor>,
+    pub preset: Option<Descriptor>,
     pub requirements: VariantRequirements,
     pub plan: PortableBuildPlan,
     pub logical_size: u64,
@@ -533,6 +583,7 @@ impl VariantManifest {
             platform: variant.platform.clone(),
             frontend: variant.frontend,
             runtime: variant.runtime,
+            preset: variant.preset,
             requirements: variant.requirements.clone(),
             plan: variant.plan.clone(),
             logical_size: variant.logical_size,
@@ -564,12 +615,17 @@ impl VariantManifest {
         if self.frontend != self.plan.installer.frontend {
             return Err(ArtifactError::Invalid);
         }
-        let computed = logical_size(&self.plan, self.runtime.as_ref());
+        let computed = logical_size(&self.plan, self.runtime.as_ref(), self.preset.as_ref());
         if computed != self.logical_size {
             return Err(ArtifactError::Invalid);
         }
         if let Some(runtime) = self.runtime
             && runtime.media_type != MediaType::RUNTIME
+        {
+            return Err(ArtifactError::Invalid);
+        }
+        if let Some(preset) = self.preset
+            && preset.media_type != MediaType::PRESET
         {
             return Err(ArtifactError::Invalid);
         }
@@ -590,6 +646,7 @@ impl VariantManifest {
                     .map(|artifact| artifact.blob),
             )
             .chain(self.plan.plugins.iter().map(|artifact| artifact.blob))
+            .chain(self.plan.ui_assets.iter().map(|asset| asset.sha256))
             .collect();
         digests.sort_unstable();
         digests.dedup();

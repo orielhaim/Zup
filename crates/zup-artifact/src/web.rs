@@ -35,6 +35,7 @@ use zup_acquire::{
 use zup_core::Sha256Digest;
 
 use crate::compose::ArtifactGraph;
+use crate::descriptor::Descriptor;
 use crate::error::ArtifactError;
 use crate::store::SegmentReader;
 use crate::table::BlobTable;
@@ -200,27 +201,50 @@ fn write_blobs(
     }
 
     for (id, bytes) in graph.runtime_bytes()? {
-        let variant = graph
-            .manifests()
-            .iter()
-            .find(|manifest| manifest.id == id)
-            .ok_or(ArtifactError::Invalid)?;
         let runtime = graph
             .index()
-            .variant(&variant.id)
+            .variant(&id)
             .and_then(|variant| variant.runtime)
             .ok_or(ArtifactError::Invalid)?;
-        let path = join_relative(destination, &blob_path(&runtime.digest).to_string())?;
-        if !path.is_file() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(ArtifactError::from)?;
-            }
-            write_atomic(&path, &bytes)?;
-            tree.blob_count += 1;
-            tree.blob_bytes = tree.blob_bytes.saturating_add(bytes.len() as u64);
-        }
-        catalog_entries.push(CatalogEntry::stored(runtime.digest, bytes.len() as u64));
+        write_native_image(destination, tree, &runtime, &bytes, catalog_entries)?;
     }
+
+    // A window's preset is the second native image, written exactly as the
+    // first one is. A release that names it without shipping it is not a release
+    // a machine can install from, so a GUI variant that declares one has its
+    // bytes here or the export refuses.
+    for (id, bytes) in graph.preset_bytes() {
+        let preset = graph
+            .index()
+            .variant(&id)
+            .and_then(|variant| variant.preset)
+            .ok_or(ArtifactError::Invalid)?;
+        write_native_image(destination, tree, &preset, &bytes, catalog_entries)?;
+    }
+    Ok(())
+}
+
+/// Write one native image into the web layout and catalogue it.
+///
+/// Uncompressed, for the reason the runtime is: this is code, and a compressed
+/// frame buys nothing for bytes that are hashed whole before they run.
+fn write_native_image(
+    destination: &Path,
+    tree: &mut WebTree,
+    image: &Descriptor,
+    bytes: &[u8],
+    catalog_entries: &mut Vec<CatalogEntry>,
+) -> Result<(), ArtifactError> {
+    let path = join_relative(destination, &blob_path(&image.digest).to_string())?;
+    if !path.is_file() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ArtifactError::from)?;
+        }
+        write_atomic(&path, bytes)?;
+        tree.blob_count += 1;
+        tree.blob_bytes = tree.blob_bytes.saturating_add(bytes.len() as u64);
+    }
+    catalog_entries.push(CatalogEntry::stored(image.digest, bytes.len() as u64));
     Ok(())
 }
 
@@ -341,13 +365,17 @@ fn write_variant(
         manifest_bytes,
     )?;
 
-    // A runtime is content like any other. Naming it in the release is what lets
-    // a thin bootstrapper verify the executable before it runs it, which is the
-    // one thing a bootstrapper is not allowed to skip.
-    let runtime = manifest
-        .runtime
-        .as_ref()
-        .map(|descriptor| DocumentRef::of(descriptor.digest, descriptor.size));
+    // A native image is content like any other. Naming it in the release is what
+    // lets a thin bootstrapper verify the executable before it runs it, which is
+    // the one thing a bootstrapper is not allowed to skip. There are two of them
+    // where the variant has a window, and a client has to know about both.
+    let native = |descriptor: &Option<Descriptor>| {
+        descriptor
+            .as_ref()
+            .map(|descriptor| DocumentRef::of(descriptor.digest, descriptor.size))
+    };
+    let runtime = native(&manifest.runtime);
+    let preset = native(&manifest.preset);
     let target = manifest.plan.installer.target.clone();
     Ok(ReleaseVariant {
         id: id.to_owned(),
@@ -368,6 +396,7 @@ fn write_variant(
             manifest_bytes.len() as u64,
         ),
         runtime,
+        preset,
         content: manifest.content_digests(),
         requirements: Default::default(),
         logical_size: manifest.logical_size,

@@ -105,9 +105,14 @@ pub struct ComposedManifest {
     pub bytes: Vec<u8>,
 }
 
-/// A variant's native runtime image, with the bytes it was composed from.
+/// A native image a variant declares, with the bytes it was composed from.
+///
+/// A runtime and a window's preset are the same kind of thing here: an
+/// executable a machine has to fetch for this target and verify before it runs.
+/// They carry different media types, and nothing else about them differs, so
+/// they are one type with two names at the point where they are addressed.
 #[derive(Debug, Clone)]
-pub struct ComposedRuntime {
+pub struct ComposedImage {
     pub id: String,
     pub descriptor: Descriptor,
     pub bytes: Vec<u8>,
@@ -119,7 +124,8 @@ pub struct ArtifactGraph {
     index: ArtifactIndex,
     table: BlobTable,
     manifests: Vec<ComposedManifest>,
-    runtimes: Vec<ComposedRuntime>,
+    runtimes: Vec<ComposedImage>,
+    presets: Vec<ComposedImage>,
     segments_root: Option<PathBuf>,
     segment_sizes: Vec<u64>,
     /// Keeps the composition spool alive for as long as the graph.
@@ -143,8 +149,13 @@ impl ArtifactGraph {
         &self.manifests
     }
 
-    pub fn runtimes(&self) -> &[ComposedRuntime] {
+    pub fn runtimes(&self) -> &[ComposedImage] {
         &self.runtimes
+    }
+
+    /// The window images this artifact carries, in index order.
+    pub fn presets(&self) -> &[ComposedImage] {
+        &self.presets
     }
 
     /// The directory the compressed segments were spooled into, when the graph
@@ -206,6 +217,14 @@ impl ArtifactGraph {
             .iter()
             .map(|runtime| (runtime.id.clone(), runtime.bytes.clone()))
             .collect())
+    }
+
+    /// The window image bytes a container must carry, in index order.
+    pub fn preset_bytes(&self) -> Vec<(String, Vec<u8>)> {
+        self.presets
+            .iter()
+            .map(|preset| (preset.id.clone(), preset.bytes.clone()))
+            .collect()
     }
 
     /// Whether this artifact carries its content bytes.
@@ -356,6 +375,7 @@ impl ArtifactComposer {
 
         let mut manifests = Vec::with_capacity(ordered.len());
         let mut runtimes = Vec::with_capacity(ordered.len());
+        let mut presets = Vec::with_capacity(ordered.len());
         let mut descriptors = Vec::with_capacity(ordered.len());
         let mut content = BTreeMap::new();
         for variant in &ordered {
@@ -379,7 +399,7 @@ impl ArtifactComposer {
                 (ArtifactMode::Thin, Some(runtime)) => Some(*runtime),
                 (ArtifactMode::Offline, Some(runtime)) => {
                     let bytes = self.runtime_bytes(variant)?;
-                    runtimes.push(ComposedRuntime {
+                    runtimes.push(ComposedImage {
                         id: variant.id().to_owned(),
                         descriptor: *runtime,
                         bytes,
@@ -397,6 +417,21 @@ impl ArtifactComposer {
                 }
                 (ArtifactMode::Thin, None) => None,
             };
+            // The window image is the second native image, and it follows the
+            // same rule for the same reason: an offline artifact must be able to
+            // present the window it carries, and a thin one fetches it from the
+            // release rather than embedding the thing it is fetching. A variant
+            // with no window has none, and saying so is a fact about the variant
+            // rather than a gap in the artifact.
+            if self.request.mode == ArtifactMode::Offline
+                && let Some(preset) = variant.preset()
+            {
+                presets.push(ComposedImage {
+                    id: variant.id().to_owned(),
+                    descriptor: *preset,
+                    bytes: self.native_image_bytes(variant, preset)?,
+                });
+            }
             let content_entry = content[variant.id()].clone();
             descriptors.push(VariantDescriptor {
                 id: variant.id().to_owned(),
@@ -406,6 +441,7 @@ impl ArtifactComposer {
                 manifest: manifest_descriptor,
                 requirements: variant.requirements().clone(),
                 runtime,
+                preset: variant.preset().cloned(),
                 content: VariantDescriptorContent {
                     logical_size: variant.logical_size(),
                     blob_count: content_entry.digests.len() as u64,
@@ -456,6 +492,7 @@ impl ArtifactComposer {
             table,
             manifests,
             runtimes,
+            presets,
             segments_root,
             segment_sizes,
             _spool: spool,
@@ -469,22 +506,37 @@ impl ArtifactComposer {
             id: self.request.id.clone(),
             detail: format!("variant `{}` has no native runtime image", variant.id()),
         })?;
+        self.native_image_bytes(variant, runtime)
+    }
+
+    /// One native image's bytes, read from the variant's own sources and
+    /// checked against the descriptor that named it.
+    ///
+    /// The same read for a runtime and for a window's preset: both are
+    /// executables a machine has to have for this target, both are named by
+    /// content, and both are refused on a size that disagrees with the digest
+    /// they were published under.
+    fn native_image_bytes(
+        &self,
+        variant: &DistributionVariant,
+        image: &Descriptor,
+    ) -> Result<Vec<u8>, ArtifactError> {
         let sources = variant.sources();
-        if let Some(bytes) = sources.bytes(&runtime.digest) {
+        if let Some(bytes) = sources.bytes(&image.digest) {
             return Ok(bytes.to_vec());
         }
         let path = sources
-            .file(&runtime.digest)
+            .file(&image.digest)
             .ok_or_else(|| ArtifactError::Missing {
-                media_type: MediaType::RUNTIME.label(),
-                digest: runtime.digest.to_hex(),
+                media_type: image.media_type.label(),
+                digest: image.digest.to_hex(),
             })?;
         let bytes = std::fs::read(path)?;
-        if bytes.len() as u64 != runtime.size {
+        if bytes.len() as u64 != image.size {
             return Err(ArtifactError::SizeMismatch {
-                media_type: MediaType::RUNTIME.label(),
-                digest: runtime.digest.to_hex(),
-                expected: runtime.size,
+                media_type: image.media_type.label(),
+                digest: image.digest.to_hex(),
+                expected: image.size,
                 found: bytes.len() as u64,
             });
         }

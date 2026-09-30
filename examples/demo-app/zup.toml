@@ -1,0 +1,151 @@
+#:schema https://zup.dev/schema/zup.toml.json
+#
+# A complete, deliberately tiny Zup application, for driving by hand.
+#
+#   zup preview    open the installer window over a simulated machine
+#   zup check      validate this project and everything it will ship
+#   zup plan       show what installing it would change, without doing it
+#   zup build      write <App name>-Setup.exe beside this file
+#
+# Nothing here is special to Zup's own repository. It is an ordinary application
+# project, read by the same reader a project outside this repository is read by.
+
+schema = 1
+
+[app]
+id = "com.example.demo"
+name = "Demo App"
+version = "1.0.0"
+publisher = "Example Software"
+description = "A small application used to exercise Zup by hand."
+# The file Windows launches. A launcher entry is made for it below.
+main = "demo.cmd"
+
+[build]
+
+# One target, so `zup build` and `zup preview` do not have to be told which.
+[build.targets.windows]
+target = "x86_64-pc-windows-msvc"
+source = { directory = "payload" }
+frontend = "gui"
+
+# `either` installs for the current user or for everyone on the machine. Choosing
+# a scope is the one thing this application genuinely offers a choice about, and
+# it is why the window shows "Who is this for?".
+[install]
+scope = "either"
+allow_directory_override = true
+
+[install.directory]
+user = "${location.user_data}/Demo App"
+machine = "${location.programs}/Demo App"
+
+# [ui] is the preset selection and that preset's own settings, and nothing else.
+#
+# There is no `preset` line, and that is the interesting part: an application that
+# names none gets the preset Zup ships, which is its UI selection semantics rather
+# than a fallback. The toolchain stages it with:
+#
+#   cargo xtask toolchain build
+[ui]
+[ui.settings]
+# The one setting the bundled preset reads. It is drawn as a line above the
+# product name, so it is the fastest way to see that a settings edit reached the
+# window: change it, and `zup preview` re-renders without restarting anything.
+hero = "A tiny application you can install, change, repair and remove."
+
+# ---------------------------------------------------------------------------
+# Components
+#
+# One required and two optional, which is the shape most real applications have
+# and the one that makes "Modify" worth exercising. The first component cannot be
+# turned off; the two that can start on and off respectively, so both directions
+# are visible in the window.
+# ---------------------------------------------------------------------------
+
+[[components]]
+id = "program"
+name = "Demo App"
+description = "The program itself."
+required = true
+default = true
+
+[[components]]
+id = "docs"
+name = "Documentation"
+description = "Notes and reference material."
+required = false
+default = false
+
+[[components]]
+id = "samples"
+name = "Sample data"
+description = "Files to try the program out with."
+required = false
+default = true
+
+# ---------------------------------------------------------------------------
+# Payload
+#
+# Every `source` is a pattern inside the `payload` directory above. Every
+# `destination` is a *directory*: the installer keeps each file's own name inside
+# it, so `"${install}"` writes `demo.cmd` into the install directory rather than
+# into a directory called `demo.cmd`. A file tagged with a component is written
+# only when that component is selected, which is what makes the component
+# checkboxes real rather than decorative.
+# ---------------------------------------------------------------------------
+
+[[files]]
+source = "demo.cmd"
+destination = "${install}"
+
+[[files]]
+source = "NOTES.txt"
+destination = "${install}"
+
+# Ordinary installed artwork, part of the program.
+#
+# This is a *file the payload ships*, not a UI asset. A UI asset is one the window
+# itself reads, and it only becomes one when the selected preset's settings
+# schema marks it with `x-zup-asset` - the bundled preset marks nothing, so
+# naming a file here is the honest way for this project to ship a logo. See
+# README.md.
+[[files]]
+source = "branding/logo.svg"
+destination = "${install}/branding"
+
+[[files]]
+source = "docs/**"
+destination = "${install}/docs"
+component = "docs"
+
+[[files]]
+source = "samples/**"
+destination = "${install}/samples"
+component = "samples"
+
+# ---------------------------------------------------------------------------
+# What the installation registers
+#
+# All three are real, and all three are what "Show what will change" lists. They
+# are also what an uninstall has to take back out, so leaving them in is the
+# honest way to see whether uninstall actually does.
+# ---------------------------------------------------------------------------
+
+[[launchers]]
+location = "menu"
+name = "Demo App"
+target = "${install}/demo.cmd"
+arguments = ["--installed"]
+
+[[launchers]]
+location = "desktop"
+name = "Demo App"
+target = "${install}/demo.cmd"
+component = "program"
+
+# One directory on PATH, so a command line can find the program. It is listed
+# under the program's component, so leaving the component out leaves PATH alone.
+[[path]]
+value = "${install}"
+component = "program"

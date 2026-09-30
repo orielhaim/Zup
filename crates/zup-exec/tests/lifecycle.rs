@@ -53,6 +53,7 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
         services: vec![],
         protocols: vec![],
         file_associations: vec![],
+        ui: None,
         summary: TargetPlanSummary {
             file_count: 0,
             install_bytes: 0,

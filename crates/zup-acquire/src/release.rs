@@ -135,6 +135,15 @@ pub struct ReleaseVariant {
     /// this stays `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<DocumentRef>,
+    /// The native image this variant presents its window with, digest-addressed.
+    ///
+    /// The same kind of claim as `runtime` and for the same reason: a second
+    /// executable the machine has to have and has to verify before it runs, so a
+    /// thin client can fetch exactly the one this variant needs. A variant with
+    /// no window has none, and that is a fact about the variant rather than a
+    /// gap in the release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<DocumentRef>,
     /// Every digest the variant can need, in ascending order.
     ///
     /// This is the superset. The exact closure a transaction wants is this set

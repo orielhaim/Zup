@@ -143,9 +143,9 @@ impl SigningSubject {
 ///
 /// One variant, and that is the honest state of the world: SHA-256 everywhere in
 /// zup, and current guidance for every platform zup can name. The type exists so
-/// the requirement is *stated* in the document a signer reads rather than assumed
-/// - a signer that chose differently would produce a release whose final digest
-/// zup cannot reproduce - and so the choice has somewhere to go when it changes.
+/// the requirement is stated in the document a signer reads rather than assumed:
+/// a signer that chose differently would produce a release whose final digest zup
+/// cannot reproduce, and the choice has somewhere to go when it changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DigestAlgorithm {

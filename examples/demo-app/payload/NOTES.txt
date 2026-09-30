@@ -1,0 +1,10 @@
+Demo App
+=========
+
+This file was installed by Zup from examples/demo-app in the Zup repository.
+
+If you are reading it on a machine, the installer put it there. Deleting it and
+running Repair from the maintenance window should put it back; running Uninstall
+should take the whole directory away.
+
+See docs/ for more, if you selected the Documentation component.

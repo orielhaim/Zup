@@ -156,6 +156,7 @@ impl ToolchainResolver {
             kind: match component {
                 ToolchainComponent::Runtime { .. } => "runtime template",
                 ToolchainComponent::Dispatcher { .. } => "dispatcher",
+                ToolchainComponent::Preset => "preset package",
             },
             wanted: describe(component),
             searched: searched.join("\n  "),
@@ -240,6 +241,21 @@ fn check(
                 });
             }
         }
+        ToolchainComponent::Preset => {
+            // The package's own reader is the check. A staged preset that this
+            // build could not verify is a preset a user would meet as a broken
+            // window, so it is refused here where the name of the file is known.
+            let bytes = std::fs::read(path).map_err(|error| ToolchainError::Unreadable {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+            zup_artifact::ui::PresetPackageView::open(bytes)
+                .and_then(|view| view.verify())
+                .map_err(|error| ToolchainError::Unreadable {
+                    path: path.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+        }
     }
     Ok(descriptor)
 }
@@ -316,6 +332,7 @@ pub fn describe(component: &ToolchainComponent) -> String {
         ToolchainComponent::Dispatcher { subsystem, .. } => {
             format!("{} dispatcher", subsystem.as_str())
         }
+        ToolchainComponent::Preset => "preset package".to_owned(),
     }
 }
 
@@ -337,6 +354,7 @@ pub fn missing_component_message(component: &ToolchainComponent, error: &Resolve
     let kind = match component {
         ToolchainComponent::Runtime { .. } => "runtime template",
         ToolchainComponent::Dispatcher { .. } => "dispatcher",
+        ToolchainComponent::Preset => "preset package",
     };
     format!(
         "no {kind} for {} was found.\n\n  \

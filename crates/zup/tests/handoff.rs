@@ -152,7 +152,7 @@ destination = "${install}"
     .expect("a build plan");
     let target = build.targets.first().expect("one target");
     let variant =
-        zup_artifact::DistributionVariant::resolve(&config, target, &[], None).expect("a variant");
+        zup_artifact::DistributionVariant::resolve(&config, target, &[], &[]).expect("a variant");
     let bytes = zup_artifact::VariantManifest::encode(&variant).expect("an encoded manifest");
     let mut sorted = digests;
     sorted.sort_unstable();
@@ -213,6 +213,7 @@ fn fixture(files: usize) -> Fixture {
                 runtime_digest,
                 std::fs::metadata(&runtime).expect("a runtime").len(),
             )),
+            preset: None,
             // The content set is the one the plan names, which is what a real
             // release carries: a graph that disagreed with its own manifest would
             // be a defect the client would have to guess about.

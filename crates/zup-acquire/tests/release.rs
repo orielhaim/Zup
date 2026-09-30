@@ -37,6 +37,7 @@ fn variant(id: &str, triple: &str, digests: &[zup_core::Sha256Digest]) -> Releas
         frontend: "gui".to_owned(),
         manifest: DocumentRef::of(digest_of(b"manifest"), 8),
         runtime: Some(DocumentRef::of(digest_of(b"runtime"), 4)),
+        preset: Some(DocumentRef::of(digest_of(b"preset"), 6)),
         content: sorted,
         requirements: Default::default(),
         logical_size: 1024,

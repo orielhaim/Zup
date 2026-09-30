@@ -82,12 +82,13 @@ fn execute(
     reporter: &Reporter,
     toolchain_root: Option<PathBuf>,
 ) -> miette::Result<BuildOutcome> {
+    let resolver = crate::resolver(toolchain_root);
     let loaded = project::load_for_build(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
+        &resolver,
     )?;
-    let resolver = crate::resolver(toolchain_root);
 
     // `--target` names a native variant, `--artifact` names a file a user
     // downloads, and they are different questions. A run that names a target
@@ -223,8 +224,10 @@ fn build_variants(
     }
 
     let mut release = crate::artifacts::release_manifest(&loaded.manifest.app);
-    for ((target_plan, config, runtime, plugin_artifacts), output) in prepared.iter().zip(&outputs)
+    for (index, ((target_plan, config, runtime, plugin_artifacts), output)) in
+        prepared.iter().zip(&outputs).enumerate()
     {
+        let preset = loaded.presets.get(index).and_then(Option::as_deref);
         let relative = release_relative(&outputs, output)?;
         reporter.phase(
             "compose",
@@ -239,6 +242,7 @@ fn build_variants(
                 written,
                 target_plan,
                 plugin_artifacts,
+                preset,
             )
             .map_err(|error| {
                 crate::failure::error(
@@ -369,7 +373,12 @@ fn build_artifacts(
         .zip(&loaded.build.targets)
         .enumerate()
     {
-        variants.push(resolve_variant(config, plan, &runtimes[index])?);
+        variants.push(resolve_variant(
+            config,
+            plan,
+            &runtimes[index],
+            loaded.presets.get(index).and_then(Option::as_deref),
+        )?);
     }
     reporter.phase("payload", "→ Validating manifest and materializing payload");
     let mut variant_index = std::collections::BTreeMap::new();
@@ -500,6 +509,7 @@ fn resolve_variant(
     config: &ResolvedTargetConfig,
     plan: &zup_build::TargetBuildPlan,
     runtime: &Path,
+    preset: Option<&[u8]>,
 ) -> miette::Result<zup_artifact::DistributionVariant> {
     let bytes = std::fs::read(runtime).map_err(|error| {
         crate::failure::error(
@@ -507,8 +517,11 @@ fn resolve_variant(
             format!("runtime template `{}`: {error}", runtime.display()),
         )
     })?;
-    let media = (zup_artifact::MediaType::RUNTIME, bytes);
-    zup_artifact::DistributionVariant::resolve(config, plan, &[], Some(media)).map_err(|error| {
+    let mut natives = vec![(zup_artifact::MediaType::RUNTIME, bytes)];
+    if let Some(preset) = preset {
+        natives.push((zup_artifact::MediaType::PRESET, preset.to_vec()));
+    }
+    zup_artifact::DistributionVariant::resolve(config, plan, &[], &natives).map_err(|error| {
         crate::failure::error(
             "zup.build.variant_invalid",
             format!("variant `{}`: {error}", config.profile),

@@ -47,6 +47,7 @@ pub fn run_stage(
         &selection.manifest,
         &selection.target,
         &selection.overrides(),
+        &crate::resolver(toolchain_root.clone()),
     )?;
     let resolver = crate::resolver(toolchain_root);
     let runtimes = resolve_runtimes(&loaded, &resolver)?;
@@ -64,14 +65,14 @@ pub fn run_stage(
         .zip(&loaded.build.targets)
         .enumerate()
     {
-        let runtime = if thin {
-            Some((
+        let mut natives = if thin {
+            vec![(
                 zup_artifact::MediaType::RUNTIME,
                 plan_only_runtime(&runtimes[index], plan)?,
-            ))
+            )]
         } else {
             let path = &runtimes[index];
-            Some((
+            vec![(
                 zup_artifact::MediaType::RUNTIME,
                 std::fs::read(path).map_err(|error| {
                     crate::failure::error(
@@ -79,10 +80,19 @@ pub fn run_stage(
                         format!("runtime template `{}`: {error}", path.display()),
                     )
                 })?,
-            ))
+            )]
         };
+        // The window, when this target has one. The same treatment the runtime
+        // gets and for the same reason: a release that names a window without
+        // carrying its executable is a release a client cannot install from, and
+        // the client finds that out on a machine rather than at publish time. The
+        // bytes are the ones the build already selected out of the package, so
+        // publishing re-derives nothing and trusts nothing new.
+        if let Some(Some(preset)) = loaded.presets.get(index) {
+            natives.push((zup_artifact::MediaType::PRESET, preset.clone()));
+        }
         variants.push(
-            zup_artifact::DistributionVariant::resolve(config, plan, &[], runtime).map_err(
+            zup_artifact::DistributionVariant::resolve(config, plan, &[], &natives).map_err(
                 |error| {
                     crate::failure::error(
                         "zup.publish.stage_variant_invalid",

@@ -105,7 +105,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Some(Commands::Init(args)) => crate::init::run(args),
         Some(Commands::Check(args)) => {
             operation(args.format, zup_automation::OPERATION_CHECK, || {
-                crate::check::run_check(args)
+                crate::check::run_check(args, toolchain)
             })
         }
         Some(Commands::Doctor(args)) => {
@@ -115,9 +115,13 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         }
         Some(Commands::Plan(args)) => {
             operation(args.format, zup_automation::OPERATION_PLAN, || {
-                crate::check::run_plan(args)
+                crate::check::run_plan(args, toolchain)
             })
         }
+        // Not an operation command: a preview is a window somebody looks at, and
+        // its result is what they saw rather than a document a caller reads. The
+        // same reason `zup ui dev` is not one.
+        Some(Commands::Preview(args)) => crate::preview::run(args, toolchain),
         Some(Commands::Build(args)) => {
             operation(args.format, zup_automation::OPERATION_BUILD, || {
                 crate::build::run(args, toolchain)
@@ -173,6 +177,12 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
                 zup_automation::OPERATION_TOOLCHAIN_CLEAN,
                 || crate::toolchain_cli::run_clean(args),
             ),
+        },
+        Some(Commands::Ui(args)) => match args.command {
+            crate::ui::UiVerb::Init(args) => crate::ui::generate(&args),
+            crate::ui::UiVerb::Dev(args) => crate::ui::dev(&args),
+            crate::ui::UiVerb::Pack(args) => crate::ui::pack(&args),
+            crate::ui::UiVerb::Inspect(args) => crate::ui::inspect(&args),
         },
         Some(Commands::Ci(args)) => crate::ci::run(args),
         Some(Commands::Schema(args)) => crate::manifest_tools::run_schema(args),
@@ -354,7 +364,7 @@ fn requested_operation(arguments: &[std::ffi::OsString]) -> Option<&'static str>
     ];
     arguments.iter().skip(1).find_map(|argument| {
         let word = argument.to_string_lossy();
-        VERBS.iter().copied().find(|verb| *verb == word.as_ref())
+        VERBS.iter().copied().find(|verb| *verb == word)
     })
 }
 
@@ -369,6 +379,8 @@ pub enum Commands {
     Doctor(crate::doctor::DoctorCommand),
     /// Show what installing this project would do, without changing anything.
     Plan(PlanCommand),
+    /// Open this application's installer window over a simulated machine.
+    Preview(crate::preview::PreviewCommand),
     /// Build the configured distribution artifacts.
     Build(BuildCommand),
     /// Look at what a build produced.
@@ -381,6 +393,8 @@ pub enum Commands {
     Ci(crate::ci::CiCommand),
     /// Manage the zup binaries a build composes an artifact from.
     Toolchain(crate::toolchain_cli::ToolchainCommand),
+    /// Build and inspect preset packages.
+    Ui(crate::ui::UiCommand),
     /// Print the authoritative zup.toml JSON Schema.
     Schema(SchemaCommand),
     /// Format zup.toml without losing its comments.

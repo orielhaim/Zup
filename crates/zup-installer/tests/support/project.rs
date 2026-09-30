@@ -98,19 +98,29 @@ impl AppSpec {
 }
 
 /// A state root a test drives the runtime against, shared with nothing.
+///
+/// The directory is removed by [`cleanup`], which every test that installs
+/// something holds; keeping it here would delete it out from under a test that
+/// is still reading it.
 pub struct State {
-    root: TempDir,
+    root: PathBuf,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self {
-            root: TempDir::new().expect("a state root"),
-        }
+        Self::with_root(TempDir::new().expect("a state root").keep())
+    }
+
+    /// A state root at a path the caller chose.
+    ///
+    /// For a test that has to reach the same directory the runtime was given -
+    /// to rewrite the record it wrote, for instance.
+    pub fn with_root(root: PathBuf) -> Self {
+        Self { root }
     }
 
     pub fn path(&self) -> &Path {
-        self.root.path()
+        &self.root
     }
 
     /// Where the persisted maintenance copy for one application and version lives.
@@ -120,7 +130,6 @@ impl State {
     /// compares paths - which is exactly what a registry assertion does.
     pub fn maintenance(&self, app: &AppSpec) -> PathBuf {
         self.root
-            .path()
             .join("maintenance")
             .join(&app.id)
             .join("user")
@@ -204,11 +213,17 @@ pub fn run(exe: &Path, state: &State, verb: &str, extra: &[&str]) -> std::proces
 }
 
 /// Run a lifecycle verb and require it to succeed.
+///
+/// Both streams in the failure, because a runtime told to report in JSON puts
+/// its error on stdout and a test that only showed stderr would report a blank
+/// reason for a real failure.
 pub fn succeed(exe: &Path, state: &State, verb: &str, extra: &[&str]) -> std::process::Output {
     let output = run(exe, state, verb, extra);
     assert!(
         output.status.success(),
-        "{verb}: {}",
+        "{verb} on {}:\n{}\n{}",
+        exe.display(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     output
@@ -249,6 +264,81 @@ pub fn compose(app: &AppSpec, frontend: Frontend, payload: &[Payload]) -> Setup 
     compose_with(app, frontend, payload, &[], &[])
 }
 
+/// The window an installer will present, and what the application configured
+/// for it.
+pub struct PresetSpec {
+    /// The preset executable, exactly as a `.zupui` target binary would carry it.
+    pub executable: Vec<u8>,
+    /// What the application wrote in `[ui.settings]`.
+    pub settings: serde_json::Value,
+    /// The application-provided assets, by the name its settings used.
+    pub assets: Vec<(String, Vec<u8>)>,
+    /// The capabilities the preset cannot present without.
+    pub required_capabilities: Vec<zup_ui_protocol::UiCapability>,
+}
+
+/// Compose an installer that carries a real preset and real UI assets.
+///
+/// The preset travels as the selected target binary and the assets travel in the
+/// package's content store, both of them resolved from files on disk the way a
+/// build resolves them - so the installer this produces is the same shape a
+/// `zup build` produces, and a test that runs it is running the real pipeline.
+pub fn compose_with_preset(app: &AppSpec, payload: &[Payload], preset: &PresetSpec) -> Setup {
+    let scratch = TempDir::new().expect("a build scratch directory");
+    let mut plan = plan(app, Frontend::Gui, payload, &[], scratch.path());
+    let mut assets = Vec::new();
+    let mut records = Vec::new();
+    for (name, bytes) in &preset.assets {
+        let source = scratch.path().join(name.replace('/', "_"));
+        std::fs::write(&source, bytes).expect("an asset file");
+        let (size, sha256) = hash_reader(bytes.as_slice()).expect("an asset hashes");
+        records.push(zup_core::UiAsset {
+            name: zup_core::NonEmptyString::new(name.as_str()).expect("a name"),
+            size,
+            sha256,
+        });
+        assets.push(zup_core::ResolvedAsset {
+            name: zup_core::NonEmptyString::new(name.as_str()).expect("a name"),
+            source: Some(source),
+            source_relative: Some(RelativePath::new(name.as_str()).expect("a portable asset path")),
+            size,
+            sha256,
+        });
+    }
+    plan.ui_assets = assets;
+    plan.installer.preset = Some(zup_core::UiPreset {
+        name: zup_core::NonEmptyString::new(format!("{}-preset", app.name)).expect("a name"),
+        version: semver::Version::parse(&app.version).expect("a version"),
+        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+        required_capabilities: preset
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.to_string())
+            .collect(),
+        settings: preset.settings.clone(),
+        assets: records,
+    });
+
+    let package = BundleWriter::encode(&plan, &[]).expect("the package encodes");
+    let package_path = scratch.path().join("package.zupbundle");
+    std::fs::write(&package_path, package).expect("the package is written");
+
+    let path = scratch.path().join("Setup.exe");
+    zup_windows::embed_bundle_file(
+        &template(Frontend::Gui),
+        &path,
+        &package_path,
+        Some(&preset.executable),
+    )
+    .expect("the package and the preset embed");
+    assert!(
+        zup_windows::EmbeddedBundle::open(&path).is_ok(),
+        "the composed installer at {} reads back as one",
+        path.display()
+    );
+    Setup { scratch, path }
+}
+
 /// Compose an installer that carries compiled plugin artifacts alongside its
 /// payload.
 pub fn compose_with(
@@ -266,7 +356,8 @@ pub fn compose_with(
 
     let path = scratch.path().join("Setup.exe");
     let template = template(frontend);
-    zup_windows::embed_bundle_file(&template, &path, &package_path).expect("the package embeds");
+    zup_windows::embed_bundle_file(&template, &path, &package_path, None)
+        .expect("the package embeds");
     assert!(
         zup_windows::EmbeddedBundle::open(&path).is_ok(),
         "the composed installer at {} reads back as one",
@@ -302,7 +393,8 @@ pub fn compose_with_corrupt_package(app: &AppSpec, frontend: Frontend) -> Setup 
 
     let path = scratch.path().join("Setup.exe");
     let template = template(frontend);
-    zup_windows::embed_bundle_file(&template, &path, &package_path).expect("the package embeds");
+    zup_windows::embed_bundle_file(&template, &path, &package_path, None)
+        .expect("the package embeds");
     Setup { scratch, path }
 }
 
@@ -354,6 +446,7 @@ fn plan(
         total_size,
         prerequisite_size: 0,
         files,
+        ui_assets: Vec::new(),
     }
 }
 
@@ -365,6 +458,7 @@ fn installer_ir(
     plugins: &[PluginSpec],
 ) -> zup_core::Installer {
     zup_core::Installer {
+        preset: None,
         app: App {
             id: AppId::new(&app.id).expect("a valid app id"),
             name: NonEmptyString::new(app.name.clone()).expect("a name"),
@@ -375,7 +469,6 @@ fn installer_ir(
         },
         target: host_target(),
         frontend,
-        ui: None,
         updates: None,
         install: Install {
             scope: InstallScope::User,
@@ -480,6 +573,31 @@ fn profile_directory() -> PathBuf {
         directory.pop();
     }
     directory
+}
+
+/// The peer preset the end-to-end tests install.
+///
+/// Staged by the same run as every other real binary, and read here rather than
+/// built: a test that shelled out to cargo would be a second build inside a
+/// build, and the two tests that launch a peer would race for the same output.
+pub fn test_preset() -> PathBuf {
+    let profile = profile_directory();
+    let name = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
+    for root in [
+        profile.join("toolchain").join(ZUP_VERSION),
+        profile.join("toolchain"),
+    ] {
+        let path = root.join(&name);
+        if path.is_file() {
+            return path;
+        }
+    }
+    panic!(
+        "no `{name}` in the staged toolchain beside {}.\n\n  \
+         The end-to-end tests need a real peer preset. Build it once:\n    \
+         cargo xtask toolchain build",
+        profile.display()
+    );
 }
 
 /// The zup version the staged components were built for. A component stamped with

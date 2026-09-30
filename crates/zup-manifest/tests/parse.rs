@@ -153,19 +153,67 @@ fn frontend_reaches_the_installer_from_the_manifest() {
     }
 }
 
+/// `[ui]` is a preset selection and that preset's own settings. There is no
+/// second customization system: a preset author decides what a window looks
+/// like, and the application fills in the values that preset declared.
 #[test]
-fn ui_branding_is_optional_and_constrained() {
+fn a_ui_section_names_a_preset_and_its_settings() {
     let source = minimal("user").replace(
         "[install]",
-        "[ui]\naccent = \"#2563eb\"\ntheme = \"dark\"\n\n[install]",
+        "[ui]\npreset = \"./vendor/aurora.zupui\"\n\n[ui.settings]\naccent = \"#695cff\"\nhero = \"Install Acme\"\n\n[install]",
     );
-    let manifest = parse_and_compile(&source, "windows-x64").unwrap();
-    let ui = manifest.ui.unwrap();
-    assert_eq!(ui.accent.as_deref(), Some("#2563eb"));
-    assert_eq!(ui.theme, zup_core::UiTheme::Dark);
+    let manifest = parse(&source).expect("a preset selection parses");
+    assert_eq!(
+        manifest.ui.preset.as_ref().map(|path| path.as_str()),
+        Some("vendor/aurora.zupui")
+    );
+    assert_eq!(
+        manifest
+            .ui
+            .settings
+            .get("accent")
+            .and_then(|value| value.as_str()),
+        Some("#695cff")
+    );
+    assert_eq!(
+        manifest
+            .ui
+            .settings
+            .get("hero")
+            .and_then(|value| value.as_str()),
+        Some("Install Acme")
+    );
+}
 
-    let error = parse_and_compile(&source.replace("#2563eb", "blue"), "windows-x64").unwrap_err();
-    assert!(matches!(error, ManifestError::InvalidUiAccent { .. }));
+/// A preset path that leaves the project is refused by the type that holds it,
+/// before anything tries to open it.
+#[test]
+fn a_preset_path_outside_the_project_is_refused() {
+    for path in ["../elsewhere/aurora.zupui", "C:/elsewhere/aurora.zupui"] {
+        let source = minimal("user").replace(
+            "[install]",
+            &format!("[ui]\npreset = \"{path}\"\n\n[install]"),
+        );
+        assert!(
+            parse_and_compile(&source, "windows-x64").is_err(),
+            "`{path}` names a file outside the project"
+        );
+    }
+}
+
+/// A `.zupui` is a build input, not something a manifest carries into a plan:
+/// the resolved preset is attached by the build, from a verified package.
+#[test]
+fn the_compiled_installer_carries_no_preset_until_a_build_proves_one() {
+    let source = minimal("user").replace(
+        "[install]",
+        "[ui]\npreset = \"./aurora.zupui\"\n\n[install]",
+    );
+    let installer = parse_and_compile(&source, "windows-x64").expect("a preset selection compiles");
+    assert!(
+        installer.preset.is_none(),
+        "the manifest crate cannot verify a package, so it does not choose one"
+    );
 }
 
 #[test]

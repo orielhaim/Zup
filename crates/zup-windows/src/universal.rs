@@ -111,10 +111,16 @@ impl UniversalLayout {
     pub const fn new(variants: usize, segments: usize) -> Self {
         // The index and the table take the first two identifiers; then a
         // manifest and a runtime per variant; then the content segments.
+        let first_segment = RESOURCE_ID_BLOB_START + 1 + variants * 2;
+        assert!(
+            first_segment + segments <= zup_pe::RESOURCE_ID_PRESET,
+            "a universal artifact's content runs into the identifier a self-contained \
+             installer's preset occupies"
+        );
         Self {
             variants,
             segments,
-            first_segment: RESOURCE_ID_BLOB_START + 1 + variants * 2,
+            first_segment,
         }
     }
 
@@ -450,10 +456,14 @@ pub fn stage_variant(
     directory: &Path,
 ) -> Result<StagedVariant, UniversalError> {
     let manifest = verify_selected_variant(artifact, id)?;
-    let runtime_descriptor = artifact
+    let variant = artifact
         .index()
         .variant(id)
-        .and_then(|variant| variant.runtime)
+        .ok_or_else(|| UniversalError::UnsupportedHost {
+            id: artifact.index().artifact.id.clone(),
+        })?;
+    let runtime_descriptor = variant
+        .runtime
         .ok_or_else(|| UniversalError::UnsupportedHost {
             id: artifact.index().artifact.id.clone(),
         })?;

@@ -117,7 +117,7 @@ fn embed_and_open_round_trip_a_real_package() {
     )
     .unwrap();
     let output = root.path().join("Setup.exe");
-    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package).unwrap();
+    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package, None).unwrap();
     let bundle = EmbeddedBundle::open(&output).unwrap();
     assert_eq!(bundle.plan().entries.len(), 1);
     assert_eq!(bundle.frontend(), bundle.plan().installer.frontend);
@@ -134,7 +134,7 @@ fn embedded_package_is_owned_after_the_executable_is_removed() {
     )
     .unwrap();
     let output = root.path().join("Setup.exe");
-    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package).unwrap();
+    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package, None).unwrap();
     let bundle = EmbeddedBundle::open(&output).unwrap();
     let package = bundle.package().clone();
     fs::remove_file(&output).unwrap();
@@ -163,9 +163,14 @@ fn self_contained_build_round_trips_matching_target() {
     let mut build = plan(root.path());
     build.installer.frontend = read_pe_frontend(&std::env::current_exe().unwrap()).unwrap();
     let output = root.path().join("Matching.exe");
-    let (_, package_size) =
-        build_self_contained_executable(&std::env::current_exe().unwrap(), &output, &build, &[])
-            .unwrap();
+    let (_, package_size) = build_self_contained_executable(
+        &std::env::current_exe().unwrap(),
+        &output,
+        &build,
+        &[],
+        None,
+    )
+    .unwrap();
     assert!(package_size > 0);
     let bundle = EmbeddedBundle::open(&output).unwrap();
     assert_eq!(bundle.plan().installer.target, build.installer.target);
@@ -181,7 +186,7 @@ fn embed_accepts_structure_and_open_rejects_a_tampered_blob() {
     let package = root.path().join("package.zup");
     fs::write(&package, bytes).unwrap();
     let output = root.path().join("Setup.exe");
-    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package).unwrap();
+    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package, None).unwrap();
     assert!(output.exists());
     assert!(EmbeddedBundle::open(&output).is_err());
 }

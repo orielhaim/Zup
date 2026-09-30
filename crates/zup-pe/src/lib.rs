@@ -65,6 +65,15 @@ pub const RESOURCE_ID_INDEX: usize = 1;
 /// document sequence begins.
 pub const RESOURCE_ID_BLOB_START: usize = 2;
 
+/// The resource identifier of a self-contained installer's UI preset.
+///
+/// Above the payload's own sequence rather than beside the index, because the
+/// payload's identifiers are assigned by position and renumbering them would
+/// invalidate every container already written. A preset is one optional document
+/// out of a bounded identifier space, so the top of that space is where an
+/// optional document belongs.
+pub const RESOURCE_ID_PRESET: usize = MAX_RESOURCE_ID;
+
 /// Largest size one resource may have, because a resource length is a 32-bit
 /// field in the resource directory.
 pub const MAX_RESOURCE_SIZE: u64 = u32::MAX as u64;

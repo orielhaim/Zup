@@ -5,7 +5,7 @@ use serde_spanned::Spanned;
 use zup_core::Prerequisite;
 use zup_core::{
     App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry, Protocol,
-    Service, UiBranding,
+    Service, Ui,
 };
 
 use crate::error::{ManifestError, named_source_named, source_span};
@@ -79,7 +79,7 @@ struct RawManifest {
     #[serde(default)]
     frontend: Frontend,
     #[serde(default)]
-    ui: Option<UiBranding>,
+    ui: Ui,
     build: Build,
     install: Install,
     #[serde(default)]

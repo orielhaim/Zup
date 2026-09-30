@@ -100,8 +100,8 @@ fn host_target() -> TargetTriple {
 
 fn installer() -> Installer {
     Installer {
-        ui: None,
         frontend: Frontend::Gui,
+        preset: None,
         app: App {
             id: AppId::new("com.example.runtime").unwrap(),
             name: NonEmptyString::new("Runtime").unwrap(),
@@ -144,6 +144,7 @@ fn plan(target: TargetTriple) -> TargetBuildPlan {
         prerequisites: Vec::new(),
         plugins: Vec::new(),
         files: Vec::new(),
+        ui_assets: Vec::new(),
         total_size: 0,
         prerequisite_size: 0,
     }

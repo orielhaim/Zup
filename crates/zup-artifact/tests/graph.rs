@@ -277,11 +277,12 @@ fn an_offline_artifact_without_a_runtime_is_incomplete() {
             prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
+            ui_assets: Vec::new(),
             total_size: 0,
             prerequisite_size: 0,
         },
         &[],
-        None,
+        &[],
     )
     .unwrap();
     let error = ArtifactComposer::new(

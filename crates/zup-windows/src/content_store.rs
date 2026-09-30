@@ -48,6 +48,22 @@ pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";
 /// The file name of the artifact index, beside the maintenance executable.
 pub const MAINTENANCE_INDEX_NAME: &str = "artifact.json";
 
+/// The file name an installer image's own UI preset is written out under, before
+/// anything has been committed.
+///
+/// An install that has committed does not use this: its preset is installed
+/// content under its own maintenance directory, addressed by digest. This is for
+/// the one window that exists only while the install that carries it is still
+/// running, and beside the image because that image is the only thing that can
+/// be certain of writing there.
+///
+/// The suffix is the target's rather than a constant: the name is part of what a
+/// target's binaries are called, so a host that assumed one platform's suffix
+/// would look for a file no other platform's composition writes.
+pub fn preset_executable_name(executable_suffix: &str) -> String {
+    format!("preset{executable_suffix}")
+}
+
 /// Failures produced by the content store.
 #[derive(Debug, thiserror::Error)]
 pub enum ContentStoreError {
@@ -222,6 +238,22 @@ pub fn maintenance_directory(
         .join(app_id.as_str())
         .join(scope_name)
         .join(version.to_string())
+}
+
+/// The directory every version of one application's maintenance runtime lives in.
+///
+/// The version is one level below this, so a question asked of "what this
+/// installation's window content is" has to span all of them: an update owns two
+/// generations until the old one is retired.
+pub fn maintenance_root(state_root: &Path, app_id: &AppId, scope: SelectedScope) -> PathBuf {
+    let scope_name = match scope {
+        SelectedScope::User => "user",
+        SelectedScope::Machine => "machine",
+    };
+    state_root
+        .join("maintenance")
+        .join(app_id.as_str())
+        .join(scope_name)
 }
 
 /// Create `directory` and every missing parent, refusing anything that is not a

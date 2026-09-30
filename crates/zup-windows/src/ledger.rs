@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_core::ReleaseIdentity;
-use zup_core::{AppId, ResourceKey, SelectedScope};
+use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
 use zup_exec::{INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource};
 use zup_platform::TargetPath;
 use zup_transaction::{
@@ -84,7 +84,7 @@ impl InstallLedgerStore {
         app_id: &AppId,
         scope: SelectedScope,
     ) -> Result<Option<InstallLedger>, LedgerError> {
-        let path = self.path(app_id, scope);
+        let path = self.path_for(app_id, scope);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -98,6 +98,11 @@ impl InstallLedgerStore {
             return Err(LedgerError::Invalid);
         }
         Ok(Some(ledger))
+    }
+
+    /// Where one application's ownership record is kept.
+    pub fn path_for(&self, app_id: &AppId, scope: SelectedScope) -> PathBuf {
+        self.path(app_id, scope)
     }
 
     pub fn repair_committed(
@@ -308,6 +313,127 @@ impl InstallLedgerStore {
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}
             }
         }
+        self.validate_ui(app_id, scope, app_version, plan, ledger.as_ref())?;
+        Ok(())
+    }
+
+    /// The plan's UI runtime and the plan's files have to be the same generation.
+    ///
+    /// A plan that names a window must install exactly the content that window
+    /// needs, at the paths the runtime will look in - otherwise a machine
+    /// believes it can present a preset whose bytes it never wrote. A plan that
+    /// names no window must retire the bytes the previous one owned, so an
+    /// update cannot leave an installation holding a preset nothing will launch.
+    fn validate_ui(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+        app_version: &semver::Version,
+        plan: &TransactionPlan,
+        ledger: Option<&InstallLedger>,
+    ) -> Result<(), LedgerError> {
+        let root = crate::plain_path_text(&crate::content_store::maintenance_root(
+            &self.root, app_id, scope,
+        ));
+        let owned: BTreeMap<&str, &Sha256Digest> = ledger
+            .into_iter()
+            .flat_map(|ledger| ledger.resources.iter())
+            .filter_map(|(key, resource)| match (key, resource) {
+                (ResourceKey::File { destination }, OwnedResource::File { sha256, .. })
+                    if crate::ui_runtime::is_content_path(Path::new(&root), destination) =>
+                {
+                    Some((destination.as_str(), sha256))
+                }
+                _ => None,
+            })
+            .collect();
+        let installed: BTreeMap<&str, Sha256Digest> = plan
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                NodeKind::FileMutation {
+                    key: ResourceKey::File { destination },
+                    ..
+                } => Some((
+                    destination.as_str(),
+                    node.meta
+                        .expected_sha256
+                        .expect("a file mutation states the digest it installs"),
+                )),
+                _ => None,
+            })
+            .collect();
+        let retired: BTreeSet<&ResourceKey> = plan.retired_keys.iter().collect();
+        // Compared as the ledger spells a path, which is without the extended
+        // length prefix Windows hands back once a component is long. Two
+        // spellings of one file are two identities to everything that stores
+        // ownership, and this is one of the things that stores it.
+        let wanted: BTreeMap<String, Sha256Digest> = match &plan.ui {
+            Some(ui) => {
+                let directory = crate::content_store::maintenance_directory(
+                    &self.root,
+                    app_id,
+                    scope,
+                    app_version,
+                );
+                std::iter::once((
+                    crate::plain_path_text(&crate::ui_runtime::preset_path(
+                        &directory,
+                        &ui.executable,
+                    )),
+                    ui.executable,
+                ))
+                .chain(ui.preset.assets.iter().map(|asset| {
+                    (
+                        crate::plain_path_text(&crate::ui_runtime::asset_path(
+                            &directory,
+                            asset.name.as_str(),
+                            &asset.sha256,
+                        )),
+                        asset.sha256,
+                    )
+                }))
+                .collect()
+            }
+            None => BTreeMap::new(),
+        };
+        for (path, digest) in &wanted {
+            // Provided either by this plan or already owned at exactly this
+            // content: a repair of a working installation installs nothing, and
+            // requiring it to would make repair impossible on a healthy machine.
+            if installed.get(path.as_str()) != Some(digest)
+                && !owned
+                    .get(path.as_str())
+                    .is_some_and(|found| **found == *digest)
+            {
+                return Err(LedgerError::Ownership(format!(
+                    "the UI runtime needs {path}, and this plan neither installs it nor already \
+                     owns it"
+                )));
+            }
+        }
+        if plan.uninstall {
+            return Ok(());
+        }
+        for destination in owned.keys() {
+            if wanted.contains_key(*destination) {
+                continue;
+            }
+            let Some(ledger) = ledger else {
+                // Nothing was owned, so there is nothing to retire.
+                continue;
+            };
+            let retired_here = ledger.resources.keys().any(|key| {
+                matches!(key, ResourceKey::File { destination: d } if d == destination
+                    && retired.contains(key))
+            });
+            if !retired_here {
+                return Err(LedgerError::Ownership(format!(
+                    "this plan stops presenting the window that owns {destination}, without \
+                     retiring it"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -382,6 +508,11 @@ impl InstallLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
+        // The window this installation presents, replaced as one value. Carried
+        // in the plan rather than passed in beside it, so a replay of a journal
+        // restores the same window the first commit recorded and recovery has
+        // something to present with.
+        ledger.ui = record.plan.ui.clone();
         // The identity follows the transaction, not the ledger. A replay keeps
         // whatever the first commit recorded, because the journal cannot supply
         // it; a development run clears it, because claiming a graph it did not
@@ -546,6 +677,11 @@ impl InstallLedgerStore {
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         write_durable(Path::new(&path), &bytes)?;
         cleanup_committed_files(record)?;
+        // Whatever this transaction retired, the directories it emptied go too.
+        // A generation that has been replaced is not a directory tree somebody
+        // left to find, and a state root that accumulates one per version is a
+        // state root nobody can read.
+        cleanup_removed_directories(record)?;
         Ok(ledger)
     }
 }

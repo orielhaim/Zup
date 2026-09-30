@@ -16,7 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_core::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
+use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 
 /// The largest a plugin module may be, at build time and in a bundle.
 ///
@@ -209,6 +209,14 @@ pub struct PortableBuildPlan {
     pub entries: Vec<PayloadEntry>,
     #[serde(default)]
     pub prerequisite_artifacts: Vec<PrerequisiteArtifact>,
+    /// The application-provided UI assets this installer presents.
+    ///
+    /// Not payload entries: these are the installer's own runtime data, handed to
+    /// a preset rather than installed into the application, so they have no
+    /// destination template. Their bytes live in the same content store as
+    /// everything else, addressed by the digest recorded here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_assets: Vec<zup_core::UiAsset>,
     pub plugins: Vec<PluginArtifact>,
     pub total_size: u64,
 }
@@ -437,6 +445,13 @@ impl Package {
                     .iter()
                     .map(|artifact| artifact.blob),
             )
+            .chain(
+                self.metadata
+                    .plan
+                    .ui_assets
+                    .iter()
+                    .map(|asset| asset.sha256),
+            )
             .collect();
         digests.sort_unstable();
         digests.dedup();
@@ -494,6 +509,19 @@ impl Package {
                 prerequisites,
                 plugins: Vec::new(),
                 files,
+                ui_assets: self
+                    .metadata
+                    .plan
+                    .ui_assets
+                    .iter()
+                    .map(|asset| ResolvedAsset {
+                        name: asset.name.clone(),
+                        source: None,
+                        source_relative: None,
+                        size: asset.size,
+                        sha256: asset.sha256,
+                    })
+                    .collect(),
                 total_size: self.metadata.plan.total_size,
                 prerequisite_size: self
                     .metadata
@@ -586,6 +614,50 @@ impl Package {
             return Err(PackageError::Payload(artifact.sha256.to_string()));
         }
         Ok(bytes)
+    }
+
+    /// The bytes of one application-provided UI asset, proved against the digest
+    /// the plan recorded.
+    ///
+    /// The host's path from "an application named a logo" to "the preset can
+    /// load a logo" runs through here, so it is a verifying read rather than a
+    /// lookup: an asset that does not hash to what the plan says is not handed
+    /// to a preset.
+    pub fn ui_asset(&self, name: &str) -> Result<(&zup_core::UiAsset, Vec<u8>), PackageError> {
+        let asset = self
+            .metadata
+            .plan
+            .ui_assets
+            .iter()
+            .find(|asset| asset.name.as_str() == name)
+            .ok_or(PackageError::Invalid)?;
+        let blob = self
+            .metadata
+            .blobs
+            .iter()
+            .find(|blob| blob.digest == asset.sha256)
+            .ok_or(PackageError::Invalid)?;
+        let decoder = self.open_blob(blob)?;
+        let mut bytes = Vec::new();
+        decoder
+            .take(asset.size.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != asset.size
+            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != asset.sha256
+        {
+            return Err(PackageError::Payload(asset.sha256.to_string()));
+        }
+        Ok((asset, bytes))
+    }
+
+    /// Every application-provided UI asset this package carries, by name.
+    pub fn ui_asset_names(&self) -> Vec<&str> {
+        self.metadata
+            .plan
+            .ui_assets
+            .iter()
+            .map(|asset| asset.name.as_str())
+            .collect()
     }
 
     pub fn payload_source(&self) -> PackagePayloadSource {
@@ -975,6 +1047,12 @@ fn parse_metadata(
         }
         referenced.insert(artifact.blob);
     }
+    for asset in &metadata.plan.ui_assets {
+        if !external && by_digest.get(&asset.sha256) != Some(&asset.size) {
+            return Err(PackageError::Invalid);
+        }
+        referenced.insert(asset.sha256);
+    }
     // An external-payload package carries no blob index at all. A partial one -
     // some content in the plan, some outside it - is the state that would let a
     // reader believe it has a self-contained copy of something it does not.
@@ -1121,10 +1199,107 @@ fn canonical_prerequisites(
     Ok(out)
 }
 
+/// One compressed object waiting to be written into the package data region.
+struct Spool {
+    path: PathBuf,
+    size: u64,
+    compressed_size: u64,
+}
+
+/// Compress one build-machine source into the spool directory, once per digest.
+///
+/// Every kind of package content goes through here: payload files, application
+/// UI assets, and embedded prerequisites are all "read these bytes, prove they
+/// are the bytes the plan names, compress them". A source whose digest is
+/// already spooled is only re-proved, so identical content is stored once and a
+/// second reference to it cannot smuggle in different bytes.
+fn spool_source(
+    source: &Path,
+    expected_size: u64,
+    expected_digest: Sha256Digest,
+    spool_dir: &tempfile::TempDir,
+    objects: &mut BTreeMap<Sha256Digest, Spool>,
+) -> Result<(), PackageError> {
+    if let std::collections::btree_map::Entry::Occupied(_) = objects.entry(expected_digest) {
+        let (size, digest) = hash_reader(File::open(source)?)?;
+        if size != expected_size || digest != expected_digest {
+            return Err(PackageError::Payload(source.display().to_string()));
+        }
+        return Ok(());
+    }
+    let spool_path = spool_dir.path().join(expected_digest.to_hex());
+    let output_file = File::create(&spool_path)?;
+    let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
+    let mut input = File::open(source)?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
+        hasher.update(&buffer[..read]);
+        encoder.write_all(&buffer[..read])?;
+    }
+    let output_file = encoder.finish()?;
+    if size != expected_size || Sha256Digest::from_hasher(hasher) != expected_digest {
+        return Err(PackageError::Payload(source.display().to_string()));
+    }
+    let compressed_size = output_file.metadata()?.len();
+    objects.insert(
+        expected_digest,
+        Spool {
+            path: spool_path,
+            size,
+            compressed_size,
+        },
+    );
+    Ok(())
+}
+
+/// The UI assets a plan resolved, in the order the package records them.
+///
+/// Sorted by name and checked against the preset that will present them, so a
+/// package cannot name an asset its own preset never declared, and two builds of
+/// the same application produce the same list.
+fn canonical_ui_assets(plan: &TargetBuildPlan) -> Result<Vec<zup_core::UiAsset>, PackageError> {
+    let Some(preset) = plan.installer.preset.as_ref() else {
+        return if plan.ui_assets.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(PackageError::Invalid)
+        };
+    };
+    let mut resolved: Vec<&ResolvedAsset> = plan.ui_assets.iter().collect();
+    resolved.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(resolved.len());
+    for asset in resolved {
+        if !seen.insert(asset.name.clone()) {
+            return Err(PackageError::Invalid);
+        }
+        let Some(declared) = preset
+            .assets
+            .iter()
+            .find(|declared| declared.name == asset.name)
+        else {
+            return Err(PackageError::Invalid);
+        };
+        if declared.size != asset.size || declared.sha256 != asset.sha256 {
+            return Err(PackageError::Invalid);
+        }
+        out.push(declared.clone());
+    }
+    if out.len() != preset.assets.len() {
+        return Err(PackageError::Invalid);
+    }
+    Ok(out)
+}
+
 #[derive(Debug)]
 pub struct BundleWriter;
-
-/// Read a build-machine source and prove it is what the plan says it is.
 ///
 /// Returns the size and digest it found, so a caller that has already trusted
 /// the plan still cannot publish a plan whose files are missing or changed.
@@ -1156,6 +1331,22 @@ impl BundleWriter {
         }
         let mut entries = Vec::with_capacity(plan.files.len());
         let mut contents = BTreeMap::<Sha256Digest, Vec<u8>>::new();
+        let ui_assets = canonical_ui_assets(plan)?;
+        for asset in &plan.ui_assets {
+            let source = asset.source.as_deref().ok_or(PackageError::Invalid)?;
+            let bytes = std::fs::read(source)?;
+            if bytes.len() as u64 != asset.size
+                || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != asset.sha256
+            {
+                return Err(PackageError::Payload(source.display().to_string()));
+            }
+            if let Some(existing) = contents.get(&asset.sha256)
+                && existing.as_slice() != bytes.as_slice()
+            {
+                return Err(PackageError::Payload(source.display().to_string()));
+            }
+            contents.entry(asset.sha256).or_insert(bytes);
+        }
         for file in &plan.files {
             let bytes = std::fs::read(&file.source)?;
             if bytes.len() as u64 != file.size
@@ -1238,6 +1429,7 @@ impl BundleWriter {
             installer,
             entries,
             prerequisite_artifacts,
+            ui_assets,
             plugins: artifacts
                 .into_iter()
                 .map(|artifact| artifact.metadata)
@@ -1305,6 +1497,11 @@ impl BundleWriter {
         for prerequisite in &plan.prerequisites {
             verify_source(&prerequisite.source, prerequisite.size, prerequisite.sha256)?;
         }
+        let ui_assets = canonical_ui_assets(plan)?;
+        for asset in &plan.ui_assets {
+            let source = asset.source.as_deref().ok_or(PackageError::Invalid)?;
+            verify_source(source, asset.size, asset.sha256)?;
+        }
         entries.sort_by(|a, b| {
             a.destination
                 .to_string()
@@ -1325,6 +1522,7 @@ impl BundleWriter {
             installer,
             entries,
             prerequisite_artifacts,
+            ui_assets,
             plugins: artifacts
                 .into_iter()
                 .map(|artifact| artifact.metadata)
@@ -1455,6 +1653,7 @@ impl BundleWriter {
                 installer,
                 entries: plan.entries.clone(),
                 prerequisite_artifacts: plan.prerequisite_artifacts.clone(),
+                ui_assets: plan.ui_assets.clone(),
                 plugins: plan.plugins.clone(),
                 total_size: plan.total_size,
             },
@@ -1492,11 +1691,6 @@ impl BundleWriter {
         output: &Path,
     ) -> Result<u64, PackageError> {
         let artifacts = canonical_artifacts(plan, artifacts)?;
-        struct Spool {
-            path: PathBuf,
-            size: u64,
-            compressed_size: u64,
-        }
         let spool_dir = tempfile::tempdir()?;
         let mut installer = plan.installer.clone();
         for mapping in &mut installer.files {
@@ -1505,39 +1699,13 @@ impl BundleWriter {
         let mut entries = Vec::with_capacity(plan.files.len());
         let mut objects = BTreeMap::<Sha256Digest, Spool>::new();
         for file in &plan.files {
-            if let std::collections::btree_map::Entry::Vacant(entry) = objects.entry(file.sha256) {
-                let mut input = File::open(&file.source)?;
-                let spool_path = spool_dir.path().join(file.sha256.to_hex());
-                let output_file = File::create(&spool_path)?;
-                let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
-                let mut hasher = Sha256::new();
-                let mut size = 0u64;
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let read = input.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
-                    hasher.update(&buffer[..read]);
-                    encoder.write_all(&buffer[..read])?;
-                }
-                let output_file = encoder.finish()?;
-                if size != file.size || Sha256Digest::from_hasher(hasher) != file.sha256 {
-                    return Err(PackageError::Payload(file.source.display().to_string()));
-                }
-                let compressed_size = output_file.metadata()?.len();
-                entry.insert(Spool {
-                    path: spool_path,
-                    size,
-                    compressed_size,
-                });
-            } else {
-                let (size, digest) = hash_reader(File::open(&file.source)?)?;
-                if size != file.size || digest != file.sha256 {
-                    return Err(PackageError::Payload(file.source.display().to_string()));
-                }
-            }
+            spool_source(
+                &file.source,
+                file.size,
+                file.sha256,
+                &spool_dir,
+                &mut objects,
+            )?;
             entries.push(PayloadEntry {
                 path: file.source_relative.clone(),
                 destination: file.destination.clone(),
@@ -1548,49 +1716,25 @@ impl BundleWriter {
                 condition: file.condition.clone(),
             });
         }
+        let ui_assets = canonical_ui_assets(plan)?;
+        for asset in &plan.ui_assets {
+            spool_source(
+                asset.source.as_deref().ok_or(PackageError::Invalid)?,
+                asset.size,
+                asset.sha256,
+                &spool_dir,
+                &mut objects,
+            )?;
+        }
         let prerequisite_artifacts = canonical_prerequisites(plan)?;
         for prerequisite in &plan.prerequisites {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                objects.entry(prerequisite.sha256)
-            {
-                let spool_path = spool_dir.path().join(prerequisite.sha256.to_hex());
-                let output_file = File::create(&spool_path)?;
-                let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
-                let mut input = File::open(&prerequisite.source)?;
-                let mut hasher = Sha256::new();
-                let mut size = 0u64;
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    let read = input.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
-                    hasher.update(&buffer[..read]);
-                    encoder.write_all(&buffer[..read])?;
-                }
-                let output_file = encoder.finish()?;
-                if size != prerequisite.size
-                    || Sha256Digest::from_hasher(hasher) != prerequisite.sha256
-                {
-                    return Err(PackageError::Payload(
-                        prerequisite.source.display().to_string(),
-                    ));
-                }
-                let compressed_size = output_file.metadata()?.len();
-                entry.insert(Spool {
-                    path: spool_path,
-                    size,
-                    compressed_size,
-                });
-            } else {
-                let (size, digest) = hash_reader(File::open(&prerequisite.source)?)?;
-                if size != prerequisite.size || digest != prerequisite.sha256 {
-                    return Err(PackageError::Payload(
-                        prerequisite.source.display().to_string(),
-                    ));
-                }
-            }
+            spool_source(
+                &prerequisite.source,
+                prerequisite.size,
+                prerequisite.sha256,
+                &spool_dir,
+                &mut objects,
+            )?;
         }
         for artifact in &artifacts {
             if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -1643,6 +1787,7 @@ impl BundleWriter {
                 installer,
                 entries,
                 prerequisite_artifacts,
+                ui_assets,
                 plugins: artifacts
                     .into_iter()
                     .map(|artifact| artifact.metadata)
@@ -1701,7 +1846,7 @@ mod tests {
                 },
                 target: TargetTriple::parse(HOST_TARGET).unwrap(),
                 frontend: Default::default(),
-                ui: None,
+                preset: None,
                 updates: None,
                 prerequisites: Vec::new(),
                 install: Install {
@@ -1730,6 +1875,7 @@ mod tests {
             prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
+            ui_assets: Vec::new(),
             total_size: 0,
             prerequisite_size: 0,
         }

@@ -282,6 +282,10 @@ pub fn resolve_target<R: InstallLocationResolver>(
         target: plan.target.clone(),
         scope: plan.scope,
         install_directory,
+        // A build plan says which preset; it does not say which bytes. The
+        // executable is content, and content is resolved by whoever supplies the
+        // payload - the caller that attaches this installation's runtime copy.
+        ui: None,
         selected_components: plan.selected_components.clone(),
         prerequisites,
         files,

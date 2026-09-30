@@ -46,6 +46,8 @@ pub enum ComponentKind {
     Runtime,
     /// A universal-artifact launcher, composed into a universal installer.
     Dispatcher,
+    /// A packaged preset, one target binary of which a build selects and composes.
+    Preset,
 }
 
 /// What a component is for.
@@ -63,6 +65,14 @@ pub enum ToolchainComponent {
     /// same source built without that path refuses a thin artifact with a clear
     /// reason instead of pretending. An offline artifact needs neither.
     Dispatcher { subsystem: Subsystem, online: bool },
+    /// The preset package Zup ships.
+    ///
+    /// One package rather than one binary per target, because that is what a
+    /// `.zupui` is: a build reads it, picks the target it needs, and composes
+    /// that. Staging the package therefore stages exactly what a user who named
+    /// a package stages, so the preset Zup ships and a third-party preset reach
+    /// the runtime by one path rather than two.
+    Preset,
 }
 
 /// The presentation a component targets, as the artifact model names it.
@@ -128,7 +138,31 @@ pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> Str
                 DISPATCHER_TARGET
             )
         }
+        // A package, so no executable suffix: the suffix is a property of one
+        // machine's binaries, and this holds all of them.
+        ToolchainComponent::Preset => PRESET_PACKAGE_NAME.to_owned(),
     }
+}
+
+/// The name the preset package Zup ships is staged under.
+///
+/// One name in the crate that owns the naming, because a build resolves this
+/// component and a readiness report names it, and two spellings of the same
+/// staged file is one file neither of them finds.
+pub const PRESET_PACKAGE_NAME: &str = "zup-preset.zupui";
+
+/// The peer preset the runtime's end-to-end tests launch.
+///
+/// Staged beside the components a build host needs rather than inside
+/// `host_components`: it is not something a build composes into an installer, it
+/// is a real preset a test installs, and it reaches the tests the way every other
+/// real binary does - through the staged toolchain, built by the same run. A test
+/// that shelled out to cargo for it would be a second build inside a build, and
+/// two tests doing that at once would race.
+///
+/// Returned rather than named, because a caller has to say where it is looking.
+pub fn test_preset_file_name(executable_suffix: &str) -> String {
+    format!("zup-preset-test{executable_suffix}")
 }
 
 /// The machine a dispatcher is built for.
@@ -148,7 +182,7 @@ pub const DISPATCHER_TARGET: &str = "i686-pc-windows-msvc";
 /// it. The order is presentation: runtimes first, then launchers, because that is
 /// the order a reader cares about them in.
 pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponent> {
-    let mut out = Vec::with_capacity(7);
+    let mut out = Vec::with_capacity(8);
     for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
         out.push(ToolchainComponent::Runtime {
             target: target.clone(),
@@ -160,6 +194,7 @@ pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponen
             out.push(ToolchainComponent::Dispatcher { subsystem, online });
         }
     }
+    out.push(ToolchainComponent::Preset);
     out
 }
 
@@ -414,6 +449,18 @@ impl ComponentDescriptor {
                 digest,
                 size,
             },
+            ToolchainComponent::Preset => Self {
+                format_version: FORMAT_VERSION,
+                kind: ComponentKind::Preset,
+                zup_version: zup_version.to_owned(),
+                // A package holds every target, so there is no single one to name.
+                target: "*".to_owned(),
+                frontend: None,
+                subsystem: None,
+                online: None,
+                digest,
+                size,
+            },
         })
     }
 
@@ -496,6 +543,11 @@ impl ComponentDescriptor {
                         },
                         wanted: if *online { "online" } else { "offline" },
                     });
+                }
+            }
+            ToolchainComponent::Preset => {
+                if self.kind != ComponentKind::Preset {
+                    return Err(ToolchainError::WrongKind);
                 }
             }
         }
@@ -919,14 +971,15 @@ mod tests {
     /// The set a build host needs, checked against what actually exists.
     ///
     /// Seven: three presentations of the runtime, and each launcher's
-    /// presentation crossed with whether it can reach a release over the network.
+    /// presentation crossed with whether it can reach a release over the network,
+    /// plus the one preset package every graphical build resolves.
     /// A host missing any of them cannot build something, and a host that
-    /// accumulates an eighth has a component nothing asked for.
+    /// accumulates a ninth has a component nothing asked for.
     #[test]
-    fn a_host_needs_exactly_seven_components_and_they_are_the_ones_listed() {
+    fn a_host_needs_exactly_eight_components_and_they_are_the_ones_listed() {
         let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid");
         let components = host_components(&target);
-        assert_eq!(components.len(), 7, "{components:?}");
+        assert_eq!(components.len(), 8, "{components:?}");
         let names: Vec<String> = components
             .iter()
             .map(|component| file_name(component, EXECUTABLE_SUFFIX))
@@ -939,6 +992,7 @@ mod tests {
             "zup-dispatch-gui-online-i686",
             "zup-dispatch-console-i686",
             "zup-dispatch-console-online-i686",
+            PRESET_PACKAGE_NAME,
         ] {
             assert!(
                 names.iter().any(|name| name.starts_with(expected)),
@@ -953,7 +1007,7 @@ mod tests {
                 ToolchainComponent::Runtime { target: found, .. } => {
                     assert_eq!(found, &target, "{component:?}");
                 }
-                ToolchainComponent::Dispatcher { .. } => {}
+                ToolchainComponent::Dispatcher { .. } | ToolchainComponent::Preset => {}
             }
         }
     }

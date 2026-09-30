@@ -32,8 +32,8 @@
 //! No release identifier, no API version, no credential, no draft flag, no
 //! discussion category, no host name. A GitHub release id has no meaning here,
 //! and a release plan that carried one would have to be rewritten the moment a
-//! project moved to another forge. Provider state belongs in a provider receipt
-//! - see [`PublishReceipt`](receipt::PublishReceipt) for the neutral shape and
+//! project moved to another forge. Provider state belongs in a provider receipt;
+//! see [`PublishReceipt`](receipt::PublishReceipt) for the neutral shape and
 //! `zup-publish-github` for the one that carries the ids.
 //!
 //! # Roles, and why a file is not a role

@@ -26,11 +26,8 @@ pub fn graphical(
     }
     #[cfg(feature = "gui")]
     {
-        crate::gui::install_surface(
-            executable,
-            bundle,
-            crate::gui::Launch::from_path(executable),
-        )
+        let _ = bundle;
+        crate::host::surface(executable)
     }
     #[cfg(not(feature = "gui"))]
     {
@@ -51,7 +48,8 @@ pub fn graphical_uninstall(
     }
     #[cfg(feature = "gui")]
     {
-        crate::gui::uninstall_confirmation(executable, bundle, args)
+        let _ = bundle;
+        crate::host::uninstall_confirmation(executable, args)
     }
     #[cfg(not(feature = "gui"))]
     {
@@ -64,7 +62,7 @@ pub fn graphical_uninstall(
 pub fn graphical_for(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     #[cfg(feature = "gui")]
     {
-        crate::gui::install_surface_from_arguments(context, args)
+        crate::host::surface_from_arguments(context, args)
     }
     #[cfg(not(feature = "gui"))]
     {

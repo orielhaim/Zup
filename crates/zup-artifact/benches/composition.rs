@@ -187,7 +187,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
                 app: app(),
                 target: resolved.target.clone(),
                 frontend: Frontend::Console,
-                ui: None,
+                preset: None,
                 updates: Some(updates()),
                 install: install(),
                 prerequisites: Vec::new(),
@@ -214,11 +214,12 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: resolved_files,
+            ui_assets: Vec::new(),
             total_size: total,
             prerequisite_size: 0,
         },
         &[plugin],
-        Some((MediaType::RUNTIME, runtime)),
+        &[(MediaType::RUNTIME, runtime)],
     )
     .unwrap()
 }

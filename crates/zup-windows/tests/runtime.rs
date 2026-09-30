@@ -272,6 +272,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
             prerequisite_count: 0,
             download_bytes: 11,
         },
+        ui: None,
     };
     let plan = zup_windows::plan_target_lifecycle(
         LifecycleAction::Install,

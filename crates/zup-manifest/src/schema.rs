@@ -17,7 +17,7 @@ struct SchemaManifest {
     #[serde(default)]
     frontend: Frontend,
     #[serde(default)]
-    ui: Option<zup_core::UiBranding>,
+    ui: zup_core::Ui,
     build: Build,
     install: Install,
     #[serde(default)]

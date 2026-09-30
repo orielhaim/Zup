@@ -68,6 +68,10 @@ jobs:
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries
 
+      - name: Public UI crates
+        shell: pwsh
+        run: ./scripts/verify-public-crates.ps1
+
       - name: Action refs
         run: cargo xtask github-action-pins check
 

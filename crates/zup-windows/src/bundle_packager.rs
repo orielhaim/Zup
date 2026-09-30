@@ -17,7 +17,8 @@ use zup_core::{
     Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, TargetTriple, hash_reader,
 };
 use zup_pe::{
-    MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument,
+    MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, RESOURCE_ID_PRESET,
+    ResourceDocument,
 };
 
 const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -90,6 +91,8 @@ fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
 pub struct EmbeddedBundle {
     executable: PathBuf,
     package: Package,
+    /// The installer's UI preset, when this executable was composed with one.
+    preset: Option<Vec<u8>>,
 }
 
 impl EmbeddedBundle {
@@ -141,10 +144,20 @@ impl EmbeddedBundle {
             bytes.extend_from_slice(&blob);
         }
         let package = Package::from_bytes(bytes)?;
+        // A self-contained GUI installer is composed with a preset; a console
+        // one is not. The resource is read only when it is there, because a
+        // missing one is a fact about the frontend rather than a damaged file.
+        let preset = read_resource(&executable, RESOURCE_ID_PRESET).ok();
         Ok(Self {
             executable,
             package,
+            preset,
         })
+    }
+
+    /// The UI preset this installer was composed with.
+    pub fn preset(&self) -> Option<&[u8]> {
+        self.preset.as_deref()
     }
 
     pub fn package(&self) -> &Package {
@@ -165,6 +178,15 @@ impl EmbeddedBundle {
 
     pub fn build_plan(&self) -> Result<zup_core::BuildPlan, BundleError> {
         Ok(self.package.build_plan()?)
+    }
+
+    /// The bytes of one application-provided UI asset, proved against the digest
+    /// the plan recorded.
+    pub fn ui_asset(&self, name: &str) -> Result<(zup_core::UiAsset, Vec<u8>), BundleError> {
+        self.package
+            .ui_asset(name)
+            .map(|(asset, bytes)| (asset.clone(), bytes))
+            .map_err(BundleError::from)
     }
 
     pub fn frontend(&self) -> Frontend {
@@ -257,6 +279,46 @@ impl EmbeddedPayloadSource {
             })?;
         Ok(Box::new(file))
     }
+
+    /// The preset executable this image was composed with.
+    ///
+    /// Present only for an installer that presents a window, and read from the
+    /// image's own resource rather than from a file beside it, because the file
+    /// beside it is a convenience a first run leaves behind and nothing else may
+    /// rely on.
+    fn open_preset(
+        &self,
+        path: &RelativePath,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<PayloadReader, PayloadError> {
+        let bundle =
+            EmbeddedBundle::open(&self.executable).map_err(|error| PayloadError::Read {
+                path: path.to_string(),
+                source: std::io::Error::other(error.to_string()),
+            })?;
+        let bytes = bundle
+            .preset()
+            .ok_or(PayloadError::Read {
+                path: path.to_string(),
+                source: std::io::Error::other("this image carries no preset"),
+            })?
+            .to_vec();
+        let size = bytes.len() as u64;
+        if size != expected_size {
+            return Err(PayloadError::SizeMismatch {
+                path: path.to_string(),
+                expected: expected_size,
+                found: size,
+            });
+        }
+        if zup_core::hash_bytes(&bytes) != *expected_sha256 {
+            return Err(PayloadError::DigestMismatch {
+                path: path.to_string(),
+            });
+        }
+        Ok(Box::new(std::io::Cursor::new(bytes)))
+    }
 }
 
 impl PayloadSource for EmbeddedPayloadSource {
@@ -268,6 +330,34 @@ impl PayloadSource for EmbeddedPayloadSource {
     ) -> Result<PayloadReader, PayloadError> {
         if path.as_str() == "__zup_maintenance__.exe" {
             return self.open_maintenance(path, expected_sha256, expected_size);
+        }
+        if path.as_str() == crate::ui_runtime::PRESET_SOURCE {
+            return self.open_preset(path, expected_sha256, expected_size);
+        }
+        if let Some(name) = path
+            .as_str()
+            .strip_prefix(crate::ui_runtime::ASSET_SOURCE_PREFIX)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            let (asset, bytes) = EmbeddedBundle::open(&self.executable)
+                .and_then(|bundle| bundle.ui_asset(name))
+                .map_err(|error| PayloadError::Read {
+                    path: path.to_string(),
+                    source: std::io::Error::other(error.to_string()),
+                })?;
+            if bytes.len() as u64 != expected_size {
+                return Err(PayloadError::SizeMismatch {
+                    path: path.to_string(),
+                    expected: expected_size,
+                    found: bytes.len() as u64,
+                });
+            }
+            if asset.sha256 != *expected_sha256 {
+                return Err(PayloadError::DigestMismatch {
+                    path: path.to_string(),
+                });
+            }
+            return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
         self.package.open(path, expected_sha256, expected_size)
     }
@@ -457,6 +547,7 @@ pub fn build_self_contained_executable(
     output: &Path,
     plan: &TargetBuildPlan,
     artifacts: &[CompiledPluginArtifact],
+    preset: Option<&[u8]>,
 ) -> Result<(u64, u64), BundleError> {
     let runtime_target = read_pe_target(executable)?;
     if runtime_target != plan.installer.target {
@@ -470,7 +561,7 @@ pub fn build_self_contained_executable(
     let temporary = tempfile::tempdir()?;
     let package = temporary.path().join("installer.zup");
     let package_size = BundleWriter::write_file(plan, artifacts, &package)?;
-    embed_bundle_file(executable, output, &package)?;
+    embed_bundle_file(executable, output, &package, preset)?;
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
 
@@ -523,7 +614,7 @@ pub fn plan_only_runtime_bytes(
     let path = temporary.path().join("runtime.zup");
     std::fs::write(&path, &package)?;
     let out = temporary.path().join("runtime.exe");
-    embed_bundle_file(executable, &out, &path)?;
+    embed_bundle_file(executable, &out, &path, None)?;
     Ok((std::fs::read(&out)?, package_size))
 }
 
@@ -532,9 +623,10 @@ pub fn embed_bundle_file(
     executable: &Path,
     output: &Path,
     package: &Path,
+    preset: Option<&[u8]>,
 ) -> Result<(), BundleError> {
     validate_unsigned_pe(executable)?;
-    embed_bundle_resource(executable, output, package)
+    embed_bundle_resource(executable, output, package, preset)
 }
 
 pub fn read_pe_target(path: &Path) -> Result<TargetTriple, BundleError> {
@@ -639,9 +731,22 @@ fn embed_bundle_resource(
     executable: &Path,
     output: &Path,
     package_path: &Path,
+    preset: Option<&[u8]>,
 ) -> Result<(), BundleError> {
     let package = Package::open_unverified(package_path)?;
-    let documents = package_documents(&package)?;
+    let mut documents = package_documents(&package)?;
+    if let Some(bytes) = preset {
+        if bytes.len() as u64 > MAX_RESOURCE_SIZE {
+            return Err(BundleError::ResourceTooLarge {
+                size: bytes.len() as u64,
+                limit: MAX_RESOURCE_SIZE,
+            });
+        }
+        documents.push(ResourceDocument {
+            id: RESOURCE_ID_PRESET,
+            bytes: bytes.to_vec(),
+        });
+    }
     crate::pe_resources::write_resources(executable, output, &documents).map_err(|error| {
         match error {
             crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),

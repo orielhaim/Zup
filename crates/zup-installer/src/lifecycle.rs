@@ -618,9 +618,25 @@ pub fn run_acquired_transition(
         miette::miette!("content source: {error}")
     })?;
     let work_root = state_root.join("work");
-    let target =
+    let mut target =
         zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
             .map_err(|error| miette::miette!("target: {error}"))?;
+    // A window is release content, fetched and verified like everything else this
+    // transition installs, and planned as ordinary files under the same state
+    // root. The digest is the release's own - carried in the manifest and named
+    // in the release descriptor - so nothing here hashes a 20 MiB executable to
+    // discover what it is, and nothing here can choose different bytes from the
+    // ones the graph authenticated.
+    if let Some(preset) = installer.preset.as_ref() {
+        let runtime_directory = zup_windows::maintenance_directory(
+            &state_root,
+            &installer.app.id,
+            scope,
+            &target.app.version,
+        );
+        let source = acquired_ui_source(&acquired.manifest, &payload);
+        attach_ui_runtime(&mut target, &runtime_directory, scope, preset, &source)?;
+    }
     let execution = zup_windows::plan_target_lifecycle_with_frontend(
         action,
         &installer.app.id,
@@ -976,6 +992,12 @@ where
         zup_windows::resolve_target(install, &zup_windows::WindowsTargetContext::new(scope))
             .map_err(|error| miette::miette!("target: {error}"))?;
     attach_maintenance_copy(&mut target, &state_root, &app_id, scope, &payload_root)?;
+    if let Some(preset) = build.installer.preset.as_ref() {
+        let runtime_directory =
+            zup_windows::maintenance_directory(&state_root, &app_id, scope, &target.app.version);
+        let source = embedded_ui_source(&payload_root);
+        attach_ui_runtime(&mut target, &runtime_directory, scope, preset, &source)?;
+    }
     let execution = zup_windows::plan_target_lifecycle_with_frontend(
         action,
         &app_id,
@@ -1061,6 +1083,164 @@ fn attach_maintenance_copy(
     target.summary.file_count += 1;
     target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
     target.summary.resource_count += 1;
+    Ok(())
+}
+
+/// Read the UI runtime out of the installer image this process is running from.
+///
+/// The image's own resources, not a file beside it: beside it is what a previous
+/// run left behind, and a plan that read it would be planning an install out of
+/// the output of an install that may have been rolled back.
+fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Vec<u8>> {
+    let executable = payload_root.to_path_buf();
+    move |name| {
+        let bundle = zup_windows::EmbeddedBundle::open(&executable).map_err(|error| {
+            miette::miette!("installer package {}: {error}", executable.display())
+        })?;
+        if name == zup_windows::ui_runtime::PRESET_SOURCE {
+            return bundle
+                .preset()
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| miette::miette!("this installer was composed without a preset"));
+        }
+        let asset = ui_asset_name(name)
+            .ok_or_else(|| miette::miette!("`{name}` is not UI runtime content"))?;
+        bundle
+            .ui_asset(asset)
+            .map(|(_, bytes)| bytes)
+            .map_err(|error| miette::miette!("the asset `{asset}`: {error}"))
+    }
+}
+
+/// The logical asset name inside a reserved UI source name.
+fn ui_asset_name(source: &str) -> Option<&str> {
+    source
+        .strip_prefix(zup_windows::ui_runtime::ASSET_SOURCE_PREFIX)
+        .and_then(|rest| rest.strip_prefix('/'))
+}
+
+/// Read a window's content out of the content this release was acquired into.
+///
+/// The same verified cache every other byte of the transition comes from, and the
+/// same plan-only package the rest of the payload is served through - so a preset
+/// reaches the machine by the identical integrity path as a payload file, and
+/// there is no second place a window's bytes could arrive from.
+fn acquired_ui_source(
+    manifest: &zup_artifact::VariantManifest,
+    payload: &zup_bundle::AcquiredPayloadSource,
+) -> impl Fn(&str) -> miette::Result<Vec<u8>> {
+    let executable = manifest
+        .preset
+        .as_ref()
+        .map(|preset| preset.digest)
+        .ok_or_else(|| {
+            miette::miette!("this release presents a window but carries no native image for it")
+        });
+    move |name| {
+        if name == zup_windows::ui_runtime::PRESET_SOURCE {
+            let digest = executable
+                .as_ref()
+                .map_err(|error| miette::miette!("{error}"))?;
+            return payload
+                .read_blob(digest)
+                .map_err(|error| miette::miette!("the preset executable {digest}: {error}"));
+        }
+        let asset = ui_asset_name(name)
+            .ok_or_else(|| miette::miette!("`{name}` is not UI runtime content"))?;
+        payload
+            .ui_asset(asset)
+            .map_err(|error| miette::miette!("the asset `{asset}`: {error}"))
+    }
+}
+
+/// Make this installation's window part of what it owns.
+///
+/// The preset executable and every asset its settings named become installed
+/// content, content-addressed beside the maintenance runtime and carrying the
+/// scope's own authority. They are planned as ordinary files, which is what
+/// makes the transaction engine do the rest: the window is published at the same
+/// commit as the application, a failed install leaves nothing behind, a rollback
+/// returns the previous window's bytes, an update replaces the whole generation
+/// at once, and an uninstall removes it without a second bookkeeping system to
+/// keep in step.
+///
+/// `bytes` reads content by its reserved source name, so this knows nothing
+/// about whether the payload is an installer image, a content store, or a
+/// directory. A caller that cannot supply the preset's bytes says so here rather
+/// than committing an installation whose window cannot open.
+///
+/// The plan is only touched once every byte is in hand, so a window that turns
+/// out to be incomplete leaves no half of itself behind. A window is one
+/// generation, and a generation that was partly written would be a machine with
+/// a preset from one release and an asset from another.
+fn attach_ui_runtime(
+    target: &mut zup_platform::TargetPlan,
+    runtime_directory: &Path,
+    scope: SelectedScope,
+    preset: &zup_core::UiPreset,
+    bytes: &impl Fn(&str) -> miette::Result<Vec<u8>>,
+) -> miette::Result<()> {
+    let executable = bytes(zup_windows::ui_runtime::PRESET_SOURCE).map_err(|error| {
+        miette::miette!(
+            "this application presents the preset `{}`, and its executable could not be read: \
+             {error}",
+            preset.name
+        )
+    })?;
+    let executable_digest = zup_core::hash_bytes(&executable);
+    let mut files = vec![(
+        zup_windows::ui_runtime::preset_path(runtime_directory, &executable_digest),
+        executable_digest,
+        executable.len() as u64,
+        zup_core::RelativePath::new(zup_windows::ui_runtime::PRESET_SOURCE)
+            .expect("a reserved source name is always relative"),
+    )];
+    for asset in &preset.assets {
+        let content =
+            bytes(zup_windows::ui_runtime::asset_source_name(asset.name.as_str()).as_str())
+                .map_err(|error| {
+                    miette::miette!("the asset `{}` could not be read: {error}", asset.name)
+                })?;
+        if content.len() as u64 != asset.size || zup_core::hash_bytes(&content) != asset.sha256 {
+            return Err(miette::miette!(
+                "the asset `{}` is not the content this application configured",
+                asset.name
+            ));
+        }
+        files.push((
+            zup_windows::ui_runtime::asset_path(
+                runtime_directory,
+                asset.name.as_str(),
+                &asset.sha256,
+            ),
+            asset.sha256,
+            asset.size,
+            zup_windows::ui_runtime::asset_source_name(asset.name.as_str()),
+        ));
+    }
+
+    let triple = target.target.clone();
+    for (path, digest, size, source) in files {
+        let destination =
+            zup_platform::TargetPath::new(triple.clone(), zup_windows::plain_path_text(&path))
+                .map_err(|error| miette::miette!("UI runtime destination: {error}"))?;
+        let text = destination.to_string();
+        target.files.push(zup_platform::TargetFile {
+            key: ResourceKey::File { destination: text },
+            source_relative: source,
+            destination,
+            size,
+            sha256: digest,
+            privilege: scope.authorization(),
+        });
+        target.summary.file_count += 1;
+        target.summary.resource_count += 1;
+        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
+    }
+    target.ui = Some(zup_core::UiRuntime {
+        preset: preset.clone(),
+        executable: executable_digest,
+    });
     Ok(())
 }
 

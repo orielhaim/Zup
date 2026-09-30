@@ -183,6 +183,24 @@ pub enum BuildError {
     #[diagnostic(code(zup_build::prerequisite_identity))]
     PrerequisiteIdentity { id: String, path: PathBuf },
 
+    /// A project source a build was told to read is not inside the project.
+    #[error("{kind} source `{path}` is outside the project")]
+    #[diagnostic(
+        code(zup_build::source_outside_project),
+        help("the path is resolved relative to the project directory and must stay inside it")
+    )]
+    SourceOutsideProject { kind: &'static str, path: String },
+
+    /// A project source is larger than the build will carry.
+    #[error("{kind} source `{path}` is {size} bytes; the limit is {limit}")]
+    #[diagnostic(code(zup_build::source_too_large))]
+    SourceTooLarge {
+        kind: &'static str,
+        path: String,
+        size: u64,
+        limit: u64,
+    },
+
     /// An I/O error occurred while resolving the source root.
     #[error("I/O error at `{path}`")]
     #[diagnostic(code(zup_build::io))]

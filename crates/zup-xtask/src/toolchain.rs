@@ -30,6 +30,19 @@ pub const DISPATCHER_PACKAGE: &str = "zup-dispatch";
 /// installs.
 pub const CLI_PACKAGE: &str = "zup";
 
+/// The package that produces the default preset.
+///
+/// Published like any other preset: it is a separate process the installer
+/// launches, so the toolchain stages a `.zupui` of it exactly as a build
+/// consumes a `.zupui` a user chose.
+pub const PRESET_PACKAGE: &str = "zup-preset-default";
+
+/// Where that package's project lives, relative to the repository root.
+pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
+
+/// The peer preset the runtime's end-to-end tests install.
+pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
+
 /// The three runtime templates, as `(feature, frontend)`.
 pub const FRONTENDS: &[(&str, &str)] = &[
     ("gui", "zup-setup-gui"),
@@ -163,7 +176,97 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
         println!("  dispatch {subsystem:<8} {}", component_name(&staged_file));
         written.push(staged_file);
     }
+
+    let preset = build_and_stage_preset(root, &staged, &version, profile)?;
+    println!("  preset             {}", component_name(&preset));
+    written.push(preset);
+
+    let peer = build_and_stage_test_preset(root, &staged, profile)?;
+    println!("  preset-peer        {}", component_name(&peer));
+    written.push(peer);
     Ok(written)
+}
+
+/// Pack the default preset and stage it for this machine.
+///
+/// Build and stage the peer preset the runtime's end-to-end tests install.
+///
+/// A real preset, written against the public SDK, staged beside the components a
+/// build host needs. It is staged rather than built by the test that uses it so
+/// that the whole test run is one build: a test that shelled out to cargo would
+/// be a second build inside a build, and two tests doing it at once would race
+/// for the same output.
+fn build_and_stage_test_preset(
+    root: &Path,
+    staged: &Path,
+    profile: &str,
+) -> Result<PathBuf, String> {
+    let binary = zup_toolchain::test_preset_file_name("");
+    cargo(
+        root,
+        &[
+            "build",
+            "-p",
+            TEST_PRESET_PACKAGE,
+            "--bin",
+            &binary,
+            "--profile",
+            profile,
+        ],
+    )?;
+    let built = target_directory(root, profile).join(format!("{binary}{EXECUTABLE_SUFFIX}"));
+    let name = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
+    let destination = staged.join(&name);
+    std::fs::copy(&built, &destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    Ok(destination)
+}
+
+/// Published through `zup ui pack` rather than by writing a package here, so the
+/// preset Zup ships is produced by the same publisher a third-party author uses
+/// and a build that consumes it is consuming something a user could have
+/// downloaded. The package carries every target it was built for, so the staged
+/// component is one file rather than one per target.
+fn build_and_stage_preset(
+    root: &Path,
+    staged: &Path,
+    version: &str,
+    profile: &str,
+) -> Result<PathBuf, String> {
+    // Somewhere else, because staging replaces the file it is given: packing
+    // straight into the staging directory would have the stager delete the
+    // package and then look for it.
+    let scratch = tempfile::tempdir_in(staged)
+        .map_err(|error| format!("a scratch directory in {}: {error}", staged.display()))?;
+    let package = scratch.path().join(zup_toolchain::PRESET_PACKAGE_NAME);
+    cargo(
+        root,
+        &[
+            "run",
+            "-p",
+            CLI_PACKAGE,
+            "--profile",
+            profile,
+            "--",
+            "ui",
+            "pack",
+            "--manifest",
+            &root.join(PRESET_DIRECTORY).to_string_lossy(),
+            "--build",
+            machine_suffix(),
+            "--profile",
+            profile,
+            "--output",
+            &package.to_string_lossy(),
+            "--force",
+        ],
+    )?;
+    stage_component(
+        &package,
+        staged,
+        &zup_toolchain::ToolchainComponent::Preset,
+        version,
+    )
 }
 
 /// The release-profile settings a launcher is built with.
@@ -505,12 +608,12 @@ mod tests {
 
     /// The stager and the contract must agree on what a host needs.
     ///
-    /// `FRONTENDS` and `DISPATCHERS` say which cargo invocation produces each
-    /// component; `zup_toolchain::host_components` says which components that is.
-    /// They are two lists because one is a build plan and the other is a
-    /// contract, and they are checked against each other here because a build
-    /// that stages six of the seven components succeeds at staging and fails at
-    /// the first composition that needs the seventh.
+    /// `FRONTENDS`, `DISPATCHERS` and `PRESET_PACKAGE` say which cargo
+    /// invocation produces each component; `zup_toolchain::host_components` says
+    /// which components that is. They are two lists because one is a build plan
+    /// and the other is a contract, and they are checked against each other here
+    /// because a build that stages seven of the eight components succeeds at
+    /// staging and fails at the first composition that needs the eighth.
     #[test]
     fn the_stager_produces_exactly_the_components_the_contract_names() {
         let target = zup_core::TargetTriple::parse(machine_suffix())
@@ -538,6 +641,10 @@ mod tests {
                     EXECUTABLE_SUFFIX,
                 )
             }))
+            .chain(std::iter::once(zup_toolchain::file_name(
+                &zup_toolchain::ToolchainComponent::Preset,
+                EXECUTABLE_SUFFIX,
+            )))
             .collect();
         staged.sort();
         let mut wanted = wanted;

@@ -165,6 +165,16 @@ impl Acquired {
             for artifact in &self.manifest.plan.plugins {
                 pinned.insert(artifact.blob);
             }
+            // A window's content is retained on the same terms as payload, and
+            // for the same reason: the cache is where a repair gets the bytes
+            // back. A retention record that left the preset and its assets out
+            // would let a sweep take exactly the content an offline repair needs.
+            if let Some(preset) = self.manifest.preset.as_ref() {
+                pinned.insert(preset.digest);
+            }
+            for asset in &self.manifest.plan.ui_assets {
+                pinned.insert(asset.sha256);
+            }
         }
         let state = RetentionState::record(policy, self.resolved.descriptor.release_digest, pinned);
         write_retention(self.cache.root(), &state)
@@ -272,7 +282,59 @@ pub fn component_closure(
         .iter()
         .map(|artifact| (artifact.blob, artifact.prerequisite_id.to_string()))
         .collect();
-    Ok(resolved.closure(entries, prerequisites, selection)?)
+    Ok(resolved.closure(
+        entries,
+        prerequisites,
+        declared_content(manifest)?,
+        selection,
+    )?)
+}
+
+/// The content a variant declares beyond its payload and prerequisites.
+///
+/// Two kinds, and the acquisition layer is told which is which without being told
+/// anything about windows: the native image a graphical variant presents itself
+/// with, and the named assets that image was configured to expect. Both are
+/// required content, so neither is narrowed away by a component selection - a
+/// preset the application chose is not a thing a user can leave out of an
+/// install the way a documentation folder is.
+pub fn declared_content(
+    manifest: &VariantManifest,
+) -> Result<Vec<(Sha256Digest, ContentReason)>, GraphError> {
+    let mut declared: Vec<(Sha256Digest, ContentReason)> = manifest
+        .plan
+        .ui_assets
+        .iter()
+        .map(|asset| {
+            (
+                asset.sha256,
+                ContentReason::UiAsset {
+                    name: asset.name.to_string(),
+                },
+            )
+        })
+        .collect();
+    match (
+        manifest.plan.installer.preset.as_ref(),
+        manifest.preset.as_ref(),
+    ) {
+        (Some(_), Some(preset)) => {
+            declared.push((preset.digest, ContentReason::Preset));
+            Ok(declared)
+        }
+        // A window with no native image beside it is a release that cannot say
+        // which bytes its client should run, so it is refused rather than
+        // installed without one.
+        (Some(_), None) => Err(GraphError::Manifest(format!(
+            "variant `{}` presents a window but the release carries no native image for it",
+            manifest.target
+        ))),
+        (None, Some(_)) => Err(GraphError::Manifest(format!(
+            "variant `{}` carries a window image for a plan that presents none",
+            manifest.target
+        ))),
+        (None, None) => Ok(declared),
+    }
 }
 
 /// The exact closure a repair needs: the digests behind drifted resources.
@@ -298,7 +360,18 @@ pub fn repair_closure(
                         .plan
                         .prerequisite_artifacts
                         .iter()
-                        .any(|artifact| artifact.sha256 == **digest))
+                        .any(|artifact| artifact.sha256 == **digest)
+                    // A window's content is installed content like any other, so
+                    // a repair that lost it needs it back from the same place.
+                    || manifest
+                        .plan
+                        .ui_assets
+                        .iter()
+                        .any(|asset| asset.sha256 == **digest)
+                    || manifest
+                        .preset
+                        .as_ref()
+                        .is_some_and(|preset| preset.digest == **digest))
         })
         .copied()
         .collect::<Vec<_>>();
@@ -424,6 +497,344 @@ pub fn is_newer(identity: &zup_core::ReleaseIdentity, version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A window's content, and the closure it produces.
+    //
+    // Proved here rather than from a test target because the invariant spans the
+    // release metadata, the authenticated catalog and the plan, and a public
+    // module invented to reach it from outside would be a production surface with
+    // a test as its only reader.
+
+    const PRESET: &[u8] = b"the preset executable";
+    const LOGO: &[u8] = b"<svg/>";
+    const HERO: &[u8] = b"\x89PNG\r\n";
+
+    fn target_triple() -> zup_core::TargetTriple {
+        zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target")
+    }
+
+    fn asset(name: &str, content: &[u8]) -> zup_core::UiAsset {
+        zup_core::UiAsset {
+            name: zup_core::NonEmptyString::new(name).expect("a name"),
+            size: content.len() as u64,
+            sha256: zup_core::hash_bytes(content),
+        }
+    }
+
+    /// A release presenting a window, carrying the bytes that window names.
+    struct Release {
+        manifest: VariantManifest,
+        catalog: zup_acquire::ContentCatalog,
+    }
+
+    impl Release {
+        /// The closure a machine would download, exactly as the transition builds
+        /// it: every declared digest resolved through the authenticated catalog.
+        ///
+        /// No component selection, and that is the point rather than an omission:
+        /// declared content is required content, so it is the same set whichever
+        /// components are chosen. [`a_window_is_never_narrowed_away`] states that.
+        fn closure(&self) -> Result<zup_acquire::AcquisitionPlan, String> {
+            let declared = declared_content(&self.manifest).map_err(|error| error.to_string())?;
+            let mut items = Vec::new();
+            for (digest, reason) in declared {
+                let entry = self
+                    .catalog
+                    .entry(&digest)
+                    .ok_or_else(|| format!("the authenticated catalog does not carry {digest}"))?;
+                items.push(zup_acquire::AcquisitionItem::new(
+                    entry.descriptor(zup_acquire::ContentKind::Payload),
+                    reason,
+                ));
+            }
+            zup_acquire::AcquisitionPlan::build(items).map_err(|error| error.to_string())
+        }
+    }
+
+    /// Build a release presenting `window`, whose assets are `assets` and whose
+    /// executable is `preset_bytes`, carrying the bytes named in `carry`.
+    fn release(
+        window: bool,
+        preset_bytes: &[u8],
+        assets: &[(&str, &[u8])],
+        carry: &[&[u8]],
+    ) -> Release {
+        let mut settings = serde_json::Map::new();
+        let mut declared = Vec::new();
+        for (name, content) in assets {
+            settings.insert((*name).to_owned(), serde_json::Value::from(*name));
+            declared.push(asset(name, content));
+        }
+        let target = target_triple();
+        let manifest = zup_artifact::VariantManifest {
+            schema: zup_artifact::VARIANT_MANIFEST_SCHEMA,
+            required_features: zup_artifact::FEATURE_VARIANT_MANIFESTS,
+            target: target.clone(),
+            platform: zup_artifact::Platform::from_triple(&target),
+            frontend: zup_core::Frontend::Gui,
+            runtime: Some(zup_artifact::Descriptor::of(
+                zup_artifact::MediaType::RUNTIME,
+                b"a runtime image",
+            )),
+            preset: window.then(|| {
+                zup_artifact::Descriptor::of(zup_artifact::MediaType::PRESET, preset_bytes)
+            }),
+            requirements: zup_artifact::VariantRequirements::default(),
+            plan: zup_bundle::PortableBuildPlan {
+                installer: zup_core::Installer {
+                    app: zup_core::App {
+                        id: zup_core::AppId::new("com.acme.ui").expect("a valid id"),
+                        name: zup_core::NonEmptyString::new("Acme").expect("a name"),
+                        version: semver::Version::parse("1.0.0").expect("a version"),
+                        publisher: None,
+                        main: None,
+                        description: None,
+                    },
+                    target,
+                    frontend: zup_core::Frontend::Gui,
+                    preset: window.then(|| zup_core::UiPreset {
+                        name: zup_core::NonEmptyString::new("aurora").expect("a name"),
+                        version: semver::Version::parse("1.4.2").expect("a version"),
+                        protocol: 1,
+                        required_capabilities: vec!["components".to_owned()],
+                        settings: serde_json::Value::Object(settings),
+                        assets: declared.clone(),
+                    }),
+                    updates: None,
+                    install: zup_core::Install {
+                        scope: zup_core::InstallScope::User,
+                        directory: zup_core::InstallDirectory {
+                            user: Some(zup_core::Template::parse("${install}").expect("a dir")),
+                            machine: None,
+                        },
+                        allow_directory_override: false,
+                    },
+                    prerequisites: Vec::new(),
+                    components: Vec::new(),
+                    plugins: Vec::new(),
+                    files: Vec::new(),
+                    launchers: Vec::new(),
+                    path: Vec::new(),
+                    services: Vec::new(),
+                    protocols: Vec::new(),
+                    file_associations: Vec::new(),
+                },
+                entries: Vec::new(),
+                prerequisite_artifacts: Vec::new(),
+                ui_assets: declared,
+                plugins: Vec::new(),
+                total_size: 0,
+            },
+            logical_size: 0,
+        };
+        // A release recomputes its own logical size and refuses a disagreement,
+        // so the fixture states the same one the shape derives rather than
+        // inventing one: no payload, no prerequisites, no plugins, and the two
+        // native images beside them.
+        let mut manifest = manifest;
+        manifest.logical_size = manifest
+            .runtime
+            .iter()
+            .chain(manifest.preset.as_ref())
+            .map(|image| image.size)
+            .sum();
+        let manifest = VariantManifest::parse(&serde_json::to_vec(&manifest).expect("serializes"))
+            .expect("a manifest this crate wrote is one it reads");
+
+        // The catalog is a superset of any one closure: it carries every byte the
+        // release holds, and each closure narrows it. That is why a client can
+        // tell a missing blob from a missing reference.
+        let mut entries: Vec<zup_acquire::CatalogEntry> = carry
+            .iter()
+            .copied()
+            .chain(window.then_some(preset_bytes))
+            .chain(assets.iter().map(|(_, content)| *content))
+            .map(|content| {
+                zup_acquire::CatalogEntry::stored(
+                    zup_core::hash_bytes(content),
+                    content.len() as u64,
+                )
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.digest);
+        entries.dedup_by_key(|entry| entry.digest);
+        Release {
+            manifest,
+            catalog: zup_acquire::ContentCatalog::new(entries).expect("a well formed catalog"),
+        }
+    }
+
+    /// A window with no assets still needs its executable, and it is fetched.
+    #[test]
+    fn a_window_with_no_assets_still_fetches_its_executable() {
+        let release = release(true, PRESET, &[], &[]);
+        let plan = release.closure().expect("a closure");
+        assert_eq!(plan.len(), 1, "the executable and nothing else");
+        assert_eq!(plan.items()[0].reason, ContentReason::Preset);
+    }
+
+    /// Every asset the settings named is fetched, under the name it was named.
+    #[test]
+    fn every_named_asset_is_in_the_closure() {
+        let release = release(
+            true,
+            PRESET,
+            &[("branding/logo.svg", LOGO), ("branding/hero.png", HERO)],
+            &[],
+        );
+        let plan = release.closure().expect("a closure");
+        assert_eq!(plan.len(), 3, "the executable and both assets");
+        let mut named: Vec<&str> = plan
+            .items()
+            .iter()
+            .filter_map(|item| match &item.reason {
+                ContentReason::UiAsset { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            ["branding/hero.png", "branding/logo.svg"],
+            "each asset keeps the name its settings used, whichever order the scheduler chose"
+        );
+        assert!(
+            plan.items()
+                .iter()
+                .any(|item| item.reason == ContentReason::Preset),
+            "and the executable is fetched beside them"
+        );
+        assert!(
+            plan.wire_size_by_group().contains_key("window"),
+            "and a progress report can account for the whole window at once"
+        );
+    }
+
+    /// Two names over one piece of content is one download.
+    #[test]
+    fn one_content_under_two_names_is_fetched_once() {
+        let release = release(
+            true,
+            PRESET,
+            &[
+                ("branding/logo.svg", LOGO),
+                ("branding/logo-mask.svg", LOGO),
+            ],
+            &[],
+        );
+        let plan = release.closure().expect("a closure");
+        assert_eq!(
+            plan.len(),
+            2,
+            "the executable and the one piece of content the two names share"
+        );
+    }
+
+    /// A window's content is required content: a user who left out a component did
+    /// not leave out the window.
+    ///
+    /// The invariant is that the declared set is not a function of the selection
+    /// at all, so the test states it that way rather than running one selection
+    /// and calling it proof. Narrowing happens in the closure, and only over
+    /// content that has a component; declared content has none.
+    #[test]
+    fn a_window_is_never_narrowed_away() {
+        let release = release(true, PRESET, &[("branding/logo.svg", LOGO)], &[]);
+        let mut reasons = release
+            .closure()
+            .expect("a closure")
+            .items()
+            .iter()
+            .map(|item| item.reason.clone())
+            .collect::<Vec<_>>();
+        reasons.sort();
+        assert_eq!(
+            reasons,
+            [
+                ContentReason::Preset,
+                ContentReason::UiAsset {
+                    name: "branding/logo.svg".to_owned()
+                }
+            ],
+            "the window and its asset are required content, and nothing narrows them"
+        );
+        assert!(
+            reasons
+                .iter()
+                .all(|reason| !matches!(reason, ContentReason::File { .. })),
+            "and none of them is payload, so there is no component to select"
+        );
+    }
+
+    /// Content a release declares but does not carry is a malformed release, and
+    /// the refusal names what is missing.
+    #[rstest::rstest]
+    #[case::an_asset_the_catalog_does_not_carry(
+        Some("branding/absent.svg"),
+        "the authenticated catalog does not carry"
+    )]
+    #[case::an_executable_the_release_does_not_carry(None, "carries no native image for it")]
+    fn content_a_release_does_not_carry_is_refused(
+        #[case] absent: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let mut release = release(true, PRESET, &[("branding/logo.svg", LOGO)], &[]);
+        match absent {
+            Some(name) => release
+                .manifest
+                .plan
+                .ui_assets
+                .push(asset(name, b"never shipped")),
+            None => release.manifest.preset = None,
+        }
+        let error = release
+            .closure()
+            .expect_err("a release that names content it does not carry");
+        assert!(
+            error.contains(expected),
+            "and the refusal says what is missing: {error}"
+        );
+    }
+
+    /// A variant with no window declares no content at all.
+    #[test]
+    fn a_variant_with_no_window_declares_no_content() {
+        let release = release(false, PRESET, &[], &[b"an application payload"]);
+        assert!(
+            declared_content(&release.manifest)
+                .expect("valid")
+                .is_empty(),
+            "so there is nothing a machine would fetch for a window that is not there"
+        );
+    }
+
+    /// Two generations of a window, one of them unchanged, fetch one blob between
+    /// them rather than two.
+    #[test]
+    fn a_window_that_did_not_change_is_the_same_content() {
+        let digests = |preset_bytes: &[u8], asset: &[u8]| {
+            release(true, preset_bytes, &[("branding/logo.svg", asset)], &[])
+                .closure()
+                .expect("a closure")
+                .digests()
+        };
+        let first = digests(PRESET, LOGO);
+        let again = digests(PRESET, LOGO);
+        assert_eq!(
+            first, again,
+            "an unchanged window fetches the same bytes, so it is one download"
+        );
+        assert_ne!(
+            first,
+            digests(PRESET, HERO),
+            "a changed asset is different content"
+        );
+        assert_ne!(
+            first,
+            digests(b"a new preset", LOGO),
+            "and so is a new executable"
+        );
+    }
 
     fn identity(version: &str) -> zup_core::ReleaseIdentity {
         zup_core::ReleaseIdentity {

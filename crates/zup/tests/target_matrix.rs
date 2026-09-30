@@ -82,12 +82,20 @@ user = "${{location.user_data}}/CliMatrix"
 #[test]
 fn repeated_profile_and_raw_triple_selection_are_checked() {
     let (root, manifest) = write_matrix_project();
+    // Both targets present a window, and a window needs a preset carrying its
+    // target. The staged toolchain a contributor has holds the one their machine
+    // can build, so this project gets a toolchain that can build both.
+    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
     for selection in [
         vec!["--target", "alpha", "--target", HOST_TARGET],
         vec!["--target", OTHER_TARGET],
         vec![],
     ] {
         let output = zup()
+            .args(["--toolchain"])
+            .arg(root.path())
             .args(["check", "--manifest"])
             .arg(&manifest)
             .args(&selection)
@@ -206,11 +214,13 @@ fn cli_overrides_beat_profile_source_and_install_directory() {
 fn repeatable_resolution_flags_must_line_up_with_the_selection() {
     let (root, manifest) = write_matrix_project();
     let output_path = root.path().join("misaligned-Setup.exe");
-    // `build` resolves a runtime before it reaches the output, so the two
-    // templates have to be individually correct or the output problem would never
-    // be the one reported.
+    // `build` resolves a runtime and a preset package before it reaches the
+    // output, so both have to be individually correct or the output problem
+    // would never be the one reported. One package carries both targets, which is
+    // what a build actually reads.
     let alpha = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
     let beta = toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
     for command in ["build", "check", "doctor"] {
         for (flag, value, noun) in [
             ("--source", "dist/alpha", "sources"),
@@ -225,6 +235,7 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
                 continue;
             }
             let mut command_line = zup();
+            command_line.arg("--toolchain").arg(root.path());
             command_line.args([command, "--manifest"]).arg(&manifest);
             if command == "build" {
                 command_line
@@ -286,7 +297,12 @@ user = "${{location.user_data}}/Shared"
         ),
     )
     .unwrap();
+    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
     let result = zup()
+        .args(["--toolchain"])
+        .arg(root.path())
         .args(["check", "--manifest"])
         .arg(&manifest)
         .arg("--install-directory")

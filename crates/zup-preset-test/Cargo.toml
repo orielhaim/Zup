@@ -1,0 +1,18 @@
+[package]
+name = "zup-preset-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The child preset the installer's end-to-end test launches"
+publish = false
+
+[[bin]]
+name = "zup-preset-test"
+path = "src/main.rs"
+
+[dependencies]
+zup-ui-sdk = { path = "../zup-ui-sdk", version = "0.1.0" }
+zup-ui-protocol = { path = "../zup-ui-protocol", version = "0.1.0" }
+serde = { workspace = true }
+serde_json.workspace = true

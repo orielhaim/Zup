@@ -1,0 +1,24 @@
+[package]
+name = "zup-ui-dev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The development environment zup ui dev runs a preset in"
+publish = false
+
+[dependencies]
+cargo_metadata = "0.23"
+jsonschema = { version = "0.58", default-features = false }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "1.1"
+zup-core.workspace = true
+zup-preview.workspace = true
+zup-ui-protocol.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

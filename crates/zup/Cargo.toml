@@ -15,6 +15,7 @@ name = "zup"
 path = "src/main.rs"
 
 [dependencies]
+cargo_metadata = "0.23"
 clap.workspace = true
 clap_complete.workspace = true
 inquire.workspace = true
@@ -35,6 +36,7 @@ zup-distribute-github.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true
 zup-pe.workspace = true
+zup-platform.workspace = true
 zup-plan.workspace = true
 zup-plugin-build.workspace = true
 zup-plugin-contract.workspace = true
@@ -43,9 +45,14 @@ zup-publish.workspace = true
 zup-publish-github.workspace = true
 zup-signing.workspace = true
 zup-toolchain.workspace = true
+zup-ui-compose.workspace = true
+zup-ui-dev.workspace = true
+zup-ui-protocol.workspace = true
+zup-preview.workspace = true
 zup-windows.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 tempfile.workspace = true
 zstd.workspace = true
 wat = "1"

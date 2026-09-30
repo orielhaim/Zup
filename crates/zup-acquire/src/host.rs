@@ -265,6 +265,7 @@ mod tests {
             frontend: "gui".to_owned(),
             manifest: DocumentRef::of(Sha256Digest::from_bytes([1; 32]), 10),
             runtime: None,
+            preset: None,
             content: vec![Sha256Digest::from_bytes([2; 32])],
             requirements: ReleaseRequirements {
                 native_execution: native,

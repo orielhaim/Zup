@@ -16,9 +16,14 @@
 //!   `zup-installer` through a shared dependency, every user of an Acme installer
 //!   ships a GitHub API client they did not ask for. That is a real production
 //!   defect, and it is invisible to a size budget until somebody looks.
+//! - **An internal crate reachable from a published one.** `zup-ui-protocol` and
+//!   `zup-ui-sdk` are consumed by preset projects that have never heard of this
+//!   repository, so an internal crate in either graph is a type that a preset
+//!   author cannot name. The fix is always a conversion at the host boundary, never
+//!   a dependency.
 //!
-//! Both are checked by reading Cargo metadata, so they run offline and take
-//! milliseconds, and both fail with the offending edge rather than a count.
+//! All three are checked by reading Cargo metadata, so they run offline and take
+//! milliseconds, and all three fail with the offending edge rather than a count.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -30,6 +35,8 @@ pub struct Findings {
     pub duplicates: Vec<Duplicate>,
     /// A package that appears in a binary it may not be part of.
     pub intrusions: Vec<String>,
+    /// An internal crate reachable from a published one.
+    pub crossings: Vec<String>,
 }
 
 /// One workspace package carrying two versions of one crate.
@@ -72,6 +79,14 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     "zup-publish-github",
     "zup-distribute-github",
     "zup-xtask",
+    // The preview environments. They belong to the person writing a preset and
+    // the person writing an application, and to nobody installing one, so they
+    // must never reach an installer through a shared dependency. `zup-preview`
+    // is the machine both of them share; `zup-ui-dev` is the Cargo half of one
+    // of them; `zup-ui-compose` is the build-plane answer both must not invent.
+    "zup-preview",
+    "zup-ui-dev",
+    "zup-ui-compose",
     // The developer CLI's machine contract. It reaches the CLI and the repository's own
     // tooling, and it must never reach an installer: the wire DTOs are a description of
     // a developer's build, and a user installing an application has no build to
@@ -79,20 +94,34 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     "zup-automation",
 ];
 
+/// The crates published for use outside this repository.
+///
+/// A preset project depends on the SDK and, if it speaks the protocol or carries
+/// the transport itself, on the two crates beneath it. None of them may reach a
+/// crate that exists only here: a published crate that names `zup-windows` is a
+/// crate that can only be built inside the repository that owns it, which is the
+/// opposite of what publishing one is for.
+///
+/// The three form a chain, and the gate walks all three, so a new edge from any
+/// of them into the engine is caught whether it is written in the SDK, in the
+/// transport, or in the contract.
+pub const PUBLIC_UI_PACKAGES: &[&str] = &["zup-ui-protocol", "zup-ui-ipc", "zup-ui-sdk"];
+
 /// Check the workspace's graphs.
 pub fn check(root: &Path) -> Result<Findings, String> {
-    let duplicates = workspace_duplicates(root)?;
-    let intrusions = intrusions(root)?;
+    let metadata = cargo_metadata(root)?;
+    let edges = edges(&metadata);
     Ok(Findings {
-        duplicates,
-        intrusions,
+        duplicates: workspace_duplicates(&metadata),
+        intrusions: intrusions(&edges),
+        crossings: crossings(&metadata, &edges),
     })
 }
 
 impl Findings {
     /// Whether the gate is clean.
     pub fn is_clean(&self) -> bool {
-        self.duplicates.is_empty() && self.intrusions.is_empty()
+        self.duplicates.is_empty() && self.intrusions.is_empty() && self.crossings.is_empty()
     }
 }
 
@@ -102,8 +131,7 @@ impl Findings {
 /// declared requirements, so a duplicate caused by a feature flag or a target
 /// condition is found and a duplicate that only exists in the manifest is not
 /// reported.
-fn workspace_duplicates(root: &Path) -> Result<Vec<Duplicate>, String> {
-    let metadata = cargo_metadata(root)?;
+fn workspace_duplicates(metadata: &Metadata) -> Vec<Duplicate> {
     let workspace: BTreeSet<&str> = metadata
         .workspace_members
         .iter()
@@ -120,7 +148,7 @@ fn workspace_duplicates(root: &Path) -> Result<Vec<Duplicate>, String> {
         // the package matrices already classify which crate may reach which.
         let mut by_name: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for dependency in &node.dependencies {
-            if is_workspace_member(&metadata, &dependency.name) {
+            if is_workspace_member(metadata, &dependency.name) {
                 continue;
             }
             by_name
@@ -139,27 +167,18 @@ fn workspace_duplicates(root: &Path) -> Result<Vec<Duplicate>, String> {
         }
     }
     out.sort();
-    Ok(out)
+    out
 }
 
 fn is_workspace_member(metadata: &Metadata, name: &str) -> bool {
-    metadata.packages.iter().any(|package| package == name)
+    metadata.workspace_members.contains(name)
 }
 
-/// Development tooling that reached a shipped installer.
-///
-/// The check is over the *resolved* graph, so it fails whether the path is direct
-/// (`zup-installer` depending on `zup-publish-github`) or indirect (through a
-/// shared crate), which is the case a reviewer's eye misses.
-fn intrusions(root: &Path) -> Result<Vec<String>, String> {
-    let metadata = cargo_metadata(root)?;
-    let shipped: BTreeSet<&str> = SHIPPED_BINARIES.iter().copied().collect();
-    let build_only: BTreeSet<&str> = BUILD_ONLY_PACKAGES.iter().copied().collect();
+/// The resolved graph as one adjacency list per crate name.
+type Edges<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
 
-    // One entry per crate name, because the question is which crates a shipped
-    // binary can reach, and a crate is reached or it is not regardless of which
-    // version of it a path went through.
-    let edges: BTreeMap<&str, BTreeSet<&str>> = metadata
+fn edges(metadata: &Metadata) -> Edges<'_> {
+    metadata
         .nodes
         .iter()
         .map(|node| {
@@ -171,31 +190,38 @@ fn intrusions(root: &Path) -> Result<Vec<String>, String> {
                     .collect(),
             )
         })
-        .collect();
+        .collect()
+}
 
-    let mut out = Vec::new();
-    for start in &shipped {
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        // The path, not just the fact. "zup-publish-github is in the installer
-        // graph" is a symptom; "it gets there through zup-distribute-github" is
-        // the edge somebody has to delete.
-        let mut queue: Vec<Vec<&str>> = vec![vec![*start]];
+/// Every path from `roots` to a crate named in `wanted`, as `a -> b -> c`.
+///
+/// The walk stops at the first crate it is looking for, because the edge that put
+/// that crate in the graph is the one somebody has to delete; whatever sits beyond
+/// it is only reachable through the same mistake. Cycles are bounded by what has
+/// already been seen.
+fn paths_to<'a>(
+    edges: &Edges<'a>,
+    roots: &[&'a str],
+    wanted: &BTreeSet<&'a str>,
+) -> Vec<Vec<&'a str>> {
+    let mut out: Vec<Vec<&'a str>> = Vec::new();
+    for start in roots {
+        let mut seen: BTreeSet<&'a str> = BTreeSet::new();
+        let mut queue: Vec<Vec<&'a str>> = vec![vec![*start]];
         while let Some(path) = queue.pop() {
             let name = *path.last().expect("a path is never empty");
             if !seen.insert(name) {
+                continue;
+            }
+            if path.len() > 1 && wanted.contains(name) {
+                out.push(path);
                 continue;
             }
             let Some(children) = edges.get(name) else {
                 continue;
             };
             for child in children {
-                if build_only.contains(child) {
-                    out.push(format!(
-                        "{}: `{}` is development tooling and reached the `{start}` graph, \
-                         which ships to users",
-                        path.join(" -> "),
-                        child
-                    ));
+                if seen.contains(child) {
                     continue;
                 }
                 let mut next = path.clone();
@@ -206,7 +232,68 @@ fn intrusions(root: &Path) -> Result<Vec<String>, String> {
     }
     out.sort();
     out.dedup();
-    Ok(out)
+    out
+}
+
+/// Development tooling that reached a shipped installer.
+///
+/// The check is over the *resolved* graph, so it fails whether the path is direct
+/// (`zup-installer` depending on `zup-publish-github`) or indirect (through a
+/// shared crate), which is the case a reviewer's eye misses.
+fn intrusions(edges: &Edges<'_>) -> Vec<String> {
+    let build_only: BTreeSet<&str> = BUILD_ONLY_PACKAGES.iter().copied().collect();
+    // One entry per crate name, because the question is which crates a shipped
+    // binary can reach, and a crate is reached or it is not regardless of which
+    // version of it a path went through.
+    let mut out: Vec<String> = paths_to(edges, SHIPPED_BINARIES, &build_only)
+        .into_iter()
+        .map(|path| {
+            format!(
+                "{}: `{}` is development tooling and reached the `{}` graph, which ships to users",
+                path.join(" -> "),
+                path[path.len() - 1],
+                path[0]
+            )
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// An internal crate a published crate now reaches.
+///
+/// One report per offending edge rather than per path, because the edge is what
+/// somebody has to delete, and two public crates reaching the same internal one is
+/// one mistake rather than two.
+fn crossings(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
+    let public: BTreeSet<&str> = PUBLIC_UI_PACKAGES.iter().copied().collect();
+    let roots: Vec<&str> = PUBLIC_UI_PACKAGES
+        .iter()
+        .copied()
+        .filter(|root| is_workspace_member(metadata, root))
+        .collect();
+    let internal: BTreeSet<&str> = metadata
+        .nodes
+        .iter()
+        .map(|node| node.name.as_str())
+        .filter(|name| is_workspace_member(metadata, name) && !public.contains(name))
+        .collect();
+    let mut reported: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for path in paths_to(edges, &roots, &internal) {
+        let edge = (path[path.len() - 2], path[path.len() - 1]);
+        if !reported.insert(edge) {
+            continue;
+        }
+        out.push(format!(
+            "{}: `{}` is an internal zup crate and a published crate may not reach it; \
+             convert at the host boundary instead",
+            path.join(" -> "),
+            path[path.len() - 1]
+        ));
+    }
+    out
 }
 
 /// `cargo metadata`, as JSON this crate can read without a serialization
@@ -293,16 +380,26 @@ fn cargo_metadata(root: &Path) -> Result<Metadata, String> {
             dependencies,
         });
     }
+    // Cargo names a workspace member by its resolved id, which is not its name.
+    // Comparing a node's name against these ids would never match, and every check
+    // that asks "is this one of ours?" would quietly pass on everything.
+    let workspace_members: BTreeSet<String> = value["workspace_members"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|id| id.as_str())
+        .map(|id| {
+            packages
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| name_of(id).to_owned())
+        })
+        .collect();
+
     Ok(Metadata {
-        packages: packages.into_values().collect(),
         nodes,
-        workspace_members: value["workspace_members"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|id| id.as_str().map(str::to_owned))
-            .collect(),
+        workspace_members,
     })
 }
 
@@ -368,9 +465,8 @@ fn version_of(id: &str) -> &str {
 }
 
 struct Metadata {
-    /// Every package name in the graph. The workspace members are a subset.
-    packages: Vec<String>,
     nodes: Vec<Node>,
+    /// The workspace's own packages, by name.
     workspace_members: BTreeSet<String>,
 }
 
@@ -399,6 +495,98 @@ mod tests {
                 !BUILD_ONLY_PACKAGES.contains(shipped),
                 "{shipped} is both shipped and build-only"
             );
+        }
+    }
+
+    /// A published crate that reaches an internal one fails; one that reaches only
+    /// another published crate passes. The SDK may depend on the protocol, because
+    /// that dependency is what a preset project resolves from crates.io.
+    #[test]
+    fn a_published_crate_may_not_reach_an_internal_one() {
+        let members: BTreeSet<String> = [
+            "zup-core",
+            "zup-installer",
+            "zup-runtime",
+            "zup-ui-protocol",
+            "zup-ui-sdk",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let clean = Metadata {
+            nodes: vec![
+                node("zup-ui-protocol", &[]),
+                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-installer", &["zup-core", "zup-runtime"]),
+                node("zup-core", &[]),
+                node("zup-runtime", &["zup-core"]),
+            ],
+            workspace_members: members.clone(),
+        };
+        assert!(crossings(&clean, &edges(&clean)).is_empty());
+
+        // The same graph with one edge added. It is reached through the protocol
+        // rather than declared directly, which is the case a reviewer's eye misses
+        // because `zup-ui-sdk -> zup-ui-protocol` is a dependency that is supposed
+        // to be there, and it is reported once, at the edge that is not.
+        let leaked = Metadata {
+            nodes: vec![
+                node("zup-ui-protocol", &["zup-core"]),
+                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-installer", &["zup-core"]),
+                node("zup-core", &[]),
+                node("zup-runtime", &["zup-core"]),
+            ],
+            workspace_members: members,
+        };
+        assert_eq!(
+            crossings(&leaked, &edges(&leaked)),
+            [
+                "zup-ui-protocol -> zup-core: `zup-core` is an internal zup crate \
+             and a published crate may not reach it; convert at the host boundary instead"
+            ]
+        );
+    }
+
+    /// A duplicate is only reported for a workspace member, which means the
+    /// membership test has to agree with cargo about which packages those are.
+    /// Reading a resolved id as a name here made the whole check vacuous.
+    #[test]
+    fn a_duplicate_is_found_for_a_workspace_member() {
+        let metadata = Metadata {
+            nodes: vec![Node {
+                name: "zup-core".to_owned(),
+                dependencies: vec![
+                    dependency("serde", "1.0.219"),
+                    dependency("serde", "1.0.228"),
+                ],
+            }],
+            workspace_members: BTreeSet::from(["zup-core".to_owned()]),
+        };
+        assert_eq!(
+            workspace_duplicates(&metadata),
+            [Duplicate {
+                package: "zup-core".to_owned(),
+                crate_name: "serde".to_owned(),
+                versions: vec!["1.0.219".to_owned(), "1.0.228".to_owned()],
+            }]
+        );
+    }
+
+    fn node(name: &str, dependencies: &[&str]) -> Node {
+        Node {
+            name: name.to_owned(),
+            dependencies: dependencies
+                .iter()
+                .map(|name| dependency(name, "0.0.1"))
+                .collect(),
+        }
+    }
+
+    fn dependency(name: &str, version: &str) -> Dependency {
+        Dependency {
+            name: name.to_owned(),
+            version: version.to_owned(),
         }
     }
 

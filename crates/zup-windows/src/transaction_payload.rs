@@ -490,6 +490,14 @@ pub(crate) fn compile_execution_plan(
         .map(|target| target.install_directory.clone())
         .or_else(|| execution.install_directory.clone());
     input.uninstall = execution.uninstall;
+    // The UI runtime is a statement about this transaction, not about the
+    // machine: an uninstall and a target with no window both leave none, and a
+    // repair carries the one it is preserving forward.
+    input.ui = if execution.uninstall {
+        None
+    } else {
+        target.and_then(|target| target.ui.clone())
+    };
 
     for file in &execution.files {
         input.files.push(FileWork {

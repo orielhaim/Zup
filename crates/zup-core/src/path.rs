@@ -204,3 +204,18 @@ impl<'de> Deserialize<'de> for RelativePath {
         Self::new(raw).map_err(serde::de::Error::custom)
     }
 }
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for RelativePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RelativePath".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A `/`-separated path relative to the project directory. \
+                            Absolute paths and `..` are refused.",
+        })
+    }
+}

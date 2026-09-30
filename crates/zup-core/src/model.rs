@@ -1,5 +1,6 @@
 //! Normalized, platform-independent installer model.
 
+use std::collections::BTreeMap as Map;
 use std::path::PathBuf;
 
 #[cfg(feature = "schema")]
@@ -11,6 +12,7 @@ use crate::condition::Condition;
 use crate::ids::{
     AppId, ComponentId, FileAssociationId, NonEmptyString, PluginId, ProtocolScheme, ServiceId,
 };
+use crate::project_path::ProjectPath;
 use crate::template::Template;
 use crate::value::ValueError;
 
@@ -31,31 +33,30 @@ pub struct App {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The preset this application presents, as its author configures it.
+///
+/// The only customization system an application has. What a preset draws is the
+/// preset's business, so there is nothing here for an application author to
+/// describe a window: the package is chosen, and its own settings are filled in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct UiBranding {
-    #[serde(default, alias = "icon")]
-    pub logo: Option<Template>,
-    #[serde(default)]
-    pub accent: Option<String>,
-    #[serde(default)]
-    pub theme: UiTheme,
-    #[serde(default, alias = "license_url")]
-    pub license_link: Option<String>,
-    #[serde(default, alias = "legal")]
-    pub legal_text: Option<String>,
+pub struct Ui {
+    /// The `.zupui` to present. Absent means the preset Zup ships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<ProjectPath>,
+    /// Values for the chosen preset's settings, validated against the schema the
+    /// package carries before anything is composed.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub settings: Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum UiTheme {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
+/// The largest a `[ui.settings]` document may be.
+///
+/// The same bound the wire uses, stated here because this is where a manifest is
+/// read: a document the wire would refuse is a document the author should hear
+/// about from `zup check`, not at the end of a build.
+pub const MAX_UI_SETTINGS_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]

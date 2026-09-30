@@ -1,0 +1,32 @@
+[package]
+name = "zup-ui-ipc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/orielhaim/zup"
+description = "Portable process transport for zup installer UI presets"
+publish = true
+
+# The child process this crate's transport tests spawn, so the peer is a real
+# preset that does the real handshake rather than a fixture that can drift from
+# the code. Never shipped: the feature that builds it is for tests alone.
+[features]
+test-launcher = []
+
+[[bin]]
+name = "zup-ui-ipc-test-preset"
+path = "src/bin/test_preset.rs"
+required-features = ["test-launcher"]
+
+[dependencies]
+# The public preset contract. A transport that could not speak the protocol
+# would be a second protocol, so this is the only Zup crate it depends on.
+zup-ui-protocol = { path = "../zup-ui-protocol", version = "0.1.0" }
+
+# Servo's cross-platform process channels. What it provides is the operating
+# system's own IPC - a named pipe, a bootstrap port, a unix socket - and what it
+# does not provide is the wire format, which stays Zup's.
+ipc-channel = "0.23"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v7", "serde"] }

@@ -24,6 +24,8 @@ use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::ExecutionPolicy;
+#[cfg(feature = "gui")]
+use zup_ui_protocol::UpdateState;
 
 use zup_acquire::CachePolicy;
 use zup_update::{ComponentSelection, TrustContext};
@@ -220,14 +222,14 @@ pub fn run(context: RuntimeContext, args: UpdateArgs) -> miette::Result<()> {
 /// The maintenance surface's update button.
 ///
 #[cfg(feature = "gui")]
-/// The same graph path as the command, with a progress line instead of a stream.
-/// A window and a terminal install the same bytes, so a window does not cost the
-/// machine a second copy of the application.
+/// The same graph path as the command, reporting where it has got to instead of
+/// a prose stream. A window and a terminal install the same bytes, so a window
+/// does not cost the machine a second copy of the application.
 pub fn from_maintenance_surface(
     executable: &Path,
     scope: SelectedScope,
-    mut status: impl FnMut(&str),
-) -> Result<Option<(String, String)>, String> {
+    status: &mut dyn FnMut(UpdateState),
+) -> Result<(), String> {
     let bundle = package::open_bundle(executable).map_err(|error| error.to_string())?;
     let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
     let installer = &build.installer;
@@ -240,6 +242,7 @@ pub fn from_maintenance_surface(
         .load(&installer.app.id, scope)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the installed application was not found".to_owned())?;
+    let current = ledger.version.to_string();
     let update_root = if scope == SelectedScope::Machine {
         state::peer_user_state_root().map_err(|error| error.to_string())?
     } else {
@@ -254,7 +257,9 @@ pub fn from_maintenance_surface(
         .build()
         .map_err(|error| error.to_string())?;
 
-    status("Checking for updates…");
+    status(UpdateState::Checking {
+        detail: "Resolving the update channel…".into(),
+    });
     let acquired = tokio
         .block_on(acquire::acquire(
             context,
@@ -270,10 +275,12 @@ pub fn from_maintenance_surface(
         .is_some_and(|installed| installed.release == acquired.resolved.descriptor.release_digest);
     if same_release {
         drop(emitter);
-        status("Up to date");
-        return Ok(None);
+        status(UpdateState::UpToDate { current });
+        return Ok(());
     }
-    status(&format!("Downloading {}", acquired.estimate()));
+    status(UpdateState::Installing {
+        detail: acquired.estimate().to_string(),
+    });
     lifecycle::run_acquired_transition(
         acquire::Request {
             scope: Some(scope),
@@ -285,7 +292,8 @@ pub fn from_maintenance_surface(
     )
     .map_err(|error| error.to_string())?;
     let _ = emitter;
-    Ok(Some((ledger.version.to_string(), available)))
+    status(UpdateState::Available { current, available });
+    Ok(())
 }
 
 /// The installation an update applies to: the one the ledger actually records.

@@ -839,6 +839,27 @@ mod tests {
     /// one and asserted "a build will find it" would be asserting something the
     /// build refuses.
     fn image(component: &ToolchainComponent) -> Vec<u8> {
+        if let ToolchainComponent::Preset = component {
+            // A package, not a PE image, and a real one: the resolver verifies it
+            // with the same reader a build consumes it with, so a fixture that
+            // were anything else would be a fixture the resolver refuses.
+            let mut writer = zup_artifact::ui::PresetPackageWriter::new(
+                zup_ui_protocol::PresetDescription::new(
+                    "aurora",
+                    "1.0.0",
+                    serde_json::json!({ "type": "object" }),
+                ),
+            )
+            .expect("a valid description");
+            writer
+                .add_binary(
+                    zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
+                        .expect("a valid target"),
+                    b"a preset".to_vec(),
+                )
+                .expect("one binary for the host");
+            return writer.finish().expect("a verified package");
+        }
         let (machine, subsystem): (u16, u16) = match component {
             ToolchainComponent::Runtime { target, frontend } => (
                 if target.as_str().starts_with("aarch64") {
@@ -859,6 +880,7 @@ mod tests {
                     3
                 },
             ),
+            ToolchainComponent::Preset => unreachable!("a package is not a PE image"),
         };
         let mut bytes = vec![0u8; 0x178];
         bytes[..2].copy_from_slice(b"MZ");

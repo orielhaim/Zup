@@ -74,6 +74,7 @@ mod release;
 mod select;
 mod store;
 mod table;
+pub mod ui;
 mod variant;
 mod web;
 
@@ -84,7 +85,7 @@ pub use compat::{
     check_compatibility, frontend_subsystem, requires_native, satisfies_minimum_host,
 };
 pub use compose::{
-    ArtifactComposer, ArtifactGraph, ArtifactRequest, ComposedManifest, ComposedRuntime,
+    ArtifactComposer, ArtifactGraph, ArtifactRequest, ComposedImage, ComposedManifest,
     CompositionStorage,
 };
 pub use descriptor::{Descriptor, from_bounded_json, to_canonical_json};

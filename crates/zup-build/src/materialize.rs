@@ -17,7 +17,7 @@ use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
-use zup_core::{BuildPlan, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
+use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
 
 /// Materialize selected target sources with [`PortableSourceFilePolicy`].
@@ -50,6 +50,27 @@ pub fn materialize_with_policy<S>(
 where
     S: AsRef<[(ResolvedTargetConfig, Installer)]>,
 {
+    let assets: BTreeMap<zup_core::TargetProfileId, Vec<ResolvedAsset>> = BTreeMap::new();
+    materialize_with_assets(manifest_path, manifest, selected, &assets, policy)
+}
+
+/// Materialize selected target sources, carrying the UI assets a preset named.
+///
+/// The assets arrive already resolved: reading a project's files is this crate's
+/// job and a caller that resolved them elsewhere would have had to reimplement
+/// the same containment and link rules. They are keyed by target profile because
+/// the same asset can resolve to different bytes per target source root, and
+/// attaching one profile's answer to another's would be a silent substitution.
+pub fn materialize_with_assets<S>(
+    manifest_path: &Path,
+    manifest: &Manifest,
+    selected: S,
+    ui_assets: &BTreeMap<zup_core::TargetProfileId, Vec<ResolvedAsset>>,
+    policy: &dyn SourceFilePolicy,
+) -> Result<BuildPlan, BuildError>
+where
+    S: AsRef<[(ResolvedTargetConfig, Installer)]>,
+{
     let selected = selected.as_ref();
     validate_selection(selected)?;
 
@@ -60,7 +81,12 @@ where
     let mut targets = Vec::with_capacity(selected.len());
     for (config, installer) in selected {
         let profile = config.profile.to_string();
-        let target = materialize_target(&project_root, manifest, config, installer, policy)
+        let mut assets = ui_assets
+            .get(config.profile.as_str())
+            .cloned()
+            .unwrap_or_default();
+        assets.sort_by(|left, right| left.name.cmp(&right.name));
+        let target = materialize_target(&project_root, manifest, config, installer, assets, policy)
             .map_err(|source| BuildError::Target {
                 profile,
                 source: Box::new(source),
@@ -106,6 +132,7 @@ fn materialize_target(
     manifest: &Manifest,
     config: ResolvedTargetConfig,
     mut installer: Installer,
+    ui_assets: Vec<ResolvedAsset>,
     policy: &dyn SourceFilePolicy,
 ) -> Result<TargetBuildPlan, BuildError> {
     let plugins = manifest
@@ -168,9 +195,69 @@ fn materialize_target(
         prerequisites,
         plugins,
         files: resolved,
+        ui_assets,
         total_size,
         prerequisite_size,
     })
+}
+
+/// Resolve one project-relative source to a verified file, size, and digest.
+///
+/// The rules here are the same ones a prerequisite and a payload file obey, and
+/// they live here because this is the crate that owns what a project may read:
+/// the path is relative with no `..`, it resolves inside the project, no
+/// directory on the way is a link, and the bytes are bounded before they are
+/// read rather than after.
+pub fn resolve_project_source(
+    project_root: &Path,
+    relative: &RelativePath,
+    kind: &'static str,
+    max_bytes: u64,
+    policy: &dyn SourceFilePolicy,
+) -> Result<(PathBuf, u64, Sha256Digest), BuildError> {
+    let source = lexical_normalize(&project_root.join(relative.as_str()));
+    if !is_within(&lexical_normalize(project_root), &source) {
+        return Err(BuildError::SourceOutsideProject {
+            kind,
+            path: relative.as_str().into(),
+        });
+    }
+    let mut current = source.clone();
+    loop {
+        if policy.is_link(&current).map_err(|cause| BuildError::Io {
+            path: current.clone(),
+            source: cause,
+        })? {
+            return Err(BuildError::SourceOutsideProject {
+                kind,
+                path: relative.as_str().into(),
+            });
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    let file = File::open(&source).map_err(|cause| BuildError::Io {
+        path: source.clone(),
+        source: cause,
+    })?;
+    let (size, digest) = hash_reader(file.take(max_bytes + 1)).map_err(|cause| BuildError::Io {
+        path: source.clone(),
+        source: cause,
+    })?;
+    if size > max_bytes {
+        return Err(BuildError::SourceTooLarge {
+            kind,
+            path: relative.as_str().into(),
+            size,
+            limit: max_bytes,
+        });
+    }
+    Ok((source, size, digest))
 }
 
 fn embed_update_root(

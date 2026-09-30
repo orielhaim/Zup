@@ -143,8 +143,33 @@ fn compiled_plugin(target: &str) -> CompiledPluginArtifact {
     CompiledPluginArtifact::new(plugin_metadata(target), aot).unwrap()
 }
 
+/// What a target's window needs, for a fixture that presents one.
+pub struct WindowSpec {
+    /// The application's assets, by the name its settings would use.
+    pub assets: Vec<(String, String)>,
+    /// Distinguishes one generation's window from another's.
+    pub generation: &'static str,
+}
+
 /// Build one target's plan and materialize its bytes under `root`.
+#[allow(
+    dead_code,
+    reason = "a windowless fixture for the tests that do not present one"
+)]
 pub fn build_target(root: impl AsRef<Path>, target: &FixtureTarget) -> DistributionVariant {
+    build_target_with_window(root, target, None)
+}
+
+/// Build one target, optionally with a window to present.
+///
+/// A window is content like any other from here on: the preset is a native image
+/// by digest, and the assets are blobs the plan names. Nothing in the release
+/// model knows what draws them.
+pub fn build_target_with_window(
+    root: impl AsRef<Path>,
+    target: &FixtureTarget,
+    window: Option<&WindowSpec>,
+) -> DistributionVariant {
     let root = root.as_ref();
     std::fs::create_dir_all(root).unwrap();
     let resolved = zup_core::ResolvedTargetConfig {
@@ -214,11 +239,54 @@ pub fn build_target(root: impl AsRef<Path>, target: &FixtureTarget) -> Distribut
         .map(|_| vec![compiled_plugin(target.target)])
         .unwrap_or_default();
 
+    // The window's assets are resolved the way a build resolves them: a file on
+    // this machine, hashed, and recorded by the name the settings used.
+    let mut ui_assets = Vec::new();
+    let mut settings = serde_json::Map::new();
+    for (name, seed) in window.iter().flat_map(|window| &window.assets) {
+        let content = filler(seed, 2);
+        let path = root.join("ui").join(name.replace('/', "_"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, &content).unwrap();
+        let size = content.len() as u64;
+        settings.insert(name.clone(), serde_json::Value::String(name.clone()));
+        ui_assets.push(zup_core::ResolvedAsset {
+            name: NonEmptyString::new(name.as_str()).unwrap(),
+            source: Some(path),
+            source_relative: Some(zup_core::RelativePath::new(name.as_str()).unwrap()),
+            size,
+            sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
+        });
+    }
+    let preset = window.map(|window| {
+        settings.insert(
+            "generation".to_owned(),
+            serde_json::Value::from(window.generation),
+        );
+        zup_core::UiPreset {
+            name: NonEmptyString::new(format!("{}-preset", window.generation)).unwrap(),
+            version: semver::Version::parse("1.0.0").unwrap(),
+            protocol: 1,
+            required_capabilities: vec!["components".to_owned()],
+            settings: serde_json::Value::Object(settings),
+            assets: ui_assets
+                .iter()
+                .map(|asset| zup_core::UiAsset {
+                    name: asset.name.clone(),
+                    size: asset.size,
+                    sha256: asset.sha256,
+                })
+                .collect(),
+        }
+    });
+
     let installer = zup_core::Installer {
         app: app(),
         target: resolved.target.clone(),
         frontend: target.frontend,
-        ui: None,
+        preset,
         updates: Some(updates()),
         install: install(),
         prerequisites: Vec::new(),
@@ -251,6 +319,7 @@ pub fn build_target(root: impl AsRef<Path>, target: &FixtureTarget) -> Distribut
         prerequisites: Vec::new(),
         plugins: Vec::new(),
         files: resolved_files,
+        ui_assets,
         total_size: total,
         prerequisite_size: 0,
     };
@@ -260,11 +329,15 @@ pub fn build_target(root: impl AsRef<Path>, target: &FixtureTarget) -> Distribut
     let mut runtime = filler("runtime-image", 0).into_bytes();
     runtime.extend_from_slice(target.target.as_bytes());
 
-    DistributionVariant::resolve(
-        &resolved,
-        &plan,
-        &plugins,
-        Some((MediaType::RUNTIME, runtime)),
-    )
-    .unwrap()
+    // The window's native image, distinct per target and per generation so a
+    // test can tell one from the other by content alone.
+    let mut natives = vec![(MediaType::RUNTIME, runtime)];
+    if let Some(window) = window {
+        let mut image = filler("preset-image", 3).into_bytes();
+        image.extend_from_slice(target.target.as_bytes());
+        image.extend_from_slice(window.generation.as_bytes());
+        natives.push((MediaType::PRESET, image));
+    }
+
+    DistributionVariant::resolve(&resolved, &plan, &plugins, &natives).unwrap()
 }

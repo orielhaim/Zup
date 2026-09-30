@@ -385,6 +385,7 @@ mod tests {
     fn a_machine_wide_application_is_only_ever_uninstalled_from_the_machine_scope() {
         let app = AppId::new("com.example.acme").expect("valid");
         let installer = zup_core::Installer {
+            preset: None,
             app: zup_core::App {
                 id: app.clone(),
                 name: zup_core::NonEmptyString::new("Acme").expect("valid"),
@@ -395,7 +396,6 @@ mod tests {
             },
             target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
             frontend: Frontend::Headless,
-            ui: None,
             updates: None,
             install: zup_core::Install {
                 scope: InstallScope::Machine,

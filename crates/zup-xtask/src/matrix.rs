@@ -73,6 +73,35 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-protocol",
     "zup-runtime",
     "zup-presentation",
+    // The published UI contract. Portable because a preset outside this repository
+    // compiles it, and a contract only one platform can compile is not one they can
+    // consume. It is deliberately free of GPUI, Windows APIs and Tokio, so nothing
+    // about it is platform-shaped.
+    "zup-ui-protocol",
+    // The transport a preset and its host speak over. Portable for the same
+    // reason the contract is: it is what makes a preset source portable, and a
+    // transport only one platform can compile is not a portable one. It is
+    // portable by using the operating system's own IPC rather than by
+    // reimplementing any of it.
+    "zup-ui-ipc",
+    // The host side of the UI protocol, with no engine behind it. Portable because a
+    // preset author meets it in zup ui dev before they meet an installer, and a
+    // state machine only one platform can run is not one they can develop against.
+    "zup-ui-host",
+    // Which window an application presents, and what it is given. Portable because
+    // a Linux CI job that checks a project does not become unable to answer the
+    // question, and a rule only one platform can apply is a rule only one platform
+    // is checking.
+    "zup-ui-compose",
+    // The machine a preset is previewed against, with no engine behind it.
+    // Portable because it spawns processes, watches a directory and drives a
+    // state machine, none of which is a platform, and a preview environment only
+    // one platform can run is an environment nobody outside that platform can
+    // develop a portable preset with.
+    "zup-preview",
+    // The source half of `zup ui dev`: the Cargo project a preset author edits
+    // and the compiler that has to run for it. Portable for the same reason.
+    "zup-ui-dev",
     "zup-update",
     "zup-plugin-contract",
     "zup-plugin-build",
@@ -96,9 +125,9 @@ pub const PORTABLE_CORE: &[&str] = &[
 ///
 /// Separate from [`PORTABLE_CORE`] because of vocabulary, not portability: a PE
 /// image, a resource table and an Authenticode digest are facts about bytes, and
-/// reading them is the same work on every host. What they do *not* include is
-/// WinVerifyTrust, `UpdateResourceW`, or any other host's judgement about a file
-/// - those are the Windows adapter's, and a file-format crate that grew one would
+/// reading them is the same work on every host. What they do not include is
+/// WinVerifyTrust, `UpdateResourceW`, or any other host's judgement about a file:
+/// those are the Windows adapter's, and a file-format crate that grew one would
 /// stop being portable in the way that matters.
 pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe"];
 
@@ -114,7 +143,22 @@ pub const WINDOWS_ONLY: &[&str] = &[
     "zup-dispatch",
     "zup",
     "zup-installer",
-    "zup-ui",
+    // The default installer interface, which is a GPUI application like any
+    // other preset and is built by the toolchain rather than shipped inside an
+    // installer as a link-time dependency.
+    //
+    // The SDK is here rather than in the portable core because its platform is
+    // GPUI's, not Zup's: a preset author writes the same source on every host
+    // and the GPUI stack decides which of them it builds for. The transport
+    // underneath it is portable, and is `zup-ui-ipc`.
+    "zup-ui-sdk",
+    // The two presets this repository builds. `zup-preset-default` is the one a
+    // graphical install presents unless an application names another, and
+    // `zup-preset-test` is the child the installer's end-to-end test launches;
+    // they are the same shape written twice, which is the point of keeping the
+    // second one a separate package rather than a mode of the first.
+    "zup-preset-default",
+    "zup-preset-test",
 ];
 
 pub const MATRICES: &[Matrix] = &[

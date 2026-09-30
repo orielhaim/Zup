@@ -1,0 +1,22 @@
+[package]
+name = "zup-ui-host"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The authoritative state machine a zup installer host and its development simulator share"
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+zup-artifact.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-ui-ipc.workspace = true
+zup-presentation.workspace = true
+zup-runtime.workspace = true
+zup-ui-protocol.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+semver.workspace = true

@@ -27,9 +27,9 @@ mod context;
 pub mod entry;
 mod execute;
 mod frontend;
-#[cfg(feature = "gui")]
-mod gui;
 mod handoff;
+#[cfg(feature = "gui")]
+pub mod host;
 mod lifecycle;
 mod package;
 mod recovery;

@@ -4,8 +4,12 @@
 //! cannot build before paying for materialization. That is the whole reason
 //! selection and materialization are two steps and not one.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use zup_toolchain::ToolchainComponent;
+
+use crate::toolchain::ToolchainResolver;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
 
 use zup_core::Frontend;
@@ -31,6 +35,14 @@ pub struct LoadedProject {
     pub manifest: zup_manifest::Manifest,
     pub selected_targets: Vec<ResolvedTargetConfig>,
     pub build: zup_build::BuildPlan,
+    /// The preset executable each selected target will launch, in target order.
+    ///
+    /// Not part of the plan because it is a native program rather than a file the
+    /// project ships: composition writes it, and nothing materializes it from the
+    /// source tree. `None` for a target that presents no window, which is why this
+    /// is an option rather than an empty vector: an empty preset resource is still
+    /// a resource, and one is not what a console installer carries.
+    pub presets: Vec<Option<Vec<u8>>>,
 }
 
 /// The caller-supplied per-target overrides of an authoring command.
@@ -169,7 +181,15 @@ pub fn select_project(
 }
 
 /// Compile and materialize the selected targets of a project.
-pub fn materialize_project(selected: SelectedProject) -> miette::Result<LoadedProject> {
+///
+/// A target that presents a window gets its preset selected here, before
+/// materialization, because a preset's settings name project files the build has
+/// to resolve and the compiled installer has to carry. The selection is one path
+/// whether the package came from `[ui].preset` or from the toolchain's own.
+pub fn materialize_project(
+    selected: SelectedProject,
+    resolver: &ToolchainResolver,
+) -> miette::Result<LoadedProject> {
     let SelectedProject {
         manifest_path,
         manifest_name,
@@ -178,20 +198,50 @@ pub fn materialize_project(selected: SelectedProject) -> miette::Result<LoadedPr
         overrides,
         selected_targets,
     } = selected;
-    let compiled = selected_targets
-        .iter()
-        .map(|config| {
-            zup_manifest::compile(&manifest, config, overrides.get(&config.profile))
-                .map(|installer| (config.clone(), installer))
-                .map_err(|error| {
-                    miette::Report::new(error.with_source_named(&source, &manifest_name))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let build = zup_build::materialize_with_policy(
+    let project_root = zup_build::project_root(&manifest_path);
+    let mut compiled = Vec::with_capacity(selected_targets.len());
+    let mut ui_assets = BTreeMap::new();
+    let mut executables = Vec::with_capacity(selected_targets.len());
+    for config in &selected_targets {
+        let mut installer =
+            zup_manifest::compile(&manifest, config, overrides.get(&config.profile)).map_err(
+                |error| miette::Report::new(error.with_source_named(&source, &manifest_name)),
+            )?;
+        if installer.frontend == Frontend::Gui {
+            let shipped = || {
+                resolver
+                    .resolve(&ToolchainComponent::Preset, None)
+                    .map(|resolved| resolved.path)
+                    .map_err(|error| error.to_string())
+            };
+            // The one resolver, so a preview and a build cannot disagree about
+            // which window this application presents. It is asked for the
+            // preset zup ships only when the project named none, because finding
+            // it costs a directory walk an application that chose its own window
+            // should not pay.
+            let resolved = zup_ui_compose::resolve(
+                &manifest.ui,
+                &project_root,
+                &installer,
+                &config.target,
+                &shipped,
+                &zup_windows::WindowsSourceFilePolicy,
+            )
+            .map_err(preset_problem)?;
+            installer.preset = Some(resolved.runtime);
+            ui_assets.insert(config.profile.clone(), resolved.assets);
+            executables.push(Some(resolved.executable));
+        } else {
+            executables.push(None);
+        }
+        compiled.push((config.clone(), installer));
+    }
+
+    let build = zup_build::materialize_with_assets(
         &manifest_path,
         &manifest,
         compiled,
+        &ui_assets,
         &zup_windows::WindowsSourceFilePolicy,
     )
     .map_err(miette::Report::new)?;
@@ -200,6 +250,7 @@ pub fn materialize_project(selected: SelectedProject) -> miette::Result<LoadedPr
         manifest,
         selected_targets,
         build,
+        presets: executables,
     })
 }
 
@@ -208,8 +259,24 @@ pub fn load_single_project(
     path: &Path,
     selectors: &[String],
     args: &TargetOverrideArgs,
+    resolver: &ToolchainResolver,
 ) -> miette::Result<LoadedProject> {
-    materialize_project(select_project(path, selectors, args, true)?)
+    materialize_project(select_project(path, selectors, args, true)?, resolver)
+}
+
+/// A window that could not be presented, as the diagnostic a build reports.
+///
+/// Two codes because there are two mistakes: nothing could be obtained at all, so
+/// the machine is missing a component or the project named a file that is not
+/// there; or something was obtained and it does not work here. A caller that has
+/// to tell those apart - a CI system deciding whether to stage a toolchain - can,
+/// and a build that collapsed them would answer that question wrongly.
+fn preset_problem(error: zup_ui_compose::PresetProblem) -> miette::Report {
+    let code = match error {
+        zup_ui_compose::PresetProblem::Unavailable { .. } => "zup.build.preset_unavailable",
+        _ => "zup.build.preset_unusable",
+    };
+    crate::failure::error(code, error.to_string())
 }
 
 /// Read and compile a manifest, for a command that does not need its sources.
@@ -229,6 +296,7 @@ pub fn load_for_build(
     path: &Path,
     selectors: &[String],
     args: &TargetOverrideArgs,
+    resolver: &ToolchainResolver,
 ) -> miette::Result<LoadedProject> {
     let selected = select_project(path, selectors, args, false)?;
     // The backend boundary reads no files, so an unsupported target is refused
@@ -236,7 +304,7 @@ pub fn load_for_build(
     for config in &selected.selected_targets {
         crate::build_inputs::check_backend_support(config)?;
     }
-    let loaded = materialize_project(selected)?;
+    let loaded = materialize_project(selected, resolver)?;
     for config in &loaded.selected_targets {
         crate::build_inputs::check_target_lowering(&loaded.build, config)?;
     }

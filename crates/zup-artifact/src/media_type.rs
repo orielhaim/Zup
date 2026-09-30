@@ -28,6 +28,9 @@ pub enum MediaType {
     /// One variant's native maintenance runtime image.
     #[serde(rename = "application/vnd.zup.artifact.runtime.v1")]
     Runtime,
+    /// One variant's native UI preset image.
+    #[serde(rename = "application/vnd.zup.artifact.preset.v1")]
+    Preset,
 }
 
 impl MediaType {
@@ -41,6 +44,8 @@ impl MediaType {
     pub const BLOB: Self = Self::Blob;
     /// One native runtime image.
     pub const RUNTIME: Self = Self::Runtime;
+    /// One native preset image.
+    pub const PRESET: Self = Self::Preset;
 
     /// The stable type string, which also carries the shape version.
     pub const fn as_str(self) -> &'static str {
@@ -50,6 +55,7 @@ impl MediaType {
             Self::VariantManifest => "application/vnd.zup.artifact.variant.v1+json",
             Self::Blob => "application/vnd.zup.artifact.blob.v1",
             Self::Runtime => "application/vnd.zup.artifact.runtime.v1",
+            Self::Preset => "application/vnd.zup.artifact.preset.v1",
         }
     }
 
@@ -66,6 +72,9 @@ impl MediaType {
             Self::BlobTable => MAX_BLOB_TABLE_BYTES,
             Self::VariantManifest => MAX_VARIANT_MANIFEST_BYTES,
             Self::Runtime => MAX_RUNTIME_BYTES,
+            // A preset is one native binary per target, the same kind of thing a
+            // runtime is, and is bounded the same way.
+            Self::Preset => MAX_RUNTIME_BYTES,
             Self::Blob => u64::MAX,
         }
     }
@@ -78,6 +87,7 @@ impl MediaType {
             Self::VariantManifest => "variant manifest",
             Self::Blob => "content blob",
             Self::Runtime => "native runtime",
+            Self::Preset => "native preset",
         }
     }
 }

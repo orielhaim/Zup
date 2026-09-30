@@ -1,0 +1,8 @@
+# Build output. `zup build` writes the installer beside zup.toml, and the
+# generated release description beside that.
+Demo App-Setup.exe
+zup-release.json
+
+# A preview's own state: the copies of the preset it launches and the files it
+# materialized. Disposable by construction, like a build's target directory.
+/.zup/

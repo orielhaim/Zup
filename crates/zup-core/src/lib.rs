@@ -22,6 +22,7 @@ mod location;
 mod model;
 mod path;
 mod prerequisite;
+mod project_path;
 mod release;
 mod resource_key;
 mod target;
@@ -29,7 +30,7 @@ mod template;
 mod value;
 
 pub use build_plan::{
-    BuildPlan, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite, TargetBuildPlan,
+    BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite, TargetBuildPlan,
 };
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};
@@ -38,12 +39,12 @@ pub use ids::{
     AppId, BackendResourceId, ComponentId, FileAssociationId, NonEmptyString, PluginId,
     ProtocolScheme, ServiceId,
 };
-pub use installer::{Installer, UpdateConfig};
+pub use installer::{Installer, UiAsset, UiPreset, UiRuntime, UpdateConfig};
 pub use location::{INSTALL_LOCATIONS, InstallLocation};
 pub use model::{
     App, Component, FileAssociation, FileExtension, FileMapping, Frontend, Install,
-    InstallDirectory, InstallScope, Launcher, LauncherLocation, PathEntry, PluginBinding,
-    Privilege, Protocol, Service, ServiceStart, Source, UiBranding, UiTheme,
+    InstallDirectory, InstallScope, Launcher, LauncherLocation, MAX_UI_SETTINGS_BYTES, PathEntry,
+    PluginBinding, Privilege, Protocol, Service, ServiceStart, Source, Ui,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use prerequisite::{
@@ -53,6 +54,7 @@ pub use prerequisite::{
     PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
     PrerequisiteRequirement, Runtime, RuntimeRequirementId,
 };
+pub use project_path::ProjectPath;
 pub use release::{IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseIdentity};
 pub use resource_key::ResourceKey;
 pub use target::{

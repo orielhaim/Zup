@@ -130,6 +130,16 @@ pub enum ContentReason {
     Prerequisite { id: String },
     /// A plugin's AOT image.
     Plugin { id: String },
+    /// The native image a graphical variant presents its window with.
+    ///
+    /// A second native image beside the runtime, for the same reason: the client
+    /// has to fetch the right one for this machine and prove it before running
+    /// it. Which image it is comes from the release's own media vocabulary, not
+    /// from anything this crate knows about how a window is drawn.
+    Preset,
+    /// An asset the variant's window was told to expect, by the name it knows it
+    /// as.
+    UiAsset { name: String },
     /// Content the same machine already has, retained for offline repair.
     Retained,
 }
@@ -143,6 +153,7 @@ impl ContentReason {
             Self::File { .. } => "files",
             Self::Prerequisite { .. } => "prerequisites",
             Self::Plugin { .. } => "plugins",
+            Self::Preset | Self::UiAsset { .. } => "window",
             Self::Retained => "retained",
         }
     }

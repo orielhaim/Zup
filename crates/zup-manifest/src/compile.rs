@@ -5,8 +5,7 @@ use std::path::Path;
 
 use zup_core::{
     App, ComponentId, Install, InstallScope, Installer, PluginBinding, Prerequisite,
-    PrerequisitePackage, PrerequisiteRequirement, ResolvedTargetConfig, TargetOverrides,
-    UiBranding,
+    PrerequisitePackage, PrerequisiteRequirement, ResolvedTargetConfig, TargetOverrides, Ui,
 };
 
 use crate::error::ManifestError;
@@ -16,7 +15,7 @@ use crate::target::{resolve_target_config, validate_target_matrix, validate_targ
 
 struct ManifestView {
     app: App,
-    ui: Option<UiBranding>,
+    ui: Ui,
     install: Install,
     prerequisites: Vec<Prerequisite>,
     updates: Option<Updates>,
@@ -78,7 +77,7 @@ pub fn compile(
     let view = ManifestView::for_target(manifest, target);
 
     validate_install(&view.install)?;
-    validate_ui(view.ui.as_ref())?;
+    validate_ui(&view.ui)?;
     if let Some(updates) = &view.updates
         && (updates.channel.is_empty()
             || updates.channel.len() > 32
@@ -112,7 +111,9 @@ pub fn compile(
         app: view.app,
         target: target.target.clone(),
         frontend: target.frontend,
-        ui: view.ui,
+        // The preset a GUI target presents is chosen from a `.zupui` the build
+        // verifies, so it is not something this crate can resolve.
+        preset: None,
         updates: None,
         install: view.install,
         prerequisites: view.prerequisites,
@@ -236,21 +237,38 @@ fn render_install_directory(install: &Install) -> String {
     format!("user={user} machine={machine}")
 }
 
-fn validate_ui(ui: Option<&UiBranding>) -> Result<(), ManifestError> {
-    let Some(accent) = ui.and_then(|ui| ui.accent.as_deref()) else {
-        return Ok(());
-    };
-    let valid = accent.strip_prefix('#').is_some_and(|value| {
-        value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    });
-    if valid {
-        Ok(())
-    } else {
-        Err(ManifestError::InvalidUiAccent {
+/// What can be checked about `[ui]` without the preset in hand.
+///
+/// Whether the settings fit the preset's own schema needs the packaged schema,
+/// so that is the build's check. What is checkable here is that the values
+/// themselves are a shape a schema could describe: a bounded, well-named
+/// document. A `.zupui` path is already refused of `..` and absolute paths by
+/// the type that holds it.
+fn validate_ui(ui: &Ui) -> Result<(), ManifestError> {
+    let encoded = serde_json::to_vec(&ui.settings).map_err(|error| ManifestError::Invalid {
+        message: format!("[ui.settings] is not a value: {error}"),
+        src: None,
+        span: None,
+    })?;
+    if encoded.len() > zup_core::MAX_UI_SETTINGS_BYTES {
+        return Err(ManifestError::Invalid {
+            message: format!(
+                "[ui.settings] is {} bytes; the limit is {}",
+                encoded.len(),
+                zup_core::MAX_UI_SETTINGS_BYTES
+            ),
             src: None,
             span: None,
-        })
+        });
     }
+    if ui.settings.keys().any(|key| key.trim().is_empty()) {
+        return Err(ManifestError::Invalid {
+            message: "a [ui.settings] name must not be empty".into(),
+            src: None,
+            span: None,
+        });
+    }
+    Ok(())
 }
 
 fn validate_install(install: &Install) -> Result<(), ManifestError> {

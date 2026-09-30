@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ComponentId, Condition, Installer, PluginId, PrerequisiteId, RelativePath, Sha256Digest,
-    TargetTriple, Template,
+    ComponentId, Condition, Installer, NonEmptyString, PluginId, PrerequisiteId, RelativePath,
+    Sha256Digest, TargetTriple, Template,
 };
 
 /// One materialized source file.
@@ -51,6 +51,25 @@ pub struct ResolvedPrerequisite {
     pub sha256: Sha256Digest,
 }
 
+/// One application-provided UI asset, found and hashed at build time.
+///
+/// The same discipline as a [`ResolvedFile`]: the source is a build-machine fact
+/// and is absent wherever the plan was read back out of a package, because a
+/// runtime has no source tree to name. Identity is the digest either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAsset {
+    /// The name the application's settings used to refer to it.
+    pub name: NonEmptyString,
+    /// Build-machine location, or `None` when this plan was read from a package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PathBuf>,
+    /// Portable path relative to the project directory, or `None` beside `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_relative: Option<RelativePath>,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+}
+
 /// A plugin module that was found and hashed at build time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPlugin {
@@ -72,6 +91,9 @@ pub struct TargetBuildPlan {
     pub plugins: Vec<ResolvedPlugin>,
     /// Resolved payload files, sorted by destination then source relative path.
     pub files: Vec<ResolvedFile>,
+    /// Resolved application UI assets, sorted by name.
+    #[serde(default)]
+    pub ui_assets: Vec<ResolvedAsset>,
     /// Sum of payload file sizes.
     pub total_size: u64,
     /// Sum of embedded prerequisite sizes.

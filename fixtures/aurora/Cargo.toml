@@ -1,0 +1,19 @@
+[package]
+name = "aurora"
+version = "1.4.2"
+edition = "2024"
+description = "A drawing program, used to exercise the preset package pipeline"
+publish = false
+
+[lib]
+name = "aurora"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aurora-preset"
+path = "src/main.rs"
+
+[dependencies]
+zup-ui-sdk = { version = "0.1.0", path = "../../crates/zup-ui-sdk" }
+serde = { version = "1", features = ["derive"] }
+schemars = "1"

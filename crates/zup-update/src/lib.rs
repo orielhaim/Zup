@@ -29,9 +29,9 @@
 //!
 //! `tough`'s datastore exists to hold the most recently observed
 //! timestamp/snapshot/targets metadata, and rollback detection is only possible
-//! *across processes* if it survives one. So the datastore is a directory under
+//! across processes if it survives one. So the datastore is a directory under
 //! the machine's state root, namespaced by everything that can change the answer
-//! - application, repository, channel, and the trust anchor's own digest - and it
+//! (application, repository, channel, and the trust anchor's own digest), and it
 //! is never deleted because a fetch failed. A publisher who cannot be reached
 //! must not be able to reset a client's rollback memory.
 
@@ -333,10 +333,17 @@ impl ResolvedRelease {
     /// Deduplicated by digest and ordered for the scheduler, so a blob two
     /// components share is one download and a component the user turned off is
     /// zero bytes.
+    ///
+    /// `declared` is everything the variant needs that is not payload and not a
+    /// prerequisite: the images a frontend has to run and the named items its
+    /// window expects. The caller says what each one is and this decides nothing
+    /// about it, so a new kind of declared content is a new reason rather than a
+    /// new argument.
     pub fn closure(
         &self,
         entries: impl IntoIterator<Item = (Sha256Digest, Option<String>)>,
         prerequisites: impl IntoIterator<Item = (Sha256Digest, String)>,
+        declared: impl IntoIterator<Item = (Sha256Digest, ContentReason)>,
         selection: ComponentSelection<'_>,
     ) -> Result<AcquisitionPlan, UpdateError> {
         let mut items: Vec<AcquisitionItem> = Vec::new();
@@ -348,6 +355,9 @@ impl ResolvedRelease {
         }
         for (digest, id) in prerequisites {
             items.push(self.item(digest, ContentReason::Prerequisite { id })?);
+        }
+        for (digest, reason) in declared {
+            items.push(self.item(digest, reason)?);
         }
         Ok(AcquisitionPlan::build(items)?)
     }
@@ -744,6 +754,7 @@ mod tests {
                 frontend: "gui".to_owned(),
                 manifest: DocumentRef::of(Sha256Digest::from_bytes([2; 32]), 8),
                 runtime: Some(DocumentRef::of(Sha256Digest::from_bytes([3; 32]), 4)),
+                preset: Some(DocumentRef::of(Sha256Digest::from_bytes([5; 32]), 6)),
                 content: vec![Sha256Digest::from_bytes([4; 32])],
                 requirements: Default::default(),
                 logical_size: 10,
@@ -774,6 +785,7 @@ mod tests {
                 frontend: "gui".to_owned(),
                 manifest: DocumentRef::of(Sha256Digest::from_bytes([2; 32]), 8),
                 runtime: Some(DocumentRef::of(Sha256Digest::from_bytes([3; 32]), 4)),
+                preset: Some(DocumentRef::of(Sha256Digest::from_bytes([5; 32]), 6)),
                 content: vec![Sha256Digest::from_bytes([4; 32])],
                 requirements: Default::default(),
                 logical_size: 10,
@@ -813,6 +825,7 @@ mod tests {
         let error = release
             .closure(
                 [(Sha256Digest::from_bytes([0xab; 32]), None)],
+                [],
                 [],
                 ComponentSelection::All,
             )

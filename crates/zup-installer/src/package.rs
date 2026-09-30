@@ -23,7 +23,7 @@ pub fn current_executable() -> miette::Result<PathBuf> {
 /// The package this image carries.
 pub fn open_bundle(executable: &Path) -> miette::Result<zup_windows::EmbeddedBundle> {
     zup_windows::EmbeddedBundle::open(executable)
-        .map_err(|error| miette::miette!("installer package: {error}"))
+        .map_err(|error| miette::miette!("installer package {}: {error}", executable.display()))
 }
 
 /// The package this image carries, or `None` when the image carries none.
@@ -37,7 +37,10 @@ pub fn open_bundle_if_present(
     match zup_windows::EmbeddedBundle::open(executable) {
         Ok(bundle) => Ok(Some(bundle)),
         Err(error) if error.is_missing_resource() => Ok(None),
-        Err(error) => Err(miette::miette!("installer package: {error}")),
+        Err(error) => Err(miette::miette!(
+            "installer package {}: {error}",
+            executable.display()
+        )),
     }
 }
 

@@ -29,6 +29,12 @@ pub struct AcquiredPayloadSource {
     /// The digests this plan can use, so a call for anything else is a miss
     /// rather than a lookup into content the plan never named.
     allowed: BTreeMap<RelativePath, (Sha256Digest, u64)>,
+    /// The window's named assets, by the name the application's settings used.
+    ///
+    /// A logical name resolves through the plan exactly as a payload path does,
+    /// so a preset is handed a logical name it already knows and the source it
+    /// never learns is a digest.
+    assets: BTreeMap<String, (Sha256Digest, u64)>,
 }
 
 impl AcquiredPayloadSource {
@@ -44,11 +50,51 @@ impl AcquiredPayloadSource {
             .iter()
             .map(|entry| (entry.path.clone(), (entry.blob, entry.size)))
             .collect();
+        let assets = package
+            .plan()
+            .ui_assets
+            .iter()
+            .map(|asset| (asset.name.to_string(), (asset.sha256, asset.size)))
+            .collect();
         Self {
             cache,
             catalog,
             allowed,
+            assets,
         }
+    }
+
+    /// The bytes of one application-provided asset, by the name its settings used.
+    ///
+    /// Verified by the same path as everything else here, and resolved through
+    /// the plan's own record so a caller cannot ask for a name this release does
+    /// not describe.
+    pub fn ui_asset(&self, name: &str) -> Result<Vec<u8>, PayloadError> {
+        let Some((digest, size)) = self.assets.get(name) else {
+            return Err(PayloadError::NotFound {
+                path: name.to_owned(),
+            });
+        };
+        let bytes = self
+            .verified(digest)?
+            .read_to_end()
+            .map_err(|error| PayloadError::Read {
+                path: name.to_owned(),
+                source: std::io::Error::other(error.to_string()),
+            })?;
+        if bytes.len() as u64 != *size {
+            return Err(PayloadError::SizeMismatch {
+                path: name.to_owned(),
+                expected: *size,
+                found: bytes.len() as u64,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// The names of the assets this release's window was told to expect.
+    pub fn ui_asset_names(&self) -> Vec<&str> {
+        self.assets.keys().map(String::as_str).collect()
     }
 
     /// Read a whole blob, for a prerequisite package or a plugin image.

@@ -164,10 +164,10 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
 
     let plan = zup_build::TargetBuildPlan {
         installer: zup_core::Installer {
+            preset: None,
             app: app(),
             target: resolved.target.clone(),
             frontend: Frontend::Console,
-            ui: None,
             updates: Some(updates()),
             install: install(),
             prerequisites: Vec::new(),
@@ -190,12 +190,13 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
         prerequisites: Vec::new(),
         plugins: Vec::new(),
         files: resolved_files,
+        ui_assets: Vec::new(),
         total_size: total,
         prerequisite_size: 0,
     };
 
     let mut runtime = filler("runtime-image", 0).into_bytes();
     runtime.extend_from_slice(target.as_bytes());
-    DistributionVariant::resolve(&resolved, &plan, &[], Some((MediaType::RUNTIME, runtime)))
+    DistributionVariant::resolve(&resolved, &plan, &[], &[(MediaType::RUNTIME, runtime)])
         .expect("the variant resolves")
 }

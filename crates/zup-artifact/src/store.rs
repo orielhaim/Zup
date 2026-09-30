@@ -551,7 +551,7 @@ impl<S: SegmentReader> ContentSource for ArtifactView<S> {
         let bytes = match descriptor.media_type {
             MediaType::INDEX => self.index_bytes.clone(),
             MediaType::BLOB_TABLE => self.table_bytes.clone(),
-            MediaType::VARIANT_MANIFEST | MediaType::RUNTIME => self
+            MediaType::VARIANT_MANIFEST | MediaType::RUNTIME | MediaType::PRESET => self
                 .metadata
                 .get(descriptor)
                 .ok_or_else(|| ArtifactError::Missing {
@@ -577,7 +577,7 @@ impl<S: SegmentReader> ContentSource for ArtifactView<S> {
     fn contains(&self, descriptor: &Descriptor) -> bool {
         match descriptor.media_type {
             MediaType::INDEX | MediaType::BLOB_TABLE => true,
-            MediaType::VARIANT_MANIFEST | MediaType::RUNTIME => {
+            MediaType::VARIANT_MANIFEST | MediaType::RUNTIME | MediaType::PRESET => {
                 self.metadata.get(descriptor).is_some()
             }
             MediaType::BLOB => self.table.entry(&descriptor.digest).is_some(),

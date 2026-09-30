@@ -11,7 +11,7 @@ publish = false
 
 [features]
 default = []
-gui = ["dep:zup-ui"]
+gui = []
 console = ["dep:cliclack", "dep:console", "dep:indicatif"]
 headless = []
 
@@ -29,6 +29,20 @@ required-features = ["console"]
 name = "zup-setup-headless"
 path = "src/bin/zup-setup-headless.rs"
 required-features = ["headless"]
+
+# The host is behind the `gui` feature, so a test that drives it belongs to that
+# frontend. Naming the requirement rather than hiding the test is what keeps the
+# console and headless builds honest: they are built with `--all-targets`, and a
+# test that reached past their frontend would fail them for the wrong reason.
+[[test]]
+name = "preset_session"
+required-features = ["gui"]
+
+# Drives the GUI host through a real install, so it belongs to the GUI frontend
+# for the same reason the session test does.
+[[test]]
+name = "preset_persistence"
+required-features = ["gui"]
 
 [dependencies]
 clap = { workspace = true }
@@ -59,9 +73,10 @@ zup-plugin-runtime.workspace = true
 zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
+zup-ui-host.workspace = true
+zup-ui-protocol.workspace = true
 zup-update.workspace = true
 zup-windows.workspace = true
-zup-ui = { path = "../zup-ui", optional = true }
 cliclack = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
@@ -83,6 +98,7 @@ windows = { version = "0.62", features = [
 # produce a genuinely precompiled plugin rather than a stand-in for one. It is the
 # contract crate, not the build plane, and it is a dev-dependency.
 tempfile.workspace = true
+rstest.workspace = true
 wat = "1"
 windows-registry.workspace = true
 wit-component = { version = "=0.259.0", features = ["dummy-module"] }

@@ -152,6 +152,51 @@ classified exactly once.
 `zup` and `zup-installer` are Windows-only because they link the adapter, not
 because the model or the build pipeline needs a Windows host.
 
+## Public UI crates
+
+Three crates, in a chain, all published:
+
+```text
+zup-ui-protocol  the wire format, versioning, and the domain vocabulary
+zup-ui-ipc       the portable process transport that carries it
+zup-ui-sdk       what a preset is written against
+```
+
+`zup-ui-protocol` depends only on `serde`, `serde_json`, `thiserror` and `uuid`,
+and owns its own vocabulary rather than re-exporting `zup_core::ComponentId` or
+any other engine type. `zup-installer/src/host` is the conversion boundary:
+engine types go in on one side, protocol types come out on the other.
+
+`zup-ui-ipc` moves frames between processes on Windows, macOS and Linux. It
+uses Servo's `ipc-channel` for the operating system's own IPC rather than
+implementing any of it, and it encodes and decodes the protocol envelope itself,
+so the wire format stays Zup's rather than becoming a dependency's serde
+representation. A preset is a child the host launches and is not sandboxed, so
+this transport is not a privilege boundary and does not borrow the elevated
+worker's ACL and process-identity machinery; the protections that apply are the
+protocol's own — version, session identity, monotonic sequences, bounded
+messages, and the host's validation of every action.
+
+`verify-dependency-graph` holds the crate boundary mechanically: it fails when
+any of the three reaches a crate that exists only here. `verify-public-crates`
+holds the part a dependency graph cannot see — Cargo unifies features across a
+workspace, so a published crate can compile on a dependency feature it never
+declared and only fail for the first project outside the repository. It
+publishes `zup-ui-protocol`, then builds and tests each crate above it from a
+directory that is not this workspace, against the *packaged* archive of the crate
+beneath it.
+
+## The installer window
+
+The window is a separate process, not a link-time part of the installer.
+`zup-installer/src/host` owns the installation state and validates every
+`UiAction` against it; `zup-preset-default` is an ordinary preset that depends on
+`zup-ui-sdk` and nothing else.
+
+A consequence worth stating: the preset is disposable. If it crashes, the
+transaction keeps running and the host can put a new window in front of the same
+state, because a `UiSnapshot` is complete and there is nothing to replay.
+
 ## Package and executable
 
 `zup-bundle` writes a portable schema-1 package: a 60-byte header, a

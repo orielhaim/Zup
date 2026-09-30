@@ -138,8 +138,7 @@ pub fn resolve_runtimes(
 }
 
 /// Resolve one output per selected target, with every problem attached to its own
-/// slot.
-///
+/// slot.///
 /// `runtimes` is the already-resolved runtime list, because an output that is
 /// also a selected template is a mistake a build would otherwise discover by
 /// writing over its own input.
@@ -160,6 +159,11 @@ pub fn resolve_outputs(
 }
 
 /// The first problem, runtimes before outputs.
+///
+/// Presets have no slot here. A GUI target's preset is selected and proved while
+/// the project is materialized, because a preset's settings name project files
+/// that have to be resolved and hashed in the same pass as the rest of the
+/// payload; a slot that only held a toolchain path could not have done that.
 fn first_problem<'a>(
     runtimes: &'a [RuntimeSlot],
     outputs: &'a [OutputSlot],

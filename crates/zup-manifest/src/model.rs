@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use zup_core::Prerequisite;
 use zup_core::{
     App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry, Protocol,
-    Service, TargetProfile, TargetProfileId, UiBranding,
+    Service, TargetProfile, TargetProfileId, Ui,
 };
 
 use crate::plugin::Plugin;
@@ -42,7 +42,7 @@ pub struct Manifest {
     pub schema: u32,
     pub app: App,
     pub frontend: Frontend,
-    pub ui: Option<UiBranding>,
+    pub ui: Ui,
     pub build: Build,
     pub install: Install,
     pub prerequisites: Vec<Targeted<Prerequisite>>,

@@ -577,9 +577,9 @@ mod transaction_fingerprint {
         BuildPlan {
             targets: vec![TargetBuildPlan {
                 installer: Installer {
-                    ui: None,
                     target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
                     frontend: Frontend::Gui,
+                    preset: None,
                     app: App {
                         id: AppId::new("com.example.fingerprint").unwrap(),
                         name: NonEmptyString::new("Fingerprint").unwrap(),
@@ -623,6 +623,7 @@ mod transaction_fingerprint {
                 prerequisites: Vec::new(),
                 plugins: Vec::new(),
                 files: Vec::new(),
+                ui_assets: Vec::new(),
                 total_size: 0,
                 prerequisite_size: 0,
             }],

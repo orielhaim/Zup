@@ -20,12 +20,16 @@ use crate::project::{self, LoadedProject};
 use crate::report::Reporter;
 
 /// Validate a project and the files it will ship.
-pub fn run_check(args: CheckCommand) -> miette::Result<AutomationResult> {
+pub fn run_check(
+    args: CheckCommand,
+    toolchain_root: Option<std::path::PathBuf>,
+) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let loaded = project::load_for_build(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
+        &crate::resolver(toolchain_root),
     )?;
     let mut variants = Vec::with_capacity(loaded.selected_targets.len());
     let mut files = 0usize;
@@ -60,7 +64,7 @@ pub fn run_check(args: CheckCommand) -> miette::Result<AutomationResult> {
         );
         files += plan.files.len();
         variants.push(
-            zup_artifact::DistributionVariant::resolve(config, plan, &[], None).map_err(
+            zup_artifact::DistributionVariant::resolve(config, plan, &[], &[]).map_err(
                 |error| {
                     crate::failure::error(
                         "zup.check.variant_invalid",
@@ -170,12 +174,16 @@ fn composition_text(composition: &Composition) -> String {
 }
 
 /// Show what installing this project would do, without changing anything.
-pub fn run_plan(args: PlanCommand) -> miette::Result<AutomationResult> {
+pub fn run_plan(
+    args: PlanCommand,
+    toolchain_root: Option<std::path::PathBuf>,
+) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let loaded = project::load_single_project(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
+        &crate::resolver(toolchain_root),
     )?;
     let config = loaded
         .selected_targets

@@ -117,6 +117,7 @@ fn release(options: &ReleaseOptions) -> ReleaseDescriptor {
             frontend: "gui".to_owned(),
             manifest: DocumentRef::of(digest_of(&manifest), manifest.len() as u64),
             runtime: Some(DocumentRef::of(digest_of(b"runtime-windows-x64"), 4)),
+            preset: Some(DocumentRef::of(digest_of(b"preset-windows-x64"), 6)),
             content: sorted_digests(&options.content),
             requirements: Default::default(),
             logical_size: 1024,
@@ -679,7 +680,7 @@ async fn a_local_seed_satisfies_a_closure_with_no_network_at_all() {
         .map(|entry| (entry.digest, None))
         .collect();
     let closure = resolved
-        .closure(entries, [], zup_update::ComponentSelection::All)
+        .closure(entries, [], [], zup_update::ComponentSelection::All)
         .expect("a closure");
     let session = zup_acquire::AcquisitionSession::new(
         closure,
@@ -774,13 +775,14 @@ async fn the_closure_narrows_by_component_selection() {
         .collect();
 
     let every = resolved
-        .closure(entries.clone(), [], zup_update::ComponentSelection::All)
+        .closure(entries.clone(), [], [], zup_update::ComponentSelection::All)
         .expect("a closure");
     assert_eq!(every.len(), 4);
 
     let core_only = resolved
         .closure(
             entries,
+            [],
             [],
             zup_update::ComponentSelection::Only(&["core", "docs"]),
         )
