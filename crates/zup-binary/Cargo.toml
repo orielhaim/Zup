@@ -1,0 +1,19 @@
+[package]
+name = "zup-binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable read-only inspection of executable files for zup"
+publish = false
+
+[dependencies]
+# Read side only. zup never writes an executable, so the writer and the
+# compression codecs are dead weight here, and a crate whose whole job is reading
+# should not link a rewriter.
+object = { workspace = true }
+thiserror.workspace = true
+zup-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

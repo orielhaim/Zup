@@ -133,8 +133,8 @@ fn a_build_composes_an_installer_from_the_staged_toolchain() {
     assert_eq!(bundle.target().as_str(), X64);
     assert_eq!(bundle.frontend(), Frontend::Gui);
     assert_eq!(
-        zup_windows::read_pe_subsystem(&output).expect("the subsystem reads"),
-        zup_windows::PeSubsystem::Gui,
+        zup_windows::read_frontend(&output).expect("the subsystem reads"),
+        Some(zup_core::Frontend::Gui),
         "the composed image is the template's own subsystem"
     );
     assert_eq!(bundle.plan().entries.len(), 1);
@@ -161,8 +161,8 @@ fn a_frontend_flag_selects_the_matching_template() {
     assert_eq!(bundle.frontend(), Frontend::Console);
     assert_eq!(bundle.plan().installer.frontend, Frontend::Console);
     assert_eq!(
-        zup_windows::read_pe_subsystem(&output).expect("the subsystem reads"),
-        zup_windows::PeSubsystem::Console
+        zup_windows::read_frontend(&output).expect("the subsystem reads"),
+        Some(zup_core::Frontend::Console)
     );
 }
 

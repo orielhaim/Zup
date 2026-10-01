@@ -41,6 +41,7 @@ windows-link.workspace = true
 zup-acquire = { workspace = true, optional = true }
 zup-artifact.workspace = true
 zup-core.workspace = true
+zup-binary.workspace = true
 zup-update = { workspace = true, optional = true }
 zup-windows.workspace = true
 

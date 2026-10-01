@@ -97,17 +97,6 @@ const ZUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The suffix this machine writes executables with.
 const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 
-/// The COFF machine value a target triple's architecture names.
-fn machine_of(target: &str) -> u16 {
-    if target.starts_with("aarch64") {
-        0xaa64
-    } else if target.starts_with("i686") {
-        0x014c
-    } else {
-        0x8664
-    }
-}
-
 /// A minimal PE header that agrees with what the descriptor claims.
 ///
 /// The header is the only independent statement a build host can make about a
@@ -138,6 +127,17 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
     bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
     bytes[0x9c..0x9e].copy_from_slice(&subsystem.to_le_bytes());
     bytes
+}
+
+/// The COFF machine value a target triple's architecture names.
+fn machine_of(target: &str) -> u16 {
+    if target.starts_with("aarch64") {
+        0xaa64
+    } else if target.starts_with("i686") {
+        0x014c
+    } else {
+        0x8664
+    }
 }
 
 /// A file that is not a PE image at all.

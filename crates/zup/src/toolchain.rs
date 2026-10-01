@@ -202,41 +202,51 @@ fn check(
     // The descriptor is a claim written by the toolchain build. The file's own
     // header is an independent statement, and the two agreeing is what makes the
     // claim worth anything on a host that cannot run the file.
+    let executable = || zup_binary::Executable::read(path);
+    let unreadable = |error: zup_binary::InspectError| ToolchainError::Unreadable {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    };
     match component {
         ToolchainComponent::Runtime { target, frontend } => {
-            let found =
-                zup_windows::read_pe_target(path).map_err(|error| ToolchainError::Unreadable {
-                    path: path.to_path_buf(),
-                    reason: error.to_string(),
-                })?;
-            if &found != target {
+            let runtime = executable().map_err(unreadable)?;
+            if !runtime.matches_target(target) {
                 return Err(ToolchainError::WrongTarget {
-                    found: found.as_str().to_owned(),
+                    found: runtime
+                        .architectures()
+                        .iter()
+                        .map(|machine| machine.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     wanted: target.as_str().to_owned(),
                 });
             }
-            zup_windows::validate_pe_frontend(path, *frontend).map_err(|error| {
-                ToolchainError::Unreadable {
-                    path: path.to_path_buf(),
-                    reason: error.to_string(),
-                }
-            })?;
+            if !runtime.matches_frontend(*frontend) {
+                return Err(ToolchainError::WrongFrontend {
+                    found: format!("{:?}", runtime.program()).to_lowercase(),
+                    wanted: frontend.as_str().to_owned(),
+                });
+            }
         }
         ToolchainComponent::Dispatcher { subsystem, .. } => {
-            let found = zup_windows::read_pe_subsystem(path).map_err(|error| {
-                ToolchainError::Unreadable {
-                    path: path.to_path_buf(),
-                    reason: error.to_string(),
+            let launcher = executable().map_err(unreadable)?;
+            // The descriptor says which launcher this component is, and the file
+            // says what it presents. `Subsystem::carries` is the one rule for
+            // whether a launcher can present a frontend, so asking it here keeps
+            // this path from restating the table.
+            let found = match launcher.program() {
+                Some(zup_binary::ProgramKind::Windowed) => zup_core::Frontend::Gui,
+                Some(zup_binary::ProgramKind::Console) => zup_core::Frontend::Console,
+                None => {
+                    return Err(ToolchainError::Unreadable {
+                        path: path.to_path_buf(),
+                        reason: "the file records no window/terminal subsystem".to_owned(),
+                    });
                 }
-            })?;
-            let matches = matches!(
-                (subsystem, found),
-                (Subsystem::Gui, zup_windows::PeSubsystem::Gui)
-                    | (Subsystem::Console, zup_windows::PeSubsystem::Console)
-            );
-            if !matches {
+            };
+            if !subsystem.carries(found) {
                 return Err(ToolchainError::WrongSubsystem {
-                    found: format!("{found:?}").to_lowercase(),
+                    found: found.as_str().to_owned(),
                     wanted: subsystem.as_str().to_owned(),
                 });
             }

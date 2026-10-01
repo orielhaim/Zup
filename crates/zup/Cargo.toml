@@ -32,6 +32,7 @@ zup-automation.workspace = true
 zup-artifact.workspace = true
 zup-build.workspace = true
 zup-core.workspace = true
+zup-binary.workspace = true
 zup-distribute-github.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true

@@ -339,6 +339,7 @@ pub fn inspection(inspection: &Inspection) -> zup_automation::ArtifactInspectDet
                 prerequisite_count: count(variant.prerequisite_count),
                 plugin_count: count(variant.plugin_count),
                 native_execution: variant.native_execution,
+                target_matches_binary: variant.target_matches_binary.clone(),
             })
             .collect(),
         content: zup_automation::InspectedContent {

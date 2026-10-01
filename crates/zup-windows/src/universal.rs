@@ -30,8 +30,9 @@ use zup_artifact::{
     ArtifactError, ArtifactGraph, ArtifactView, ContentSource, Descriptor, MediaType, MetadataSet,
     SegmentReader, select_from_index,
 };
+use zup_binary::{BinaryArchitecture, Executable, ProgramKind};
 use zup_core::TargetTriple;
-use zup_pe::{Machine, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument};
+use zup_pe::{RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument};
 
 use crate::host;
 
@@ -40,6 +41,8 @@ use crate::host;
 pub enum UniversalError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
+    #[error(transparent)]
+    Inspect(#[from] zup_binary::InspectError),
     #[error(transparent)]
     Portable(#[from] zup_pe::PeError),
     #[error(transparent)]
@@ -63,11 +66,13 @@ pub enum UniversalError {
     },
     #[error("dispatcher template is already signed; compose before signing")]
     DispatcherSigned,
+    #[error("dispatcher template records no window/terminal subsystem; it is not a launcher")]
+    DispatcherSubsystem,
     #[error(
         "the dispatcher is a {found} program, but the artifact includes a {narrowest} variant; a machine that can run that variant must be able to start the dispatcher first"
     )]
     DispatcherTooWide {
-        found: Machine,
+        found: BinaryArchitecture,
         narrowest: TargetTriple,
     },
     #[error("artifact `{id}` has no variant this host can run")]
@@ -160,13 +165,11 @@ pub fn compose_universal_executable(
     graph: &ArtifactGraph,
 ) -> Result<UniversalLayout, UniversalError> {
     let expected = graph.index().artifact.subsystem;
-    let header = zup_pe::read_pe_header(dispatcher)?;
-    let found = match header.subsystem {
-        zup_pe::Subsystem::Gui => zup_artifact::LauncherSubsystem::Gui,
-        zup_pe::Subsystem::Console => zup_artifact::LauncherSubsystem::Console,
-        zup_pe::Subsystem::Other(_) => {
-            return Err(crate::BundleError::Invalid.into());
-        }
+    let template = Executable::read(dispatcher)?;
+    let found = match template.program() {
+        Some(ProgramKind::Windowed) => zup_artifact::LauncherSubsystem::Gui,
+        Some(ProgramKind::Console) => zup_artifact::LauncherSubsystem::Console,
+        None => return Err(UniversalError::DispatcherSubsystem),
     };
     if found != expected {
         return Err(UniversalError::DispatcherTemplate { expected, found });
@@ -174,11 +177,12 @@ pub fn compose_universal_executable(
     if zup_pe::is_signed(dispatcher)? {
         return Err(UniversalError::DispatcherSigned);
     }
-    if let Some(narrowest) = narrowest_variant(graph)
-        && machine_width(header.machine) > machine_width(machine_of(&narrowest))
+    if let Some((width, narrowest)) = narrowest_variant(graph)
+        && let Some(machine) = template.architecture()
+        && machine_width(machine) > width
     {
         return Err(UniversalError::DispatcherTooWide {
-            found: header.machine,
+            found: machine,
             narrowest,
         });
     }
@@ -219,39 +223,39 @@ pub fn compose_universal_executable(
     Ok(layout)
 }
 
-/// The narrowest machine any included variant targets.
+/// The narrowest machine any included variant targets, and that variant's target.
 ///
-/// Windows runs 32-bit x86 everywhere, and runs 64-bit only where the operating
-/// system is 64-bit, so the narrowest variant is the one that decides how wide a
-/// dispatcher may be.
-fn narrowest_variant(graph: &ArtifactGraph) -> Option<TargetTriple> {
+/// The triple comes back with the width because the refusal names it: a project's
+/// manifest carries `x86_64-pc-windows-msvc`, not "width 1", and a diagnostic that
+/// says the width is one the reader has to look up again.
+///
+/// A variant naming a machine zup cannot rank is skipped rather than treated as the
+/// widest, so one unrankable target cannot refuse every dispatcher.
+fn narrowest_variant(graph: &ArtifactGraph) -> Option<(u8, TargetTriple)> {
     graph
         .index()
         .variants
         .iter()
-        .map(|variant| variant.target.clone())
-        .min_by_key(|target| machine_width(machine_of(target)))
-}
-
-/// The machine a Windows target triple names.
-fn machine_of(target: &TargetTriple) -> Machine {
-    use zup_core::TargetArchitecture;
-    match target.architecture() {
-        TargetArchitecture::X86_32(_) => Machine::I386,
-        TargetArchitecture::X86_64 => Machine::Amd64,
-        TargetArchitecture::Aarch64(_) => Machine::Arm64,
-        _ => Machine::Other(0),
-    }
+        .filter_map(|variant| {
+            BinaryArchitecture::of_target(&variant.target)
+                .map(|machine| (machine_width(machine), variant.target.clone()))
+        })
+        .min_by_key(|(width, _)| *width)
 }
 
 /// How wide a machine is, in the one order that matters: a machine runs
 /// everything narrower than itself.
-const fn machine_width(machine: Machine) -> u8 {
+///
+/// Windows' rule rather than a property of the CPUs, which is why it lives here
+/// and not in `zup-binary`: 32-bit x86 runs on every Windows host, 64-bit only
+/// where the operating system is 64-bit, and the two are unrelated. AArch64 is
+/// ranked above x86-64 so that an artifact with both variants insists on a
+/// dispatcher the narrowest of them can start.
+const fn machine_width(machine: BinaryArchitecture) -> u8 {
     match machine {
-        Machine::I386 => 0,
-        Machine::Amd64 => 1,
-        Machine::Arm64 => 2,
-        Machine::Other(_) => u8::MAX,
+        BinaryArchitecture::X86_32 | BinaryArchitecture::Arm32 => 0,
+        BinaryArchitecture::X86_64 => 1,
+        BinaryArchitecture::Arm64 => 2,
     }
 }
 

@@ -22,6 +22,7 @@ thiserror.workspace = true
 toml.workspace = true
 zup-automation = { workspace = true, features = ["bindings"] }
 zup-artifact.workspace = true
+zup-binary.workspace = true
 zup-core.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true

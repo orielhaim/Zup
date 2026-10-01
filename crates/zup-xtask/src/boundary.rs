@@ -840,6 +840,11 @@ mod tests {
     fn the_vocabulary_is_the_matrixs_and_an_unclaimed_package_gets_the_strict_one() {
         assert_eq!(matrix::vocabulary_of("zup-pe"), Vocabulary::FileFormat);
         assert_eq!(
+            matrix::vocabulary_of("zup-binary"),
+            Vocabulary::FileFormat,
+            "a crate that reads PE/COFF, ELF and Mach-O is a file-format crate"
+        );
+        assert_eq!(
             matrix::vocabulary_of("no-such-crate"),
             Vocabulary::Domain,
             "an unclassified package is held to the strict rules"

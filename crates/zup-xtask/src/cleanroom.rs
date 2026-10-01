@@ -124,38 +124,37 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         ));
     }
 
-    // The artifact is a real image, not a file that happens to exist. The DOS
-    // stub, the `e_lfanew` pointer, and the PE signature are the three facts a
-    // downloader can check without executing anything, and reading the signature
-    // *through* the pointer rather than at a fixed offset is what makes this a
-    // check rather than a coincidence about linkers.
-    let head = read_head(&artifact, 0x100)?;
-    if &head[..2] != b"MZ" {
-        return Err(format!(
-            "`{}` does not start with a DOS header",
+    // The artifact is a real image, not a file that happens to exist. `zup-binary`
+    // reads the DOS stub, follows the `e_lfanew` pointer, checks the PE signature
+    // through it, and names the machine - the three facts a downloader can
+    // establish without executing anything.
+    let image = zup_binary::Executable::read(&artifact).map_err(|error| {
+        format!(
+            "`{}` is not an executable this build produced: {error}",
             artifact.display()
-        ));
-    }
-    let pe = u32::from_le_bytes(head[0x3c..0x40].try_into().expect("four bytes")) as usize;
-    if pe + 6 > head.len() || &head[pe..pe + 4] != b"PE\0\0" {
+        )
+    })?;
+    if image.format() != zup_binary::BinaryFormat::Pe {
         return Err(format!(
-            "`{}` has no PE header at the offset its DOS header names",
+            "`{}` is a {image:?} file, and this release builds Windows images",
             artifact.display()
         ));
     }
     // And the machine it is for, which is the fact a dispatcher selects on. A
     // build that produced an image for the wrong architecture would still be a
     // valid PE and would still install on a machine that cannot run it.
-    let machine = u16::from_le_bytes(head[pe + 4..pe + 6].try_into().expect("two bytes"));
-    let expected = if cfg!(target_arch = "aarch64") {
-        0xaa64
-    } else {
-        0x8664
-    };
-    if machine != expected {
-        return Err(format!(
-            "`{}` is machine 0x{machine:04x}; this build produces 0x{expected:04x}",
+    let host = zup_binary::BinaryArchitecture::host().ok_or_else(|| {
+        format!(
+            "`{}` cannot be checked: this build host runs on a machine zup has no target for",
             artifact.display()
+        )
+    })?;
+    if !image.carries(host) {
+        return Err(format!(
+            "`{}` is a {} image; this build produces {}",
+            artifact.display(),
+            image.architectures(),
+            host
         ));
     }
 
@@ -353,16 +352,6 @@ fn step(program: &Path, work: &Path, arguments: &[&str], name: &str) -> Result<(
         ));
     }
     Ok(())
-}
-
-fn read_head(path: &Path, length: usize) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut file =
-        std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut buffer = vec![0u8; length];
-    file.read_exact(&mut buffer)
-        .map_err(|error| format!("{} is shorter than a PE header: {error}", path.display()))?;
-    Ok(buffer)
 }
 
 fn executable(name: &str) -> String {

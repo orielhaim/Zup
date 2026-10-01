@@ -33,10 +33,11 @@ use std::path::{Path, PathBuf};
 use zup_acquire::{
     CachePolicy, ContentCache, ContentCatalog, ReleaseDescriptor, RuntimeHandoff, Verify,
 };
+use zup_binary::{Executable, ProgramKind};
 use zup_bundle::{AcquiredPayloadSource, Package, PayloadError};
-use zup_core::Sha256Digest;
+use zup_core::{Frontend, Sha256Digest};
 
-use crate::bundle_packager::{EmbeddedBundle, PeSubsystem, read_pe_subsystem, read_pe_target};
+use crate::bundle_packager::EmbeddedBundle;
 use crate::durable::write_durable;
 
 /// A verified view of one authenticated release, from inside a native runtime.
@@ -263,14 +264,14 @@ pub fn verify(
     // And the machine's own opinion, which no handoff can overrule: this image is
     // built for the triple it is built for, and a claim otherwise is a lie about
     // the only party that cannot be lied to.
-    let built_for = read_pe_target(executable)
+    let built_for = zup_binary::Executable::read(executable)
         .map_err(|error| HandoffRejection::Unreadable(format!("this executable: {error}")))?;
-    if built_for != handoff.target {
-        return Err(HandoffRejection::TargetMismatch {
+    built_for
+        .refuse_target(&handoff.target)
+        .map_err(|error| HandoffRejection::TargetMismatch {
             handoff: handoff.target.to_string(),
-            executable: built_for.to_string(),
-        });
-    }
+            executable: error.to_string(),
+        })?;
 
     let manifest = read_document(cache, variant.manifest.digest, "variant manifest")?;
     let catalog = read_document(cache, descriptor.catalog.digest, "content catalog")?;
@@ -466,8 +467,15 @@ pub fn write_handoff(
     Ok(handoff.digest())
 }
 
-/// The subsystem this image presents, which the bootstrapper matches against the
+/// The frontend this image presents, which the bootstrapper matches against the
 /// variant it selected.
-pub fn subsystem(executable: &Path) -> Result<PeSubsystem, HandoffRejection> {
-    read_pe_subsystem(executable).map_err(|error| HandoffRejection::Unreadable(error.to_string()))
+pub fn frontend(executable: &Path) -> Result<Option<Frontend>, HandoffRejection> {
+    Executable::read(executable)
+        .map(|executable| executable.program())
+        .map(|program| match program {
+            Some(ProgramKind::Windowed) => Some(Frontend::Gui),
+            Some(ProgramKind::Console) => Some(Frontend::Console),
+            None => None,
+        })
+        .map_err(|error| HandoffRejection::Unreadable(error.to_string()))
 }

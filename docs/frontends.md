@@ -40,7 +40,7 @@ ships a machine-readable **descriptor** beside it:
 
 The descriptor names the contract version, the zup release that produced the
 bytes, the machine, the presentation, the digest, and the size. The build then
-confirms it against the file's own PE header. The two agreeing is what makes the
+confirms it against the file's own header. The two agreeing is what makes the
 claim worth anything **on a build host that cannot run the file** - a Linux host
 composes a Windows installer for two architectures and can start neither.
 

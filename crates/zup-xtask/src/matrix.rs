@@ -129,7 +129,12 @@ pub const PORTABLE_CORE: &[&str] = &[
 /// WinVerifyTrust, `UpdateResourceW`, or any other host's judgement about a file:
 /// those are the Windows adapter's, and a file-format crate that grew one would
 /// stop being portable in the way that matters.
-pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe"];
+///
+/// `zup-binary` is here for the same reason and covers PE/COFF, ELF and Mach-O
+/// at once. It has no Windows vocabulary of its own to relax, but it is a
+/// platform file format crate by the same argument, and classifying it here keeps
+/// that a fact about what it is rather than a judgement made per call site.
+pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe", "zup-binary"];
 
 /// Portable crates that verify the stack instead of shipping inside an
 /// installer. Their test suites are part of the native portable run.

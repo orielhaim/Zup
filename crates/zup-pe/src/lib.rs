@@ -1,41 +1,31 @@
-//! Portable Executable headers and resources.
+//! Portable Executable mutation, certificate tables, and Authenticode.
 //!
-//! This is the native implementation, and it is deliberately small. Two things
-//! need it and neither can use a generic object-file rewriter:
+//! Two things live here, and a general object-file library must not be asked to
+//! do either:
 //!
-//! - **Composition** writes resources into an image that is about to be signed.
-//!   Rewriting a PE through a general library would have to reproduce section
-//!   alignment, the resource directory, and the certificate table exactly, and
-//!   the certificate table is what Authenticode later covers.
-//! - **Reading** an image's own resources is how a program finds the artifact it
-//!   was built into.
+//! - **Composition** writes resources into an image that is about to be signed,
+//!   so it has to reproduce section alignment, the resource directory and the
+//!   certificate table exactly. The writing is four `kernel32` calls in
+//!   `zup-windows`; the *vocabulary* it writes against is here.
+//! - **Authenticode** is a digest over the image's bytes by a rule the format
+//!   specifies, and the certificate table holds that rule's inputs. Both are
+//!   properties of the bytes, so [`authenticode`] reads them on every platform.
 //!
-//! A build-time inspector answers a different question - what format and machine
-//! an arbitrary template is - and belongs in `zup-build`, which is portable.
+//! Whether *Windows* trusts the chain, whether the publisher matches a policy,
+//! whether a timestamp is acceptable, and whether a file is safe to run are not
+//! properties of the bytes. They are answers from a machine's trust store, and
+//! they live in the Windows adapter. This crate will tell you a signature covers
+//! these bytes, and will refuse to tell you anybody should install it.
 //!
-//! # What this crate is and is not allowed to know
+//! **This crate does not answer "what file is this?"** What format, what machine,
+//! whether it opens a window - `object` already has that for PE/COFF, ELF and
+//! Mach-O, and `zup-binary` is the only place zup asks. What stays here is the
+//! part `object` cannot give: the certificate table's file range, and the byte
+//! regions the digest excludes and includes. Modelling those twice would risk
+//! signing a different image than the one that was measured.
 //!
-//! A PE is a file format, and Authenticode is part of it: an image may carry a
-//! certificate table holding a PKCS#7 blob, and the digest that blob claims over
-//! the image is computed by a rule the format specifies. [`authenticode`] reads
-//! and computes both, on every platform, because both are properties of the
-//! bytes.
-//!
-//! Whether *Windows* trusts the chain, whether the publisher matches a project's
-//! policy, whether a timestamp is acceptable, and whether a file is safe to run
-//! are not properties of the bytes. They are answers from a machine's trust
-//! store, and they live in the Windows adapter, which is the only place that can
-//! ask. The line is drawn deliberately: this crate will tell you a signature
-//! covers these bytes, and it will refuse to tell you anybody should install it.
-//!
-//! The PE parsing itself is delegated where a maintained implementation exists.
-//! [`authenticode`] uses `google/authenticode-rs` for the certificate table, the
-//! `WIN_CERTIFICATE` walk and the image digest, and this crate contributes the
-//! image layout those routines read: the header is parsed here, once, and
-//! everything that needs a section range or a data directory asks for it.
-//!
-//! The header is read **without loading the file**, because a universal artifact
-//! is measured in gigabytes and `is_signed` is asked about one every time
+//! The layout is read **without loading the file**, because a universal artifact
+//! is measured in gigabytes and [`is_signed`] is asked about one every time
 //! anything composes. Only [`authenticode::image_digest`] needs the whole image,
 //! and only because the digest rule reads sections in an order the file is not
 //! laid out in.
@@ -81,47 +71,6 @@ pub const MAX_RESOURCE_SIZE: u64 = u32::MAX as u64;
 /// Largest resource identifier a container may use.
 pub const MAX_RESOURCE_ID: usize = u16::MAX as usize - 1;
 
-/// The machine type a PE header names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Machine {
-    I386,
-    Amd64,
-    Arm64,
-    /// A machine type this build does not model.
-    Other(u16),
-}
-
-impl Machine {
-    /// The stable token for this machine type, which is also the architecture
-    /// name a target triple uses where they agree.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::I386 => "i686",
-            Self::Amd64 => "x86_64",
-            Self::Arm64 => "aarch64",
-            Self::Other(_) => "other",
-        }
-    }
-}
-
-impl std::fmt::Display for Machine {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Other(raw) => write!(out, "machine 0x{raw:04x}"),
-            machine => out.write_str(machine.as_str()),
-        }
-    }
-}
-
-/// The subsystem a PE header names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Subsystem {
-    Console,
-    Gui,
-    /// A subsystem this build does not model.
-    Other(u16),
-}
-
 /// The offsets a PE image's layout is made of.
 ///
 /// Every field is a file offset, which is the thing the format specification is
@@ -152,13 +101,10 @@ struct Layout {
     certificate_table: Option<Range<usize>>,
 }
 
-/// The parts of a PE header zup reads.
+/// The image layout, and nothing else: what a machine or a subsystem says is
+/// `zup-binary`'s to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeHeader {
-    pub machine: Machine,
-    pub subsystem: Subsystem,
-    raw_machine: u16,
-    raw_subsystem: u16,
     layout: Layout,
 }
 
@@ -192,10 +138,11 @@ pub enum PeError {
     TooManyResources { count: usize, limit: usize },
 }
 
-/// The smallest optional header zup can read anything from: the `SizeOfHeaders`,
-/// `CheckSum` and `Subsystem` fields end at byte 70, and the last four bytes
-/// after them are the start of the data directories.
-const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = 70;
+/// The smallest optional header this reader can work with: `SizeOfHeaders` ends
+/// at byte 64 and `CheckSum` at byte 68, and the digest excludes the second of
+/// those two fields by name. Anything shorter is a header with nothing in it
+/// that this crate needs.
+const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = 68;
 /// Offsets inside the optional header. These are the same for PE32 and PE32+:
 /// the two layouts differ only below `SectionAlignment`, and a PE32+ image
 /// replaces `{BaseOfData, ImageBase}` with a 64-bit `ImageBase`, which is
@@ -203,21 +150,18 @@ const PE_MIN_OPTIONAL_HEADER_SIZE: u64 = 70;
 /// offset in both.
 const PE_SIZE_OF_HEADERS_OFFSET: u64 = 60;
 const PE_CHECKSUM_OFFSET: u64 = 64;
-const PE_SUBSYSTEM_OFFSET: u64 = 68;
 /// The Certificate Table is data directory entry 4.
 const PE_SECURITY_DIRECTORY_INDEX: u64 = 4;
 const PE_DATA_DIRECTORY_SIZE: u64 = 8;
 const PE_SECTION_HEADER_SIZE: u64 = 40;
 const PE_SECTION_POINTER_TO_RAW_DATA: u64 = 20;
 const PE_SECTION_SIZE_OF_RAW_DATA: u64 = 16;
-const IMAGE_SUBSYSTEM_GUI: u16 = 2;
-const IMAGE_SUBSYSTEM_CUI: u16 = 3;
 
 /// Read the header fields zup needs from an image.
 ///
 /// Seeks rather than slurps: the header is a few hundred bytes at a fixed set of
 /// offsets, and the only reason to read more of the file is a caller that asks
-/// [`PeHeader::read_resource`] for one.
+/// for the digest.
 pub fn read_pe_header(path: &Path) -> Result<PeHeader, PeError> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -246,7 +190,6 @@ fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, Pe
     }
     let mut coff = [0u8; 20];
     file.read_exact(&mut coff)?;
-    let raw_machine = u16::from_le_bytes(coff[..2].try_into().unwrap());
     let section_count = u16::from_le_bytes(coff[2..4].try_into().unwrap());
     let optional_offset = pe + 24;
     let optional_len = u16::from_le_bytes(coff[16..18].try_into().unwrap()) as u64;
@@ -282,11 +225,6 @@ fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, Pe
     }
     let check_sum = optional_offset + PE_CHECKSUM_OFFSET;
     let security_data_dir = optional_offset + security_offset;
-    let raw_subsystem = u16::from_le_bytes(
-        optional[PE_SUBSYSTEM_OFFSET as usize..PE_SUBSYSTEM_OFFSET as usize + 2]
-            .try_into()
-            .unwrap(),
-    );
 
     // The certificate table's directory entry is `{ u32 address; u32 size }` - the
     // size sits 4 bytes after the address, because both are 32-bit fields even
@@ -344,19 +282,6 @@ fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, Pe
     }
 
     Ok(PeHeader {
-        machine: match raw_machine {
-            0x014c => Machine::I386,
-            0x8664 => Machine::Amd64,
-            0xaa64 => Machine::Arm64,
-            other => Machine::Other(other),
-        },
-        subsystem: match raw_subsystem {
-            IMAGE_SUBSYSTEM_CUI => Subsystem::Console,
-            IMAGE_SUBSYSTEM_GUI => Subsystem::Gui,
-            other => Subsystem::Other(other),
-        },
-        raw_machine,
-        raw_subsystem,
         layout: Layout {
             after_header: field(PE_SIZE_OF_HEADERS_OFFSET)? as usize,
             check_sum: check_sum as usize,
@@ -372,33 +297,14 @@ fn read_header(source: &mut (impl Read + Seek), len: u64) -> Result<PeHeader, Pe
     })
 }
 
-/// The raw machine value, for a caller that maps it to its own vocabulary.
-pub const fn raw_machine(header: &PeHeader) -> u16 {
-    header.raw_machine
-}
-
-/// The raw subsystem value.
-pub const fn raw_subsystem(header: &PeHeader) -> u16 {
-    header.raw_subsystem
-}
-
 /// Whether an image's certificate table directory is populated, which is what
 /// composition must refuse to write over.
 ///
-/// Seeks, reads eight bytes, and answers. A universal artifact is measured in
-/// gigabytes and this is asked about one every time anything is composed, so it
-/// cannot be a question that loads the file.
+/// Seeks, and answers. A universal artifact is measured in gigabytes and this is
+/// asked about one every time anything is composed, so it cannot be a question
+/// that loads the file.
 pub fn is_signed(path: &Path) -> Result<bool, PeError> {
     Ok(read_pe_header(path)?.is_signed())
-}
-
-/// Whether an image starts with a DOS signature.
-pub fn looks_like_pe(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 2];
-    file.read_exact(&mut magic).is_ok() && &magic == b"MZ"
 }
 
 /// One document a container writes, addressed by its resource identifier.
@@ -522,7 +428,10 @@ impl authenticode::PeTrait for Image {
 mod tests {
     use super::*;
 
-    fn image(subsystem: u16) -> Vec<u8> {
+    /// One minimal PE image, built by hand so every field a test depends on is a
+    /// named offset in this file rather than a fixture that could move with a
+    /// toolchain.
+    fn image() -> Vec<u8> {
         let mut bytes = vec![0u8; 0x170];
         bytes[..2].copy_from_slice(b"MZ");
         bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
@@ -531,7 +440,6 @@ mod tests {
         bytes[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
         bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
         bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
-        bytes[0x9c..0x9e].copy_from_slice(&subsystem.to_le_bytes());
         bytes
     }
 
@@ -543,25 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn machine_and_subsystem_are_read_from_the_header() {
-        let (_dir, path) = write(&image(3), "cui.exe");
-        let header = read_pe_header(&path).unwrap();
-        assert_eq!(header.machine, Machine::Amd64);
-        assert_eq!(header.subsystem, Subsystem::Console);
-
-        let (_dir, path) = write(&image(2), "gui.exe");
-        assert_eq!(read_pe_header(&path).unwrap().subsystem, Subsystem::Gui);
-
-        let (_dir, path) = write(&image(9), "odd.exe");
-        assert_eq!(
-            read_pe_header(&path).unwrap().subsystem,
-            Subsystem::Other(9)
-        );
-    }
-
-    #[test]
     fn an_unsigned_image_reports_itself_as_unsigned() {
-        let (_dir, path) = write(&image(2), "gui.exe");
+        let (_dir, path) = write(&image(), "gui.exe");
         assert!(!is_signed(&path).unwrap());
         assert!(!read_pe_header(&path).unwrap().is_signed());
         assert_eq!(read_pe_header(&path).unwrap().certificate_table(), None);
@@ -571,14 +462,12 @@ mod tests {
     /// is a **file offset** rather than an RVA, because the table is not mapped
     /// into memory. Reading it as an RVA would look for the signature somewhere
     /// inside a section and find nothing.
-    ///
     #[test]
     fn a_truncated_or_foreign_file_is_rejected() {
         let (_dir, path) = write(b"not an image", "x.bin");
         assert!(matches!(read_pe_header(&path), Err(PeError::Invalid)));
-        assert!(!looks_like_pe(&path));
 
-        let (_dir, path) = write(&image(2)[..0x50], "short.exe");
+        let (_dir, path) = write(&image()[..0x50], "short.exe");
         assert!(matches!(read_pe_header(&path), Err(PeError::Invalid)));
     }
 
@@ -587,7 +476,7 @@ mod tests {
     #[test]
     fn a_section_that_runs_past_the_end_of_the_file_is_rejected() {
         const SECTION: usize = 0x58 + 240;
-        let mut bytes = image(2);
+        let mut bytes = image();
         bytes[SECTION + 20..SECTION + 24].copy_from_slice(&0x200u32.to_le_bytes());
         bytes[SECTION + 16..SECTION + 20].copy_from_slice(&0x1000u32.to_le_bytes());
         let (_dir, path) = write(&bytes, "overrun.exe");

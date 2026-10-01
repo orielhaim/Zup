@@ -50,6 +50,7 @@ zup-plan.workspace = true
 zup-platform.workspace = true
 zup-acquire.workspace = true
 zup-artifact.workspace = true
+zup-binary.workspace = true
 zup-pe.workspace = true
 zstd.workspace = true
 semver.workspace = true

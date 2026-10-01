@@ -141,8 +141,9 @@ workspace member. `verify-portable-boundaries` fails when a portable crate:
 The last two are vocabulary rules and apply to a `domain` matrix only. A crate
 whose domain *is* a platform file format is classified as one in the same matrix
 every other command reads: `zup-pe` may say `RCDATA`, because a PE parser that
-cannot name a PE resource type is not a PE parser. It still may not depend on a
-Windows crate or branch on the build host.
+cannot name a PE resource type is not a PE parser. `zup-binary` is here for the
+same reason and covers PE/COFF, ELF and Mach-O at once. Both still may not depend
+on a Windows crate or branch on the build host.
 
 The classification is read from the matrix, so a package cannot acquire the
 relaxation by a line written next to the code it silences, and a package no

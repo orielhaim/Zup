@@ -44,10 +44,12 @@ uuid = { version = "1", features = ["v7", "serde"] }
 semver = { version = "1", features = ["serde"] }
 target-lexicon = { version = "0.13", features = ["std"] }
 bytes = "1"
+object = { version = "0.40", default-features = false, features = ["read", "std"] }
 
 # Workspace crates
 zup-automation = { path = "crates/zup-automation" }
 zup-core = { path = "crates/zup-core" }
+zup-binary = { path = "crates/zup-binary" }
 zup-pe = { path = "crates/zup-pe" }
 zup-toolchain = { path = "crates/zup-toolchain" }
 zup-signing = { path = "crates/zup-signing" }

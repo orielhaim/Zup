@@ -47,15 +47,15 @@ mod worker_rt;
 pub mod ui_runtime;
 
 pub use acquired::{
-    AcquiredBundle, AcquiredRelease, HandoffRejection, VerifiedHandoff, accept_handoff, open_cache,
-    own_digest, subsystem, verify, write_handoff,
+    AcquiredBundle, AcquiredRelease, HandoffRejection, VerifiedHandoff, accept_handoff, frontend,
+    open_cache, own_digest, verify, write_handoff,
 };
 pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
 pub use bundle_packager::{
     AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
-    PeSubsystem, build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
-    plan_only_runtime_bytes, read_pe_frontend, read_pe_subsystem, read_pe_target,
-    sidecar_package_path, validate_embedded_bundle_target, validate_pe_frontend,
+    build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
+    is_executable_image, plan_only_runtime_bytes, read_frontend, sidecar_package_path,
+    validate_embedded_bundle_target, validate_frontend,
 };
 pub use cmdline::{
     command_spec, command_spec_from_command_line, commands_match, format_command_line,

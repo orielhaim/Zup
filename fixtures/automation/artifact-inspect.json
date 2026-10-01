@@ -34,7 +34,8 @@
         "file_count": 1,
         "prerequisite_count": 0,
         "plugin_count": 0,
-        "native_execution": true
+        "native_execution": true,
+        "target_matches_binary": "matches"
       }
     ],
     "content": {

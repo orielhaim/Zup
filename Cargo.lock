@@ -11600,6 +11600,7 @@ dependencies = [
  "zup-acquire",
  "zup-artifact",
  "zup-automation",
+ "zup-binary",
  "zup-build",
  "zup-core",
  "zup-distribute-github",
@@ -11694,6 +11695,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-binary"
+version = "0.0.1"
+dependencies = [
+ "object 0.40.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zup-core",
+]
+
+[[package]]
 name = "zup-bootstrap"
 version = "0.0.1"
 dependencies = [
@@ -11771,6 +11782,7 @@ dependencies = [
  "zstd",
  "zup-acquire",
  "zup-artifact",
+ "zup-binary",
  "zup-core",
  "zup-update",
  "zup-windows",
@@ -12265,6 +12277,7 @@ dependencies = [
  "zstd",
  "zup-acquire",
  "zup-artifact",
+ "zup-binary",
  "zup-bootstrap",
  "zup-build",
  "zup-bundle",
@@ -12294,6 +12307,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "zup-artifact",
  "zup-automation",
+ "zup-binary",
  "zup-core",
  "zup-publish-github",
  "zup-toolchain",

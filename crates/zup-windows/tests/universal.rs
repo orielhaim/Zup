@@ -212,12 +212,11 @@ fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
     // it composes with a host-built launcher instead of the shipped one: the
     // build machine runs every variant, and the artifact only works there.
     let dispatcher = dispatcher_template();
-    let shipped = zup_pe::read_pe_header(&dispatcher)
-        .expect("the dispatcher is an image")
-        .machine;
     assert_eq!(
-        shipped,
-        zup_pe::Machine::I386,
+        zup_binary::Executable::read(&dispatcher)
+            .expect("the dispatcher is an image")
+            .architecture(),
+        Some(zup_binary::BinaryArchitecture::X86_32),
         "the dispatcher is built for the narrowest machine Windows runs everywhere"
     );
     let widened = root.path().join("widened-dispatcher.exe");
@@ -233,7 +232,7 @@ fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
         matches!(
             error,
             UniversalError::DispatcherTooWide {
-                found: zup_pe::Machine::Amd64,
+                found: zup_binary::BinaryArchitecture::X86_64,
                 ..
             }
         ),
@@ -243,6 +242,10 @@ fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
 }
 
 /// Where the machine field sits in an image, found the way the reader finds it.
+///
+/// The one place this test still reads a header by hand, and only because it has
+/// to *rewrite* one: a widened dispatcher is a real image with a different
+/// `Machine` field, and no reader turns an existing file into a different one.
 fn pe_machine_offset(bytes: &[u8]) -> usize {
     let header = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
     assert_eq!(&bytes[header..header + 4], b"PE\0\0");

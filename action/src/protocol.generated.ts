@@ -586,7 +586,15 @@ logical_size: ByteCount, file_count: number, prerequisite_count: number, plugin_
 /**
  * Whether the variant refuses to run under a compatibility layer.
  */
-native_execution: boolean, };
+native_execution: boolean, 
+/**
+ * Whether the runtime image this variant carries is built for the target the
+ * index names.
+ *
+ * The index's `target` is a claim; the runtime's own header is an independent
+ * statement, and this is the comparison between them.
+ */
+target_matches_binary: string, };
 
 export type InspectedContent = { 
 /**

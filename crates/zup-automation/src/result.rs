@@ -778,6 +778,12 @@ pub struct InspectedVariant {
     pub plugin_count: u32,
     /// Whether the variant refuses to run under a compatibility layer.
     pub native_execution: bool,
+    /// Whether the runtime image this variant carries is built for the target the
+    /// index names.
+    ///
+    /// The index's `target` is a claim; the runtime's own header is an independent
+    /// statement, and this is the comparison between them.
+    pub target_matches_binary: String,
 }
 
 /// What an artifact costs.

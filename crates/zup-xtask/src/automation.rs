@@ -469,6 +469,7 @@ fn artifact_inspect() -> AutomationResult {
                 prerequisite_count: 0,
                 plugin_count: 0,
                 native_execution: true,
+                target_matches_binary: "matches".to_owned(),
             }],
             content: InspectedContent {
                 logical_size: ByteCount::new(248_512_896),

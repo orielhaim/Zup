@@ -2,13 +2,14 @@ use std::{fs, path::Path};
 
 use rstest::rstest;
 use tempfile::TempDir;
+use zup_binary::{Executable, ProgramKind};
 use zup_build::TargetBuildPlan;
 use zup_bundle::{BundleWriter, PayloadSource};
 use zup_core::Frontend;
 use zup_manifest::TargetOverrides;
 use zup_windows::{
-    BundleError, EmbeddedBundle, PeSubsystem, build_self_contained_executable, embed_bundle_file,
-    read_pe_frontend, read_pe_subsystem, read_pe_target, validate_pe_frontend,
+    BundleError, EmbeddedBundle, build_self_contained_executable, embed_bundle_file, read_frontend,
+    validate_frontend,
 };
 
 fn plan(root: &Path) -> TargetBuildPlan {
@@ -47,62 +48,79 @@ destination = "${{install}}"
     build.targets.pop().unwrap()
 }
 
-/// Reading a PE and deciding whether it may be the installer is one decision at
-/// three levels: what the image declares, whether the bytes are an image at all,
-/// and whether what they declare is the frontend the build asked for. The three
-/// share one parser, so they are one table.
+/// Reading an image and deciding whether it may be the installer is one decision
+/// at three levels: what the image declares, whether the bytes are an image at
+/// all, and whether what they declare is the frontend the build asked for.
 #[rstest]
-#[case(pe_bytes(3), Some((PeSubsystem::Console, Frontend::Console)), true)]
-#[case(pe_bytes(2), Some((PeSubsystem::Gui, Frontend::Gui)), true)]
+#[case(pe_bytes(3), Some(Frontend::Console), true)]
+#[case(pe_bytes(2), Some(Frontend::Gui), true)]
+/// A driver records a subsystem that is neither a window nor a console. Its
+/// machine type is still readable; its frontend is not guessed at.
 #[case(pe_bytes(9), None, true)]
+/// A file that is not an image at all.
 #[case(b"not a PE".to_vec(), None, false)]
-fn a_pe_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
+fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
     #[case] bytes: Vec<u8>,
-    #[case] declared: Option<(PeSubsystem, Frontend)>,
+    #[case] declared: Option<Frontend>,
     #[case] readable_target: bool,
 ) {
     let root = TempDir::new().unwrap();
     let runtime = root.path().join("runtime.exe");
     fs::write(&runtime, bytes).unwrap();
+    let target =
+        zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("the host target");
 
-    let Some((subsystem, frontend)) = declared else {
-        assert!(
-            matches!(read_pe_frontend(&runtime), Err(BundleError::Invalid)),
+    let Some(frontend) = declared else {
+        if !readable_target {
+            // A file that is not an image at all: there is nothing to read, and
+            // every question about it is refused at the read rather than answered.
+            let error = read_frontend(&runtime).expect_err("not an image at all");
+            assert!(matches!(error, BundleError::Inspect(_)), "{error}");
+            assert!(
+                Executable::read(&runtime).is_err(),
+                "a file that is not an image states nothing about a target"
+            );
+            return;
+        }
+        // An image whose subsystem is neither a window nor a console. Its machine
+        // type is still readable; its frontend is not guessed at.
+        assert_eq!(
+            read_frontend(&runtime).unwrap(),
+            None,
             "a subsystem the loader has no frontend for is not guessed at"
         );
-        if readable_target {
-            assert!(
-                read_pe_target(&runtime).is_ok(),
-                "the machine type is still readable"
-            );
-        } else {
-            assert!(matches!(
-                read_pe_target(&runtime),
-                Err(BundleError::Invalid)
-            ));
-        }
+        assert!(
+            Executable::read(&runtime).unwrap().matches_target(&target),
+            "the machine type is still readable"
+        );
         return;
     };
 
-    assert_eq!(read_pe_subsystem(&runtime).unwrap(), subsystem);
-    assert_eq!(read_pe_frontend(&runtime).unwrap(), frontend);
-    assert!(read_pe_target(&runtime).is_ok());
+    assert_eq!(read_frontend(&runtime).unwrap(), Some(frontend));
+    let executable = Executable::read(&runtime).unwrap();
     assert_eq!(
-        read_pe_target(&runtime).unwrap(),
-        zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+        executable.program(),
+        Some(match frontend {
+            Frontend::Gui => ProgramKind::Windowed,
+            _ => ProgramKind::Console,
+        })
     );
-    assert!(validate_pe_frontend(&runtime, frontend).is_ok());
+    assert!(executable.matches_target(&target));
+    assert!(validate_frontend(&runtime, frontend).is_ok());
+
     let other = match frontend {
-        Frontend::Console => Frontend::Gui,
         Frontend::Gui => Frontend::Console,
-        Frontend::Headless => Frontend::Console,
+        Frontend::Console | Frontend::Headless => Frontend::Gui,
     };
     assert!(
-        matches!(
-            validate_pe_frontend(&runtime, other),
-            Err(BundleError::FrontendMismatch { .. })
-        ),
+        validate_frontend(&runtime, other).is_err(),
         "a {frontend:?} image may not launch a {other:?} installer"
+    );
+    // A headless frontend is a console program that also promises to speak a
+    // protocol, so a console image serves it and a windowed one does not.
+    assert_eq!(
+        validate_frontend(&runtime, Frontend::Headless).is_ok(),
+        frontend == Frontend::Console
     );
 }
 
@@ -161,7 +179,11 @@ fn embedded_reader_reports_a_missing_index() {
 fn self_contained_build_round_trips_matching_target() {
     let root = TempDir::new().unwrap();
     let mut build = plan(root.path());
-    build.installer.frontend = read_pe_frontend(&std::env::current_exe().unwrap()).unwrap();
+    // Whatever this test binary happens to be, so the round trip exercises the
+    // matching case rather than a deliberate mismatch.
+    build.installer.frontend = read_frontend(&std::env::current_exe().unwrap())
+        .unwrap()
+        .expect("a test binary on Windows records a subsystem");
     let output = root.path().join("Matching.exe");
     let (_, package_size) = build_self_contained_executable(
         &std::env::current_exe().unwrap(),

@@ -491,11 +491,26 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
 /// A release is one build on one machine, so this is the machine that built it
 /// rather than the machine that happens to be unpacking it. A developer on
 /// another machine downloads the other release.
+///
+/// The machine is the one this process runs on, read through `zup-binary` rather
+/// than from `cfg!(target_arch)`: a release has to name a machine its components
+/// can actually run on, and that is the same question `compose_universal_executable`
+/// asks when it compares a dispatcher's width against a variant's.
 pub fn machine_target() -> String {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64-pc-windows-msvc".to_owned()
-    } else {
-        "x86_64-pc-windows-msvc".to_owned()
+    let machine = zup_binary::BinaryArchitecture::host().unwrap_or_else(|| {
+        panic!(
+            "this host runs on a machine zup has no Windows target triple for. A release has \
+             to name a machine its components can run on, and there is no honest name for \
+             one that has none."
+        )
+    });
+    match machine {
+        zup_binary::BinaryArchitecture::X86_64 => "x86_64-pc-windows-msvc".to_owned(),
+        zup_binary::BinaryArchitecture::Arm64 => "aarch64-pc-windows-msvc".to_owned(),
+        other => panic!(
+            "{} is not a machine a Windows toolchain release targets",
+            other
+        ),
     }
 }
 

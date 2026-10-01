@@ -155,13 +155,34 @@ than one digest-verified blob, weakening the content-addressed, fail-closed
 property the graph exists to provide. **Adopt at 64 KiB when a content-addressed
 cross-build cache exists.**
 
-**`object`** would replace hand-rolled PE header parsing. Composition writes into
-an image that is about to be signed, so a general rewriter would have to
-reproduce section alignment, the resource directory, and the certificate table
-exactly - and `BeginUpdateResourceW` gets that right for free. Reading an image's
-own resources is four `kernel32` calls. `zup-pe` is 445 lines and shared by
-`zup-windows` and `zup-dispatch`, so there is one implementation of the certificate
-table.
+**`object`** was declined in favour of hand-rolled PE header parsing, and is now
+adopted with a narrower claim than it could carry. Composition still is not
+`object`'s work: it writes into an image that is about to be signed, so a general
+rewriter would have to reproduce section alignment, the resource directory and the
+certificate table exactly, and `BeginUpdateResourceW` gets that right for free.
+Reading an image's own resources is four `kernel32` calls. So `zup-pe` keeps
+exactly that: the resource vocabulary composition writes against, the certificate
+table, and the byte regions the Authenticode digest measures. Nothing else.
+
+Everything shaped like "what file is this?" moved to `zup-binary`, which is
+`object` with zup's vocabulary on top. It reads PE/COFF, ELF, and Mach-O -
+including a universal Mach-O's several machines - and answers four questions:
+the format, the machines, whether the file records a window or a terminal, and
+the operating system the file says for itself. It reads and never writes.
+
+The reason for the change is a target triple, not a parser. A triple names an
+architecture, an operating system, a vendor and an ABI, and a binary states only
+its architecture and sometimes its operating system. `refuse_target` compares the
+two on the fields the file actually stated and leaves the rest unconstrained,
+because the alternative - synthesising `x86_64-pc-windows-msvc` from "a PE that is
+x86-64" - asserts an ABI the image never recorded and would refuse a perfectly
+good MinGW build. **Adding a platform is now target-policy mapping, not writing a
+parser.**
+
+A second thing went with it. Six independent tables of PE machine numbers existed
+across `zup-pe`, `zup-windows::host`, `zup-xtask`'s clean room, and three test
+fixtures; there are none now. So does the duplicated "does this console binary
+satisfy this declared frontend" rule, which was written twice and is now one.
 
 **`target-lexicon`** was removed from `zup-artifact`. The portable model stores
 canonical triple components as `String` and reconstructs a `TargetTriple` only at

@@ -29,7 +29,7 @@ Each is closed by a *type* or a *check*, not a convention.
 | Input | Who writes it | Checked by |
 | --- | --- | --- |
 | A release directory | whoever unpacked the download | `ToolchainRelease::verify` |
-| A toolchain component | `cargo xtask toolchain build` | descriptor + the file's own PE header |
+| A toolchain component | `cargo xtask toolchain build` | descriptor + the file's own header |
 | A content path | a manifest, catalog, or HTTP response | `RelativeContentPath::parse` |
 | A release description | `zup build` | `ReleaseManifest::parse` + `is_finalized` |
 | An artifact index | a build | `ArtifactIndex::parse` |
@@ -61,9 +61,10 @@ Two things must hold for a composed artifact to be the one its author meant.
 **Every input is identified, not just found.** A file name is not a compatibility
 check - `zup-setup-gui.exe` is written by every zup release that ever had a GUI
 template. Every component ships a machine-readable descriptor beside it, and the
-build reads both the descriptor *and* the file's own PE header. A descriptor is a
-claim; a PE header is an independent statement; the two agreeing is what makes
-the claim worth anything on a host that cannot run the file.
+build reads both the descriptor *and* the file's own header, through
+`zup-binary` on any host. A descriptor is a claim; a header is an independent
+statement; the two agreeing is what makes the claim worth anything on a host that
+cannot run the file.
 
 **Resolution is a closed list.** The resolver searches exactly three places - an
 explicit root, the cache for this exact zup version, and a toolchain staged

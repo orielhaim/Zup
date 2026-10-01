@@ -354,6 +354,14 @@ fn inspect_describes_the_built_artifact_in_text_and_json() {
     );
     assert_eq!(report["trust"]["content_digests"], "valid");
     assert_eq!(report["variants"].as_array().unwrap().len(), 2);
+    // The index's target is a claim and the runtime's own header is an
+    // independent statement, so the report compares them rather than printing one.
+    for variant in report["variants"].as_array().unwrap() {
+        assert_eq!(
+            variant["target_matches_binary"], "matches",
+            "a built artifact's runtime is for the target it names: {variant}"
+        );
+    }
     // Every blob is either needed by more than one variant or by exactly one, so
     // the two sizes partition the uncompressed content. The stored size is what
     // compression made of it, and the logical size counts the shared bytes once
@@ -467,8 +475,8 @@ fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() 
     assert_eq!(bundle.target().as_str(), X64);
     assert_eq!(bundle.frontend(), zup_core::Frontend::Console);
     assert_eq!(
-        zup_windows::read_pe_subsystem(&output).unwrap(),
-        zup_windows::PeSubsystem::Console
+        zup_windows::read_frontend(&output).unwrap(),
+        Some(zup_core::Frontend::Console)
     );
     // Nothing a composed artifact would have written is there.
     assert!(

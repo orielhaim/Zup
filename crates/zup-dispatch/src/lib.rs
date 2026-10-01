@@ -281,17 +281,19 @@ fn launch(
 /// matters because a GUI handoff must not briefly show two windows and a console
 /// handoff must keep its terminal.
 fn is_gui() -> bool {
-    // A launcher with no console is a window. Reading the PE header of our own
-    // image is the same check `compose_universal_executable` makes when it
-    // refuses a mismatched template, so a launcher cannot be composed into a
-    // subsystem it does not report.
-    matches!(zup_pe_subsystem(), Ok(zup_windows::PeSubsystem::Gui))
+    // A launcher with no console is a window. Reading our own image is the same
+    // check `compose_universal_executable` makes when it refuses a mismatched
+    // template, so a launcher cannot be composed into a subsystem it does not
+    // report.
+    matches!(own_program(), Ok(Some(zup_binary::ProgramKind::Windowed)))
 }
 
-fn zup_pe_subsystem() -> Result<zup_windows::PeSubsystem, String> {
+fn own_program() -> Result<Option<zup_binary::ProgramKind>, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("the launcher's own path is unavailable: {error}"))?;
-    zup_windows::read_pe_subsystem(&executable).map_err(|error| error.to_string())
+    zup_binary::Executable::read(&executable)
+        .map(|executable| executable.program())
+        .map_err(|error| error.to_string())
 }
 
 /// The process entry point, shared by the windowed and console dispatchers.

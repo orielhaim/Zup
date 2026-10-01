@@ -47,6 +47,15 @@ pub struct InspectedVariant {
     pub plugin_count: u64,
     /// Whether the variant refuses to run under a compatibility layer.
     pub native_execution: bool,
+    /// Whether the runtime image this variant carries is built for the target the
+    /// index names.
+    ///
+    /// The index's `target` is a claim; the runtime's own header is an independent
+    /// statement. A report that printed one and never compared them would be
+    /// describing what the artifact says about itself rather than what it is.
+    /// `"carries no runtime"` for a thin artifact, which fetches its runtime and so
+    /// has no bytes here to read.
+    pub target_matches_binary: String,
 }
 
 /// What the artifact costs, and what composing it saved.
@@ -192,6 +201,17 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
             plugin_count: variant.content.plugin_count,
             native_execution: variant.requirements.native_execution
                 || !variant.requirements.capabilities.is_empty(),
+            target_matches_binary: match artifact.view().variant_runtime(&variant.id) {
+                Ok(None) => "carries no runtime".to_owned(),
+                Ok(Some(bytes)) => match zup_binary::Executable::from_bytes(&bytes) {
+                    Err(error) => format!("unreadable: {error}"),
+                    Ok(runtime) => match runtime.refuse_target(&variant.target) {
+                        Ok(()) => "matches".to_owned(),
+                        Err(error) => format!("mismatch: {error}"),
+                    },
+                },
+                Err(error) => format!("unreadable: {error}"),
+            },
         })
         .collect();
 
@@ -278,15 +298,24 @@ impl Inspection {
         out.push_str(&format!("\n  pinned to    {}\n", self.pin));
         out.push_str("\nVariants\n");
         for variant in &self.variants {
+            // The mismatch is spelled out where a reader is already looking at
+            // the target, rather than only in the machine-readable report: a
+            // variant that installs on the wrong machine is the one fact here a
+            // human has to notice.
+            let binary = match variant.target_matches_binary.as_str() {
+                "matches" | "carries no runtime" => String::new(),
+                other => format!("  <- {other}"),
+            };
             out.push_str(&format!(
-                "  {:<24} {:<7}{}\n",
+                "  {:<24} {:<7}{}{}\n",
                 variant.target,
                 variant.frontend,
                 if variant.native_execution {
                     "native only"
                 } else {
                     "emulation allowed"
-                }
+                },
+                binary,
             ));
         }
         out.push_str("\nContent\n");

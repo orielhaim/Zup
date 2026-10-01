@@ -7,6 +7,7 @@ use std::{
 };
 
 use thiserror::Error;
+use zup_binary::{BinaryFormat, Executable, ProgramKind};
 use zup_bundle::{
     AutoPayloadSource as PortableAutoPayloadSource, BundleWriter, CompiledPluginArtifact,
     DirectoryPayloadSource, Package, PackageError, PackagePayloadSource, PayloadError,
@@ -20,9 +21,6 @@ use zup_pe::{
     MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, RESOURCE_ID_PRESET,
     ResourceDocument,
 };
-
-const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
-const WINDOWS_ARM64_TARGET: &str = "aarch64-pc-windows-msvc";
 
 /// Errors produced by the Windows package adapter.
 #[derive(Debug, Error)]
@@ -51,13 +49,17 @@ pub enum BundleError {
     Resource(String),
     #[error("runtime already has an Authenticode certificate table; embed before signing")]
     RuntimeAlreadySigned,
-    #[error("runtime frontend is {found:?}; expected {expected:?}")]
-    FrontendMismatch { expected: Frontend, found: Frontend },
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
     TargetMismatch {
         expected: TargetTriple,
         found: TargetTriple,
     },
+    #[error(transparent)]
+    Target(#[from] zup_binary::TargetRefusal),
+    #[error(transparent)]
+    Frontend(#[from] zup_binary::FrontendRefusal),
+    #[error(transparent)]
+    Inspect(#[from] zup_binary::InspectError),
 }
 
 impl BundleError {
@@ -388,25 +390,27 @@ impl AutoPayloadSource {
         }
         match PortableAutoPayloadSource::from_path(&path) {
             Ok(source) => Ok(Self::Portable(source)),
-            Err(_package_error) if looks_like_pe(&path) => match EmbeddedBundle::open(&path) {
-                Ok(bundle) => Ok(Self::Embedded(bundle.payload_source())),
-                // An image that carries a universal artifact is not a payload
-                // root; it is something to run.
-                Err(error) if error.is_missing_resource() => {
-                    if is_universal_artifact(&path) {
-                        return Err(BundleError::UniversalArtifact {
-                            path: path.display().to_string(),
-                        });
+            Err(_package_error) if is_executable_image(&path) => {
+                match EmbeddedBundle::open(&path) {
+                    Ok(bundle) => Ok(Self::Embedded(bundle.payload_source())),
+                    // An image that carries a universal artifact is not a payload
+                    // root; it is something to run.
+                    Err(error) if error.is_missing_resource() => {
+                        if is_universal_artifact(&path) {
+                            return Err(BundleError::UniversalArtifact {
+                                path: path.display().to_string(),
+                            });
+                        }
+                        // An image with no package of its own is a bare native
+                        // runtime, whose content is the sidecar store the
+                        // installation persisted beside it.
+                        Self::from_sidecar(&path)
                     }
-                    // An image with no package of its own is a bare native
-                    // runtime, whose content is the sidecar store the
-                    // installation persisted beside it.
-                    Self::from_sidecar(&path)
+                    // An image that does carry something zup wrote but cannot read is
+                    // a defect, not a sidecar case.
+                    Err(error) => Err(error),
                 }
-                // An image that does carry something zup wrote but cannot read is
-                // a defect, not a sidecar case.
-                Err(error) => Err(error),
-            },
+            }
             Err(package_error) => Err(BundleError::Package(package_error)),
         }
     }
@@ -537,10 +541,6 @@ fn is_plugin_path(path: &RelativePath) -> bool {
         .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)
 }
 
-fn looks_like_pe(path: &Path) -> bool {
-    zup_pe::looks_like_pe(path)
-}
-
 /// Build an installer executable containing a package index and its blobs.
 pub fn build_self_contained_executable(
     executable: &Path,
@@ -549,14 +549,7 @@ pub fn build_self_contained_executable(
     artifacts: &[CompiledPluginArtifact],
     preset: Option<&[u8]>,
 ) -> Result<(u64, u64), BundleError> {
-    let runtime_target = read_pe_target(executable)?;
-    if runtime_target != plan.installer.target {
-        return Err(BundleError::TargetMismatch {
-            expected: plan.installer.target.clone(),
-            found: runtime_target,
-        });
-    }
-    validate_pe_frontend(executable, plan.installer.frontend)?;
+    validate_runtime_executable(executable, &plan.installer)?;
     validate_unsigned_pe(executable)?;
     let temporary = tempfile::tempdir()?;
     let package = temporary.path().join("installer.zup");
@@ -599,14 +592,7 @@ pub fn plan_only_runtime_bytes(
     plan: &TargetBuildPlan,
     artifacts: &[CompiledPluginArtifact],
 ) -> Result<(Vec<u8>, u64), BundleError> {
-    let runtime_target = read_pe_target(executable)?;
-    if runtime_target != plan.installer.target {
-        return Err(BundleError::TargetMismatch {
-            expected: plan.installer.target.clone(),
-            found: runtime_target,
-        });
-    }
-    validate_pe_frontend(executable, plan.installer.frontend)?;
+    validate_runtime_executable(executable, &plan.installer)?;
     validate_unsigned_pe(executable)?;
     let package = BundleWriter::encode_plan_only(plan, artifacts)?;
     let package_size = package.len() as u64;
@@ -629,13 +615,32 @@ pub fn embed_bundle_file(
     embed_bundle_resource(executable, output, package, preset)
 }
 
-pub fn read_pe_target(path: &Path) -> Result<TargetTriple, BundleError> {
-    let target = match zup_pe::read_pe_header(path)?.machine {
-        zup_pe::Machine::Amd64 => WINDOWS_X64_TARGET,
-        zup_pe::Machine::Arm64 => WINDOWS_ARM64_TARGET,
-        _ => return Err(BundleError::Invalid),
-    };
-    TargetTriple::parse(target).map_err(|_| BundleError::Invalid)
+/// Confirm a runtime template is the executable its plan says it is.
+///
+/// The descriptor a toolchain ships beside a component is a claim; the image's
+/// own header is an independent statement. Reading the file and refusing any
+/// contradiction is what makes the claim worth anything on a host that cannot
+/// run the file.
+fn validate_runtime_executable(
+    executable: &Path,
+    installer: &zup_core::Installer,
+) -> Result<(), BundleError> {
+    let runtime = Executable::read(executable)?;
+    if runtime.format() != BinaryFormat::Pe {
+        return Err(BundleError::Invalid);
+    }
+    runtime.refuse_target(&installer.target)?;
+    runtime.refuse_frontend(installer.frontend)?;
+    Ok(())
+}
+
+/// Whether `path` is an executable image at all.
+///
+/// The question is asked about files zup did not write and about a universal
+/// artifact measured in gigabytes, so it is a bounded read rather than a parse:
+/// the architecture and the subsystem are not needed to answer it.
+pub fn is_executable_image(path: &Path) -> bool {
+    Executable::read(path).is_ok_and(|executable| executable.format() == BinaryFormat::Pe)
 }
 
 pub fn validate_embedded_bundle_target(
@@ -651,36 +656,27 @@ pub fn validate_embedded_bundle_target(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeSubsystem {
-    Console,
-    Gui,
+/// The frontend a runtime template presents, judged by its own header.
+///
+/// A template whose format records no subsystem answers `None`: ELF and Mach-O
+/// have no such field, and reporting one of the two would be a guess about a
+/// file that did not make it.
+pub fn read_frontend(path: &Path) -> Result<Option<Frontend>, BundleError> {
+    let program = Executable::read(path)?.program();
+    Ok(match program {
+        Some(ProgramKind::Windowed) => Some(Frontend::Gui),
+        Some(ProgramKind::Console) => Some(Frontend::Console),
+        None => None,
+    })
 }
 
-pub fn read_pe_subsystem(path: &Path) -> Result<PeSubsystem, BundleError> {
-    match zup_pe::read_pe_header(path)?.subsystem {
-        zup_pe::Subsystem::Console => Ok(PeSubsystem::Console),
-        zup_pe::Subsystem::Gui => Ok(PeSubsystem::Gui),
-        zup_pe::Subsystem::Other(_) => Err(BundleError::Invalid),
-    }
-}
-
-pub fn read_pe_frontend(path: &Path) -> Result<Frontend, BundleError> {
-    match read_pe_subsystem(path)? {
-        PeSubsystem::Console => Ok(Frontend::Console),
-        PeSubsystem::Gui => Ok(Frontend::Gui),
-    }
-}
-
-pub fn validate_pe_frontend(path: &Path, expected: Frontend) -> Result<(), BundleError> {
-    let found = read_pe_frontend(path)?;
-    let matches = match expected {
-        Frontend::Gui => found == Frontend::Gui,
-        Frontend::Console | Frontend::Headless => found == Frontend::Console,
-    };
-    if !matches {
-        return Err(BundleError::FrontendMismatch { expected, found });
-    }
+/// Whether a runtime template satisfies a declared frontend.
+///
+/// One rule for every caller: a console program serves a headless frontend,
+/// because a headless frontend is a console program that also promises to speak
+/// a protocol rather than draw anything.
+pub fn validate_frontend(path: &Path, expected: Frontend) -> Result<(), BundleError> {
+    Executable::read(path)?.refuse_frontend(expected)?;
     Ok(())
 }
 
