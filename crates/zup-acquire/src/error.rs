@@ -215,9 +215,9 @@ pub enum CacheError {
     /// A path inside the cache left the cache root.
     #[error("{path} escapes the content cache at {root}")]
     Escapes { root: String, path: String },
-    /// Another writer holds the blob's reservation.
-    #[error("{digest} is reserved by another acquisition")]
-    Reserved { digest: String },
+    /// Another writer holds this blob's lock.
+    #[error("{digest} is being written by another acquisition")]
+    Locked { digest: String },
     /// The cache root is not usable.
     #[error("{path}: {source}")]
     Io {

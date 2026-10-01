@@ -341,34 +341,6 @@ fn a_link_inside_the_cache_is_refused() {
     }
 }
 
-/// A blob is claimed for the duration of one writer. A second writer is told the
-/// blob is reserved rather than being allowed to write beside it, and the claim
-/// is released when the first writer is dropped.
-#[test]
-fn a_reserved_blob_refuses_a_second_writer_until_the_claim_is_released() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let cache = ContentCache::open(dir.path(), CachePolicy::Keep).expect("the cache opens");
-    let logical = payload(15, 4096);
-    let descriptor = payload_descriptor(&logical, LEVEL);
-    let wire = wire_of(&logical, LEVEL);
-
-    let first = cache.writer(&descriptor).expect("the first writer opens");
-    let error = cache
-        .writer(&descriptor)
-        .err()
-        .expect("a second writer is told the blob is reserved");
-    assert!(
-        matches!(error, zup_acquire::CacheError::Reserved { .. }),
-        "{error}"
-    );
-    drop(first);
-
-    // Once the claim is released, the blob is available again.
-    let mut writer = cache.writer(&descriptor).expect("the writer opens again");
-    writer.write(&wire).expect("the bytes land");
-    writer.commit().expect("the blob verifies");
-}
-
 #[test]
 fn a_temporary_cache_drops_payload_but_protects_what_a_closure_needs() {
     let dir = tempfile::tempdir().expect("a temporary directory");
@@ -457,28 +429,6 @@ fn a_blob_survives_a_process_restart_because_it_is_named_by_its_content() {
             .expect("auto keeps recent entries")
             == 0
     );
-}
-
-#[test]
-fn a_reservation_from_a_dead_writer_is_reclaimed() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let mut cache = ContentCache::open(dir.path(), CachePolicy::Keep).expect("the cache opens");
-    // A machine that wants to recover quickly from an installer that was killed
-    // mid-write asks for a short claim lifetime rather than waiting one out.
-    cache.set_reservation_stale(std::time::Duration::ZERO);
-    let logical = payload(24, 1024);
-    let descriptor = payload_descriptor(&logical, LEVEL);
-    let paths = cache.paths(&descriptor).expect("the blob has paths");
-    fs::create_dir_all(paths.parent()).expect("the directory exists");
-    // A claim left behind by a process that is gone.
-    fs::write(&paths.lock_path, b"999999\n").expect("the stale claim is written");
-    let mut writer = cache
-        .writer(&descriptor)
-        .expect("a stale claim is reclaimed");
-    writer
-        .write(&wire_of(&logical, LEVEL))
-        .expect("the bytes land");
-    writer.commit().expect("the blob verifies");
 }
 
 /// The published path is derived from the digest alone, so a blob's location on

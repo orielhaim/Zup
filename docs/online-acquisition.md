@@ -145,22 +145,24 @@ file, a registry entry, or a service while a required download can still fail.
 Every byte from any source passes through `ContentCache::writer`, so the algorithm
 is the same everywhere.
 
-1. **Open.** If `<digest>.partial` and `<digest>.resume` exist and the record
+1. **Lock.** Take the exclusive OS lock on `<digest>.lock`, or report the blob as
+   busy. The lock is held for the writer's whole lifetime.
+2. **Open.** If `<digest>.partial` and `<digest>.resume` exist and the record
    describes this descriptor, continue; otherwise start from zero and delete
    what was there.
-2. **Measure.** Decompress the accounted wire prefix and hash it; compare
+3. **Measure.** Decompress the accounted wire prefix and hash it; compare
    against the record's prefix digest and length. A mismatch discards the
    partial - a torn write costs a re-fetch, never a corrupt blob. **No hash
    state is ever read from disk.**
-3. **Request** `bytes=<offset>-`.
-4. **Require a correct range.** A `206` whose `Content-Range` does not start at
+4. **Request** `bytes=<offset>-`.
+5. **Require a correct range.** A `206` whose `Content-Range` does not start at
    the offset, or whose total is not the descriptor's wire length, is refused. A
    `200` in reply to a range request means the server will not do ranges: the
    partial is **deleted**, not abandoned, and the next attempt starts from zero.
-5. **Bound.** The descriptor's wire length is a hard ceiling; a source that keeps
+6. **Bound.** The descriptor's wire length is a hard ceiling; a source that keeps
    sending past it is refused rather than allowed to fill a disk.
-6. **Verify.** The complete wire form is re-read, decompressed, and hashed.
-7. **Publish** `partial → <digest>` by rename. Until that instant no consumer
+7. **Verify.** The complete wire form is re-read, decompressed, and hashed.
+8. **Publish** `partial → <digest>` by rename. Until that instant no consumer
    outside the cache can see the bytes.
 
 The record is rewritten every 8 MiB, so an unclean exit costs at most that much
@@ -173,7 +175,7 @@ interruption loses nothing.
 <root>/blobs/sha256/<ab>/<hex>            a verified blob
 <root>/blobs/sha256/<ab>/<hex>.partial    a transfer in progress
 <root>/blobs/sha256/<ab>/<hex>.resume     what the partial is and how far it got
-<root>/blobs/sha256/<ab>/<hex>.lock       a writer's claim
+<root>/blobs/sha256/<ab>/<hex>.lock       the file a writer's OS lock is taken on
 ```
 
 No database: a filesystem walk and a digest are enough, and a measurement that
@@ -193,10 +195,18 @@ Three properties are enforced, not assumed:
   through an injected `CacheFileSystem` so a Windows host can reject reparse
   points.
 
-Concurrent writers are handled by a per-blob claim, which is an optimization and
-never a correctness requirement: two writers of one digest produce identical
-bytes, so a lost race costs bandwidth. A claim older than `RESERVATION_STALE`
-(30 minutes) is reclaimed rather than waited on forever.
+Concurrent writers are handled by an exclusive OS lock on a file beside the blob,
+held for exactly as long as the writer's handle exists. Two writers of one digest
+produce identical bytes, so exclusion is an optimization rather than a correctness
+requirement and the lock is never waited on: a writer that finds the blob busy
+reads the published blob instead.
+
+Because the lock is held by the handle, releasing it needs no cleanup of any kind.
+A dropped writer, a process that exits, and a process that is killed all release
+it, and there is no timestamp to age out and no owner to reclaim. A `.lock` file
+that survives a writer says nothing: only an open, locked handle means the blob is
+busy. Locks are advisory - they coordinate cooperating Zup processes and are not a
+security boundary.
 
 ### Retention
 

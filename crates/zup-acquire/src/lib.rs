@@ -66,7 +66,7 @@ mod source;
 
 pub use cache::{
     BlobPaths, BlobReader, BlobWriter, CacheObject, CachePolicy, CacheProbe, ContentCache,
-    RESERVATION_STALE, RESUME_RECORD_INTERVAL, RESUME_SCHEMA, ResumeRecord, VerifiedBlob, Verify,
+    RESUME_RECORD_INTERVAL, RESUME_SCHEMA, ResumeRecord, VerifiedBlob, Verify,
 };
 pub use cancellation::{CancelFlag, Cancellation, NeverCancelled, cancellable_sleep};
 pub use descriptor::{

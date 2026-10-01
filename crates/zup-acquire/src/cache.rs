@@ -19,6 +19,10 @@
 //!   re-hashed before the transfer continues.
 //! - **No path leaves the root, and no link is followed.** Every prefix of
 //!   every path is checked before a byte is read or written.
+//! - **One writer at a time, for as long as it lives.** A writer holds an
+//!   exclusive OS lock on the blob's `.lock` file, and the operating system
+//!   releases it when the handle closes - including when the process is killed.
+//!   There is no claim to age out and no owner to reclaim.
 //!
 //! # Layout
 //!
@@ -26,7 +30,7 @@
 //! <root>/blobs/sha256/<ab>/<hex>            a verified blob
 //! <root>/blobs/sha256/<ab>/<hex>.partial    a transfer in progress
 //! <root>/blobs/sha256/<ab>/<hex>.resume     what the partial is and how far it got
-//! <root>/blobs/sha256/<ab>/<hex>.lock       a writer's claim on the blob
+//! <root>/blobs/sha256/<ab>/<hex>.lock       the file a writer's OS lock is taken on
 //! ```
 //!
 //! The layout is the same shape the web tree uses, so a directory staged for
@@ -55,9 +59,6 @@ pub const RESUME_SCHEMA: u32 = 1;
 /// A record is rewritten on this interval so an unclean exit costs at most this
 /// many bytes of redownload, and the record itself stays a few hundred bytes.
 pub const RESUME_RECORD_INTERVAL: u64 = 8 * 1024 * 1024;
-
-/// A lock older than this is assumed to belong to a writer that died.
-pub const RESERVATION_STALE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// How thoroughly a cached blob is re-validated before it is consumed.
 ///
@@ -372,7 +373,6 @@ pub struct ContentCache {
     root: PathBuf,
     file_system: Arc<dyn CacheFileSystem>,
     policy: CachePolicy,
-    reservation_stale: std::time::Duration,
 }
 
 /// Where one blob's files live.
@@ -412,21 +412,9 @@ impl ContentCache {
             root,
             file_system,
             policy,
-            reservation_stale: RESERVATION_STALE,
         };
         cache.reject_links(cache.root.as_path())?;
         Ok(cache)
-    }
-
-    /// How long a writer's claim on a blob survives before another acquisition
-    /// may take it.
-    ///
-    /// A claim is an optimization - two writers of one digest produce identical
-    /// bytes - so the only cost of getting this wrong is a refused transfer.
-    /// Lowering it lets a machine recover quickly from an installer that was
-    /// killed mid-write.
-    pub fn set_reservation_stale(&mut self, stale: std::time::Duration) {
-        self.reservation_stale = stale;
     }
 
     /// The directory the cache is rooted at.
@@ -666,6 +654,12 @@ impl ContentCache {
     /// interrupted half way leaves either the object or a scratch file the next
     /// sweep removes. It never leaves a file whose name is a digest it does not
     /// hash to.
+    ///
+    /// Everything beside the object goes with it, the lock file included, so a
+    /// `temporary` cache does not leave one empty file per blob the machine ever
+    /// fetched. What protects a live writer here is the retention grace period,
+    /// not the lock: eviction already removes a transfer in progress, and the
+    /// cost of that race is a re-fetch.
     pub fn remove(&self, digest: &Sha256Digest) -> Result<u64, CacheError> {
         let descriptor = ContentDescriptor::stored(ContentKind::Payload, *digest, 1);
         let paths = self.paths(&descriptor)?;
@@ -727,8 +721,10 @@ impl ContentCache {
         self.reject_links(paths.parent())?;
         self.reject_links(&paths.final_path)?;
 
+        // The lock is taken before the partial is measured so that the resume
+        // point is this writer's to decide, not a race with another one.
+        let lock = BlobLock::acquire(&paths)?;
         let resume = self.resume_point(&paths, descriptor)?;
-        let lock = Reservation::acquire(&self.file_system, &paths, self.reservation_stale)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -746,7 +742,7 @@ impl ContentCache {
             paths,
             file: Some(file),
             file_system: Arc::clone(&self.file_system),
-            lock,
+            _lock: lock,
             wire_offset: resume,
             next_record: resume.saturating_add(RESUME_RECORD_INTERVAL),
             settled: false,
@@ -910,80 +906,51 @@ impl ContentCache {
     }
 }
 
-/// A writer's claim on one blob.
+/// One writer's exclusive claim on a blob, held by an open file handle.
 ///
-/// The claim is an optimization, never a correctness requirement: two writers
-/// of the same digest produce identical bytes, so the worst a lost race costs is
-/// bandwidth. That is why a stale claim is reclaimed rather than waited on
-/// forever, and why correctness never depends on holding it.
-struct Reservation {
-    path: PathBuf,
-    held: bool,
+/// The claim is an optimization, never a correctness requirement: two writers of
+/// the same digest produce identical bytes, so the worst a lost race costs is
+/// bandwidth. It is therefore taken without waiting - a writer that finds the
+/// blob busy is told so and reads the published blob instead, or retries later.
+///
+/// The lock is whatever the operating system enforces, and it is held by the
+/// handle: dropping the writer releases it, and a killed process releases it
+/// because its handles close. There is no timestamp to age out, no owner to
+/// identify, and nothing to clean up on the way out. A `.lock` file that
+/// survives a writer is therefore not evidence of anything - only an open,
+/// locked handle is, and the handle is gone.
+///
+/// Locks are advisory. They coordinate cooperating Zup processes, and are not a
+/// security boundary against anything else on the machine.
+struct BlobLock {
+    _file: File,
 }
 
-impl Reservation {
-    fn acquire(
-        file_system: &Arc<dyn CacheFileSystem>,
-        paths: &BlobPaths,
-        stale_after: std::time::Duration,
-    ) -> Result<Self, CacheError> {
-        for attempt in 0..2 {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&paths.lock_path)
-            {
-                Ok(mut file) => {
-                    let _ = file.write_all(format!("{}\n", std::process::id()).as_bytes());
-                    let _ = file.sync_all();
-                    return Ok(Self {
-                        path: paths.lock_path.clone(),
-                        held: true,
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if attempt == 1 || !claim_is_stale(&paths.lock_path, stale_after) {
-                        return Err(CacheError::Reserved {
-                            digest: paths
-                                .final_path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("blob")
-                                .to_owned(),
-                        });
-                    }
-                    let _ = std::fs::remove_file(&paths.lock_path);
-                }
-                Err(source) => return Err(CacheError::io(&paths.lock_path, source)),
+impl BlobLock {
+    /// Take the blob's lock, or report that another writer holds it.
+    fn acquire(paths: &BlobPaths) -> Result<Self, CacheError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&paths.lock_path)
+            .map_err(|source| CacheError::io(&paths.lock_path, source))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(CacheError::Locked {
+                digest: paths
+                    .final_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("blob")
+                    .to_owned(),
+            }),
+            Err(std::fs::TryLockError::Error(source)) => {
+                Err(CacheError::io(&paths.lock_path, source))
             }
         }
-        let _ = file_system;
-        Err(CacheError::Descriptor(
-            "a blob reservation could not be taken",
-        ))
     }
-
-    /// Give the blob back so the next acquisition can take it.
-    fn release(&mut self) {
-        if self.held {
-            let _ = std::fs::remove_file(&self.path);
-            self.held = false;
-        }
-    }
-}
-
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-fn claim_is_stale(path: &Path, stale_after: std::time::Duration) -> bool {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age >= stale_after)
 }
 
 /// Writes one blob's wire form into quarantine and publishes it verified.
@@ -992,7 +959,9 @@ pub struct BlobWriter {
     paths: BlobPaths,
     file: Option<File>,
     file_system: Arc<dyn CacheFileSystem>,
-    lock: Reservation,
+    /// Kept alive for as long as this writer is: the blob is reserved for
+    /// exactly as long as this handle exists.
+    _lock: BlobLock,
     wire_offset: u64,
     next_record: u64,
     /// Whether the transfer reached a decision, so `Drop` does not second-guess
@@ -1091,15 +1060,13 @@ impl BlobWriter {
             .publish_replace(&self.paths.partial_path, &self.paths.final_path)
             .map_err(|source| CacheError::io(&self.paths.final_path, source))?;
         let _ = std::fs::remove_file(&self.paths.resume_path);
-        let blob = VerifiedBlob {
+        // Dropping `self` here releases the blob, whether or not the caller
+        // looks at what it got.
+        Ok(VerifiedBlob {
             descriptor: self.descriptor,
             path: self.paths.final_path.clone(),
             wire_size,
-        };
-        // The claim is released here rather than in `Drop` so a caller that
-        // fails to look at the result still frees the blob for the next run.
-        self.lock.release();
-        Ok(blob)
+        })
     }
 
     /// Give up on this transfer, keeping the partial when a resume is worth it.
@@ -1112,7 +1079,6 @@ impl BlobWriter {
         } else {
             self.discard_files();
         }
-        self.lock.release();
     }
 
     fn discard_files(&self) {
@@ -1357,8 +1323,8 @@ fn link_checked_prefixes(path: &Path) -> Result<Vec<PathBuf>, CacheError> {
 ///
 /// A blob's name is split across two levels - `blobs/sha256/<ab>/<rest>` - so a
 /// walk has to carry the prefix down. Anything that is not exactly a digest is
-/// not content: a partial, a resume record, and a writer's claim all live in the
-/// same directory and none of them may be counted or pruned as a blob.
+/// not content: a partial, a resume record, and a lock file all live in the same
+/// directory and none of them may be counted or pruned as a blob.
 fn collect_digests(
     file_system: &Arc<dyn CacheFileSystem>,
     directory: &Path,

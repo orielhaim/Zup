@@ -162,10 +162,6 @@ impl HttpSource {
                 let writer = match cache.writer(descriptor) {
                     Ok(writer) => writer,
                     Err(error) => {
-                        // The blob is already verified: another process, or an
-                        // earlier item in this session, got there first. A
-                        // reservation is therefore not a failure, it is a
-                        // reason to read rather than to write.
                         return cache
                             .get(descriptor, Verify::for_kind(descriptor.kind()))
                             .ok()

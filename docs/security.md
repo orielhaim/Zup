@@ -121,8 +121,15 @@ It is deliberately **not** keyed by target or version: those are properties of
 one operation, and a key that changed as a plan changed would let two operations
 hold "the" lock for the same installation at once.
 
-A crash releases the lock through the OS's handle lifetime, so there is no
-stale-PID cleanup to get wrong. This is coordination, not a security boundary.
+Writers of one content blob exclude each other the same way, on a per-blob lock
+file beside the blob. Nothing in either scheme records a PID or a timestamp on
+disk, so there is no stale-PID cleanup to get wrong: a crash releases the lock
+through the OS's handle lifetime.
+
+Both are coordination between cooperating Zup processes, not a security
+boundary. A lock is advisory, and anything on the machine that does not take it
+is not stopped by it - which is exactly why the cache re-validates every blob it
+consumes rather than trusting that a published blob is intact.
 
 ## Durability
 
