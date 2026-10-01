@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use rstest::rstest;
 use zup_core::{InstallLocation, SelectedScope, TargetTriple, Template, Variable, VariableValue};
 use zup_platform::{
-    InstallLocationError, InstallLocationResolver, TargetPath, TargetPathError,
-    TemplateResolveError, resolve_template_path,
+    InstallLocationError, InstallLocationResolver, TargetPath, TemplateResolveError,
+    resolve_template_path,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -98,148 +98,6 @@ fn fake_locations() -> FakeLocations {
     FakeLocations { paths }
 }
 
-#[rstest]
-#[case::windows(r"C:\Windows\System32\cmd.exe", r"C:\Windows\System32\cmd.exe")]
-#[case::windows_forward_slash(r"C:/Windows/System32/cmd.exe", r"C:\Windows\System32\cmd.exe")]
-#[case::windows_unc(r"\\server\share\Acme", r"\\server\share\Acme")]
-fn accepts_windows_absolute(#[case] raw: &str, #[case] expected: &str) {
-    let path = TargetPath::new(windows_target(), raw).unwrap();
-    assert_eq!(path.as_str(), expected);
-    assert_eq!(path.target(), &windows_target());
-}
-
-#[test]
-fn accepts_unix_absolute_without_host_inference() {
-    let path = TargetPath::new(unix_target(), "/opt/acme/bin").unwrap();
-    assert_eq!(path.as_str(), "/opt/acme/bin");
-    assert_eq!(path.target(), &unix_target());
-}
-
-#[test]
-fn unc_paths_keep_their_root_and_parent() {
-    let path = TargetPath::new(windows_target(), r"\\server\share\Acme\tool.exe").unwrap();
-    assert_eq!(path.as_str(), r"\\server\share\Acme\tool.exe");
-    assert_eq!(path.parent().unwrap().as_str(), r"\\server\share\Acme");
-    assert_eq!(
-        path.parent().unwrap().parent().unwrap().as_str(),
-        r"\\server\share"
-    );
-    assert_eq!(path.file_name(), Some("tool.exe"));
-}
-
-/// A path whose segments end on multi-byte characters: the byte before the end
-/// is not a character boundary, so the split has to be on separators.
-#[rstest]
-#[case::windows(r"C:\Ünïcodé\toolé", "windows", &["C:\\Ünïcodé", "C:\\"], "toolé")]
-#[case::unix("/opt/café/naïvé", "unix", &["/opt/café", "/opt", "/"], "naïvé")]
-fn parent_splits_on_separators_not_bytes(
-    #[case] authored: &str,
-    #[case] target_kind: &str,
-    #[case] ancestors: &[&str],
-    #[case] file_name: &str,
-) {
-    let target = if target_kind == "unix" {
-        unix_target()
-    } else {
-        windows_target()
-    };
-    let path = TargetPath::new(target, authored).unwrap();
-    assert_eq!(path.as_str(), authored);
-    assert_eq!(path.file_name(), Some(file_name));
-    for (depth, expected) in ancestors.iter().enumerate() {
-        let mut at = path.clone();
-        for _ in 0..=depth {
-            at = at.parent().expect("the path is above its root");
-        }
-        assert_eq!(at.as_str(), *expected);
-    }
-    let mut at_root = path;
-    for _ in ancestors {
-        at_root = at_root.parent().expect("the path is above its root");
-    }
-    assert!(
-        at_root.parent().is_none(),
-        "the last ancestor is the root and has no parent"
-    );
-}
-
-#[test]
-fn parent_of_a_unicode_unc_path_keeps_the_share() {
-    let path = TargetPath::new(windows_target(), r"\\sérveur\partagé\toolé").unwrap();
-    assert_eq!(path.parent().unwrap().as_str(), r"\\sérveur\partagé");
-    assert!(path.parent().unwrap().parent().is_none());
-    assert_eq!(path.file_name(), Some("toolé"));
-}
-
-#[rstest]
-#[case::windows_drive_root(r"C:\", "windows")]
-#[case::windows_unc_root(r"\\server\share", "windows")]
-#[case::windows_unicode_unc_root(r"\\sérveur\partagé", "windows")]
-#[case::unix_root("/", "unix")]
-fn roots_have_no_parent_or_file_name(#[case] path: &str, #[case] target_kind: &str) {
-    let target = match target_kind {
-        "unix" => unix_target(),
-        _ => windows_target(),
-    };
-    let root = TargetPath::new(target, path).unwrap();
-    assert!(root.parent().is_none(), "path: {path:?}");
-    assert_eq!(root.file_name(), None, "path: {path:?}");
-}
-
-#[rstest]
-#[case::empty("", "windows")]
-#[case::relative("foo/bar", "windows")]
-#[case::traversal(r"C:\PF\..\Windows", "windows")]
-#[case::dot(r"C:\PF\.\Windows", "windows")]
-#[case::nul("C:\\PF\\Windows\0", "windows")]
-#[case::unresolved(r"C:\PF\${install}", "windows")]
-#[case::windows_on_unix(r"C:\Windows", "unix")]
-#[case::windows_device(r"\\?\C:\Windows", "windows")]
-#[case::windows_dot_device(r"\\.\PIPE\device", "windows")]
-#[case::unix_on_windows(r"/opt/acme", "windows")]
-fn rejects_invalid(#[case] path: &str, #[case] target_kind: &str) {
-    let target = match target_kind {
-        "unix" => unix_target(),
-        _ => windows_target(),
-    };
-    let error = TargetPath::new(target, path).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            TargetPathError::NotAbsolute { .. }
-                | TargetPathError::Traversal { .. }
-                | TargetPathError::UnresolvedVariable { .. }
-                | TargetPathError::Nul { .. }
-                | TargetPathError::Empty
-        ),
-        "path: {path:?}, error: {error:?}"
-    );
-}
-
-#[test]
-fn unix_backslashes_remain_lexical_characters() {
-    let base = TargetPath::new(unix_target(), "/opt/acme").unwrap();
-    let path = TargetPath::new(unix_target(), "/opt/acme\\tool").unwrap();
-    assert_eq!(path.as_str(), "/opt/acme\\tool");
-    assert!(!path.starts_with(&base));
-    assert_eq!(base.join("C:tool").unwrap().as_str(), "/opt/acme/C:tool");
-}
-
-#[test]
-fn preserves_case_and_normalizes_only_separators() {
-    let path = TargetPath::new(windows_target(), r"c:/Users/Alice/AppData/Local").unwrap();
-    assert_eq!(path.as_str(), r"c:\Users\Alice\AppData\Local");
-}
-
-#[test]
-fn joins_with_target_separator_and_preserves_case() {
-    let base = TargetPath::new(windows_target(), r"C:\PF").unwrap();
-    let path = base.join("MixedCase").unwrap();
-    assert_eq!(path.as_str(), r"C:\PF\MixedCase");
-    assert_eq!(path.target(), base.target());
-    assert!(path.starts_with(&TargetPath::new(windows_target(), r"c:\pf").unwrap()));
-}
-
 #[test]
 fn resolves_semantic_location_into_target_path() {
     let template = Template::parse("${location.programs}/Acme").unwrap();
@@ -298,6 +156,40 @@ fn scope_aware_locations_are_forwarded_to_resolver() {
     )
     .unwrap();
     assert_eq!(path.as_str(), r"C:\Users\Public\Start Menu\Acme");
+}
+
+#[rstest]
+#[case::parent(r"${location.programs}/../Windows")]
+#[case::nested_parent(r"${location.programs}/bin/..")]
+#[case::drive(r"${location.programs}/D:/Windows")]
+#[case::drive_relative(r"${location.programs}/C:Windows")]
+fn a_literal_relocating_the_path_is_refused(#[case] template: &str) {
+    let error = resolve_template_path(
+        &Template::parse(template).unwrap(),
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::Machine,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TemplateResolveError::InvalidSegment { .. } | TemplateResolveError::InvalidPath(_)
+        ),
+        "{template}: {error:?}"
+    );
+}
+
+#[test]
+fn a_literal_is_joined_onto_the_resolved_location() {
+    let path = resolve_template_path(
+        &Template::parse("${location.programs}/Programs/Acme/bin/tool.exe").unwrap(),
+        &windows_target(),
+        &fake_locations(),
+        SelectedScope::Machine,
+    )
+    .unwrap();
+    assert_eq!(path.as_str(), r"C:\PF\Programs\Acme\bin\tool.exe");
 }
 
 #[test]

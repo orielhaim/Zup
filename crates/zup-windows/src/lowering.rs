@@ -1,24 +1,23 @@
+//! Lowering a [`TargetPath`] onto this Windows host.
+//!
+//! The lexical half of a target path is already settled: absolute, canonical,
+//! free of device namespaces. What is left is what Windows will still refuse to
+//! name a file with, which `typed-path` does not model because it is a rule
+//! about a filesystem rather than about a path's spelling.
+
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use typed_path::{
+    Utf8Component, Utf8WindowsComponent, constants::windows::RESERVED_DEVICE_NAMES_STR,
+};
 use zup_core::{TargetOperatingSystem, TargetTriple};
 use zup_platform::{TargetPath, TargetPathError};
-
-const RESERVED_NAMES: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$",
-    "CONOUT$",
-];
-
-const FORBIDDEN_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetPathValidationError {
     #[error("target path targets `{target}`, not Windows")]
     UnsupportedTarget { target: String },
-
-    #[error("Windows device path `{path}` is not supported")]
-    DevicePath { path: String },
 
     #[error("Windows path component `{component}` is invalid: {reason}")]
     InvalidComponent { component: String, reason: String },
@@ -34,57 +33,23 @@ pub enum TargetPathLoweringError {
 }
 
 pub fn validate_windows_target_path(path: &TargetPath) -> Result<(), TargetPathValidationError> {
-    if path.target().operating_system() != TargetOperatingSystem::Windows {
+    let Some(windows) = path.as_windows() else {
         return Err(TargetPathValidationError::UnsupportedTarget {
             target: path.target().to_string(),
         });
-    }
-
-    let lexical = path.as_str();
-    if lexical.starts_with(r"\\?\") || lexical.starts_with(r"\\.") || lexical.starts_with(r"\\??\")
-    {
-        return Err(TargetPathValidationError::DevicePath {
-            path: lexical.to_owned(),
-        });
-    }
-
-    if let Some(unc) = lexical.strip_prefix(r"\\") {
-        for component in unc.split('\\') {
-            if component.is_empty() {
-                return Err(TargetPathValidationError::InvalidComponent {
-                    component: component.to_owned(),
-                    reason: "empty path component".to_owned(),
-                });
-            }
-            validate_component(component)?;
-        }
-        return Ok(());
-    }
-
-    let Some(suffix) = lexical.get(3..) else {
-        return Err(TargetPathValidationError::InvalidComponent {
-            component: lexical.to_owned(),
-            reason: "missing Windows drive root".to_owned(),
-        });
     };
-    if suffix.is_empty() {
-        return Ok(());
-    }
-    for component in suffix.split('\\') {
-        if component.is_empty() {
-            return Err(TargetPathValidationError::InvalidComponent {
-                component: component.to_owned(),
-                reason: "empty path component".to_owned(),
-            });
+    // The prefix and the root are structural, so only the names are judged.
+    for component in windows.components() {
+        if let Utf8WindowsComponent::Normal(name) = component {
+            validate_component(component, name)?;
         }
-        validate_component(component)?;
     }
-
     Ok(())
 }
 
+/// Windows path identity: the canonical spelling, case-folded.
 pub fn windows_target_path_identity(path: &TargetPath) -> String {
-    path.as_str().replace('/', "\\").to_lowercase()
+    path.as_str().to_lowercase()
 }
 
 pub fn to_host_path(path: &TargetPath) -> Result<PathBuf, TargetPathLoweringError> {
@@ -95,8 +60,7 @@ pub fn to_host_path(path: &TargetPath) -> Result<PathBuf, TargetPathLoweringErro
         });
     }
     validate_windows_target_path(path)?;
-    let lexical = path.as_str().replace('/', "\\");
-    Ok(PathBuf::from(lexical))
+    Ok(PathBuf::from(path.as_str()))
 }
 
 pub(crate) fn host_path(path: &TargetPath) -> PathBuf {
@@ -107,49 +71,39 @@ pub(crate) fn target_path_from_host(
     path: &Path,
     target: &TargetTriple,
 ) -> Result<TargetPath, TargetPathError> {
-    TargetPath::new(target.clone(), host_path_text(path))
+    TargetPath::new(target.clone(), crate::machine_state::plain_path_text(path))
 }
 
-fn host_path_text(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else if let Some(path) = text.strip_prefix(r"\\?\") {
-        path.to_owned()
-    } else {
-        text.into_owned()
-    }
-}
+/// Windows' own filename rules, applied to one component.
+///
+/// A reserved device name, a separator, an illegal character, or a trailing dot
+/// or space makes a component unrepresentable, and a path is only refused if
+/// one of its components is.
+fn validate_component(
+    component: Utf8WindowsComponent<'_>,
+    name: &str,
+) -> Result<(), TargetPathValidationError> {
+    let invalid = |reason: &str| TargetPathValidationError::InvalidComponent {
+        component: name.to_owned(),
+        reason: reason.to_owned(),
+    };
 
-fn validate_component(component: &str) -> Result<(), TargetPathValidationError> {
-    if component.ends_with(' ') || component.ends_with('.') {
-        return Err(TargetPathValidationError::InvalidComponent {
-            component: component.to_owned(),
-            reason: "trailing spaces and dots are not allowed".to_owned(),
-        });
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err(invalid("trailing spaces and dots are not allowed"));
     }
-
-    if component
-        .chars()
-        .any(|character| FORBIDDEN_CHARS.contains(&character) || character.is_control())
-    {
-        return Err(TargetPathValidationError::InvalidComponent {
-            component: component.to_owned(),
-            reason: "forbidden or control character".to_owned(),
-        });
+    // `is_valid` is the filename-character rule: a separator or a character
+    // Windows reserves inside a name.
+    if !component.is_valid() || name.chars().any(char::is_control) {
+        return Err(invalid("forbidden or control character"));
     }
-
-    let stem = component.split('.').next().unwrap_or(component);
-    if RESERVED_NAMES
+    // `nul.txt` is still the `NUL` device, so the name that matters is the stem.
+    let stem = name.split('.').next().unwrap_or(name);
+    if RESERVED_DEVICE_NAMES_STR
         .iter()
-        .any(|name| stem.eq_ignore_ascii_case(name))
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
     {
-        return Err(TargetPathValidationError::InvalidComponent {
-            component: component.to_owned(),
-            reason: "reserved device name".to_owned(),
-        });
+        return Err(invalid("reserved device name"));
     }
-
     Ok(())
 }
 
@@ -163,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_windows_lexical_separators_without_changing_case() {
+    fn a_canonical_windows_path_is_already_a_host_path() {
         let path = target_path(r"C:/Program Files/Acme");
         assert_eq!(
             to_host_path(&path).unwrap().to_string_lossy(),
@@ -184,10 +138,6 @@ mod tests {
         ));
     }
 
-    // Windows' own filename rules, stated as one table: a reserved device name,
-    // a separator, an illegal character, or a trailing dot or space makes a
-    // component unrepresentable, and a path is only refused if one of its
-    // components is.
     #[test]
     fn every_component_is_validated_without_host_path_semantics() {
         for (path, accepted) in [
@@ -222,11 +172,24 @@ mod tests {
 
     #[test]
     fn device_paths_are_rejected_at_the_target_path_boundary() {
-        for path in [r"\\.\PIPE\device", r"\\?\C:\Windows"] {
-            let result =
-                TargetPath::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(), path);
-            assert!(result.is_err(), "{path:?}");
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        for path in [
+            r"\\.\PIPE\device",
+            r"\\?\C:\Windows",
+            r"\\?\UNC\server\share",
+            r"\\??\C:\Windows",
+        ] {
+            assert!(TargetPath::new(&target, path).is_err(), "{path:?}");
         }
+    }
+
+    #[test]
+    fn identity_ignores_case_and_separator_spelling() {
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(
+            windows_target_path_identity(&target_path(r"C:\Apps\Acme")),
+            windows_target_path_identity(&TargetPath::new(&target, r"c:/apps/acme").unwrap()),
+        );
     }
 
     #[test]

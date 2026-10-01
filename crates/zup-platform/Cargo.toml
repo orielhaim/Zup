@@ -9,6 +9,7 @@ description = "Platform abstraction layer for zup"
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+typed-path.workspace = true
 zup-core.workspace = true
 
 [dev-dependencies]

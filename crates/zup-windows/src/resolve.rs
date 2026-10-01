@@ -309,14 +309,6 @@ fn validate_target_path(kind: &str, path: &TargetPath) -> Result<(), TargetResol
                 reason,
             })
         }
-        Err(TargetPathValidationError::DevicePath { path }) => {
-            Err(TargetResolveError::InvalidTargetPath {
-                kind: kind.to_owned(),
-                path,
-                component: "<device>".to_owned(),
-                reason: "device namespace paths are not supported".to_owned(),
-            })
-        }
         Err(TargetPathValidationError::UnsupportedTarget { target }) => {
             Err(TargetResolveError::InvalidTargetPath {
                 kind: kind.to_owned(),
@@ -336,7 +328,7 @@ enum OwnedPathKind {
 
 #[derive(Debug)]
 struct OwnedPath {
-    path: String,
+    path: TargetPath,
     kind: OwnedPathKind,
 }
 
@@ -358,43 +350,30 @@ impl TargetCollisionIndex {
         path_kind: OwnedPathKind,
     ) -> Result<(), TargetResolveError> {
         let identity = windows_target_path_identity(path);
-        let display = path.to_string();
-        let is_directory = matches!(path_kind, OwnedPathKind::Directory);
         if let Some(existing) = self.owned_paths.get(&identity) {
             return Err(TargetResolveError::TargetCollision {
                 kind: kind.to_owned(),
-                first: existing.path.clone(),
-                second: display,
+                first: existing.path.to_string(),
+                second: path.to_string(),
                 identity,
             });
         }
 
-        for (existing_identity, existing) in &self.owned_paths {
-            let existing_is_directory = matches!(existing.kind, OwnedPathKind::Directory);
-            let hierarchy_conflict = if existing_is_directory && !is_directory {
-                is_ancestor(&identity, existing_identity)
-            } else if !existing_is_directory && is_directory {
-                is_ancestor(existing_identity, &identity)
-            } else if !existing_is_directory && !is_directory {
-                is_ancestor(&identity, existing_identity)
-                    || is_ancestor(existing_identity, &identity)
-            } else {
-                false
-            };
-            if hierarchy_conflict {
+        for existing in self.owned_paths.values() {
+            if hierarchy_conflict(path, path_kind, existing) {
                 return Err(TargetResolveError::TargetCollision {
                     kind: kind.to_owned(),
-                    first: existing.path.clone(),
-                    second: display,
-                    identity: existing_identity.clone(),
+                    first: existing.path.to_string(),
+                    second: path.to_string(),
+                    identity: windows_target_path_identity(&existing.path),
                 });
             }
         }
 
         self.owned_paths.insert(
-            identity.clone(),
+            identity,
             OwnedPath {
-                path: display,
+                path: path.clone(),
                 kind: path_kind,
             },
         );
@@ -461,11 +440,20 @@ fn insert_identity(
     Ok(())
 }
 
-fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
-    let ancestor = ancestor.trim_end_matches('\\');
-    descendant.len() > ancestor.len()
-        && descendant
-            .get(..ancestor.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ancestor))
-        && descendant.as_bytes().get(ancestor.len()) == Some(&b'\\')
+/// Whether an installation cannot own both paths.
+///
+/// A directory and a path inside it cannot both be owned, because one is the
+/// container of the other. Two files at unrelated locations can, and so can two
+/// directories, because the installer owns directories as a set of parents
+/// rather than as a single entry.
+fn hierarchy_conflict(path: &TargetPath, kind: OwnedPathKind, existing: &OwnedPath) -> bool {
+    match (
+        matches!(kind, OwnedPathKind::Directory),
+        matches!(existing.kind, OwnedPathKind::Directory),
+    ) {
+        (true, false) => path.starts_with(&existing.path),
+        (false, true) => existing.path.starts_with(path),
+        (false, false) => path.starts_with(&existing.path) || existing.path.starts_with(path),
+        (true, true) => false,
+    }
 }

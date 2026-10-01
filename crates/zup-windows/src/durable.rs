@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
+use typed_path::{
+    Utf8Component, Utf8WindowsPath, Utf8WindowsPrefix, constants::windows::SEPARATOR_STR,
+};
 
 use crate::fs_bindings::{
     self, CREATE_NEW, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
@@ -414,18 +417,53 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The extended-length spelling a Win32 file API accepts.
+///
+/// `\\?\` lifts the `MAX_PATH` limit and the path normalization the API would
+/// otherwise apply, which is what durable writes need: a name the installer
+/// owns has to reach the same file the ledger recorded. A relative path has no
+/// root to lift, so it is passed through as it stands.
 fn to_wide_path(path: &Path) -> Vec<u16> {
-    let value = path.to_string_lossy().replace('/', "\\");
-    let value = if value.starts_with(r"\\?\") {
-        value
-    } else if let Some(value) = value.strip_prefix(r"\\") {
-        format!(r"\\?\UNC\{value}")
-    } else if path.is_absolute() {
-        format!(r"\\?\{value}")
-    } else {
-        value
+    let text = path.to_string_lossy();
+    let lexical = Utf8WindowsPath::new(&text);
+    let verbatim = match lexical.components().prefix_kind() {
+        // Already extended-length, so the API has nothing left to lift.
+        Some(prefix) if prefix.is_verbatim() => text.into_owned(),
+        Some(prefix) => verbatim_prefix(prefix)
+            .map(|prefix| verbatim_spelling(&prefix, lexical))
+            .unwrap_or_else(|_| text.into_owned()),
+        // A rooted path with no drive names a location on whichever drive is
+        // current, so it has a root to lift.
+        None if lexical.has_root() => verbatim_spelling("\\\\?\\", lexical),
+        None => text.into_owned(),
     };
-    to_wide(&value)
+    to_wide(&verbatim)
+}
+
+/// The verbatim prefix naming the same root as `prefix`.
+///
+/// Only a drive and a network share have a place in the file namespace; a
+/// device namespace is not a file, so there is nothing to re-root it under.
+fn verbatim_prefix(prefix: Utf8WindowsPrefix<'_>) -> Result<String, &'static str> {
+    match prefix {
+        Utf8WindowsPrefix::Disk(drive) => Ok(format!("\\\\?\\{drive}:")),
+        Utf8WindowsPrefix::UNC(server, share) => Ok(format!("\\\\?\\UNC\\{server}\\{share}")),
+        _ => Err("path is not rooted at a drive or a network share"),
+    }
+}
+
+/// `prefix`, then every name `path` holds below its own root.
+///
+/// The prefix and the root are skipped because `prefix` already names the root.
+fn verbatim_spelling(prefix: &str, path: &Utf8WindowsPath) -> String {
+    let mut text = prefix.to_owned();
+    for component in path.components() {
+        if component.is_normal() {
+            text.push_str(SEPARATOR_STR);
+            text.push_str(component.as_str());
+        }
+    }
+    text
 }
 
 fn win32_err(path: &Path, api: &str) -> DurableError {

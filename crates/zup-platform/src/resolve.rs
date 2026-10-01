@@ -2,7 +2,7 @@ use thiserror::Error;
 use zup_core::{Template, TemplatePart, Variable};
 
 use crate::install_locations::{InstallLocationError, InstallLocationResolver};
-use crate::target_path::{TargetPath, TargetPathError};
+use crate::target_path::{TargetPath, TargetPathError, suffix_components};
 
 #[derive(Debug, Error)]
 pub enum TemplateResolveError {
@@ -39,10 +39,18 @@ pub fn resolve_template_path<R: InstallLocationResolver + ?Sized>(
     for part in template.parts() {
         match part {
             TemplatePart::Variable(Variable::Location(location)) => {
-                let location_path = resolver.resolve(*location, scope, target)?;
+                let resolved = resolver.resolve(*location, scope, target)?;
                 output = Some(match output {
-                    None => location_path,
-                    Some(existing) => append_target_path(&existing, &location_path)?,
+                    None => resolved,
+                    Some(existing) => {
+                        if existing.target() != resolved.target() {
+                            return Err(TemplateResolveError::ResolverTargetMismatch {
+                                path: resolved.as_str().to_owned(),
+                                target: resolved.target().to_string(),
+                            });
+                        }
+                        existing.extend_with(&resolved)?
+                    }
                 });
             }
             TemplatePart::Variable(variable) => {
@@ -51,76 +59,24 @@ pub fn resolve_template_path<R: InstallLocationResolver + ?Sized>(
                 });
             }
             TemplatePart::Literal(text) => {
+                if text.contains("${") {
+                    return Err(TemplateResolveError::UnresolvedLiteral {
+                        text: text.to_owned(),
+                    });
+                }
                 output = Some(match output {
                     None => TargetPath::new(target, text)?,
-                    Some(existing) => append_literal(&existing, target, text)?,
+                    Some(existing) => {
+                        existing.join_segments(suffix_components(target, text).map_err(
+                            |segment| TemplateResolveError::InvalidSegment {
+                                segment: segment.to_owned(),
+                            },
+                        )?)?
+                    }
                 });
             }
         }
     }
 
     Ok(output.ok_or(TargetPathError::Empty)?)
-}
-
-fn append_literal(
-    existing: &TargetPath,
-    target: &zup_core::TargetTriple,
-    text: &str,
-) -> Result<TargetPath, TemplateResolveError> {
-    if text.contains("${") {
-        return Err(TemplateResolveError::UnresolvedLiteral {
-            text: text.to_owned(),
-        });
-    }
-    let separator = if target.operating_system() == zup_core::TargetOperatingSystem::Windows {
-        '\\'
-    } else {
-        '/'
-    };
-    let mut output = existing.clone();
-    let is_windows = target.operating_system() == zup_core::TargetOperatingSystem::Windows;
-    for segment in
-        text.split(|character| character == separator || (is_windows && character == '/'))
-    {
-        if segment.is_empty() {
-            continue;
-        }
-        if segment == "." || segment == ".." {
-            return Err(TemplateResolveError::InvalidSegment {
-                segment: segment.to_owned(),
-            });
-        }
-        output = output.join(segment)?;
-    }
-    Ok(output)
-}
-
-fn append_target_path(
-    existing: &TargetPath,
-    addition: &TargetPath,
-) -> Result<TargetPath, TemplateResolveError> {
-    // A resolver is told which target to answer for; answering for another one
-    // is a broken resolver rather than a bad template.
-    if existing.target() != addition.target() {
-        return Err(TemplateResolveError::ResolverTargetMismatch {
-            path: addition.as_str().to_owned(),
-            target: addition.target().to_string(),
-        });
-    }
-    let separator =
-        if existing.target().operating_system() == zup_core::TargetOperatingSystem::Windows {
-            '\\'
-        } else {
-            '/'
-        };
-    let root_len = addition.root_len();
-    let suffix = addition.as_str().get(root_len..).unwrap_or_default();
-    let mut output = existing.clone();
-    for segment in suffix.split(separator) {
-        if segment.is_empty() {
-            continue;
-        }
-        output = output.join(segment)?;
-    }
-    Ok(output)
 }
