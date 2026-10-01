@@ -270,12 +270,10 @@ impl Simulator {
     /// Forget the child, having noticed it exited, and end it.
     ///
     /// Reaping here rather than at exit is what keeps a crashed preset from
-    /// becoming a permanent one: the handle is waited on, so the process is gone
-    /// before anything else is started.
+    /// becoming a permanent one: the whole tree is ended, so the process and
+    /// anything it started are gone before anything else is started.
     pub fn forget_child(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            child.shutdown();
-        }
+        drop(self.child.take());
     }
 
     /// Copy a verified selection somewhere it can be launched from, and check
@@ -314,14 +312,12 @@ impl Simulator {
             self.host.snapshot().product.clone(),
         )?;
         // The state goes out before the reader starts, so a child that draws the
-        // instant it can draws the real one rather than an empty window.
-        if let Err(error) = process.publish(
+        // instant it can draws the real one rather than an empty window. A
+        // failure here drops `process`, which ends the tree it started.
+        process.publish(
             self.configuration.clone(),
             Box::new(self.host.snapshot().clone()),
-        ) {
-            process.shutdown();
-            return Err(error);
-        }
+        )?;
         let reader = process.take_reader();
         std::thread::Builder::new()
             .name("zup-preview-preset".into())
@@ -335,10 +331,10 @@ impl Simulator {
             .map_err(|error| zup_ui_host::SessionError::Handshake(error.to_string()))?;
 
         // Only now is the previous child finished with. Until this point the
-        // working window was still up, and a failure above leaves it up.
-        if let Some(mut previous) = self.child.take() {
-            previous.shutdown();
-        }
+        // working window was still up, and a failure above leaves it up. The tree
+        // goes with it: a preset that has been replaced must not leave helpers of
+        // its own running against the executable the next generation is staging.
+        drop(self.child.take());
         self.generation = candidate.generation;
         self.child = Some(process);
         self.retire();
@@ -426,6 +422,11 @@ impl Simulator {
     }
 
     /// End the session, and take the child with it.
+    ///
+    /// The child goes because it is dropped, which ends its tree; the state
+    /// directories go because nothing will read them again. A session that ended
+    /// any other way would leave both behind, which is why this is the one place
+    /// that ends both rather than two callers that each remember to.
     pub fn shutdown(&mut self) {
         self.forget_child();
         self.state.retire(None);

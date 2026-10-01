@@ -198,6 +198,22 @@ A consequence worth stating: the preset is disposable. If it crashes, the
 transaction keeps running and the host can put a new window in front of the same
 state, because a `UiSnapshot` is complete and there is nothing to replay.
 
+Disposable means the host's to finish with. Every child Zup owns is launched
+through `process-wrap` — a job object on Windows, a process group on Unix — so
+ending it ends the tree it started, and a preset's own helpers do not outlive the
+window that was showing them. `process-wrap` owns that mechanics and nothing else:
+when a child may be left running, when a replacement counts as successful, how long
+a handshake may take and whether a failure aborts the operation are all Zup's, and
+the ordering that matters is that a replacement is adopted only after its
+successor has opened a session, and the previous tree is ended only afterwards.
+
+The waits are bounded in the same spirit. A host gives up on a preset that never
+collects its endpoint and on one that collects it and then says nothing, because an
+installer blocked on a window that is never coming is a worse answer than a message.
+The short synchronous commands elsewhere — a describe, a `git`, a prerequisite
+installer — run and wait, and are left as plain `Command` because nothing outlives
+them to terminate as a group.
+
 ## Package and executable
 
 `zup-bundle` writes a portable schema-1 package: a 60-byte header, a

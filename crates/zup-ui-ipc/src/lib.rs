@@ -53,6 +53,16 @@ use zup_ui_protocol::{MAX_FRAME_BYTES, UiEnvelope, decode, encode};
 /// that never arrives must not hang an installer.
 pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a host waits for the preset's first frame.
+///
+/// Distinct from [`ACCEPT_TIMEOUT`] because it bounds a different wait, and
+/// because a preset that got this far and then stopped is a different failure
+/// from one that never started. Without it a preset that collects its endpoint
+/// and then says nothing holds the host on an `recv` that will never return - and
+/// an installer waiting on a window that is never coming is the one outcome the
+/// bound exists to prevent.
+pub const GREETING_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What went wrong between a host and a preset.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,6 +71,9 @@ pub enum Error {
 
     #[error("the preset did not collect its endpoint in time")]
     AcceptTimeout,
+
+    #[error("the preset collected its endpoint and then said nothing")]
+    GreetingTimeout,
 
     #[error("the preset's transport failed: {0}")]
     Transport(String),
@@ -262,6 +275,49 @@ impl Channel {
         self.bounded(MAX_FRAME_BYTES)
     }
 
+    /// Read one envelope, or give up after `budget`, handing the channel back.
+    ///
+    /// The one read a host must not block on forever: a preset that has collected
+    /// its endpoint and then gone quiet. Everything after the greeting is a read a
+    /// host is willing to sit on, because the preset is the thing the person is
+    /// looking at and it may take as long as it likes to speak.
+    ///
+    /// Takes and returns `self` because the bound is a thread: `ipc-channel`
+    /// offers a blocking receive and a non-blocking one, and no receive with a
+    /// deadline, so the wait that must end goes on a thread and the wait that need
+    /// not does not. On a timeout the thread is left holding the channel - the
+    /// same trade [`Endpoint::accept`] makes - and the caller is failing the
+    /// handshake, which ends the preset and with it any reason to read again.
+    pub fn recv_within(self, budget: Duration) -> Result<(Self, UiEnvelope), Error> {
+        let Channel { sender, inbound } = self;
+        // The receiver goes to the thread and comes back with the frame it read,
+        // because a session that has greeted is a session that still has to be
+        // read from.
+        let (read, waiting) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("zup-ui-greeting".into())
+            .spawn(move || {
+                let received = inbound.recv();
+                let _ = read.send((inbound, received));
+            })
+            .map_err(|error| Error::Transport(error.to_string()))?;
+        let (inbound, body) = match waiting.recv_timeout(budget) {
+            Ok(received) => received,
+            Err(_) => return Err(Error::GreetingTimeout),
+        };
+        let channel = Self { sender, inbound };
+        let body = body.map_err(|error| Error::Transport(error.to_string()))?;
+        if body.len() > MAX_FRAME_BYTES {
+            return Err(Error::Protocol(
+                zup_ui_protocol::UiWireError::FrameTooLarge {
+                    max: MAX_FRAME_BYTES,
+                },
+            ));
+        }
+        let envelope = decode(&body)?;
+        Ok((channel, envelope))
+    }
+
     /// Read one envelope, refusing anything longer than `max`.
     ///
     /// The bound is checked before the body is decoded rather than after, so a
@@ -348,6 +404,80 @@ mod tests {
             collected.recv_timeout(Duration::from_millis(50)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
+    }
+
+    /// A peer that collects the endpoint and then says nothing must not hold a
+    /// host on its greeting.
+    ///
+    /// The bound is the whole claim. Without it, a preset that got this far and
+    /// then stopped is an installer waiting forever on a window that is never
+    /// coming, holding a tree it will never release. The writer below outlives the
+    /// call on purpose: nothing has ended the session, so the deadline is the only
+    /// thing that can.
+    #[test]
+    fn a_peer_that_stops_after_collecting_is_given_up_on() {
+        let (writer, reader) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        let (outbound, _unread) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        let channel = Channel {
+            sender: Sender {
+                session: Uuid::now_v7(),
+                outbound,
+            },
+            inbound: reader,
+        };
+        let error = channel
+            .recv_within(Duration::from_millis(100))
+            .expect_err("a peer that says nothing is given up on");
+        assert!(
+            matches!(error, Error::GreetingTimeout),
+            "and it says the greeting never arrived rather than reporting a broken transport: \
+             {error}"
+        );
+        drop(writer);
+    }
+
+    /// A frame that arrives inside the budget is read normally, and the channel
+    /// comes back with it.
+    ///
+    /// The other half of the bound: a deadline that turned every read into a
+    /// failure would satisfy the test above by refusing to talk to presets. The
+    /// channel surviving is the part that matters afterwards - a session that has
+    /// greeted is a session that still has to be read from.
+    #[test]
+    fn a_frame_inside_the_budget_is_read_and_the_channel_survives() {
+        let session = Uuid::now_v7();
+        let hello = UiEnvelope {
+            version: zup_ui_protocol::UI_PROTOCOL_VERSION,
+            session: zup_ui_protocol::UiSessionId(session),
+            sequence: 1,
+            message: zup_ui_protocol::UiMessage::UiHello(zup_ui_protocol::UiHello {
+                protocol_version: zup_ui_protocol::UI_PROTOCOL_VERSION,
+                session: zup_ui_protocol::UiSessionId(session),
+                preset: "bounded".into(),
+                preset_version: "0.0.0".into(),
+                required_capabilities: Default::default(),
+            }),
+        };
+
+        let (writer, reader) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        let (outbound, _unread) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        writer
+            .send(&encode(&hello).expect("an envelope encodes"))
+            .expect("write");
+        let channel = Channel {
+            sender: Sender { session, outbound },
+            inbound: reader,
+        };
+
+        let (channel, read) = channel
+            .recv_within(Duration::from_secs(30))
+            .expect("a frame inside the budget is read");
+        assert_eq!(read, hello);
+        assert_eq!(
+            channel.session(),
+            session,
+            "and the channel comes back, because greeting is one read rather than the only one"
+        );
     }
 
     /// A preset that has gone is the end of the session, not a hang. This is

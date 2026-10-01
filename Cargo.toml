@@ -87,6 +87,17 @@ zup-xtask = { path = "crates/zup-xtask" }
 # Graph
 petgraph = "0.8"
 
+# Managed child processes. `process-wrap` owns the platform mechanics - a job
+# object on Windows, a process group on Unix - so that terminating a child
+# terminates the tree it started, on every supported desktop platform, from one
+# code path. Which children get this treatment, and when they may be left
+# running, stays zup's decision.
+process-wrap = { version = "10", default-features = false, features = [
+  "job-object",
+  "process-group",
+  "std",
+] }
+
 # Build / filesystem
 atomic-write-file = "0.3"
 walkdir = "2"

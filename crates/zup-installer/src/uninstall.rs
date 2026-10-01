@@ -309,6 +309,13 @@ pub fn remove_lock(state_root: &Path, app_id: &AppId, scope: SelectedScope) -> m
 /// The returned handle is deliberately dropped. Whoever started the runner is
 /// either the file the uninstall deletes or a process a person is watching, and
 /// in both cases waiting would mean the runner could never begin.
+///
+/// The one child in this repository that is *not* launched managed, and the reason
+/// is this function: the runner has to survive the process that started it, so
+/// ending that process's tree must not end the runner's. Every other child Zup
+/// starts is a job object or a process group precisely so it can be ended; this
+/// one is the case that says when a child is allowed to survive, and it is
+/// detached by hand for that reason.
 pub fn launch_runner(
     executable: &Path,
     args: &UninstallArgs,

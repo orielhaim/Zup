@@ -10,13 +10,20 @@
 //! while an earlier one is still open somewhere else. Guessing where Cargo put
 //! something is how a watcher ends up executing a previous build's output, which
 //! is the kind of bug that reproduces once a week and is never the watcher.
+//!
+//! Cargo is launched managed, in a job object on Windows and a process group on
+//! Unix, because Cargo is not the only process in a build: it drives `rustc`,
+//! build scripts and linkers. Ending Cargo alone would leave those holding the
+//! very files the next build needs to write, which is the same class of bug as a
+//! preset that outlives its own executable.
 
 use std::io::BufRead;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{ChildStdout, Stdio};
 
 use cargo_metadata::Message;
 use cargo_metadata::diagnostic::DiagnosticLevel;
+use process_wrap::std::{ChildWrapper, CommandWrap};
 
 use crate::project::Project;
 
@@ -82,42 +89,42 @@ impl Supervisor {
         &self.project.binary
     }
 
-    /// Start a build, handing back its output pipe and the process itself.
+    /// Start a build, handing back its output pipe and the build it belongs to.
     ///
-    /// Both belong to whoever reads the result. A supervisor that keeps a handle
-    /// it has to remember to poll is how a second build silently never starts:
-    /// the first handle is still there, the supervisor believes a build is
-    /// running, and nothing ever replaces it. The thread reading the pipe is the
-    /// only thing that can know a build is over, so it is the thing that holds
-    /// the process and waits on it.
-    pub fn start(
-        &self,
-        cargo: &std::path::Path,
-    ) -> Result<(std::process::ChildStdout, Child), String> {
-        let mut child = Command::new(cargo)
-            .current_dir(&self.project.root)
-            .args([
-                "build",
-                "--package",
-                &self.project.name,
-                "--bin",
-                &self.project.binary,
-                "--profile",
-                &self.profile,
-                // `json` rather than `json-render-diagnostics`: cargo emits the
-                // rendered form beside the machine form on this channel, and the
-                // machine form is the one that carries every message. Standard
-                // error is inherited, so a person still sees cargo's own
-                // rendering as well.
-                "--message-format=json",
-            ])
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .stdout(Stdio::piped())
+    /// The pipe goes to the thread that reads the result, because that thread is
+    /// the only thing that can know a build is over. The build itself comes back
+    /// with it, because the tree Cargo drives is the session's to end: a session
+    /// that stops waiting for a build must not leave a compiler writing into a
+    /// target directory the next build needs.
+    pub fn start(&self, cargo: &Path) -> Result<(ChildStdout, Building), String> {
+        let mut command = CommandWrap::with_new(cargo, |command| {
+            command
+                .current_dir(&self.project.root)
+                .args([
+                    "build",
+                    "--package",
+                    &self.project.name,
+                    "--bin",
+                    &self.project.binary,
+                    "--profile",
+                    &self.profile,
+                    // `json` rather than `json-render-diagnostics`: cargo emits the
+                    // rendered form beside the machine form on this channel, and the
+                    // machine form is the one that carries every message. Standard
+                    // error is inherited, so a person still sees cargo's own
+                    // rendering as well.
+                    "--message-format=json",
+                ])
+                .stdin(Stdio::null())
+                .stderr(Stdio::inherit())
+                .stdout(Stdio::piped());
+        });
+        manage(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("could not run `{}`: {error}", cargo.display()))?;
-        let out = child.stdout.take().expect("a piped build has a pipe");
-        Ok((out, child))
+        let out = child.stdout().take().expect("a piped build has a pipe");
+        Ok((out, Building { child }))
     }
 
     /// Read a build's result from a running process's output pipe.
@@ -183,4 +190,55 @@ impl Supervisor {
         }
         Build::Unusable("the build ended without reporting a result".into())
     }
+}
+
+/// One build, held for as long as anything is waiting on it.
+///
+/// Cargo runs `rustc`, build scripts and linkers, so a build is a tree rather
+/// than a process, and the tree is launched managed: a job object on Windows, a
+/// process group on Unix. Ending it terminates all of them, which is what lets a
+/// session that stopped waiting for a build leave nothing behind.
+///
+/// The policy is Zup's and not `process-wrap`'s: a build somebody is still waiting
+/// for is waited on, and a build nobody is waiting for any more is ended. That is
+/// why this is a type rather than a bare child - it is what makes "nobody is
+/// waiting for this any more" a thing that can be acted on, and dropping it is
+/// that answer rather than a leak.
+#[derive(Debug)]
+pub struct Building {
+    child: Box<dyn ChildWrapper>,
+}
+
+impl Building {
+    /// Wait for the build to finish, and reap it.
+    ///
+    /// Every process in the tree is reaped, not just Cargo, so the next build is
+    /// not queued behind a build script that is still holding a file. Nothing is
+    /// terminated: a build that has run to completion has nothing left to kill, and
+    /// the drop below is right to try and find nothing to do.
+    pub fn wait(mut self) {
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Building {
+    fn drop(&mut self) {
+        // Terminate, then reap, and do the second even if the first reported a
+        // problem: a build whose kill failed still has processes holding the target
+        // directory, and the next build is waiting on those files.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Put `command`'s whole process tree under this process's control.
+///
+/// The only place that knows which platform mechanism answers this: a job object
+/// on Windows, a new process group on Unix. Both give one thing to end, so
+/// everything above asks for a build rather than for a platform.
+fn manage(command: &mut CommandWrap) {
+    #[cfg(windows)]
+    command.wrap(process_wrap::std::JobObject);
+    #[cfg(unix)]
+    command.wrap(process_wrap::std::ProcessGroup::leader());
 }

@@ -8,6 +8,7 @@ description = "The authoritative state machine a zup installer host and its deve
 publish = false
 
 [dependencies]
+process-wrap.workspace = true
 thiserror.workspace = true
 zup-artifact.workspace = true
 zup-core.workspace = true

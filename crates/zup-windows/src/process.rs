@@ -27,6 +27,15 @@
 //! and to keep a console attached - and never a correctness one. A bootstrapper
 //! that is killed mid-install leaves an installation that is either committed or
 //! recoverable, which is the same guarantee the offline artifact has always had.
+//!
+//! ## Why this child is not launched managed
+//!
+//! Everything else in this repository that starts a process it owns does so
+//! through `process-wrap`, so that ending the owner ends the tree. This one is
+//! the exception, and it is the exception that defines the rule rather than a
+//! leftover: the runtime this bootstrapper starts is the product, it is meant to
+//! outlive the bootstrapper, and a job object with kill-on-close would end it the
+//! moment the thin launcher exited. Termination here would be the bug.
 
 // The Win32 structures below mirror `STARTUPINFOEXW` and friends exactly. Their
 // field names are the C names, because a renamed field is a field a reader

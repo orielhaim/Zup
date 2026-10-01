@@ -4,6 +4,12 @@
 //! Windows crate, name a Windows API, branch on `cfg(windows)` in production
 //! code, reintroduce an identifier that presents a Windows concept as part of
 //! the portable model, or spell a Windows concept inside a string literal.
+//!
+//! One structural rule has a narrow, declared relaxation: a package that owns a
+//! child process may branch to choose between the two process-tree mechanisms
+//! `process-wrap` provides, because it has no portable spelling for "the tree is
+//! mine". See [`matrix::PORTABLE_PLATFORM_DELEGATING`]. Every other rule still
+//! applies to such a package.
 //! Windows is allowed in the Windows adapter, in the product frontends and
 //! binaries, in tests and documentation, and inside target-lexicon identifiers
 //! such as `TargetOperatingSystem::Windows`.
@@ -364,6 +370,7 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
         // vocabulary ones. Decided by the matrix rather than by an allowlist here,
         // so the classification is the one the rest of the tooling already reads.
         let vocabulary = matrix::vocabulary_of(package);
+        let lifecycle = matrix::delegates_platform_lifecycle(package);
         for source in production_sources(&directory)? {
             violations.extend(check_source(
                 member,
@@ -374,6 +381,7 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
                 ),
                 &source,
                 vocabulary,
+                lifecycle,
             )?);
         }
     }
@@ -529,12 +537,24 @@ fn check_source(
     location: &str,
     path: &Path,
     vocabulary: matrix::Vocabulary,
+    delegates_lifecycle: bool,
 ) -> Result<Vec<Violation>, String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     // The vocabulary tables are what a file-format crate is exempt from; every
     // other table applies to it unchanged.
     let mut structural = vec![
-        (Rule::WindowsCfgBranch, WINDOWS_CFG_TOKENS),
+        (
+            Rule::WindowsCfgBranch,
+            // A package that delegates process-tree lifecycle to `process-wrap`
+            // names that crate's two wrappers rather than branching on anything
+            // Windows-shaped. Every other rule still applies to it, and the
+            // decision comes from the matrix rather than from an allowlist here.
+            if delegates_lifecycle {
+                &[][..]
+            } else {
+                WINDOWS_CFG_TOKENS
+            },
+        ),
         (Rule::OsWindowsImport, OS_WINDOWS_TOKENS),
         (Rule::WindowsApiNamespace, WINDOWS_API_TOKENS),
     ];
@@ -776,10 +796,22 @@ mod tests {
 
     /// Write `source` to a scratch file and scan it under one vocabulary.
     fn scan(vocabulary: Vocabulary, source: &str) -> Vec<Rule> {
+        scan_as(vocabulary, false, source)
+    }
+
+    /// The same scan for a package that delegates process-tree lifecycle.
+    fn scan_delegating(source: &str) -> Vec<Rule> {
+        scan_as(Vocabulary::Domain, true, source)
+    }
+
+    fn scan_as(vocabulary: Vocabulary, delegates: bool, source: &str) -> Vec<Rule> {
         let directory = tempfile::TempDir::new().expect("temp dir");
         let path = directory.path().join("source.rs");
         fs::write(&path, source).expect("write");
-        rules(&check_source(&member("probe"), "probe.rs", &path, vocabulary).expect("scan"))
+        rules(
+            &check_source(&member("probe"), "probe.rs", &path, vocabulary, delegates)
+                .expect("scan"),
+        )
     }
 
     /// The relaxation is to the concept tables and to nothing else. Every
@@ -849,6 +881,66 @@ mod tests {
             Vocabulary::Domain,
             "an unclassified package is held to the strict rules"
         );
+    }
+
+    /// A package that delegates process-tree lifecycle to `process-wrap` may name
+    /// that crate's two wrappers, because a job object and a process group are two
+    /// spellings of one guarantee rather than two behaviours.
+    ///
+    /// The point of the test is what else still fires. A relaxation that dropped
+    /// the import and namespace rules too would be indistinguishable from not
+    /// enforcing the boundary here at all, so those are pinned as well.
+    #[test]
+    fn a_lifecycle_delegating_package_may_name_the_two_wrappers() {
+        assert_eq!(
+            scan_delegating("#[cfg(windows)]\nfn f() {}\n#[cfg(unix)]\nfn g() {}\n"),
+            Vec::new(),
+            "the branch that selects process-wrap's per-platform tree mechanism is the one thing \
+             it is exempt from"
+        );
+        assert_eq!(
+            scan_delegating("use std::os::windows::ffi::OsStrExt;\n"),
+            vec![Rule::OsWindowsImport],
+            "and a platform std import is still a violation: the exemption is for the wrapper \
+             names, not for reaching around them"
+        );
+        assert_eq!(
+            scan_delegating("use windows::Win32::System::SystemInformation;\n"),
+            vec![Rule::WindowsApiNamespace],
+            "as is naming a Win32 namespace directly"
+        );
+        assert_eq!(
+            scan_delegating("pub const KEY: &str = \"HKEY_LOCAL_MACHINE\";\n"),
+            vec![Rule::BannedLiteral],
+            "and the concept tables apply unchanged"
+        );
+    }
+
+    /// The delegation is declared in the matrix, so it cannot be acquired by
+    /// anything written next to the code it silences, and an unclassified package
+    /// gets the strict answer.
+    #[test]
+    fn the_lifecycle_delegation_is_the_matrixs_and_is_claimed_by_someone() {
+        assert!(matrix::delegates_platform_lifecycle("zup-ui-host"));
+        assert!(
+            matrix::delegates_platform_lifecycle("zup-ui-dev"),
+            "the crate that supervises a compiler owns the same lifecycle"
+        );
+        assert!(
+            !matrix::delegates_platform_lifecycle("no-such-crate"),
+            "an unclassified package is still held to the strict rules"
+        );
+        assert!(
+            !matrix::delegates_platform_lifecycle("zup-core"),
+            "and a package with no children to own does not get it"
+        );
+        for package in matrix::PORTABLE_PLATFORM_DELEGATING {
+            assert!(
+                matrix::is_portable(package),
+                "{package} owns a child process, so it is portable and delegates: the two \
+                 classifications are not alternatives"
+            );
+        }
     }
 
     /// A file-format crate is portable by definition. One that needed a Windows

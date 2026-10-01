@@ -398,10 +398,11 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
 
     active.lock().expect("the running operation").cancel();
     // The session is over, and the child this host launched is still running.
-    // Leaving it would hold the executable it was launched from open, and an
-    // uninstall that follows would fail on a file a window the user already
-    // closed is still using.
-    preset.shutdown();
+    // Dropping the owner ends the preset and everything it started, which is what
+    // releases the executable it was launched from: an uninstall that follows
+    // would otherwise fail on a file a window the user already closed is still
+    // holding open.
+    drop(preset);
     Ok(())
 }
 

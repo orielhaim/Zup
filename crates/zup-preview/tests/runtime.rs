@@ -38,13 +38,60 @@ use zup_ui_protocol::{
 
 /// Beside this executable, which the runtime staged into a directory of its own.
 fn report_path() -> PathBuf {
-    let mut beside = std::env::current_exe().expect("a launched executable");
-    beside.set_file_name("REPORT");
-    beside
+    beside("REPORT")
+}
+
+/// A file beside this executable, which the runtime staged into a directory of
+/// its own - so a helper it spawns writes where only this generation's tests
+/// look.
+fn beside(name: &str) -> PathBuf {
+    let mut path = std::env::current_exe().expect("a launched executable");
+    path.set_file_name(name);
+    path
+}
+
+/// The role that outlives its parent unless the whole tree is ended.
+///
+/// It appends to a file forever and nothing else, which is the only observable a
+/// test in another process needs: a heartbeat still growing is a tree still
+/// running, and a heartbeat that has stopped is a tree that was ended. It cannot
+/// be faked by the parent reporting on itself, which is the point - a preset that
+/// says it is alive while its helpers are not has told the host nothing.
+fn grandchild() -> ! {
+    let heartbeat = beside("HEARTBEAT");
+    loop {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&heartbeat)
+        {
+            let _ = writeln!(file, "alive");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Start a helper in this preset's own tree, and record that one was asked for.
+///
+/// Driven by a marker file beside the executable rather than by an argument,
+/// because the host passes exactly one argument and a fixture that needed a
+/// second would be testing a launch protocol zup does not have.
+fn spawn_helper() {
+    std::process::Command::new(std::env::current_exe().expect("a launched executable"))
+        .arg("--zup-grandchild")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the helper starts");
 }
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.iter().any(|argument| argument == "--zup-grandchild") {
+        grandchild();
+    }
     if arguments.iter().any(|argument| argument == "--zup-describe") {
         let schema = serde_json::json!({
             "type": "object",
@@ -59,6 +106,21 @@ fn main() {
 
     let bootstrap = Bootstrap::from_arguments(arguments).expect("launched by a host");
     let channel = bootstrap.collect().expect("the transport opens");
+
+    // The tree this preset owns, before anything else: a helper that has to be
+    // ended with it, and a mode where this preset never finishes its handshake.
+    if beside("SPAWNS").exists() {
+        spawn_helper();
+    }
+    if beside("SILENT").exists() {
+        // Collected the endpoint, then said nothing. The host is left waiting on a
+        // handshake that will not complete, which is the case where it has to end
+        // the tree itself rather than expect the preset to.
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     let sender = channel.sender().clone();
     let mut session = Session::preset(
         UiSessionId(channel.session()),
@@ -177,20 +239,61 @@ fn crate_directory(name: &str) -> String {
         .replace('\\', "/")
 }
 
-fn cargo() -> PathBuf {
-    std::env::var_os("CARGO")
+/// Where the fixture preset is built, shared by every process that runs this
+/// suite.
+///
+/// One fixed directory rather than one temporary directory per process, and the
+/// reason is size rather than taste: this suite runs under `nextest`, which gives
+/// each test its own process, and each process building its own copy of a preset
+/// means a separate multi-gigabyte target directory per test. Nineteen tests left
+/// behind nineteen of them, and the machine ran out of disk partway through the
+/// workspace run.
+///
+/// Cargo takes a lock on a target directory, so concurrent processes here queue
+/// rather than collide: the first builds, and the rest find it fresh and finish in
+/// the time it takes to read a manifest. The build product is the same bytes either
+/// way, which is all these tests ask of it.
+fn fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the workspace root")
+        .join("target")
+        .join("zup-preview-fixture")
+}
+
+/// Cargo, configured the way this suite builds its own fixtures.
+///
+/// A resolver of its own so the fixture never joins the workspace it is built
+/// from, and offline so a fixture build cannot reach for the network. The target
+/// directory is the shared one above.
+///
+/// Deliberately a plain `Command`: this is a build that runs to completion and is
+/// waited on before the test proceeds, so nothing outlives it to be terminated as
+/// a group. The same command in `zup ui dev` is managed, because there a build is
+/// something a session stops waiting for.
+fn fixture_build(root: &Path) -> Command {
+    let cargo = std::env::var_os("CARGO")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"))
+        .unwrap_or_else(|| PathBuf::from("cargo"));
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .args(["build", "--message-format=json"]);
+    command
 }
 
 /// The fixture preset, built once for the whole run.
 ///
-/// One build rather than one per test: these tests are about behaviour after a
-/// build, and a nested cargo per test is a second build inside a build.
+/// Once per process, and cheap for every process after the first, because the
+/// directory is shared: these tests are about behaviour after a build, and a nested
+/// cargo per test would be a second build inside a build.
 fn built() -> &'static PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
-        let root = tempfile::tempdir().expect("a scratch directory").keep();
+        let root = fixture_root();
         std::fs::create_dir_all(root.join("src")).expect("a source directory");
         std::fs::write(root.join("src/main.rs"), PRESET).expect("the preset source");
         std::fs::write(
@@ -201,17 +304,7 @@ fn built() -> &'static PathBuf {
         )
         .expect("the manifest");
 
-        let output = Command::new(cargo())
-            .current_dir(&root)
-            // A target directory and a resolver of its own, so a fixture build
-            // running inside a suite that is itself building never queues behind
-            // the suite's own output or reaches for the network. Nothing here
-            // needs anything that is not already in the lockfile.
-            .env("CARGO_TARGET_DIR", root.join("target"))
-            .env("CARGO_NET_OFFLINE", "true")
-            .args(["build", "--message-format=json"])
-            .output()
-            .expect("cargo runs");
+        let output = fixture_build(&root).output().expect("cargo runs");
         assert!(
             output.status.success(),
             "the probe preset builds: {}",
@@ -246,6 +339,83 @@ fn executable_of(stdout: &[u8], name: &str) -> Option<PathBuf> {
 /// The bytes of the fixture preset.
 fn preset_bytes() -> Vec<u8> {
     std::fs::read(built()).expect("the build product is readable")
+}
+
+/// How long a person - or a test - waits for a tree to start or to stop.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// The heartbeat a generation's helper writes, if that generation spawned one.
+fn heartbeat(state: &StateDirectory, generation: u64) -> PathBuf {
+    run_directory(state, generation).join("HEARTBEAT")
+}
+
+/// One generation's staged directory, where its executable and its markers live.
+fn run_directory(state: &StateDirectory, generation: u64) -> PathBuf {
+    state.root().join("runs").join(generation.to_string())
+}
+
+/// Tell the next staged generation to behave a certain way.
+///
+/// Markers rather than arguments, because the host passes a preset exactly one
+/// argument and a fixture that needed another would be asserting a launch
+/// protocol zup does not have. The marker sits beside the executable the runtime
+/// stages, which is the same place the preset looks.
+fn mark(state: &StateDirectory, generation: u64, marker: &str) {
+    let directory = run_directory(state, generation);
+    std::fs::create_dir_all(&directory).expect("the generation's directory");
+    std::fs::write(directory.join(marker), b"").expect("the marker is written");
+}
+
+/// Whether a heartbeat is still being written, sampled twice.
+///
+/// A heartbeat file that exists is not evidence: a helper writes it before it is
+/// killed too. What proves a tree is running is that the file is still growing
+/// between two reads, and what proves it was ended is that it has stopped.
+fn beating(path: &Path) -> bool {
+    let size = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let first = size(path);
+    if first == 0 {
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    size(path) > first
+}
+
+/// Wait for a helper to be running, and fail rather than assert on a tree that
+/// never started.
+fn await_beating(path: &Path) {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if beating(path) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "the helper never reported that it is running: {}",
+        path.display()
+    );
+}
+
+/// Wait for a tree to be gone, and fail rather than assert on one that is still
+/// running.
+///
+/// Generous in both directions: a heartbeat that stops is a claim about a process
+/// this process cannot schedule, so it is given time to be true. A test that gave
+/// up early would pass on a leak, which is the failure this exists to catch.
+fn await_still(path: &Path) {
+    std::thread::sleep(Duration::from_millis(500));
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if !beating(path) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "a helper is still running after its owner ended: {}",
+        path.display()
+    );
 }
 
 /// A session's own directory, per test.
@@ -376,27 +546,6 @@ fn the_state_a_replaced_child_connects_to_is_the_state_the_host_owns() {
 }
 
 #[test]
-fn a_preset_that_will_not_start_leaves_the_running_one_alone() {
-    let (_directory, state) = scratch();
-    let mut runtime = runtime(state);
-    present_and_wait_for_the_ask(&mut runtime);
-
-    // A file with the right name and nothing a program can do: it stages, and it
-    // cannot open a session.
-    let broken = b"this is not a program";
-    assert!(
-        runtime.present(&preset(), broken).is_err(),
-        "the handshake fails"
-    );
-    assert!(
-        runtime.generation().is_some() && runtime.is_running(),
-        "and the child that was working is still the one that is running, because nothing above \
-         touched it"
-    );
-    runtime.shutdown();
-}
-
-#[test]
 fn a_replacement_generation_is_a_file_of_its_own() {
     let (directory, state) = scratch();
     let mut runtime = runtime(state);
@@ -504,6 +653,137 @@ fn shutdown_ends_the_child_rather_than_leaving_it_holding_its_executable() {
     // reaped would still hold it open, and on this platform that is a file the
     // next generation could not be written to.
     std::fs::write(executable.join("probe.exe"), b"replaced").expect("the file is writable again");
+}
+
+/// The tree a preset started ends with it, on every platform.
+///
+/// The witness is a helper the preset spawned, not the preset's own claim about
+/// itself: a preset that reports itself alive while its helpers are still running
+/// has told this process nothing, and on both supported platforms that is the
+/// failure a host without process-tree semantics produces.
+#[test]
+fn ending_a_preset_ends_the_tree_it_started() {
+    let (_directory, state) = scratch();
+    let mut runtime = runtime(state.clone());
+    mark(&state, 1, "SPAWNS");
+    present(&mut runtime);
+    let helper = heartbeat(&state, 1);
+    await_beating(&helper);
+
+    runtime.shutdown();
+    await_still(&helper);
+}
+
+/// The same guarantee by the other route: an owner that is dropped rather than
+/// stopped. A session that ends because it went out of scope must leave nothing
+/// behind for the same reason one that ends deliberately does.
+#[test]
+fn dropping_the_session_ends_the_tree_it_started() {
+    let (_directory, state) = scratch();
+    let mut runtime = runtime(state.clone());
+    mark(&state, 1, "SPAWNS");
+    present(&mut runtime);
+    let helper = heartbeat(&state, 1);
+    await_beating(&helper);
+
+    drop(runtime);
+    await_still(&helper);
+}
+
+/// A launch that does not complete ends what it started.
+///
+/// The preset collected the endpoint and then said nothing, so the handshake never
+/// finishes and the host is left holding a child it will never talk to. The
+/// guarantee is that it does not go on holding it: the tree is ended at the point
+/// the failure is reported, rather than becoming a preset with no host and no one
+/// to end it.
+#[test]
+fn a_preset_that_never_completes_its_handshake_leaves_no_orphan() {
+    let (_directory, state) = scratch();
+    let mut runtime = runtime(state.clone());
+    mark(&state, 1, "SPAWNS");
+    mark(&state, 1, "SILENT");
+
+    let error = runtime
+        .present(&preset(), &preset_bytes())
+        .expect_err("the handshake never completes");
+    assert!(
+        error.to_string().contains("handshake"),
+        "and it says what failed rather than reporting an empty success: {error}"
+    );
+    await_still(&heartbeat(&state, 1));
+    assert!(
+        runtime.generation().is_none(),
+        "and no generation was adopted, because nothing ever opened a session"
+    );
+}
+
+/// A replacement ends the old tree, and only the new generation survives.
+///
+/// Both halves matter, and they fail independently: a host that ended the new
+/// child instead of the old one leaves a window that is not there, and a host
+/// that did not end the old one leaves a window nobody is looking at - holding an
+/// executable the next build would otherwise be unable to write.
+#[test]
+fn a_replacement_ends_the_old_tree_and_keeps_the_new_one_running() {
+    let (_directory, state) = scratch();
+    let mut runtime = runtime(state.clone());
+    mark(&state, 1, "SPAWNS");
+    present(&mut runtime);
+    let first = heartbeat(&state, 1);
+    await_beating(&first);
+
+    // The replacement is marked too, so the new tree is observable and the claim is
+    // about which of two live trees survives rather than about one.
+    mark(&state, 2, "SPAWNS");
+    present(&mut runtime);
+    assert_eq!(
+        runtime.generation(),
+        Some(2),
+        "the new generation is the one that is running"
+    );
+    let second = heartbeat(&state, 2);
+    await_beating(&second);
+    await_still(&first);
+
+    runtime.shutdown();
+    await_still(&second);
+}
+
+/// The replacement ordering, proved through what a preset observes.
+///
+/// The old tree has to survive the new child's handshake, or a preset that failed
+/// to start would cost the person the window that was working. This is the same
+/// rule from the other side: the state the old generation was showing is still
+/// its state when it is ended.
+#[test]
+fn a_preset_that_will_not_start_leaves_the_running_one_alone() {
+    let (_directory, state) = scratch();
+    let mut runtime = runtime(state.clone());
+    mark(&state, 1, "SPAWNS");
+    present_and_wait_for_the_ask(&mut runtime);
+    let working = heartbeat(&state, 1);
+    await_beating(&working);
+
+    // A file with the right name and nothing a program can do: it stages, and it
+    // cannot open a session.
+    let broken = b"this is not a program";
+    assert!(
+        runtime.present(&preset(), broken).is_err(),
+        "the handshake fails"
+    );
+    assert!(
+        runtime.generation() == Some(1) && runtime.is_running(),
+        "and the child that was working is still the one that is running, because nothing above \
+         touched it"
+    );
+    assert!(
+        beating(&working),
+        "and its tree is untouched with it: a replacement that starts by stopping the running child \
+         costs a working window every time a build is wrong"
+    );
+    runtime.shutdown();
+    await_still(&working);
 }
 
 #[test]

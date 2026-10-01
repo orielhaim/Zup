@@ -140,6 +140,23 @@ pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe", "zup-binary"];
 /// installer. Their test suites are part of the native portable run.
 pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 
+/// Portable packages whose `cfg` branch selects between two spellings of one
+/// behaviour that a portable dependency already provides per platform.
+///
+/// The [`Vocabulary`] relaxation is about *words*: a file-format crate must name
+/// the format it reads. This one is about a *branch*, and it is much narrower.
+/// `process-wrap` exposes exactly one process-tree mechanism per platform - a job
+/// object on Windows, a process group on Unix - and no portable spelling of "the
+/// tree is mine". A host that owns a child has to name which one it is using, and
+/// the two names compile to the same guarantee on both platforms.
+///
+/// What is still refused for these packages, unchanged: a Windows dependency, a
+/// Windows-only manifest target, `std::os::windows`, and a Win32 namespace. The
+/// branch may only choose between the two wrappers `process-wrap` documents, and a
+/// package gains this by appearing here rather than by a line added beside the
+/// code it silences.
+pub const PORTABLE_PLATFORM_DELEGATING: &[&str] = &["zup-ui-host", "zup-ui-dev"];
+
 /// Crates that require a Windows build host: the Windows adapter, the
 /// composition CLI, the runtime an installer embeds, the native frontends, and
 /// the small dispatcher a universal artifact starts through.
@@ -241,6 +258,17 @@ pub fn vocabulary_of(package: &str) -> Vocabulary {
         .iter()
         .find(|matrix| matrix.packages.contains(&package))
         .map_or(Vocabulary::Domain, |matrix| matrix.vocabulary)
+}
+
+/// Whether a portable package may branch on the build host to choose between two
+/// spellings of one portable dependency's per-platform API.
+///
+/// Declared by list rather than by an allowlist next to the caller, so a package
+/// does not gain the relaxation by a line added beside the code it silences, and
+/// so the set is reviewable in one place. An unclassified package gets the strict
+/// answer.
+pub fn delegates_platform_lifecycle(package: &str) -> bool {
+    PORTABLE_PLATFORM_DELEGATING.contains(&package)
 }
 
 /// Packages listed in more than one matrix. A package belongs to exactly one.

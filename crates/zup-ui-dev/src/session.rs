@@ -10,6 +10,12 @@
 //! through [`Session::start_build`], and nothing else starts one: a change that
 //! does not compile leaves the running window alone, and a change that does
 //! compile replaces it only once the new child has opened its session.
+//!
+//! Both children this session owns - the compiler and the preset it built - are
+//! launched managed, and their termination is this crate's decision rather than
+//! `process-wrap`'s. A build that is still running when a session ends is ended
+//! with it, and a preset is replaced only after its successor has proved it can
+//! start.
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -121,7 +127,7 @@ impl Session {
         // compiles the whole GPUI stack and takes minutes, and a session that
         // has said nothing for two of them looks like one that has hung.
         println!("  build    {}", self.supervisor.binary());
-        let (out, mut child) = match self.supervisor.start(&self.cargo) {
+        let (out, build) = match self.supervisor.start(&self.cargo) {
             Ok(started) => started,
             Err(error) => {
                 println!("  build    {error}");
@@ -137,10 +143,9 @@ impl Session {
                     BufReader::new(out),
                     &binary,
                 )));
-                // The process is this thread's to reap, which is what lets the
-                // next build start rather than finding a finished handle still
-                // held by a supervisor nobody polled.
-                let _ = child.wait();
+                // The build is this thread's to finish with, which is what lets the
+                // next build start rather than finding a tree nobody ended.
+                build.wait();
             })
             .expect("a build reader thread");
     }
