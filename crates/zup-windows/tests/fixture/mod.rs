@@ -195,6 +195,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
         ui_assets: Vec::new(),
         total_size: total,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
     };
 
     let mut runtime = filler("runtime-image", 0).into_bytes();

@@ -6,6 +6,7 @@ use zup_core::{
     PathEntry, Protocol, Service,
 };
 
+use crate::icon::IconSetting;
 use crate::{Build, Distribution, Plugin, Publish, SCHEMA_VERSION, Targeted, Updates};
 
 #[allow(dead_code)]
@@ -13,7 +14,7 @@ use crate::{Build, Distribution, Plugin, Publish, SCHEMA_VERSION, Targeted, Upda
 #[serde(deny_unknown_fields)]
 struct SchemaManifest {
     schema: u32,
-    app: App,
+    app: SchemaApp,
     #[serde(default)]
     frontend: Frontend,
     #[serde(default)]
@@ -46,6 +47,17 @@ struct SchemaManifest {
     protocols: Vec<Targeted<Protocol>>,
     #[serde(default)]
     file_associations: Vec<Targeted<FileAssociation>>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SchemaApp {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    app: App,
+    #[serde(default)]
+    icon: Option<IconSetting>,
 }
 
 pub fn schema() -> schemars::Schema {

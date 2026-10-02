@@ -149,6 +149,7 @@ fn plan(target: TargetTriple) -> TargetBuildPlan {
         ui_assets: Vec::new(),
         total_size: 0,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
     }
 }
 

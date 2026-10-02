@@ -219,6 +219,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             ui_assets: Vec::new(),
             total_size: total,
             prerequisite_size: 0,
+            icons: zup_core::TargetIcons::default(),
         },
         &[plugin],
         &[(MediaType::RUNTIME, runtime)],

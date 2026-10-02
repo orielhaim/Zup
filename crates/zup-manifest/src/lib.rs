@@ -46,6 +46,7 @@
 
 mod compile;
 mod error;
+mod icon;
 mod model;
 mod parse;
 mod plugin;
@@ -54,6 +55,7 @@ mod target;
 
 pub use compile::{compile, parse_and_compile, parse_and_compile_named};
 pub use error::ManifestError;
+pub use icon::IconConfig;
 pub use model::{
     ArtifactId, ArtifactKind, ArtifactMode, ArtifactProfile, Build, Distribution, DistributionHost,
     Github, GithubNotes, GithubTag, GithubWorkflow, Manifest, Publish, SCHEMA_VERSION, Targeted,

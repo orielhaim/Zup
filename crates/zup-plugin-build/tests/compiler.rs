@@ -69,6 +69,7 @@ source = "plugins/helper.wasm"
         &root.path().join("zup.toml"),
         &manifest,
         vec![(config, installer)],
+        zup_build::Writes::None,
     )
     .unwrap();
     (root, plan.targets.pop().unwrap())

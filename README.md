@@ -28,6 +28,7 @@ id = "com.acme.desktop"
 name = "Acme"
 version = "0.1.0"
 main = "app.exe"
+icon = "assets/icon.svg"
 
 [build]
 

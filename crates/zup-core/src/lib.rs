@@ -30,7 +30,8 @@ mod template;
 mod value;
 
 pub use build_plan::{
-    BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPlugin, ResolvedPrerequisite, TargetBuildPlan,
+    BuildPlan, CompiledIcon, IconRole, ResolvedAsset, ResolvedFile, ResolvedPlugin,
+    ResolvedPrerequisite, TargetBuildPlan, TargetIcons,
 };
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};

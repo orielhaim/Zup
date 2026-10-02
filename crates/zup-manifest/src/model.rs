@@ -41,6 +41,8 @@ impl<T> Targeted<T> {
 pub struct Manifest {
     pub schema: u32,
     pub app: App,
+    /// Application icon. Absent means the build uses the built-in mark.
+    pub icon: Option<crate::icon::IconConfig>,
     pub frontend: Frontend,
     pub ui: Ui,
     pub build: Build,

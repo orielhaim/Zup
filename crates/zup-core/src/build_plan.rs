@@ -80,6 +80,56 @@ pub struct ResolvedPlugin {
     pub sha256: Sha256Digest,
 }
 
+/// Which generated icon file this is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IconRole {
+    Windows,
+    MacOs,
+    LinuxSvg,
+    LinuxPng { size: u32 },
+    Png { size: u32 },
+}
+
+/// One icon file produced for a target.
+///
+/// `source` is a build-machine path into the icon cache. The portable package
+/// does not carry it. `executable_images` and `executable_group` are the bytes
+/// an executable's icon resources are written from, and only the Windows file
+/// has them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledIcon {
+    pub role: IconRole,
+    /// `/`-separated name, such as `app.ico` or `hicolor/48x48/apps/id.png`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PathBuf>,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executable_images: Vec<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executable_group: Vec<u8>,
+}
+
+/// Icons compiled for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TargetIcons {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<CompiledIcon>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// The project named no icon, so these bytes came from the built-in mark.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
+}
+
+impl TargetIcons {
+    pub fn is_empty(&self) -> bool {
+        self.artifacts.is_empty() && self.warnings.is_empty() && !self.fallback
+    }
+}
+
 /// Materialized sources for one target profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetBuildPlan {
@@ -98,6 +148,9 @@ pub struct TargetBuildPlan {
     pub total_size: u64,
     /// Sum of embedded prerequisite sizes.
     pub prerequisite_size: u64,
+    /// Icons this target asked for. Empty for a target with no icon surface.
+    #[serde(default, skip_serializing_if = "TargetIcons::is_empty")]
+    pub icons: TargetIcons,
 }
 
 /// Deterministic materialization result for all selected target profiles.

@@ -161,11 +161,12 @@ fn run_session(state: &mut HostState, configuration: &zup_ui_protocol::UiConfigu
 fn describe(decision: HostDecision) -> String {
     match decision {
         HostDecision::Run { .. } => "run".into(),
-        HostDecision::Preview(_) => "preview".into(),
+        HostDecision::Plan(_) => "plan".into(),
         HostDecision::Update => "update".into(),
         HostDecision::Cancel => "cancel".into(),
         HostDecision::OpenLog => "open-log".into(),
         HostDecision::CopyDiagnostics => "diagnostics".into(),
+        HostDecision::Launch(_) => "launch".into(),
         HostDecision::Acknowledged => "acknowledged".into(),
         HostDecision::Refused(_) => "refused".into(),
     }
@@ -429,6 +430,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
         }],
         total_size: 0,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
     };
 
     // A real installer, composed around this package's own runtime template.

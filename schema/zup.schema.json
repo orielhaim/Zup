@@ -12,22 +12,15 @@
       "const": 1
     },
     "app": {
-      "$ref": "#/$defs/App"
+      "$ref": "#/$defs/SchemaApp"
     },
     "frontend": {
       "$ref": "#/$defs/Frontend",
       "default": "gui"
     },
     "ui": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/UiBranding"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
+      "$ref": "#/$defs/Ui",
+      "default": {}
     },
     "build": {
       "$ref": "#/$defs/Build"
@@ -79,52 +72,59 @@
       },
       "default": []
     },
-    "plugins": {
+    "component_groups": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted3"
       },
       "default": []
     },
-    "files": {
+    "plugins": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted4"
       },
       "default": []
     },
-    "launchers": {
+    "files": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted5"
       },
       "default": []
     },
-    "path": {
+    "launchers": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted6"
       },
       "default": []
     },
-    "services": {
+    "path": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted7"
       },
       "default": []
     },
-    "protocols": {
+    "services": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted8"
       },
       "default": []
     },
-    "file_associations": {
+    "protocols": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/Targeted9"
+      },
+      "default": []
+    },
+    "file_associations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Targeted10"
       },
       "default": []
     }
@@ -172,7 +172,7 @@
     }
   ],
   "$defs": {
-    "App": {
+    "SchemaApp": {
       "description": "Application identity and display metadata.",
       "type": "object",
       "properties": {
@@ -213,6 +213,16 @@
             "null"
           ],
           "default": null
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IconSetting"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -238,6 +248,43 @@
         "${location.programs}/Acme"
       ]
     },
+    "IconSetting": {
+      "description": "An application icon: a path in the project, or a table with `source` and optional `padding`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProjectPath"
+        },
+        {
+          "$ref": "#/$defs/IconOptions"
+        }
+      ]
+    },
+    "ProjectPath": {
+      "description": "A path relative to the project directory. `./` is accepted; absolute paths, drive letters, and `..` are refused.",
+      "type": "string"
+    },
+    "IconOptions": {
+      "description": "`icon` written as a table.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/ProjectPath"
+        },
+        "padding": {
+          "description": "Fraction of the canvas left empty on each side. `0.10` insets by a tenth.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ]
+    },
     "Frontend": {
       "type": "string",
       "enum": [
@@ -246,55 +293,28 @@
         "headless"
       ]
     },
-    "UiBranding": {
+    "Ui": {
+      "description": "The preset this application presents, as its author configures it.\n\nThe only customization system an application has. What a preset draws is the\npreset's business, so there is nothing here for an application author to\ndescribe a window: the package is chosen, and its own settings are filled in.",
       "type": "object",
       "properties": {
-        "logo": {
+        "preset": {
+          "description": "The `.zupui` to present. Absent means the preset Zup ships.",
           "anyOf": [
             {
-              "$ref": "#/$defs/Template"
+              "$ref": "#/$defs/ProjectPath"
             },
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
-        "accent": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "theme": {
-          "$ref": "#/$defs/UiTheme",
-          "default": "system"
-        },
-        "license_link": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "legal_text": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
+        "settings": {
+          "description": "Values for the chosen preset's settings, validated against the schema the\npackage carries before anything is composed.",
+          "type": "object",
+          "additionalProperties": true
         }
       },
       "additionalProperties": false
-    },
-    "UiTheme": {
-      "type": "string",
-      "enum": [
-        "system",
-        "light",
-        "dark"
-      ]
     },
     "Build": {
       "description": "Build configuration and target matrix.",
@@ -1128,6 +1148,17 @@
           },
           "default": []
         },
+        "group": {
+          "description": "The group this component belongs to. Absent means the implicit group.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "targets": {
           "type": "array",
           "items": {
@@ -1143,6 +1174,86 @@
       ]
     },
     "Targeted3": {
+      "description": "A resource declaration with optional target-profile applicability.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prominence": {
+          "$ref": "#/$defs/ComponentProminence",
+          "default": "auto"
+        },
+        "selection": {
+          "$ref": "#/$defs/SelectionRequirement",
+          "default": "defaulted"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TargetProfileId"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ]
+    },
+    "ComponentProminence": {
+      "description": "How clearly a component group should be presented.\n\nThis is about the group as one decision, not about where a preset draws it.\n`Auto` is conservative: a group with nothing optional to choose disappears,\na group that requires an explicit selection is primary, and everything else\nis secondary.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        },
+        {
+          "description": "The person should see that this decision exists before installing.",
+          "type": "string",
+          "const": "primary"
+        },
+        {
+          "description": "A sensible default. The whole group can stay out of the happy path.",
+          "type": "string",
+          "const": "secondary"
+        }
+      ]
+    },
+    "SelectionRequirement": {
+      "description": "Whether a group's defaults are enough to install.",
+      "oneOf": [
+        {
+          "description": "The declared defaults are a valid choice.",
+          "type": "string",
+          "const": "defaulted"
+        },
+        {
+          "description": "At least one optional component in the group must be selected.",
+          "type": "string",
+          "const": "explicit"
+        }
+      ]
+    },
+    "Targeted4": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1188,7 +1299,7 @@
         "source"
       ]
     },
-    "Targeted4": {
+    "Targeted5": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1239,7 +1350,7 @@
         "destination"
       ]
     },
-    "Targeted5": {
+    "Targeted6": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1315,7 +1426,7 @@
         "desktop"
       ]
     },
-    "Targeted6": {
+    "Targeted7": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1357,7 +1468,7 @@
         "value"
       ]
     },
-    "Targeted7": {
+    "Targeted8": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1442,7 +1553,7 @@
         "disabled"
       ]
     },
-    "Targeted8": {
+    "Targeted9": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
@@ -1488,7 +1599,7 @@
       "description": "URI scheme such as `acme` in `acme://`.",
       "type": "string"
     },
-    "Targeted9": {
+    "Targeted10": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {

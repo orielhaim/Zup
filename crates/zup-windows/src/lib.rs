@@ -103,7 +103,7 @@ pub use payload_overlay::{
     is_plugin_payload_path, materialize_payload_overlay, payload_overlay_base_root,
     validate_payload_overlay_base, verify_payload_overlay,
 };
-pub use pe_resources::{ResourceError, read_resource, write_resources};
+pub use pe_resources::{ResourceError, apply_icon, read_resource, write_resources};
 pub use pipe::{
     ClientReader, ClientWriter, HELLO_TIMEOUT, PipeError, PipeSecurity, PipeServer, ServerReader,
     ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,

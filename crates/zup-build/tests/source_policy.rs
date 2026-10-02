@@ -142,6 +142,7 @@ fn prerequisite_target(
         manifest,
         vec![selection(manifest)],
         policy,
+        zup_build::Writes::None,
     )
     .map_err(unwrap_target)?;
     assert_eq!(plan.targets.len(), 1);
@@ -152,7 +153,12 @@ fn materialize_default(
     dir: &Path,
     manifest: &Manifest,
 ) -> Result<zup_build::BuildPlan, BuildError> {
-    zup_build::materialize(&dir.join("zup.toml"), manifest, vec![selection(manifest)])
+    zup_build::materialize(
+        &dir.join("zup.toml"),
+        manifest,
+        vec![selection(manifest)],
+        zup_build::Writes::None,
+    )
 }
 
 fn unwrap_target(error: BuildError) -> BuildError {

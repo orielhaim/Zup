@@ -332,6 +332,37 @@ when = 'component()'
     assert!(matches!(err, ManifestError::Invalid { .. }));
 }
 
+#[test]
+fn an_icon_path_and_an_icon_table_both_parse() {
+    let path = parse(&minimal("user").replace(
+        "version = \"1.0.0\"\n",
+        "version = \"1.0.0\"\nicon = \"assets/icon.svg\"\n",
+    ))
+    .unwrap();
+    let icon = path.icon.expect("icon");
+    assert_eq!(icon.source.as_str(), "assets/icon.svg");
+    assert_eq!(icon.padding(), 0.0);
+
+    let table = parse(&minimal("user").replace(
+        "[build]",
+        "[app.icon]\nsource = \"assets/icon.svg\"\npadding = 0.10\n\n[build]",
+    ))
+    .unwrap();
+    let icon = table.icon.expect("icon");
+    assert_eq!(icon.source.as_str(), "assets/icon.svg");
+    assert_eq!(icon.padding_milli, 100);
+}
+
+#[test]
+fn an_icon_padding_outside_the_range_is_refused() {
+    let error = parse(&minimal("user").replace(
+        "[build]",
+        "[app.icon]\nsource = \"assets/icon.svg\"\npadding = 0.9\n\n[build]",
+    ))
+    .unwrap_err();
+    assert!(error.to_string().contains("padding"), "{error}");
+}
+
 #[rstest]
 #[case::empty("")]
 #[case::leading_dot("./plugin.wasm")]

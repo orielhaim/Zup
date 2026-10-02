@@ -48,6 +48,7 @@ object = { version = "0.40", default-features = false, features = ["read", "std"
 
 # Workspace crates
 zup-automation = { path = "crates/zup-automation" }
+zup-assets = { path = "crates/zup-assets" }
 zup-core = { path = "crates/zup-core" }
 zup-binary = { path = "crates/zup-binary" }
 zup-pe = { path = "crates/zup-pe" }

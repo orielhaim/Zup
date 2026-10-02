@@ -189,6 +189,7 @@ pub fn select_project(
 pub fn materialize_project(
     selected: SelectedProject,
     resolver: &ToolchainResolver,
+    writes: zup_build::Writes,
 ) -> miette::Result<LoadedProject> {
     let SelectedProject {
         manifest_path,
@@ -243,6 +244,7 @@ pub fn materialize_project(
         compiled,
         &ui_assets,
         &zup_windows::WindowsSourceFilePolicy,
+        writes,
     )
     .map_err(miette::Report::new)?;
     Ok(LoadedProject {
@@ -260,8 +262,13 @@ pub fn load_single_project(
     selectors: &[String],
     args: &TargetOverrideArgs,
     resolver: &ToolchainResolver,
+    writes: zup_build::Writes,
 ) -> miette::Result<LoadedProject> {
-    materialize_project(select_project(path, selectors, args, true)?, resolver)
+    materialize_project(
+        select_project(path, selectors, args, true)?,
+        resolver,
+        writes,
+    )
 }
 
 /// A window that could not be presented, as the diagnostic a build reports.
@@ -297,6 +304,7 @@ pub fn load_for_build(
     selectors: &[String],
     args: &TargetOverrideArgs,
     resolver: &ToolchainResolver,
+    writes: zup_build::Writes,
 ) -> miette::Result<LoadedProject> {
     let selected = select_project(path, selectors, args, false)?;
     // The backend boundary reads no files, so an unsupported target is refused
@@ -304,7 +312,7 @@ pub fn load_for_build(
     for config in &selected.selected_targets {
         crate::build_inputs::check_backend_support(config)?;
     }
-    let loaded = materialize_project(selected, resolver)?;
+    let loaded = materialize_project(selected, resolver, writes)?;
     for config in &loaded.selected_targets {
         crate::build_inputs::check_target_lowering(&loaded.build, config)?;
     }

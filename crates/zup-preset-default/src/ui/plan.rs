@@ -20,7 +20,7 @@ use zup_ui_sdk::prelude::*;
 
 use crate::model;
 use crate::theme::{size, space, text};
-use crate::ui::{Callout, Section, Tone, caption, muted};
+use crate::ui::{Callout, ChoiceHandler, Handler, Section, Tone, caption, muted};
 
 /// The icon a resource category is marked with.
 fn category_icon(category: ResourceCategory) -> IconName {
@@ -59,7 +59,7 @@ pub struct PlanDetails {
     plan: PlanStatus,
     context: (String, Option<String>),
     expanded: BTreeSet<ResourceCategory>,
-    on_toggle: Rc<dyn Fn(ResourceCategory, &mut Window, &mut App)>,
+    on_toggle: ChoiceHandler<ResourceCategory>,
 }
 
 impl PlanDetails {
@@ -266,7 +266,7 @@ fn requirements(requirements: &[RequirementPresentation], cx: &App) -> AnyElemen
 struct Group {
     group: ChangeGroup,
     open: bool,
-    on_toggle: Rc<dyn Fn(&mut Window, &mut App)>,
+    on_toggle: Handler,
 }
 
 impl RenderOnce for Group {

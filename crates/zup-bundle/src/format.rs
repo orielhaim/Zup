@@ -530,6 +530,7 @@ impl Package {
                     .iter()
                     .map(|artifact| artifact.size)
                     .sum(),
+                icons: zup_core::TargetIcons::default(),
             }],
         })
     }
@@ -1879,6 +1880,7 @@ mod tests {
             ui_assets: Vec::new(),
             total_size: 0,
             prerequisite_size: 0,
+            icons: zup_core::TargetIcons::default(),
         }
     }
 

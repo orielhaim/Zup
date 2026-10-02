@@ -324,6 +324,7 @@ pub fn build_target_with_window(
         ui_assets,
         total_size: total,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
     };
 
     // A stand-in for a native runtime template. The real build passes the actual

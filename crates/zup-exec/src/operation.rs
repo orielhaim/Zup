@@ -164,6 +164,10 @@ pub struct LauncherOperation {
     pub privilege: Privilege,
     pub previous: ObservedLauncherState,
     pub conflict: Option<Conflict>,
+    /// File whose icon the shortcut should show. Absent when the shortcut
+    /// should use its target's own icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<TargetPath>,
 }
 
 /// One search-path entry decision.

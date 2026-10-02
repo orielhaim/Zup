@@ -17,7 +17,7 @@ use zup_ui_sdk::prelude::InstallScope;
 
 use crate::model::{ComponentKind, ComponentRow, Location, Pending, ScopeChoice as Choice};
 use crate::theme::{size, space, text};
-use crate::ui::{Handler, caption};
+use crate::ui::{ChoiceHandler, Handler, caption};
 
 /// Where the installation goes, and the way to put it somewhere else.
 ///
@@ -145,7 +145,7 @@ fn rems_of(value: f32) -> zup_ui_sdk::gpui_kit::Rems {
 pub struct ScopeChoice {
     choices: Vec<Choice>,
     selected: InstallScope,
-    on_select: std::rc::Rc<dyn Fn(InstallScope, &mut Window, &mut App)>,
+    on_select: ChoiceHandler<InstallScope>,
 }
 
 impl ScopeChoice {

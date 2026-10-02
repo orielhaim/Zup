@@ -446,6 +446,7 @@ fn plan(
         plugins: resolved_plugins,
         total_size,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
         files,
         ui_assets: Vec::new(),
     }

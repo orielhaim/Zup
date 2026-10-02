@@ -146,6 +146,83 @@ pub fn read_resource(path: &Path, id: usize) -> Result<Vec<u8>, ResourceError> {
     result
 }
 
+/// `RT_ICON`.
+const ICON_RESOURCE: u16 = 3;
+/// `RT_GROUP_ICON`.
+const ICON_GROUP_RESOURCE: u16 = 14;
+
+/// Add an application icon to an executable that already exists.
+///
+/// `images` are stored under ids 1..n and `group` is the directory stored as
+/// id 1. Existing resources of other types are left in place.
+pub fn apply_icon(
+    executable: &Path,
+    images: &[Vec<u8>],
+    group: &[u8],
+) -> Result<(), ResourceError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    if images.is_empty() || group.is_empty() {
+        return Err(ResourceError::Missing);
+    }
+    if images.len() > MAX_RESOURCE_ID {
+        return Err(ResourceError::Pe(PeError::TooManyResources {
+            count: images.len(),
+            limit: MAX_RESOURCE_ID,
+        }));
+    }
+    let wide: Vec<u16> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let update = unsafe { BeginUpdateResourceW(wide.as_ptr(), 0) };
+    if update.is_null() {
+        return Err(ResourceError::Api(unsafe { GetLastError() }));
+    }
+    let result = (|| {
+        for (index, image) in images.iter().enumerate() {
+            write_typed(update, ICON_RESOURCE, index + 1, image)?;
+        }
+        write_typed(update, ICON_GROUP_RESOURCE, 1, group)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        unsafe {
+            EndUpdateResourceW(update, 1);
+        }
+        return Err(error);
+    }
+    if unsafe { EndUpdateResourceW(update, 0) } == 0 {
+        return Err(ResourceError::Api(unsafe { GetLastError() }));
+    }
+    Ok(())
+}
+
+fn write_typed(update: Handle, kind: u16, id: usize, bytes: &[u8]) -> Result<(), ResourceError> {
+    let size = u32::try_from(bytes.len()).map_err(|_| ResourceError::Api(87))?;
+    if u64::from(size) > MAX_RESOURCE_SIZE || id > MAX_RESOURCE_ID {
+        return Err(ResourceError::Pe(PeError::ResourceTooLarge {
+            size: bytes.len() as u64,
+            limit: MAX_RESOURCE_SIZE,
+        }));
+    }
+    let ok = unsafe {
+        UpdateResourceW(
+            update,
+            kind as *const u16,
+            id as *const u16,
+            0,
+            bytes.as_ptr().cast(),
+            size,
+        )
+    };
+    if ok == 0 {
+        return Err(ResourceError::Api(unsafe { GetLastError() }));
+    }
+    Ok(())
+}
+
 /// Why a resource table could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceError {

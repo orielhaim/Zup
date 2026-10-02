@@ -47,6 +47,7 @@ pub fn save_shortcut(
     target: &TargetPath,
     arguments: &[String],
     working_directory: Option<&TargetPath>,
+    icon: Option<&TargetPath>,
 ) -> Result<(), String> {
     let mut link = if current_path.exists() {
         lnks::Shortcut::load(current_path).map_err(|error| error.to_string())?
@@ -66,5 +67,8 @@ pub fn save_shortcut(
         )
     };
     link.working_dir = working_directory.map(host_path);
+    if let Some(icon) = icon {
+        link.icon = Some(lnks::Icon::new(host_path(icon)));
+    }
     link.save(output_path).map_err(|error| error.to_string())
 }

@@ -36,7 +36,13 @@ fn build_plan_from(source: &str, files: &[(&str, &[u8])]) -> zup_build::BuildPla
             (config, installer)
         })
         .collect::<Vec<_>>();
-    materialize(&dir.path().join("zup.toml"), &manifest, selected).expect("materialize")
+    materialize(
+        &dir.path().join("zup.toml"),
+        &manifest,
+        selected,
+        zup_build::Writes::None,
+    )
+    .expect("materialize")
 }
 
 const BASE: &str = r#"
@@ -896,7 +902,13 @@ destination = "${install}"
             (config, installer)
         })
         .collect::<Vec<_>>();
-    let build = materialize(&dir.path().join("zup.toml"), &manifest, selected).unwrap();
+    let build = materialize(
+        &dir.path().join("zup.toml"),
+        &manifest,
+        selected,
+        zup_build::Writes::None,
+    )
+    .unwrap();
     let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
 
     let result = plan(

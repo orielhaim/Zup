@@ -280,6 +280,7 @@ fn an_offline_artifact_without_a_runtime_is_incomplete() {
             ui_assets: Vec::new(),
             total_size: 0,
             prerequisite_size: 0,
+            icons: zup_core::TargetIcons::default(),
         },
         &[],
         &[],

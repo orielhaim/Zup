@@ -39,6 +39,7 @@ fn acme_project() -> (TempDir, zup_build::BuildPlan) {
         &dir.path().join("zup.toml"),
         &manifest,
         vec![(config, installer)],
+        zup_build::Writes::None,
     )
     .expect("materialize");
     (dir, build)

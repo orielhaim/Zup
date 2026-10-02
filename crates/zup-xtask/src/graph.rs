@@ -92,6 +92,10 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     // a developer's build, and a user installing an application has no build to
     // describe.
     "zup-automation",
+    // Icon compilation. It runs while a project is built and must not be linked
+    // into an installer: the generated files travel with the plan, and the
+    // rasterizer does not.
+    "zup-assets",
 ];
 
 /// The crates published for use outside this repository.

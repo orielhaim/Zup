@@ -17,6 +17,7 @@ use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
+use zup_assets::IconCache;
 use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
 
@@ -29,11 +30,18 @@ pub fn materialize<S>(
     manifest_path: &Path,
     manifest: &Manifest,
     selected: S,
+    writes: Writes,
 ) -> Result<BuildPlan, BuildError>
 where
     S: AsRef<[(ResolvedTargetConfig, Installer)]>,
 {
-    materialize_with_policy(manifest_path, manifest, selected, &PortableSourceFilePolicy)
+    materialize_with_policy(
+        manifest_path,
+        manifest,
+        selected,
+        &PortableSourceFilePolicy,
+        writes,
+    )
 }
 
 /// Materialize selected target sources into one deterministic aggregate plan.
@@ -46,12 +54,27 @@ pub fn materialize_with_policy<S>(
     manifest: &Manifest,
     selected: S,
     policy: &dyn SourceFilePolicy,
+    writes: Writes,
 ) -> Result<BuildPlan, BuildError>
 where
     S: AsRef<[(ResolvedTargetConfig, Installer)]>,
 {
     let assets: BTreeMap<zup_core::TargetProfileId, Vec<ResolvedAsset>> = BTreeMap::new();
-    materialize_with_assets(manifest_path, manifest, selected, &assets, policy)
+    materialize_with_assets(manifest_path, manifest, selected, &assets, policy, writes)
+}
+
+/// What a materialization may leave behind in the project.
+///
+/// Materializing an icon publishes it under `.zup` so the next build reuses the
+/// bytes instead of rasterizing again. That is a build's business. A command
+/// that only reports asks for [`Writes::None`] and gets the same answer without
+/// the files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Writes {
+    /// Publish what was derived, for a later build to reuse.
+    Publish,
+    /// Create and remove nothing.
+    None,
 }
 
 /// Materialize selected target sources, carrying the UI assets a preset named.
@@ -67,6 +90,7 @@ pub fn materialize_with_assets<S>(
     selected: S,
     ui_assets: &BTreeMap<zup_core::TargetProfileId, Vec<ResolvedAsset>>,
     policy: &dyn SourceFilePolicy,
+    writes: Writes,
 ) -> Result<BuildPlan, BuildError>
 where
     S: AsRef<[(ResolvedTargetConfig, Installer)]>,
@@ -75,6 +99,10 @@ where
     validate_selection(selected)?;
 
     let project_root = project_root(manifest_path);
+    let icons = match writes {
+        Writes::Publish => IconCache::open(project_root.join(".zup").join("icons")),
+        Writes::None => IconCache::in_memory(),
+    };
     let mut selected = selected.to_vec();
     selected.sort_by(|left, right| left.0.profile.cmp(&right.0.profile));
 
@@ -86,11 +114,19 @@ where
             .cloned()
             .unwrap_or_default();
         assets.sort_by(|left, right| left.name.cmp(&right.name));
-        let target = materialize_target(&project_root, manifest, config, installer, assets, policy)
-            .map_err(|source| BuildError::Target {
-                profile,
-                source: Box::new(source),
-            })?;
+        let target = materialize_target(
+            &project_root,
+            manifest,
+            config,
+            installer,
+            assets,
+            &icons,
+            policy,
+        )
+        .map_err(|source| BuildError::Target {
+            profile,
+            source: Box::new(source),
+        })?;
         targets.push(target);
     }
 
@@ -133,6 +169,7 @@ fn materialize_target(
     config: ResolvedTargetConfig,
     mut installer: Installer,
     ui_assets: Vec<ResolvedAsset>,
+    icons: &IconCache,
     policy: &dyn SourceFilePolicy,
 ) -> Result<TargetBuildPlan, BuildError> {
     let plugins = manifest
@@ -190,6 +227,14 @@ fn materialize_target(
     let file_count = resolved.len();
     info!(file_count, total_size, "materialization complete");
 
+    let icons = crate::icons::compile_icons(
+        project_root,
+        icons,
+        manifest.icon.as_ref(),
+        &installer,
+        policy,
+    )?;
+
     Ok(TargetBuildPlan {
         installer,
         prerequisites,
@@ -198,6 +243,7 @@ fn materialize_target(
         ui_assets,
         total_size,
         prerequisite_size,
+        icons,
     })
 }
 

@@ -65,6 +65,7 @@ fn build(source: &str) -> BuildPlan {
         &dir.path().join("zup.toml"),
         &manifest,
         vec![(config, installer)],
+        zup_build::Writes::None,
     )
     .expect("materializes")
 }

@@ -92,7 +92,11 @@ fn installed(op: &LauncherOperation) -> LauncherState {
     }
 }
 
-fn write(path: &TargetPath, value: &LauncherState) -> Result<(), String> {
+fn write(
+    path: &TargetPath,
+    value: &LauncherState,
+    icon: Option<&zup_platform::TargetPath>,
+) -> Result<(), String> {
     let path = host_path(path);
     match value {
         LauncherState::Absent => std::fs::remove_file(&path).map_err(|e| e.to_string()),
@@ -111,6 +115,7 @@ fn write(path: &TargetPath, value: &LauncherState) -> Result<(), String> {
                     target,
                     arguments,
                     working_directory.as_ref(),
+                    icon,
                 )?;
                 std::fs::OpenOptions::new()
                     .read(true)
@@ -142,7 +147,7 @@ pub fn apply(op: &LauncherOperation) -> Result<BackendReceipt, String> {
         return Err("shortcut changed since planning".into());
     }
     let installed = installed(op);
-    write(&op.launcher_path, &installed)?;
+    write(&op.launcher_path, &installed, op.icon.as_ref())?;
     Ok(BackendReceipt::Launcher {
         launcher_path: op.launcher_path.clone(),
         privilege: op.privilege,
@@ -159,7 +164,7 @@ pub fn rollback(
     if state(launcher_path)? != Some(installed.clone()) {
         return Err("shortcut changed after installation".into());
     }
-    write(launcher_path, previous)
+    write(launcher_path, previous, None)
 }
 
 pub fn reconcile(op: &LauncherOperation) -> Result<NativeReconcileResult, String> {
@@ -217,6 +222,7 @@ mod tests {
             privilege: zup_core::Privilege::User,
             previous: ObservedLauncherState::Absent,
             conflict: None,
+            icon: None,
         };
         assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::NotApplied);
         let first = apply(&op).unwrap();
@@ -284,7 +290,7 @@ mod tests {
             arguments: vec!["foreign".into()],
             working_directory: None,
         };
-        write(&launcher_path, &foreign).unwrap();
+        write(&launcher_path, &foreign, None).unwrap();
         assert!(rollback(&launcher_path, previous, first_installed).is_err());
         assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::Ambiguous);
     }

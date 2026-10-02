@@ -88,6 +88,7 @@ fn execute(
         &args.project.target,
         &args.project.overrides(),
         &resolver,
+        zup_build::Writes::Publish,
     )?;
 
     // `--target` names a native variant, `--artifact` names a file a user
@@ -180,6 +181,7 @@ fn build_variants(
     resolver: &ToolchainResolver,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
+    report_icon_warnings(reporter, loaded);
     let targets = &loaded.selected_targets;
     let runtimes = build_inputs::resolve_runtimes(
         build_inputs::InputMode::Enforce,
@@ -353,6 +355,7 @@ fn build_artifacts(
     resolver: &ToolchainResolver,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
+    report_icon_warnings(reporter, loaded);
     let app = &loaded.manifest.app;
     let runtimes = resolve_runtimes(args, loaded, resolver)?;
     if args.dispatcher.len() > 1 {
@@ -457,6 +460,7 @@ fn build_artifacts(
                     )
                 },
             )?;
+            stamp_application_icon(written, &loaded.build)?;
             std::fs::metadata(written)
                 .map(|meta| meta.len())
                 .map_err(|error| {
@@ -901,4 +905,33 @@ fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, 
         }
     }
     by_variant.into_iter().collect()
+}
+
+fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProject) {
+    for target in &loaded.build.targets {
+        for warning in &target.icons.warnings {
+            reporter.log(LogLevel::Warning, warning.clone());
+        }
+    }
+}
+
+pub(crate) fn stamp_application_icon(
+    path: &Path,
+    plan: &zup_build::BuildPlan,
+) -> miette::Result<()> {
+    let Some(icon) = plan.targets.iter().find_map(|target| {
+        target
+            .icons
+            .artifacts
+            .iter()
+            .find(|icon| icon.role == zup_core::IconRole::Windows)
+    }) else {
+        return Ok(());
+    };
+    if icon.executable_group.is_empty() {
+        return Ok(());
+    }
+    zup_windows::apply_icon(path, &icon.executable_images, &icon.executable_group).map_err(
+        |error| crate::failure::error("zup.build.icon", format!("application icon: {error}")),
+    )
 }

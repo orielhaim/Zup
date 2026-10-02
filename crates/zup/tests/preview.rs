@@ -369,6 +369,7 @@ fn a_build_and_a_preview_resolve_the_same_window() {
         )
         .expect("a project"),
         &resolver,
+        zup_build::Writes::Publish,
     )
     .expect("a materializable project");
     let composed = loaded.build.targets[0]

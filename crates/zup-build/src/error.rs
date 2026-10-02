@@ -209,4 +209,17 @@ pub enum BuildError {
         #[source]
         source: io::Error,
     },
+
+    /// The icon path does not exist.
+    #[error("icon `{path}` does not exist")]
+    #[diagnostic(
+        code(zup_build::icon_missing),
+        help("add the file, or remove `icon` to use the built-in icon")
+    )]
+    IconMissing { path: String },
+
+    /// The icon could not be compiled.
+    #[error("icon `{path}`: {message}")]
+    #[diagnostic(code(zup_build::icon))]
+    Icon { path: String, message: String },
 }

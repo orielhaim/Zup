@@ -148,6 +148,7 @@ destination = "${install}"
         &project.join("zup.toml"),
         &manifest,
         vec![(config.clone(), installer)],
+        zup_build::Writes::None,
     )
     .expect("a build plan");
     let target = build.targets.first().expect("one target");

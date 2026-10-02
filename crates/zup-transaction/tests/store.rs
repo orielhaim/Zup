@@ -153,7 +153,7 @@ impl TransactionStore for RevisionRaceStore {
     ) -> Result<(), StoreError> {
         if self
             .budget
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(1)
             })
             .is_err()

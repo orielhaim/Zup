@@ -393,6 +393,9 @@ fn plan_launchers(
     ledger: Option<&InstallLedger>,
     summary: &mut ExecutionSummary,
 ) -> Vec<LauncherOperation> {
+    let icon = target.files.iter().find_map(|file| {
+        matches!(file.key, ResourceKey::Maintenance { .. }).then(|| file.destination.clone())
+    });
     let mut out = Vec::with_capacity(target.launchers.len());
     for (desired, observed) in target.launchers.iter().zip(snapshot.launchers.iter()) {
         let owned = ledger.and_then(|l| l.resources.get(&desired.key));
@@ -494,6 +497,7 @@ fn plan_launchers(
             privilege: desired.privilege,
             previous: observed.state.clone(),
             conflict,
+            icon: icon.clone(),
         });
     }
     out

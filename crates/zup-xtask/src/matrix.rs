@@ -134,7 +134,9 @@ pub const PORTABLE_CORE: &[&str] = &[
 /// at once. It has no Windows vocabulary of its own to relax, but it is a
 /// platform file format crate by the same argument, and classifying it here keeps
 /// that a fact about what it is rather than a judgement made per call site.
-pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe", "zup-binary"];
+/// `zup-assets` is here because ICO and ICNS are file formats: it names them,
+/// and it still has no host API.
+pub const PORTABLE_FILE_FORMAT: &[&str] = &["zup-pe", "zup-binary", "zup-assets"];
 
 /// Portable crates that verify the stack instead of shipping inside an
 /// installer. Their test suites are part of the native portable run.

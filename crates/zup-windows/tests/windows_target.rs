@@ -181,6 +181,7 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan
         &project.join("zup.toml"),
         &manifest,
         vec![(config.clone(), installer)],
+        zup_build::Writes::None,
     )
     .expect("materialize");
     let install = plan(
@@ -221,6 +222,7 @@ fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::Target
         &project.join("zup.toml"),
         &manifest,
         vec![(config.clone(), installer)],
+        zup_build::Writes::None,
     )
     .expect("materialize");
     let install =
@@ -651,6 +653,7 @@ mod transaction_fingerprint {
                 ui_assets: Vec::new(),
                 total_size: 0,
                 prerequisite_size: 0,
+                icons: zup_core::TargetIcons::default(),
             }],
         }
     }

@@ -29,6 +29,9 @@ use zup_ui_sdk::gpui_kit::{App, Window};
 /// What a control does when it is used.
 pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// What a control does when it is used, for one of a fixed set of choices.
+pub type ChoiceHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
+
 /// Wrap a closure as a [`Handler`].
 pub fn handler(f: impl Fn(&mut Window, &mut App) + 'static) -> Handler {
     Rc::new(f)

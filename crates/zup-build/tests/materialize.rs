@@ -6,7 +6,7 @@ use std::path::Path;
 use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{BuildError, FilePattern, Sha256Digest, materialize};
+use zup_build::{BuildError, FilePattern, Sha256Digest, Writes, materialize};
 use zup_core::{MAX_PLUGIN_ARTIFACTS, TargetTriple};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 
@@ -62,8 +62,13 @@ fn materialize_one(
         .into_iter()
         .next()
         .expect("selected target");
-    let mut plan = materialize(manifest_path, manifest, vec![(config, installer)])
-        .map_err(unwrap_target_error)?;
+    let mut plan = materialize(
+        manifest_path,
+        manifest,
+        vec![(config, installer)],
+        Writes::None,
+    )
+    .map_err(unwrap_target_error)?;
     assert_eq!(plan.targets.len(), 1);
     Ok(plan.targets.pop().expect("target plan"))
 }
@@ -765,7 +770,7 @@ fn materialize_targets(
 ) -> Result<zup_build::BuildPlan, BuildError> {
     let (manifest, mut selected) = selected_targets(source);
     selected.reverse();
-    materialize(manifest_path, &manifest, selected)
+    materialize(manifest_path, &manifest, selected, Writes::None)
 }
 
 #[test]
@@ -815,6 +820,21 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
     assert_ne!(linux.files[0].sha256, windows.files[0].sha256);
     assert_eq!(linux.total_size, 5);
     assert_eq!(windows.total_size, 7);
+    assert!(linux.icons.fallback);
+    assert!(windows.icons.fallback);
+    assert!(linux.icons.artifacts.iter().all(|icon| matches!(
+        icon.role,
+        zup_core::IconRole::LinuxSvg | zup_core::IconRole::LinuxPng { .. }
+    )));
+    assert!(
+        windows
+            .icons
+            .artifacts
+            .iter()
+            .all(|icon| icon.role == zup_core::IconRole::Windows)
+    );
+    assert_eq!(windows.icons.artifacts.len(), 1);
+    assert!(!windows.icons.artifacts[0].executable_group.is_empty());
     assert_eq!(
         plan.target_by_triple(&TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()),
         Some(windows)
@@ -918,22 +938,114 @@ fn selection_errors_are_rejected_before_filesystem_access() {
     let path = Path::new("missing-project/zup.toml");
 
     let (manifest, _) = selected_targets(TARGET_MATRIX);
-    let error = materialize(path, &manifest, Vec::new()).unwrap_err();
+    let error = materialize(path, &manifest, Vec::new(), Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::EmptyTargetSelection));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
     selected[1].0.profile = selected[0].0.profile.clone();
-    let error = materialize(path, &manifest, selected).unwrap_err();
+    let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::DuplicateTargetProfile { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
     selected[1].0.target = selected[0].0.target.clone();
     selected[1].1.target = selected[1].0.target.clone();
-    let error = materialize(path, &manifest, selected).unwrap_err();
+    let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::DuplicateTarget { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
     selected[0].1.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
-    let error = materialize(path, &manifest, selected).unwrap_err();
+    let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::TargetMismatch { .. }));
+}
+
+fn with_icon(source_line: &str) -> String {
+    manifest_toml("").replace(
+        "version = \"1.0.0\"\n",
+        &format!("version = \"1.0.0\"\n{source_line}\n"),
+    )
+}
+
+#[test]
+fn a_project_icon_replaces_the_built_in_mark() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#fff"/></svg>"##;
+    let plain = project(&[("dist/app.exe", b"app")]);
+    let branded = project(&[("dist/app.exe", b"app"), ("assets/icon.svg", svg)]);
+    let plain_plan = materialize_project(plain.path(), "").unwrap();
+    let source = with_icon("icon = \"assets/icon.svg\"");
+    let manifest = parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let branded_plan =
+        materialize_one(&branded.path().join("zup.toml"), &manifest, installer).unwrap();
+    assert!(plain_plan.icons.fallback);
+    assert!(!branded_plan.icons.fallback);
+    assert_ne!(
+        plain_plan.icons.artifacts[0].sha256,
+        branded_plan.icons.artifacts[0].sha256
+    );
+}
+
+#[test]
+fn only_a_publishing_materialization_leaves_the_icon_cache() {
+    let quiet = project(&[("dist/app.exe", b"app")]);
+    let quiet_plan = materialize_project(quiet.path(), "").unwrap();
+    assert!(
+        !quiet.path().join(".zup").exists(),
+        "a plan nobody asked to install must not leave anything behind"
+    );
+
+    let loud = project(&[("dist/app.exe", b"app")]);
+    let (manifest, selected) = selected_targets(&manifest_toml(""));
+    let loud_plan = materialize(
+        &loud.path().join("zup.toml"),
+        &manifest,
+        selected,
+        Writes::Publish,
+    )
+    .unwrap();
+
+    assert_eq!(
+        quiet_plan.icons.artifacts[0].sha256, loud_plan.targets[0].icons.artifacts[0].sha256,
+        "the cache is a memo, so both must compile the same icon"
+    );
+    assert!(
+        loud.path().join(".zup").join("icons").is_dir(),
+        "a build publishes what it derived, so the next build can reuse it"
+    );
+    assert!(quiet_plan.icons.artifacts[0].source.is_none());
+    assert!(loud_plan.targets[0].icons.artifacts[0].source.is_some());
+}
+
+#[test]
+fn a_missing_icon_names_the_file() {
+    let dir = project(&[("dist/app.exe", b"app")]);
+    let source = with_icon("icon = \"assets/icon.svg\"");
+    let manifest = parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
+    assert!(matches!(error, BuildError::IconMissing { .. }), "{error}");
+    assert!(error.to_string().contains("icon.svg"), "{error}");
+}
+
+#[test]
+fn a_small_raster_warns_and_still_builds() {
+    // 16×16 PNG. The Windows icon needs 256px, so this must warn and still compile.
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0xf3, 0xff, 0x61, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0xf0, 0x9f, 0x12, 0xcc, 0x30, 0x6a, 0xc0, 0xa8, 0x01, 0xa3, 0x06, 0x0c, 0x17,
+        0x03, 0x00, 0x30, 0xc4, 0xfe, 0x10, 0x1c, 0x27, 0xe4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let dir = project(&[("dist/app.exe", b"app"), ("assets/icon.png", png)]);
+    let source = with_icon("icon = \"assets/icon.png\"");
+    let manifest = parse(&source).unwrap();
+    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
+    assert!(
+        plan.icons.warnings[0].contains("16×16"),
+        "{}",
+        plan.icons.warnings[0]
+    );
+    assert_eq!(plan.icons.artifacts.len(), 1);
 }

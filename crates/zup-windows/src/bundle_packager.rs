@@ -555,6 +555,7 @@ pub fn build_self_contained_executable(
     let package = temporary.path().join("installer.zup");
     let package_size = BundleWriter::write_file(plan, artifacts, &package)?;
     embed_bundle_file(executable, output, &package, preset)?;
+    apply_plan_icon(output, plan)?;
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
 
@@ -601,6 +602,7 @@ pub fn plan_only_runtime_bytes(
     std::fs::write(&path, &package)?;
     let out = temporary.path().join("runtime.exe");
     embed_bundle_file(executable, &out, &path, None)?;
+    apply_plan_icon(&out, plan)?;
     Ok((std::fs::read(&out)?, package_size))
 }
 
@@ -721,6 +723,25 @@ fn package_documents(package: &Package) -> Result<Vec<ResourceDocument>, BundleE
         });
     }
     Ok(documents)
+}
+
+fn apply_plan_icon(output: &Path, plan: &TargetBuildPlan) -> Result<(), BundleError> {
+    let Some(icon) = plan
+        .icons
+        .artifacts
+        .iter()
+        .find(|icon| icon.role == zup_core::IconRole::Windows)
+    else {
+        return Ok(());
+    };
+    if icon.executable_images.is_empty() || icon.executable_group.is_empty() {
+        return Ok(());
+    }
+    crate::pe_resources::apply_icon(output, &icon.executable_images, &icon.executable_group)
+        .map_err(|error| match error {
+            crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
+            other => BundleError::Resource(other.to_string()),
+        })
 }
 
 fn embed_bundle_resource(

@@ -129,8 +129,8 @@ impl Simulation {
     fn event(&mut self, now: Instant) -> Step {
         let stage = self.stages[self.index];
         let elapsed = now.saturating_duration_since(self.stage_started);
-        let fraction = (elapsed.as_millis() as u128).saturating_mul(stage.weight as u128)
-            / (stage.duration.as_millis().max(1) as u128);
+        let fraction = elapsed.as_millis().saturating_mul(stage.weight as u128)
+            / stage.duration.as_millis().max(1);
         let completed = self
             .finished_weight
             .saturating_add(fraction as u64)

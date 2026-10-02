@@ -20,6 +20,7 @@
 
 mod digest;
 mod error;
+mod icons;
 mod materialize;
 mod pattern;
 mod plugins;
@@ -31,7 +32,7 @@ pub use zup_core::{
 pub use digest::{DigestParseError, Sha256Digest};
 pub use error::BuildError;
 pub use materialize::{
-    MAX_UPDATE_ROOT_BYTES, ResolvedUpdateRoot, materialize, materialize_destination,
+    MAX_UPDATE_ROOT_BYTES, ResolvedUpdateRoot, Writes, materialize, materialize_destination,
     materialize_with_assets, materialize_with_policy, project_root, resolve_project_source,
     resolve_source_root, resolve_update_root,
 };

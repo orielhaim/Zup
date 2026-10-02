@@ -461,6 +461,7 @@ impl Inspection<'_> {
             self.manifest,
             selection,
             &zup_windows::WindowsSourceFilePolicy,
+            zup_build::Writes::None,
         ) {
             Ok(build) => PlanOutcome::Ready(Box::new(build)),
             Err(error) => {

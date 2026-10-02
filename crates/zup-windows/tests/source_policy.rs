@@ -116,6 +116,7 @@ fn materialize_target(
         manifest,
         vec![(config, installer)],
         policy,
+        zup_build::Writes::None,
     )
     .map_err(|error| match error {
         BuildError::Target { source, .. } => *source,

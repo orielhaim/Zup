@@ -48,6 +48,7 @@ pub fn run_stage(
         &selection.target,
         &selection.overrides(),
         &crate::resolver(toolchain_root.clone())?,
+        zup_build::Writes::Publish,
     )?;
     let resolver = crate::resolver(toolchain_root)?;
     let runtimes = resolve_runtimes(&loaded, &resolver)?;
@@ -450,6 +451,7 @@ fn stage_thin_installers(
                 format!("`{}`: {error}", file.display()),
             )
         })?;
+        crate::build::stamp_application_icon(&file, &loaded.build)?;
         written.push((label, file));
     }
 

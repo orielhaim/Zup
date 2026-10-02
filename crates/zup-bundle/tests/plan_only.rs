@@ -53,8 +53,13 @@ destination = "${{install}}"
         .into_iter()
         .next()
         .unwrap();
-    let mut build =
-        zup_build::materialize(&root.join("zup.toml"), &parsed, vec![(config, installer)]).unwrap();
+    let mut build = zup_build::materialize(
+        &root.join("zup.toml"),
+        &parsed,
+        vec![(config, installer)],
+        zup_build::Writes::None,
+    )
+    .unwrap();
     build.targets.pop().unwrap()
 }
 

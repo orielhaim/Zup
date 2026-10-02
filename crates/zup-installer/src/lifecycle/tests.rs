@@ -105,6 +105,7 @@ fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
         ui_assets: Vec::new(),
         total_size: size,
         prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
     }
 }
 

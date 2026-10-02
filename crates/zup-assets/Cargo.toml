@@ -1,0 +1,23 @@
+[package]
+name = "zup-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Application icon compilation for zup"
+
+[dependencies]
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+resvg = { version = "0.48", default-features = false, features = [
+  "raster-images",
+] }
+sha2.workspace = true
+thiserror.workspace = true
+tiny-skia = "0.12"
+usvg = { version = "0.48", default-features = false }
+ico = "0.5"
+icns = { version = "0.5", features = ["jp2io", "pngio"] }
+
+[dev-dependencies]
+tempfile.workspace = true

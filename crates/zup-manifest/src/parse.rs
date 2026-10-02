@@ -37,7 +37,8 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
 
     let manifest = Manifest {
         schema,
-        app: raw.app,
+        app: raw.app.app,
+        icon: raw.app.icon,
         frontend: raw.frontend,
         ui: raw.ui,
         build: raw.build,
@@ -76,7 +77,8 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     schema: Spanned<u32>,
-    app: App,
+    #[serde(deserialize_with = "deserialize_app")]
+    app: ParsedApp,
     #[serde(default)]
     frontend: Frontend,
     #[serde(default)]
@@ -108,4 +110,22 @@ struct RawManifest {
     protocols: Vec<Targeted<Protocol>>,
     #[serde(default)]
     file_associations: Vec<Targeted<FileAssociation>>,
+}
+
+struct ParsedApp {
+    app: App,
+    icon: Option<crate::icon::IconConfig>,
+}
+
+fn deserialize_app<'de, D>(deserializer: D) -> Result<ParsedApp, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut value = toml::Value::deserialize(deserializer)?;
+    let icon = match value.as_table_mut().and_then(|table| table.remove("icon")) {
+        Some(icon) => Some(crate::icon::from_value(icon).map_err(serde::de::Error::custom)?),
+        None => None,
+    };
+    let app = App::deserialize(value).map_err(serde::de::Error::custom)?;
+    Ok(ParsedApp { app, icon })
 }
