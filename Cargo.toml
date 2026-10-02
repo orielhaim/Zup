@@ -10,7 +10,7 @@ default-members = ["crates/zup"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/orielhaim/zup"
 description = "A programmable application installer for the modern desktop"
 
@@ -44,7 +44,10 @@ uuid = { version = "1", features = ["v7", "serde"] }
 semver = { version = "1", features = ["serde"] }
 target-lexicon = { version = "0.13", features = ["std"] }
 bytes = "1"
-object = { version = "0.40", default-features = false, features = ["read", "std"] }
+object = { version = "0.40", default-features = false, features = [
+  "read",
+  "std",
+] }
 
 # Workspace crates
 zup-automation = { path = "crates/zup-automation" }
