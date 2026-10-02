@@ -4,9 +4,10 @@ use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
 use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_ui_protocol::{
-    ComponentId, DiagnosticKind, DiagnosticPresentation, InstallScope, MaintenanceState,
-    OperationPhase, ProductIdentity, ProgressPresentation, UiAction, UiCapabilities, UiCapability,
-    UiSnapshot, UiState, UiSurface, UpdatePresentation, UpdateState,
+    ComponentId, DiagnosticKind, DiagnosticPresentation, InstallScope, LaunchTarget,
+    MaintenanceState, OperationKind, OperationPhase, PlanStatus, ProductIdentity,
+    ProgressPresentation, UiAction, UiCapabilities, UiCapability, UiSnapshot, UiState, UiSurface,
+    UpdatePresentation, UpdateState,
 };
 
 use crate::convert;
@@ -36,6 +37,13 @@ impl Selection {
     }
 }
 
+/// One launcher the application declares, and the component that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launchable {
+    pub target: LaunchTarget,
+    pub component: Option<ComponentId>,
+}
+
 /// What the host decided an action means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDecision {
@@ -47,8 +55,8 @@ pub enum HostDecision {
         /// delete, so this process is the one that has to finish it.
         cleanup_lock: bool,
     },
-    /// Ask the engine what this selection would change.
-    Preview(Selection),
+    /// The choices changed: work out what they would change.
+    Plan(Selection),
     /// Resolve the configured update channel.
     Update,
     /// Ask the running operation to stop at a safe boundary.
@@ -57,6 +65,8 @@ pub enum HostDecision {
     OpenLog,
     /// Put a diagnostic summary on the clipboard.
     CopyDiagnostics,
+    /// Start the installed application through this launcher.
+    Launch(LaunchTarget),
     /// The action was absorbed into the snapshot and needs no engine work.
     Acknowledged,
     /// The action does not apply here.
@@ -86,6 +96,8 @@ pub enum ActionRefusal {
     NothingToConfirm,
     #[error("there is no session log to open yet")]
     NoLog,
+    #[error("there is nothing installed to start")]
+    NothingToLaunch,
 }
 
 /// The installer's authoritative view of itself.
@@ -104,6 +116,8 @@ pub struct HostState {
     log_path: Option<String>,
     /// Whether the last operation is still owned by a running thread.
     running: bool,
+    /// What the application can be started through once it is installed.
+    launchers: Vec<Launchable>,
 }
 
 impl HostState {
@@ -130,22 +144,36 @@ impl HostState {
             UiSurface::Install(_) => UiState::Options,
             UiSurface::Maintenance(_) => UiState::Maintenance,
         };
+        let plan = if capabilities.contains(UiCapability::PlanPreview) {
+            PlanStatus::Computing { last: None }
+        } else {
+            PlanStatus::Unsupported
+        };
         Self {
             snapshot: UiSnapshot {
                 product,
                 surface,
                 state,
+                operation: None,
                 progress: None,
-                plan: None,
+                plan,
                 diagnostic: None,
                 update: None,
                 repair_drift: Vec::new(),
+                launch: None,
             },
             capabilities,
             retry: None,
             log_path: None,
             running: false,
+            launchers: Vec::new(),
         }
+    }
+
+    /// The launchers the application declares, in the order it declared them.
+    pub fn with_launchers(mut self, launchers: Vec<Launchable>) -> Self {
+        self.launchers = launchers;
+        self
     }
 
     pub fn snapshot(&self) -> &UiSnapshot {
@@ -185,7 +213,7 @@ impl HostState {
             UiAction::SetInstallDirectory { directory } => {
                 self.set_install_directory(Some(directory))
             }
-            UiAction::Preview => self.preview(),
+            UiAction::ResetInstallDirectory => self.set_install_directory(None),
             UiAction::Install => self.start(LifecycleAction::Install, false),
             UiAction::Update => self.update(),
             UiAction::Modify => self.maintenance_op(LifecycleAction::Modify, false),
@@ -205,19 +233,52 @@ impl HostState {
                 }
             }
             UiAction::CopyDiagnostics => HostDecision::CopyDiagnostics,
+            UiAction::Launch => match &self.snapshot.launch {
+                Some(target) => HostDecision::Launch(target.clone()),
+                None => HostDecision::Refused(ActionRefusal::NothingToLaunch),
+            },
             UiAction::Close => HostDecision::Acknowledged,
         }
     }
 
+    /// Ask for a plan of the current choices, when this host works plans out.
+    ///
+    /// The session calls this once when it opens; every change of choice asks
+    /// again through [`HostDecision::Plan`].
+    pub fn plan_request(&mut self) -> Option<Selection> {
+        if !self.capabilities.contains(UiCapability::PlanPreview) {
+            return None;
+        }
+        let last = self.snapshot.plan.latest().cloned().map(Box::new);
+        self.snapshot.plan = PlanStatus::Computing { last };
+        Some(Selection::from_surface(&self.snapshot.surface))
+    }
+
+    fn replan(&mut self) -> HostDecision {
+        match self.plan_request() {
+            Some(selection) => HostDecision::Plan(selection),
+            None => HostDecision::Acknowledged,
+        }
+    }
+
     fn set_scope(&mut self, scope: InstallScope) -> HostDecision {
+        if self.running {
+            return HostDecision::Refused(ActionRefusal::Busy);
+        }
         if !self.snapshot.surface.scopes().contains(&scope) {
             return HostDecision::Refused(ActionRefusal::UnsupportedScope);
         }
+        if self.snapshot.surface.scope() == scope {
+            return HostDecision::Acknowledged;
+        }
         self.snapshot.surface.set_scope(scope);
-        HostDecision::Acknowledged
+        self.replan()
     }
 
     fn set_component(&mut self, id: &ComponentId, selected: bool) -> HostDecision {
+        if self.running {
+            return HostDecision::Refused(ActionRefusal::Busy);
+        }
         let components = self.snapshot.surface.components_mut();
         let Some(component) = components.iter_mut().find(|component| &component.id == id) else {
             return HostDecision::Refused(ActionRefusal::UnknownComponent(id.to_string()));
@@ -225,26 +286,41 @@ impl HostState {
         if component.required && !selected {
             return HostDecision::Refused(ActionRefusal::RequiredComponent(id.to_string()));
         }
+        if component.selected == selected {
+            return HostDecision::Acknowledged;
+        }
         component.selected = selected;
-        HostDecision::Acknowledged
+        self.replan()
     }
 
     fn set_install_directory(&mut self, directory: Option<String>) -> HostDecision {
-        if directory.is_some() && !self.snapshot.surface.allows_directory_override() {
-            return HostDecision::Refused(ActionRefusal::DirectoryNotAllowed);
-        }
-        self.snapshot.surface.set_install_directory(directory);
-        HostDecision::Acknowledged
-    }
-
-    fn preview(&mut self) -> HostDecision {
-        if !self.capabilities.contains(UiCapability::PlanPreview) {
-            return HostDecision::Refused(ActionRefusal::UnsupportedSurface);
-        }
         if self.running {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
-        HostDecision::Preview(Selection::from_surface(&self.snapshot.surface))
+        if !self.snapshot.surface.allows_directory_override() {
+            return HostDecision::Refused(ActionRefusal::DirectoryNotAllowed);
+        }
+        let directory = directory.filter(|directory| !directory.trim().is_empty());
+        if self.snapshot.surface.install_directory() == directory.as_deref() {
+            return HostDecision::Acknowledged;
+        }
+        self.snapshot.surface.set_install_directory(directory);
+        self.replan()
+    }
+
+    /// Which lifecycle a person would recognize this action as.
+    fn operation_kind(&self, action: LifecycleAction) -> OperationKind {
+        match action {
+            LifecycleAction::Uninstall => OperationKind::Uninstall,
+            LifecycleAction::Modify => OperationKind::Modify,
+            LifecycleAction::Repair { .. } => OperationKind::Repair,
+            _ => match &self.snapshot.surface {
+                UiSurface::Install(options) if options.existing_version.is_some() => {
+                    OperationKind::Upgrade
+                }
+                _ => OperationKind::Install,
+            },
+        }
     }
 
     /// Start a lifecycle, recording the intent a `Retry` would repeat.
@@ -254,6 +330,7 @@ impl HostState {
         }
         let selection = Selection::from_surface(&self.snapshot.surface);
         self.retry = Some((action, selection.clone()));
+        self.snapshot.operation = Some(self.operation_kind(action));
         self.begin();
         HostDecision::Run {
             action,
@@ -324,6 +401,7 @@ impl HostState {
         if self.running {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
+        self.snapshot.operation = Some(self.operation_kind(action));
         self.begin();
         HostDecision::Run {
             action,
@@ -345,15 +423,38 @@ impl HostState {
             "Preparing…",
         ));
         self.snapshot.diagnostic = None;
+        self.snapshot.repair_drift.clear();
+        self.snapshot.launch = None;
     }
 
     /// Record the answer to "what will change".
+    ///
+    /// An answer for choices that have since changed is dropped: the request
+    /// for the current ones is already on its way.
     pub fn set_plan(&mut self, preview: zup_presentation::PlanPreview) {
         let preview = convert::plan(&preview);
-        self.snapshot
+        let selected: std::collections::BTreeSet<&ComponentId> = self
+            .snapshot
             .surface
-            .set_install_directory(Some(preview.install_directory.clone()));
-        self.snapshot.plan = Some(preview);
+            .components()
+            .iter()
+            .filter(|component| component.selected)
+            .map(|component| &component.id)
+            .collect();
+        let planned: std::collections::BTreeSet<&ComponentId> =
+            preview.selected_components.iter().collect();
+        let current = preview.scope == self.snapshot.surface.scope()
+            && (self.snapshot.surface.components().is_empty() || planned == selected);
+        if current {
+            self.snapshot.plan = PlanStatus::Ready {
+                preview: Box::new(preview),
+            };
+        }
+    }
+
+    /// The plan could not be worked out. The choices still stand.
+    pub fn plan_failed(&mut self, reason: String) {
+        self.snapshot.plan = PlanStatus::Failed { reason };
     }
 
     /// Record where the engine is writing its log.
@@ -400,9 +501,9 @@ impl HostState {
                 name, satisfied, ..
             } => {
                 let label = if *satisfied {
-                    format!("✓ {name}")
+                    format!("{name} is already installed")
                 } else {
-                    format!("↓ {name}")
+                    format!("{name} is needed")
                 };
                 self.advance(&label);
             }
@@ -413,7 +514,7 @@ impl HostState {
                     OperationPhase::Download,
                     *completed,
                     total.unwrap_or(0),
-                    "Downloading required component…",
+                    "Downloading a required component…",
                 );
             }
             RuntimeEvent::PrerequisiteInstall { name, .. } => {
@@ -440,14 +541,23 @@ impl HostState {
                 self.progress(convert::phase(phase), *completed, *total, action);
             }
             RuntimeEvent::RollingBack => self.advance("Restoring the previous state…"),
-            RuntimeEvent::Completed { outcome } => {
-                self.snapshot.state = match outcome.as_str() {
-                    "reboot_required" => UiState::Failed,
-                    "recovery_required" => UiState::RecoveryRequired,
-                    _ => UiState::Succeeded,
-                };
-                self.finish();
-            }
+            RuntimeEvent::Completed { outcome } => match outcome.as_str() {
+                "reboot_required" => {
+                    self.snapshot.state = UiState::Failed;
+                    self.finish();
+                }
+                "recovery_required" => {
+                    self.snapshot.state = UiState::RecoveryRequired;
+                    self.finish();
+                }
+                "cancelled" | "rolled_back" => {
+                    self.snapshot.state = self.resting_state();
+                    self.snapshot.diagnostic = None;
+                    self.snapshot.progress = None;
+                    self.finish();
+                }
+                _ => self.succeed(),
+            },
             RuntimeEvent::Failed { kind, message } => {
                 self.fail(message.clone(), kind == "recovery_required");
             }
@@ -469,10 +579,7 @@ impl HostState {
             S::ConnectingWorker => self.advance("Starting…"),
             S::Executing => self.advance("Installing files…"),
             S::RollingBack => self.advance("Restoring the previous state…"),
-            S::Completed => {
-                self.snapshot.state = UiState::Succeeded;
-                self.finish();
-            }
+            S::Completed => self.succeed(),
             S::Cancelled => {
                 self.snapshot.state = self.resting_state();
                 self.finish();
@@ -488,10 +595,8 @@ impl HostState {
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
         match outcome {
             InstallOutcome::Committed => {
-                self.snapshot.state = UiState::Succeeded;
-                self.snapshot.progress = None;
                 self.retry = None;
-                self.finish();
+                self.succeed();
             }
             InstallOutcome::RebootRequired {
                 prerequisite_id,
@@ -538,6 +643,33 @@ impl HostState {
         }
     }
 
+    /// The operation committed.
+    fn succeed(&mut self) {
+        self.snapshot.state = UiState::Succeeded;
+        self.snapshot.launch = self.launch_target();
+        self.finish();
+    }
+
+    /// What the installation can be started through, now that it has committed.
+    fn launch_target(&self) -> Option<LaunchTarget> {
+        if !self.capabilities.contains(UiCapability::Launch)
+            || self.snapshot.operation == Some(OperationKind::Uninstall)
+        {
+            return None;
+        }
+        let components = self.snapshot.surface.components();
+        self.launchers
+            .iter()
+            .find(|launcher| {
+                launcher.component.as_ref().is_none_or(|id| {
+                    components
+                        .iter()
+                        .any(|component| &component.id == id && component.selected)
+                })
+            })
+            .map(|launcher| launcher.target.clone())
+    }
+
     /// The operation is no longer owned by a thread.
     fn finish(&mut self) {
         self.running = false;
@@ -577,7 +709,7 @@ fn operation_label(id: &str) -> String {
     if id.contains("service") {
         "Registering services…".into()
     } else if id.contains("launcher") {
-        "Updating launchers…".into()
+        "Adding shortcuts…".into()
     } else if id.contains("file") {
         "Installing files…".into()
     } else {
@@ -593,9 +725,11 @@ fn diagnostic_for(
     if recovery_required {
         return zup_presentation::DiagnosticPresentation {
             kind: zup_presentation::DiagnosticKind::Recovery,
-            title: "Recovery is required".into(),
-            meaning: "The last transaction did not finish safely.".into(),
-            recovery: "Run recovery before starting another operation.".into(),
+            title: "The last change didn't finish".into(),
+            meaning: "Setup was interrupted while it was changing this computer, so the \
+                      installation is between two versions."
+                .into(),
+            recovery: "Let setup finish restoring it before you make other changes.".into(),
             technical_details: Some(message.into()),
         };
     }

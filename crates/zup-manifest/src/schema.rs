@@ -2,8 +2,8 @@ use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 use zup_core::Prerequisite;
 use zup_core::{
-    App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry, Protocol,
-    Service,
+    App, Component, ComponentGroup, FileAssociation, FileMapping, Frontend, Install, Launcher,
+    PathEntry, Protocol, Service,
 };
 
 use crate::{Build, Distribution, Plugin, Publish, SCHEMA_VERSION, Targeted, Updates};
@@ -30,6 +30,8 @@ struct SchemaManifest {
     publish: Option<Publish>,
     #[serde(default)]
     components: Vec<Targeted<Component>>,
+    #[serde(default)]
+    component_groups: Vec<Targeted<ComponentGroup>>,
     #[serde(default)]
     plugins: Vec<Targeted<Plugin>>,
     #[serde(default)]

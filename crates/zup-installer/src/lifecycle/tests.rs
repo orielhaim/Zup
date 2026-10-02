@@ -66,6 +66,7 @@ fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
             },
             prerequisites: Vec::new(),
             components: Vec::new(),
+            component_groups: Vec::new(),
             plugins: vec![PluginBinding {
                 id: plugin_id.clone(),
                 component: None,
@@ -298,7 +299,7 @@ fn preset() -> UiPreset {
     UiPreset {
         name: NonEmptyString::new("aurora").expect("a name"),
         version: semver::Version::parse("1.4.2").expect("a version"),
-        protocol: 1,
+        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
         required_capabilities: vec!["components".to_owned()],
         settings: serde_json::json!({ "hero": "Install Acme" }),
         assets: vec![UiAsset {
@@ -629,6 +630,7 @@ fn acquired_release(
             },
             prerequisites: Vec::new(),
             components: Vec::new(),
+            component_groups: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: Vec::new(),

@@ -147,6 +147,56 @@ pub struct InstallDirectory {
     pub machine: Option<Template>,
 }
 
+/// How clearly a component group should be presented.
+///
+/// This is about the group as one decision, not about where a preset draws it.
+/// `Auto` is conservative: a group with nothing optional to choose disappears,
+/// a group that requires an explicit selection is primary, and everything else
+/// is secondary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentProminence {
+    #[default]
+    Auto,
+    /// The person should see that this decision exists before installing.
+    Primary,
+    /// A sensible default. The whole group can stay out of the happy path.
+    Secondary,
+}
+
+/// Whether a group's defaults are enough to install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionRequirement {
+    /// The declared defaults are a valid choice.
+    #[default]
+    Defaulted,
+    /// At least one optional component in the group must be selected.
+    Explicit,
+}
+
+/// One named set of components that is chosen together.
+///
+/// Membership lives on each [`Component::group`]. A component with no group
+/// belongs to the implicit default group, so a package that never mentions
+/// groups still has one coherent set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ComponentGroup {
+    pub id: NonEmptyString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<NonEmptyString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub prominence: ComponentProminence,
+    #[serde(default)]
+    pub selection: SelectionRequirement,
+}
+
 /// A selectable application component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -162,6 +212,9 @@ pub struct Component {
     pub default: bool,
     #[serde(default)]
     pub requires: Vec<ComponentId>,
+    /// The group this component belongs to. Absent means the implicit group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<NonEmptyString>,
 }
 
 fn default_true() -> bool {

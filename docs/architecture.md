@@ -175,12 +175,12 @@ so the wire format stays Zup's rather than becoming a dependency's serde
 representation. A preset is a child the host launches and is not sandboxed, so
 this transport is not a privilege boundary and does not borrow the elevated
 worker's ACL and process-identity machinery; the protections that apply are the
-protocol's own — version, session identity, monotonic sequences, bounded
+protocol's own - version, session identity, monotonic sequences, bounded
 messages, and the host's validation of every action.
 
 `verify-dependency-graph` holds the crate boundary mechanically: it fails when
 any of the three reaches a crate that exists only here. `verify-public-crates`
-holds the part a dependency graph cannot see — Cargo unifies features across a
+holds the part a dependency graph cannot see - Cargo unifies features across a
 workspace, so a published crate can compile on a dependency feature it never
 declared and only fail for the first project outside the repository. It
 publishes `zup-ui-protocol`, then builds and tests each crate above it from a
@@ -199,7 +199,7 @@ transaction keeps running and the host can put a new window in front of the same
 state, because a `UiSnapshot` is complete and there is nothing to replay.
 
 Disposable means the host's to finish with. Every child Zup owns is launched
-through `process-wrap` — a job object on Windows, a process group on Unix — so
+through `process-wrap` - a job object on Windows, a process group on Unix - so
 ending it ends the tree it started, and a preset's own helpers do not outlive the
 window that was showing them. `process-wrap` owns that mechanics and nothing else:
 when a child may be left running, when a replacement counts as successful, how long
@@ -210,8 +210,8 @@ successor has opened a session, and the previous tree is ended only afterwards.
 The waits are bounded in the same spirit. A host gives up on a preset that never
 collects its endpoint and on one that collects it and then says nothing, because an
 installer blocked on a window that is never coming is a worse answer than a message.
-The short synchronous commands elsewhere — a describe, a `git`, a prerequisite
-installer — run and wait, and are left as plain `Command` because nothing outlives
+The short synchronous commands elsewhere - a describe, a `git`, a prerequisite
+installer - run and wait, and are left as plain `Command` because nothing outlives
 them to terminate as a group.
 
 ## Package and executable

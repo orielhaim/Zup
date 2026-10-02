@@ -45,6 +45,7 @@ fn installer() -> Installer {
                 required: true,
                 default: true,
                 requires: Vec::new(),
+                group: None,
             },
             zup_core::Component {
                 id: EngineComponentId::new("docs").expect("id"),
@@ -53,8 +54,10 @@ fn installer() -> Installer {
                 required: false,
                 default: false,
                 requires: Vec::new(),
+                group: None,
             },
         ],
+        component_groups: Vec::new(),
         plugins: Vec::new(),
         files: Vec::new(),
         launchers: Vec::new(),
@@ -234,6 +237,22 @@ fn a_cancelled_operation_returns_to_its_surface() {
     assert!(host.snapshot().diagnostic.is_none());
 }
 
+/// The engine reports cancellation as events, and those events are not a success.
+#[test]
+fn a_cancelled_operation_reported_by_the_engine_returns_to_its_surface() {
+    let mut host = install_host();
+    host.accept(UiAction::Install);
+    host.observe(&RuntimeEvent::StateChanged {
+        state: zup_runtime::RuntimeState::Cancelled,
+    });
+    host.observe(&RuntimeEvent::Completed {
+        outcome: "cancelled".into(),
+    });
+    assert_eq!(host.snapshot().state, UiState::Options);
+    assert!(host.snapshot().diagnostic.is_none());
+    assert!(!host.snapshot().state.is_active());
+}
+
 #[test]
 fn a_blocked_machine_reports_the_applications_holding_it() {
     let mut host = install_host();
@@ -297,8 +316,11 @@ fn a_second_operation_is_refused_while_one_is_running() {
         HostDecision::Refused(ActionRefusal::Busy)
     );
     assert_eq!(
-        host.accept(UiAction::Preview),
-        HostDecision::Refused(ActionRefusal::Busy)
+        host.accept(UiAction::SetScope {
+            scope: zup_ui_protocol::InstallScope::Machine
+        }),
+        HostDecision::Refused(ActionRefusal::Busy),
+        "the choices an operation is running with do not change under it"
     );
     assert_eq!(host.accept(UiAction::Cancel), HostDecision::Cancel);
     assert_eq!(
@@ -340,14 +362,22 @@ fn a_required_component_cannot_be_turned_off() {
     assert!(matches!(
         host.accept(UiAction::SetComponent {
             component: ComponentId::new("docs").expect("id"),
-            selected: false,
+            selected: true,
         }),
-        HostDecision::Acknowledged
+        HostDecision::Plan(_)
     ));
     let UiSurface::Install(options) = &host.snapshot().surface else {
         panic!("an install surface")
     };
-    assert!(!options.components[1].selected);
+    assert!(options.components[1].selected);
+    assert_eq!(
+        host.accept(UiAction::SetComponent {
+            component: ComponentId::new("docs").expect("id"),
+            selected: true,
+        }),
+        HostDecision::Acknowledged,
+        "asking for the choice already made changes nothing and plans nothing"
+    );
 }
 
 /// The selection a preset changed is the selection the engine receives, with no
@@ -376,12 +406,12 @@ fn the_selection_the_host_reports_is_the_one_it_will_run() {
 #[test]
 fn a_scope_the_application_does_not_offer_is_refused() {
     let mut host = install_host();
-    assert_eq!(
+    assert!(matches!(
         host.accept(UiAction::SetScope {
             scope: zup_ui_protocol::InstallScope::Machine
         }),
-        HostDecision::Acknowledged
-    );
+        HostDecision::Plan(_)
+    ));
     let mut fixed = installer();
     fixed.install.scope = InstallScope::User;
     let options = surface::install_options(&fixed, SelectedScope::User, None, None, None);
@@ -405,12 +435,17 @@ fn a_location_the_application_forbids_is_refused() {
         host.accept(UiAction::SetInstallDirectory {
             directory: r"C:\Apps\Acme".into()
         }),
-        HostDecision::Acknowledged
+        HostDecision::Plan(_)
     ));
     assert_eq!(
         host.snapshot().surface.install_directory(),
         Some(r"C:\Apps\Acme")
     );
+    assert!(matches!(
+        host.accept(UiAction::ResetInstallDirectory),
+        HostDecision::Plan(_)
+    ));
+    assert_eq!(host.snapshot().surface.install_directory(), None);
 
     let mut fixed = installer();
     fixed.install.allow_directory_override = false;
@@ -428,14 +463,15 @@ fn a_location_the_application_forbids_is_refused() {
     );
 }
 
+/// A plan is kept, not requested: the session asks for one when it opens, and
+/// every change of choice asks again.
 #[test]
-fn a_preview_becomes_the_snapshot_the_next_decision_reads() {
+fn a_plan_answers_the_current_choices() {
     let mut host = install_host();
-    assert!(matches!(
-        host.accept(UiAction::Preview),
-        HostDecision::Preview(_)
-    ));
+    assert!(host.snapshot().plan.is_computing());
+    assert!(host.plan_request().is_some());
     let mut preview = preview(SelectedScope::User);
+    preview.selected_components = vec![EngineComponentId::new("core").expect("id")];
     preview.install_directory = r"C:\Apps\Acme".into();
     preview.estimated_bytes = 4096;
     preview.groups = vec![zup_presentation::ChangeGroup {
@@ -453,20 +489,50 @@ fn a_preview_becomes_the_snapshot_the_next_decision_reads() {
             technical_key: Some("File { destination }".into()),
         }],
     }];
-    host.set_plan(preview);
-    let plan = host.snapshot().plan.as_ref().expect("a plan");
+    host.set_plan(preview.clone());
+    let plan = host.snapshot().plan.current().expect("a plan");
     assert_eq!(plan.estimated_bytes, 4096);
     assert_eq!(plan.scope, zup_ui_protocol::InstallScope::User);
     assert_eq!(
         plan.groups[0].changes[0].kind,
         zup_ui_protocol::ChangeKind::Create
     );
-    // The resolved location becomes the session's location, so the decision the
-    // person is looking at is the one the engine will act on.
+
+    assert!(matches!(
+        host.accept(UiAction::SetScope {
+            scope: zup_ui_protocol::InstallScope::Machine
+        }),
+        HostDecision::Plan(_)
+    ));
     assert_eq!(
-        host.snapshot().surface.install_directory(),
-        Some(r"C:\Apps\Acme")
+        host.snapshot()
+            .plan
+            .latest()
+            .map(|plan| plan.estimated_bytes),
+        Some(4096),
+        "the last answer stays readable while the next is worked out"
     );
+    host.set_plan(preview);
+    assert!(
+        host.snapshot().plan.is_computing(),
+        "an answer for the user scope does not answer the machine scope"
+    );
+}
+
+/// A plan that cannot be worked out is not a failed installation.
+#[test]
+fn a_plan_that_fails_leaves_the_choices_standing() {
+    let mut host = install_host();
+    host.plan_failed("the package could not be read".into());
+    assert_eq!(host.snapshot().state, UiState::Options);
+    assert!(matches!(
+        host.snapshot().plan,
+        zup_ui_protocol::PlanStatus::Failed { .. }
+    ));
+    assert!(matches!(
+        host.accept(UiAction::Install),
+        HostDecision::Run { .. }
+    ));
 }
 
 #[test]
@@ -717,19 +783,29 @@ fn capabilities_describe_the_package_rather_than_the_build() {
 }
 
 #[test]
-fn a_preview_capability_a_package_lacks_is_refused_rather_than_simulated() {
+fn a_host_without_plans_says_so_rather_than_simulating_one() {
     let installer = installer();
     let options = surface::install_options(&installer, SelectedScope::User, None, None, None);
     let capabilities = UiCapabilities::default();
     let mut host = HostState::install(surface::product(&installer), options, capabilities);
     assert_eq!(
-        host.accept(UiAction::Preview),
-        HostDecision::Refused(ActionRefusal::UnsupportedSurface)
+        host.snapshot().plan,
+        zup_ui_protocol::PlanStatus::Unsupported
+    );
+    assert_eq!(host.plan_request(), None);
+    assert_eq!(
+        host.accept(UiAction::SetComponent {
+            component: ComponentId::new("docs").expect("id"),
+            selected: false,
+        }),
+        HostDecision::Acknowledged
     );
 }
 
+/// The location a plan resolves is where the default goes, not a choice the
+/// person made: an install that never chose a location is not run with one.
 #[test]
-fn the_surface_a_plan_resolves_becomes_the_session_s_selection() {
+fn a_resolved_location_is_not_a_chosen_one() {
     let mut host = install_host();
     let mut preview = preview(SelectedScope::User);
     preview.install_directory = r"C:\Apps\Acme".into();
@@ -737,10 +813,39 @@ fn the_surface_a_plan_resolves_becomes_the_session_s_selection() {
     let HostDecision::Run { selection, .. } = host.accept(UiAction::Install) else {
         panic!("an install runs a lifecycle")
     };
+    assert_eq!(selection.install_directory, None);
+}
+
+/// Once an installation commits, the host offers to start it through the
+/// launcher the application declared, and only then.
+#[test]
+fn a_committed_install_offers_its_launcher() {
+    let installer = installer();
+    let options = surface::install_options(&installer, SelectedScope::User, None, None, None);
+    let capabilities =
+        surface::capabilities(&installer, false).with(zup_ui_protocol::UiCapability::Launch);
+    let mut host = HostState::install(surface::product(&installer), options, capabilities)
+        .with_launchers(vec![crate::Launchable {
+            target: zup_ui_protocol::LaunchTarget {
+                name: "Acme".into(),
+            },
+            component: None,
+        }]);
     assert_eq!(
-        selection.install_directory.as_deref(),
-        Some(r"C:\Apps\Acme")
+        host.accept(UiAction::Launch),
+        HostDecision::Refused(ActionRefusal::NothingToLaunch)
     );
+    host.accept(UiAction::Install);
+    assert_eq!(
+        host.snapshot().operation,
+        Some(zup_ui_protocol::OperationKind::Install)
+    );
+    host.finish_with(&InstallOutcome::Committed);
+    assert_eq!(host.snapshot().state, UiState::Succeeded);
+    assert!(matches!(
+        host.accept(UiAction::Launch),
+        HostDecision::Launch(target) if target.name == "Acme"
+    ));
 }
 
 #[test]
@@ -769,7 +874,7 @@ fn a_prerequisite_is_presented_as_a_requirement_not_as_a_failure() {
     assert_eq!(host.snapshot().state, UiState::Running);
     assert_eq!(
         host.snapshot().progress.as_ref().expect("progress").label,
-        "↓ runtime library"
+        "runtime library is needed"
     );
 }
 

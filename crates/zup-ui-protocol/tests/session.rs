@@ -10,10 +10,10 @@
 //! about what a preset that does not follow it gets.
 
 use zup_ui_protocol::{
-    ComponentId, ComponentOption, InstallOptions, InstallScope, MaintenanceState, ProductIdentity,
-    Session, SessionProgress, SessionState, UI_PROTOCOL_VERSION, UiAction, UiCapabilities,
-    UiCapability, UiConfiguration, UiEnvelope, UiMessage, UiPeerRole, UiSessionId, UiSnapshot,
-    UiState, UiSurface, UiWireError,
+    ComponentId, ComponentOption, InstallOptions, InstallScope, MaintenanceState, PlanStatus,
+    ProductIdentity, Session, SessionProgress, SessionState, UI_PROTOCOL_VERSION, UiAction,
+    UiCapabilities, UiCapability, UiConfiguration, UiEnvelope, UiMessage, UiPeerRole, UiSessionId,
+    UiSnapshot, UiState, UiSurface, UiWireError,
 };
 
 fn product() -> ProductIdentity {
@@ -38,16 +38,20 @@ fn snapshot() -> UiSnapshot {
                 description: None,
                 required: false,
                 selected: false,
+                installed: false,
             }],
+            groups: Vec::new(),
             install_directory: None,
             allow_directory_override: true,
         }),
         state: UiState::Options,
+        operation: None,
         progress: None,
-        plan: None,
+        plan: PlanStatus::Unsupported,
         diagnostic: None,
         update: None,
         repair_drift: Vec::new(),
+        launch: None,
     }
 }
 
@@ -364,7 +368,7 @@ fn a_sequence_that_goes_backwards_is_refused() {
     pair.publish(UiConfiguration::empty());
     let first = pair
         .preset
-        .frame(UiMessage::Action(UiAction::Preview))
+        .frame(UiMessage::Action(UiAction::Retry))
         .expect("frames");
     let second = pair
         .preset
@@ -467,6 +471,7 @@ fn a_maintenance_session_is_the_same_handshake() {
     maintenance.surface = UiSurface::Maintenance(MaintenanceState {
         installed_version: "1.3.0".into(),
         components: Vec::new(),
+        groups: Vec::new(),
         updates_enabled: true,
         scope: InstallScope::Machine,
         install_directory: Some("C:/Program Files/Acme".into()),

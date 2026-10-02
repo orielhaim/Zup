@@ -1858,6 +1858,7 @@ mod tests {
                     allow_directory_override: false,
                 },
                 components: Vec::new(),
+                component_groups: Vec::new(),
                 plugins: (0..count)
                     .map(|index| PluginBinding {
                         id: PluginId::new(format!("plugin-{index}")).unwrap(),

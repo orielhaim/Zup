@@ -394,6 +394,11 @@ impl Session {
         self.tick();
     }
 
+    /// Whether the window has been closed, and the preview with it.
+    pub fn closed(&self) -> bool {
+        self.runtime.closed()
+    }
+
     /// The state the presented window is drawing.
     pub fn state(&self) -> &zup_ui_protocol::UiSnapshot {
         self.runtime.snapshot()

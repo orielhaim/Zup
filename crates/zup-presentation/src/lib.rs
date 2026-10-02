@@ -810,26 +810,27 @@ impl DiagnosticPresentation {
         if normalized.contains("running") || normalized.contains("blocked by") {
             Self {
                 kind: DiagnosticKind::Blocked,
-                title: "An application is still running".into(),
-                meaning: "zup needs the application to close before it can continue safely.".into(),
-                recovery: "Close the listed applications, then choose Retry.".into(),
+                title: "An application is still open".into(),
+                meaning: "Files setup needs to change are in use.".into(),
+                recovery: "Close the application, then try again.".into(),
                 technical_details: Some(message.into()),
             }
         } else if normalized.contains("drift") || normalized.contains("modified outside") {
             Self {
                 kind: DiagnosticKind::Drift,
                 title: "Some installed files were changed".into(),
-                meaning: "The files no longer match the copy zup installed.".into(),
-                recovery: "Repair can restore owned files, or leave the modified files untouched."
+                meaning: "They no longer match the files setup installed.".into(),
+                recovery: "Repair restores the files setup manages. Files you changed on \
+                           purpose are left as they are."
                     .into(),
                 technical_details: Some(message.into()),
             }
         } else if normalized.contains("recovery") || recovery_required {
             Self {
                 kind: DiagnosticKind::Recovery,
-                title: "Recovery is required".into(),
-                meaning: "The last transaction did not finish safely.".into(),
-                recovery: "Run recovery before starting another operation.".into(),
+                title: "The last change didn't finish".into(),
+                meaning: "Setup was interrupted while it was changing this computer.".into(),
+                recovery: "Let setup finish restoring it before you make other changes.".into(),
                 technical_details: Some(message.into()),
             }
         } else if normalized.contains("permission")
@@ -840,17 +841,42 @@ impl DiagnosticPresentation {
         {
             Self {
                 kind: DiagnosticKind::Permission,
-                title: "Windows needs permission".into(),
-                meaning: "This operation includes a protected system change.".into(),
-                recovery: "Approve the Windows administrator prompt, then choose Retry.".into(),
+                title: "Administrator approval is needed".into(),
+                meaning: "Part of this installation changes settings that are shared by \
+                          everyone on this computer."
+                    .into(),
+                recovery: "Try again and approve the Windows prompt, or ask an administrator \
+                           to install it."
+                    .into(),
+                technical_details: Some(message.into()),
+            }
+        } else if normalized.contains("digest")
+            || normalized.contains("hash")
+            || normalized.contains("signature")
+            || normalized.contains("verif")
+            || normalized.contains("corrupt")
+        {
+            Self {
+                kind: DiagnosticKind::Verification,
+                title: "The download couldn't be verified".into(),
+                meaning: "A file didn't match what the publisher released, so setup didn't \
+                          use it. Nothing on this computer was changed."
+                    .into(),
+                recovery: "Check your connection and try again. If it keeps happening, \
+                           download the installer again from the publisher."
+                    .into(),
                 technical_details: Some(message.into()),
             }
         } else {
             Self {
                 kind: DiagnosticKind::Unknown,
-                title: "The operation could not finish".into(),
-                meaning: "zup stopped before the transaction was committed.".into(),
-                recovery: "Choose Retry, or open diagnostics for support.".into(),
+                title: "Setup couldn't finish".into(),
+                meaning: "Something went wrong before any changes were kept, so this \
+                          computer is as it was."
+                    .into(),
+                recovery: "Try again. If it happens again, copy the details for the \
+                           publisher."
+                    .into(),
                 technical_details: Some(message.into()),
             }
         }

@@ -630,7 +630,9 @@ mod transaction_fingerprint {
                         required: true,
                         default: true,
                         requires: Vec::new(),
+                        group: None,
                     }],
+                    component_groups: Vec::new(),
                     plugins: vec![PluginBinding {
                         id: PluginId::new("guest").unwrap(),
                         component: None,

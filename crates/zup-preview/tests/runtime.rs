@@ -952,8 +952,7 @@ fn a_maintenance_action_asks_the_engine_rather_than_performing_anything() {
     assert_eq!(
         runtime.snapshot().state,
         zup_ui_protocol::UiState::Running,
-        "so the machine is waiting for an engine that will never report, which is the only state \
-         a preview can honestly show"
+        "so the machine is running, and the session is what starts the engine"
     );
     assert_eq!(
         runtime

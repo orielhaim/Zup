@@ -42,9 +42,10 @@ pub use ids::{
 pub use installer::{Installer, UiAsset, UiPreset, UiRuntime, UpdateConfig};
 pub use location::{INSTALL_LOCATIONS, InstallLocation};
 pub use model::{
-    App, Component, FileAssociation, FileExtension, FileMapping, Frontend, Install,
-    InstallDirectory, InstallScope, Launcher, LauncherLocation, MAX_UI_SETTINGS_BYTES, PathEntry,
-    PluginBinding, Privilege, Protocol, Service, ServiceStart, Source, Ui,
+    App, Component, ComponentGroup, ComponentProminence, FileAssociation, FileExtension,
+    FileMapping, Frontend, Install, InstallDirectory, InstallScope, Launcher, LauncherLocation,
+    MAX_UI_SETTINGS_BYTES, PathEntry, PluginBinding, Privilege, Protocol, SelectionRequirement,
+    Service, ServiceStart, Source, Ui,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use prerequisite::{

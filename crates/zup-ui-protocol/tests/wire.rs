@@ -6,7 +6,7 @@
 
 use zup_ui_protocol::{
     ComponentId, ComponentOption, DiagnosticKind, DiagnosticPresentation, HostHello,
-    InstallOptions, InstallScope, MaintenanceState, OperationPhase, ProductIdentity,
+    InstallOptions, InstallScope, MaintenanceState, OperationPhase, PlanStatus, ProductIdentity,
     ProgressPresentation, UiAction, UiCapabilities, UiCapability, UiEnvelope, UiHello, UiMessage,
     UiSessionId, UiSnapshot, UiState, UiSurface, UiWireError, decode, encode, negotiate,
 };
@@ -37,16 +37,20 @@ fn snapshot() -> UiSnapshot {
                 description: None,
                 required: true,
                 selected: true,
+                installed: false,
             }],
+            groups: Vec::new(),
             install_directory: None,
             allow_directory_override: true,
         }),
         state: UiState::Options,
+        operation: None,
         progress: None,
-        plan: None,
+        plan: PlanStatus::Unsupported,
         diagnostic: None,
         update: None,
         repair_drift: Vec::new(),
+        launch: None,
     }
 }
 
@@ -69,13 +73,13 @@ fn a_frame_survives_the_round_trip() {
 #[test]
 fn a_frame_from_a_different_protocol_is_refused() {
     let mut frame = envelope(UiMessage::Action(UiAction::Install));
-    frame.version = 2;
+    frame.version = zup_ui_protocol::UI_PROTOCOL_VERSION + 1;
     let bytes = encode(&frame).expect("encoded");
     assert_eq!(
         decode(&bytes).expect_err("a newer protocol is not readable"),
         UiWireError::VersionMismatch {
-            expected: 1,
-            found: 2,
+            expected: zup_ui_protocol::UI_PROTOCOL_VERSION,
+            found: zup_ui_protocol::UI_PROTOCOL_VERSION + 1,
         }
     );
 }
@@ -233,7 +237,7 @@ fn every_lifecycle_state_and_action_survives_the_wire() {
         UiAction::SetInstallDirectory {
             directory: r"C:\Apps\Acme".into(),
         },
-        UiAction::Preview,
+        UiAction::ResetInstallDirectory,
         UiAction::Install,
         UiAction::Update,
         UiAction::Modify,
@@ -245,6 +249,7 @@ fn every_lifecycle_state_and_action_survives_the_wire() {
         UiAction::Retry,
         UiAction::OpenLog,
         UiAction::CopyDiagnostics,
+        UiAction::Launch,
         UiAction::Close,
     ];
     for action in actions {
@@ -291,6 +296,7 @@ fn a_maintenance_snapshot_reports_what_can_be_done_to_an_installation() {
         surface: UiSurface::Maintenance(MaintenanceState {
             installed_version: "1.3.0".into(),
             components: Vec::new(),
+            groups: Vec::new(),
             updates_enabled: true,
             scope: InstallScope::Machine,
             install_directory: Some(r"C:\Program Files\Acme".into()),

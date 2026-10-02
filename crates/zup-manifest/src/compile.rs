@@ -20,6 +20,7 @@ struct ManifestView {
     prerequisites: Vec<Prerequisite>,
     updates: Option<Updates>,
     components: Vec<zup_core::Component>,
+    component_groups: Vec<zup_core::ComponentGroup>,
     plugins: Vec<crate::Plugin>,
     files: Vec<zup_core::FileMapping>,
     launchers: Vec<zup_core::Launcher>,
@@ -39,6 +40,7 @@ impl ManifestView {
             prerequisites: targeted_values(&manifest.prerequisites, profile),
             updates: manifest.updates.clone(),
             components: targeted_values(&manifest.components, profile),
+            component_groups: targeted_values(&manifest.component_groups, profile),
             plugins: targeted_values(&manifest.plugins, profile),
             files: targeted_values(&manifest.files, profile),
             launchers: targeted_values(&manifest.launchers, profile),
@@ -94,6 +96,7 @@ pub fn compile(
         });
     }
     validate_components(&view.components)?;
+    validate_groups(&view.component_groups, &view.components)?;
     validate_prerequisites(&view)?;
     validate_resources(&view)?;
 
@@ -118,6 +121,7 @@ pub fn compile(
         install: view.install,
         prerequisites: view.prerequisites,
         components: view.components,
+        component_groups: view.component_groups,
         plugins,
         files: view.files,
         launchers: view.launchers,
@@ -300,6 +304,47 @@ fn validate_install(install: &Install) -> Result<(), ManifestError> {
         if machine.contains_variable(zup_core::Variable::Install) {
             return Err(ManifestError::RecursiveInstallDirectory {
                 scope: InstallScope::Machine,
+                src: None,
+                span: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_groups(
+    groups: &[zup_core::ComponentGroup],
+    components: &[zup_core::Component],
+) -> Result<(), ManifestError> {
+    let mut seen = BTreeSet::new();
+    for group in groups {
+        if !seen.insert(group.id.clone()) {
+            return Err(ManifestError::Invalid {
+                message: format!("component group `{}` is declared more than once", group.id),
+                src: None,
+                span: None,
+            });
+        }
+    }
+    for component in components {
+        if let Some(group) = &component.group
+            && !seen.contains(group)
+        {
+            return Err(ManifestError::UnknownComponent {
+                id: group.to_string(),
+                context: format!("component `{}` names a group", component.id),
+                src: None,
+                span: None,
+            });
+        }
+    }
+    for group in groups {
+        if !components
+            .iter()
+            .any(|component| component.group.as_ref() == Some(&group.id))
+        {
+            return Err(ManifestError::Invalid {
+                message: format!("component group `{}` has no components", group.id),
                 src: None,
                 span: None,
             });

@@ -397,7 +397,7 @@ pub async fn run_local_install(
     run_install(backend, request).await
 }
 
-fn emit_terminal(
+pub(crate) fn emit_terminal(
     events: &broadcast::Sender<RuntimeEvent>,
     result: &Result<InstallOutcome, SessionError>,
 ) {

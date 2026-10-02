@@ -10,10 +10,12 @@ publish = false
 [dependencies]
 ctrlc = "3.4"
 notify-debouncer-mini = "0.7"
+tokio.workspace = true
 semver.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 zup-core.workspace = true
+zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-ui-host.workspace = true
 zup-ui-protocol.workspace = true

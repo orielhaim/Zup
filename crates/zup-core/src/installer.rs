@@ -4,8 +4,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry,
-    PluginBinding, Protocol, Service,
+    App, Component, ComponentGroup, FileAssociation, FileMapping, Frontend, Install, Launcher,
+    PathEntry, PluginBinding, Protocol, Service,
 };
 use crate::prerequisite::Prerequisite;
 use crate::target::TargetTriple;
@@ -35,6 +35,10 @@ pub struct Installer {
     #[serde(default)]
     pub prerequisites: Vec<Prerequisite>,
     pub components: Vec<Component>,
+    /// Named component groups. Components that name no group share one implicit
+    /// group and do not appear here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_groups: Vec<ComponentGroup>,
     pub plugins: Vec<PluginBinding>,
     pub files: Vec<FileMapping>,
     pub launchers: Vec<Launcher>,

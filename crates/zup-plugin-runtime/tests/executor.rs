@@ -123,6 +123,7 @@ fn installer() -> Installer {
             allow_directory_override: false,
         },
         components: Vec::new(),
+        component_groups: Vec::new(),
         plugins: vec![PluginBinding {
             id: PluginId::new(PLUGIN_ID).unwrap(),
             component: None,

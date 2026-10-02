@@ -150,6 +150,49 @@ pub struct PlanPreview {
     pub requirements: Vec<RequirementPresentation>,
 }
 
+/// The host's answer to "what would the current choices change".
+///
+/// The host keeps this current as the choices change, so a preset can show the
+/// cost of an installation before anyone asks for it. A preset never requests
+/// a plan: it reads whichever answer the host has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum PlanStatus {
+    /// This host does not work out plans for this surface.
+    Unsupported,
+    /// Being worked out for the current choices. `last` answers the previous
+    /// choices, so a preset can keep showing it rather than flashing empty.
+    Computing { last: Option<Box<PlanPreview>> },
+    /// The answer for the current choices.
+    Ready { preview: Box<PlanPreview> },
+    /// The plan could not be worked out. The operation can still be started;
+    /// the engine plans again and reports anything that stops it.
+    Failed { reason: String },
+}
+
+impl PlanStatus {
+    /// The newest answer the host has, current or not.
+    pub fn latest(&self) -> Option<&PlanPreview> {
+        match self {
+            Self::Ready { preview } => Some(preview),
+            Self::Computing { last } => last.as_deref(),
+            Self::Unsupported | Self::Failed { .. } => None,
+        }
+    }
+
+    /// The answer for the current choices, when there is one.
+    pub fn current(&self) -> Option<&PlanPreview> {
+        match self {
+            Self::Ready { preview } => Some(preview),
+            _ => None,
+        }
+    }
+
+    pub fn is_computing(&self) -> bool {
+        matches!(self, Self::Computing { .. })
+    }
+}
+
 /// Why an operation stopped, in the shape a person can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

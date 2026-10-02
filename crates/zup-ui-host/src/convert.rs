@@ -9,9 +9,9 @@
 use zup_core::{ComponentId as EngineComponentId, SelectedScope};
 use zup_presentation::OperationPhase as EnginePhase;
 use zup_ui_protocol::{
-    ChangeGroup, ChangeKind, ComponentId, DiagnosticKind, DiagnosticPresentation, InstallScope,
-    OperationPhase, PlanPreview, PlannedChange, RequirementPresentation, RequirementStatus,
-    ResourceCategory,
+    ChangeGroup, ChangeKind, ComponentId, ComponentProminence, DiagnosticKind,
+    DiagnosticPresentation, InstallScope, OperationPhase, PlanPreview, PlannedChange,
+    RequirementPresentation, RequirementStatus, ResourceCategory, SelectionRequirement,
 };
 
 /// The protocol's scope for an engine scope.
@@ -32,6 +32,21 @@ pub fn engine_scope(value: InstallScope) -> SelectedScope {
 
 pub fn component(value: &EngineComponentId) -> ComponentId {
     ComponentId::new(value.as_str()).expect("an engine component id is never empty")
+}
+
+pub fn prominence(value: zup_core::ComponentProminence) -> ComponentProminence {
+    match value {
+        zup_core::ComponentProminence::Auto => ComponentProminence::Auto,
+        zup_core::ComponentProminence::Primary => ComponentProminence::Primary,
+        zup_core::ComponentProminence::Secondary => ComponentProminence::Secondary,
+    }
+}
+
+pub fn selection(value: zup_core::SelectionRequirement) -> SelectionRequirement {
+    match value {
+        zup_core::SelectionRequirement::Defaulted => SelectionRequirement::Defaulted,
+        zup_core::SelectionRequirement::Explicit => SelectionRequirement::Explicit,
+    }
 }
 
 pub fn components<'a>(values: impl IntoIterator<Item = &'a EngineComponentId>) -> Vec<ComponentId> {

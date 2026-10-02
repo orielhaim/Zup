@@ -1,4 +1,4 @@
-//! The simulated machine, and the child process that draws it.
+//! The child process that draws the simulated machine.
 //!
 //! The division here is the whole design. Everything a person is developing
 //! against - the state, the settings, the files the application provided, the
@@ -24,163 +24,10 @@ use std::sync::mpsc::Sender;
 
 use zup_core::{Sha256Digest, UiPreset};
 use zup_runtime::{InstallOutcome, RuntimeEvent};
-use zup_ui_host::HostState;
-use zup_ui_protocol::{
-    ComponentOption, InstallOptions, InstallScope, InstallationHealth, MaintenanceState,
-    ProductIdentity, UiAction, UiCapabilities, UiCapability, UiConfiguration, UiSnapshot,
-    UpdateState,
-};
+use zup_ui_protocol::{UiAction, UiConfiguration, UiSnapshot, UpdateState};
 
+use crate::machine::{Machine, Scenario};
 use crate::state::StateDirectory;
-
-/// Which surface the simulated machine is presenting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Surface {
-    /// A machine that has never had this application.
-    Install,
-    /// A machine that has, and can therefore be modified, repaired or removed.
-    Maintenance,
-}
-
-impl Surface {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Install => "install",
-            Self::Maintenance => "maintenance",
-        }
-    }
-}
-
-/// The machine being simulated.
-///
-/// Every field here is something a real machine has an answer for. Nothing is a
-/// preview-only concept, because a state a preset can only meet in a preview is
-/// a state its author will believe in and its users will never see.
-#[derive(Debug, Clone)]
-pub struct Scenario {
-    pub product: ProductIdentity,
-    pub surface: Surface,
-    pub scopes: Vec<InstallScope>,
-    pub scope: InstallScope,
-    pub components: Vec<ComponentOption>,
-    pub install_directory: String,
-    pub allow_directory_override: bool,
-    pub existing_version: Option<String>,
-    pub installed_version: String,
-    pub updates_enabled: bool,
-    /// What the update channel says, when the preset asks.
-    pub update: UpdateState,
-    /// What a repair found, when a repair has run.
-    pub health: InstallationHealth,
-    pub drift: Vec<String>,
-}
-
-impl Default for Scenario {
-    fn default() -> Self {
-        Self {
-            product: ProductIdentity {
-                name: "Acme".into(),
-                publisher: Some("Acme Inc".into()),
-                version: "1.4.0".into(),
-                description: Some("The Acme application.".into()),
-            },
-            surface: Surface::Install,
-            scopes: vec![InstallScope::User, InstallScope::Machine],
-            scope: InstallScope::User,
-            components: Vec::new(),
-            install_directory: "C:\\Program Files\\Acme".into(),
-            allow_directory_override: true,
-            existing_version: None,
-            installed_version: "1.3.0".into(),
-            updates_enabled: true,
-            update: UpdateState::Idle,
-            health: InstallationHealth::Unknown,
-            drift: Vec::new(),
-        }
-    }
-}
-
-impl Scenario {
-    /// The machine a real application would present, from its own compiled form.
-    ///
-    /// Every field is derived by the functions a real host uses to open a
-    /// session, so the first thing a person sees is the application they are
-    /// authoring rather than a demonstration. What a real machine has that this
-    /// does not - an existing installation, a health reading, an update channel -
-    /// is exactly what the controls are for, and it starts as unknown rather than
-    /// as an answer nobody has.
-    pub fn from_installer(installer: &zup_core::Installer) -> Self {
-        let directory = installer
-            .install
-            .directory
-            .user
-            .as_ref()
-            .or(installer.install.directory.machine.as_ref())
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        Self {
-            product: zup_ui_host::product(installer),
-            scopes: zup_ui_host::scopes(installer),
-            scope: zup_ui_host::scope(zup_ui_host::default_scope(installer)),
-            components: zup_ui_host::surface_components(installer, None, None),
-            install_directory: directory,
-            allow_directory_override: installer.install.allow_directory_override,
-            updates_enabled: installer.updates.is_some(),
-            ..Self::default()
-        }
-    }
-
-    /// What this machine can offer a preset.
-    ///
-    /// Derived over the same capabilities an installer's answer is derived from,
-    /// so a preset is refused here for the same reason it would be refused there.
-    pub fn capabilities(&self) -> UiCapabilities {
-        let mut capabilities = UiCapabilities::new([
-            UiCapability::Diagnostics,
-            UiCapability::PlanPreview,
-            UiCapability::InstallDirectory,
-        ]);
-        if !self.components.is_empty() {
-            capabilities = capabilities.with(UiCapability::Components);
-        }
-        if self.updates_enabled {
-            capabilities = capabilities.with(UiCapability::Updates);
-        }
-        capabilities.with(UiCapability::Maintenance)
-    }
-
-    /// The state a session on this machine opens in.
-    pub fn host(&self) -> HostState {
-        match self.surface {
-            Surface::Install => HostState::install(
-                self.product.clone(),
-                InstallOptions {
-                    existing_version: self.existing_version.clone(),
-                    scopes: self.scopes.clone(),
-                    scope: self.scope,
-                    components: self.components.clone(),
-                    install_directory: (!self.install_directory.is_empty())
-                        .then(|| self.install_directory.clone()),
-                    allow_directory_override: self.allow_directory_override,
-                },
-                self.capabilities(),
-            ),
-            Surface::Maintenance => HostState::maintenance(
-                self.product.clone(),
-                MaintenanceState {
-                    installed_version: self.installed_version.clone(),
-                    components: self.components.clone(),
-                    updates_enabled: self.updates_enabled,
-                    scope: self.scope,
-                    install_directory: (!self.install_directory.is_empty())
-                        .then(|| self.install_directory.clone()),
-                    health: self.health.clone(),
-                },
-                self.capabilities(),
-            ),
-        }
-    }
-}
 
 /// Why a selection could not become a running child.
 #[derive(Debug, thiserror::Error)]
@@ -200,7 +47,7 @@ pub enum StageError {
 /// a preset could not have put it.
 pub struct Simulator {
     state: StateDirectory,
-    host: HostState,
+    machine: Machine,
     configuration: UiConfiguration,
     child: Option<zup_ui_host::PresetProcess>,
     generation: u64,
@@ -209,14 +56,13 @@ pub struct Simulator {
 impl Simulator {
     /// A session with no child yet, which is the state before anything is shown.
     pub fn new(state: StateDirectory, scenario: Scenario) -> Self {
-        let host = scenario.host();
         let configuration = UiConfiguration {
             settings: serde_json::json!({}),
             assets: BTreeMap::new(),
         };
         Self {
             state,
-            host,
+            machine: Machine::new(scenario),
             configuration,
             child: None,
             generation: 0,
@@ -225,7 +71,17 @@ impl Simulator {
 
     /// The state a preset would see right now.
     pub fn snapshot(&self) -> &UiSnapshot {
-        self.host.snapshot()
+        self.machine.snapshot()
+    }
+
+    /// The simulated machine, for a control that drives it directly.
+    pub fn machine_mut(&mut self) -> &mut Machine {
+        &mut self.machine
+    }
+
+    /// The machine the engine is running against.
+    pub fn scenario(&self) -> &Scenario {
+        self.machine.scenario()
     }
 
     /// What the preset is told the application configured.
@@ -247,7 +103,7 @@ impl Simulator {
     /// settings, the files, the running child - is kept, so switching surfaces
     /// does not close the window.
     pub fn reopen(&mut self, scenario: &Scenario) {
-        self.host = scenario.host();
+        self.machine.reopen(scenario);
     }
 
     /// The generation currently running, if any.
@@ -257,9 +113,9 @@ impl Simulator {
 
     /// Whether the child is still alive.
     ///
-    /// Checks the process rather than assuming, because a preset that crashes
-    /// must be noticed: the session survives it, and the next selection
-    /// replaces it.
+    /// Checks the process rather than assuming, because a window that has
+    /// closed has to end the preview rather than leave a session with nothing
+    /// to show.
     pub fn is_running(&mut self) -> bool {
         match self.child.as_mut() {
             Some(child) => child.is_running(),
@@ -284,7 +140,7 @@ impl Simulator {
     /// gets its own file and an earlier one is only removed once nothing is
     /// running from it.
     pub fn stage(&self, bytes: &[u8], preset: &UiPreset) -> Result<Candidate, StageError> {
-        zup_ui_host::process::check_presentable(preset, self.host.capabilities())
+        zup_ui_host::process::check_presentable(preset, self.machine.capabilities())
             .map_err(StageError::Incompatible)?;
         let generation = self.generation + 1;
         write_durable(&self.state.run_executable(generation), bytes)
@@ -308,15 +164,15 @@ impl Simulator {
     ) -> Result<(), zup_ui_host::SessionError> {
         let mut process = zup_ui_host::launch(
             &candidate.executable,
-            self.host.capabilities().clone(),
-            self.host.snapshot().product.clone(),
+            self.machine.capabilities().clone(),
+            self.machine.snapshot().product.clone(),
         )?;
         // The state goes out before the reader starts, so a child that draws the
         // instant it can draws the real one rather than an empty window. A
         // failure here drops `process`, which ends the tree it started.
         process.publish(
             self.configuration.clone(),
-            Box::new(self.host.snapshot().clone()),
+            Box::new(self.machine.snapshot().clone()),
         )?;
         let reader = process.take_reader();
         std::thread::Builder::new()
@@ -344,7 +200,7 @@ impl Simulator {
     /// Feed one action to the state machine, whether a preset or a control sent
     /// it.
     pub fn act(&mut self, action: UiAction) -> zup_ui_host::HostDecision {
-        self.host.accept(action)
+        self.machine.act(action)
     }
 
     /// Report an engine event to the state machine.
@@ -353,22 +209,22 @@ impl Simulator {
     /// state moves forward: a development control causes the same event a real
     /// operation would rather than setting a state of its own.
     pub fn observe(&mut self, event: &RuntimeEvent) {
-        self.host.observe(event);
+        self.machine.observe(event);
     }
 
     /// Report the outcome of a finished transaction.
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
-        self.host.finish_with(outcome);
+        self.machine.finish_with(outcome);
     }
 
     /// Record what the update channel says.
     pub fn set_update(&mut self, state: UpdateState) {
-        self.host.set_update(Some("stable".into()), state);
+        self.machine.set_update(state);
     }
 
     /// Record the resources a repair found drifted.
     pub fn set_drift(&mut self, resources: Vec<String>) {
-        self.host.set_repair_drift(resources);
+        self.machine.set_drift(resources);
     }
 
     /// Send the current state to the running child.
@@ -378,7 +234,7 @@ impl Simulator {
         };
         child.publish(
             self.configuration.clone(),
-            Box::new(self.host.snapshot().clone()),
+            Box::new(self.machine.snapshot().clone()),
         )
     }
 

@@ -198,7 +198,9 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
                     required: true,
                     default: true,
                     requires: Vec::new(),
+                    group: None,
                 }],
+                component_groups: Vec::new(),
                 plugins: vec![zup_core::PluginBinding {
                     id: plugin.metadata().plugin_id.clone(),
                     component: None,

@@ -3,8 +3,8 @@
 use zup_core::{InstallScope, Installer, SelectedScope};
 use zup_exec::InstallLedger;
 use zup_ui_protocol::{
-    ComponentOption, InstallOptions, InstallationHealth, MaintenanceState, ProductIdentity,
-    UiCapabilities,
+    ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, InstallationHealth,
+    MaintenanceState, ProductIdentity, SelectionRequirement, UiCapabilities,
 };
 
 use crate::convert;
@@ -52,14 +52,13 @@ pub fn components(
         .components
         .iter()
         .map(|component| {
-            let selected = match preselected {
-                Some(preselected) => preselected.contains(&component.id),
-                None => {
-                    installed
-                        .is_some_and(|ledger| ledger.selected_components.contains(&component.id))
-                        || component.default
-                        || component.required
-                }
+            let has = installed.map(|ledger| ledger.selected_components.contains(&component.id));
+            let selected = match (preselected, has) {
+                (Some(preselected), _) => preselected.contains(&component.id),
+                // An existing installation keeps what it has; a component it
+                // never had is something to add, not something already chosen.
+                (None, Some(has)) => has || component.required,
+                (None, None) => component.default || component.required,
             };
             ComponentOption {
                 id: convert::component(&component.id),
@@ -67,9 +66,59 @@ pub fn components(
                 description: component.description.clone(),
                 required: component.required,
                 selected,
+                installed: has.unwrap_or(false),
             }
         })
         .collect()
+}
+
+/// The component groups a person chooses among, implicit group included.
+///
+/// Every component is in exactly one group. Components that name no group share
+/// one group, so a package that never declares groups still presents one set.
+pub fn component_groups(
+    installer: &Installer,
+    listed: &[ComponentOption],
+) -> Vec<ComponentGroupOption> {
+    let mut groups: Vec<ComponentGroupOption> = installer
+        .component_groups
+        .iter()
+        .map(|group| ComponentGroupOption {
+            id: group.id.to_string(),
+            label: group.label.as_ref().map(ToString::to_string),
+            description: group.description.clone(),
+            prominence: convert::prominence(group.prominence),
+            selection: convert::selection(group.selection),
+            components: installer
+                .components
+                .iter()
+                .filter(|component| component.group.as_ref().is_some_and(|id| id == &group.id))
+                .map(|component| convert::component(&component.id))
+                .collect(),
+        })
+        .filter(|group| !group.components.is_empty())
+        .collect();
+    let claimed: std::collections::BTreeSet<&zup_ui_protocol::ComponentId> =
+        groups.iter().flat_map(|group| &group.components).collect();
+    let rest: Vec<_> = listed
+        .iter()
+        .filter(|component| !claimed.contains(&component.id))
+        .map(|component| component.id.clone())
+        .collect();
+    if !rest.is_empty() {
+        groups.insert(
+            0,
+            ComponentGroupOption {
+                id: String::new(),
+                label: None,
+                description: None,
+                prominence: ComponentProminence::Auto,
+                selection: SelectionRequirement::Defaulted,
+                components: rest,
+            },
+        );
+    }
+    groups
 }
 
 /// The choices a fresh installation offers.
@@ -80,11 +129,14 @@ pub fn install_options(
     preselected: Option<&[zup_core::ComponentId]>,
     installed: Option<&InstallLedger>,
 ) -> InstallOptions {
+    let components = components(installer, preselected, installed);
+    let groups = component_groups(installer, &components);
     InstallOptions {
         existing_version,
         scopes: scopes(installer),
         scope: convert::scope(scope),
-        components: components(installer, preselected, installed),
+        components,
+        groups,
         install_directory: installed.and_then(|ledger| persisted_location(Some(ledger))),
         allow_directory_override: installer.install.allow_directory_override,
     }
@@ -101,14 +153,35 @@ pub fn maintenance_state(
     ledger: &InstallLedger,
     scope: SelectedScope,
 ) -> MaintenanceState {
+    let components = components(installer, None, Some(ledger));
+    let groups = component_groups(installer, &components);
     MaintenanceState {
         installed_version: ledger.version.to_string(),
-        components: components(installer, None, Some(ledger)),
+        components,
+        groups,
         updates_enabled: installer.updates.is_some(),
         scope: convert::scope(scope),
         install_directory: persisted_location(Some(ledger)),
         health: InstallationHealth::Unknown,
     }
+}
+
+/// What the application can be started through, in the order it declared them.
+///
+/// Start-menu launchers first: they are the ones a person would reach for, and a
+/// desktop shortcut is usually a second copy of one of them.
+pub fn launchers(installer: &Installer) -> Vec<crate::Launchable> {
+    let mut launchers: Vec<&zup_core::Launcher> = installer.launchers.iter().collect();
+    launchers.sort_by_key(|launcher| launcher.location != zup_core::LauncherLocation::Menu);
+    launchers
+        .into_iter()
+        .map(|launcher| crate::Launchable {
+            target: zup_ui_protocol::LaunchTarget {
+                name: launcher.name.to_string(),
+            },
+            component: launcher.component.as_ref().map(convert::component),
+        })
+        .collect()
 }
 
 /// What this installer can offer a preset.

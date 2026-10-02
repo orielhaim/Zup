@@ -1,6 +1,6 @@
 //! A path bound to the target it names, not to the machine doing the work.
 //!
-//! Lexical mechanics — roots, components, separators, joining, parents — come
+//! Lexical mechanics - roots, components, separators, joining, parents - come
 //! from `typed-path`, so a Windows path is parsed as Windows even when the build
 //! host is not. What lives here is installer policy: a target path is absolute
 //! for its own target, carries no unresolved template variable, and refuses to

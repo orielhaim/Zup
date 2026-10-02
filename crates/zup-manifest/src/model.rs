@@ -9,8 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zup_core::Prerequisite;
 use zup_core::{
-    App, Component, FileAssociation, FileMapping, Frontend, Install, Launcher, PathEntry, Protocol,
-    Service, TargetProfile, TargetProfileId, Ui,
+    App, Component, ComponentGroup, FileAssociation, FileMapping, Frontend, Install, Launcher,
+    PathEntry, Protocol, Service, TargetProfile, TargetProfileId, Ui,
 };
 
 use crate::plugin::Plugin;
@@ -52,6 +52,7 @@ pub struct Manifest {
     /// Where a release is published.
     pub publish: Option<Publish>,
     pub components: Vec<Targeted<Component>>,
+    pub component_groups: Vec<Targeted<ComponentGroup>>,
     pub plugins: Vec<Targeted<Plugin>>,
     pub files: Vec<Targeted<FileMapping>>,
     pub launchers: Vec<Targeted<Launcher>>,

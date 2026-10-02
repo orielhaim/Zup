@@ -614,29 +614,17 @@ fn a_rebuilt_package_replaces_the_window_only_after_the_new_one_has_connected() 
 }
 
 #[test]
-fn a_window_that_exits_does_not_end_the_preview() {
-    let (project, mut session) = opened();
-    await_report(&project);
-    // The real preset closes its own session as soon as it has done what it came
-    // to do, which is the case a host has to notice rather than die of.
+fn closing_the_window_ends_the_preview() {
+    let (_project, mut session) = opened();
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline && run_directory(&project).join("2").exists() {
-        std::thread::sleep(Duration::from_millis(50));
+    while Instant::now() < deadline && !session.closed() {
+        session.pump();
+        std::thread::sleep(Duration::from_millis(40));
     }
-    assert_eq!(
-        session.state().product.name,
-        "Acme Desktop",
-        "the host is still authoritative over the installation, so it outlives the window that \
-         was drawing it"
+    assert!(
+        session.closed(),
+        "the preview is the window, so closing it ends the session"
     );
-    assert_eq!(
-        session.state().state,
-        zup_ui_protocol::UiState::Options,
-        "and it is in the state it was in, not a fresh one"
-    );
-    // The controls still work, which is what "the session is still here" means.
-    assert_ne!(session.control("run"), ControlOutcome::Quit);
-    assert!(session.state().state.is_active());
     session.end();
 }
 
@@ -644,10 +632,6 @@ fn a_window_that_exits_does_not_end_the_preview() {
 fn the_install_button_of_a_real_preset_drives_the_simulated_lifecycle() {
     let (project, mut session) = opened();
     await_report(&project);
-    // The preset chose a component and pressed Install, over the real transport, and
-    // the host validated both. Nothing has run, because there is no engine - but
-    // the state machine has decided what the requests mean, which is the whole of
-    // what a host does before an engine answers.
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline && !session.state().state.is_active() {
         session.pump();
@@ -655,17 +639,27 @@ fn the_install_button_of_a_real_preset_drives_the_simulated_lifecycle() {
     }
     assert!(
         session.state().state.is_active(),
-        "an accepted request puts the machine where a real one would be, waiting for work"
+        "an accepted request puts the machine where a real one would be, and the engine runs it"
     );
-    assert_eq!(
-        session
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut reported = false;
+    while Instant::now() < deadline {
+        session.pump();
+        if session
             .state()
             .progress
             .as_ref()
-            .and_then(|progress| progress.percent()),
-        None,
-        "reporting no position, because a progress bar a preview invented would be a state a \
-         real install cannot be in"
+            .and_then(|progress| progress.percent())
+            .is_some()
+        {
+            reported = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert!(
+        reported,
+        "the simulated engine reports how far the operation has got"
     );
     assert!(
         session
@@ -675,17 +669,6 @@ fn the_install_button_of_a_real_preset_drives_the_simulated_lifecycle() {
             .iter()
             .any(|component| component.id.as_str() == "docs" && component.selected),
         "and the component the preset chose is the one the host now holds"
-    );
-    session.control("next");
-    assert_eq!(
-        session
-            .state()
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.percent()),
-        Some(50),
-        "stepping it along moves only because an event was synthesised, so the state it reaches \
-         is one a real install can reach"
     );
     session.end();
 }

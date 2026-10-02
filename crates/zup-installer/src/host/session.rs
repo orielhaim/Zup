@@ -166,6 +166,7 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
         return Err(miette::miette!("the installed application was not found"));
     }
 
+    let launchers = zup_ui_host::surface::launchers(&installer);
     let state = match &installed {
         Some((scope, ledger)) => {
             let maintenance = zup_ui_host::surface::maintenance_state(&installer, ledger, *scope);
@@ -192,7 +193,8 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
                 zup_ui_host::surface::capabilities(&installer, false),
             )
         }
-    };
+    }
+    .with_launchers(launchers);
 
     let scope = installed
         .as_ref()
@@ -269,7 +271,8 @@ fn find_installation(
 #[derive(Clone)]
 enum Report {
     Engine(RuntimeEvent),
-    Plan(Result<zup_presentation::PlanPreview, String>),
+    /// The plan for one generation of choices. An older generation is stale.
+    Plan(u64, Result<zup_presentation::PlanPreview, String>),
     Update(UpdateReport),
     RepairDrift(Vec<String>),
 }
@@ -351,9 +354,13 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
 
     let active = Arc::new(Mutex::new(Active::default()));
     let (reports, mut inbox) = tokio::sync::broadcast::channel::<Report>(256);
+    let mut plans = Plans::default();
 
     if launch.auto_uninstall {
         state.accept(UiAction::RequestUninstall);
+    }
+    if let Some(selection) = state.plan_request() {
+        plans.request(selection, &reports);
     }
     publish(&preset, &state, &configuration)?;
 
@@ -366,8 +373,15 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
             report = inbox.recv() => {
                 match report.map_err(lagged)? {
                     Report::Engine(event) => state.observe(&event),
-                    Report::Plan(Ok(plan)) => state.set_plan(plan),
-                    Report::Plan(Err(message)) => state.fail(message, false),
+                    Report::Plan(generation, plan) => {
+                        if generation != plans.generation {
+                            continue;
+                        }
+                        match plan {
+                            Ok(plan) => state.set_plan(plan),
+                            Err(message) => state.plan_failed(message),
+                        }
+                    }
                     Report::Update(UpdateReport::Status(status)) => state.set_update(None, status),
                     Report::Update(UpdateReport::Finished(Ok(()))) => {}
                     Report::Update(UpdateReport::Finished(Err(message))) => {
@@ -390,6 +404,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     &active,
                     &reports,
                     &mut inbox,
+                    &mut plans,
                 );
                 publish(&preset, &state, &configuration)?;
             }
@@ -432,7 +447,31 @@ fn publish(
         .map_err(|error| miette::miette!("{error}"))
 }
 
+/// The plans this session has asked for.
+///
+/// Every change of choice starts a new one, and only the newest answer is
+/// kept: a person who toggles three components quickly gets the plan for the
+/// third, whatever order the three finish in.
+#[derive(Default)]
+struct Plans {
+    generation: u64,
+}
+
+impl Plans {
+    fn request(&mut self, selection: Selection, reports: &Reports) {
+        self.generation += 1;
+        let generation = self.generation;
+        let reports = reports.clone();
+        let executable = package::current_executable().map_err(|error| error.to_string());
+        spawn("setup-plan", move || {
+            let plan = executable.and_then(|executable| preview(&executable, selection));
+            let _ = reports.send(Report::Plan(generation, plan));
+        });
+    }
+}
+
 /// Carry out one decision the state machine reached.
+#[allow(clippy::too_many_arguments)]
 fn act(
     state: &mut HostState,
     installer: &Installer,
@@ -441,6 +480,7 @@ fn act(
     active: &Arc<Mutex<Active>>,
     reports: &Reports,
     inbox: &mut Inbox,
+    plans: &mut Plans,
 ) {
     match state.accept(action) {
         HostDecision::Run {
@@ -471,25 +511,14 @@ fn act(
                 run_lifecycle(operation, installer, placement, cancel, reports);
             });
         }
-        HostDecision::Preview(selection) => {
-            let executable = match package::current_executable() {
-                Ok(executable) => executable,
-                Err(error) => return state.fail(error.to_string(), false),
-            };
-            let (sender, receiver) = tokio::sync::broadcast::channel(1);
-            *inbox = receiver;
-            spawn("setup-preview", move || {
-                let _ = sender.send(Report::Plan(preview(&executable, selection)));
-            });
-        }
+        HostDecision::Plan(selection) => plans.request(selection, reports),
         HostDecision::Update => {
             let executable = match package::current_executable() {
                 Ok(executable) => executable,
                 Err(error) => return state.fail(error.to_string(), false),
             };
             let scope = placement.scope;
-            let (sender, receiver) = tokio::sync::broadcast::channel(8);
-            *inbox = receiver;
+            let sender = reports.clone();
             spawn("setup-update", move || {
                 let mut status = |progress| {
                     let _ = sender.send(Report::Update(UpdateReport::Status(progress)));
@@ -497,6 +526,17 @@ fn act(
                 let result =
                     crate::update::from_maintenance_surface(&executable, scope, &mut status);
                 let _ = sender.send(Report::Update(UpdateReport::Finished(result)));
+            });
+        }
+        HostDecision::Launch(target) => {
+            let selection = Selection::from_surface(&state.snapshot().surface);
+            spawn("setup-launch", move || {
+                let started = package::current_executable()
+                    .map_err(|error| error.to_string())
+                    .and_then(|executable| launch(&executable, selection, &target.name));
+                if let Err(error) = started {
+                    eprintln!("{} did not start: {error}", target.name);
+                }
             });
         }
         HostDecision::Cancel => active.lock().expect("the running operation").cancel(),
@@ -662,6 +702,49 @@ fn preview(
     executable: &Path,
     selection: Selection,
 ) -> Result<zup_presentation::PlanPreview, String> {
+    let (plan, installer) = plan(executable, &selection)?;
+    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan)
+        .with_declared_prerequisites(&installer.prerequisites);
+    if let Ok(target) = zup_windows::resolve_target(
+        &plan,
+        &zup_windows::WindowsTargetContext::new(selection.scope),
+    ) {
+        preview.install_directory = target.install_directory.to_string();
+        preview.estimated_bytes = target.summary.install_bytes;
+        preview.requires_authorization = target.summary.requires_authorization;
+    }
+    Ok(preview)
+}
+
+/// Start the installed application through the launcher named `name`.
+///
+/// Resolved from the same plan the installation committed, so the program that
+/// starts is the one the launcher points at and never a path a preset supplied.
+fn launch(executable: &Path, selection: Selection, name: &str) -> Result<(), String> {
+    let (plan, _) = plan(executable, &selection)?;
+    let target = zup_windows::resolve_target(
+        &plan,
+        &zup_windows::WindowsTargetContext::new(selection.scope),
+    )
+    .map_err(found)?;
+    let launcher = target
+        .launchers
+        .iter()
+        .find(|launcher| launcher.name.as_str() == name)
+        .ok_or_else(|| format!("no launcher is named `{name}`"))?;
+    let mut command = std::process::Command::new(launcher.target.as_str());
+    command.args(&launcher.arguments);
+    if let Some(directory) = &launcher.working_directory {
+        command.current_dir(directory.as_str());
+    }
+    command.spawn().map(drop).map_err(found)
+}
+
+/// The plan this package would follow for `selection`.
+fn plan(
+    executable: &Path,
+    selection: &Selection,
+) -> Result<(zup_plan::InstallPlan, Installer), String> {
     let build =
         package::target_plan(&package::open_bundle(executable).map_err(found)?).map_err(found)?;
     let installer = build.installer.clone();
@@ -689,18 +772,7 @@ fn preview(
         &request,
     )
     .map_err(found)?;
-
-    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan)
-        .with_declared_prerequisites(&installer.prerequisites);
-    if let Ok(target) = zup_windows::resolve_target(
-        &plan,
-        &zup_windows::WindowsTargetContext::new(selection.scope),
-    ) {
-        preview.install_directory = target.install_directory.to_string();
-        preview.estimated_bytes = target.summary.install_bytes;
-        preview.requires_authorization = target.summary.requires_authorization;
-    }
-    Ok(preview)
+    Ok((plan, installer))
 }
 
 fn found(error: impl std::fmt::Display) -> String {

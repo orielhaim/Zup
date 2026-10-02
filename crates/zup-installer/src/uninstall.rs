@@ -414,6 +414,7 @@ mod tests {
             },
             prerequisites: Vec::new(),
             components: Vec::new(),
+            component_groups: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: Vec::new(),

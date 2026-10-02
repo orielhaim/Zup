@@ -45,7 +45,7 @@ complete tour of the format.
 
 One required component and two optional ones, `user` or `machine` scope, a Start
 menu entry, a desktop shortcut, and one directory on `PATH`. Those last three are
-real system changes, which is the point — they are what "Show what will change"
+real system changes, which is the point - they are what "Show what will change"
 lists, and what an uninstall has to take back out.
 
 ## `zup preview`
@@ -66,12 +66,12 @@ Things worth trying:
 - **Edit `hero` in `zup.toml` while it is open.** The line under the product name
   changes without the window restarting, and without a build. That is the fastest
   proof that a data change and a code change are different things.
-- **Edit it into something invalid** — `hero = 42`. The session reports the
+- **Edit it into something invalid** - `hero = 42`. The session reports the
   schema's own refusal, naming the setting, and keeps showing the last settings
   that fitted. A half-finished edit must not cost a working window.
 - **Press the buttons.** Install, Stop, and the state changes are all real
   behaviour. There is no engine behind them, so an operation waits at "Preparing"
-  until you drive it from the console — see below.
+  until you drive it from the console - see below.
 - **Ctrl+C.** No child process is left behind.
 
 The controls are typed into the session, not clicked:
@@ -111,14 +111,14 @@ Run the installer, and work through:
   elevation; a shell that is not elevated will be told so, which is the honest
   answer rather than a failure.
 - **Components.** `Demo App` is required; `Documentation` starts off; `Sample data`
-  starts on. Press "Show what will change" — the docs and samples files appear and
+  starts on. Press "Show what will change" - the docs and samples files appear and
   disappear with their checkboxes.
 - **Install.** Then find it in the Start menu, or run `demo.cmd` from the install
   directory, or open a new command prompt and run `demo --version`, which only
   works if the `PATH` entry was taken.
 - **Change** on the maintenance surface re-opens the component choices.
-- **Repair.** Delete a file from the install directory — `NOTES.txt` is the easiest
-  — then press Repair. It comes back.
+- **Repair.** Delete a file from the install directory - `NOTES.txt` is the easiest
+  - then press Repair. It comes back.
 - **Uninstall.** Everything goes, including the shortcut and the `PATH` entry.
   `demo --version` stops working, which is how you know.
 
@@ -151,7 +151,7 @@ update-failed no route to host
 places it, a plan lists it, a repair restores it and an uninstall removes it.
 
 It is not a *UI asset*, which is a different thing. A UI asset is a file the
-**window itself reads** — a logo the installer draws in its own chrome. It only
+**window itself reads** - a logo the installer draws in its own chrome. It only
 becomes one when the selected preset's settings schema marks it, so that the
 application can say `logo = "branding/logo.svg"` under `[ui.settings]` and have
 Zup resolve, hash and hand over the bytes.
@@ -188,7 +188,7 @@ preset = "./aurora.zupui"
 ```
 
 and `zup preview` will resolve the file, hash it, materialize it into the
-session's own directory and hand the preset a logical name and verified content —
+session's own directory and hand the preset a logical name and verified content -
 never a path into this project. `zup preview` also re-resolves when you edit the
 package, and only replaces the window once the new one has connected.
 
@@ -199,5 +199,5 @@ zup build --force
 ```
 
 replaces the installer. To remove everything the demo installed, run the
-installer's own Uninstall from the maintenance window — that is the path worth
+installer's own Uninstall from the maintenance window - that is the path worth
 exercising, and it is the one that has to take the `PATH` entry back out.

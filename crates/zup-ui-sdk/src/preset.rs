@@ -42,7 +42,7 @@
 
 use futures_channel::mpsc::UnboundedReceiver;
 use futures_util::StreamExt;
-use gpui_kit::{App, AppContext};
+use gpui_kit::{App, AppContext, AssetSource};
 use serde::de::DeserializeOwned;
 use zup_ui_protocol::{UiCapabilities, UiMessage};
 
@@ -160,6 +160,14 @@ pub trait Preset: 'static {
         UiCapabilities::default()
     }
 
+    /// The files compiled into this preset: icons beyond the component
+    /// library's own, fonts, illustrations.
+    ///
+    /// Served behind the application's assets and in front of the component
+    /// library's icons, so a name a preset ships is never shadowed by one the
+    /// library happens to share.
+    fn assets() -> impl AssetSource {}
+
     /// Draw the installer.
     ///
     /// Called once the handshake is done and the first snapshot has arrived,
@@ -261,7 +269,7 @@ pub fn serve<P: Preset>(bootstrap: Bootstrap) -> Result<(), PresetError> {
     let assets = source_assets.clone();
     let (incoming, requester) = channel.into_parts();
     gpui_kit::application()
-        .with_assets(PresetAssets::new(source_assets))
+        .with_assets(PresetAssets::new(source_assets, P::assets()))
         .run(move |cx| {
             gpui_kit::init(cx);
             let session = UiSession::open(cx, requester);

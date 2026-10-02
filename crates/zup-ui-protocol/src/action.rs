@@ -23,8 +23,8 @@ pub enum UiAction {
     },
     /// Install somewhere other than the default, where the application allows it.
     SetInstallDirectory { directory: String },
-    /// Recompute what the current choices would change.
-    Preview,
+    /// Go back to the application's default location.
+    ResetInstallDirectory,
     /// Apply the current choices.
     Install,
     /// Check the configured update channel.
@@ -47,6 +47,9 @@ pub enum UiAction {
     OpenLog,
     /// Put a diagnostic summary on the clipboard.
     CopyDiagnostics,
+    /// Start the application this session installed, as
+    /// [`UiSnapshot::launch`](crate::UiSnapshot::launch) names it.
+    Launch,
     /// The person closed the window.
     Close,
 }

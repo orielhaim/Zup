@@ -2,9 +2,10 @@
 //!
 //! There are two kinds of asset and they are not the same thing:
 //!
-//! - **Preset-owned** assets belong to the preset's own code. `include_bytes!`
-//!   them, put them in a `rust-embed` folder, register a `gpui_kit` asset
-//!   source. Nothing here is involved; they are part of the compiled preset.
+//! - **Preset-owned** assets belong to the preset's own code: icons, fonts,
+//!   illustrations. A preset returns an asset source for them from
+//!   [`Preset::assets`](crate::Preset::assets); they are part of the compiled
+//!   preset.
 //! - **Application-provided** assets are data an application configured when it
 //!   chose this preset. A logo, a hero image, a font. They are not compiled
 //!   into the preset, which is the whole reason one compiled preset serves
@@ -144,25 +145,28 @@ impl ApplicationAssets {
     }
 }
 
-/// An asset source that serves a preset's own assets and the application's.
+/// The asset source a preset's window reads: the application's files, then the
+/// preset's own, then the component library's icons.
 ///
-/// A preset registers one of these instead of `gpui_kit::assets::Assets`, and
-/// gets both. The application's files are read through the same interface GPUI
-/// already has, so `img("logo.svg")` and the SVG renderer are unchanged - there
-/// is no second image-loading stack, and a preset does not learn which kind of
-/// asset a name refers to.
+/// The application's files are read through the same interface GPUI already
+/// has, so `img("logo.svg")` and the SVG renderer are unchanged - there is no
+/// second image-loading stack, and a preset does not learn which kind of asset
+/// a name refers to.
 pub struct PresetAssets {
-    /// Assets compiled into the preset, from `gpui-kit-assets`.
-    own: gpui_kit::assets::Assets,
     /// Assets the application configured.
     application: ApplicationAssets,
+    /// Assets compiled into the preset.
+    own: Box<dyn AssetSource>,
+    /// The icons `gpui-kit`'s components draw themselves with.
+    components: gpui_kit::assets::Assets,
 }
 
 impl PresetAssets {
-    pub fn new(application: ApplicationAssets) -> Self {
+    pub fn new(application: ApplicationAssets, own: impl AssetSource) -> Self {
         Self {
-            own: gpui_kit::assets::Assets::new(""),
             application,
+            own: Box::new(own),
+            components: gpui_kit::assets::Assets::new(""),
         }
     }
 }
@@ -179,7 +183,10 @@ impl AssetSource for PresetAssets {
                 .into()),
             };
         }
-        self.own.load(path)
+        if let Ok(Some(bytes)) = self.own.load(path) {
+            return Ok(Some(bytes));
+        }
+        self.components.load(path)
     }
 
     fn list(&self, path: &str) -> GpuiResult<Vec<SharedString>> {
@@ -190,7 +197,8 @@ impl AssetSource for PresetAssets {
             .filter(|name| name.starts_with(path))
             .map(SharedString::from)
             .collect();
-        listed.extend(self.own.list(path)?);
+        listed.extend(self.own.list(path).unwrap_or_default());
+        listed.extend(self.components.list(path)?);
         listed.sort();
         listed.dedup();
         Ok(listed)

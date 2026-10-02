@@ -21,9 +21,11 @@ pub use gpui_kit as gpui;
 pub use gpui_kit::{App, AppContext, AsyncApp, Context, Entity, IntoElement, Render, Subscription};
 
 pub use zup_ui_protocol::{
-    ChangeGroup, ChangeKind, ComponentId, ComponentOption, DiagnosticKind, DiagnosticPresentation,
-    HostHello, InstallOptions, InstallScope, InstallationHealth, MaintenanceState, OperationPhase,
-    PlanPreview, PlannedChange, ProductIdentity, RequirementPresentation, RequirementStatus,
-    ResourceCategory, UiAction, UiCapabilities, UiCapability, UiConfiguration, UiSnapshot, UiState,
-    UiSurface, UpdatePresentation, UpdateState, format_bytes,
+    ChangeGroup, ChangeKind, ComponentGroupOption, ComponentId, ComponentOption,
+    ComponentProminence, DiagnosticKind, DiagnosticPresentation, HostHello, InstallOptions,
+    InstallScope, InstallationHealth, LaunchTarget, MaintenanceState, OperationKind,
+    OperationPhase, PlanPreview, PlanStatus, PlannedChange, ProductIdentity,
+    RequirementPresentation, RequirementStatus, ResourceCategory, SelectionRequirement, UiAction,
+    UiCapabilities, UiCapability, UiConfiguration, UiSnapshot, UiState, UiSurface,
+    UpdatePresentation, UpdateState, format_bytes,
 };

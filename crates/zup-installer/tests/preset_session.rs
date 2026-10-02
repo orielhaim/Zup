@@ -73,6 +73,7 @@ fn installer() -> Installer {
                 required: true,
                 default: true,
                 requires: Vec::new(),
+                group: None,
             },
             Component {
                 id: ComponentId::new("docs").expect("id"),
@@ -81,8 +82,10 @@ fn installer() -> Installer {
                 required: false,
                 default: false,
                 requires: Vec::new(),
+                group: None,
             },
         ],
+        component_groups: Vec::new(),
         plugins: Vec::new(),
         files: Vec::new(),
         launchers: Vec::new(),

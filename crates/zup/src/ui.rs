@@ -208,7 +208,7 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
         println!("  packed  {target}");
     }
     println!(
-        "\n{} {} — {} target(s), {} bytes",
+        "\n{} {} - {} target(s), {} bytes",
         view.name(),
         view.version(),
         view.targets().len(),

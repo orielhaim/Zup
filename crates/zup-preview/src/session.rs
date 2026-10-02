@@ -17,18 +17,25 @@
 //! What is *not* here is what the world being previewed is. A driver supplies its
 //! own change vocabulary and its own jobs; everything the child sees, everything
 //! the controls do, and everything that happens when a child exits is decided
-//! here, once, by the same code for every preview.
+//! here, once, by the same code for every preview. Closing the window ends the
+//! session: a preview is the window, and a host with nothing left to show is
+//! finished.
 
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use tokio::sync::broadcast;
 use zup_core::{Sha256Digest, UiPreset};
+use zup_runtime::{
+    CancellationHandle, RuntimeEvent, SimulatedJob, SimulatedLifecycle, run_simulated,
+};
 use zup_ui_host::HostDecision;
-use zup_ui_protocol::{UiAction, UiSnapshot};
+use zup_ui_protocol::{OperationKind, UiAction, UiSnapshot};
 
 use crate::controls::{self, Command, Components, Effect};
-use crate::simulator::{Scenario, Simulator, StageError};
+use crate::machine::Scenario;
+use crate::simulator::{Simulator, StageError};
 use crate::state::StateDirectory;
 
 /// How long the loop waits for something to happen before looking again.
@@ -126,6 +133,7 @@ pub trait Driver {
     /// giving it a second copy of this loop is how a driver and a session would
     /// come to disagree about when a preset's ask was honoured.
     fn pump(&mut self) {
+        self.runtime().drain_engine();
         if !self.runtime().is_running() {
             self.runtime().notice_exit();
         }
@@ -175,6 +183,12 @@ pub struct Runtime {
     scenario: Scenario,
     /// Where the running child's actions arrive, replaced with the child.
     actions: Option<Receiver<UiAction>>,
+    /// The simulated engine's events, while an operation is running.
+    engine: Option<broadcast::Receiver<RuntimeEvent>>,
+    /// Cancels the operation the engine is running.
+    cancel: Option<CancellationHandle>,
+    /// The window was closed, so the session is finished.
+    closed: bool,
 }
 
 impl Runtime {
@@ -184,7 +198,15 @@ impl Runtime {
             simulator: Simulator::new(state, scenario.clone()),
             scenario,
             actions: None,
+            engine: None,
+            cancel: None,
+            closed: false,
         }
+    }
+
+    /// Whether the window has been closed.
+    pub fn closed(&self) -> bool {
+        self.closed
     }
 
     /// The state a preset sees right now.
@@ -232,22 +254,31 @@ impl Runtime {
             }
             Ok(Command::Quit) => ControlOutcome::Quit,
             Ok(command) => {
+                if !matches!(command, Command::Run) {
+                    self.stop_engine();
+                }
                 let effect = controls::apply(&mut self.simulator, &mut self.scenario, command);
+                if matches!(effect, Effect::Running) {
+                    self.start_engine();
+                    self.publish();
+                }
                 self.report(effect);
                 ControlOutcome::Handled
             }
         }
     }
 
-    /// A child that exited is noticed, not waited for.
+    /// The window's process has gone, so the preview is over.
     ///
-    /// The session survives it: the state, the settings, and the selection that
-    /// is still known to work are all still here.
+    /// A replacement does not come through here. The new child is adopted before
+    /// the old one is dropped, on this same thread, so a rebuild never looks
+    /// like the person closed the window.
     pub fn notice_exit(&mut self) {
-        if self.simulator.generation().is_some() {
-            println!("  stopped  the preset process exited; the session is still here");
-            self.simulator.forget_child();
+        if self.closed || self.simulator.generation().is_none() {
+            return;
         }
+        self.simulator.forget_child();
+        self.finish();
     }
 
     /// Everything the running child has asked for since the last call.
@@ -315,29 +346,125 @@ impl Runtime {
 
     /// End the session, and take the child with it.
     pub fn shutdown(&mut self) {
+        self.stop_engine();
         self.simulator.shutdown();
     }
 
-    /// A preset asked for something.
-    fn asked(&mut self, action: UiAction) {
-        match self.simulator.act(action) {
-            HostDecision::Refused(refusal) => {
-                println!("  refused  {refusal}");
+    /// Events the simulated engine has emitted since the last turn.
+    pub fn drain_engine(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut finished = false;
+        loop {
+            match engine.try_recv() {
+                Ok(event) => {
+                    finished |= matches!(
+                        event,
+                        RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
+                    );
+                    events.push(event);
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    finished = true;
+                    break;
+                }
             }
-            // A lifecycle the engine would have run is the one thing a preview
-            // cannot do on a person's behalf. The state is already running; what
-            // is left is to say so.
-            HostDecision::Run { .. } => {
-                println!("  action   the engine is simulated; `next` steps it along");
-            }
-            _ => {}
+        }
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            self.simulator.observe(&event);
+        }
+        if finished {
+            self.engine = None;
+            self.cancel = None;
         }
         self.publish();
     }
 
+    /// A preset asked for something.
+    fn asked(&mut self, action: UiAction) {
+        let closing = matches!(action, UiAction::Close);
+        match self.simulator.act(action) {
+            HostDecision::Refused(refusal) => {
+                println!("  refused  {refusal}");
+            }
+            HostDecision::Run { .. } => self.start_engine(),
+            HostDecision::Cancel => self.cancel_engine(),
+            _ => {}
+        }
+        if closing {
+            self.finish();
+        } else {
+            self.publish();
+        }
+    }
+
+    /// The window is gone, so the session loop ends and shuts the rest down.
+    fn finish(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        println!("  closed   the window was closed");
+    }
+
+    /// Start the simulated engine for the operation the host just accepted.
+    fn start_engine(&mut self) {
+        self.stop_engine();
+        let lifecycle = match self.simulator.snapshot().operation {
+            Some(OperationKind::Upgrade) => SimulatedLifecycle::Upgrade,
+            Some(OperationKind::Modify) => SimulatedLifecycle::Modify,
+            Some(OperationKind::Repair) => SimulatedLifecycle::Repair,
+            Some(OperationKind::Uninstall) => SimulatedLifecycle::Uninstall,
+            Some(OperationKind::Install) | None => SimulatedLifecycle::Install,
+        };
+        let footprint = &self.simulator.scenario().footprint;
+        let job = SimulatedJob {
+            lifecycle,
+            download_bytes: footprint.download_bytes,
+            file_bytes: footprint.application_bytes,
+            system_changes: footprint.path
+                || !footprint.shortcuts.is_empty()
+                || !footprint.services.is_empty()
+                || !footprint.protocols.is_empty()
+                || !footprint.file_associations.is_empty(),
+        };
+        let cancel = CancellationHandle::new();
+        let (events, receiver) = broadcast::channel(256);
+        let running = cancel.clone();
+        let _ = std::thread::Builder::new()
+            .name("zup-engine".into())
+            .spawn(move || {
+                run_simulated(job, running, events);
+            });
+        self.cancel = Some(cancel);
+        self.engine = Some(receiver);
+    }
+
+    /// Ask the engine to stop at its next safe point.
+    fn cancel_engine(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+    }
+
+    /// Drop the engine without applying whatever it still had to say.
+    fn stop_engine(&mut self) {
+        self.engine = None;
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
+
     fn report(&self, effect: Effect) {
         match effect {
-            Effect::Published | Effect::Quit => {}
+            Effect::Published | Effect::Quit | Effect::Running => {}
             Effect::Held => println!("  held     no preset is running to tell"),
             Effect::Refused(reason) => println!("  refused  {reason}"),
         }
@@ -352,15 +479,17 @@ impl Runtime {
 /// decision about the *session*, and a session per command is a session per
 /// command that will be different next year.
 ///
-/// The loop does not end when a child does. The machine, the settings and the
-/// files all outlive the window that was drawing them, and a session that ended
-/// with a crashed preset would take the controls with it.
+/// The loop ends when the window does. A preview with no window is not a
+/// session someone is still driving.
 pub fn serve<D: Driver>(inbox: &Receiver<Event<D::Change, D::Finished>>, driver: &mut D) {
     // What the session prints is its product, and a redirected stdout is block
     // buffered by default, so a preview would say nothing at all while it works.
     let _lines = std::io::LineWriter::new(std::io::stdout());
     loop {
         driver.pump();
+        if driver.runtime().closed() {
+            break;
+        }
         driver.tick();
         match inbox.recv_timeout(TICK) {
             Ok(Event::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,

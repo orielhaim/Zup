@@ -13,23 +13,24 @@
 //! agreement, the controls, the debounced watcher, and where the copies go. A
 //! driver supplies a source and a change vocabulary and nothing else.
 //!
-//! There is no engine behind any of it, and nothing here can install, update,
-//! repair, remove, elevate, register or write anything outside its own state
-//! directory. That is not a limitation of the simulation - it is what makes a
-//! preview safe to leave open while editing an application, and a control causes
-//! the event an engine would have caused rather than performing one, so there is
-//! no path from a button to a mutation.
+//! The engine behind an operation is [`zup_runtime::run_simulated`]: the same
+//! stages a real lifecycle walks, on a clock, reporting the same events. It
+//! installs nothing. A control still cannot mutate the machine, because the
+//! engine's only product is those events.
 
 #![deny(unsafe_code)]
 
+pub mod catalog;
 mod controls;
+mod machine;
 mod session;
 mod simulator;
 mod state;
 mod watch;
 
 pub use controls::{COMMANDS, Command, Components, Effect, apply};
+pub use machine::{Footprint, Machine, Scenario, Surface};
 pub use session::{ControlOutcome, Driver, Event, Runtime, StartError, default_scenario, serve};
-pub use simulator::{Candidate, Scenario, Simulator, StageError, Surface};
+pub use simulator::{Candidate, Simulator, StageError};
 pub use state::{PROJECT_DIRECTORY, StateDirectory};
 pub use watch::{Seen, Watcher};

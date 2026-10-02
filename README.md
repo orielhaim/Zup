@@ -60,9 +60,6 @@ cargo xtask toolchain build             # for `cargo run` and `cargo test`
 cargo xtask toolchain build --profile release
 ```
 
-`zup` has no Cargo features, so `--help` and `cargo install` need no flag
-deciding what you get.
-
 ## Authoring commands
 
 | Command | Purpose |

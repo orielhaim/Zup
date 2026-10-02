@@ -39,9 +39,11 @@ pub enum UiCapability {
     Diagnostics,
     /// The application allows choosing an install location.
     InstallDirectory,
+    /// The host can start the application it installed.
+    Launch,
     /// The host can modify, repair, and uninstall an existing installation.
     Maintenance,
-    /// The host can answer a plan preview.
+    /// The host keeps a plan of what the current choices would change.
     PlanPreview,
     /// The application is configured for updates.
     Updates,
@@ -53,6 +55,7 @@ impl UiCapability {
         Self::Components,
         Self::Diagnostics,
         Self::InstallDirectory,
+        Self::Launch,
         Self::Maintenance,
         Self::PlanPreview,
         Self::Updates,
@@ -63,6 +66,7 @@ impl UiCapability {
             Self::Components => "components",
             Self::Diagnostics => "diagnostics",
             Self::InstallDirectory => "install-directory",
+            Self::Launch => "launch",
             Self::Maintenance => "maintenance",
             Self::PlanPreview => "plan-preview",
             Self::Updates => "updates",

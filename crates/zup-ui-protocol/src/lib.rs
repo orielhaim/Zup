@@ -44,15 +44,17 @@ pub use error::UiWireError;
 pub use identifiers::{ComponentId, ComponentIdError, InstallScope};
 pub use presentation::{
     ChangeGroup, ChangeKind, DiagnosticKind, DiagnosticPresentation, InstallationHealth,
-    OperationPhase, PlanPreview, PlannedChange, ProgressPresentation, RequirementPresentation,
-    RequirementStatus, ResourceCategory, UpdatePresentation, UpdateState, format_bytes,
+    OperationPhase, PlanPreview, PlanStatus, PlannedChange, ProgressPresentation,
+    RequirementPresentation, RequirementStatus, ResourceCategory, UpdatePresentation, UpdateState,
+    format_bytes,
 };
 pub use session::{
     HostHello, UiCapabilities, UiCapability, UiHello, UiSessionId, UnknownCapability,
 };
 pub use session_machine::{Identity, Session, SessionProgress, SessionState};
 pub use snapshot::{
-    ComponentOption, InstallOptions, MaintenanceState, ProductIdentity, UiSnapshot, UiState,
+    ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, LaunchTarget,
+    MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement, UiSnapshot, UiState,
     UiSurface,
 };
 pub use wire::{

@@ -58,6 +58,16 @@ impl SessionState {
     pub fn closed(&self) -> Option<&str> {
         self.closed.as_deref()
     }
+
+    /// Replace the snapshot, as a host publishing one would.
+    ///
+    /// For a preset's own tests and previews: the window still renders only
+    /// what it is handed, and a caller notifies the entity afterwards.
+    pub fn replace(&mut self, snapshot: UiSnapshot) {
+        self.snapshot = Some(snapshot);
+        self.connected = true;
+        self.closed = None;
+    }
 }
 
 /// Where an action goes once a preset has sent it.

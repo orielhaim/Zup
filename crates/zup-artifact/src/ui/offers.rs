@@ -34,6 +34,9 @@ pub fn offers(installer: &Installer) -> UiCapabilities {
     if installer.updates.is_some() {
         capabilities = capabilities.with(UiCapability::Updates);
     }
+    if !installer.launchers.is_empty() {
+        capabilities = capabilities.with(UiCapability::Launch);
+    }
     // A maintenance surface always exists to be reached; what a given launch may
     // offer of it is the host's decision, not the application's.
     capabilities.with(UiCapability::Maintenance)

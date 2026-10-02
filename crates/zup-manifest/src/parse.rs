@@ -47,6 +47,7 @@ pub fn parse_named(source: &str, name: &str) -> Result<Manifest, ManifestError> 
         distribution: raw.distribution,
         publish: raw.publish,
         components: raw.components,
+        component_groups: raw.component_groups,
         plugins: raw.plugins,
         files: raw.files,
         launchers: raw.launchers,
@@ -91,6 +92,8 @@ struct RawManifest {
     publish: Option<crate::model::Publish>,
     #[serde(default)]
     components: Vec<Targeted<Component>>,
+    #[serde(default)]
+    component_groups: Vec<Targeted<zup_core::ComponentGroup>>,
     #[serde(default)]
     plugins: Vec<Targeted<Plugin>>,
     #[serde(default)]

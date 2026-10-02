@@ -19,10 +19,11 @@
 //! preset's component list has no heading, no scrolling, and no way to say "and
 //! four more".
 
-use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_ui_protocol::{ComponentOption, InstallScope, InstallationHealth, UpdateState};
 
-use crate::simulator::{Scenario, Simulator, Surface};
+use crate::machine::{Scenario, Surface};
+use crate::simulator::Simulator;
 
 /// The component shapes a real application can have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,7 @@ impl Components {
             description: None,
             required,
             selected,
+            installed: false,
         };
         match self {
             Self::None => Vec::new(),
@@ -85,6 +87,8 @@ impl Components {
 /// One thing a person can do to the simulated machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Open one of the named states in [`crate::catalog`].
+    Scenario(String),
     Surface(Surface),
     Scope(InstallScope),
     Components(Components),
@@ -92,6 +96,10 @@ pub enum Command {
     Run,
     /// Report the engine events an install passes through, one step at a time.
     Advance,
+    /// The running transaction committed.
+    Commit,
+    /// The running operation failed with this engine message.
+    Fail(String),
     Blocked(String),
     Rollback,
     RecoveryRequired,
@@ -105,11 +113,14 @@ pub enum Command {
 
 /// The commands, as a person reads them.
 pub const COMMANDS: &str = "\
+scenario <name>             open a named state; `scenario` alone lists them
 install | maintenance        which surface this machine shows
 user | machine              who the installation is for
 components <layout>         none | one-optional | many | required-and-optional
 run                         start an installation
 next                        step the running installation along
+commit                      the running operation finished
+fail <text>                 the running operation failed with this message
 blocked <text>              a file in the way
 rollback                    the transaction failed and was undone
 recovery                    the last transaction did not finish
@@ -129,6 +140,9 @@ impl Command {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let rest = rest.trim();
         match word {
+            "scenario" => Ok(Self::Scenario(rest.to_owned())),
+            "commit" => Ok(Self::Commit),
+            "fail" => Ok(Self::Fail(rest.to_owned())),
             "install" => Ok(Self::Surface(Surface::Install)),
             "maintenance" => Ok(Self::Surface(Surface::Maintenance)),
             "user" => Ok(Self::Scope(InstallScope::User)),
@@ -181,6 +195,8 @@ pub enum Effect {
     Published,
     /// The state changed and no child is running to tell.
     Held,
+    /// A lifecycle was accepted. The engine runs it.
+    Running,
     /// The control asked for something the state machine refused.
     Refused(String),
     /// The preview is finished.
@@ -191,6 +207,29 @@ pub enum Effect {
 pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Command) -> Effect {
     match command {
         Command::Quit => Effect::Quit,
+        Command::Scenario(name) => match crate::catalog::named(&name) {
+            Some(machine) => {
+                *scenario = machine.scenario().clone();
+                *simulator.machine_mut() = machine;
+                publish(simulator)
+            }
+            None => Effect::Refused(format!(
+                "`{name}` is not a named state; try one of: {}",
+                crate::catalog::ENTRIES
+                    .iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        },
+        Command::Commit => {
+            simulator.finish_with(&InstallOutcome::Committed);
+            publish(simulator)
+        }
+        Command::Fail(message) => {
+            simulator.finish_with(&InstallOutcome::Failed(message));
+            publish(simulator)
+        }
         Command::Surface(surface) => {
             if scenario.surface != surface {
                 scenario.surface = surface;
@@ -210,18 +249,13 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
             // required one has to be opened with it already selected.
             publish(simulator)
         }
-        Command::Run => match simulator.act(zup_ui_protocol::UiAction::Install) {
-            zup_ui_host::HostDecision::Run { .. } => {
-                // A real operation begins by saying it has. The controls then
-                // step it, which is what makes a half-finished installation
-                // reproducible rather than a race against a timer.
-                simulator.observe(&RuntimeEvent::StateChanged {
-                    state: RuntimeState::Preparing,
-                });
-                publish(simulator)
+        Command::Run => {
+            let decision = simulator.act(zup_ui_protocol::UiAction::Install);
+            match decision {
+                zup_ui_host::HostDecision::Run { .. } => Effect::Running,
+                other => refused_with(simulator, other),
             }
-            other => refused_with(simulator, other),
-        },
+        }
         Command::Advance => {
             for event in operation_events() {
                 simulator.observe(&event);

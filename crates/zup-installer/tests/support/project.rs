@@ -481,6 +481,7 @@ fn installer_ir(
         },
         prerequisites: Vec::new(),
         components: components(payload),
+        component_groups: Vec::new(),
         plugins: plugins
             .iter()
             .map(|plugin| zup_core::PluginBinding {
@@ -529,6 +530,7 @@ fn components(payload: &[Payload]) -> Vec<Component> {
             required: id == "core",
             default: true,
             requires: Vec::new(),
+            group: None,
         })
         .collect()
 }
