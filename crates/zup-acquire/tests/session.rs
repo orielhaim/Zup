@@ -809,7 +809,7 @@ async fn a_closure_the_engine_cannot_build_is_refused() {
 }
 
 /// A refusal reaches the caller with the machine untouched, the reasons intact,
-/// and every source it tried named in order - on the event stream a UI reads and
+/// and every source it tried named in order - on the event stream a preset reads and
 /// in the error a library caller gets. A chain with nothing in it still has to
 /// say something.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

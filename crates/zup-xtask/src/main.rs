@@ -51,7 +51,7 @@ xtask verify-dependency-graph [--root <dir>]
     Refuse a dependency graph that grew by accident. Fails when a workspace
     package reaches two versions of one external crate, when development tooling
     has reached the graph of a binary that ships to users, and when a published
-    UI crate has reached a crate that exists only in this repository.
+    published crate has reached a crate that exists only in this repository.
 
 xtask automation generate [--root <dir>]
     Write the artifacts derived from the automation contract: the JSON Schema, the

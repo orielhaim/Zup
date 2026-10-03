@@ -67,7 +67,7 @@ pub struct PresetPackage {
     pub schema: u32,
     pub name: String,
     pub version: semver::Version,
-    /// The UI wire protocol this build speaks.
+    /// The preset protocol this build speaks.
     pub ui_protocol: u32,
     /// What this preset cannot present without.
     pub required_capabilities: Capabilities,

@@ -1086,7 +1086,7 @@ fn attach_maintenance_copy(
     Ok(())
 }
 
-/// Read the UI runtime out of the installer image this process is running from.
+/// Read the preset runtime out of the installer image this process is running from.
 ///
 /// The image's own resources, not a file beside it: beside it is what a previous
 /// run left behind, and a plan that read it would be planning an install out of
@@ -1104,7 +1104,7 @@ fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Ve
                 .ok_or_else(|| miette::miette!("this installer was composed without a preset"));
         }
         let asset = ui_asset_name(name)
-            .ok_or_else(|| miette::miette!("`{name}` is not UI runtime content"))?;
+            .ok_or_else(|| miette::miette!("`{name}` is not preset runtime content"))?;
         bundle
             .ui_asset(asset)
             .map(|(_, bytes)| bytes)
@@ -1112,7 +1112,7 @@ fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Ve
     }
 }
 
-/// The logical asset name inside a reserved UI source name.
+/// The logical asset name inside a reserved preset source name.
 fn ui_asset_name(source: &str) -> Option<&str> {
     source
         .strip_prefix(zup_windows::preset_runtime::ASSET_SOURCE_PREFIX)
@@ -1146,7 +1146,7 @@ fn acquired_ui_source(
                 .map_err(|error| miette::miette!("the preset executable {digest}: {error}"));
         }
         let asset = ui_asset_name(name)
-            .ok_or_else(|| miette::miette!("`{name}` is not UI runtime content"))?;
+            .ok_or_else(|| miette::miette!("`{name}` is not preset runtime content"))?;
         payload
             .ui_asset(asset)
             .map_err(|error| miette::miette!("the asset `{asset}`: {error}"))
@@ -1223,7 +1223,7 @@ fn attach_ui_runtime(
     for (path, digest, size, source) in files {
         let destination =
             zup_platform::TargetPath::new(triple.clone(), zup_windows::plain_path_text(&path))
-                .map_err(|error| miette::miette!("UI runtime destination: {error}"))?;
+                .map_err(|error| miette::miette!("preset runtime destination: {error}"))?;
         let text = destination.to_string();
         target.files.push(zup_platform::TargetFile {
             key: ResourceKey::File { destination: text },

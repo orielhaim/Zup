@@ -27,7 +27,7 @@ pub use session::{
     uninstall_confirmation,
 };
 
-// The host half of the UI protocol, re-exported so a caller that already names
+// The host half of the preset protocol, re-exported so a caller that already names
 // this module does not have to learn a second one. `zup preset dev` names
 // `zup_preset_host` directly; this is a convenience for the installer's own callers,
 // not a second path.

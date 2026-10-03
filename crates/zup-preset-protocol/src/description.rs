@@ -4,7 +4,7 @@
 //! document. That is the only moment a preset binary is executed, and it
 //! happens in the preset author's build, never in an application's build.
 //!
-//! The describe document is what only the preset knows: the UI protocol it
+//! The describe document is what only the preset knows: the preset protocol it
 //! speaks, the capabilities it cannot work without, and the JSON Schema of its
 //! settings, generated from the same type the preset will deserialize at
 //! runtime. The `.zupui` that carries it is a build product and belongs to
@@ -40,7 +40,7 @@ pub struct PresetDescription {
     pub name: String,
     /// The preset's version, from its Cargo package.
     pub version: String,
-    /// The UI wire protocol this build speaks.
+    /// The preset protocol this build speaks.
     pub ui_protocol: u32,
     /// What this preset cannot present without.
     pub required_capabilities: Capabilities,

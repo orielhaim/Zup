@@ -1,4 +1,4 @@
-//! The host side of the UI protocol, with no engine behind it.
+//! The host side of the preset protocol, with no engine behind it.
 //!
 //! Two things in this repository are called a host and they are the same thing:
 //! the process that owns a machine's presentation state and speaks

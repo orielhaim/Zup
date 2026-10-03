@@ -1,4 +1,4 @@
-//! The versioned contract between a zup installer host and a UI preset.
+//! The versioned contract between a zup installer host and a preset.
 //!
 //! A preset is presentation code. It never sees a transaction, a plan, an
 //! elevation decision, or a runtime event: it receives [`Snapshot`] values

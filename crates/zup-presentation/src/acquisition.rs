@@ -8,7 +8,7 @@
 //! The mapping is deliberately total. Every acquisition event maps to exactly one
 //! automation event or to nothing at all, and the set of events a consumer may
 //! see is the closed set in [`automation_events`]. Adding an event is therefore a
-//! visible change rather than something a UI silently ignores.
+//! visible change rather than something a preset silently ignores.
 //!
 //! # What a consumer may rely on
 //!

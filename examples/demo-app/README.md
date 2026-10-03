@@ -145,12 +145,12 @@ up-to-date 1.0.0
 update-failed no route to host
 ```
 
-## The logo, and what a UI asset actually is
+## The logo, and what a preset asset actually is
 
 `payload/branding/logo.svg` is a file this application **ships**: the installer
 places it, a plan lists it, a repair restores it and an uninstall removes it.
 
-It is not a *UI asset*, which is a different thing. A UI asset is a file the
+It is not a *preset asset*, which is a different thing. A preset asset is a file the
 **window itself reads** - a logo the installer draws in its own chrome. It only
 becomes one when the selected preset's settings schema marks it, so that the
 application can say `logo = "branding/logo.svg"` under `[ui.settings]` and have
@@ -168,7 +168,7 @@ settings      hero (others permitted)
 validate and then be ignored, because the preset would never read it. This project
 ships the logo as a payload file instead, which does something.
 
-To see a real UI asset, point this project at a preset that takes one. In a
+To see a real preset asset, point this project at a preset that takes one. In a
 preset's own settings type:
 
 ```rust

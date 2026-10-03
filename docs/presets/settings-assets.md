@@ -77,7 +77,7 @@ project path - `ApplicationAssets::path(&asset_ref)` resolves a name to a
 verified file, and the asset source serves it to `img()` and the SVG renderer
 through GPUI's own interface.
 
-A UI asset is a different thing from a payload file:
+A preset asset is a different thing from a payload file:
 
 - a **preset asset** is read by the installer window;
 - a **payload file** is installed onto the target machine.

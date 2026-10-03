@@ -51,7 +51,7 @@ pub struct ResolvedPrerequisite {
     pub sha256: Sha256Digest,
 }
 
-/// One application-provided UI asset, found and hashed at build time.
+/// One application-provided preset asset, found and hashed at build time.
 ///
 /// The same discipline as a [`ResolvedFile`]: the source is a build-machine fact
 /// and is absent wherever the plan was read back out of a package, because a
@@ -141,7 +141,7 @@ pub struct TargetBuildPlan {
     pub plugins: Vec<ResolvedPlugin>,
     /// Resolved payload files, sorted by destination then source relative path.
     pub files: Vec<ResolvedFile>,
-    /// Resolved application UI assets, sorted by name.
+    /// Resolved application preset assets, sorted by name.
     #[serde(default)]
     pub ui_assets: Vec<ResolvedAsset>,
     /// Sum of payload file sizes.

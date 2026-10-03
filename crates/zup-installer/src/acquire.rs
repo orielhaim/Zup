@@ -308,7 +308,7 @@ pub fn declared_content(
         .map(|asset| {
             (
                 asset.sha256,
-                ContentReason::UiAsset {
+                ContentReason::PresetAsset {
                     name: asset.name.to_string(),
                 },
             )
@@ -689,7 +689,7 @@ mod tests {
             .items()
             .iter()
             .filter_map(|item| match &item.reason {
-                ContentReason::UiAsset { name } => Some(name.as_str()),
+                ContentReason::PresetAsset { name } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -753,7 +753,7 @@ mod tests {
             reasons,
             [
                 ContentReason::Preset,
-                ContentReason::UiAsset {
+                ContentReason::PresetAsset {
                     name: "branding/logo.svg".to_owned()
                 }
             ],

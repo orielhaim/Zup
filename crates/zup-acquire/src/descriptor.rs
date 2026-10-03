@@ -113,7 +113,7 @@ impl ContentPriority {
 /// Why one item is in a closure, which is what makes a download explainable.
 ///
 /// A machine that downloads 184 MiB should be able to say which 184 MiB. Every
-/// item carries the reason it was selected, and a group lets the UI collapse
+/// item carries the reason it was selected, and a group lets a preset collapse
 /// the detail without losing it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,16 +130,16 @@ pub enum ContentReason {
     Prerequisite { id: String },
     /// A plugin's AOT image.
     Plugin { id: String },
-    /// The native image a graphical variant presents its window with.
+    /// The native image a graphical variant presents its preset with.
     ///
     /// A second native image beside the runtime, for the same reason: the client
     /// has to fetch the right one for this machine and prove it before running
     /// it. Which image it is comes from the release's own media vocabulary, not
-    /// from anything this crate knows about how a window is drawn.
+    /// from anything this crate knows about how a preset is drawn.
     Preset,
-    /// An asset the variant's window was told to expect, by the name it knows it
+    /// An asset the variant's preset was told to expect, by the name it knows it
     /// as.
-    UiAsset { name: String },
+    PresetAsset { name: String },
     /// Content the same machine already has, retained for offline repair.
     Retained,
 }
@@ -153,7 +153,7 @@ impl ContentReason {
             Self::File { .. } => "files",
             Self::Prerequisite { .. } => "prerequisites",
             Self::Plugin { .. } => "plugins",
-            Self::Preset | Self::UiAsset { .. } => "window",
+            Self::Preset | Self::PresetAsset { .. } => "preset",
             Self::Retained => "retained",
         }
     }

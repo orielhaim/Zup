@@ -1,6 +1,6 @@
-//! A window as release content, from a build plan to a staged web tree.
+//! a preset as release content, from a build plan to a staged web tree.
 //!
-//! Every claim a release makes about a window is checked here, because a release
+//! Every claim a release makes about a preset is checked here, because a release
 //! that names a preset without shipping it is a release a client cannot install
 //! from - and the client finds that out on a machine rather than at publish
 //! time.
@@ -12,15 +12,15 @@ mod common;
 
 use std::path::Path;
 
-use common::{ARM64, WindowSpec, X64, build_target_with_window};
+use common::{ARM64, PresetSpec, X64, build_target_with_preset};
 use zup_acquire::{ContentCatalog, ReleaseDescriptor};
 use zup_artifact::{
     ArtifactComposer, ArtifactRequest, MediaType, VariantManifest, WebExport, export_web_tree,
 };
 
-/// A window with three names over two pieces of content.
-fn window(generation: &'static str) -> WindowSpec {
-    WindowSpec {
+/// a preset with three names over two pieces of content.
+fn preset(generation: &'static str) -> PresetSpec {
+    PresetSpec {
         assets: vec![
             (
                 "branding/logo.svg".to_owned(),
@@ -47,9 +47,9 @@ fn window(generation: &'static str) -> WindowSpec {
 /// in the mode that carries content. A thin artifact is the bootstrapper that
 /// fetches from the release, so the release - not the bootstrapper - is what has
 /// to hold the bytes.
-fn compose(root: &Path, id: &str, window: Option<&WindowSpec>) -> zup_artifact::ArtifactGraph {
-    let x64 = build_target_with_window(root.join("x64"), &X64, window);
-    let arm = build_target_with_window(root.join("arm"), &ARM64, window);
+fn compose(root: &Path, id: &str, window: Option<&PresetSpec>) -> zup_artifact::ArtifactGraph {
+    let x64 = build_target_with_preset(root.join("x64"), &X64, window);
+    let arm = build_target_with_preset(root.join("arm"), &ARM64, window);
     let request = ArtifactRequest::universal_offline(id, &common::app(), "Acme-Windows-Setup.exe");
     let variants = [&x64, &arm];
     ArtifactComposer::new(request, &variants)
@@ -98,11 +98,11 @@ fn blob_path(web: &Path, digest: &zup_core::Sha256Digest) -> std::path::PathBuf 
         .join(&hex[2..])
 }
 
-/// A release names the window's executable, per target, and ships its bytes.
+/// A release names the preset's executable, per target, and ships its bytes.
 #[test]
-fn a_release_names_and_ships_each_targets_window() {
+fn a_release_names_and_ships_each_targets_preset() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let graph = compose(dir.path(), "acme-1.4.0", Some(&window("a")));
+    let graph = compose(dir.path(), "acme-1.4.0", Some(&preset("a")));
     let web = stage(dir.path(), &graph);
     let release = release(&web);
     let catalog = catalog(&web);
@@ -128,7 +128,7 @@ fn a_release_names_and_ships_each_targets_window() {
     for descriptor in [x64_preset, arm_preset] {
         let entry = catalog
             .entry(&descriptor.digest)
-            .expect("the window's bytes are catalogued");
+            .expect("the preset's bytes are catalogued");
         assert_eq!(
             entry.size, descriptor.size,
             "the catalog agrees with the release"
@@ -146,7 +146,7 @@ fn a_release_names_and_ships_each_targets_window() {
 #[test]
 fn the_assets_a_window_needs_are_part_of_the_variants_content() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let graph = compose(dir.path(), "acme-1.4.0", Some(&window("a")));
+    let graph = compose(dir.path(), "acme-1.4.0", Some(&preset("a")));
     let web = stage(dir.path(), &graph);
     let release = release(&web);
     let catalog = catalog(&web);
@@ -189,7 +189,7 @@ fn the_assets_a_window_needs_are_part_of_the_variants_content() {
 
 /// Where the preset came from is not a fact the release carries.
 ///
-/// A window from the toolchain and a window from a user's package are the same
+/// a preset from the toolchain and a preset from a user's package are the same
 /// shape by this point, because both are a digest in a plan beside a media type
 /// the release model already had. Branching acquisition on the origin would mean
 /// two acquisition paths for one thing.
@@ -198,7 +198,7 @@ fn the_assets_a_window_needs_are_part_of_the_variants_content() {
 #[case::a_package_the_user_chooses("package")]
 fn where_the_window_came_from_does_not_change_the_release(#[case] _origin: &str) {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let graph = compose(dir.path(), "acme-1.4.0", Some(&window("a")));
+    let graph = compose(dir.path(), "acme-1.4.0", Some(&preset("a")));
     stage(dir.path(), &graph);
     let release = release(&dir.path().join("web"));
 
@@ -215,7 +215,7 @@ fn where_the_window_came_from_does_not_change_the_release(#[case] _origin: &str)
             .preset
             .map(|preset| preset.media_type),
         Some(MediaType::PRESET),
-        "and the media type is the permanent one, not a UI side channel"
+        "and the media type is the permanent one, not a side channel"
     );
 }
 
@@ -237,21 +237,21 @@ fn a_variant_with_no_window_carries_none() {
     );
     assert!(
         manifest_of(&graph, "windows-x64").plan.ui_assets.is_empty(),
-        "and the plan names no assets for a window it does not have"
+        "and the plan names no assets for a preset it does not have"
     );
 }
 
-/// The release names a window by content, never by filename.
+/// The release names a preset by content, never by filename.
 ///
 /// A filename is what a target's composition decides, and a release that
 /// published one would be telling a client running on a different platform which
 /// file to expect. Payload destinations are a different matter - they are real
-/// paths the application asked for - so the check is about the window's own
+/// paths the application asked for - so the check is about the preset's own
 /// records.
 #[test]
 fn the_release_names_a_window_by_content_and_never_by_filename() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let graph = compose(dir.path(), "acme-1.4.0", Some(&window("a")));
+    let graph = compose(dir.path(), "acme-1.4.0", Some(&preset("a")));
     stage(dir.path(), &graph);
     let web = dir.path().join("web");
 
@@ -268,22 +268,22 @@ fn the_release_names_a_window_by_content_and_never_by_filename() {
         assert_eq!(preset.media_type, MediaType::PRESET);
         assert!(
             !preset.digest.to_hex().contains('.'),
-            "and a window is named by its content address alone"
+            "and a preset is named by its content address alone"
         );
     }
 }
 
-/// Two generations of the same application: the window that did not change is one
-/// download, and the window that did is a different digest.
+/// Two generations of the same application: the preset that did not change is one
+/// download, and the preset that did is a different digest.
 #[test]
 fn a_window_that_did_not_change_is_the_same_content() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let first = compose(&dir.path().join("first"), "acme-1.4.0", Some(&window("a")));
-    let again = compose(&dir.path().join("again"), "acme-1.4.0", Some(&window("a")));
+    let first = compose(&dir.path().join("first"), "acme-1.4.0", Some(&preset("a")));
+    let again = compose(&dir.path().join("again"), "acme-1.4.0", Some(&preset("a")));
     let changed = compose(
         &dir.path().join("changed"),
         "acme-1.5.0",
-        Some(&WindowSpec {
+        Some(&PresetSpec {
             assets: vec![(
                 "branding/logo.svg".to_owned(),
                 "a different logo".to_owned(),
@@ -316,7 +316,7 @@ fn a_window_that_did_not_change_is_the_same_content() {
 #[test]
 fn one_piece_of_content_under_two_names_is_stored_once() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let graph = compose(dir.path(), "acme-1.4.0", Some(&window("a")));
+    let graph = compose(dir.path(), "acme-1.4.0", Some(&preset("a")));
     let web = stage(dir.path(), &graph);
     let manifest = manifest_of(&graph, "windows-x64");
 

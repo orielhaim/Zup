@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/orielhaim/zup"
-description = "Portable process transport for zup installer UI presets"
+description = "Portable process transport for zup installer presets"
 publish = true
 
 # The child process this crate's transport tests spawn, so the peer is a real

@@ -7,7 +7,7 @@
 //!
 //! | question                | why it is the question                                       |
 //! |-------------------------|--------------------------------------------------------------|
-//! | how many assets         | the host allows 1000 and the UI allows about thirty            |
+//! | how many assets         | the host allows 1000 and a preset allows about thirty            |
 //! | how many bytes, cold    | what a user on a slow connection waits for                     |
 //! | how many bytes, warm    | what a second install costs, and whether it costs anything     |
 //! | how many requests       | what the host sees, and what a rate limit would be spent on     |

@@ -129,7 +129,7 @@ impl AcquisitionProgress {
 /// Something worth telling the caller about, as a closed set.
 ///
 /// The set is closed on purpose: a frontend switches on it exhaustively, so
-/// adding an event is a visible change rather than something a UI silently
+/// adding an event is a visible change rather than something a preset silently
 /// ignores.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]

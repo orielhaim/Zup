@@ -28,7 +28,7 @@ pub enum MediaType {
     /// One variant's native maintenance runtime image.
     #[serde(rename = "application/vnd.zup.artifact.runtime.v1")]
     Runtime,
-    /// One variant's native UI preset image.
+    /// One variant's native preset image.
     #[serde(rename = "application/vnd.zup.artifact.preset.v1")]
     Preset,
 }
