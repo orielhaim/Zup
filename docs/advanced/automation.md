@@ -17,8 +17,8 @@ install`, `toolchain status`, `toolchain clean`.
 Not operation commands, because for them the document *is* the product: `schema`
 writes a JSON Schema, `completions` writes a shell script. Wrapping either in a
 result would be a JSON document inside a JSON document for no reason a consumer
-could use. `init`, `preview`, `ui`, `ci` and `fmt` are not in the contract
-either.
+could use. `init`, `preview`, `preset`, `plugin`, `ci` and `fmt` are not in the
+contract either.
 
 ## The result
 

@@ -278,7 +278,7 @@ pub struct PresetSpec {
     pub required_capabilities: Vec<zup_preset_protocol::Capability>,
 }
 
-/// Compose an installer that carries a real preset and real UI assets.
+/// Compose an installer that carries a real preset and real preset assets.
 ///
 /// The preset travels as the selected target binary and the assets travel in the
 /// package's content store, both of them resolved from files on disk the way a
@@ -293,7 +293,7 @@ pub fn compose_with_preset(app: &AppSpec, payload: &[Payload], preset: &PresetSp
         let source = scratch.path().join(name.replace('/', "_"));
         std::fs::write(&source, bytes).expect("an asset file");
         let (size, sha256) = hash_reader(bytes.as_slice()).expect("an asset hashes");
-        records.push(zup_core::UiAsset {
+        records.push(zup_core::PresetAsset {
             name: zup_core::NonEmptyString::new(name.as_str()).expect("a name"),
             size,
             sha256,
@@ -307,7 +307,7 @@ pub fn compose_with_preset(app: &AppSpec, payload: &[Payload], preset: &PresetSp
         });
     }
     plan.ui_assets = assets;
-    plan.installer.preset = Some(zup_core::UiPreset {
+    plan.installer.preset = Some(zup_core::PresetRuntime {
         name: zup_core::NonEmptyString::new(format!("{}-preset", app.name)).expect("a name"),
         version: semver::Version::parse(&app.version).expect("a version"),
         protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,

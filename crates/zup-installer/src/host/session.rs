@@ -112,7 +112,7 @@ pub struct Opening {
     ///
     /// An installation reads what it owns; an install that has committed nothing
     /// reads the image it was launched from. There is no third option and no
-    /// fallback between them: an installation whose recorded UI content is gone
+    /// fallback between them: an installation whose recorded preset content is gone
     /// has a problem to report, not a window to open some other way.
     pub ui: PresetSource,
     pub placement: Placement,
@@ -122,10 +122,10 @@ pub struct Opening {
 /// The window this launch will present, and where its bytes are.
 pub enum PresetSource {
     /// Not installed yet: this image's own preset, and nothing committed.
-    Composed { preset: zup_core::UiPreset },
+    Composed { preset: zup_core::PresetRuntime },
     /// Installed: the window the ledger recorded, under the runtime's directory.
     Installed {
-        runtime: zup_core::UiRuntime,
+        runtime: zup_core::InstalledPreset,
         directory: PathBuf,
     },
 }
@@ -212,7 +212,7 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     };
     let ui = match &installed {
         Some((_, ledger)) => {
-            let runtime = ledger.ui().cloned().ok_or_else(|| {
+            let runtime = ledger.preset().cloned().ok_or_else(|| {
                 miette::miette!(
                     "{} is installed with no recorded window, and its maintenance runtime cannot \
                      present one.\n\nReinstall it to restore the window it was installed with.",
@@ -344,7 +344,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     {
         let reader = preset.take_reader();
         std::thread::Builder::new()
-            .name("zup-ui-preset".into())
+            .name("zup-preset-actions".into())
             .spawn(move || {
                 while let Some(action) = reader.next() {
                     if asked.send(action).is_err() {

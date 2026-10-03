@@ -64,7 +64,7 @@ fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_pla
             prerequisite_count: 0,
             download_bytes: 0,
         },
-        ui: None,
+        preset: None,
     }
 }
 

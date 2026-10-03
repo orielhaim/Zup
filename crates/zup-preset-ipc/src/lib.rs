@@ -155,7 +155,7 @@ fn one_shot<T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static>(
 ) {
     let (delivered, collected) = std::sync::mpsc::sync_channel(1);
     let handle = std::thread::Builder::new()
-        .name("zup-ui-bootstrap".into())
+        .name("zup-preset-bootstrap".into())
         .spawn(move || {
             let (_, payload) = match server.accept() {
                 Ok(pair) => pair,
@@ -295,7 +295,7 @@ impl Channel {
         // read from.
         let (read, waiting) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
-            .name("zup-ui-greeting".into())
+            .name("zup-preset-greeting".into())
             .spawn(move || {
                 let received = inbound.recv();
                 let _ = read.send((inbound, received));

@@ -239,7 +239,7 @@ fn a_preset_from_another_protocol_generation_is_refused_as_such() {
     )
     .expect_err("this package speaks another protocol generation");
     let message = error.to_string();
-    assert!(message.contains("UI protocol"), "{message}");
+    assert!(message.contains("preset protocol"), "{message}");
     assert!(
         !message.contains("capabilit"),
         "a different axis: {message}"
@@ -293,7 +293,7 @@ fn a_capability_this_application_cannot_provide_is_named() {
     let message = error.to_string();
     assert!(message.contains("updates"), "{message}");
     assert!(
-        !message.contains("UI protocol"),
+        !message.contains("preset protocol"),
         "a different axis: {message}"
     );
 }
@@ -560,7 +560,7 @@ fn an_asset_over_the_size_limit_is_refused() {
     let error = prepare(directory.path(), &selected, &PortableSourceFilePolicy)
         .expect_err("an asset this large is not one a preset draws with");
     let message = error.to_string();
-    assert!(message.contains("UI asset"), "{message}");
+    assert!(message.contains("preset asset"), "{message}");
 }
 
 /// Changing the asset's bytes changes its digest, because identity is content.

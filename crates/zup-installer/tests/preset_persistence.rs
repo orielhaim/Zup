@@ -55,7 +55,7 @@ fn preset_app(label: &str, report: &Path) -> (AppSpec, PresetSpec) {
 }
 
 /// The window an installation recorded, read back the way a host reads it.
-fn recorded_ui(state: &State, app: &AppSpec) -> zup_core::UiRuntime {
+fn recorded_ui(state: &State, app: &AppSpec) -> zup_core::InstalledPreset {
     let ledger = InstallLedgerStore::new(state.path())
         .load(
             &zup_core::AppId::new(&app.id).expect("a valid id"),
@@ -64,12 +64,12 @@ fn recorded_ui(state: &State, app: &AppSpec) -> zup_core::UiRuntime {
         .expect("the ledger reads")
         .expect("the installation is recorded");
     ledger
-        .ui()
+        .preset()
         .cloned()
         .expect("a graphical installation records the window it will present")
 }
 
-/// Every UI content file the installation owns, across every version.
+/// Every preset content file the installation owns, across every version.
 fn owned_ui_files(state: &State, app: &AppSpec) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![state.path().join("maintenance").join(&app.id).join("user")];
@@ -360,7 +360,7 @@ fn a_graphical_installation_with_no_recorded_window_is_refused() {
     let setup = compose_with_preset(&app, &payload, &preset);
     setup.succeed(&state, "install", &["--yes", "--output", "json"]);
 
-    // The record loses its window, as it would if a write were truncated.
+    // The record loses its preset, as it would if a write were truncated.
     let path = zup_windows::InstallLedgerStore::new(state.path()).path_for(
         &zup_core::AppId::new(&app.id).expect("a valid id"),
         zup_core::SelectedScope::User,
@@ -368,7 +368,7 @@ fn a_graphical_installation_with_no_recorded_window_is_refused() {
     let mut document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("the ledger is readable"))
             .expect("the ledger parses");
-    document["ui"] = serde_json::Value::Null;
+    document["preset"] = serde_json::Value::Null;
     std::fs::write(&path, serde_json::to_vec(&document).expect("it serializes"))
         .expect("the record is rewritten");
 
@@ -410,22 +410,22 @@ fn an_installation_whose_preset_is_missing_says_so_rather_than_opening_another()
         .join(&app.id)
         .join("user")
         .join(&app.version);
-    let executable = zup_windows::ui_runtime::preset_path(&directory, &ui.executable);
+    let executable = zup_windows::preset_runtime::preset_path(&directory, &ui.executable);
     std::fs::write(&executable, b"not the preset").expect("the content is replaced");
 
-    let error = zup_windows::ui_runtime::resolve(&directory, &ui)
+    let error = zup_windows::preset_runtime::resolve(&directory, &ui)
         .expect_err("content that is not what the installation recorded");
     assert!(
         error.to_string().contains("hashes to"),
         "the refusal says the content is wrong, not that something is missing: {error}"
     );
-    let asset = zup_windows::ui_runtime::asset_path(
+    let asset = zup_windows::preset_runtime::asset_path(
         &directory,
         "branding/logo.svg",
         &ui.preset.assets[0].sha256,
     );
     std::fs::remove_file(&asset).expect("the asset is removed");
-    let error = zup_windows::ui_runtime::resolve(&directory, &ui)
+    let error = zup_windows::preset_runtime::resolve(&directory, &ui)
         .expect_err("an asset the settings named is gone");
     assert!(
         error.to_string().contains("branding/logo.svg"),
@@ -468,7 +468,7 @@ fn modify_and_repair_leave_the_same_window_in_place() {
         2,
         "and the same content, not a second copy: {owned:?}"
     );
-    let asset = zup_windows::ui_runtime::asset_path(
+    let asset = zup_windows::preset_runtime::asset_path(
         &state
             .path()
             .join("maintenance")

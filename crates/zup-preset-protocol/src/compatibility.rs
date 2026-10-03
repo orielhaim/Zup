@@ -73,7 +73,7 @@ impl HostOffers {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Incompatible {
     /// The preset was built against a different wire version.
-    #[error("the preset speaks UI protocol {found}; this host speaks {expected}")]
+    #[error("the preset speaks preset protocol {found}; this host speaks {expected}")]
     Protocol { expected: u32, found: u32 },
     /// The preset needs capabilities this host does not provide.
     #[error("the preset needs {missing}, which this host does not provide")]
@@ -142,7 +142,7 @@ mod tests {
             }
         );
         assert!(
-            error.to_string().contains("UI protocol"),
+            error.to_string().contains("preset protocol"),
             "the message names the axis: {error}"
         );
     }

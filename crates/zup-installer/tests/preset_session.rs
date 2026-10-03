@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use zup_core::{
     AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, SelectedScope, TargetTriple, Template, UiAsset, UiPreset,
+    NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, TargetTriple, Template,
 };
 use zup_installer::host::{HostDecision, HostState, preset};
 use zup_preset_protocol::{Action, Capabilities, Capability, HostOffers, PRESET_PROTOCOL_VERSION};
@@ -276,7 +276,7 @@ fn a_component_the_host_never_published_is_refused() {
 #[test]
 fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
     let installer = installer();
-    let preset = UiPreset {
+    let preset = PresetRuntime {
         name: NonEmptyString::new("needy").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
         protocol: PRESET_PROTOCOL_VERSION,
@@ -293,7 +293,7 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
     let error = preset::materialize(
         &preset::Source::Installed {
             directory: Path::new("nowhere"),
-            runtime: &zup_core::UiRuntime {
+            runtime: &zup_core::InstalledPreset {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
@@ -327,13 +327,13 @@ fn a_preset_from_another_protocol_generation_is_its_own_refusal() {
 fn a_preset_whose_assets_are_absent_is_refused() {
     let installer = installer();
     let offered = zup_artifact::preset::offers_for(&installer, false);
-    let preset = UiPreset {
+    let preset = PresetRuntime {
         name: NonEmptyString::new("needy").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
         protocol: PRESET_PROTOCOL_VERSION,
         required_capabilities: Vec::new(),
         settings: serde_json::json!({}),
-        assets: vec![UiAsset {
+        assets: vec![PresetAsset {
             name: NonEmptyString::new("branding/logo.svg").expect("a name"),
             size: 6,
             sha256: zup_core::hash_reader(b"<svg/>".as_slice())
@@ -344,7 +344,7 @@ fn a_preset_whose_assets_are_absent_is_refused() {
     let error = preset::materialize(
         &preset::Source::Installed {
             directory: Path::new("nowhere"),
-            runtime: &zup_core::UiRuntime {
+            runtime: &zup_core::InstalledPreset {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
@@ -403,7 +403,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
         zup_core::hash_reader(std::fs::File::open(&logo).expect("open")).expect("the asset hashes");
 
     let mut installer = installer();
-    installer.preset = Some(UiPreset {
+    installer.preset = Some(PresetRuntime {
         name: NonEmptyString::new("e2e").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
         protocol: PRESET_PROTOCOL_VERSION,
@@ -413,7 +413,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
             "logo": "branding/logo.svg",
             "report": directory.path().join("report.txt").to_string_lossy(),
         }),
-        assets: vec![UiAsset {
+        assets: vec![PresetAsset {
             name: NonEmptyString::new("logo").expect("name"),
             size,
             sha256: digest,

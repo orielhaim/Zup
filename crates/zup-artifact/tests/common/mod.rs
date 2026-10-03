@@ -265,7 +265,7 @@ pub fn build_target_with_window(
             "generation".to_owned(),
             serde_json::Value::from(window.generation),
         );
-        zup_core::UiPreset {
+        zup_core::PresetRuntime {
             name: NonEmptyString::new(format!("{}-preset", window.generation)).unwrap(),
             version: semver::Version::parse("1.0.0").unwrap(),
             protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
@@ -273,7 +273,7 @@ pub fn build_target_with_window(
             settings: serde_json::Value::Object(settings),
             assets: ui_assets
                 .iter()
-                .map(|asset| zup_core::UiAsset {
+                .map(|asset| zup_core::PresetAsset {
                     name: asset.name.clone(),
                     size: asset.size,
                     sha256: asset.sha256,

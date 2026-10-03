@@ -93,7 +93,7 @@ fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
 pub struct EmbeddedBundle {
     executable: PathBuf,
     package: Package,
-    /// The installer's UI preset, when this executable was composed with one.
+    /// The installer's preset, when this executable was composed with one.
     preset: Option<Vec<u8>>,
 }
 
@@ -157,7 +157,7 @@ impl EmbeddedBundle {
         })
     }
 
-    /// The UI preset this installer was composed with.
+    /// The preset this installer was composed with.
     pub fn preset(&self) -> Option<&[u8]> {
         self.preset.as_deref()
     }
@@ -182,9 +182,9 @@ impl EmbeddedBundle {
         Ok(self.package.build_plan()?)
     }
 
-    /// The bytes of one application-provided UI asset, proved against the digest
+    /// The bytes of one application-provided preset asset, proved against the digest
     /// the plan recorded.
-    pub fn ui_asset(&self, name: &str) -> Result<(zup_core::UiAsset, Vec<u8>), BundleError> {
+    pub fn ui_asset(&self, name: &str) -> Result<(zup_core::PresetAsset, Vec<u8>), BundleError> {
         self.package
             .ui_asset(name)
             .map(|(asset, bytes)| (asset.clone(), bytes))
@@ -333,12 +333,12 @@ impl PayloadSource for EmbeddedPayloadSource {
         if path.as_str() == "__zup_maintenance__.exe" {
             return self.open_maintenance(path, expected_sha256, expected_size);
         }
-        if path.as_str() == crate::ui_runtime::PRESET_SOURCE {
+        if path.as_str() == crate::preset_runtime::PRESET_SOURCE {
             return self.open_preset(path, expected_sha256, expected_size);
         }
         if let Some(name) = path
             .as_str()
-            .strip_prefix(crate::ui_runtime::ASSET_SOURCE_PREFIX)
+            .strip_prefix(crate::preset_runtime::ASSET_SOURCE_PREFIX)
             .and_then(|rest| rest.strip_prefix('/'))
         {
             let (asset, bytes) = EmbeddedBundle::open(&self.executable)

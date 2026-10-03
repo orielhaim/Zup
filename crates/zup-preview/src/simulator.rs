@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use zup_core::{Sha256Digest, UiPreset};
+use zup_core::{PresetRuntime, Sha256Digest};
 use zup_preset_protocol::{Action, Configuration, Snapshot, UpdateState};
 use zup_runtime::{InstallOutcome, RuntimeEvent};
 
@@ -139,7 +139,7 @@ impl Simulator {
     /// be overwritten on the platform this product targets, so each generation
     /// gets its own file and an earlier one is only removed once nothing is
     /// running from it.
-    pub fn stage(&self, bytes: &[u8], preset: &UiPreset) -> Result<Candidate, StageError> {
+    pub fn stage(&self, bytes: &[u8], preset: &PresetRuntime) -> Result<Candidate, StageError> {
         zup_preset_host::process::check_presentable(preset, self.machine.capabilities())
             .map_err(StageError::Incompatible)?;
         let generation = self.generation + 1;

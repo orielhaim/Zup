@@ -9,7 +9,7 @@
 //! needed in two places that must not disagree. A build composes an installer
 //! around the window and has to be right about which bytes run. A developer
 //! previewing their application has to see what they will actually ship, and a
-//! preview that resolved the UI its own way would be a preview of something
+//! preview that resolved the preset its own way would be a preview of something
 //! nobody is going to install. So both ask this one function, and neither has a
 //! second implementation to drift.
 //!
@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use jsonschema::error::ValidationErrorKind;
 use zup_artifact::preset::PresetPackageView;
 use zup_core::{
-    Installer, NonEmptyString, ProjectPath, ResolvedAsset, TargetTriple, Ui, UiAsset, UiPreset,
+    Installer, NonEmptyString, PresetAsset, PresetRuntime, ProjectPath, ResolvedAsset,
+    TargetTriple, Ui,
 };
 use zup_preset_protocol::{Capabilities, HostOffers};
 
@@ -95,7 +96,7 @@ pub struct Resolved {
     /// The package the answer came from, project-relative paths already resolved.
     pub package: PathBuf,
     /// The runtime model the installer carries.
-    pub runtime: UiPreset,
+    pub runtime: PresetRuntime,
     /// The resolved assets, ready to be materialized wherever a caller keeps them.
     pub assets: Vec<ResolvedAsset>,
     /// The target's native preset executable, as it will be launched.
@@ -118,7 +119,7 @@ pub struct Resolved {
 /// finding the preset zup ships costs a directory walk and an application that
 /// chose its own window should not pay for the one it did not choose. An
 /// application that names none is not misconfigured: it gets the preset Zup
-/// ships, and that is the whole of its UI selection semantics.
+/// ships, and that is the whole of its preset selection semantics.
 pub fn resolve(
     ui: &Ui,
     project_root: &Path,
@@ -199,7 +200,7 @@ pub struct Selected {
 #[derive(Debug)]
 pub struct Prepared {
     /// The runtime model the installer carries.
-    pub runtime: UiPreset,
+    pub runtime: PresetRuntime,
     /// The resolved assets, to hand to materialization.
     pub assets: Vec<ResolvedAsset>,
     /// The preset executable's bytes.
@@ -327,7 +328,7 @@ pub fn prepare(
         let (path, size, sha256) = zup_build::resolve_project_source(
             project_root,
             &relative,
-            "UI asset",
+            "preset asset",
             MAX_ASSET_BYTES,
             policy,
         )
@@ -351,7 +352,7 @@ pub fn prepare(
                 sha256,
             });
         }
-        declared.push(UiAsset {
+        declared.push(PresetAsset {
             name: asset_name(setting)?,
             size,
             sha256,
@@ -360,7 +361,7 @@ pub fn prepare(
 
     declared.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(Prepared {
-        runtime: UiPreset {
+        runtime: PresetRuntime {
             name: NonEmptyString::new(selected.name.clone()).map_err(|error| {
                 PresetProblem::Incompatible {
                     reason: error.to_string(),

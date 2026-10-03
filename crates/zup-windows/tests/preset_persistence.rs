@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use zup_core::{
-    AppId, NonEmptyString, ResourceKey, SelectedScope, Sha256Digest, TargetTriple, UiAsset,
-    UiPreset, UiRuntime,
+    AppId, InstalledPreset, NonEmptyString, PresetAsset, PresetRuntime, ResourceKey, SelectedScope,
+    Sha256Digest, TargetTriple,
 };
 use zup_exec::InstallLedger;
 use zup_transaction::{
@@ -21,7 +21,7 @@ use zup_transaction::{
 };
 
 /// The wire version a preset on this host would speak.
-fn zup_core_ui_protocol_version() -> u32 {
+fn zup_core_preset_protocol_version() -> u32 {
     1
 }
 
@@ -43,19 +43,19 @@ fn target_path(path: &Path) -> zup_platform::TargetPath {
 }
 
 /// A window with settings deep enough to be worth checking, and one asset.
-fn window(executable: &[u8], logo: &[u8]) -> UiRuntime {
-    UiRuntime {
-        preset: UiPreset {
+fn window(executable: &[u8], logo: &[u8]) -> InstalledPreset {
+    InstalledPreset {
+        preset: PresetRuntime {
             name: NonEmptyString::new("aurora").expect("a name"),
             version: "1.4.2".parse().expect("a version"),
-            protocol: zup_core_ui_protocol_version(),
+            protocol: zup_core_preset_protocol_version(),
             required_capabilities: vec!["components".to_owned()],
             settings: serde_json::json!({
                 "hero": "Install Acme",
                 "logo": "branding/logo.svg",
                 "nested": { "depth": [1, 2, 3], "on": true, "empty": {} },
             }),
-            assets: vec![UiAsset {
+            assets: vec![PresetAsset {
                 name: NonEmptyString::new("branding/logo.svg").expect("a name"),
                 size: logo.len() as u64,
                 sha256: zup_core::hash_bytes(logo),
@@ -77,16 +77,16 @@ fn content_directory(
 fn content_files(
     state_root: &Path,
     scope: SelectedScope,
-    ui: &UiRuntime,
+    ui: &InstalledPreset,
 ) -> Vec<(PathBuf, Sha256Digest)> {
     let directory = content_directory(state_root, scope, &version());
     let mut files = vec![(
-        zup_windows::ui_runtime::preset_path(&directory, &ui.executable),
+        zup_windows::preset_runtime::preset_path(&directory, &ui.executable),
         ui.executable,
     )];
     files.extend(ui.preset.assets.iter().map(|asset| {
         (
-            zup_windows::ui_runtime::asset_path(&directory, asset.name.as_str(), &asset.sha256),
+            zup_windows::preset_runtime::asset_path(&directory, asset.name.as_str(), &asset.sha256),
             asset.sha256,
         )
     }));
@@ -94,7 +94,7 @@ fn content_files(
 }
 
 /// A plan that installs a window's content into one scope.
-fn install_plan(state_root: &Path, scope: SelectedScope, ui: &UiRuntime) -> TransactionPlan {
+fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
         input.files.push(FileWork {
@@ -110,12 +110,12 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &UiRuntime) -> Tran
             delta: FileDelta::Create,
         });
     }
-    input.ui = Some(ui.clone());
+    input.preset = Some(ui.clone());
     compile_transaction(&input).expect("the plan compiles")
 }
 
 /// A plan that retires a window's content and declares no window in its place.
-fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &UiRuntime) -> TransactionPlan {
+fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
         let key = ResourceKey::File {
@@ -186,7 +186,7 @@ fn a_window_whose_content_the_plan_does_not_install_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let ui = window(b"a preset executable", b"<svg/>");
     let mut input = TransactionInput::new(target());
-    input.ui = Some(ui);
+    input.preset = Some(ui);
     let plan = compile_transaction(&input).expect("a plan with a window and no content");
     let error = validate(state_root.path(), SelectedScope::User, &plan, None)
         .expect_err("a window with no content behind it");
@@ -206,7 +206,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
     let mut previous = install_plan(state_root.path(), SelectedScope::User, &first);
     let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
     ledger.version = version();
-    ledger.ui = Some(first.clone());
+    ledger.preset = Some(first.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &first) {
         ledger.resources.insert(
             ResourceKey::File {
@@ -254,7 +254,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
             created_directories: Vec::new(),
         });
     }
-    input.ui = Some(second.clone());
+    input.preset = Some(second.clone());
     let replacing = compile_transaction(&input).expect("the plan compiles");
     validate(
         state_root.path(),
@@ -263,7 +263,11 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
         Some(ledger),
     )
     .expect("a generation that retires what it replaces");
-    assert_eq!(replacing.ui, Some(second), "and it records the new window");
+    assert_eq!(
+        replacing.preset,
+        Some(second),
+        "and it records the new window"
+    );
     let _ = &mut previous;
 }
 
@@ -275,7 +279,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
     let ui = window(b"a preset executable", b"<svg/>");
     let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
     ledger.version = version();
-    ledger.ui = Some(ui.clone());
+    ledger.preset = Some(ui.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &ui) {
         ledger.resources.insert(
             ResourceKey::File {
@@ -319,14 +323,14 @@ fn settings_survive_the_journal_unchanged() {
     let plan = install_plan(state_root.path(), SelectedScope::User, &ui);
     let journal = serde_json::to_vec(&plan).expect("the plan serializes");
     let read: TransactionPlan = serde_json::from_slice(&journal).expect("the plan parses");
-    let recorded = read.ui.expect("the journal carries the window");
+    let recorded = read.preset.expect("the journal carries the window");
     assert_eq!(recorded.preset.settings, ui.preset.settings);
     assert_eq!(recorded, ui, "and the whole window, as one value");
 }
 
 /// Each scope keeps its own window, under its own authority.
 ///
-/// A machine-scope installation's UI content is installed content in the
+/// A machine-scope installation's preset content is installed content in the
 /// machine's own state root, moved by the elevated worker. One shared directory
 /// would be a machine install reading from a per-user location, which is the
 /// failure a user-scope install works and a machine install does not.
@@ -351,7 +355,7 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
         }
         for (path, _) in content_files(state_root.path(), scope, &ui) {
             assert!(
-                zup_windows::ui_runtime::is_content_path(
+                zup_windows::preset_runtime::is_content_path(
                     &zup_windows::maintenance_root(state_root.path(), &app_id(), scope),
                     &zup_windows::plain_path_text(&path),
                 ),
@@ -381,11 +385,14 @@ fn the_persisted_window_is_the_runtime_model() {
         "selected_components": [],
         "install_directory": null,
         "release": null,
-        "ui": {
+        // The persisted ledger. Its keys come from the Rust field names, so
+        // renaming the model renamed what is written; there is no older format
+        // to stay compatible with.
+        "preset": {
             "preset": {
                 "name": "aurora",
                 "version": "1.4.2",
-                "protocol": zup_core_ui_protocol_version(),
+                "protocol": zup_core_preset_protocol_version(),
                 "required_capabilities": ["components"],
                 "settings": { "hero": "Install Acme" },
             },
@@ -395,7 +402,7 @@ fn the_persisted_window_is_the_runtime_model() {
         "resources": [],
     }))
     .expect("a ledger carrying a window");
-    let recorded = ledger.ui().expect("the window is present");
+    let recorded = ledger.preset().expect("the window is present");
     assert_eq!(recorded.executable, ui.executable);
     assert_eq!(recorded.preset.name, ui.preset.name);
     assert_eq!(recorded.preset.version, ui.preset.version);

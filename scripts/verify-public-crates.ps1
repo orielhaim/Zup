@@ -53,15 +53,15 @@ try {
     # Everything else. A published crate that names one of these is a crate that
     # can only be built inside the repository that owns it.
     $internal = @(
-        "zup-core", "zup-runtime", "zup-plan", "zup-exec", "zup-windows",
+        "zup", "zup-core", "zup-runtime", "zup-plan", "zup-exec", "zup-windows",
         "zup-bundle", "zup-installer", "zup-artifact", "zup-transaction",
         "zup-presentation", "zup-build", "zup-manifest", "zup-update",
-        "zup-bootstrap", "zup-platform", "zup-acquire", "zup-signing",
-        "zup-toolchain", "zup-protocol", "zup-dispatch", "zup-preview",
-        "zup-preset-host", "zup-preset-compose", "zup-preset-dev",
-        "zup-preset-default", "zup-preset-test", "zup-plugin-contract",
-        "zup-plugin-runtime", "zup-plugin-build", "zup-automation",
-        "zup-assets", "zup-xtask"
+        "zup-bootstrap", "zup-platform", "zup-acquire", "zup-acquire-http",
+        "zup-pe", "zup-binary", "zup-signing", "zup-toolchain", "zup-protocol",
+        "zup-dispatch", "zup-preview", "zup-publish", "zup-preset-host",
+        "zup-preset-compose", "zup-preset-dev", "zup-preset-default",
+        "zup-preset-test", "zup-plugin-contract", "zup-plugin-runtime",
+        "zup-plugin-build", "zup-automation", "zup-assets", "zup-xtask"
     )
 
     # 1. Each published crate packages and verifies on its own.

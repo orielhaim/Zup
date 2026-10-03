@@ -75,7 +75,7 @@ impl Channel {
         };
         let (messages, incoming) = futures_channel::mpsc::unbounded();
         std::thread::Builder::new()
-            .name("zup-ui-session".into())
+            .name("zup-preset-session".into())
             .spawn(move || read(transport, rules, messages))
             .map_err(|error| TransportError::Transport(error.to_string()))?;
 

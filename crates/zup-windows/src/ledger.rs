@@ -317,7 +317,7 @@ impl InstallLedgerStore {
         Ok(())
     }
 
-    /// The plan's UI runtime and the plan's files have to be the same generation.
+    /// The plan's preset runtime and the plan's files have to be the same generation.
     ///
     /// A plan that names a window must install exactly the content that window
     /// needs, at the paths the runtime will look in - otherwise a machine
@@ -340,7 +340,7 @@ impl InstallLedgerStore {
             .flat_map(|ledger| ledger.resources.iter())
             .filter_map(|(key, resource)| match (key, resource) {
                 (ResourceKey::File { destination }, OwnedResource::File { sha256, .. })
-                    if crate::ui_runtime::is_content_path(Path::new(&root), destination) =>
+                    if crate::preset_runtime::is_content_path(Path::new(&root), destination) =>
                 {
                     Some((destination.as_str(), sha256))
                 }
@@ -368,7 +368,7 @@ impl InstallLedgerStore {
         // length prefix Windows hands back once a component is long. Two
         // spellings of one file are two identities to everything that stores
         // ownership, and this is one of the things that stores it.
-        let wanted: BTreeMap<String, Sha256Digest> = match &plan.ui {
+        let wanted: BTreeMap<String, Sha256Digest> = match &plan.preset {
             Some(ui) => {
                 let directory = crate::content_store::maintenance_directory(
                     &self.root,
@@ -377,7 +377,7 @@ impl InstallLedgerStore {
                     app_version,
                 );
                 std::iter::once((
-                    crate::plain_path_text(&crate::ui_runtime::preset_path(
+                    crate::plain_path_text(&crate::preset_runtime::preset_path(
                         &directory,
                         &ui.executable,
                     )),
@@ -385,7 +385,7 @@ impl InstallLedgerStore {
                 ))
                 .chain(ui.preset.assets.iter().map(|asset| {
                     (
-                        crate::plain_path_text(&crate::ui_runtime::asset_path(
+                        crate::plain_path_text(&crate::preset_runtime::asset_path(
                             &directory,
                             asset.name.as_str(),
                             &asset.sha256,
@@ -407,7 +407,7 @@ impl InstallLedgerStore {
                     .is_some_and(|found| **found == *digest)
             {
                 return Err(LedgerError::Ownership(format!(
-                    "the UI runtime needs {path}, and this plan neither installs it nor already \
+                    "the preset runtime needs {path}, and this plan neither installs it nor already \
                      owns it"
                 )));
             }
@@ -508,11 +508,11 @@ impl InstallLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
-        // The window this installation presents, replaced as one value. Carried
+        // The preset this installation presents, replaced as one value. Carried
         // in the plan rather than passed in beside it, so a replay of a journal
-        // restores the same window the first commit recorded and recovery has
+        // restores the same preset the first commit recorded and recovery has
         // something to present with.
-        ledger.ui = record.plan.ui.clone();
+        ledger.preset = record.plan.preset.clone();
         // The identity follows the transaction, not the ledger. A replay keeps
         // whatever the first commit recorded, because the journal cannot supply
         // it; a development run clears it, because claiming a graph it did not

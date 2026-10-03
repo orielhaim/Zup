@@ -274,7 +274,7 @@ fn end(child: &mut Box<dyn ChildWrapper>) {
 /// out before the child exists is the difference between a message and a window
 /// that never appears.
 pub fn check_presentable(
-    preset: &zup_core::UiPreset,
+    preset: &zup_core::PresetRuntime,
     capabilities: &Capabilities,
 ) -> Result<(), String> {
     let offers = zup_preset_protocol::HostOffers::new(capabilities.clone());

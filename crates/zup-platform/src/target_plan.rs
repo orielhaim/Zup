@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{
-    App, ComponentId, FileAssociationId, FileExtension, LauncherLocation, NonEmptyString,
-    PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
-    PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
-    ServiceId, ServiceStart, Sha256Digest, TargetTriple, UiRuntime,
+    App, ComponentId, FileAssociationId, FileExtension, InstalledPreset, LauncherLocation,
+    NonEmptyString, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
+    PrerequisitePackage, PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath,
+    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, TargetTriple,
 };
 
 use crate::command::CommandSpec;
@@ -30,13 +30,13 @@ pub struct TargetPlan {
     pub file_associations: Vec<TargetFileAssociation>,
 
     pub summary: TargetPlanSummary,
-    /// The UI runtime this target will make durable, or none for a target that
+    /// The preset runtime this target will make durable, or none for a target that
     /// presents no window.
     ///
     /// Named here rather than inferred from the files below, because the files
     /// are content and this is the record of what they are for. An installation
     /// whose window cannot be reconstructed from its own state is not installed.
-    pub ui: Option<UiRuntime>,
+    pub preset: Option<InstalledPreset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

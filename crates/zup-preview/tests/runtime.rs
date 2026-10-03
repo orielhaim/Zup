@@ -429,8 +429,8 @@ fn scratch() -> (tempfile::TempDir, StateDirectory) {
 }
 
 /// The preset the session is told about, described the way the SDK describes one.
-fn preset() -> zup_core::UiPreset {
-    zup_core::UiPreset {
+fn preset() -> zup_core::PresetRuntime {
+    zup_core::PresetRuntime {
         name: zup_core::NonEmptyString::new("probe").expect("a name"),
         version: semver::Version::parse("0.1.0").expect("a version"),
         protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,

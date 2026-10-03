@@ -26,7 +26,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
-use zup_core::{Sha256Digest, UiPreset};
+use zup_core::{PresetRuntime, Sha256Digest};
 use zup_preset_host::HostDecision;
 use zup_preset_protocol::{Action, OperationKind, Snapshot};
 use zup_runtime::{
@@ -302,7 +302,7 @@ impl Runtime {
     /// window needs to know it was replaced rather than restarted. A failure
     /// leaves whatever was running exactly where it was: nothing above touches
     /// the previous child, and only a completed handshake swaps it.
-    pub fn present(&mut self, preset: &UiPreset, bytes: &[u8]) -> Result<u64, StartError> {
+    pub fn present(&mut self, preset: &PresetRuntime, bytes: &[u8]) -> Result<u64, StartError> {
         let candidate = self.simulator.stage(bytes, preset)?;
         let (asked, received) = mpsc::channel();
         self.simulator.adopt(candidate, asked)?;

@@ -102,15 +102,29 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
 
 /// The crates published for use outside this repository.
 ///
-/// A preset project depends on the SDK and, if it speaks the protocol or carries
-/// the transport itself, on the two crates beneath it. None of them may reach a
-/// crate that exists only here: a published crate that names `zup-windows` is a
-/// crate that can only be built inside the repository that owns it, which is the
-/// opposite of what publishing one is for.
+/// One author-facing name, and two roles behind it that share almost nothing:
 ///
-/// The three form a chain, and the gate walks all three, so a new edge from any
-/// of them into the engine is caught whether it is written in the SDK, in the
-/// transport, or in the contract.
+/// ```text
+/// zup-sdk                    the facade, one feature per role
+///   preset
+///     zup-preset-sdk         the preset authoring API
+///       zup-preset-sdk-macros
+///       zup-preset-protocol  the wire, read by the SDK and the transport
+///       zup-preset-ipc       the transport that carries it
+///   plugin
+///     zup-plugin-sdk         the plugin authoring API and its bindings
+///       zup-plugin-abi       the Component Model contract, the canonical ABI
+/// ```
+///
+/// An author names `zup-sdk` and one role. Everything below it is published
+/// because Cargo resolves a transitive dependency from crates.io, not because
+/// anyone should reach it directly: a published crate that names `zup-windows` is
+/// a crate that can only be built inside the repository that owns it, which is
+/// the opposite of what publishing one is for.
+///
+/// The gate treats all seven as roots, so a new edge from any of them into the
+/// engine is caught whether it is written in the facade, in a role's API, in a
+/// transport, or in a contract.
 pub const PUBLISHED_PACKAGES: &[&str] = &[
     "zup-sdk",
     "zup-preset-sdk",

@@ -101,7 +101,7 @@ where
 /// # }
 /// # impl Render for View {
 /// #     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-/// #         div().child(self.session.SessionState().read(cx).is_connected().to_string())
+/// #         div().child(self.session.state().read(cx).is_connected().to_string())
 /// #     }
 /// # }
 /// ```

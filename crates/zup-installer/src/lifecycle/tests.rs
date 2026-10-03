@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use zup_core::{
     App, AppId, FileMapping, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
-    PluginBinding, PluginId, RelativePath, ResolvedFile, ResolvedPlugin, SelectedScope,
-    TargetTriple, Template, UiAsset, UiPreset, hash_reader,
+    PluginBinding, PluginId, PresetAsset, PresetRuntime, RelativePath, ResolvedFile,
+    ResolvedPlugin, SelectedScope, TargetTriple, Template, hash_reader,
 };
 use zup_exec::LifecycleAction;
 use zup_plan::{
@@ -291,19 +291,19 @@ fn empty_target(scope: SelectedScope, id: &str) -> zup_platform::TargetPlan {
             prerequisite_count: 0,
             download_bytes: 0,
         },
-        ui: None,
+        preset: None,
     }
 }
 
 /// A window with settings and one application-provided asset.
-fn preset() -> UiPreset {
-    UiPreset {
+fn preset() -> PresetRuntime {
+    PresetRuntime {
         name: NonEmptyString::new("aurora").expect("a name"),
         version: semver::Version::parse("1.4.2").expect("a version"),
         protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
         required_capabilities: vec!["components".to_owned()],
         settings: serde_json::json!({ "hero": "Install Acme" }),
-        assets: vec![UiAsset {
+        assets: vec![PresetAsset {
             name: NonEmptyString::new("branding/logo.svg").expect("a name"),
             size: 6,
             sha256: zup_core::hash_bytes(b"<svg/>"),
@@ -326,7 +326,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
     let app = AppId::new("com.example.window").expect("an app id");
     let version = semver::Version::parse("1.0.0").expect("a version");
     let source = |name: &str| -> miette::Result<Vec<u8>> {
-        Ok(if name == zup_windows::ui_runtime::PRESET_SOURCE {
+        Ok(if name == zup_windows::preset_runtime::PRESET_SOURCE {
             PRESET_EXECUTABLE.to_vec()
         } else {
             LOGO.to_vec()
@@ -344,7 +344,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
         attach_ui_runtime(&mut target, &directory, scope, &preset(), &source)
             .expect("the window is attached");
 
-        let runtime = target.ui.as_ref().expect("the plan records the window");
+        let runtime = target.preset.as_ref().expect("the plan records the window");
         assert_eq!(
             runtime.preset,
             preset(),
@@ -356,8 +356,8 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
             "and the executable is named by content"
         );
 
-        let executable = zup_windows::ui_runtime::preset_path(&directory, &runtime.executable);
-        let asset = zup_windows::ui_runtime::asset_path(
+        let executable = zup_windows::preset_runtime::preset_path(&directory, &runtime.executable);
+        let asset = zup_windows::preset_runtime::asset_path(
             &directory,
             "branding/logo.svg",
             &zup_core::hash_bytes(LOGO),
@@ -391,7 +391,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
         }
         assert_eq!(
             target.files[0].source_relative.as_str(),
-            zup_windows::ui_runtime::PRESET_SOURCE,
+            zup_windows::preset_runtime::PRESET_SOURCE,
             "and the plan names where the bytes come from rather than a file to copy"
         );
         assert_eq!(
@@ -423,7 +423,7 @@ fn a_window_whose_executable_cannot_be_read_is_refused() {
     .expect_err("a window with no executable cannot be installed");
     assert!(error.to_string().contains("could not be read"), "{error}");
     assert!(
-        target.ui.is_none(),
+        target.preset.is_none(),
         "and the plan records no window rather than one it cannot honour"
     );
     assert!(target.files.is_empty(), "and no half-installed content");
@@ -437,7 +437,7 @@ fn an_asset_that_is_not_the_configured_content_is_refused() {
     let root = TempDir::new().expect("a scratch directory");
     let mut target = empty_target(SelectedScope::User, "com.example.mismatch");
     let source = |name: &str| -> miette::Result<Vec<u8>> {
-        Ok(if name == zup_windows::ui_runtime::PRESET_SOURCE {
+        Ok(if name == zup_windows::preset_runtime::PRESET_SOURCE {
             PRESET_EXECUTABLE.to_vec()
         } else {
             b"something else".to_vec()
@@ -455,7 +455,7 @@ fn an_asset_that_is_not_the_configured_content_is_refused() {
         error.to_string().contains("branding/logo.svg"),
         "and it names the asset: {error}"
     );
-    assert!(target.ui.is_none(), "and records no window");
+    assert!(target.preset.is_none(), "and records no window");
 }
 
 /// A transition's window comes out of verified acquired content, by digest.
@@ -486,7 +486,7 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
     )
     .expect("a release that carries the window can install it");
 
-    let recorded = target.ui.as_ref().expect("the plan records the window");
+    let recorded = target.preset.as_ref().expect("the plan records the window");
     assert_eq!(
         recorded.executable,
         zup_core::hash_bytes(PRESET_EXECUTABLE),
@@ -505,12 +505,12 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
         .collect();
     destinations.sort();
     let mut expected = vec![
-        zup_windows::plain_path_text(&zup_windows::ui_runtime::asset_path(
+        zup_windows::plain_path_text(&zup_windows::preset_runtime::asset_path(
             &directory,
             "branding/logo.svg",
             &recorded.preset.assets[0].sha256,
         )),
-        zup_windows::plain_path_text(&zup_windows::ui_runtime::preset_path(
+        zup_windows::plain_path_text(&zup_windows::preset_runtime::preset_path(
             &directory,
             &recorded.executable,
         )),
@@ -529,7 +529,10 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
     sources.sort();
     assert_eq!(
         sources,
-        ["__zup_preset__.exe", "__zup_ui_asset__/branding/logo.svg",],
+        [
+            "__zup_preset__.exe",
+            "__zup_preset_asset__/branding/logo.svg",
+        ],
         "and the plan names where the bytes come from, rather than a build-machine path"
     );
 }
@@ -582,7 +585,7 @@ fn a_window_the_release_does_not_carry_is_refused(#[case] absent_executable: boo
         !error.to_string().is_empty(),
         "and the refusal says what is wrong: {error}"
     );
-    assert!(target.ui.is_none(), "and the plan records no window");
+    assert!(target.preset.is_none(), "and the plan records no window");
     assert!(target.files.is_empty(), "and no half-installed content");
 }
 
@@ -599,8 +602,8 @@ fn acquired_release(
     zup_artifact::VariantManifest,
     zup_bundle::AcquiredPayloadSource,
 ) {
-    let preset = zup_core::UiPreset {
-        assets: vec![zup_core::UiAsset {
+    let preset = zup_core::PresetRuntime {
+        assets: vec![zup_core::PresetAsset {
             name: zup_core::NonEmptyString::new("branding/logo.svg").expect("a name"),
             size: LOGO.len() as u64,
             sha256: asset_digest,
@@ -642,7 +645,7 @@ fn acquired_release(
         },
         entries: Vec::new(),
         prerequisite_artifacts: Vec::new(),
-        ui_assets: vec![zup_core::UiAsset {
+        ui_assets: vec![zup_core::PresetAsset {
             name: zup_core::NonEmptyString::new("branding/logo.svg").expect("a name"),
             size: LOGO.len() as u64,
             sha256: asset_digest,

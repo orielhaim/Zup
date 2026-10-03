@@ -493,10 +493,10 @@ pub(crate) fn compile_execution_plan(
     // The UI runtime is a statement about this transaction, not about the
     // machine: an uninstall and a target with no window both leave none, and a
     // repair carries the one it is preserving forward.
-    input.ui = if execution.uninstall {
+    input.preset = if execution.uninstall {
         None
     } else {
-        target.and_then(|target| target.ui.clone())
+        target.and_then(|target| target.preset.clone())
     };
 
     for file in &execution.files {

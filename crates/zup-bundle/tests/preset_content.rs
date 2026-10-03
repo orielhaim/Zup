@@ -23,8 +23,8 @@ const PRESET: &[u8] = b"the preset executable";
 const LOGO: &[u8] = b"<svg/>";
 const HERO: &[u8] = b"\x89PNG\r\n";
 
-fn asset(name: &str, content: &[u8]) -> zup_core::UiAsset {
-    zup_core::UiAsset {
+fn asset(name: &str, content: &[u8]) -> zup_core::PresetAsset {
+    zup_core::PresetAsset {
         name: zup_core::NonEmptyString::new(name).expect("a name"),
         size: content.len() as u64,
         sha256: hash_bytes(content),
@@ -58,7 +58,7 @@ fn release(
             .parse()
             .expect("the host target"),
         frontend: zup_core::Frontend::Gui,
-        preset: Some(zup_core::UiPreset {
+        preset: Some(zup_core::PresetRuntime {
             name: zup_core::NonEmptyString::new("aurora").expect("a name"),
             version: "1.4.2".parse().expect("a version"),
             protocol: 1,

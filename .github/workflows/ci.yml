@@ -68,7 +68,7 @@ jobs:
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries
 
-      - name: Public UI crates
+      - name: Published authoring surface
         shell: pwsh
         run: ./scripts/verify-public-crates.ps1
 

@@ -1,4 +1,4 @@
-//! Where an installation keeps the UI runtime it will present.
+//! Where an installation keeps the preset runtime it will present.
 //!
 //! Two things live here, and they are the same thing: the preset executable and
 //! the application-provided assets its settings named. Both are addressed by
@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{Sha256Digest, UiRuntime};
+use zup_core::{InstalledPreset, Sha256Digest};
 
 use crate::machine_state;
 
@@ -33,16 +33,16 @@ use crate::machine_state;
 /// that cannot collide with a file a project happens to ship.
 pub const PRESET_SOURCE: &str = "__zup_preset__.exe";
 
-/// The payload-relative prefix that means "an application-provided UI asset".
-pub const ASSET_SOURCE_PREFIX: &str = "__zup_ui_asset__";
+/// The payload-relative prefix that means "an application-provided preset asset".
+pub const ASSET_SOURCE_PREFIX: &str = "__zup_preset_asset__";
 
-/// The directory an installation's UI content is kept in.
-const UI_DIRECTORY: &str = "ui";
+/// The directory an installation's preset content is kept in.
+const PRESET_DIRECTORY: &str = "ui";
 
 /// Where an installation keeps one preset executable.
 pub fn preset_path(runtime_directory: &Path, digest: &Sha256Digest) -> PathBuf {
     runtime_directory
-        .join(UI_DIRECTORY)
+        .join(PRESET_DIRECTORY)
         .join("preset")
         .join(preset_file_name(digest))
 }
@@ -61,7 +61,7 @@ pub fn preset_path(runtime_directory: &Path, digest: &Sha256Digest) -> PathBuf {
 /// would be a different string from the one everything that compares installed
 /// paths - the ledger, the installer - is holding.
 pub fn asset_path(runtime_directory: &Path, name: &str, digest: &Sha256Digest) -> PathBuf {
-    let mut path = runtime_directory.join(UI_DIRECTORY).join("assets");
+    let mut path = runtime_directory.join(PRESET_DIRECTORY).join("assets");
     for segment in name.split('/').filter(|segment| !segment.is_empty()) {
         path.push(segment);
     }
@@ -83,10 +83,10 @@ pub fn asset_source_name(name: &str) -> zup_core::RelativePath {
         .expect("a reserved asset source name is always relative")
 }
 
-/// Why an installed application's UI content could not be used.
+/// Why an installed application's preset content could not be used.
 #[derive(Debug, thiserror::Error)]
-pub enum UiContentError {
-    #[error("the installed UI runtime names preset content that is not on this machine: {0}")]
+pub enum PresetContentError {
+    #[error("the installed preset runtime names preset content that is not on this machine: {0}")]
     PresetMissing(String),
     #[error(
         "the installed preset executable is {size} bytes and hashes to {found}, not the {expected} this installation recorded"
@@ -109,7 +109,7 @@ pub enum UiContentError {
     },
 }
 
-/// The verified executable and asset paths of an installed UI runtime.
+/// The verified executable and asset paths of an installed preset runtime.
 ///
 /// Every byte proved against the digest the installation recorded, before the
 /// caller is told where it is. A path that might or might not be right is not
@@ -120,20 +120,23 @@ pub struct Resolved {
     pub assets: BTreeMap<String, String>,
 }
 
-/// Locate an installed UI runtime's content, proving each byte.
+/// Locate an installed preset runtime's content, proving each byte.
 ///
 /// Assets first, then the executable, for the same reason the composed path
 /// does it: a missing asset is a specific thing the application configured, and
 /// an installation missing both would otherwise be reported as a missing
 /// executable, which is the same mistake twice with the less useful half kept.
-pub fn resolve(runtime_directory: &Path, ui: &UiRuntime) -> Result<Resolved, UiContentError> {
+pub fn resolve(
+    runtime_directory: &Path,
+    ui: &InstalledPreset,
+) -> Result<Resolved, PresetContentError> {
     let mut assets = BTreeMap::new();
     for asset in &ui.preset.assets {
         let path = asset_path(runtime_directory, asset.name.as_str(), &asset.sha256);
         match digest_of(&path) {
             Ok((_, found)) if found == asset.sha256 => {}
             Ok((size, found)) => {
-                return Err(UiContentError::AssetDamaged {
+                return Err(PresetContentError::AssetDamaged {
                     name: asset.name.to_string(),
                     size,
                     found,
@@ -141,7 +144,7 @@ pub fn resolve(runtime_directory: &Path, ui: &UiRuntime) -> Result<Resolved, UiC
                 });
             }
             Err(()) => {
-                return Err(UiContentError::AssetMissing {
+                return Err(PresetContentError::AssetMissing {
                     name: asset.name.to_string(),
                 });
             }
@@ -155,14 +158,14 @@ pub fn resolve(runtime_directory: &Path, ui: &UiRuntime) -> Result<Resolved, UiC
     match digest_of(&executable) {
         Ok((_, found)) if found == ui.executable => {}
         Ok((size, found)) => {
-            return Err(UiContentError::PresetDamaged {
+            return Err(PresetContentError::PresetDamaged {
                 size,
                 found,
                 expected: ui.executable,
             });
         }
         Err(()) => {
-            return Err(UiContentError::PresetMissing(
+            return Err(PresetContentError::PresetMissing(
                 executable.display().to_string(),
             ));
         }
@@ -176,7 +179,7 @@ fn digest_of(path: &Path) -> Result<(u64, Sha256Digest), ()> {
     zup_core::hash_reader(&mut file).map_err(|_| ())
 }
 
-/// Whether a destination is one of an installation's UI content files.
+/// Whether a destination is one of an installation's preset content files.
 ///
 /// Asked of the ledger rather than assumed, so that retiring a window's bytes is
 /// decided by where they are and not by a marker that could go stale. Scoped to
@@ -191,6 +194,6 @@ pub fn is_content_path(maintenance_root: &Path, destination: &str) -> bool {
     components.next();
     components
         .next()
-        .is_some_and(|component| component.as_os_str() == UI_DIRECTORY)
+        .is_some_and(|component| component.as_os_str() == PRESET_DIRECTORY)
         && components.next().is_some()
 }

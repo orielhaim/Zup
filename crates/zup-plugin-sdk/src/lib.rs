@@ -16,7 +16,7 @@
 //!         Ok(Plan::new().generated_file(GeneratedFile::text(
 //!             "${install}/configure.txt",
 //!             format!("installing {} for {}", context.app_name, context.plugin_id),
-//!         ))
+//!         )))
 //!     }
 //! }
 //!

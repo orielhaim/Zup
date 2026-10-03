@@ -3,8 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zup_core::{
-    BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, SelectedScope,
-    Sha256Digest, TargetTriple, UiRuntime,
+    BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
+    SelectedScope, Sha256Digest, TargetTriple,
 };
 use zup_platform::TargetPath;
 
@@ -194,12 +194,12 @@ pub struct TransactionInput {
     pub files: Vec<FileWork>,
     pub removals: Vec<FileRemoval>,
     pub backend_operations: Vec<BackendOperation>,
-    /// The UI runtime this transaction makes durable, or leaves absent.
+    /// The preset runtime this transaction makes durable, or leaves absent.
     ///
     /// In the plan and the journal rather than beside them, because a recovery
     /// run works from the journal alone. Settings that lived only in the caller
     /// would be unrecoverable exactly when recovery is what is needed.
-    pub ui: Option<UiRuntime>,
+    pub preset: Option<InstalledPreset>,
 }
 
 impl TransactionInput {
@@ -213,7 +213,7 @@ impl TransactionInput {
             files: Vec::new(),
             removals: Vec::new(),
             backend_operations: Vec::new(),
-            ui: None,
+            preset: None,
         }
     }
 

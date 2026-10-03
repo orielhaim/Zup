@@ -513,8 +513,8 @@ mod tests {
         zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target")
     }
 
-    fn asset(name: &str, content: &[u8]) -> zup_core::UiAsset {
-        zup_core::UiAsset {
+    fn asset(name: &str, content: &[u8]) -> zup_core::PresetAsset {
+        zup_core::PresetAsset {
             name: zup_core::NonEmptyString::new(name).expect("a name"),
             size: content.len() as u64,
             sha256: zup_core::hash_bytes(content),
@@ -583,7 +583,7 @@ mod tests {
             plan: zup_bundle::PortableBuildPlan {
                 installer: zup_core::Installer {
                     app: zup_core::App {
-                        id: zup_core::AppId::new("com.acme.ui").expect("a valid id"),
+                        id: zup_core::AppId::new("com.acme.preset").expect("a valid id"),
                         name: zup_core::NonEmptyString::new("Acme").expect("a name"),
                         version: semver::Version::parse("1.0.0").expect("a version"),
                         publisher: None,
@@ -592,7 +592,7 @@ mod tests {
                     },
                     target,
                     frontend: zup_core::Frontend::Gui,
-                    preset: window.then(|| zup_core::UiPreset {
+                    preset: window.then(|| zup_core::PresetRuntime {
                         name: zup_core::NonEmptyString::new("aurora").expect("a name"),
                         version: semver::Version::parse("1.4.2").expect("a version"),
                         protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,

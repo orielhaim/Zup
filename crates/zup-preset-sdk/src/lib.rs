@@ -10,7 +10,7 @@
 //! ```no_run
 //! use zup_preset_sdk::prelude::*;
 //!
-//! #[zup_preset_sdk::Settings]
+//! #[zup_preset_sdk::settings]
 //! struct Settings {
 //!     hero: Option<String>,
 //! }
@@ -18,6 +18,8 @@
 //! struct Aurora;
 //!
 //! impl Preset for Aurora {
+//!     const NAME: &'static str = env!("CARGO_PKG_NAME");
+//!     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 //!     type Settings = Settings;
 //!
 //!     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {

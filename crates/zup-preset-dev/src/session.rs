@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 
-use zup_core::UiPreset;
+use zup_core::PresetRuntime;
 use zup_preview::{Driver, Event, Runtime, StateDirectory, default_scenario, serve};
 
 use crate::build::{Build, Supervisor};
@@ -179,7 +179,7 @@ impl Session {
         // The preset's own account of itself is the only thing that says what it
         // needs, and the SDK wrote it. A compatibility failure here is the same
         // refusal a build would give, arrived at from the other side.
-        let preset = UiPreset {
+        let preset = PresetRuntime {
             name: zup_core::NonEmptyString::new(description.name.clone()).expect("a named preset"),
             version: semver::Version::parse(&description.version)
                 .unwrap_or_else(|_| semver::Version::new(0, 0, 0)),

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use zup_core::UiPreset;
+use zup_core::PresetRuntime;
 use zup_preset_protocol::Capabilities;
 
 /// Why no window appeared.
@@ -29,7 +29,7 @@ pub enum PresetError {
     #[error("this host cannot present the preset: {0}")]
     Incompatible(String),
     #[error("the installed UI content cannot be used: {0}")]
-    Integrity(#[from] zup_windows::ui_runtime::UiContentError),
+    Integrity(#[from] zup_windows::preset_runtime::PresetContentError),
     #[error("the preset could not be prepared for launch: {0}")]
     Prepare(#[source] io::Error),
 }
@@ -45,14 +45,14 @@ pub enum Source<'a> {
     /// The installer image this process is running from, before any commit.
     Composed {
         executable: &'a Path,
-        preset: &'a UiPreset,
+        preset: &'a PresetRuntime,
         bundle: &'a zup_windows::EmbeddedBundle,
     },
     /// What an installed application owns.
     Installed {
         /// The installation's maintenance directory, where its content is kept.
         directory: &'a Path,
-        runtime: &'a zup_core::UiRuntime,
+        runtime: &'a zup_core::InstalledPreset,
     },
 }
 
@@ -84,7 +84,7 @@ pub fn materialize(
 
     let (executable, assets) = match source {
         Source::Installed { directory, runtime } => {
-            let resolved = zup_windows::ui_runtime::resolve(directory, runtime)?;
+            let resolved = zup_windows::preset_runtime::resolve(directory, runtime)?;
             (resolved.executable, resolved.assets)
         }
         Source::Composed {
@@ -131,7 +131,7 @@ fn staging_directory(executable: &Path) -> PathBuf {
     executable
         .parent()
         .unwrap_or(Path::new("."))
-        .join("ui-assets")
+        .join("preset-assets")
 }
 
 /// Write the installer image's own embedded preset out beside itself.

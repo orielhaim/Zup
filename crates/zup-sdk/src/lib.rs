@@ -26,6 +26,8 @@
 //! struct MyPreset;
 //!
 //! impl Preset for MyPreset {
+//!     const NAME: &'static str = env!("CARGO_PKG_NAME");
+//!     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 //!     type Settings = Settings;
 //!
 //!     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
