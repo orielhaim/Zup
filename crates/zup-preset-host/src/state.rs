@@ -2,13 +2,13 @@
 
 use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
-use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_preset_protocol::{
-    ComponentId, DiagnosticKind, DiagnosticPresentation, InstallScope, LaunchTarget,
-    MaintenanceState, OperationKind, OperationPhase, PlanStatus, ProductIdentity,
-    ProgressPresentation, Action, Capabilities, Capability, Snapshot, InstallerState, Surface,
-    UpdatePresentation, UpdateState,
+    Action, Capabilities, Capability, ComponentId, DiagnosticKind, DiagnosticPresentation,
+    InstallScope, InstallerState, LaunchTarget, MaintenanceState, OperationKind, OperationPhase,
+    PlanStatus, ProductIdentity, ProgressPresentation, Snapshot, Surface, UpdatePresentation,
+    UpdateState,
 };
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 use crate::convert;
 

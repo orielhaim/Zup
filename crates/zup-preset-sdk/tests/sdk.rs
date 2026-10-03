@@ -11,12 +11,15 @@
 //! read a session id - so each is checked by breaking it here rather than
 //! discovered there.
 
+use zup_preset_ipc::Bootstrap;
 use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::{Bootstrap, Describe, NoSettings, describe};
+use zup_preset_sdk::{Describe, PresetContext, describe, host::Configuration};
+use zup_sdk::__private::schemars as _;
+use zup_sdk::__private::serde as _;
 
 /// A preset with the settings a real one has. The fields are read by the build,
 /// not here, so their only job is to appear in a generated schema.
-#[derive(Default, serde::Deserialize, schemars::JsonSchema)]
+#[zup_preset_sdk::settings]
 #[allow(dead_code)]
 struct Branded {
     hero: Option<String>,

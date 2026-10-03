@@ -3,8 +3,8 @@
 use zup_core::{InstallScope, Installer, SelectedScope};
 use zup_exec::InstallLedger;
 use zup_preset_protocol::{
-    ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, InstallationHealth,
-    MaintenanceState, ProductIdentity, SelectionRequirement, Capabilities,
+    Capabilities, ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions,
+    InstallationHealth, MaintenanceState, ProductIdentity, SelectionRequirement,
 };
 
 use crate::convert;

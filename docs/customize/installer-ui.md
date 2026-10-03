@@ -26,6 +26,19 @@ The preset that ships with Zup exposes three settings.
 | `accent` | `#rrggbb` | The colour of the main button, selections and progress |
 | `appearance` | `system`, `light` or `dark` | Which theme to use. `system` follows the person's Windows setting |
 
+In the preset's own settings type, that is three fields:
+
+```rust
+#[zup_sdk::preset::settings]
+pub struct Settings {
+    pub logo: Option<AssetRef>,
+    pub accent: Option<Accent>,
+    pub appearance: Appearance,
+}
+```
+
+`AssetRef` is what marks a setting as a file, so the build resolves it.
+
 ```toml
 [ui]
 [ui.settings]
@@ -69,7 +82,7 @@ Name a package inside your project:
 preset = "./acme-brand.zupui"
 ```
 
-Zup verifies the package before reading anything out of it, checks that the UI
+Zup verifies the package before reading anything out of it, checks that the preset
 protocol matches, that a binary exists for the target being built, and that your
 settings satisfy the schema the package carries. A failure at any of those is a
 failure at `zup check`, not at the end of a build.
@@ -89,7 +102,7 @@ zup preset inspect ./acme-brand.zupui
 ```text
 preset        acme-brand 1.0.0
 package       schema 1
-ui protocol   1
+preset protocol   1
 capabilities  none required
 settings      accent, appearance, logo (others permitted)
 ```

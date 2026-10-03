@@ -274,7 +274,10 @@ impl Session {
     /// The same document, produced by the same code, so a preset that cannot be
     /// developed against is refused for the reason a build would refuse it
     /// rather than for a new one.
-    fn describe(&self, executable: &Path) -> Result<zup_preset_protocol::PresetDescription, String> {
+    fn describe(
+        &self,
+        executable: &Path,
+    ) -> Result<zup_preset_protocol::PresetDescription, String> {
         let output = Command::new(executable)
             .arg(zup_preset_protocol::DESCRIBE_FLAG)
             .output()

@@ -12388,6 +12388,7 @@ dependencies = [
  "zup-preset-ipc",
  "zup-preset-protocol",
  "zup-preset-sdk-macros",
+ "zup-sdk",
 ]
 
 [[package]]
@@ -12404,8 +12405,8 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "zup-preset-ipc",
  "zup-preset-protocol",
- "zup-preset-sdk",
 ]
 
 [[package]]

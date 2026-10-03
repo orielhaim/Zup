@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use zup_preset_ipc::{Bootstrap, Endpoint, Error};
-use zup_preset_protocol::{PRESET_PROTOCOL_VERSION, Envelope, PresetHello, Message, SessionId};
+use zup_preset_protocol::{Envelope, Message, PRESET_PROTOCOL_VERSION, PresetHello, SessionId};
 
 /// The child is this crate's own preset, built behind a test-only feature, so the
 /// peer is a real preset that does the real handshake.

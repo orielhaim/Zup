@@ -35,7 +35,7 @@ mod wire;
 pub use action::Action;
 pub use compatibility::{HostOffers, Incompatible};
 pub use configuration::{
-    ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS, MAX_SETTINGS_BYTES, Configuration,
+    Configuration, ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS, MAX_SETTINGS_BYTES,
 };
 pub use description::{
     DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES, MAX_TARGETS, PresetDescription,
@@ -48,18 +48,16 @@ pub use presentation::{
     RequirementPresentation, RequirementStatus, ResourceCategory, UpdatePresentation, UpdateState,
     format_bytes,
 };
-pub use session::{
-    HostHello, Capabilities, Capability, PresetHello, SessionId, UnknownCapability,
-};
-pub use session_machine::{Identity, Session, SessionProgress, SessionState};
+pub use session::{Capabilities, Capability, HostHello, PresetHello, SessionId, UnknownCapability};
+pub use session_machine::{Handshake, Identity, Session, SessionProgress};
 pub use snapshot::{
-    ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, LaunchTarget,
-    MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement, Snapshot, InstallerState,
+    ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, InstallerState,
+    LaunchTarget, MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement, Snapshot,
     Surface,
 };
 pub use wire::{
-    MAX_FRAME_BYTES, SequenceTracker, Envelope, Message, PeerRole, decode, encode,
-    message_name, negotiate, sender_is_allowed,
+    Envelope, MAX_FRAME_BYTES, Message, PeerRole, SequenceTracker, decode, encode, message_name,
+    negotiate, sender_is_allowed,
 };
 
 /// The UI wire protocol version.

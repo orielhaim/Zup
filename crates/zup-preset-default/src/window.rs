@@ -21,6 +21,7 @@ use zup_preset_sdk::gpui_kit::{
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
     Window, WindowBounds, WindowOptions, div, px, relative, size,
 };
+use zup_preset_sdk::host::ResourceCategory;
 use zup_preset_sdk::prelude::*;
 
 use crate::Settings;
@@ -378,7 +379,9 @@ impl Installer {
             let modifying = this.local.modifying;
             let toggle = view.clone();
             let primary = match (&snapshot.state, modifying) {
-                (InstallerState::Options, _) => Some((model::install_label(&snapshot), Action::Install)),
+                (InstallerState::Options, _) => {
+                    Some((model::install_label(&snapshot), Action::Install))
+                }
                 (InstallerState::Maintenance, true)
                     if model::pending_sentence(&snapshot.surface).is_some() =>
                 {

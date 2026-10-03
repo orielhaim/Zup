@@ -27,11 +27,11 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 use zup_core::{Sha256Digest, UiPreset};
+use zup_preset_host::HostDecision;
+use zup_preset_protocol::{Action, OperationKind, Snapshot};
 use zup_runtime::{
     CancellationHandle, RuntimeEvent, SimulatedJob, SimulatedLifecycle, run_simulated,
 };
-use zup_preset_host::HostDecision;
-use zup_preset_protocol::{OperationKind, Action, Snapshot};
 
 use crate::controls::{self, Command, Components, Effect};
 use crate::machine::Scenario;

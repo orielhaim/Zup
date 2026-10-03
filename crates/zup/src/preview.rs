@@ -27,11 +27,11 @@ use std::sync::mpsc::Sender;
 
 use clap::{Args, ValueHint};
 use zup_core::{Frontend, Installer, Sha256Digest, TargetTriple, hash_bytes};
+use zup_preset_compose::{PresetProblem, Resolved};
 use zup_preview::{
     ControlOutcome, Driver, Event, Runtime, Scenario, Seen, StateDirectory, Watcher, serve,
 };
 use zup_toolchain::ToolchainComponent;
-use zup_preset_compose::{PresetProblem, Resolved};
 
 use crate::failure;
 use crate::project::{SelectedProject, TargetOverrideArgs};

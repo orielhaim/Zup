@@ -173,7 +173,13 @@ pub const ISOLATION: &[(&str, &[&str], &str)] = &[
         // it publishable at all: anything platform-shaped in it would be a crate
         // a preset on another platform cannot compile.
         "zup-preset-protocol",
-        &["gpui-kit", "wasmtime", "tokio", "zup-core", "zup-preset-ipc"],
+        &[
+            "gpui-kit",
+            "wasmtime",
+            "tokio",
+            "zup-core",
+            "zup-preset-ipc",
+        ],
         "the preset contract is pure data, and carries neither the window nor the engine",
     ),
     (

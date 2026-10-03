@@ -27,7 +27,7 @@ use zup_core::{
     NonEmptyString, SelectedScope, TargetTriple, Template, UiAsset, UiPreset,
 };
 use zup_installer::host::{HostDecision, HostState, preset};
-use zup_preset_protocol::{HostOffers, PRESET_PROTOCOL_VERSION, Action, Capabilities, Capability};
+use zup_preset_protocol::{Action, Capabilities, Capability, HostOffers, PRESET_PROTOCOL_VERSION};
 
 /// The child this test launches.
 ///
@@ -131,7 +131,10 @@ struct Session {
 }
 
 /// Run the production loop against one real child.
-fn run_session(state: &mut HostState, configuration: &zup_preset_protocol::Configuration) -> Session {
+fn run_session(
+    state: &mut HostState,
+    configuration: &zup_preset_protocol::Configuration,
+) -> Session {
     let mut process = preset::launch(
         &child(),
         state.capabilities().clone(),

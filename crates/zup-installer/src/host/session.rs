@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use zup_core::{Frontend, Installer, SelectedScope};
 use zup_exec::{InstallLedger, LifecycleAction};
-use zup_runtime::{CancellationHandle, RuntimeEvent};
 use zup_preset_protocol::{Action, UpdateState};
+use zup_runtime::{CancellationHandle, RuntimeEvent};
 
 use super::preset::{self, PresetError};
 use super::{HostDecision, HostState, Selection};
@@ -169,7 +169,8 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     let launchers = zup_preset_host::surface::launchers(&installer);
     let state = match &installed {
         Some((scope, ledger)) => {
-            let maintenance = zup_preset_host::surface::maintenance_state(&installer, ledger, *scope);
+            let maintenance =
+                zup_preset_host::surface::maintenance_state(&installer, ledger, *scope);
             HostState::maintenance(
                 zup_preset_host::surface::product(&installer),
                 maintenance,
@@ -199,7 +200,9 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     let scope = installed
         .as_ref()
         .map(|(scope, _)| *scope)
-        .unwrap_or_else(|| zup_preset_host::convert::engine_scope(state.snapshot().surface.scope()));
+        .unwrap_or_else(|| {
+            zup_preset_host::convert::engine_scope(state.snapshot().surface.scope())
+        });
     let state_root = state::resolve_state_root(launch.state_root.clone(), scope)?;
     let placement = Placement {
         scope,

@@ -95,10 +95,6 @@ pub mod __private {
 ///
 /// Compiles to `wasm32-unknown-unknown`. `zup plugin build` turns that into the
 /// component Zup loads.
-/// A plugin: a declarative extension to what an application installs.
-///
-/// Compiles to `wasm32-unknown-unknown`. `zup plugin build` turns that into the
-/// component Zup loads.
 #[cfg(feature = "plugin")]
 pub mod plugin {
     // Listed rather than globbed. The bindings generator inside
@@ -107,8 +103,8 @@ pub mod plugin {
     // takes a bare type name and looks for bindings beside itself. Naming what
     // is public is what makes `export!` here mean the macro an author expects.
     pub use zup_plugin_sdk::{
-        export, Context, Error, FileAssociation, Launcher, Path, Plan, Plugin, Protocol, Scope,
-        Service,
+        Context, Error, FileAssociation, Launcher, Path, Plan, Plugin, Protocol, Scope, Service,
+        export,
     };
     pub mod prelude {
         pub use zup_plugin_sdk::prelude::*;

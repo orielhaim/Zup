@@ -6,7 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{ProductIdentity, PRESET_PROTOCOL_VERSION};
+use crate::{PRESET_PROTOCOL_VERSION, ProductIdentity};
 
 /// Identity of one host ↔ preset relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -16,6 +16,17 @@ pub struct SessionId(pub Uuid);
 impl SessionId {
     pub fn new_v7() -> Self {
         Self(Uuid::now_v7())
+    }
+}
+
+/// A transport's session identity is this one.
+///
+/// The transport learns the id when it collects its endpoint and both peers then
+/// frame with it, so converting rather than inventing one is what keeps a preset
+/// and the host that launched it talking about the same connection.
+impl From<Uuid> for SessionId {
+    fn from(id: Uuid) -> Self {
+        Self(id)
     }
 }
 

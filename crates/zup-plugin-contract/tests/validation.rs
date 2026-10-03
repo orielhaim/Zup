@@ -7,8 +7,7 @@ use rstest::rstest;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 use zup_plugin_contract::{
-    Context, ContractError, EngineFingerprint, InstallScope, InvocationError, PluginEngine,
-    engine_fingerprint,
+    Context, ContractError, InstallScope, InvocationError, PluginEngine, engine_fingerprint,
 };
 
 const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;

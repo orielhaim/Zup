@@ -199,10 +199,7 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
 fn build_example_plugin(root: &Path) -> Result<(), String> {
     let project = root.join("examples").join("plugins").join("configure");
     if !project.is_dir() {
-        return Err(format!(
-            "no example plugin at {}",
-            project.display()
-        ));
+        return Err(format!("no example plugin at {}", project.display()));
     }
     cargo(
         root,

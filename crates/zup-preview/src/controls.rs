@@ -19,8 +19,8 @@
 //! preset's component list has no heading, no scrolling, and no way to say "and
 //! four more".
 
-use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_preset_protocol::{ComponentOption, InstallScope, InstallationHealth, UpdateState};
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 use crate::machine::{Scenario, Surface};
 use crate::simulator::Simulator;

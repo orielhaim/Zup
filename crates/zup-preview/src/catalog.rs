@@ -8,11 +8,11 @@
 //! render.
 
 use zup_presentation::RequirementStatus;
-use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 use zup_preset_protocol::{
-    ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence, InstallScope,
-    InstallationHealth, ProductIdentity, SelectionRequirement, Action, UpdateState,
+    Action, ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence, InstallScope,
+    InstallationHealth, ProductIdentity, SelectionRequirement, UpdateState,
 };
+use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 
 use crate::machine::{Footprint, Machine, Scenario, Surface};
 

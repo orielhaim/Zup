@@ -8,7 +8,7 @@
 use zup::preset::{InspectCommand, inspect};
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::TargetTriple;
-use zup_preset_protocol::{PresetDescription, Capabilities, Capability};
+use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 fn packed(targets: &[&str]) -> Vec<u8> {
     let description = PresetDescription::new(

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use futures_channel::mpsc::UnboundedReceiver;
 use zup_preset_ipc::{Channel as Transport, Sender};
 use zup_preset_protocol::{
-    HostHello, Session, SessionProgress, Action, Capabilities, Configuration, Message,
-    SessionId, Snapshot, WireError,
+    Action, Capabilities, Configuration, HostHello, Message, Session, SessionId, SessionProgress,
+    Snapshot, WireError,
 };
 
 pub use zup_preset_ipc::{Bootstrap, Error as TransportError};
@@ -102,11 +102,6 @@ impl Channel {
         Requester,
     ) {
         (self.incoming, self.requester)
-    }
-
-    /// A handle a UI thread can use to ask for something.
-    pub fn requests(&self) -> Requester {
-        self.requester.clone()
     }
 }
 

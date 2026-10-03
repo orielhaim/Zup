@@ -6,8 +6,6 @@
 //! the way an author would, hands it to the same validation an installer
 //! performs, and calls it.
 
-use std::path::Path;
-
 use zup_plugin_contract::{
     Context, InstallScope, InvocationError, PluginEngine, ValidatedComponent,
 };

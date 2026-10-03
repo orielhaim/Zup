@@ -30,9 +30,9 @@ use std::time::{Duration, Instant};
 
 use zup::preview::Session;
 use zup_artifact::preset::PresetPackageWriter;
+use zup_preset_compose::resolve;
 use zup_preview::ControlOutcome;
 use zup_toolchain::ToolchainComponent;
-use zup_preset_compose::resolve;
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 

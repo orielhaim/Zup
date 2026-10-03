@@ -30,7 +30,7 @@ use zup_artifact::preset::PresetPackageView;
 use zup_core::{
     Installer, NonEmptyString, ProjectPath, ResolvedAsset, TargetTriple, Ui, UiAsset, UiPreset,
 };
-use zup_preset_protocol::{HostOffers, Capabilities};
+use zup_preset_protocol::{Capabilities, HostOffers};
 
 /// The largest one application-provided asset may be.
 ///

@@ -5,10 +5,10 @@
 //! asserting the happy path alone.
 
 use zup_preset_protocol::{
-    ComponentId, ComponentOption, DiagnosticKind, DiagnosticPresentation, HostHello,
-    InstallOptions, InstallScope, MaintenanceState, OperationPhase, PlanStatus, ProductIdentity,
-    ProgressPresentation, Action, Capabilities, Capability, Envelope, PresetHello, Message,
-    SessionId, Snapshot, InstallerState, Surface, WireError, decode, encode, negotiate,
+    Action, Capabilities, Capability, ComponentId, ComponentOption, DiagnosticKind,
+    DiagnosticPresentation, Envelope, HostHello, InstallOptions, InstallScope, InstallerState,
+    MaintenanceState, Message, OperationPhase, PlanStatus, PresetHello, ProductIdentity,
+    ProgressPresentation, SessionId, Snapshot, Surface, WireError, decode, encode, negotiate,
 };
 
 fn session() -> SessionId {

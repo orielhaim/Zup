@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_preset_protocol::{PresetDescription, Capabilities};
+use zup_preset_protocol::{Capabilities, PresetDescription};
 
 use crate::error::ArtifactError;
 

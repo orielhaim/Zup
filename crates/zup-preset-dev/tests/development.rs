@@ -93,13 +93,18 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     assert!(
         matches!(
             wait_for(&mut watcher),
-            Some(zup_preset_dev::Watched::Changed(zup_preset_dev::Change::Source))
+            Some(zup_preset_dev::Watched::Changed(
+                zup_preset_dev::Change::Source
+            ))
         ),
         "a save to the preset's own code is a source change"
     );
 
-    std::fs::write(root.join("zup.preset.dev.toml"), "[settings]\nhero = \"two\"\n")
-        .expect("the document is saved");
+    std::fs::write(
+        root.join("zup.preset.dev.toml"),
+        "[settings]\nhero = \"two\"\n",
+    )
+    .expect("the document is saved");
     assert!(
         matches!(
             wait_for(&mut watcher),

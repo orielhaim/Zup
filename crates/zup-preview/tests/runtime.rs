@@ -32,7 +32,7 @@ const PRESET: &str = r##"
 use std::path::PathBuf;
 use zup_preset_ipc::Bootstrap;
 use zup_preset_protocol::{
-    Session, SessionProgress, SessionState, Action, Capabilities, Configuration, Message,
+    Session, SessionProgress, Handshake, Action, Capabilities, Configuration, Message,
     SessionId,
 };
 
@@ -148,7 +148,7 @@ fn main() {
                 _ => {}
             },
         }
-        let SessionState::Live { snapshot } = session.state() else {
+        let Handshake::Live { snapshot } = session.handshake() else {
             continue;
         };
         let configuration = configuration.clone().expect("a configuration arrives first");
@@ -300,7 +300,10 @@ fn built() -> &'static PathBuf {
             root.join("Cargo.toml"),
             PROBE_MANIFEST
                 .replace("zup_preset_ipc", &crate_directory("zup-preset-ipc"))
-                .replace("zup_preset_protocol", &crate_directory("zup-preset-protocol")),
+                .replace(
+                    "zup_preset_protocol",
+                    &crate_directory("zup-preset-protocol"),
+                ),
         )
         .expect("the manifest");
 

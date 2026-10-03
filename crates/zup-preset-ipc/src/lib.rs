@@ -44,7 +44,7 @@ use std::time::Duration;
 use ipc_channel::ipc::{IpcBytesReceiver, IpcBytesSender, IpcOneShotServer, IpcSender};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zup_preset_protocol::{MAX_FRAME_BYTES, Envelope, decode, encode};
+use zup_preset_protocol::{Envelope, MAX_FRAME_BYTES, decode, encode};
 
 /// How long a host waits for the preset to collect its endpoint.
 ///

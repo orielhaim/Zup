@@ -16,6 +16,10 @@ use zup_preset_sdk::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
+use zup_preset_sdk::host::{
+    ChangeGroup, ChangeKind, PlannedChange, RequirementPresentation, RequirementStatus,
+    ResourceCategory,
+};
 use zup_preset_sdk::prelude::*;
 
 use crate::model;

@@ -14,7 +14,8 @@ fn main() {
     // path that has already been joined does not survive the normalisation a
     // Windows path goes through, and the result is a path that reads as if it
     // exists and does not.
-    let mut root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
+    let mut root =
+        std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
     root.pop();
     while root.file_name().is_some_and(|name| name != "crates") {
         if !root.pop() {

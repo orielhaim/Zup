@@ -60,7 +60,10 @@ pub fn init(name: &str, parent: &Path) -> miette::Result<()> {
         ));
     }
     std::fs::create_dir_all(root.join("src")).map_err(|error| {
-        failure::error("zup.preset.init_write", format!("{}: {error}", root.display()))
+        failure::error(
+            "zup.preset.init_write",
+            format!("{}: {error}", root.display()),
+        )
     })?;
 
     for (relative, contents) in [
@@ -84,7 +87,10 @@ fn write(path: &Path, contents: &str) -> miette::Result<()> {
         })?;
     }
     std::fs::write(path, contents).map_err(|error| {
-        failure::error("zup.preset.init_write", format!("{}: {error}", path.display()))
+        failure::error(
+            "zup.preset.init_write",
+            format!("{}: {error}", path.display()),
+        )
     })
 }
 
@@ -106,8 +112,11 @@ zup-sdk = {{ version = "0.1.0", features = ["preset"] }}
 # both slow and, for a text and layout engine, surprisingly slow at run time.
 # These are the packages that dominate the cost; everything else stays at the
 # development default so a change to this preset's own code is compiled in
-# seconds. Names are checked against the graph by `cargo build`, so a stack that
-# renames one produces a warning rather than a silently unoptimised preset.
+# seconds.
+#
+# A name here that the GPUI stack has since renamed is a warning rather than an
+# error, so it costs nothing but the optimisation it was buying. Cargo prints it
+# on the first build, which is where it is worth knowing about.
 [profile.dev.package.gpui-pre]
 opt-level = 2
 [profile.dev.package.gpui-pre-platform]
@@ -126,8 +135,6 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.gpui-pre-util-macros]
 opt-level = 2
-[profile.dev.package.gpui-pre-derive-macro]
-opt-level = 2
 [profile.dev.package.gpui-base]
 opt-level = 2
 [profile.dev.package.gpui-component]
@@ -137,12 +144,6 @@ opt-level = 2
 [profile.dev.package.taffy]
 opt-level = 2
 [profile.dev.package.smol_str]
-opt-level = 2
-[profile.dev.package.cosmic-text]
-opt-level = 2
-[profile.dev.package.swash]
-opt-level = 2
-[profile.dev.package.fontdue]
 opt-level = 2
 [profile.dev.package.rustybuzz]
 opt-level = 2
@@ -157,8 +158,6 @@ opt-level = 2
 [profile.dev.package.zune-jpeg]
 opt-level = 2
 [profile.dev.package.png]
-opt-level = 2
-[profile.dev.package.tokio]
 opt-level = 2
 [profile.dev.package.smol]
 opt-level = 2
@@ -184,9 +183,13 @@ pub struct Settings {
     pub accent: Option<String>,
 }
 
-struct Preset;
+/// The preset.
+///
+/// Named rather than `Preset` because a struct and a trait share one namespace,
+/// and `impl Preset for Preset` would resolve the trait position to the struct.
+struct Aurora;
 
-impl Preset for Preset {
+impl Preset for Aurora {
     const NAME: &'static str = env!("CARGO_PKG_NAME");
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -195,9 +198,9 @@ impl Preset for Preset {
     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
         let session = context.session().clone();
         let settings = context.settings().clone();
-        let state = session.state();
+        let state = session.SessionState();
 
-        gpui::open_window(gpui::WindowOptions::default(), cx, move |window, cx| {
+        gpui::open_window(gpui::WindowOptions::default(), cx, move |_window, cx| {
             let view = cx.new(|_| View {
                 session: session.clone(),
                 state: state.clone(),
@@ -234,7 +237,7 @@ struct View {
 }
 
 impl Render for View {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui::base::{Disableable, StyledExt};
         use gpui::component::button::Button;
         use gpui::component::{ActiveTheme, Theme};
@@ -294,7 +297,7 @@ impl Render for View {
 }
 
 fn main() {
-    if let Err(error) = zup_sdk::preset::run::<Preset>() {
+    if let Err(error) = zup_sdk::preset::run::<Aurora>() {
         eprintln!("{error}");
         std::process::exit(1);
     }

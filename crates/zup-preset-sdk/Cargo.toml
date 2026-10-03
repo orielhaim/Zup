@@ -38,5 +38,6 @@ futures-channel = "0.3"
 futures-util = "0.3"
 
 [dev-dependencies]
+zup-sdk = { path = "../zup-sdk", version = "0.1.0", features = ["preset"] }
 gpui-kit = { version = "0.7", features = ["test-support"] }
 zup-preset-protocol = { path = "../zup-preset-protocol" }

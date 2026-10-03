@@ -10,10 +10,10 @@
 //! about what a preset that does not follow it gets.
 
 use zup_preset_protocol::{
-    ComponentId, ComponentOption, InstallOptions, InstallScope, MaintenanceState, PlanStatus,
-    ProductIdentity, Session, SessionProgress, SessionState, PRESET_PROTOCOL_VERSION, Action,
-    Capabilities, Capability, Configuration, Envelope, Message, PeerRole, SessionId,
-    Snapshot, InstallerState, Surface, WireError,
+    Action, Capabilities, Capability, ComponentId, ComponentOption, Configuration, Envelope,
+    Handshake, InstallOptions, InstallScope, InstallerState, MaintenanceState, Message,
+    PRESET_PROTOCOL_VERSION, PeerRole, PlanStatus, ProductIdentity, Session, SessionId,
+    SessionProgress, Snapshot, Surface, WireError,
 };
 
 fn product() -> ProductIdentity {
@@ -120,8 +120,8 @@ fn a_connected_preset_receives_its_configuration_then_the_current_state() {
             Message::Snapshot(Box::new(snapshot())),
         ]
     );
-    assert!(matches!(pair.preset.state(), SessionState::Live { .. }));
-    assert!(matches!(pair.host.state(), SessionState::Live { .. }));
+    assert!(matches!(pair.preset.handshake(), Handshake::Live { .. }));
+    assert!(matches!(pair.host.handshake(), Handshake::Live { .. }));
 }
 
 /// A preset that reconnects gets the whole state again.
@@ -157,8 +157,8 @@ fn a_reconnecting_preset_is_sent_the_whole_state_again() {
         assert!(preset.receive(frame).is_ok());
     }
     assert!(matches!(
-        preset.state(),
-        SessionState::Live { snapshot } if **snapshot == running
+        preset.handshake(),
+        Handshake::Live { snapshot } if **snapshot == running
     ));
 }
 
@@ -168,11 +168,7 @@ fn a_reconnecting_preset_is_sent_the_whole_state_again() {
 #[test]
 fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(
-        id,
-        Capabilities::new([Capability::Components]),
-        product(),
-    );
+    let mut host = Session::host(id, Capabilities::new([Capability::Components]), product());
     let mut preset = Session::preset(
         id,
         Capabilities::new([Capability::Maintenance]),
@@ -192,12 +188,7 @@ fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
 fn a_preset_that_needs_nothing_still_connects() {
     let id = SessionId::new_v7();
     let mut host = Session::host(id, Capabilities::default(), product());
-    let mut preset = Session::preset(
-        id,
-        Capabilities::default(),
-        "plain".into(),
-        "0.1.0".into(),
-    );
+    let mut preset = Session::preset(id, Capabilities::default(), "plain".into(), "0.1.0".into());
     let hello = preset.opening().expect("opens");
     assert!(matches!(host.receive(hello), Ok(SessionProgress::Send(_))));
 }
@@ -215,10 +206,7 @@ fn a_frame_from_another_session_is_refused() {
     )
     .opening()
     .expect("opens");
-    assert_eq!(
-        pair.host.receive(stranger),
-        Err(WireError::SessionMismatch)
-    );
+    assert_eq!(pair.host.receive(stranger), Err(WireError::SessionMismatch));
 }
 
 /// A host cannot answer its own hello, and a preset cannot send one. A peer

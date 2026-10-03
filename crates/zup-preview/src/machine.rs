@@ -6,13 +6,12 @@
 //! installation could be in.
 
 use zup_core::SelectedScope;
-use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_preset_host::{HostDecision, HostState, Launchable, Selection};
 use zup_preset_protocol::{
-    ComponentId, ComponentOption, InstallOptions, InstallScope, InstallationHealth, LaunchTarget,
-    MaintenanceState, ProductIdentity, Action, Capabilities, Capability, Snapshot,
-    UpdateState,
+    Action, Capabilities, Capability, ComponentId, ComponentOption, InstallOptions, InstallScope,
+    InstallationHealth, LaunchTarget, MaintenanceState, ProductIdentity, Snapshot, UpdateState,
 };
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 /// Which surface the simulated machine is presenting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

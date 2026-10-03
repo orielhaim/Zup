@@ -24,7 +24,7 @@ The goal is simple: **shipping a desktop application should not require maintain
 - Components and optional features
 - Prerequisites
 - Files, launchers, services, PATH entries, protocols and file associations
-- Custom installer UIs through [presets](https://zup.orielhaim.com/presets/)
+- Custom installer windows through [presets](https://zup.orielhaim.com/presets/)
 - Sandboxed extensions through [plugins](https://zup.orielhaim.com/plugins/)
 - Offline and thin installers
 - Updates, signing and release publishing
@@ -83,6 +83,37 @@ zup build
 ```
 
 That's the basic workflow. The manifest grows with the application instead of being replaced by installer-specific scripts.
+
+## Authoring extensions
+
+Zup has two kinds of extension, and both are written against one crate.
+
+A **preset** is the window an installer draws. An ordinary GPUI application, packaged per target:
+
+```bash
+zup preset init aurora
+cd aurora && zup preset dev
+```
+
+```toml
+[dependencies]
+zup-sdk = { version = "0.1.0", features = ["preset"] }
+```
+
+A **plugin** is a declarative extension to what an application installs. Compiled to WebAssembly, answering one question and returning resources Zup installs:
+
+```bash
+zup plugin init configure
+cd configure && zup plugin build
+```
+
+```toml
+[dependencies]
+zup-sdk = { version = "0.1.0", features = ["plugin"] }
+```
+
+Neither project adds anything else to its manifest - not `serde`, not
+`schemars`, not a GPUI version, not a Wasm toolchain.
 
 ## Documentation
 

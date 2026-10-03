@@ -11,7 +11,7 @@
 //! it and a rule that exists twice is a rule that will be applied twice
 //! differently.
 
-use crate::{PRESET_PROTOCOL_VERSION, Capabilities};
+use crate::{Capabilities, PRESET_PROTOCOL_VERSION};
 
 /// What a host offers a preset.
 #[derive(Debug, Clone, PartialEq, Eq)]

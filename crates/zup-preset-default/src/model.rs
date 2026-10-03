@@ -6,6 +6,10 @@
 //! wrong thing for a state is a bug here, and only this half is visible without
 //! a display.
 
+use zup_preset_sdk::host::{
+    ChangeGroup, ChangeKind, DiagnosticKind, InstallOptions, InstallationHealth, OperationPhase,
+    RequirementStatus, ResourceCategory, UpdateState,
+};
 use zup_preset_sdk::prelude::*;
 
 /// The one screen a snapshot belongs to.

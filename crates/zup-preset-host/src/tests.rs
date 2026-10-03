@@ -6,11 +6,11 @@
 
 use zup_core::{ComponentId as EngineComponentId, InstallScope, Installer, SelectedScope};
 use zup_exec::{InstallLedger, LifecycleAction};
-use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 use zup_preset_protocol::{
-    ComponentId, DiagnosticKind, InstallationHealth, OperationPhase, Action, Capabilities,
-    InstallerState, Surface, UpdateState,
+    Action, Capabilities, ComponentId, DiagnosticKind, InstallationHealth, InstallerState,
+    OperationPhase, Surface, UpdateState,
 };
+use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 
 use crate::{ActionRefusal, HostDecision, HostState, Selection, surface};
 
@@ -217,11 +217,11 @@ fn a_cancelled_operation_returns_to_its_surface() {
         total: 100,
         action: "Installing files".into(),
     });
-    assert!(matches!(
-        host.accept(Action::Cancel),
-        HostDecision::Cancel
-    ));
-    assert_eq!(host.snapshot().state, InstallerState::WaitingForSafeCancellation);
+    assert!(matches!(host.accept(Action::Cancel), HostDecision::Cancel));
+    assert_eq!(
+        host.snapshot().state,
+        InstallerState::WaitingForSafeCancellation
+    );
 
     // Progress continues to arrive while the engine walks to a safe point, and
     // must not pretend the cancellation request was withdrawn.
@@ -230,7 +230,10 @@ fn a_cancelled_operation_returns_to_its_surface() {
         total: 100,
         action: "Installing files".into(),
     });
-    assert_eq!(host.snapshot().state, InstallerState::WaitingForSafeCancellation);
+    assert_eq!(
+        host.snapshot().state,
+        InstallerState::WaitingForSafeCancellation
+    );
 
     host.finish_with(&InstallOutcome::Cancelled);
     assert_eq!(host.snapshot().state, InstallerState::Options);
@@ -273,7 +276,10 @@ fn a_blocked_machine_reports_the_applications_holding_it() {
     host.finish_with(&InstallOutcome::Failed(
         "blocked by running applications".into(),
     ));
-    assert!(matches!(host.snapshot().state, InstallerState::Blocked { .. }));
+    assert!(matches!(
+        host.snapshot().state,
+        InstallerState::Blocked { .. }
+    ));
     assert!(!host.snapshot().state.is_active());
 
     assert!(matches!(

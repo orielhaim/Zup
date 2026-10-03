@@ -2,7 +2,7 @@
 
 A preset is the installer UI.
 
-Zup owns installation state and lifecycle behavior. A preset decides how that state is presented and which valid actions the user can request. It is a native Rust program built with GPUI and `zup-ui-sdk`, then packaged as `.zupui` for one or more target triples.
+Zup owns installation state and lifecycle behavior. A preset decides how that state is presented and which valid actions the user can request. It is a native Rust program built with GPUI and `zup-sdk`, then packaged as `.zupui` for one or more target triples.
 
 The default preset ships with Zup. Application authors can select another preset without changing installation logic.
 
@@ -19,7 +19,7 @@ hero = "Install Acme"
 accent = "#695cff"
 ```
 
-**Preset authors** write Rust against `zup-ui-sdk`, develop against a simulated installer, and package native binaries into `.zupui`.
+**Preset authors** write Rust against `zup-sdk`, develop against a simulated installer, and package native binaries into `.zupui`.
 
 ## What a preset owns
 

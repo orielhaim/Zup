@@ -210,8 +210,13 @@ fn a_generated_project_teaches_the_public_api_and_nothing_else() {
     let source = std::fs::read_to_string(root.join("src/main.rs")).expect("the source");
 
     assert!(
-        source.contains("zup_sdk::preset::run::<Preset>()"),
+        source.contains("zup_sdk::preset::run::<Aurora>()"),
         "one call starts it, through the crate a preset author depends on"
+    );
+    assert!(
+        !source.contains("impl Preset for Preset {"),
+        "and the struct is not called `Preset`, which would shadow the trait in \
+         the position that names it"
     );
     assert!(
         !source.contains("zup_preset_sdk::"),
@@ -226,8 +231,14 @@ fn a_generated_project_teaches_the_public_api_and_nothing_else() {
         !source.contains("serde::Deserialize") && !source.contains("schemars::JsonSchema"),
         "so the project depends on neither crate directly"
     );
-    assert!(source.contains("AssetRef"), "and the type that marks a setting as a file");
-    assert!(source.contains("session.send(Action::Install)"), "and asks the host for things");
+    assert!(
+        source.contains("AssetRef"),
+        "and the type that marks a setting as a file"
+    );
+    assert!(
+        source.contains("session.send(Action::Install)"),
+        "and asks the host for things"
+    );
 
     // A component is the installer's own word for something a person chooses, so
     // the generated window uses it. What it must not contain is a *framework*
@@ -289,6 +300,92 @@ fn a_generated_project_says_which_of_its_files_are_its_own() {
     );
 }
 
+/// A generated preset compiles.
+///
+/// The generated source is the first thing a preset author ever compiles, and a
+/// template that does not build is the most expensive failure this crate can
+/// have: it is found by the first person to use it, on their machine, with
+/// nothing to point at. Checking that it compiles is therefore not optional, and
+/// not something a manifest resolution can stand in for.
+#[test]
+#[ignore = "compiles the GPUI stack, which takes longer than the rest of this suite"]
+fn a_generated_project_compiles() {
+    let directory = tempfile::tempdir().expect("a scratch directory");
+    let root = generated_with_local_sdk(directory.path());
+    let output = cargo()
+        .current_dir(&root)
+        .arg("check")
+        .arg("--all-targets")
+        .output()
+        .expect("cargo runs");
+    assert!(
+        output.status.success(),
+        "a generated preset builds:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("warning:"),
+        "and builds without warnings, because the first warning an author sees is \
+         one they will think they caused:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A generated plugin compiles to a component.
+///
+/// The other half of the claim, and the one a plugin author cannot check without
+/// learning the Component Model first: the crate builds for the guest target and
+/// componentises.
+#[test]
+#[ignore = "compiles the bindings generator for Wasm, which takes a while"]
+fn a_generated_plugin_compiles_and_componentises() {
+    let directory = tempfile::tempdir().expect("a scratch directory");
+    zup::plugin::init(&zup::plugin::PluginInitCommand {
+        name: "configure".to_owned(),
+        directory: Some(directory.path().to_path_buf()),
+    })
+    .expect("the project is generated");
+    let root = directory.path().join("configure");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "{}\n{}\n",
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest"),
+            patch(&[
+                ("zup-sdk", "zup-sdk"),
+                ("zup-plugin-sdk", "zup-plugin-sdk"),
+                ("zup-plugin-abi", "zup-plugin-abi"),
+            ])
+        ),
+    )
+    .expect("the patch is appended");
+
+    let output = cargo()
+        .current_dir(&root)
+        .arg("build")
+        .arg("--release")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown")
+        .output()
+        .expect("cargo runs");
+    assert!(
+        output.status.success(),
+        "a generated plugin builds for Wasm:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let component = root.join("target").join("wasm32-unknown-unknown");
+    let component = component.join("release").join("configure.wasm");
+    let bytes = std::fs::read(&component).expect("cargo produced a module");
+    let componentised = zup_plugin_build::componentize(&bytes)
+        .expect("the module componentises against the contract");
+    assert_eq!(
+        &componentised[..4],
+        &[0x00, 0x61, 0x73, 0x6d],
+        "and what comes out is a component rather than a core module"
+    );
+}
+
 /// `zup plugin init` produces a project a third party can build too.
 ///
 /// The two generators differ in what they write and nothing else: both produce a
@@ -345,7 +442,8 @@ fn a_generated_plugin_resolves_against_the_published_sdk() {
         .map(|dependency| dependency["name"].as_str().expect("a name"))
         .collect();
     assert_eq!(
-        declared, ["zup-sdk"],
+        declared,
+        ["zup-sdk"],
         "a plugin author declares the SDK and nothing else - not wit-bindgen, and \
          not a vendored copy of the contract"
     );
@@ -355,9 +453,11 @@ fn a_generated_plugin_resolves_against_the_published_sdk() {
     let targets = package["targets"].as_array().expect("targets");
     let library = targets
         .iter()
-        .find(|target| target["kind"].as_array().is_some_and(|kinds| {
-            kinds.iter().any(|kind| kind == "cdylib")
-        }))
+        .find(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "cdylib"))
+        })
         .expect("the generated plugin builds a cdylib");
     assert_eq!(library["name"], "configure");
 

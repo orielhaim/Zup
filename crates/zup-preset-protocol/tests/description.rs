@@ -8,8 +8,8 @@
 //! document rather than by describing a good one.
 
 use zup_preset_protocol::{
-    DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES, PresetDescription, PRESET_PROTOCOL_VERSION,
-    Capabilities, Capability,
+    Capabilities, Capability, DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES,
+    PRESET_PROTOCOL_VERSION, PresetDescription,
 };
 
 fn schema() -> serde_json::Value {

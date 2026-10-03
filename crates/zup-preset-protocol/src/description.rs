@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PRESET_PROTOCOL_VERSION, Capabilities};
+use crate::{Capabilities, PRESET_PROTOCOL_VERSION};
 
 /// The flag a preset executable recognizes to print its description.
 pub const DESCRIBE_FLAG: &str = "--zup-describe";

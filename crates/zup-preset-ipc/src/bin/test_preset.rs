@@ -7,7 +7,7 @@
 
 use zup_preset_ipc::Bootstrap;
 use zup_preset_protocol::{
-    HostHello, PRESET_PROTOCOL_VERSION, Action, Capabilities, Capability, Envelope, Message,
+    Action, Capabilities, Capability, Envelope, HostHello, Message, PRESET_PROTOCOL_VERSION,
     SessionId,
 };
 

@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use zup_core::{Sha256Digest, UiPreset};
-use zup_runtime::{InstallOutcome, RuntimeEvent};
 use zup_preset_protocol::{Action, Configuration, Snapshot, UpdateState};
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 use crate::machine::{Machine, Scenario};
 use crate::state::StateDirectory;

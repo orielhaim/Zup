@@ -270,7 +270,38 @@ plugin exceeded a sandbox resource limit
 A plugin gets 250 ms of wall clock, 32 MiB of memory, and no host calls at all -
 no filesystem, no network, no clock, no randomness. Anything it needs must come
 from the eight fields of its context, or be returned as a generated file's
-contents. See [plugins](/advanced/plugins#what-it-cannot-do).
+contents. See [plugins](/plugins/).
+
+## A plugin will not build
+
+```text
+`acme-integrations` holds no Cargo package; a plugin is a project of its own
+the package `configure` builds no cdylib; a plugin is compiled to a
+  WebAssembly component and its manifest has to say `crate-type = ["cdylib"]`
+```
+
+`zup plugin build` runs from inside a plugin project. Check that the current
+directory holds the `Cargo.toml` with `zup-sdk` and `crate-type = ["cdylib"]`,
+or pass `--project <dir>`.
+
+A build that reaches Cargo and fails there is a Rust compile error - the command
+reports Cargo's own stderr verbatim.
+
+## A plugin's component is refused
+
+```text
+plugin `acme-integrations` is not a Zup plugin
+plugin `acme-integrations` does not implement the plugin world
+```
+
+The file is not a component built against the current ABI. Rebuild it:
+
+```bash
+zup plugin build
+```
+
+`zup check` validates the component as part of project validation, so this is a
+diagnostic rather than a failure at the end of a build.
 
 ## Diagnosing a failure in CI
 

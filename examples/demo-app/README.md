@@ -172,13 +172,16 @@ To see a real UI asset, point this project at a preset that takes one. In a
 preset's own settings type:
 
 ```rust
-#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[zup_sdk::preset::settings]
 struct Settings {
     hero: Option<String>,
-    #[schemars(extend("x-zup-asset" = true))]
-    logo: Option<zup_ui_sdk::AssetRef>,
+    logo: Option<AssetRef>,
 }
 ```
+
+`AssetRef` is what marks the field as a file, so the build knows to resolve it.
+`#[zup_sdk::preset::settings]` is the whole derive story - the preset depends on
+`zup-sdk` and neither `serde` nor `schemars`.
 
 `zup preset pack` that preset, then set in `zup.toml`:
 

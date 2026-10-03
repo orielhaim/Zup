@@ -28,6 +28,17 @@ Common project selection flags include `--manifest` and repeatable `--target`. C
 | `zup preset pack` | package target binaries into `.zupui` |
 | `zup preset inspect <file>` | inspect a preset package |
 
+## Plugin authoring
+
+| Command | Purpose |
+| --- | --- |
+| `zup plugin init <name>` | create a plugin project |
+| `zup plugin build` | compile for wasm and componentise into the plugin Zup loads |
+
+Both generate a project whose only dependency is `zup-sdk`. `zup plugin build`
+runs Cargo for `wasm32-unknown-unknown` and componentises the result; the author
+installs no Wasm tooling and vendors no WIT.
+
 ## Release
 
 | Command | Purpose |
@@ -51,6 +62,7 @@ Use command help as the authoritative flag reference for the installed Zup versi
 zup --help
 zup build --help
 zup preset pack --help
+zup plugin build --help
 zup publish github --help
 ```
 

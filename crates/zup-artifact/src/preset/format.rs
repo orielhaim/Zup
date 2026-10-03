@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_preset_protocol::{PRESET_PROTOCOL_VERSION, Capabilities};
+use zup_preset_protocol::{Capabilities, PRESET_PROTOCOL_VERSION};
 
 use crate::error::ArtifactError;
 

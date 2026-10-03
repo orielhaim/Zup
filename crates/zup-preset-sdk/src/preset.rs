@@ -171,7 +171,7 @@ pub trait Preset: 'static {
     /// Draw the installer.
     ///
     /// Called once the handshake is done and the first snapshot has arrived,
-    /// so `context.session().state()` already has the state to draw.
+    /// so `context.session().handshake()` already has the state to draw.
     fn launch(context: PresetContext<Self::Settings>, cx: &mut App);
 }
 
@@ -243,9 +243,12 @@ pub fn run<P: Preset>() -> Result<(), PresetError> {
 /// that could not be packaged says so from the one command its author ran.
 pub fn describe<P: Preset>() -> Result<String, Describe> {
     let schema = schemars::schema_for!(P::Settings);
-    let description =
-        zup_preset_protocol::PresetDescription::new(P::NAME, P::VERSION, serde_json::to_value(schema)?)
-            .with_capabilities(P::required_capabilities());
+    let description = zup_preset_protocol::PresetDescription::new(
+        P::NAME,
+        P::VERSION,
+        serde_json::to_value(schema)?,
+    )
+    .with_capabilities(P::required_capabilities());
     description.validate()?;
     Ok(serde_json::to_string_pretty(&description)?)
 }

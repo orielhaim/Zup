@@ -20,7 +20,7 @@ use zup_core::{
 };
 use zup_platform::PortableSourceFilePolicy;
 use zup_preset_compose::{PresetProblem, asset_settings, select, validate_settings};
-use zup_preset_protocol::{PresetDescription, Capabilities, Capability};
+use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
@@ -147,7 +147,10 @@ fn a_user_package_is_selected_and_its_settings_accepted() {
 
     assert_eq!(selected.name, "aurora");
     assert_eq!(selected.version.to_string(), "1.4.2");
-    assert_eq!(selected.protocol, zup_preset_protocol::PRESET_PROTOCOL_VERSION);
+    assert_eq!(
+        selected.protocol,
+        zup_preset_protocol::PRESET_PROTOCOL_VERSION
+    );
     assert_eq!(
         selected.executable,
         format!("native preset for {HOST}").repeat(32).into_bytes(),

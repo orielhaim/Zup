@@ -13,7 +13,7 @@ use zup_artifact::preset::{
     decode_metadata, encode_metadata,
 };
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_preset_protocol::{PresetDescription, PRESET_PROTOCOL_VERSION, Capabilities, Capability};
+use zup_preset_protocol::{Capabilities, Capability, PRESET_PROTOCOL_VERSION, PresetDescription};
 
 fn target(name: &str) -> TargetTriple {
     TargetTriple::parse(name).expect("a valid target triple")
@@ -385,7 +385,10 @@ fn compatibility_is_stated_rather_than_negotiated() {
     let package = view.package();
     assert!(package.is_compatible_with(PRESET_PROTOCOL_VERSION));
     assert!(!package.is_compatible_with(PRESET_PROTOCOL_VERSION + 1));
-    assert_eq!(PresetPackage::current_wire_protocol(), PRESET_PROTOCOL_VERSION);
+    assert_eq!(
+        PresetPackage::current_wire_protocol(),
+        PRESET_PROTOCOL_VERSION
+    );
 }
 
 #[test]

@@ -12,20 +12,24 @@
 //! drive a whole session - including every refusal - without one.
 
 use crate::{
-    HostHello, ProductIdentity, PRESET_PROTOCOL_VERSION, Capabilities, Configuration, Envelope,
-    PresetHello, Message, PeerRole, SessionId, Snapshot, WireError, negotiate,
-    sender_is_allowed,
+    Capabilities, Configuration, Envelope, HostHello, Message, PRESET_PROTOCOL_VERSION, PeerRole,
+    PresetHello, ProductIdentity, SessionId, Snapshot, WireError, negotiate, sender_is_allowed,
 };
 
-/// Where a session has reached.
+/// Where a connection has reached.
+///
+/// Named for the handshake rather than for the session, because this is the
+/// exchange's own progress and not what a preset draws: the state a preset
+/// renders is a [`Snapshot`], and the session it draws it through is the SDK's.
+/// A preset never sees this.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionState {
+pub enum Handshake {
     /// Nothing has been sent.
     Opening,
     /// This side has said hello and is waiting for the other.
     Awaiting { role: PeerRole },
     /// Both sides have said hello. The preset has no state to draw yet.
-    Handshaken,
+    Completed,
     /// The preset has been told what the installer is doing.
     Live { snapshot: Box<Snapshot> },
     /// One side ended the session.
@@ -61,7 +65,7 @@ pub enum SessionProgress {
 pub struct Session {
     id: SessionId,
     role: PeerRole,
-    state: SessionState,
+    state: Handshake,
     inbound: crate::SequenceTracker,
     outbound: u64,
     /// What this side offers: a host's capabilities, a preset's requirements.
@@ -106,16 +110,11 @@ impl Session {
         )
     }
 
-    fn new(
-        id: SessionId,
-        role: PeerRole,
-        declared: Capabilities,
-        identity: Identity,
-    ) -> Self {
+    fn new(id: SessionId, role: PeerRole, declared: Capabilities, identity: Identity) -> Self {
         Self {
             id,
             role,
-            state: SessionState::Opening,
+            state: Handshake::Opening,
             inbound: crate::SequenceTracker::new(),
             outbound: 0,
             declared,
@@ -132,7 +131,7 @@ impl Session {
         self.role
     }
 
-    pub fn state(&self) -> &SessionState {
+    pub fn handshake(&self) -> &Handshake {
         &self.state
     }
 
@@ -143,7 +142,7 @@ impl Session {
 
     /// Whether either side has ended the session.
     pub fn is_closed(&self) -> bool {
-        matches!(self.state, SessionState::Closed)
+        matches!(self.state, Handshake::Closed)
     }
 
     /// The host's answer to a preset's hello.
@@ -171,7 +170,7 @@ impl Session {
             }),
             Identity::Host(_) => Message::HostHello(self.host_hello()),
         };
-        self.state = SessionState::Awaiting { role: self.peer() };
+        self.state = Handshake::Awaiting { role: self.peer() };
         self.frame(message)
     }
 
@@ -185,7 +184,7 @@ impl Session {
 
     /// Take one frame from the peer and say what to do next.
     pub fn receive(&mut self, envelope: Envelope) -> Result<SessionProgress, WireError> {
-        if matches!(self.state, SessionState::Closed) {
+        if matches!(self.state, Handshake::Closed) {
             return Err(WireError::SessionClosed);
         }
         if envelope.version != PRESET_PROTOCOL_VERSION {
@@ -206,20 +205,18 @@ impl Session {
         self.inbound.accept(envelope.sequence)?;
         match envelope.message {
             Message::Closed => {
-                self.state = SessionState::Closed;
+                self.state = Handshake::Closed;
                 Ok(SessionProgress::Done)
             }
             Message::PresetHello(hello) => self.greet(hello),
             Message::HostHello(hello) => self.greet_host(hello),
             Message::Configuration(configuration) => {
-                configuration
-                    .validate()
-                    .map_err(WireError::Configuration)?;
+                configuration.validate().map_err(WireError::Configuration)?;
                 self.configuration = *configuration;
                 Ok(SessionProgress::Done)
             }
             Message::Snapshot(snapshot) => {
-                self.state = SessionState::Live { snapshot };
+                self.state = Handshake::Live { snapshot };
                 Ok(SessionProgress::Done)
             }
             Message::Action(action) => Ok(SessionProgress::Act(action)),
@@ -233,7 +230,7 @@ impl Session {
     /// new session with a new id, and this frame would already have been
     /// refused for carrying one.
     fn greet(&mut self, hello: PresetHello) -> Result<SessionProgress, WireError> {
-        if self.role != PeerRole::Host || !matches!(self.state, SessionState::Opening) {
+        if self.role != PeerRole::Host || !matches!(self.state, Handshake::Opening) {
             return Err(WireError::UnexpectedMessage {
                 expected: "an action",
                 found: "ui_hello",
@@ -244,14 +241,14 @@ impl Session {
             return Err(WireError::SessionMismatch);
         }
         negotiate(&self.declared, &hello.required_capabilities)?;
-        self.state = SessionState::Handshaken;
+        self.state = Handshake::Completed;
         let answer = self.frame(Message::HostHello(self.host_hello()))?;
         Ok(SessionProgress::Send(answer))
     }
 
     /// A preset receiving a host's answer.
     fn greet_host(&mut self, hello: HostHello) -> Result<SessionProgress, WireError> {
-        if self.role != PeerRole::Preset || !matches!(self.state, SessionState::Awaiting { .. }) {
+        if self.role != PeerRole::Preset || !matches!(self.state, Handshake::Awaiting { .. }) {
             return Err(WireError::UnexpectedMessage {
                 expected: "a configuration or snapshot",
                 found: "host_hello",
@@ -262,7 +259,7 @@ impl Session {
             return Err(WireError::SessionMismatch);
         }
         negotiate(&hello.capabilities, &self.declared)?;
-        self.state = SessionState::Handshaken;
+        self.state = Handshake::Completed;
         Ok(SessionProgress::Done)
     }
 
@@ -272,17 +269,13 @@ impl Session {
         configuration: Configuration,
         snapshot: Box<Snapshot>,
     ) -> Result<Vec<Envelope>, WireError> {
-        configuration
-            .validate()
-            .map_err(WireError::Configuration)?;
+        configuration.validate().map_err(WireError::Configuration)?;
         self.configuration = configuration;
-        self.state = SessionState::Live {
+        self.state = Handshake::Live {
             snapshot: snapshot.clone(),
         };
         Ok(vec![
-            self.frame(Message::Configuration(Box::new(
-                self.configuration.clone(),
-            )))?,
+            self.frame(Message::Configuration(Box::new(self.configuration.clone())))?,
             self.frame(Message::Snapshot(snapshot))?,
         ])
     }

@@ -8,7 +8,7 @@
 //! materializes both, and a preset that received an arbitrary path would be
 //! reading a file nobody authorized.
 
-use zup_preset_protocol::{ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS, Configuration};
+use zup_preset_protocol::{Configuration, ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS};
 
 /// Nothing configured is a valid configuration, not a missing one.
 #[test]

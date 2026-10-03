@@ -7,7 +7,7 @@ use zup_preset_sdk::gpui_kit::{
     AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StatefulInteractiveElement, Styled, Window, div, relative,
 };
-use zup_preset_sdk::prelude::DiagnosticKind;
+use zup_preset_sdk::host::DiagnosticKind;
 
 use crate::model::{self, Severity};
 use crate::theme::{size, space, text};

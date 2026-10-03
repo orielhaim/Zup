@@ -7,17 +7,13 @@
 
 use zup_plugin_abi as abi;
 
-use crate::planner::{
-    LauncherLocation, PathEntry, PluginError, ResourceItem, ServiceStart,
-};
+use crate::planner::{LauncherLocation, PathEntry, PluginError, ResourceItem, ServiceStart};
 
 // The resource records are the WIT's own, re-exported from `crate::planner`.
 // They are re-exported here too so a plugin can name them without a second
 // import, and so the constructors below are visibly methods on the same types
 // rather than on look-alikes.
-pub use crate::planner::{
-    FileAssociation, GeneratedFile, Launcher, Protocol, Service,
-};
+pub use crate::planner::{FileAssociation, GeneratedFile, Launcher, Protocol, Service};
 
 /// Why a plugin cannot produce a plan.
 ///
