@@ -24,7 +24,7 @@ use std::sync::mpsc::Sender;
 
 use zup_core::{Sha256Digest, UiPreset};
 use zup_runtime::{InstallOutcome, RuntimeEvent};
-use zup_ui_protocol::{UiAction, UiConfiguration, UiSnapshot, UpdateState};
+use zup_preset_protocol::{Action, Configuration, Snapshot, UpdateState};
 
 use crate::machine::{Machine, Scenario};
 use crate::state::StateDirectory;
@@ -48,15 +48,15 @@ pub enum StageError {
 pub struct Simulator {
     state: StateDirectory,
     machine: Machine,
-    configuration: UiConfiguration,
-    child: Option<zup_ui_host::PresetProcess>,
+    configuration: Configuration,
+    child: Option<zup_preset_host::PresetProcess>,
     generation: u64,
 }
 
 impl Simulator {
     /// A session with no child yet, which is the state before anything is shown.
     pub fn new(state: StateDirectory, scenario: Scenario) -> Self {
-        let configuration = UiConfiguration {
+        let configuration = Configuration {
             settings: serde_json::json!({}),
             assets: BTreeMap::new(),
         };
@@ -70,7 +70,7 @@ impl Simulator {
     }
 
     /// The state a preset would see right now.
-    pub fn snapshot(&self) -> &UiSnapshot {
+    pub fn snapshot(&self) -> &Snapshot {
         self.machine.snapshot()
     }
 
@@ -85,7 +85,7 @@ impl Simulator {
     }
 
     /// What the preset is told the application configured.
-    pub fn configuration(&self) -> &UiConfiguration {
+    pub fn configuration(&self) -> &Configuration {
         &self.configuration
     }
 
@@ -96,7 +96,7 @@ impl Simulator {
 
     /// Reopen the session on a different machine.
     ///
-    /// A surface change is not a `UiAction`: choosing between a fresh install
+    /// A surface change is not a `Action`: choosing between a fresh install
     /// and a maintenance session is a fact about the machine, and the protocol
     /// has no action for it because a preset cannot decide it. The state machine
     /// is rebuilt from the new scenario and everything the host still owns - the
@@ -140,7 +140,7 @@ impl Simulator {
     /// gets its own file and an earlier one is only removed once nothing is
     /// running from it.
     pub fn stage(&self, bytes: &[u8], preset: &UiPreset) -> Result<Candidate, StageError> {
-        zup_ui_host::process::check_presentable(preset, self.machine.capabilities())
+        zup_preset_host::process::check_presentable(preset, self.machine.capabilities())
             .map_err(StageError::Incompatible)?;
         let generation = self.generation + 1;
         write_durable(&self.state.run_executable(generation), bytes)
@@ -160,9 +160,9 @@ impl Simulator {
     pub fn adopt(
         &mut self,
         candidate: Candidate,
-        asked: Sender<UiAction>,
-    ) -> Result<(), zup_ui_host::SessionError> {
-        let mut process = zup_ui_host::launch(
+        asked: Sender<Action>,
+    ) -> Result<(), zup_preset_host::SessionError> {
+        let mut process = zup_preset_host::launch(
             &candidate.executable,
             self.machine.capabilities().clone(),
             self.machine.snapshot().product.clone(),
@@ -184,7 +184,7 @@ impl Simulator {
                     }
                 }
             })
-            .map_err(|error| zup_ui_host::SessionError::Handshake(error.to_string()))?;
+            .map_err(|error| zup_preset_host::SessionError::Handshake(error.to_string()))?;
 
         // Only now is the previous child finished with. Until this point the
         // working window was still up, and a failure above leaves it up. The tree
@@ -199,7 +199,7 @@ impl Simulator {
 
     /// Feed one action to the state machine, whether a preset or a control sent
     /// it.
-    pub fn act(&mut self, action: UiAction) -> zup_ui_host::HostDecision {
+    pub fn act(&mut self, action: Action) -> zup_preset_host::HostDecision {
         self.machine.act(action)
     }
 
@@ -228,7 +228,7 @@ impl Simulator {
     }
 
     /// Send the current state to the running child.
-    pub fn publish(&self) -> Result<(), zup_ui_host::SessionError> {
+    pub fn publish(&self) -> Result<(), zup_preset_host::SessionError> {
         let Some(child) = self.child.as_ref() else {
             return Ok(());
         };

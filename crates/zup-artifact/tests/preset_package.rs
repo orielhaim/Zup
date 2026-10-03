@@ -13,7 +13,7 @@ use zup_artifact::ui::{
     decode_metadata, encode_metadata,
 };
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_ui_protocol::{PresetDescription, UI_PROTOCOL_VERSION, UiCapabilities, UiCapability};
+use zup_preset_protocol::{PresetDescription, PRESET_PROTOCOL_VERSION, Capabilities, Capability};
 
 fn target(name: &str) -> TargetTriple {
     TargetTriple::parse(name).expect("a valid target triple")
@@ -21,7 +21,7 @@ fn target(name: &str) -> TargetTriple {
 
 fn description() -> PresetDescription {
     PresetDescription::new("aurora", "1.4.2", serde_json::json!({ "type": "object" }))
-        .with_capabilities(UiCapabilities::new([UiCapability::Components]))
+        .with_capabilities(Capabilities::new([Capability::Components]))
 }
 
 /// One package per supported target, which is the shape a real one has.
@@ -46,11 +46,11 @@ fn a_single_target_package_round_trips() {
     let view = PresetPackageView::open(bytes).expect("a package reads back");
     assert_eq!(view.name(), "aurora");
     assert_eq!(view.version().to_string(), "1.4.2");
-    assert_eq!(view.wire_protocol(), UI_PROTOCOL_VERSION);
+    assert_eq!(view.wire_protocol(), PRESET_PROTOCOL_VERSION);
     assert_eq!(view.targets(), ["x86_64-pc-windows-msvc"]);
     assert!(
         view.required_capabilities()
-            .contains(UiCapability::Components)
+            .contains(Capability::Components)
     );
     view.verify().expect("every binary verifies");
 }
@@ -383,15 +383,15 @@ fn a_version_this_package_cannot_state_is_refused() {
 fn compatibility_is_stated_rather_than_negotiated() {
     let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
     let package = view.package();
-    assert!(package.is_compatible_with(UI_PROTOCOL_VERSION));
-    assert!(!package.is_compatible_with(UI_PROTOCOL_VERSION + 1));
-    assert_eq!(PresetPackage::current_wire_protocol(), UI_PROTOCOL_VERSION);
+    assert!(package.is_compatible_with(PRESET_PROTOCOL_VERSION));
+    assert!(!package.is_compatible_with(PRESET_PROTOCOL_VERSION + 1));
+    assert_eq!(PresetPackage::current_wire_protocol(), PRESET_PROTOCOL_VERSION);
 }
 
 #[test]
 fn missing_capabilities_are_named() {
     let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
-    let provided = UiCapabilities::new([UiCapability::PlanPreview]);
+    let provided = Capabilities::new([Capability::PlanPreview]);
     let missing = view.package().missing_capabilities(&provided);
     assert_eq!(missing, vec!["components"]);
 }

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_ui_protocol::{PresetDescription, UiCapabilities};
+use zup_preset_protocol::{PresetDescription, Capabilities};
 
 use crate::error::ArtifactError;
 
@@ -230,7 +230,7 @@ impl PresetPackageView {
         &self.package.version
     }
 
-    pub fn required_capabilities(&self) -> &UiCapabilities {
+    pub fn required_capabilities(&self) -> &Capabilities {
         &self.package.required_capabilities
     }
 

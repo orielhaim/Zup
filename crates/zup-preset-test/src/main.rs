@@ -1,6 +1,6 @@
 //! A real preset, launched as a child process by the installer's end-to-end test.
 //!
-//! It depends on the public `zup-ui-sdk` and on nothing else, the way a
+//! It depends on the public `zup-preset-sdk` and on nothing else, the way a
 //! third-party preset project does. It does not open a window: the only thing
 //! between "the host launched a preset" and "a person sees a window" is GPUI's
 //! own startup, and a headless environment has no display to start one on.
@@ -15,8 +15,8 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use zup_ui_protocol::{UiAction, UiCapabilities, UiCapability, UiState};
-use zup_ui_sdk::{Bootstrap, Channel, Identity};
+use zup_preset_protocol::{Action, Capabilities, Capability, InstallerState};
+use zup_preset_sdk::{Bootstrap, Channel, Identity};
 
 /// What this preset accepts.
 ///
@@ -26,7 +26,7 @@ use zup_ui_sdk::{Bootstrap, Channel, Identity};
 #[allow(dead_code)]
 struct Settings {
     hero: Option<String>,
-    logo: Option<zup_ui_sdk::AssetRef>,
+    logo: Option<zup_preset_sdk::AssetRef>,
     /// Where this preset reports what it received.
     report: PathBuf,
 }
@@ -39,7 +39,7 @@ fn main() {
         Identity {
             name: "e2e".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            required_capabilities: UiCapabilities::default(),
+            required_capabilities: Capabilities::default(),
         },
     )
     .unwrap_or_else(|error| {
@@ -59,7 +59,7 @@ fn main() {
     let _ = writeln!(
         report,
         "maintenance={}",
-        opened.host.capabilities.contains(UiCapability::Maintenance)
+        opened.host.capabilities.contains(Capability::Maintenance)
     );
     let _ = writeln!(report, "protocol={}", opened.host.protocol_version);
     let _ = writeln!(
@@ -79,16 +79,16 @@ fn main() {
     // What a person does: choose what to install, then start it. Both are actions
     // the host validates against the state it owns, and the second is the one
     // that asks the machine to do something.
-    if let UiState::Options = opened.snapshot.state {
+    if let InstallerState::Options = opened.snapshot.state {
         if let Some(component) = surface.components().iter().find(|c| !c.required) {
-            opened.channel.requests().send(UiAction::SetComponent {
+            opened.channel.requests().send(Action::SetComponent {
                 component: component.id.clone(),
                 selected: !component.selected,
             });
         }
-        opened.channel.requests().send(UiAction::Install);
+        opened.channel.requests().send(Action::Install);
     }
 
     // And then the window closes, which is how a preset ends a session.
-    opened.channel.requests().send(UiAction::Close);
+    opened.channel.requests().send(Action::Close);
 }

@@ -12,7 +12,7 @@ name = "zup-preset-test"
 path = "src/main.rs"
 
 [dependencies]
-zup-ui-sdk = { path = "../zup-ui-sdk", version = "0.1.0" }
-zup-ui-protocol = { path = "../zup-ui-protocol", version = "0.1.0" }
+zup-preset-sdk = { path = "../zup-preset-sdk", version = "0.1.0" }
+zup-preset-protocol = { path = "../zup-preset-protocol", version = "0.1.0" }
 serde = { workspace = true }
 serde_json.workspace = true

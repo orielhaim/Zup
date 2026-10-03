@@ -723,7 +723,7 @@ dependencies = [
  "clang-sys",
  "itertools 0.13.0",
  "log",
- "prettyplease",
+ "prettyplease 0.2.37",
  "proc-macro2",
  "quote",
  "regex",
@@ -5074,6 +5074,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "macro-string"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e7b3a5bbb2f63aaa223a671ea1bd0e7bc16bd30ce387324cf63995deaddbbd2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6602,6 +6613,16 @@ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -9574,7 +9595,7 @@ version = "1.0.4+wasi-0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]
@@ -9645,6 +9666,16 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
+version = "0.259.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d0246511d901aacf25d2dc9111f0054947de5e093fe662099e709ff7530dc3"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.259.0",
+]
+
+[[package]]
+name = "wasm-encoder"
 version = "0.260.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1e9692da9ef627c5ee12b45378f68ac2689ce306f88078f5cf849b7c3444ed8"
@@ -9663,6 +9694,18 @@ dependencies = [
  "indexmap",
  "wasm-encoder 0.258.0",
  "wasmparser 0.258.0",
+]
+
+[[package]]
+name = "wasm-metadata"
+version = "0.259.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7bf119eb01f4a246864c10bd87c8f26c566350abb25aa4d5273c415bbab338"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "wasm-encoder 0.259.0",
+ "wasmparser 0.259.0",
 ]
 
 [[package]]
@@ -9726,6 +9769,18 @@ dependencies = [
  "indexmap",
  "semver",
  "serde",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.259.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f7c12eac7bb587801590f6a67ff0bc84d0748513864b71108e4b311cc3df694"
+dependencies = [
+ "bitflags 2.13.2",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "semver",
 ]
 
 [[package]]
@@ -11084,6 +11139,59 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "wit-bindgen"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53cb4b5556c3a791e86838ea287782bdafa704d55b0e68b5b81a3a16b9ea5f4b"
+dependencies = [
+ "bitflags 2.13.2",
+ "wit-bindgen-rust-macro",
+]
+
+[[package]]
+name = "wit-bindgen-core"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72ad22a37ecbc0e1fdca34d2b670ba41368cb0920735643e00fdf39a16ee5431"
+dependencies = [
+ "anyhow",
+ "heck 0.5.0",
+ "wit-parser 0.259.0",
+]
+
+[[package]]
+name = "wit-bindgen-rust"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84ba5213d4332c260a0d4e69e34b0f7e4b85ddae10b6ebfbac00d9c185ba628a"
+dependencies = [
+ "anyhow",
+ "heck 0.5.0",
+ "indexmap",
+ "prettyplease 0.3.0",
+ "syn 3.0.6",
+ "wasm-metadata 0.259.0",
+ "wit-bindgen-core",
+ "wit-component 0.259.0",
+]
+
+[[package]]
+name = "wit-bindgen-rust-macro"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f19d63da8e478a370ef8192d90ccb517965b7747d6b46cd2d831dd0ef4d2541"
+dependencies = [
+ "anyhow",
+ "macro-string",
+ "prettyplease 0.3.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+ "wit-bindgen-core",
+ "wit-bindgen-rust",
+]
+
+[[package]]
 name = "wit-component"
 version = "0.258.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11100,6 +11208,25 @@ dependencies = [
  "wasm-metadata 0.258.0",
  "wasmparser 0.258.0",
  "wit-parser 0.258.0",
+]
+
+[[package]]
+name = "wit-component"
+version = "0.259.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092f783dee3253265fcde131475055f8c275ac0176a9c0396db1dc7b5544bfb4"
+dependencies = [
+ "anyhow",
+ "bitflags 2.13.2",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.259.0",
+ "wasm-metadata 0.259.0",
+ "wasmparser 0.259.0",
+ "wit-parser 0.259.0",
 ]
 
 [[package]]
@@ -11139,6 +11266,25 @@ dependencies = [
  "serde_json",
  "unicode-ident",
  "wasmparser 0.258.0",
+]
+
+[[package]]
+name = "wit-parser"
+version = "0.259.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6390f4f02493ce678d509c859cf1698e38929fb75c8012a6ee2f7d6b6cb66cd7"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap",
+ "log",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-ident",
+ "wasmparser 0.259.0",
 ]
 
 [[package]]
@@ -11724,17 +11870,18 @@ dependencies = [
  "zup-pe",
  "zup-plan",
  "zup-platform",
+ "zup-plugin-abi",
  "zup-plugin-build",
  "zup-plugin-contract",
  "zup-presentation",
+ "zup-preset-compose",
+ "zup-preset-dev",
+ "zup-preset-protocol",
  "zup-preview",
  "zup-publish",
  "zup-publish-github",
  "zup-signing",
  "zup-toolchain",
- "zup-ui-compose",
- "zup-ui-dev",
- "zup-ui-protocol",
  "zup-windows",
  "zup-xtask",
 ]
@@ -11795,8 +11942,8 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-plugin-contract",
+ "zup-preset-protocol",
  "zup-signing",
- "zup-ui-protocol",
 ]
 
 [[package]]
@@ -11985,14 +12132,15 @@ dependencies = [
  "zup-exec",
  "zup-plan",
  "zup-platform",
+ "zup-plugin-abi",
  "zup-plugin-contract",
  "zup-plugin-runtime",
  "zup-presentation",
+ "zup-preset-host",
+ "zup-preset-protocol",
  "zup-runtime",
  "zup-toolchain",
  "zup-transaction",
- "zup-ui-host",
- "zup-ui-protocol",
  "zup-update",
  "zup-windows",
 ]
@@ -12059,6 +12207,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-plugin-abi"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "zup-plugin-build"
 version = "0.0.1"
 dependencies = [
@@ -12072,6 +12227,7 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-manifest",
+ "zup-plugin-abi",
  "zup-plugin-contract",
 ]
 
@@ -12086,6 +12242,7 @@ dependencies = [
  "wat",
  "wit-component 0.260.0",
  "wit-parser 0.260.0",
+ "zup-plugin-abi",
 ]
 
 [[package]]
@@ -12106,7 +12263,16 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-plan",
+ "zup-plugin-abi",
  "zup-plugin-contract",
+]
+
+[[package]]
+name = "zup-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.62.0",
+ "zup-plugin-abi",
 ]
 
 [[package]]
@@ -12124,13 +12290,111 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-preset-compose"
+version = "0.0.1"
+dependencies = [
+ "jsonschema",
+ "rstest",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zup-artifact",
+ "zup-build",
+ "zup-core",
+ "zup-platform",
+ "zup-preset-protocol",
+]
+
+[[package]]
 name = "zup-preset-default"
 version = "0.0.1"
 dependencies = [
  "gpui-kit",
  "schemars",
  "serde",
- "zup-ui-sdk",
+ "zup-preset-sdk",
+]
+
+[[package]]
+name = "zup-preset-dev"
+version = "0.0.1"
+dependencies = [
+ "cargo_metadata",
+ "jsonschema",
+ "process-wrap",
+ "rstest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.1.6+spec-1.1.0",
+ "zup-core",
+ "zup-preset-protocol",
+ "zup-preview",
+]
+
+[[package]]
+name = "zup-preset-host"
+version = "0.0.1"
+dependencies = [
+ "process-wrap",
+ "rstest",
+ "semver",
+ "thiserror 2.0.21",
+ "zup-artifact",
+ "zup-core",
+ "zup-exec",
+ "zup-presentation",
+ "zup-preset-ipc",
+ "zup-preset-protocol",
+ "zup-runtime",
+]
+
+[[package]]
+name = "zup-preset-ipc"
+version = "0.1.0"
+dependencies = [
+ "ipc-channel",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
+ "zup-preset-protocol",
+]
+
+[[package]]
+name = "zup-preset-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "zup-preset-sdk"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "gpui-kit",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zup-preset-ipc",
+ "zup-preset-protocol",
+ "zup-preset-sdk-macros",
+]
+
+[[package]]
+name = "zup-preset-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -12139,8 +12403,8 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
- "zup-ui-protocol",
- "zup-ui-sdk",
+ "zup-preset-protocol",
+ "zup-preset-sdk",
 ]
 
 [[package]]
@@ -12157,9 +12421,9 @@ dependencies = [
  "tokio",
  "zup-core",
  "zup-presentation",
+ "zup-preset-host",
+ "zup-preset-protocol",
  "zup-runtime",
- "zup-ui-host",
- "zup-ui-protocol",
 ]
 
 [[package]]
@@ -12229,6 +12493,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-sdk"
+version = "0.1.0"
+dependencies = [
+ "zup-plugin-sdk",
+ "zup-preset-sdk",
+]
+
+[[package]]
 name = "zup-signing"
 version = "0.0.1"
 dependencies = [
@@ -12272,95 +12544,6 @@ dependencies = [
  "uuid",
  "zup-core",
  "zup-platform",
-]
-
-[[package]]
-name = "zup-ui-compose"
-version = "0.0.1"
-dependencies = [
- "jsonschema",
- "rstest",
- "semver",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "zup-artifact",
- "zup-build",
- "zup-core",
- "zup-platform",
- "zup-ui-protocol",
-]
-
-[[package]]
-name = "zup-ui-dev"
-version = "0.0.1"
-dependencies = [
- "cargo_metadata",
- "jsonschema",
- "process-wrap",
- "rstest",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "toml 1.1.6+spec-1.1.0",
- "zup-core",
- "zup-preview",
- "zup-ui-protocol",
-]
-
-[[package]]
-name = "zup-ui-host"
-version = "0.0.1"
-dependencies = [
- "process-wrap",
- "rstest",
- "semver",
- "thiserror 2.0.21",
- "zup-artifact",
- "zup-core",
- "zup-exec",
- "zup-presentation",
- "zup-runtime",
- "zup-ui-ipc",
- "zup-ui-protocol",
-]
-
-[[package]]
-name = "zup-ui-ipc"
-version = "0.1.0"
-dependencies = [
- "ipc-channel",
- "serde",
- "thiserror 2.0.21",
- "uuid",
- "zup-ui-protocol",
-]
-
-[[package]]
-name = "zup-ui-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "zup-ui-sdk"
-version = "0.1.0"
-dependencies = [
- "futures-channel",
- "futures-util",
- "gpui-kit",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "zup-ui-ipc",
- "zup-ui-protocol",
 ]
 
 [[package]]

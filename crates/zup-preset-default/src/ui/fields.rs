@@ -1,19 +1,19 @@
 //! The choices an installation offers: where, for whom, and with what.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::button::{Button, ButtonVariants};
-use zup_ui_sdk::gpui_kit::component::checkbox::Checkbox;
-use zup_ui_sdk::gpui_kit::component::collapsible::Collapsible;
-use zup_ui_sdk::gpui_kit::component::radio::{Radio, RadioGroup};
-use zup_ui_sdk::gpui_kit::component::tag::Tag;
-use zup_ui_sdk::gpui_kit::component::tooltip::Tooltip;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariants};
+use zup_preset_sdk::gpui_kit::component::checkbox::Checkbox;
+use zup_preset_sdk::gpui_kit::component::collapsible::Collapsible;
+use zup_preset_sdk::gpui_kit::component::radio::{Radio, RadioGroup};
+use zup_preset_sdk::gpui_kit::component::tag::Tag;
+use zup_preset_sdk::gpui_kit::component::tooltip::Tooltip;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
-use zup_ui_sdk::prelude::InstallScope;
+use zup_preset_sdk::prelude::InstallScope;
 
 use crate::model::{ComponentKind, ComponentRow, Location, Pending, ScopeChoice as Choice};
 use crate::theme::{size, space, text};
@@ -136,8 +136,8 @@ impl RenderOnce for PathChooser {
     }
 }
 
-fn rems_of(value: f32) -> zup_ui_sdk::gpui_kit::Rems {
-    zup_ui_sdk::gpui_kit::Rems(value)
+fn rems_of(value: f32) -> zup_preset_sdk::gpui_kit::Rems {
+    zup_preset_sdk::gpui_kit::Rems(value)
 }
 
 /// Who the installation is for.

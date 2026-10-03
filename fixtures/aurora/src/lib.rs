@@ -1,10 +1,16 @@
 //! The preset's own type, in a library so a test can name it without building
 //! the binary.
 
-use zup_ui_sdk::prelude::{gpui, *};
+use zup_sdk::preset::prelude::{gpui, *};
 
 /// What an application may configure about how this preset looks.
-#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+///
+/// `#[settings]` rather than naming the derives, so this project depends on the
+/// SDK alone. The schema `zup preset pack` puts in the package is generated
+/// from these same fields, by the same `schemars` this preset deserializes
+/// with.
+#[zup_sdk::preset::settings]
+#[derive(Debug, Clone)]
 pub struct Settings {
     /// A line above the product name.
     pub hero: Option<String>,
@@ -23,8 +29,8 @@ impl Preset for Aurora {
 
     type Settings = Settings;
 
-    fn required_capabilities() -> UiCapabilities {
-        UiCapabilities::new([UiCapability::Components, UiCapability::PlanPreview])
+    fn required_capabilities() -> Capabilities {
+        Capabilities::new([Capability::Components, Capability::PlanPreview])
     }
 
     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
@@ -62,9 +68,9 @@ impl Preset for Aurora {
 
 /// A window that draws what the host published and asks for what it wants.
 pub struct View {
-    session: zup_ui_sdk::UiSession,
-    state: gpui::Entity<zup_ui_sdk::SessionState>,
-    settings: zup_ui_sdk::PresetSettings<Settings>,
+    session: zup_sdk::preset::Session,
+    state: gpui::Entity<zup_sdk::preset::SessionState>,
+    settings: zup_sdk::preset::PresetSettings<Settings>,
     location: gpui::Entity<gpui::component::input::InputState>,
     _settings: gpui::Subscription,
 }
@@ -118,7 +124,7 @@ impl gpui::Render for View {
         )));
 
         for component in snapshot.surface.components() {
-            let action = UiAction::SetComponent {
+            let action = Action::SetComponent {
                 component: component.id.clone(),
                 selected: !component.selected,
             };
@@ -139,7 +145,7 @@ impl gpui::Render for View {
         body = body.child(
             Button::new("install")
                 .label("Install")
-                .on_click(move |_, _, _| session.send(UiAction::Install)),
+                .on_click(move |_, _, _| session.send(Action::Install)),
         );
         let _ = &self.location;
         body

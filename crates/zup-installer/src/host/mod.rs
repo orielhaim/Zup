@@ -2,7 +2,7 @@
 //!
 //! The host owns every fact about the installation: what is installed, what an
 //! action means, whether the machine will allow it, and what the next
-//! `UiSnapshot` says. The preset owns none of that. It is a GPUI application
+//! `Snapshot` says. The preset owns none of that. It is a GPUI application
 //! that draws what it is told and asks for what it wants, over a pipe, in
 //! another process, and the only thing that can change the state is a validated
 //! action arriving here.
@@ -15,7 +15,7 @@
 //!
 //! What is left here is the part that is about *this* machine: the embedded
 //! package, the installed content store, the engine, and the elevation it needs.
-//! The state machine and the session are in `zup-ui-host`, so that `zup ui dev`
+//! The state machine and the session are in `zup-preset-host`, so that `zup ui dev`
 //! runs the same ones.
 
 pub mod preset;
@@ -29,9 +29,9 @@ pub use session::{
 
 // The host half of the UI protocol, re-exported so a caller that already names
 // this module does not have to learn a second one. `zup ui dev` names
-// `zup_ui_host` directly; this is a convenience for the installer's own callers,
+// `zup_preset_host` directly; this is a convenience for the installer's own callers,
 // not a second path.
-pub use zup_ui_host::{
+pub use zup_preset_host::{
     ActionRefusal, HostDecision, HostState, Selection, capabilities, component, components,
     diagnostic, engine_scope, install_options, maintenance_state, plan, product, scope, scopes,
 };

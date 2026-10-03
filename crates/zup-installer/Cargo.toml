@@ -74,8 +74,8 @@ zup-plugin-runtime.workspace = true
 zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
-zup-ui-host.workspace = true
-zup-ui-protocol.workspace = true
+zup-preset-host.workspace = true
+zup-preset-protocol.workspace = true
 zup-update.workspace = true
 zup-windows.workspace = true
 cliclack = { workspace = true, optional = true }
@@ -89,6 +89,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+zup-plugin-abi = { workspace = true }
 # The runtime's tests compose their own installer from a literal plan and a real
 # staged runtime template. They do not depend on the build plane: a dev-dependency
 # on the compiler that produces this package's artifacts would put the boundary

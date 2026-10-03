@@ -1,14 +1,14 @@
 [workspace]
-resolver = "3"
 
 [package]
 name = "configure"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
+description = "A Zup installation plugin"
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "=0.62.0"
+zup-sdk = { version = "0.1.0", path = "../../../crates/zup-sdk", features = ["plugin"] }

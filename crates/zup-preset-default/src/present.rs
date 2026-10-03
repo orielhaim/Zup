@@ -4,7 +4,7 @@
 //! group, and nowhere else. Prominence says how clearly the decision is
 //! exposed. Whether the defaults are enough to install is a separate question.
 
-use zup_ui_sdk::prelude::*;
+use zup_preset_sdk::prelude::*;
 
 use crate::model::{self, ComponentRow};
 
@@ -81,7 +81,7 @@ pub struct InstallSurface {
 }
 
 impl InstallSurface {
-    pub fn of(snapshot: &UiSnapshot) -> Self {
+    pub fn of(snapshot: &Snapshot) -> Self {
         let resolved = resolve(snapshot);
         Self {
             primary: resolved
@@ -131,7 +131,7 @@ impl InstallSurface {
 }
 
 /// Every group that should be shown, each with all of its members.
-pub fn resolve(snapshot: &UiSnapshot) -> Vec<ResolvedGroup> {
+pub fn resolve(snapshot: &Snapshot) -> Vec<ResolvedGroup> {
     let rows = model::component_rows(&snapshot.surface);
     let by_id: std::collections::BTreeMap<&ComponentId, &ComponentRow> =
         rows.iter().map(|row| (&row.id, row)).collect();
@@ -248,15 +248,15 @@ mod tests {
         }
     }
 
-    fn surface(components: Vec<ComponentOption>, groups: Vec<ComponentGroupOption>) -> UiSnapshot {
-        UiSnapshot {
+    fn surface(components: Vec<ComponentOption>, groups: Vec<ComponentGroupOption>) -> Snapshot {
+        Snapshot {
             product: ProductIdentity {
                 name: "Demo".into(),
                 publisher: None,
                 version: "1.0.0".into(),
                 description: None,
             },
-            surface: UiSurface::Install(InstallOptions {
+            surface: Surface::Install(InstallOptions {
                 existing_version: None,
                 scopes: vec![InstallScope::User],
                 scope: InstallScope::User,
@@ -265,7 +265,7 @@ mod tests {
                 install_directory: None,
                 allow_directory_override: false,
             }),
-            state: UiState::Options,
+            state: InstallerState::Options,
             operation: None,
             progress: None,
             plan: PlanStatus::Unsupported,

@@ -16,8 +16,8 @@
 //!   `zup-installer` through a shared dependency, every user of an Acme installer
 //!   ships a GitHub API client they did not ask for. That is a real production
 //!   defect, and it is invisible to a size budget until somebody looks.
-//! - **An internal crate reachable from a published one.** `zup-ui-protocol` and
-//!   `zup-ui-sdk` are consumed by preset projects that have never heard of this
+//! - **An internal crate reachable from a published one.** `zup-preset-protocol` and
+//!   `zup-preset-sdk` are consumed by preset projects that have never heard of this
 //!   repository, so an internal crate in either graph is a type that a preset
 //!   author cannot name. The fix is always a conversion at the host boundary, never
 //!   a dependency.
@@ -82,11 +82,11 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     // The preview environments. They belong to the person writing a preset and
     // the person writing an application, and to nobody installing one, so they
     // must never reach an installer through a shared dependency. `zup-preview`
-    // is the machine both of them share; `zup-ui-dev` is the Cargo half of one
-    // of them; `zup-ui-compose` is the build-plane answer both must not invent.
+    // is the machine both of them share; `zup-preset-dev` is the Cargo half of one
+    // of them; `zup-preset-compose` is the build-plane answer both must not invent.
     "zup-preview",
-    "zup-ui-dev",
-    "zup-ui-compose",
+    "zup-preset-dev",
+    "zup-preset-compose",
     // The developer CLI's machine contract. It reaches the CLI and the repository's own
     // tooling, and it must never reach an installer: the wire DTOs are a description of
     // a developer's build, and a user installing an application has no build to
@@ -109,7 +109,7 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
 /// The three form a chain, and the gate walks all three, so a new edge from any
 /// of them into the engine is caught whether it is written in the SDK, in the
 /// transport, or in the contract.
-pub const PUBLIC_UI_PACKAGES: &[&str] = &["zup-ui-protocol", "zup-ui-ipc", "zup-ui-sdk"];
+pub const PUBLIC_UI_PACKAGES: &[&str] = &["zup-preset-protocol", "zup-preset-ipc", "zup-preset-sdk"];
 
 /// Check the workspace's graphs.
 pub fn check(root: &Path) -> Result<Findings, String> {
@@ -511,16 +511,16 @@ mod tests {
             "zup-core",
             "zup-installer",
             "zup-runtime",
-            "zup-ui-protocol",
-            "zup-ui-sdk",
+            "zup-preset-protocol",
+            "zup-preset-sdk",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect();
         let clean = Metadata {
             nodes: vec![
-                node("zup-ui-protocol", &[]),
-                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-preset-protocol", &[]),
+                node("zup-preset-sdk", &["zup-preset-protocol"]),
                 node("zup-installer", &["zup-core", "zup-runtime"]),
                 node("zup-core", &[]),
                 node("zup-runtime", &["zup-core"]),
@@ -531,12 +531,12 @@ mod tests {
 
         // The same graph with one edge added. It is reached through the protocol
         // rather than declared directly, which is the case a reviewer's eye misses
-        // because `zup-ui-sdk -> zup-ui-protocol` is a dependency that is supposed
+        // because `zup-preset-sdk -> zup-preset-protocol` is a dependency that is supposed
         // to be there, and it is reported once, at the edge that is not.
         let leaked = Metadata {
             nodes: vec![
-                node("zup-ui-protocol", &["zup-core"]),
-                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-preset-protocol", &["zup-core"]),
+                node("zup-preset-sdk", &["zup-preset-protocol"]),
                 node("zup-installer", &["zup-core"]),
                 node("zup-core", &[]),
                 node("zup-runtime", &["zup-core"]),
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(
             crossings(&leaked, &edges(&leaked)),
             [
-                "zup-ui-protocol -> zup-core: `zup-core` is an internal zup crate \
+                "zup-preset-protocol -> zup-core: `zup-core` is an internal zup crate \
              and a published crate may not reach it; convert at the host boundary instead"
             ]
         );

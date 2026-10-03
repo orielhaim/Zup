@@ -25,7 +25,7 @@ use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::ExecutionPolicy;
 #[cfg(feature = "gui")]
-use zup_ui_protocol::UpdateState;
+use zup_preset_protocol::UpdateState;
 
 use zup_acquire::CachePolicy;
 use zup_update::{ComponentSelection, TrustContext};

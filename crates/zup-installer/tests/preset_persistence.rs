@@ -5,7 +5,7 @@
 //! with a preset, a payload, and an asset the application configured; it is run;
 //! the file a person downloaded is deleted; the maintenance copy the
 //! installation persisted is launched instead; and a real preset child, built
-//! against the public SDK, answers over real `zup-ui-ipc` with the settings and
+//! against the public SDK, answers over real `zup-preset-ipc` with the settings and
 //! the asset the original installer carried.
 //!
 //! What this deliberately does not weaken: the child is a real executable, not a
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use support::project::{AppSpec, Payload, PresetSpec, State, compose_with_preset};
 
-use zup_ui_protocol::UiCapability;
+use zup_preset_protocol::Capability;
 use zup_windows::InstallLedgerStore;
 
 /// The preset executable these tests launch, staged by the same run.
@@ -49,7 +49,7 @@ fn preset_app(label: &str, report: &Path) -> (AppSpec, PresetSpec) {
             "report": report,
         }),
         assets: vec![("branding/logo.svg".to_owned(), logo.to_vec())],
-        required_capabilities: vec![UiCapability::Components],
+        required_capabilities: vec![Capability::Components],
     };
     (app, preset)
 }
@@ -250,7 +250,7 @@ fn the_installer_can_be_deleted_and_the_window_still_opens() {
     assert!(
         report.contains(&format!(
             "protocol={}",
-            zup_ui_protocol::UI_PROTOCOL_VERSION
+            zup_preset_protocol::PRESET_PROTOCOL_VERSION
         )),
         "over the protocol version the composition recorded: {report}"
     );
@@ -610,7 +610,7 @@ fn an_update_replaces_the_whole_window_generation() {
             "branding/logo.svg".to_owned(),
             b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'/>".to_vec(),
         )],
-        required_capabilities: vec![UiCapability::Components],
+        required_capabilities: vec![Capability::Components],
     };
     let upgrade = compose_with_preset(&next, &payload, &second);
     // The hidden verb, because that is the door an embedded installer is upgraded

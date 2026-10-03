@@ -1,0 +1,29 @@
+[package]
+name = "zup-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/orielhaim/zup"
+description = "Author a Zup installer preset or an installation plugin"
+publish = true
+
+[features]
+# Authoring roles, not implementation details. A preset project and a plugin
+# project depend on this crate for entirely different reasons and share nothing
+# but the name, so they are separate features and neither pulls in the other's
+# world: `plugin` never reaches GPUI and `preset` never reaches Wasmtime.
+#
+# There is deliberately no default feature. An empty dependency is a mistake, and
+# the two roles have almost nothing in common; a project that wants one has to
+# say so.
+preset = ["dep:zup-preset-sdk"]
+plugin = ["dep:zup-plugin-sdk"]
+
+# GPUI's headless test harness, for a preset that tests its own windows. Off by
+# default, because a preset that never tests a window should not compile a test
+# harness into its build.
+test-support = ["zup-preset-sdk?/test-support"]
+
+[dependencies]
+zup-plugin-sdk = { path = "../zup-plugin-sdk", version = "0.1.0", optional = true }
+zup-preset-sdk = { path = "../zup-preset-sdk", version = "0.1.0", optional = true }

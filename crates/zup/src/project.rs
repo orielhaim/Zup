@@ -220,7 +220,7 @@ pub fn materialize_project(
             // preset zup ships only when the project named none, because finding
             // it costs a directory walk an application that chose its own window
             // should not pay.
-            let resolved = zup_ui_compose::resolve(
+            let resolved = zup_preset_compose::resolve(
                 &manifest.ui,
                 &project_root,
                 &installer,
@@ -278,9 +278,9 @@ pub fn load_single_project(
 /// there; or something was obtained and it does not work here. A caller that has
 /// to tell those apart - a CI system deciding whether to stage a toolchain - can,
 /// and a build that collapsed them would answer that question wrongly.
-fn preset_problem(error: zup_ui_compose::PresetProblem) -> miette::Report {
+fn preset_problem(error: zup_preset_compose::PresetProblem) -> miette::Report {
     let code = match error {
-        zup_ui_compose::PresetProblem::Unavailable { .. } => "zup.build.preset_unavailable",
+        zup_preset_compose::PresetProblem::Unavailable { .. } => "zup.build.preset_unavailable",
         _ => "zup.build.preset_unusable",
     };
     crate::failure::error(code, error.to_string())

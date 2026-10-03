@@ -595,7 +595,7 @@ mod tests {
                     preset: window.then(|| zup_core::UiPreset {
                         name: zup_core::NonEmptyString::new("aurora").expect("a name"),
                         version: semver::Version::parse("1.4.2").expect("a version"),
-                        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+                        protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
                         required_capabilities: vec!["components".to_owned()],
                         settings: serde_json::Value::Object(settings),
                         assets: declared.clone(),

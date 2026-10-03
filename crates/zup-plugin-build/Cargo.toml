@@ -14,6 +14,7 @@ zup-core.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 
 [dev-dependencies]
+zup-plugin-abi = { workspace = true }
 zup-build.workspace = true
 tempfile.workspace = true
 zup-manifest.workspace = true

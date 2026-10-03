@@ -11,7 +11,7 @@ use zup_manifest::TargetOverrides;
 use zup_plugin_build::{PluginBuildError, compile_plugins};
 use zup_plugin_contract::{ContractError, HOST_TARGET, PluginEngine};
 
-const WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_wit() -> Vec<u8> {
     let mut resolve = Resolve::default();

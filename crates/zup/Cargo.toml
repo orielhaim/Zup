@@ -46,13 +46,14 @@ zup-publish.workspace = true
 zup-publish-github.workspace = true
 zup-signing.workspace = true
 zup-toolchain.workspace = true
-zup-ui-compose.workspace = true
-zup-ui-dev.workspace = true
-zup-ui-protocol.workspace = true
+zup-preset-compose.workspace = true
+zup-preset-dev.workspace = true
+zup-preset-protocol.workspace = true
 zup-preview.workspace = true
 zup-windows.workspace = true
 
 [dev-dependencies]
+zup-plugin-abi = { workspace = true }
 rstest.workspace = true
 tempfile.workspace = true
 zstd.workspace = true

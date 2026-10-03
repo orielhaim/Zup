@@ -13,7 +13,7 @@ use wit_parser::{ManglingAndAbi, Resolve};
 #[path = "support/toolchain_fixture.rs"]
 mod toolchain_fixture;
 
-const PLUGIN_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 const LINUX_TARGET: &str = "aarch64-unknown-linux-gnu";
 

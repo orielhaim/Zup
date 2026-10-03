@@ -30,10 +30,10 @@ use zup_preview::{
 /// The child that answers, asks, and holds its session open.
 const PRESET: &str = r##"
 use std::path::PathBuf;
-use zup_ui_ipc::Bootstrap;
-use zup_ui_protocol::{
-    Session, SessionProgress, SessionState, UiAction, UiCapabilities, UiConfiguration, UiMessage,
-    UiSessionId,
+use zup_preset_ipc::Bootstrap;
+use zup_preset_protocol::{
+    Session, SessionProgress, SessionState, Action, Capabilities, Configuration, Message,
+    SessionId,
 };
 
 /// Beside this executable, which the runtime staged into a directory of its own.
@@ -99,7 +99,7 @@ fn main() {
             "additionalProperties": false,
         });
         let description =
-            zup_ui_protocol::PresetDescription::new("probe", env!("CARGO_PKG_VERSION"), schema);
+            zup_preset_protocol::PresetDescription::new("probe", env!("CARGO_PKG_VERSION"), schema);
         println!("{}", serde_json::to_string(&description).expect("a description"));
         return;
     }
@@ -123,8 +123,8 @@ fn main() {
 
     let sender = channel.sender().clone();
     let mut session = Session::preset(
-        UiSessionId(channel.session()),
-        UiCapabilities::default(),
+        SessionId(channel.session()),
+        Capabilities::default(),
         "probe".to_owned(),
         env!("CARGO_PKG_VERSION").to_owned(),
     );
@@ -144,7 +144,7 @@ fn main() {
                 sender.send(&answer).expect("the host receives the answer");
             }
             _ => match envelope.message {
-                UiMessage::Configuration(value) => configuration = Some(value),
+                Message::Configuration(value) => configuration = Some(value),
                 _ => {}
             },
         }
@@ -160,8 +160,8 @@ fn main() {
         // transport rather than that a local value changed.
         asked = true;
         let frame = session
-            .frame(UiMessage::Action(UiAction::SetScope {
-                scope: zup_ui_protocol::InstallScope::Machine,
+            .frame(Message::Action(Action::SetScope {
+                scope: zup_preset_protocol::InstallScope::Machine,
             }))
             .expect("a framed action");
         sender.send(&frame).expect("the host receives the action");
@@ -169,7 +169,7 @@ fn main() {
 }
 
 /// What the child was told, written where the test that launched it can read it.
-fn report(snapshot: &zup_ui_protocol::UiSnapshot, configuration: &UiConfiguration) {
+fn report(snapshot: &zup_preset_protocol::Snapshot, configuration: &Configuration) {
     let mut seen = String::new();
     seen.push_str(&format!("name={}\n", snapshot.product.name));
     seen.push_str(&format!("version={}\n", snapshot.product.version));
@@ -220,8 +220,8 @@ name = "probe"
 path = "src/main.rs"
 
 [dependencies]
-zup-ui-ipc = { path = "ZUP_UI_IPC", version = "0.1.0" }
-zup-ui-protocol = { path = "ZUP_UI_PROTOCOL", version = "0.1.0" }
+zup-preset-ipc = { path = "zup_preset_ipc", version = "0.1.0" }
+zup-preset-protocol = { path = "zup_preset_protocol", version = "0.1.0" }
 serde_json = "1"
 
 [workspace]
@@ -299,8 +299,8 @@ fn built() -> &'static PathBuf {
         std::fs::write(
             root.join("Cargo.toml"),
             PROBE_MANIFEST
-                .replace("ZUP_UI_IPC", &crate_directory("zup-ui-ipc"))
-                .replace("ZUP_UI_PROTOCOL", &crate_directory("zup-ui-protocol")),
+                .replace("zup_preset_ipc", &crate_directory("zup-preset-ipc"))
+                .replace("zup_preset_protocol", &crate_directory("zup-preset-protocol")),
         )
         .expect("the manifest");
 
@@ -430,7 +430,7 @@ fn preset() -> zup_core::UiPreset {
     zup_core::UiPreset {
         name: zup_core::NonEmptyString::new("probe").expect("a name"),
         version: semver::Version::parse("0.1.0").expect("a version"),
-        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+        protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
         required_capabilities: Vec::new(),
         settings: serde_json::json!({ "hero": "first" }),
         assets: Vec::new(),
@@ -464,7 +464,7 @@ fn present_and_wait_for_the_ask(runtime: &mut Runtime) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         runtime.drain_actions();
-        if runtime.snapshot().surface.scope() == zup_ui_protocol::InstallScope::Machine {
+        if runtime.snapshot().surface.scope() == zup_preset_protocol::InstallScope::Machine {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -500,7 +500,7 @@ fn a_preset_reaches_the_runtime_over_the_production_transport() {
     present_and_wait_for_the_ask(&mut runtime);
     assert_eq!(
         runtime.snapshot().surface.scope(),
-        zup_ui_protocol::InstallScope::Machine,
+        zup_preset_protocol::InstallScope::Machine,
         "an action a real child sent over the real transport was validated by the state machine \
          and published back"
     );
@@ -516,7 +516,7 @@ fn the_state_a_replaced_child_connects_to_is_the_state_the_host_owns() {
     // state a replacement has to preserve.
     runtime
         .simulator_mut()
-        .act(zup_ui_protocol::UiAction::Install);
+        .act(zup_preset_protocol::Action::Install);
     for event in zup_runtime_events() {
         runtime.simulator_mut().observe(&event);
     }
@@ -608,7 +608,7 @@ fn a_surface_change_reopens_the_machine_without_closing_the_window() {
     assert!(
         matches!(
             runtime.snapshot().surface,
-            zup_ui_protocol::UiSurface::Maintenance(_)
+            zup_preset_protocol::Surface::Maintenance(_)
         ),
         "the machine is a different one"
     );
@@ -625,7 +625,7 @@ fn a_preset_that_needs_something_this_machine_cannot_do_is_never_launched() {
     let (_directory, state) = scratch();
     let runtime = runtime(state);
     let mut demanding = preset();
-    demanding.protocol = zup_ui_protocol::UI_PROTOCOL_VERSION + 1;
+    demanding.protocol = zup_preset_protocol::PRESET_PROTOCOL_VERSION + 1;
     let error = runtime
         .simulator()
         .stage(&preset_bytes(), &demanding)
@@ -912,7 +912,7 @@ fn a_cancel_during_an_operation_leaves_the_machine_waiting_for_a_safe_boundary()
     present(&mut runtime);
     runtime
         .simulator_mut()
-        .act(zup_ui_protocol::UiAction::Install);
+        .act(zup_preset_protocol::Action::Install);
     for event in zup_runtime_events() {
         runtime.simulator_mut().observe(&event);
     }
@@ -922,10 +922,10 @@ fn a_cancel_during_an_operation_leaves_the_machine_waiting_for_a_safe_boundary()
     );
     runtime
         .simulator_mut()
-        .act(zup_ui_protocol::UiAction::Cancel);
+        .act(zup_preset_protocol::Action::Cancel);
     assert_eq!(
         runtime.snapshot().state,
-        zup_ui_protocol::UiState::WaitingForSafeCancellation,
+        zup_preset_protocol::InstallerState::WaitingForSafeCancellation,
         "and cancelling it puts the machine where a real one would be rather than pretending it \
          stopped"
     );
@@ -944,14 +944,14 @@ fn a_maintenance_action_asks_the_engine_rather_than_performing_anything() {
 
     let decision = runtime
         .simulator_mut()
-        .act(zup_ui_protocol::UiAction::Repair);
+        .act(zup_preset_protocol::Action::Repair);
     assert!(
-        matches!(decision, zup_ui_host::HostDecision::Run { .. }),
+        matches!(decision, zup_preset_host::HostDecision::Run { .. }),
         "a repair is a request, and the preview has no engine to run it with"
     );
     assert_eq!(
         runtime.snapshot().state,
-        zup_ui_protocol::UiState::Running,
+        zup_preset_protocol::InstallerState::Running,
         "so the machine is running, and the session is what starts the engine"
     );
     assert_eq!(
@@ -978,13 +978,13 @@ fn an_install_click_advances_the_simulated_lifecycle() {
     present(&mut runtime);
     assert_eq!(
         runtime.snapshot().state,
-        zup_ui_protocol::UiState::Options,
+        zup_preset_protocol::InstallerState::Options,
         "a machine that has not had this application is waiting for a person"
     );
 
     runtime
         .simulator_mut()
-        .act(zup_ui_protocol::UiAction::Install);
+        .act(zup_preset_protocol::Action::Install);
     for event in zup_runtime_events() {
         runtime.simulator_mut().observe(&event);
     }

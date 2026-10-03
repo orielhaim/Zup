@@ -19,7 +19,7 @@ pub mod init;
 use clap::{Args, Subcommand, ValueHint};
 use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
 use zup_core::TargetTriple;
-use zup_ui_protocol::{MAX_DESCRIBE_BYTES, PresetDescription};
+use zup_preset_protocol::{MAX_DESCRIBE_BYTES, PresetDescription};
 
 use crate::failure;
 
@@ -86,7 +86,7 @@ pub fn dev(args: &DevCommand) -> miette::Result<()> {
         None => std::env::current_dir()
             .map_err(|error| failure::error("zup.ui.dev_cwd", error.to_string()))?,
     };
-    zup_ui_dev::develop(root, &args.profile)
+    zup_preset_dev::develop(root, &args.profile)
         .map_err(|error| failure::error("zup.ui.dev", error.to_string()))
 }
 
@@ -308,7 +308,7 @@ fn describe(
         None => build_target(root, cargo, &identity.binary, host.as_str(), profile)?,
     };
     let output = Command::new(&executable)
-        .arg(zup_ui_protocol::DESCRIBE_FLAG)
+        .arg(zup_preset_protocol::DESCRIBE_FLAG)
         .output()
         .map_err(|error| {
             miette::miette!(

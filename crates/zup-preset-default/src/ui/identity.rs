@@ -1,13 +1,13 @@
 //! The application's mark and name.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     App, FontWeight, IntoElement, ObjectFit, ParentElement, Rems, RenderOnce, SharedString, Styled,
     StyledImage, Window, div, img, relative,
 };
-use zup_ui_sdk::prelude::ProductIdentity;
+use zup_preset_sdk::prelude::ProductIdentity;
 
 use crate::theme::{size, space, text};
 use crate::ui::{caption, muted};

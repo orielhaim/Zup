@@ -7,21 +7,21 @@
 
 use std::collections::BTreeSet;
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::animation::EffectTransition;
-use zup_ui_sdk::gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use zup_ui_sdk::gpui_kit::component::scroll::ScrollableElement;
-use zup_ui_sdk::gpui_kit::component::spinner::Spinner;
-use zup_ui_sdk::gpui_kit::component::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::animation::EffectTransition;
+use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use zup_preset_sdk::gpui_kit::component::scroll::ScrollableElement;
+use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
+use zup_preset_sdk::gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Sizable, TitleBar, WindowExt, h_flex, v_flex,
 };
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
     Window, WindowBounds, WindowOptions, div, px, relative, size,
 };
-use zup_ui_sdk::prelude::*;
+use zup_preset_sdk::prelude::*;
 
 use crate::Settings;
 use crate::model::{self, Screen};
@@ -50,7 +50,7 @@ pub fn open(context: PresetContext<Settings>, cx: &mut App) {
     let settings: Entity<Settings> = (**context.settings()).clone();
     let capabilities = context.host().capabilities.clone();
     let options = window_options(cx);
-    zup_ui_sdk::gpui_kit::open_window(options, cx, move |window, cx| {
+    zup_preset_sdk::gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| Installer::new(session, settings, capabilities, window, cx))
     })
     .expect("open the installer window");
@@ -99,18 +99,18 @@ struct Local {
 
 /// The installer window.
 pub struct Installer {
-    session: UiSession,
+    session: Session,
     settings: Entity<Settings>,
-    capabilities: UiCapabilities,
+    capabilities: Capabilities,
     local: Local,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Installer {
     pub fn new(
-        session: UiSession,
+        session: Session,
         settings: Entity<Settings>,
-        capabilities: UiCapabilities,
+        capabilities: Capabilities,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -138,10 +138,10 @@ impl Installer {
                 if active {
                     // Closing mid-operation is a request to stop, not a way to
                     // walk away from a half-changed machine.
-                    session.send(UiAction::Cancel);
+                    session.send(Action::Cancel);
                     return false;
                 }
-                session.send(UiAction::Close);
+                session.send(Action::Close);
                 if !KEEP_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
                     cx.defer(|cx| cx.quit());
                 }
@@ -188,7 +188,7 @@ impl Installer {
         cx.notify();
     }
 
-    fn snapshot(&self, cx: &App) -> Option<UiSnapshot> {
+    fn snapshot(&self, cx: &App) -> Option<Snapshot> {
         self.session.state().read(cx).snapshot().cloned()
     }
 
@@ -217,7 +217,7 @@ impl Installer {
         if window.has_active_sheet(cx) && !matches!(screen, Screen::Install | Screen::Maintenance) {
             window.close_sheet(cx);
         }
-        let confirming = snapshot.state == UiState::ConfirmUninstall;
+        let confirming = snapshot.state == InstallerState::ConfirmUninstall;
         if !confirming {
             self.local.confirm_answered = false;
             if window.has_active_dialog(cx) {
@@ -230,7 +230,7 @@ impl Installer {
     }
 
     /// A control that sends one action.
-    fn send(&self, action: UiAction) -> Handler {
+    fn send(&self, action: Action) -> Handler {
         let session = self.session.clone();
         handler(move |_, _| session.send(action.clone()))
     }
@@ -253,7 +253,7 @@ impl Installer {
     fn close(&self) -> Handler {
         let session = self.session.clone();
         handler(move |_, cx| {
-            session.send(UiAction::Close);
+            session.send(Action::Close);
             cx.quit();
         })
     }
@@ -271,7 +271,7 @@ impl Installer {
             if let Ok(Ok(Some(paths))) = prompt.await
                 && let Some(chosen) = paths.into_iter().next()
             {
-                session.send(UiAction::SetInstallDirectory {
+                session.send(Action::SetInstallDirectory {
                     directory: model::folder_for(&chosen, &product),
                 });
             }
@@ -281,7 +281,7 @@ impl Installer {
 
     fn confirm_uninstall(
         &mut self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -354,12 +354,12 @@ impl Installer {
                 .cancel_text("Cancel")
                 .on_ok(move |_, _, cx| {
                     confirmed.update(cx, |this, _| this.local.confirm_answered = true);
-                    confirm.send(UiAction::ConfirmUninstall);
+                    confirm.send(Action::ConfirmUninstall);
                     true
                 })
                 .on_cancel(move |_, _, cx| {
                     dismissed.update(cx, |this, _| this.local.confirm_answered = true);
-                    dismiss.send(UiAction::DismissUninstall);
+                    dismiss.send(Action::DismissUninstall);
                     true
                 })
         });
@@ -378,11 +378,11 @@ impl Installer {
             let modifying = this.local.modifying;
             let toggle = view.clone();
             let primary = match (&snapshot.state, modifying) {
-                (UiState::Options, _) => Some((model::install_label(&snapshot), UiAction::Install)),
-                (UiState::Maintenance, true)
+                (InstallerState::Options, _) => Some((model::install_label(&snapshot), Action::Install)),
+                (InstallerState::Maintenance, true)
                     if model::pending_sentence(&snapshot.surface).is_some() =>
                 {
-                    Some(("Apply changes", UiAction::Modify))
+                    Some(("Apply changes", Action::Modify))
                 }
                 _ => None,
             };
@@ -430,7 +430,7 @@ impl Installer {
 
     fn install(
         &self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> (AnyElement, ActionBar) {
@@ -456,7 +456,7 @@ impl Installer {
             body = body.child(
                 PathChooser::new("Install location", model::location(snapshot))
                     .on_change(choose)
-                    .on_reset(self.send(UiAction::ResetInstallDirectory)),
+                    .on_reset(self.send(Action::ResetInstallDirectory)),
             );
         }
         if surface.show_scope || !surface.secondary.is_empty() {
@@ -488,7 +488,7 @@ impl Installer {
                     .on_click(move |_, window, cx| open_plan(window, cx)),
             );
         }
-        let install = self.send(UiAction::Install);
+        let install = self.send(Action::Install);
         bar = bar.trailing(
             Button::new("install")
                 .primary()
@@ -538,7 +538,7 @@ impl Installer {
     }
 
     fn component_list(
-        session: &UiSession,
+        session: &Session,
         label: &str,
         rows: &[model::ComponentRow],
         cx: &App,
@@ -570,7 +570,7 @@ impl Installer {
             .into_any_element()
     }
 
-    fn scope_section(&self, snapshot: &UiSnapshot) -> Option<AnyElement> {
+    fn scope_section(&self, snapshot: &Snapshot) -> Option<AnyElement> {
         let choices = model::scope_choices(snapshot);
         if choices.is_empty() {
             return None;
@@ -581,14 +581,14 @@ impl Installer {
                 .child(ScopeChoice::new(
                     choices,
                     snapshot.surface.scope(),
-                    move |scope, _, _| session.send(UiAction::SetScope { scope }),
+                    move |scope, _, _| session.send(Action::SetScope { scope }),
                 ))
                 .into_any_element(),
         )
     }
 
     /// A message the host left on a screen that is waiting for a person.
-    fn resting_notice(&self, snapshot: &UiSnapshot, _: &App) -> Option<AnyElement> {
+    fn resting_notice(&self, snapshot: &Snapshot, _: &App) -> Option<AnyElement> {
         let diagnostic = snapshot.diagnostic.as_ref()?;
         Some(
             Callout::new(Tone::Attention, IconName::Info)
@@ -600,7 +600,7 @@ impl Installer {
 
     fn maintenance(
         &self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         state: &MaintenanceState,
         layout: Layout,
         cx: &mut Context<Self>,
@@ -634,7 +634,7 @@ impl Installer {
         {
             body = body.child(HealthNotice::new(
                 resources.clone(),
-                self.send(UiAction::Repair),
+                self.send(Action::Repair),
             ));
         }
 
@@ -663,18 +663,18 @@ impl Installer {
                         .on_click(move |_, window, cx| open_plan(window, cx)),
                 );
             }
-            let undo: Vec<UiAction> = state
+            let undo: Vec<Action> = state
                 .components
                 .iter()
                 .filter(|component| component.selected != component.installed)
-                .map(|component| UiAction::SetComponent {
+                .map(|component| Action::SetComponent {
                     component: component.id.clone(),
                     selected: component.installed,
                 })
                 .collect();
             let session = self.session.clone();
             let view = cx.entity();
-            let apply = self.send(UiAction::Modify);
+            let apply = self.send(Action::Modify);
             bar =
                 bar.trailing(Button::new("modify-cancel").label("Cancel").on_click(
                     move |_, _, cx| {
@@ -703,7 +703,7 @@ impl Installer {
 
         let mut actions = v_flex();
         if let Some(row) = model::update_row(snapshot) {
-            actions = actions.child(UpdateRow::new(row, layout, self.send(UiAction::Update)));
+            actions = actions.child(UpdateRow::new(row, layout, self.send(Action::Update)));
         }
         if model::has_optional_components(&snapshot.surface) {
             actions = actions.child(
@@ -730,7 +730,7 @@ impl Installer {
                  stopped working.",
             )
             .layout(layout)
-            .button("Repair", Emphasis::Normal, self.send(UiAction::Repair)),
+            .button("Repair", Emphasis::Normal, self.send(Action::Repair)),
         );
         body = body
             .child(Section::new("Manage").child(actions))
@@ -739,14 +739,14 @@ impl Installer {
                 "Remove the app and everything setup added to this computer.",
                 "Uninstall…",
                 layout,
-                self.send(UiAction::RequestUninstall),
+                self.send(Action::RequestUninstall),
             ));
         (body.into_any_element(), ActionBar::new(layout))
     }
 
     fn operation(
         &self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> (AnyElement, ActionBar) {
@@ -754,7 +754,7 @@ impl Installer {
         let stopping = progress.stopping;
         let body = OperationProgress::new(snapshot.product.name.clone(), self.logo(cx), progress)
             .into_any_element();
-        let stop = self.send(UiAction::Cancel);
+        let stop = self.send(Action::Cancel);
         let bar = ActionBar::new(layout).trailing(
             Button::new("stop")
                 .label(if stopping { "Stopping…" } else { "Stop" })
@@ -766,7 +766,7 @@ impl Installer {
 
     fn outcome(
         &self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> (AnyElement, ActionBar) {
@@ -784,7 +784,7 @@ impl Installer {
                 .on_click(move |_, window, cx| close(window, cx)),
         );
         if let Some(name) = launch {
-            let launch = self.send(UiAction::Launch);
+            let launch = self.send(Action::Launch);
             let close = self.close();
             bar = bar.trailing(
                 Button::new("launch")
@@ -800,10 +800,10 @@ impl Installer {
         (body, bar)
     }
 
-    fn blocked(&self, snapshot: &UiSnapshot, layout: Layout) -> (AnyElement, ActionBar) {
+    fn blocked(&self, snapshot: &Snapshot, layout: Layout) -> (AnyElement, ActionBar) {
         let body = BlockedView::new(model::blocked(snapshot)).into_any_element();
         let close = self.close();
-        let retry = self.send(UiAction::Retry);
+        let retry = self.send(Action::Retry);
         let bar = ActionBar::new(layout)
             .trailing(
                 Button::new("close")
@@ -823,19 +823,19 @@ impl Installer {
 
     fn problem(
         &self,
-        snapshot: &UiSnapshot,
+        snapshot: &Snapshot,
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> (AnyElement, ActionBar) {
         let problem = model::problem(snapshot);
-        let copy = self.send(UiAction::CopyDiagnostics);
+        let copy = self.send(Action::CopyDiagnostics);
         let mut view = DiagnosticView::new(
             problem,
             self.local.technical_open,
             self.local(cx, |this, _, _| this.local.technical_open ^= true),
         );
-        if self.capabilities.contains(UiCapability::Diagnostics) {
-            let open_log = self.send(UiAction::OpenLog);
+        if self.capabilities.contains(Capability::Diagnostics) {
+            let open_log = self.send(Action::OpenLog);
             view = view
                 .support(
                     Button::new("copy-details")
@@ -855,7 +855,7 @@ impl Installer {
                 );
         }
         let close = self.close();
-        let retry = self.send(UiAction::Retry);
+        let retry = self.send(Action::Retry);
         let bar = ActionBar::new(layout)
             .trailing(
                 Button::new("close")
@@ -873,7 +873,7 @@ impl Installer {
         (view.into_any_element(), bar)
     }
 
-    fn title_bar(&self, snapshot: Option<&UiSnapshot>, cx: &App) -> impl IntoElement {
+    fn title_bar(&self, snapshot: Option<&Snapshot>, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let name = snapshot.map_or_else(String::new, |snapshot| snapshot.product.name.clone());
         TitleBar::new()
@@ -944,8 +944,8 @@ impl Render for Installer {
         let (body, bar) = match screen {
             Screen::Install => self.install(&snapshot, layout, cx),
             Screen::Maintenance => match &snapshot.surface {
-                UiSurface::Maintenance(state) => self.maintenance(&snapshot, state, layout, cx),
-                UiSurface::Install(_) => self.install(&snapshot, layout, cx),
+                Surface::Maintenance(state) => self.maintenance(&snapshot, state, layout, cx),
+                Surface::Install(_) => self.install(&snapshot, layout, cx),
             },
             Screen::Operation => self.operation(&snapshot, layout, cx),
             Screen::Outcome => self.outcome(&snapshot, layout, cx),

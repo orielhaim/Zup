@@ -8,7 +8,7 @@
 use zup::ui::{InspectCommand, inspect};
 use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
 use zup_core::TargetTriple;
-use zup_ui_protocol::{PresetDescription, UiCapabilities, UiCapability};
+use zup_preset_protocol::{PresetDescription, Capabilities, Capability};
 
 fn packed(targets: &[&str]) -> Vec<u8> {
     let description = PresetDescription::new(
@@ -19,7 +19,7 @@ fn packed(targets: &[&str]) -> Vec<u8> {
             "properties": { "accent": { "type": "string" } },
         }),
     )
-    .with_capabilities(UiCapabilities::new([UiCapability::Components]));
+    .with_capabilities(Capabilities::new([Capability::Components]));
     let mut writer = PresetPackageWriter::new(description).expect("a valid description");
     for target in targets {
         writer

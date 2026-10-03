@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use zup_core::{Frontend, Installer, SelectedScope};
 use zup_exec::{InstallLedger, LifecycleAction};
 use zup_runtime::{CancellationHandle, RuntimeEvent};
-use zup_ui_protocol::{UiAction, UpdateState};
+use zup_preset_protocol::{Action, UpdateState};
 
 use super::preset::{self, PresetError};
 use super::{HostDecision, HostState, Selection};
@@ -166,21 +166,21 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
         return Err(miette::miette!("the installed application was not found"));
     }
 
-    let launchers = zup_ui_host::surface::launchers(&installer);
+    let launchers = zup_preset_host::surface::launchers(&installer);
     let state = match &installed {
         Some((scope, ledger)) => {
-            let maintenance = zup_ui_host::surface::maintenance_state(&installer, ledger, *scope);
+            let maintenance = zup_preset_host::surface::maintenance_state(&installer, ledger, *scope);
             HostState::maintenance(
-                zup_ui_host::surface::product(&installer),
+                zup_preset_host::surface::product(&installer),
                 maintenance,
-                zup_ui_host::surface::capabilities(&installer, true),
+                zup_preset_host::surface::capabilities(&installer, true),
             )
         }
         None => {
             let scope = launch
                 .scope
-                .unwrap_or_else(|| zup_ui_host::surface::default_scope(&installer));
-            let options = zup_ui_host::surface::install_options(
+                .unwrap_or_else(|| zup_preset_host::surface::default_scope(&installer));
+            let options = zup_preset_host::surface::install_options(
                 &installer,
                 scope,
                 None,
@@ -188,9 +188,9 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
                 None,
             );
             HostState::install(
-                zup_ui_host::surface::product(&installer),
+                zup_preset_host::surface::product(&installer),
                 options,
-                zup_ui_host::surface::capabilities(&installer, false),
+                zup_preset_host::surface::capabilities(&installer, false),
             )
         }
     }
@@ -199,7 +199,7 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     let scope = installed
         .as_ref()
         .map(|(scope, _)| *scope)
-        .unwrap_or_else(|| zup_ui_host::convert::engine_scope(state.snapshot().surface.scope()));
+        .unwrap_or_else(|| zup_preset_host::convert::engine_scope(state.snapshot().surface.scope()));
     let state_root = state::resolve_state_root(launch.state_root.clone(), scope)?;
     let placement = Placement {
         scope,
@@ -246,9 +246,9 @@ fn find_installation(
     installer: &Installer,
     state_root: Option<&Path>,
 ) -> miette::Result<Option<(SelectedScope, InstallLedger)>> {
-    for scope in zup_ui_host::surface::scopes(installer)
+    for scope in zup_preset_host::surface::scopes(installer)
         .into_iter()
-        .map(zup_ui_host::convert::engine_scope)
+        .map(zup_preset_host::convert::engine_scope)
     {
         let root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)?;
         let ledger = zup_windows::InstallLedgerStore::new(root)
@@ -357,7 +357,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     let mut plans = Plans::default();
 
     if launch.auto_uninstall {
-        state.accept(UiAction::RequestUninstall);
+        state.accept(Action::RequestUninstall);
     }
     if let Some(selection) = state.plan_request() {
         plans.request(selection, &reports);
@@ -393,7 +393,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
             }
             asked = questions.recv() => {
                 let Some(action) = asked else { break };
-                if action == UiAction::Close {
+                if action == Action::Close {
                     break;
                 }
                 act(
@@ -440,7 +440,7 @@ fn lagged(error: tokio::sync::broadcast::error::RecvError) -> miette::Report {
 fn publish(
     preset: &preset::PresetProcess,
     state: &HostState,
-    configuration: &zup_ui_protocol::UiConfiguration,
+    configuration: &zup_preset_protocol::Configuration,
 ) -> miette::Result<()> {
     preset
         .publish(configuration.clone(), Box::new(state.snapshot().clone()))
@@ -476,7 +476,7 @@ fn act(
     state: &mut HostState,
     installer: &Installer,
     placement: &Placement,
-    action: UiAction,
+    action: Action,
     active: &Arc<Mutex<Active>>,
     reports: &Reports,
     inbox: &mut Inbox,
@@ -848,6 +848,6 @@ fn preset_error(error: PresetError) -> miette::Report {
     miette::miette!("{error}")
 }
 
-fn session_error(error: zup_ui_host::SessionError) -> miette::Report {
+fn session_error(error: zup_preset_host::SessionError) -> miette::Report {
     miette::miette!("{error}")
 }

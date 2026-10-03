@@ -1,8 +1,8 @@
 //! The default zup installer interface.
 //!
-//! This preset is written against `zup-ui-sdk` and nothing else, exactly as an
+//! This preset is written against `zup-preset-sdk` and nothing else, exactly as an
 //! application author's preset would be. Every fact this window shows arrived
-//! in a `UiSnapshot`, and everything it asks for is a `UiAction` the host may
+//! in a `Snapshot`, and everything it asks for is a `Action` the host may
 //! refuse.
 //!
 //! The window holds no copy of the selection, the scope, or the progress. The
@@ -23,9 +23,9 @@ pub mod window;
 #[cfg(test)]
 mod tests;
 
-use zup_ui_sdk::gpui_kit::AssetSource;
-use zup_ui_sdk::prelude::*;
-use zup_ui_sdk::{AssetRef, PresetContext};
+use zup_preset_sdk::gpui_kit::AssetSource;
+use zup_preset_sdk::prelude::*;
+use zup_preset_sdk::{AssetRef, PresetContext};
 
 /// What an application can change about how this preset looks.
 ///
@@ -112,7 +112,7 @@ impl Preset for DefaultPreset {
     }
 }
 
-zup_ui_sdk::gpui_kit::assets::icon_assets!(
+zup_preset_sdk::gpui_kit::assets::icon_assets!(
     pub Icons,
     [
         AppWindow,

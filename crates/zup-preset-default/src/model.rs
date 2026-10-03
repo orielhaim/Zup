@@ -6,7 +6,7 @@
 //! wrong thing for a state is a bug here, and only this half is visible without
 //! a display.
 
-use zup_ui_sdk::prelude::*;
+use zup_preset_sdk::prelude::*;
 
 /// The one screen a snapshot belongs to.
 ///
@@ -29,28 +29,28 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub fn of(snapshot: &UiSnapshot) -> Self {
+    pub fn of(snapshot: &Snapshot) -> Self {
         match &snapshot.state {
-            UiState::Options => Self::Install,
-            UiState::Maintenance | UiState::ConfirmUninstall => Self::Maintenance,
-            UiState::Running | UiState::WaitingForSafeCancellation => Self::Operation,
-            UiState::Succeeded => Self::Outcome,
-            UiState::Blocked { .. } => Self::Blocked,
-            UiState::Failed | UiState::RecoveryRequired => Self::Problem,
+            InstallerState::Options => Self::Install,
+            InstallerState::Maintenance | InstallerState::ConfirmUninstall => Self::Maintenance,
+            InstallerState::Running | InstallerState::WaitingForSafeCancellation => Self::Operation,
+            InstallerState::Succeeded => Self::Outcome,
+            InstallerState::Blocked { .. } => Self::Blocked,
+            InstallerState::Failed | InstallerState::RecoveryRequired => Self::Problem,
         }
     }
 }
 
 /// The operation a snapshot is about.
-pub fn operation(snapshot: &UiSnapshot) -> OperationKind {
+pub fn operation(snapshot: &Snapshot) -> OperationKind {
     snapshot
         .operation
         .unwrap_or_else(|| match &snapshot.surface {
-            UiSurface::Install(options) if options.existing_version.is_some() => {
+            Surface::Install(options) if options.existing_version.is_some() => {
                 OperationKind::Upgrade
             }
-            UiSurface::Install(_) => OperationKind::Install,
-            UiSurface::Maintenance(_) => OperationKind::Modify,
+            Surface::Install(_) => OperationKind::Install,
+            Surface::Maintenance(_) => OperationKind::Modify,
         })
 }
 
@@ -96,7 +96,7 @@ pub struct Fact {
 /// The plan is the authority once there is one. Before it arrives, installing
 /// for everyone is the choice that needs approval on this platform, and saying
 /// so early is better than surprising somebody at the prompt.
-pub fn needs_approval(snapshot: &UiSnapshot) -> bool {
+pub fn needs_approval(snapshot: &Snapshot) -> bool {
     match snapshot.plan.latest() {
         Some(plan) if plan.scope == snapshot.surface.scope() => plan.requires_authorization,
         _ => snapshot.surface.scope() == InstallScope::Machine,
@@ -104,7 +104,7 @@ pub fn needs_approval(snapshot: &UiSnapshot) -> bool {
 }
 
 /// The facts the install summary shows, in reading order.
-pub fn summary(snapshot: &UiSnapshot) -> Vec<Fact> {
+pub fn summary(snapshot: &Snapshot) -> Vec<Fact> {
     let mut facts = Vec::new();
     match snapshot.plan.latest() {
         Some(plan) if plan.estimated_bytes > 0 => facts.push(Fact {
@@ -147,7 +147,7 @@ pub fn summary(snapshot: &UiSnapshot) -> Vec<Fact> {
 
 /// The commit bar's facts. Every fact stays visible when the window is resized;
 /// the bar wraps instead of dropping one.
-pub fn commit_facts(snapshot: &UiSnapshot) -> Vec<Fact> {
+pub fn commit_facts(snapshot: &Snapshot) -> Vec<Fact> {
     summary(snapshot)
 }
 
@@ -162,7 +162,7 @@ pub struct Location {
     pub changeable: bool,
 }
 
-pub fn location(snapshot: &UiSnapshot) -> Location {
+pub fn location(snapshot: &Snapshot) -> Location {
     let custom = snapshot.surface.install_directory().map(str::to_owned);
     let resolved = snapshot
         .plan
@@ -170,7 +170,7 @@ pub fn location(snapshot: &UiSnapshot) -> Location {
         .map(|plan| plan.install_directory.clone())
         .filter(|path| !path.is_empty());
     Location {
-        custom: custom.is_some() && matches!(snapshot.surface, UiSurface::Install(_)),
+        custom: custom.is_some() && matches!(snapshot.surface, Surface::Install(_)),
         path: custom.or(resolved),
         changeable: snapshot.surface.allows_directory_override(),
     }
@@ -204,8 +204,8 @@ pub struct ScopeChoice {
 }
 
 /// The scopes on offer, or nothing when there is no choice to make.
-pub fn scope_choices(snapshot: &UiSnapshot) -> Vec<ScopeChoice> {
-    let UiSurface::Install(options) = &snapshot.surface else {
+pub fn scope_choices(snapshot: &Snapshot) -> Vec<ScopeChoice> {
+    let Surface::Install(options) = &snapshot.surface else {
         return Vec::new();
     };
     if options.scopes.len() < 2 {
@@ -259,10 +259,10 @@ pub struct ComponentRow {
 
 impl ComponentRow {
     /// The action a press asks for: the opposite of what the row shows.
-    pub fn toggle(&self) -> Option<UiAction> {
+    pub fn toggle(&self) -> Option<Action> {
         match self.kind {
             ComponentKind::Required => None,
-            ComponentKind::Optional { selected } => Some(UiAction::SetComponent {
+            ComponentKind::Optional { selected } => Some(Action::SetComponent {
                 component: self.id.clone(),
                 selected: !selected,
             }),
@@ -270,8 +270,8 @@ impl ComponentRow {
     }
 }
 
-pub fn component_rows(surface: &UiSurface) -> Vec<ComponentRow> {
-    let maintenance = matches!(surface, UiSurface::Maintenance(_));
+pub fn component_rows(surface: &Surface) -> Vec<ComponentRow> {
+    let maintenance = matches!(surface, Surface::Maintenance(_));
     surface
         .components()
         .iter()
@@ -296,7 +296,7 @@ pub fn component_rows(surface: &UiSurface) -> Vec<ComponentRow> {
 }
 
 /// Whether any component is a person's choice.
-pub fn has_optional_components(surface: &UiSurface) -> bool {
+pub fn has_optional_components(surface: &Surface) -> bool {
     surface
         .components()
         .iter()
@@ -304,21 +304,21 @@ pub fn has_optional_components(surface: &UiSurface) -> bool {
 }
 
 /// What the main button on the install screen says.
-pub fn install_label(snapshot: &UiSnapshot) -> &'static str {
+pub fn install_label(snapshot: &Snapshot) -> &'static str {
     match &snapshot.surface {
-        UiSurface::Install(options) if options.existing_version.is_some() => "Upgrade",
+        Surface::Install(options) if options.existing_version.is_some() => "Upgrade",
         _ => "Install",
     }
 }
 
 /// The line under the product's name on the install screen.
-pub fn install_subtitle(snapshot: &UiSnapshot) -> Option<String> {
+pub fn install_subtitle(snapshot: &Snapshot) -> Option<String> {
     match &snapshot.surface {
-        UiSurface::Install(options) => options
+        Surface::Install(options) => options
             .existing_version
             .as_ref()
             .map(|installed| format!("Replaces version {installed}, which is installed now")),
-        UiSurface::Maintenance(_) => None,
+        Surface::Maintenance(_) => None,
     }
 }
 
@@ -374,9 +374,9 @@ pub struct Progress {
     pub stopping: bool,
 }
 
-pub fn progress(snapshot: &UiSnapshot) -> Progress {
+pub fn progress(snapshot: &Snapshot) -> Progress {
     let kind = operation(snapshot);
-    let stopping = snapshot.state == UiState::WaitingForSafeCancellation;
+    let stopping = snapshot.state == InstallerState::WaitingForSafeCancellation;
     let report = snapshot.progress.as_ref();
     let phase = report.map_or(OperationPhase::Prepare, |progress| progress.phase);
     let phase_text = phase_label(phase, kind);
@@ -434,7 +434,7 @@ pub struct Outcome {
     pub removed: bool,
 }
 
-pub fn outcome(snapshot: &UiSnapshot) -> Outcome {
+pub fn outcome(snapshot: &Snapshot) -> Outcome {
     let name = &snapshot.product.name;
     let version = &snapshot.product.version;
     let audience = match snapshot.surface.scope() {
@@ -459,7 +459,7 @@ pub fn outcome(snapshot: &UiSnapshot) -> Outcome {
         OperationKind::Upgrade => Outcome {
             title: format!("{name} is up to date"),
             detail: match &snapshot.surface {
-                UiSurface::Install(InstallOptions {
+                Surface::Install(InstallOptions {
                     existing_version: Some(previous),
                     ..
                 }) => format!("Upgraded from version {previous} to {version}."),
@@ -535,7 +535,7 @@ pub struct UpdateRow {
     pub busy: bool,
 }
 
-pub fn update_row(snapshot: &UiSnapshot) -> Option<UpdateRow> {
+pub fn update_row(snapshot: &Snapshot) -> Option<UpdateRow> {
     if !snapshot.surface.updates_enabled() {
         return None;
     }
@@ -599,7 +599,7 @@ pub fn update_row(snapshot: &UiSnapshot) -> Option<UpdateRow> {
 }
 
 /// Which components applying the current choices would add and remove.
-pub fn pending_changes(surface: &UiSurface) -> (Vec<String>, Vec<String>) {
+pub fn pending_changes(surface: &Surface) -> (Vec<String>, Vec<String>) {
     let rows = component_rows(surface);
     let named = |wanted: Pending| {
         rows.iter()
@@ -611,7 +611,7 @@ pub fn pending_changes(surface: &UiSurface) -> (Vec<String>, Vec<String>) {
 }
 
 /// The sentence that says what applying the changes would do.
-pub fn pending_sentence(surface: &UiSurface) -> Option<String> {
+pub fn pending_sentence(surface: &Surface) -> Option<String> {
     let (added, removed) = pending_changes(surface);
     let list = |names: &[String]| match names {
         [] => String::new(),
@@ -659,8 +659,8 @@ pub struct Problem {
     pub technical: Option<String>,
 }
 
-pub fn problem(snapshot: &UiSnapshot) -> Problem {
-    let severity = if snapshot.state == UiState::RecoveryRequired {
+pub fn problem(snapshot: &Snapshot) -> Problem {
+    let severity = if snapshot.state == InstallerState::RecoveryRequired {
         Severity::Recovery
     } else {
         Severity::Failure
@@ -706,8 +706,8 @@ pub struct Blocked {
     pub apps: Vec<String>,
 }
 
-pub fn blocked(snapshot: &UiSnapshot) -> Blocked {
-    let UiState::Blocked { blockers } = &snapshot.state else {
+pub fn blocked(snapshot: &Snapshot) -> Blocked {
+    let InstallerState::Blocked { blockers } = &snapshot.state else {
         return Blocked {
             title: String::new(),
             detail: String::new(),
@@ -852,7 +852,7 @@ pub fn counts_line(group: &ChangeGroup) -> String {
 /// The same facts sit on the main screen as a decision summary. Here they are
 /// one line of context, because the sheet has to make sense on its own without
 /// repeating that summary as a form.
-pub fn review_context(snapshot: &UiSnapshot) -> (String, Option<String>) {
+pub fn review_context(snapshot: &Snapshot) -> (String, Option<String>) {
     let line = summary(snapshot)
         .into_iter()
         .map(|fact| fact.text)

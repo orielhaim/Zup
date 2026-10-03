@@ -300,7 +300,7 @@ fn preset() -> UiPreset {
     UiPreset {
         name: NonEmptyString::new("aurora").expect("a name"),
         version: semver::Version::parse("1.4.2").expect("a version"),
-        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+        protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
         required_capabilities: vec!["components".to_owned()],
         settings: serde_json::json!({ "hero": "Install Acme" }),
         assets: vec![UiAsset {

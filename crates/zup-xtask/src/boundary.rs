@@ -921,9 +921,9 @@ mod tests {
     /// gets the strict answer.
     #[test]
     fn the_lifecycle_delegation_is_the_matrixs_and_is_claimed_by_someone() {
-        assert!(matrix::delegates_platform_lifecycle("zup-ui-host"));
+        assert!(matrix::delegates_platform_lifecycle("zup-preset-host"));
         assert!(
-            matrix::delegates_platform_lifecycle("zup-ui-dev"),
+            matrix::delegates_platform_lifecycle("zup-preset-dev"),
             "the crate that supervises a compiler owns the same lifecycle"
         );
         assert!(

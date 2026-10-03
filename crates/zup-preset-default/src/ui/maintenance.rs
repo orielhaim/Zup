@@ -1,11 +1,11 @@
 //! Looking after an installation that exists.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::button::{Button, ButtonVariants};
-use zup_ui_sdk::gpui_kit::component::spinner::Spinner;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariants};
+use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce,
     SharedString, Styled, Window, div, relative,
 };

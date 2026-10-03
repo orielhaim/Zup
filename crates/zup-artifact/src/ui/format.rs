@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_ui_protocol::{UI_PROTOCOL_VERSION, UiCapabilities};
+use zup_preset_protocol::{PRESET_PROTOCOL_VERSION, Capabilities};
 
 use crate::error::ArtifactError;
 
@@ -70,7 +70,7 @@ pub struct PresetPackage {
     /// The UI wire protocol this build speaks.
     pub ui_protocol: u32,
     /// What this preset cannot present without.
-    pub required_capabilities: UiCapabilities,
+    pub required_capabilities: Capabilities,
     /// The JSON Schema of this preset's settings, generated from its own types.
     pub settings_schema: serde_json::Value,
     /// One entry per supported target, ordered by target so two builds of the
@@ -219,12 +219,12 @@ impl PresetPackage {
     }
 
     /// What a host would have to provide for this preset to work.
-    pub fn required_capabilities(&self) -> &UiCapabilities {
+    pub fn required_capabilities(&self) -> &Capabilities {
         &self.required_capabilities
     }
 
     /// Capability names this preset needs that `provided` does not have.
-    pub fn missing_capabilities(&self, provided: &UiCapabilities) -> Vec<&'static str> {
+    pub fn missing_capabilities(&self, provided: &Capabilities) -> Vec<&'static str> {
         provided.missing(&self.required_capabilities)
     }
 
@@ -235,7 +235,7 @@ impl PresetPackage {
 
     /// The wire protocol this crate speaks, for a consumer comparing against it.
     pub fn current_wire_protocol() -> u32 {
-        UI_PROTOCOL_VERSION
+        PRESET_PROTOCOL_VERSION
     }
 }
 

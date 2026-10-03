@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
-use zup_ui_sdk::gpui_kit::component::{Colorize, Theme, ThemeMode};
-use zup_ui_sdk::gpui_kit::{App, Hsla, Pixels, Rems, Rgba, Window, px};
+use zup_preset_sdk::gpui_kit::component::{Colorize, Theme, ThemeMode};
+use zup_preset_sdk::gpui_kit::{App, Hsla, Pixels, Rems, Rgba, Window, px};
 
 use crate::{Accent, Appearance, Settings};
 

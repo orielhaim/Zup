@@ -2,7 +2,7 @@
 //! it.
 //!
 //! Everything after that - the endpoint, the handshake, publishing a snapshot,
-//! reading an action, and ending the child - is in `zup_ui_host::process`,
+//! reading an action, and ending the child - is in `zup_preset_host::process`,
 //! because a development environment does exactly the same and a host with two
 //! launch paths would be a host whose behaviour could not be established from
 //! either.
@@ -19,7 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use zup_core::UiPreset;
-use zup_ui_protocol::UiCapabilities;
+use zup_preset_protocol::Capabilities;
 
 /// Why no window appeared.
 #[derive(Debug, thiserror::Error)]
@@ -66,20 +66,20 @@ pub struct Composed {
     /// The executable to launch.
     pub executable: PathBuf,
     /// What to tell the preset, once its executable is running.
-    pub configuration: zup_ui_protocol::UiConfiguration,
+    pub configuration: zup_preset_protocol::Configuration,
 }
 
 /// Materialize the preset executable and its assets, and check this launch can
 /// present them.
 pub fn materialize(
     source: &Source<'_>,
-    capabilities: &UiCapabilities,
+    capabilities: &Capabilities,
 ) -> Result<Composed, PresetError> {
     let preset = match source {
         Source::Composed { preset, .. } => *preset,
         Source::Installed { runtime, .. } => &runtime.preset,
     };
-    zup_ui_host::process::check_presentable(preset, capabilities)
+    zup_preset_host::process::check_presentable(preset, capabilities)
         .map_err(PresetError::Incompatible)?;
 
     let (executable, assets) = match source {
@@ -115,7 +115,7 @@ pub fn materialize(
 
     Ok(Composed {
         executable,
-        configuration: zup_ui_protocol::UiConfiguration {
+        configuration: zup_preset_protocol::Configuration {
             settings: preset.settings.clone(),
             assets,
         },
@@ -162,4 +162,4 @@ fn locate(executable: &Path) -> Result<PathBuf, PresetError> {
 
 // The session itself. Re-exported rather than reimplemented, so a caller that
 // already names this module keeps naming it.
-pub use zup_ui_host::process::{PresetProcess, PresetReader, SessionError, launch};
+pub use zup_preset_host::process::{PresetProcess, PresetReader, SessionError, launch};

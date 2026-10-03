@@ -76,7 +76,7 @@ fn precompiled(app_id: &str, install_name: &str) -> Vec<u8> {
     let package = resolve
         .push_str(
             "zup-plugin.wit",
-            include_str!("../../../wit/zup-plugin.wit"),
+            zup_plugin_abi::WIT_PACKAGE,
         )
         .expect("the plugin world parses");
     let world = resolve

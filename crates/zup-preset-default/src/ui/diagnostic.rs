@@ -1,13 +1,13 @@
 //! What went wrong, and what a person can do about it.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StatefulInteractiveElement, Styled, Window, div, relative,
 };
-use zup_ui_sdk::prelude::DiagnosticKind;
+use zup_preset_sdk::prelude::DiagnosticKind;
 
 use crate::model::{self, Severity};
 use crate::theme::{size, space, text};

@@ -16,6 +16,7 @@ zup-plan.workspace = true
 zup-plugin-contract.workspace = true
 
 [dev-dependencies]
+zup-plugin-abi = { workspace = true }
 rstest.workspace = true
 semver.workspace = true
 serde_json.workspace = true

@@ -2,10 +2,10 @@
 //! process answering over the real transport.
 //!
 //! Everything here crosses a process boundary: a host that creates the endpoint,
-//! a child executable that collects it, the `UiHello` and `HostHello` a shipped
+//! a child executable that collects it, the `PresetHello` and `HostHello` a shipped
 //! preset exchanges, the first snapshot, an action the child sends, and the state
 //! machine validating it. The peer is a real binary built against the public
-//! `zup-ui-sdk`, not an in-process fake, because a fake can only prove that the
+//! `zup-preset-sdk`, not an in-process fake, because a fake can only prove that the
 //! code agrees with itself.
 //!
 //! What this cannot cover is the window itself. Between "the host launched a
@@ -27,7 +27,7 @@ use zup_core::{
     NonEmptyString, SelectedScope, TargetTriple, Template, UiAsset, UiPreset,
 };
 use zup_installer::host::{HostDecision, HostState, preset};
-use zup_ui_protocol::{HostOffers, UI_PROTOCOL_VERSION, UiAction, UiCapabilities, UiCapability};
+use zup_preset_protocol::{HostOffers, PRESET_PROTOCOL_VERSION, Action, Capabilities, Capability};
 
 /// The child this test launches.
 ///
@@ -112,8 +112,8 @@ fn install_state(installer: &Installer) -> HostState {
 fn configuration(
     report: &Path,
     assets: BTreeMap<String, String>,
-) -> zup_ui_protocol::UiConfiguration {
-    zup_ui_protocol::UiConfiguration {
+) -> zup_preset_protocol::Configuration {
+    zup_preset_protocol::Configuration {
         settings: serde_json::json!({
             "hero": "Install Acme",
             "logo": "branding/logo.svg",
@@ -131,7 +131,7 @@ struct Session {
 }
 
 /// Run the production loop against one real child.
-fn run_session(state: &mut HostState, configuration: &zup_ui_protocol::UiConfiguration) -> Session {
+fn run_session(state: &mut HostState, configuration: &zup_preset_protocol::Configuration) -> Session {
     let mut process = preset::launch(
         &child(),
         state.capabilities().clone(),
@@ -147,7 +147,7 @@ fn run_session(state: &mut HostState, configuration: &zup_ui_protocol::UiConfigu
     let mut decisions = Vec::new();
     while let Some(action) = reader.next() {
         decisions.push(describe(state.accept(action.clone())));
-        if action == UiAction::Close {
+        if action == Action::Close {
             break;
         }
     }
@@ -257,8 +257,8 @@ fn an_application_asset_reaches_the_child_as_verified_bytes() {
 fn a_component_the_host_never_published_is_refused() {
     let installer = installer();
     let mut state = install_state(&installer);
-    let decision = state.accept(UiAction::SetComponent {
-        component: zup_ui_protocol::ComponentId::new("not-published").expect("an id"),
+    let decision = state.accept(Action::SetComponent {
+        component: zup_preset_protocol::ComponentId::new("not-published").expect("an id"),
         selected: true,
     });
     assert!(
@@ -276,14 +276,14 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
     let preset = UiPreset {
         name: NonEmptyString::new("needy").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
-        protocol: UI_PROTOCOL_VERSION,
-        required_capabilities: vec![UiCapability::Updates.to_string()],
+        protocol: PRESET_PROTOCOL_VERSION,
+        required_capabilities: vec![Capability::Updates.to_string()],
         settings: serde_json::json!({}),
         assets: Vec::new(),
     };
     let offered = zup_artifact::ui::offers_for(&installer, false);
     assert!(
-        !offered.contains(UiCapability::Updates),
+        !offered.contains(Capability::Updates),
         "this application configures no updates, so it cannot offer that capability"
     );
 
@@ -308,12 +308,12 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
 /// missing capability: adding a capability would not have helped.
 #[test]
 fn a_preset_from_another_protocol_generation_is_its_own_refusal() {
-    let host = HostOffers::new(UiCapabilities::new(UiCapability::ALL.iter().copied()));
+    let host = HostOffers::new(Capabilities::new(Capability::ALL.iter().copied()));
     let error = host
-        .check(UI_PROTOCOL_VERSION + 1, &UiCapabilities::default())
+        .check(PRESET_PROTOCOL_VERSION + 1, &Capabilities::default())
         .expect_err("a preset built against another generation");
     assert!(
-        matches!(error, zup_ui_protocol::Incompatible::Protocol { .. }),
+        matches!(error, zup_preset_protocol::Incompatible::Protocol { .. }),
         "{error}"
     );
 }
@@ -327,7 +327,7 @@ fn a_preset_whose_assets_are_absent_is_refused() {
     let preset = UiPreset {
         name: NonEmptyString::new("needy").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
-        protocol: UI_PROTOCOL_VERSION,
+        protocol: PRESET_PROTOCOL_VERSION,
         required_capabilities: Vec::new(),
         settings: serde_json::json!({}),
         assets: vec![UiAsset {
@@ -370,8 +370,8 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
 
     // A real package, written the way `zup ui pack` writes one.
     let mut writer = zup_artifact::ui::PresetPackageWriter::new(
-        zup_ui_protocol::PresetDescription::new("e2e", "1.0.0", settings_schema())
-            .with_capabilities(UiCapabilities::new([UiCapability::Components])),
+        zup_preset_protocol::PresetDescription::new("e2e", "1.0.0", settings_schema())
+            .with_capabilities(Capabilities::new([Capability::Components])),
     )
     .expect("a valid description");
     writer
@@ -403,8 +403,8 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     installer.preset = Some(UiPreset {
         name: NonEmptyString::new("e2e").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
-        protocol: UI_PROTOCOL_VERSION,
-        required_capabilities: vec![UiCapability::Components.to_string()],
+        protocol: PRESET_PROTOCOL_VERSION,
+        required_capabilities: vec![Capability::Components.to_string()],
         settings: serde_json::json!({
             "hero": "Install Acme",
             "logo": "branding/logo.svg",
@@ -506,7 +506,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
             HostDecision::Acknowledged => "acknowledged",
             other => Box::leak(format!("{other:?}").into_boxed_str()),
         });
-        if action == UiAction::Close {
+        if action == Action::Close {
             break;
         }
     }

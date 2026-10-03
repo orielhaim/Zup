@@ -151,7 +151,7 @@ pub fn not_an_image() -> Vec<u8> {
 /// package would be a test of the fixture rather than of the path a build takes.
 pub fn package(targets: &[&str]) -> Vec<u8> {
     let mut writer = zup_artifact::ui::PresetPackageWriter::new(
-        zup_ui_protocol::PresetDescription::new("aurora", "1.0.0", settings_schema()),
+        zup_preset_protocol::PresetDescription::new("aurora", "1.0.0", settings_schema()),
     )
     .expect("a valid description");
     for target in targets {

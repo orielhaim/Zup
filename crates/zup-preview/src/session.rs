@@ -30,8 +30,8 @@ use zup_core::{Sha256Digest, UiPreset};
 use zup_runtime::{
     CancellationHandle, RuntimeEvent, SimulatedJob, SimulatedLifecycle, run_simulated,
 };
-use zup_ui_host::HostDecision;
-use zup_ui_protocol::{OperationKind, UiAction, UiSnapshot};
+use zup_preset_host::HostDecision;
+use zup_preset_protocol::{OperationKind, Action, Snapshot};
 
 use crate::controls::{self, Command, Components, Effect};
 use crate::machine::Scenario;
@@ -159,7 +159,7 @@ pub enum StartError {
     #[error(transparent)]
     Staged(#[from] StageError),
     #[error(transparent)]
-    Session(#[from] zup_ui_host::SessionError),
+    Session(#[from] zup_preset_host::SessionError),
 }
 
 /// What a control did, in terms the session acts on.
@@ -176,13 +176,13 @@ pub enum ControlOutcome {
 /// Everything a preset can observe passes through here, and nothing else can
 /// reach the child. The child is presented the same state whether it was built by
 /// Cargo, read out of a `.zupui`, or copied from anywhere else, because what it
-/// sees is a [`Runtime`]'s configuration and a [`zup_ui_host::HostState`]'s
+/// sees is a [`Runtime`]'s configuration and a [`zup_preset_host::HostState`]'s
 /// snapshot rather than anything about how it was chosen.
 pub struct Runtime {
     simulator: Simulator,
     scenario: Scenario,
     /// Where the running child's actions arrive, replaced with the child.
-    actions: Option<Receiver<UiAction>>,
+    actions: Option<Receiver<Action>>,
     /// The simulated engine's events, while an operation is running.
     engine: Option<broadcast::Receiver<RuntimeEvent>>,
     /// Cancels the operation the engine is running.
@@ -210,12 +210,12 @@ impl Runtime {
     }
 
     /// The state a preset sees right now.
-    pub fn snapshot(&self) -> &UiSnapshot {
+    pub fn snapshot(&self) -> &Snapshot {
         self.simulator.snapshot()
     }
 
     /// What the preset is told the application configured.
-    pub fn configuration(&self) -> &zup_ui_protocol::UiConfiguration {
+    pub fn configuration(&self) -> &zup_preset_protocol::Configuration {
         self.simulator.configuration()
     }
 
@@ -388,8 +388,8 @@ impl Runtime {
     }
 
     /// A preset asked for something.
-    fn asked(&mut self, action: UiAction) {
-        let closing = matches!(action, UiAction::Close);
+    fn asked(&mut self, action: Action) {
+        let closing = matches!(action, Action::Close);
         match self.simulator.act(action) {
             HostDecision::Refused(refusal) => {
                 println!("  refused  {refusal}");

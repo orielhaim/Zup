@@ -31,7 +31,7 @@ use zup_preview::{
     ControlOutcome, Driver, Event, Runtime, Scenario, Seen, StateDirectory, Watcher, serve,
 };
 use zup_toolchain::ToolchainComponent;
-use zup_ui_compose::{PresetProblem, Resolved};
+use zup_preset_compose::{PresetProblem, Resolved};
 
 use crate::failure;
 use crate::project::{SelectedProject, TargetOverrideArgs};
@@ -286,7 +286,7 @@ impl Session {
                 .map(|resolved| resolved.path)
                 .map_err(|error| error.to_string())
         };
-        Ok(zup_ui_compose::resolve(
+        Ok(zup_preset_compose::resolve(
             &selected.manifest.ui,
             &self.project_root,
             installer,
@@ -400,12 +400,12 @@ impl Session {
     }
 
     /// The state the presented window is drawing.
-    pub fn state(&self) -> &zup_ui_protocol::UiSnapshot {
+    pub fn state(&self) -> &zup_preset_protocol::Snapshot {
         self.runtime.snapshot()
     }
 
     /// What the presented window is told the application configured.
-    pub fn configuration(&self) -> &zup_ui_protocol::UiConfiguration {
+    pub fn configuration(&self) -> &zup_preset_protocol::Configuration {
         self.runtime.configuration()
     }
 

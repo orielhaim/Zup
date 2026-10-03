@@ -92,7 +92,7 @@ description = "A zup installer preset"
 publish = false
 
 [dependencies]
-zup-ui-sdk = {{ version = "0.1.0" }}
+zup-preset-sdk = {{ version = "0.1.0" }}
 gpui-kit = "0.7"
 serde = {{ version = "1", features = ["derive"] }}
 schemars = "1"
@@ -161,8 +161,8 @@ opt-level = 2
     )
 }
 
-const MAIN: &str = r#"use zup_ui_sdk::prelude::*;
-use zup_ui_sdk::prelude::gpui::Window;
+const MAIN: &str = r#"use zup_preset_sdk::prelude::*;
+use zup_preset_sdk::prelude::gpui::Window;
 
 /// What an application may configure about how this preset looks.
 ///
@@ -182,7 +182,7 @@ pub struct Settings {
 
 struct Preset;
 
-impl zup_ui_sdk::Preset for Preset {
+impl zup_preset_sdk::Preset for Preset {
     const NAME: &'static str = env!("CARGO_PKG_NAME");
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -263,7 +263,7 @@ impl Render for View {
             );
 
         for component in snapshot.surface.components() {
-            let action = UiAction::SetComponent {
+            let action = Action::SetComponent {
                 component: component.id.clone(),
                 selected: !component.selected,
             };
@@ -284,13 +284,13 @@ impl Render for View {
         column.child(
             Button::new("install")
                 .label("Install")
-                .on_click(move |_, _, _| session.send(UiAction::Install)),
+                .on_click(move |_, _, _| session.send(Action::Install)),
         )
     }
 }
 
 fn main() {
-    if let Err(error) = zup_ui_sdk::run::<Preset>() {
+    if let Err(error) = zup_preset_sdk::run::<Preset>() {
         eprintln!("{error}");
         std::process::exit(1);
     }

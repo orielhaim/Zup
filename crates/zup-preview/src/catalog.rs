@@ -9,9 +9,9 @@
 
 use zup_presentation::RequirementStatus;
 use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
-use zup_ui_protocol::{
+use zup_preset_protocol::{
     ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence, InstallScope,
-    InstallationHealth, ProductIdentity, SelectionRequirement, UiAction, UpdateState,
+    InstallationHealth, ProductIdentity, SelectionRequirement, Action, UpdateState,
 };
 
 use crate::machine::{Footprint, Machine, Scenario, Surface};
@@ -261,7 +261,7 @@ fn maintained(scenario: Scenario) -> Machine {
 }
 
 /// Start an operation and report the events every run begins with.
-fn begin(machine: &mut Machine, action: UiAction) {
+fn begin(machine: &mut Machine, action: Action) {
     machine.act(action);
     machine.observe(&RuntimeEvent::StateChanged {
         state: RuntimeState::Preparing,
@@ -475,7 +475,7 @@ fn machine_only() -> Machine {
 
 fn machine_scope() -> Machine {
     let mut machine = open(with_components());
-    machine.act(UiAction::SetScope {
+    machine.act(Action::SetScope {
         scope: InstallScope::Machine,
     });
     machine
@@ -490,7 +490,7 @@ fn fixed_location() -> Machine {
 
 fn custom_location() -> Machine {
     let mut machine = open(with_components());
-    machine.act(UiAction::SetInstallDirectory {
+    machine.act(Action::SetInstallDirectory {
         directory: r"D:\Apps\Demo App".into(),
     });
     machine
@@ -647,21 +647,21 @@ fn upgrade() -> Machine {
 
 fn progress() -> Machine {
     let mut machine = components();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     files(&mut machine, 41 * 1024 * 1024, 96 * 1024 * 1024);
     machine
 }
 
 fn progress_unknown() -> Machine {
     let mut machine = components();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     machine.observe(&RuntimeEvent::PreflightStarted);
     machine
 }
 
 fn downloading() -> Machine {
     let mut machine = big_plan();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     machine.observe(&RuntimeEvent::PrerequisiteDownload {
         id: "vcredist".into(),
         completed: 9 * 1024 * 1024,
@@ -672,7 +672,7 @@ fn downloading() -> Machine {
 
 fn stopping() -> Machine {
     let mut machine = progress();
-    machine.act(UiAction::Cancel);
+    machine.act(Action::Cancel);
     machine
 }
 
@@ -684,7 +684,7 @@ fn installed() -> Machine {
 
 fn upgraded() -> Machine {
     let mut machine = upgrade();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     machine.finish_with(&InstallOutcome::Committed);
     machine
 }
@@ -740,11 +740,11 @@ fn update_failed() -> Machine {
 
 fn modify() -> Machine {
     let mut machine = maintenance();
-    machine.act(UiAction::SetComponent {
+    machine.act(Action::SetComponent {
         component: ComponentId::new("samples").expect("id"),
         selected: true,
     });
-    machine.act(UiAction::SetComponent {
+    machine.act(Action::SetComponent {
         component: ComponentId::new("cli").expect("id"),
         selected: false,
     });
@@ -753,21 +753,21 @@ fn modify() -> Machine {
 
 fn repairing() -> Machine {
     let mut machine = drifted();
-    begin(&mut machine, UiAction::Repair);
+    begin(&mut machine, Action::Repair);
     files(&mut machine, 12, 30);
     machine
 }
 
 fn repaired() -> Machine {
     let mut machine = maintenance();
-    begin(&mut machine, UiAction::Repair);
+    begin(&mut machine, Action::Repair);
     machine.finish_with(&InstallOutcome::Committed);
     machine
 }
 
 fn repaired_drift() -> Machine {
     let mut machine = drifted();
-    begin(&mut machine, UiAction::Repair);
+    begin(&mut machine, Action::Repair);
     machine.finish_with(&InstallOutcome::Committed);
     machine.set_drift(vec![
         r"C:\Users\you\AppData\Local\Programs\Demo App\settings.json".into(),
@@ -777,13 +777,13 @@ fn repaired_drift() -> Machine {
 
 fn uninstall_confirm() -> Machine {
     let mut machine = maintenance();
-    machine.act(UiAction::RequestUninstall);
+    machine.act(Action::RequestUninstall);
     machine
 }
 
 fn uninstalling() -> Machine {
     let mut machine = uninstall_confirm();
-    begin(&mut machine, UiAction::ConfirmUninstall);
+    begin(&mut machine, Action::ConfirmUninstall);
     machine.observe(&RuntimeEvent::OperationStarted {
         id: "remove-files".into(),
     });
@@ -792,7 +792,7 @@ fn uninstalling() -> Machine {
 
 fn uninstalled() -> Machine {
     let mut machine = uninstall_confirm();
-    begin(&mut machine, UiAction::ConfirmUninstall);
+    begin(&mut machine, Action::ConfirmUninstall);
     machine.finish_with(&InstallOutcome::Committed);
     machine
 }
@@ -819,7 +819,7 @@ fn failed() -> Machine {
 
 fn permission() -> Machine {
     let mut machine = machine_scope();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     machine.finish_with(&InstallOutcome::Failed(
         "elevation was declined: access is denied (os error 5)".into(),
     ));
@@ -828,7 +828,7 @@ fn permission() -> Machine {
 
 fn verification() -> Machine {
     let mut machine = big_plan();
-    begin(&mut machine, UiAction::Install);
+    begin(&mut machine, Action::Install);
     machine.finish_with(&InstallOutcome::Failed(
         "vcredist: digest mismatch: expected sha256:9f2c…41d0, found sha256:03ab…77e1".into(),
     ));

@@ -12,7 +12,7 @@
 //! nothing.
 
 use zup_core::Installer;
-use zup_ui_protocol::{UiCapabilities, UiCapability};
+use zup_preset_protocol::{Capabilities, Capability};
 
 /// What this application can offer a preset, across every surface it has.
 ///
@@ -20,26 +20,26 @@ use zup_ui_protocol::{UiCapabilities, UiCapability};
 /// installer, not a session, and a session's own surface is not known until
 /// somebody launches it. A host narrows this for the session it is actually
 /// doing, which is the only difference between the two answers.
-pub fn offers(installer: &Installer) -> UiCapabilities {
-    let mut capabilities = UiCapabilities::new([
+pub fn offers(installer: &Installer) -> Capabilities {
+    let mut capabilities = Capabilities::new([
         // A diagnostics summary and a plan preview are the installer's own
         // subject matter, and a preset that offers them costs nothing.
-        UiCapability::Diagnostics,
-        UiCapability::PlanPreview,
-        UiCapability::InstallDirectory,
+        Capability::Diagnostics,
+        Capability::PlanPreview,
+        Capability::InstallDirectory,
     ]);
     if !installer.components.is_empty() {
-        capabilities = capabilities.with(UiCapability::Components);
+        capabilities = capabilities.with(Capability::Components);
     }
     if installer.updates.is_some() {
-        capabilities = capabilities.with(UiCapability::Updates);
+        capabilities = capabilities.with(Capability::Updates);
     }
     if !installer.launchers.is_empty() {
-        capabilities = capabilities.with(UiCapability::Launch);
+        capabilities = capabilities.with(Capability::Launch);
     }
     // A maintenance surface always exists to be reached; what a given launch may
     // offer of it is the host's decision, not the application's.
-    capabilities.with(UiCapability::Maintenance)
+    capabilities.with(Capability::Maintenance)
 }
 
 /// What this installer provides, for one session.
@@ -48,10 +48,10 @@ pub fn offers(installer: &Installer) -> UiCapabilities {
 /// is not. A fresh install offers no maintenance surface, and a preset that
 /// needs one is refused before it is launched rather than opening a window whose
 /// buttons would all be dead.
-pub fn offers_for(installer: &Installer, maintenance: bool) -> UiCapabilities {
+pub fn offers_for(installer: &Installer, maintenance: bool) -> Capabilities {
     if maintenance {
         offers(installer)
     } else {
-        offers(installer).without(UiCapability::Maintenance)
+        offers(installer).without(Capability::Maintenance)
     }
 }

@@ -268,7 +268,7 @@ pub fn build_target_with_window(
         zup_core::UiPreset {
             name: NonEmptyString::new(format!("{}-preset", window.generation)).unwrap(),
             version: semver::Version::parse("1.0.0").unwrap(),
-            protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
             required_capabilities: vec!["components".to_owned()],
             settings: serde_json::Value::Object(settings),
             assets: ui_assets

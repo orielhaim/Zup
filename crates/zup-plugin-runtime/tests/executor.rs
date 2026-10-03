@@ -21,7 +21,7 @@ use zup_plugin_contract::{
 use zup_plugin_runtime::{LoadError, WasmtimePluginExecutor};
 
 const PLUGIN_ID: &str = "helper";
-const VALID_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_body(body: &str) -> Vec<u8> {
     let wat = format!(

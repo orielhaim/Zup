@@ -1,3 +1,11 @@
+//! What an ahead-of-time plugin artifact records, and how it is checked.
+//!
+//! A precompiled component is only loadable by the exact engine that produced
+//! it, so an artifact carries enough to prove it was: the Wasmtime version, the
+//! layout version, the ABI version, the digest of the WIT, and a fingerprint of
+//! the engine configuration. Every one of those is compared before a
+//! deserializer is handed a byte of the artifact.
+
 use std::fmt::{self, Write as _};
 
 use sha2::{Digest, Sha256};
@@ -8,17 +16,25 @@ use crate::config::{
     MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, WASMTIME_VERSION, engine_features,
 };
 
+/// Separates this fingerprint from any other use of a SHA-256, so a digest
+/// computed here can never be mistaken for one computed for another purpose.
 const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v1";
-const WIT: &[u8] = include_bytes!("../../../wit/zup-plugin.wit");
 
+/// The identity of one engine configuration.
+///
+/// Hash rather than a description because the answer is only ever compared, and
+/// a hash cannot be wrong in the way a list of settings can be: adding a limit
+/// changes the value whether or not anybody remembered to update a comment.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EngineFingerprint([u8; 32]);
 
 impl EngineFingerprint {
+    /// The raw digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// The digest as hex, which is how an artifact records it.
     pub fn to_hex(&self) -> String {
         let mut output = String::with_capacity(64);
         for byte in self.0 {
@@ -43,6 +59,7 @@ impl fmt::Display for EngineFingerprint {
     }
 }
 
+/// What an engine configured for `target` is, as one comparable value.
 pub fn engine_fingerprint(target: &str) -> EngineFingerprint {
     let mut hasher = Sha256::new();
     update_field(&mut hasher, FINGERPRINT_DOMAIN);
@@ -84,8 +101,13 @@ pub fn engine_fingerprint(target: &str) -> EngineFingerprint {
     EngineFingerprint(hasher.finalize().into())
 }
 
+/// The digest of the canonical WIT contract.
+///
+/// Recorded in every artifact and checked when one is loaded, so a component
+/// built against a different contract is refused rather than called with a
+/// signature its author never wrote.
 pub fn wit_package_digest() -> [u8; 32] {
-    Sha256::digest(WIT).into()
+    zup_plugin_abi::wit_package_digest()
 }
 
 fn update_field(hasher: &mut Sha256, value: &[u8]) {

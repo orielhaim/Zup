@@ -67,8 +67,8 @@ fn a_generated_project_resolves_against_the_published_sdk() {
             "{}\n{}\n",
             std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest"),
             patch(&[
-                ("zup-ui-sdk", "zup-ui-sdk"),
-                ("zup-ui-protocol", "zup-ui-protocol"),
+                ("zup-preset-sdk", "zup-preset-sdk"),
+                ("zup-preset-protocol", "zup-preset-protocol"),
             ])
         ),
     )
@@ -101,7 +101,7 @@ fn a_generated_project_resolves_against_the_published_sdk() {
         .iter()
         .map(|dependency| dependency["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(declared, ["gpui-kit", "schemars", "serde", "zup-ui-sdk"]);
+    assert_eq!(declared, ["gpui-kit", "schemars", "serde", "zup-preset-sdk"]);
     let resolved: Vec<&str> = metadata["packages"]
         .as_array()
         .expect("packages")
@@ -109,7 +109,7 @@ fn a_generated_project_resolves_against_the_published_sdk() {
         .map(|package| package["name"].as_str().expect("a name"))
         .collect();
     assert!(
-        resolved.contains(&"zup-ui-sdk"),
+        resolved.contains(&"zup-preset-sdk"),
         "and Cargo resolved the SDK to a real package, from outside this workspace"
     );
 }
@@ -127,7 +127,7 @@ fn a_generated_project_teaches_the_public_api_and_nothing_else() {
     let source = std::fs::read_to_string(root.join("src/main.rs")).expect("the source");
 
     assert!(
-        source.contains("zup_ui_sdk::run::<Preset>()"),
+        source.contains("zup_preset_sdk::run::<Preset>()"),
         "one call starts it"
     );
     assert!(

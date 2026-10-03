@@ -1,34 +1,44 @@
-wit_bindgen::generate!({
-    path: "../../../wit",
-    world: "plugin",
-});
+//! A plugin that records what an installation selected.
+//!
+//! Plugins return declarations; Zup installs them. Nothing here runs a command
+//! or writes a registry key, and the world this plugin implements imports
+//! nothing at all - which is what makes a plugin safe to ship inside somebody
+//! else's application.
 
-use exports::zup::plugin::planner::{
-    Context, GeneratedFile, Guest, InstallationPlan, PluginError, ResourceItem,
-};
+use zup_sdk::plugin::prelude::*;
 
-struct ConfigurePlugin;
+struct Configure;
 
-impl Guest for ConfigurePlugin {
-    fn plan(context: Context) -> Result<InstallationPlan, PluginError> {
-        let mut selected_components = context.selected_components;
-        selected_components.sort();
+impl Plugin for Configure {
+    fn plan(context: Context) -> Result<Plan, Error> {
+        let mut components = context.selected_components.clone();
+        components.sort();
 
-        let contents = format!(
-            "app id: {}\ninstall directory: {}\nselected components: {}\n",
-            context.app_id,
+        let report = format!(
+            "application: {}\nversion: {}\nplugin: {}\ninstall directory: {}\n\
+             scope: {}\nselected components: {}\n",
+            context.app_name,
+            context.app_version,
+            context.plugin_id,
             context.install_directory,
-            selected_components.join(", "),
-        )
-        .into_bytes();
+            context.scope.as_str(),
+            if components.is_empty() {
+                "none".to_owned()
+            } else {
+                components.join(", ")
+            },
+        );
 
-        Ok(InstallationPlan {
-            resources: vec![ResourceItem::GeneratedFile(GeneratedFile {
-                destination: "${install}/plugin-config.txt".to_owned(),
-                contents,
-            })],
-        })
+        Ok(Plan::new()
+            .generated_file(GeneratedFile::text(
+                "${install}/configure.txt",
+                report,
+            ))
+            .launcher(Launcher::menu(
+                format!("{} Settings", context.app_name),
+                "${launcher}",
+            )))
     }
 }
 
-export!(ConfigurePlugin);
+zup_sdk::plugin::export!(Configure);

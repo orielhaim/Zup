@@ -11,7 +11,7 @@ use zup_plugin_contract::{
     engine_fingerprint,
 };
 
-const VALID_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_wit(wit: &str) -> Vec<u8> {
     let mut resolve = Resolve::default();

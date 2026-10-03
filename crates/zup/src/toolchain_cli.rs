@@ -844,7 +844,7 @@ mod tests {
             // with the same reader a build consumes it with, so a fixture that
             // were anything else would be a fixture the resolver refuses.
             let mut writer = zup_artifact::ui::PresetPackageWriter::new(
-                zup_ui_protocol::PresetDescription::new(
+                zup_preset_protocol::PresetDescription::new(
                     "aurora",
                     "1.0.0",
                     serde_json::json!({ "type": "object" }),

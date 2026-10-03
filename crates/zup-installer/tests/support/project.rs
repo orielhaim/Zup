@@ -275,7 +275,7 @@ pub struct PresetSpec {
     /// The application-provided assets, by the name its settings used.
     pub assets: Vec<(String, Vec<u8>)>,
     /// The capabilities the preset cannot present without.
-    pub required_capabilities: Vec<zup_ui_protocol::UiCapability>,
+    pub required_capabilities: Vec<zup_preset_protocol::Capability>,
 }
 
 /// Compose an installer that carries a real preset and real UI assets.
@@ -310,7 +310,7 @@ pub fn compose_with_preset(app: &AppSpec, payload: &[Payload], preset: &PresetSp
     plan.installer.preset = Some(zup_core::UiPreset {
         name: zup_core::NonEmptyString::new(format!("{}-preset", app.name)).expect("a name"),
         version: semver::Version::parse(&app.version).expect("a version"),
-        protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+        protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
         required_capabilities: preset
             .required_capabilities
             .iter()

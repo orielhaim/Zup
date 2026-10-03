@@ -4,19 +4,24 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Stable WebAssembly component contract for zup plugins"
+description = "Host-side WebAssembly engine and validation for zup plugins"
+publish = false
+build = "build.rs"
 
 [features]
 default = []
+# Ahead-of-time compilation, for the build host only. A machine that installs
+# applications loads precompiled plugins and never needs a compiler.
 compiler = ["wasmtime/cranelift", "wasmtime/all-arch"]
 
 [dependencies]
 sha2.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true
+zup-plugin-abi.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-wat = "1"
 wit-component = { version = "=0.260.0", features = ["dummy-module"] }
 wit-parser = "=0.260.0"
+wat = "1"
