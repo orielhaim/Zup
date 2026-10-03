@@ -1,34 +1,35 @@
-# Verify the published UI crates the way a consumer outside this repository
-# would see them.
+# Verify the published authoring surface the way a consumer outside this
+# repository would see it.
 #
-# The three public crates form a chain:
+# There is exactly one crate an author depends on:
 #
-#   zup-ui-protocol  the wire format, versioning, and the domain vocabulary
-#   zup-ui-ipc       the portable process transport that carries it
-#   zup-ui-sdk       what a preset is written against
+#   zup-sdk    the facade, with a feature per authoring role
 #
-# A preset author depends on the SDK and, if they need the transport or the
-# protocol directly, on the other two. All three resolve from crates.io, so none
-# of them may name a crate that exists only in this repository.
+# and two roles behind it, which share a name and almost nothing else:
 #
-# `cargo publish` resolves dependencies from crates.io, so `zup-ui-sdk` cannot be
-# packaged until `zup-ui-protocol` and `zup-ui-ipc` are on the registry. That
-# ordering is correct - it is what makes the chain genuinely consumable from
-# outside - and it means the verification has to be done the way a third-party
-# project does it: from a directory that is not this workspace, depending only on
-# crates.io crates and the packaged archives of the crates beneath it.
+#   preset    a window, written in Rust against GPUI
+#   plugin    a declaration, compiled to a WebAssembly component
 #
-# So this proves four things, in the order they stop being true:
+# A preset project and a plugin project resolve differently, reach different
+# dependency graphs, and must not be able to reach each other's machinery. This
+# script proves that, from a directory outside this workspace, against the
+# packaged archives of the crates beneath the facade rather than the workspace's
+# copies - because a crate that only resolves because of a path this repository
+# happens to provide has not been shown to be publishable.
 #
-#   1. `zup-ui-protocol` and `zup-ui-ipc` each package, verify, and build alone.
-#   2. No public manifest names an internal Zup crate, in any form.
-#   3. `zup-ui-sdk` builds and tests outside this workspace, against the packaged
-#      protocol and transport rather than the workspace's copies.
-#   4. Nothing any of them builds reaches an internal crate.
+# So this proves five things, in the order they stop being true:
 #
-# The one thing this cannot prove is what `cargo publish` does for the two crates
-# that sit above `zup-ui-protocol` once it is on crates.io. That is a property of
-# the registry, not of this repository, and it is checked by publishing.
+#   1. Every published crate packages and verifies on its own.
+#   2. No published manifest names a crate that exists only here.
+#   3. `zup-sdk --features preset` resolves, builds and tests from outside, and
+#      its graph reaches GPUI and no WebAssembly runtime.
+#   4. `zup-sdk --features plugin` resolves, builds and tests from outside, and
+#      its graph reaches no GPUI at all.
+#   5. Neither role reaches an internal crate.
+#
+# The one thing this cannot prove is what `cargo publish` does for the crates
+# above `zup-plugin-abi` once it is on crates.io. That is a property of the
+# registry rather than of this repository, and it is checked by publishing.
 #
 # Run: ./scripts/verify-public-crates.ps1
 
@@ -36,37 +37,46 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    $protocol = "zup-ui-protocol"
-    $ipc = "zup-ui-ipc"
-    $sdk = "zup-ui-sdk"
-    $public = @($protocol, $ipc, $sdk)
+    # Published for use outside this repository. The facade is the only one an
+    # author names; the rest are published because Cargo resolves a transitive
+    # dependency from crates.io, not because anyone should reach them directly.
+    $published = @(
+        "zup-sdk",
+        "zup-preset-sdk",
+        "zup-preset-sdk-macros",
+        "zup-preset-protocol",
+        "zup-preset-ipc",
+        "zup-plugin-sdk",
+        "zup-plugin-abi"
+    )
+
+    # Everything else. A published crate that names one of these is a crate that
+    # can only be built inside the repository that owns it.
     $internal = @(
         "zup-core", "zup-runtime", "zup-plan", "zup-exec", "zup-windows",
         "zup-bundle", "zup-installer", "zup-artifact", "zup-transaction",
-        "zup-ui-package", "zup-presentation", "zup-build", "zup-manifest",
-        "zup-update", "zup-bootstrap", "zup-platform", "zup-acquire",
-        "zup-signing", "zup-toolchain", "zup-protocol", "zup-dispatch"
+        "zup-presentation", "zup-build", "zup-manifest", "zup-update",
+        "zup-bootstrap", "zup-platform", "zup-acquire", "zup-signing",
+        "zup-toolchain", "zup-protocol", "zup-dispatch", "zup-preview",
+        "zup-preset-host", "zup-preset-compose", "zup-preset-dev",
+        "zup-preset-default", "zup-preset-test", "zup-plugin-contract",
+        "zup-plugin-runtime", "zup-plugin-build", "zup-automation",
+        "zup-assets", "zup-xtask"
     )
 
-    # 1. The bottom of the chain is self-contained: cargo packages it, verifies
-    #    the packaged sources, and compiles them with no path to this workspace.
-    #    Nothing above it can be dry-run published until this one is on the
-    #    registry, so each of those is verified the way a consumer gets it
-    #    instead: built and tested from outside this workspace.
-    cargo publish -p $protocol --dry-run --allow-dirty
-    if ($LASTEXITCODE -ne 0) { throw "$protocol does not package on its own" }
-    cargo package -p $protocol --allow-dirty --no-verify | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "$protocol could not be packaged" }
+    # 1. Each published crate packages and verifies on its own.
+    foreach ($crate in $published) {
+        cargo publish -p $crate --dry-run --allow-dirty
+        if ($LASTEXITCODE -ne 0) { throw "$crate does not package on its own" }
+    }
 
-    # 2. No public manifest may reach a crate that exists only here. This is the
-    #    crates.io boundary stated as a check rather than as a claim, and it is
-    #    checked on the source manifests so it covers `cargo package`'s
-    #    rewriting as well as the declared shape.
-    foreach ($crate in $public) {
+    # 2. No published manifest reaches a crate that exists only here. Checked on
+    #    the source manifests so it covers `cargo package`'s rewriting as well as
+    #    the declared shape.
+    foreach ($crate in $published) {
         $declared = Get-Content -LiteralPath "crates\$crate\Cargo.toml" -Raw
-        # `publish` defaults to true, and a crate that cannot be packaged has
-        # already failed above, so what matters here is that none of them opts
-        # out of being published.
+        # A crate that could not be packaged has already failed above, so what
+        # matters here is that none of them opts out of being published.
         if ($declared -match "(?m)^\s*publish\s*=\s*false") { throw "$crate is not published" }
         foreach ($name in $internal) {
             if ($declared -match "(?m)^\s*$name\s*=") { throw "$crate depends on $name" }
@@ -76,75 +86,92 @@ try {
         }
     }
 
-    # 3. Each crate above the bottom is built and tested from outside the
-    #    workspace, against the *packaged* archive of the crate beneath it. So
-    #    the transport links the packaged protocol rather than this workspace's
-    #    copy, and the SDK links the packaged protocol and the transport copy
-    #    that was just built on its own. Every other dependency comes from
-    #    crates.io, so a preset author cannot reach an unpublished internal crate
-    #    through any of them.
+    # 3 and 4. Each role, resolved and built from outside this workspace.
+    #
+    # A copy of the facade is placed beside copies of everything it needs, with
+    # every path rewritten to a sibling. Nothing it builds can then come from this
+    # repository, so a crate that only resolves here is caught here.
     $work = Join-Path $root "target\public-crate-check"
     if (Test-Path $work) { Remove-Item -Recurse -Force $work }
     New-Item -ItemType Directory -Path $work | Out-Null
 
-    $archive = Get-ChildItem "target\package" -Filter "$protocol-*.crate" |
-        Select-Object -First 1
-    # A `.crate` is a gzipped tar with one top-level directory, so unpacking it
-    # leaves a nested directory of the same name.
-    tar -xf $archive.FullName -C $work
-    $unpacked = @{
-        $protocol = [IO.Path]::GetFileNameWithoutExtension($archive.Name)
-        $ipc      = $ipc
-        $sdk      = $sdk
-    }
-
-    foreach ($crate in @($ipc, $sdk)) {
-        # Each copy is a sibling of the crate beneath it, so its path dependency
-        # is one `..` and cannot reach anything else in the repository.
+    foreach ($crate in $published) {
         $outside = Join-Path $work $crate
         New-Item -ItemType Directory -Path $outside | Out-Null
         Copy-Item -Recurse -Force "crates\$crate\*" $outside
-        # An empty `[workspace]` detaches the copy from this repository, which is
-        # the whole point: nothing it builds can come from here.
+        # An empty `[workspace]` detaches the copy: this is the whole point, that
+        # nothing it builds is inherited from the repository it came from.
         Add-Content -LiteralPath (Join-Path $outside "Cargo.toml") -Value "`n[workspace]"
 
+        # Every dependency on another published crate becomes a sibling path.
         $manifest = Join-Path $outside "Cargo.toml"
         $text = Get-Content -LiteralPath $manifest -Raw
-        foreach ($beneath in @($protocol, $ipc)) {
-            if ($beneath -eq $crate) { continue }
-            $text = $text -replace `
-                "$beneath = \{ path = `"\.\./$beneath`", version = `"0\.1\.0`" \}", `
-                "$beneath = { path = `"../$($unpacked[$beneath])`" }"
+        foreach ($other in $published) {
+            if ($other -eq $crate) { continue }
+            $text = $text -replace "$other = \{ path = `"\.\./$other`", version = `"[0-9.]+`" \}", "$other = { path = `"../$other`" }"
         }
         Set-Content -LiteralPath $manifest -Value $text -NoNewline
-
-        Push-Location $outside
-        try {
-            cargo test --all-targets --all-features
-            if ($LASTEXITCODE -ne 0) { throw "$crate does not build outside this repository" }
-            $graph = cargo tree --edges normal --prefix none
-            if ($LASTEXITCODE -ne 0) { throw "could not read $crate's dependency graph" }
-            foreach ($name in $internal) {
-                if ($graph | Select-String -Pattern "(^|[^a-z-])$name v" -Quiet) {
-                    throw "$crate reaches the internal crate $name"
-                }
-            }
-            # The crate beneath has to be reachable by name, or a preset that
-            # wanted the transport rather than the SDK could not have it.
-            foreach ($beneath in @($protocol, $ipc)) {
-                if ($beneath -eq $crate) { continue }
-                if (-not ($graph | Select-String -Pattern "(^|[^a-z-])$beneath v" -Quiet)) {
-                    throw "$crate does not link $beneath, so a preset cannot reach it"
-                }
-            }
-        }
-        finally { Pop-Location }
     }
 
+    # The facade, with the preset role.
+    Push-Location (Join-Path $work "zup-sdk")
+    try {
+        cargo test --all-targets --no-default-features --features preset
+        if ($LASTEXITCODE -ne 0) { throw "the preset role does not build outside this repository" }
+        $graph = cargo tree --edges normal --prefix none --no-default-features --features preset
+        if ($LASTEXITCODE -ne 0) { throw "could not read the preset graph" }
+        foreach ($name in $internal) {
+            if ($graph | Select-String -Pattern "(^|[^a-z-])$name v" -Quiet) {
+                throw "the preset role reaches the internal crate $name"
+            }
+        }
+        foreach ($expected in @("zup-preset-sdk", "zup-preset-protocol", "zup-preset-ipc")) {
+            if (-not ($graph | Select-String -Pattern "(^|[^a-z-])$expected v" -Quiet)) {
+                throw "the preset role does not link $expected"
+            }
+        }
+        if (-not ($graph | Select-String -Pattern "(^|[^a-z-])gpui-kit v" -Quiet)) {
+            throw "the preset role does not reach GPUI, so a preset could not draw"
+        }
+        foreach ($forbidden in @("wasmtime", "zup-windows", "zup-installer")) {
+            if ($graph | Select-String -Pattern "(^|[^a-z-])$forbidden v" -Quiet) {
+                throw "the preset role reaches $forbidden, which decides what an installation does"
+            }
+        }
+    }
+    finally { Pop-Location }
+
+    # The facade, with the plugin role.
+    Push-Location (Join-Path $work "zup-sdk")
+    try {
+        cargo test --all-targets --no-default-features --features plugin
+        if ($LASTEXITCODE -ne 0) { throw "the plugin role does not build outside this repository" }
+        $graph = cargo tree --edges normal --prefix none --no-default-features --features plugin
+        if ($LASTEXITCODE -ne 0) { throw "could not read the plugin graph" }
+        foreach ($name in $internal) {
+            if ($graph | Select-String -Pattern "(^|[^a-z-])$name v" -Quiet) {
+                throw "the plugin role reaches the internal crate $name"
+            }
+        }
+        foreach ($expected in @("zup-plugin-sdk", "zup-plugin-abi")) {
+            if (-not ($graph | Select-String -Pattern "(^|[^a-z-])$expected v" -Quiet)) {
+                throw "the plugin role does not link $expected"
+            }
+        }
+        # The two assertions the design is made of: a plugin carries no window,
+        # and no runtime that would execute it.
+        foreach ($forbidden in @("gpui-kit", "gpui-pre", "wasmtime")) {
+            if ($graph | Select-String -Pattern "(^|[^a-z-])$forbidden v" -Quiet) {
+                throw "the plugin role reaches $forbidden, which it must never carry"
+            }
+        }
+    }
+    finally { Pop-Location }
+
     ""
-    "public UI crates: the protocol packages and publishes standalone, no public"
-    "manifest names an internal crate, and the transport and the SDK each build"
-    "and test outside this repository against the packaged protocol"
+    "authoring surface: every published crate packages on its own, no published"
+    "manifest names an internal crate, and each role of zup-sdk builds and tests"
+    "from outside this workspace with only the graphs its role should have"
 }
 finally {
     Pop-Location

@@ -297,9 +297,15 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
     for crossing in &findings.crossings {
         eprintln!("xtask: {crossing}");
     }
+    for isolation in &findings.isolations {
+        eprintln!("xtask: {isolation}");
+    }
     eprintln!(
         "xtask: {} finding(s)",
-        findings.duplicates.len() + findings.intrusions.len() + findings.crossings.len()
+        findings.duplicates.len()
+            + findings.intrusions.len()
+            + findings.crossings.len()
+            + findings.isolations.len()
     );
     Ok(ExitCode::from(1))
 }

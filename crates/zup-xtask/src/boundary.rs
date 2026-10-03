@@ -250,6 +250,33 @@ pub const BANNED_LITERALS: &[&str] = &[
     ".zup-payload-overlays",
 ];
 
+/// Source files that describe a machine rather than model one.
+///
+/// The portable boundary is about a package's model: it must not present a
+/// Windows concept as part of what it can represent. A preview scenario is not
+/// that. It is a description of a machine somebody might install onto, and
+/// naming the prerequisite such a machine would be asked for is the entire point
+/// of the scenario - a portable preview environment still previews the thing an
+/// installer actually installs.
+///
+/// The exemption is declared per package and per file, and it covers the literal
+/// table only: every structural rule still applies to these files, so a scenario
+/// that branched on the build host or reached for a Win32 namespace would be
+/// refused exactly as it would be anywhere else.
+pub const SCENARIO_FILES: &[(&str, &str)] = &[
+    // The named states `zup preview` offers. Each one describes a Windows
+    // machine, so each one may name what that machine would be missing.
+    ("zup-preview", "crates/zup-preview/src/catalog.rs"),
+    // A scenario's footprint, which records where a demo installation lands.
+    ("zup-preview", "crates/zup-preview/src/machine.rs"),
+];
+
+/// Whether a source file describes a machine rather than modelling one.
+pub fn is_scenario(package: &str, location: &str) -> bool {
+    SCENARIO_FILES
+        .iter()
+        .any(|(owner, path)| *owner == package && *path == location)
+}
 /// One boundary rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
@@ -589,6 +616,13 @@ fn check_source(
             });
         }
         if vocabulary != matrix::Vocabulary::Domain {
+            continue;
+        }
+        if is_scenario(&member.name, location) {
+            // A scenario describes a machine rather than modelling one, so it is
+            // allowed to name what such a machine has or is missing. The
+            // structural rules above have already run on this line and are
+            // unaffected: a scenario still may not branch on the build host.
             continue;
         }
         let literals = line.literals.to_ascii_lowercase();
