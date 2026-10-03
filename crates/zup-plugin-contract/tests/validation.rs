@@ -280,13 +280,29 @@ fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]
     );
 }
 
+/// The fingerprint is what stops a host from loading output a differently
+/// configured engine produced, so two calls have to agree and a change to any
+/// input has to move it.
+///
+/// The expected value is pinned rather than compared to a second call: the
+/// point is that the digest covers its inputs, and the WIT contract is one of
+/// them. A change here means the contract or the engine configuration changed,
+/// which is exactly the event an ahead-of-time artifact has to be rebuilt for.
 #[test]
-fn fingerprint_is_stable() {
-    let first: EngineFingerprint = engine_fingerprint("x86_64-pc-windows-msvc");
-    let second = engine_fingerprint("x86_64-pc-windows-msvc");
-    assert_eq!(first, second);
+fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
+    let first = engine_fingerprint("x86_64-pc-windows-msvc");
+    assert_eq!(
+        first,
+        engine_fingerprint("x86_64-pc-windows-msvc"),
+        "one configuration is one fingerprint"
+    );
+    assert_ne!(
+        first,
+        engine_fingerprint("aarch64-pc-windows-msvc"),
+        "the target is part of what an engine is"
+    );
     assert_eq!(
         first.to_hex(),
-        "bb10e7c2044e5f55ace87ae79d15a4f4846e61d3614101e3dbff11b0f0a918ef"
+        "55c7a6d0e0e7bd14f5cdd0b3a6176a2691a7ae54b99efa994ae4954990318a08"
     );
 }
