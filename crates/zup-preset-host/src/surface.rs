@@ -186,7 +186,7 @@ pub fn launchers(installer: &Installer) -> Vec<crate::Launchable> {
 
 /// What this installer can offer a preset.
 pub fn capabilities(installer: &Installer, maintenance: bool) -> Capabilities {
-    zup_artifact::ui::offers_for(installer, maintenance)
+    zup_artifact::preset::offers_for(installer, maintenance)
 }
 
 /// The location an installation committed, as text.

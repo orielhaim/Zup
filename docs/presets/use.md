@@ -37,7 +37,7 @@ zup preview
 
 Preview watches the application-facing preset inputs. Use it after changing the preset package, `[ui.settings]`, or configured UI assets.
 
-Preset source development is a separate loop: [`zup ui dev`](./develop).
+Preset source development is a separate loop: [`zup preset dev`](./develop).
 
 ## Cross-platform packages
 

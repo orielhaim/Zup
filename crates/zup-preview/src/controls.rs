@@ -9,7 +9,7 @@
 //! being developed against.
 //!
 //! One set, because there is one thing being controlled. A preset author running
-//! `zup ui dev` and an application author running `zup preview` are both driving
+//! `zup preset dev` and an application author running `zup preview` are both driving
 //! the same machine, and two lists of controls would drift into two different
 //! sets of states a real installation could be in.
 //!

@@ -1,6 +1,6 @@
 //! What a compiled preset executable says about itself when it is packaged.
 //!
-//! `zup ui pack` runs the executable with `--zup-describe` and reads one JSON
+//! `zup preset pack` runs the executable with `--zup-describe` and reads one JSON
 //! document. That is the only moment a preset binary is executed, and it
 //! happens in the preset author's build, never in an application's build.
 //!

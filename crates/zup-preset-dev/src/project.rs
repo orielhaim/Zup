@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// The preset project `zup ui dev` is developing.
+/// The preset project `zup preset dev` is developing.
 #[derive(Debug, Clone)]
 pub struct Project {
     /// The directory holding this package's `Cargo.toml`.
@@ -36,7 +36,7 @@ pub enum ProjectError {
     NoPackage(PathBuf),
     #[error("the package in `{0}` has no binary; a preset is an executable")]
     NoBinary(PathBuf),
-    #[error("the package in `{0}` has more than one binary; `zup ui dev` does not guess")]
+    #[error("the package in `{0}` has more than one binary; `zup preset dev` does not guess")]
     AmbiguousBinary(PathBuf),
 }
 

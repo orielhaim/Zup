@@ -1,4 +1,4 @@
-//! `zup ui dev`, driven the way a preset author drives it.
+//! `zup preset dev`, driven the way a preset author drives it.
 //!
 //! What is tested here is the half that only a preset author has: a Cargo project,
 //! a compiler, and the rule that a save to Rust is a build while a save to the
@@ -43,7 +43,7 @@ fn cargo() -> PathBuf {
 
 /// A preset project of this test's own.
 ///
-/// The source is never compiled in this suite - that is `zup ui dev`'s job, and it
+/// The source is never compiled in this suite - that is `zup preset dev`'s job, and it
 /// is proved end to end by running the command - but the watcher and the
 /// development document both need a project that really is one.
 fn probe() -> tempfile::TempDir {
@@ -58,7 +58,7 @@ fn probe() -> tempfile::TempDir {
 fn the_development_document_is_data_and_not_a_preset_format() {
     let directory = tempfile::tempdir().expect("a scratch directory");
     std::fs::write(
-        directory.path().join("zup.ui.dev.toml"),
+        directory.path().join("zup.preset.dev.toml"),
         "[settings]\nhero = \"one\"\n\n[assets]\n\"a.svg\" = \"a.svg\"\n",
     )
     .expect("the document");
@@ -98,7 +98,7 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
         "a save to the preset's own code is a source change"
     );
 
-    std::fs::write(root.join("zup.ui.dev.toml"), "[settings]\nhero = \"two\"\n")
+    std::fs::write(root.join("zup.preset.dev.toml"), "[settings]\nhero = \"two\"\n")
         .expect("the document is saved");
     assert!(
         matches!(
@@ -194,7 +194,7 @@ fn a_build_that_succeeded_without_naming_the_binary_is_not_run() {
 }
 
 /// A project that is not a preset project is refused with the reason, rather than
-/// guessed at. `zup ui dev` is pointed at a Cargo project by a person who expects
+/// guessed at. `zup preset dev` is pointed at a Cargo project by a person who expects
 /// a window, and "no package here" is a sentence they can act on.
 #[test]
 fn a_directory_with_no_manifest_is_refused_and_nothing_is_created() {

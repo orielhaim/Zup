@@ -259,7 +259,7 @@ fn check(
                 path: path.to_path_buf(),
                 reason: error.to_string(),
             })?;
-            zup_artifact::ui::PresetPackageView::open(bytes)
+            zup_artifact::preset::PresetPackageView::open(bytes)
                 .and_then(|view| view.verify())
                 .map_err(|error| ToolchainError::Unreadable {
                     path: path.to_path_buf(),

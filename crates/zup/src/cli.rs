@@ -120,7 +120,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         }
         // Not an operation command: a preview is a window somebody looks at, and
         // its result is what they saw rather than a document a caller reads. The
-        // same reason `zup ui dev` is not one.
+        // same reason `zup preset dev` is not one.
         Some(Commands::Preview(args)) => crate::preview::run(args, toolchain),
         Some(Commands::Build(args)) => {
             operation(args.format, zup_automation::OPERATION_BUILD, || {
@@ -178,11 +178,15 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
                 || crate::toolchain_cli::run_clean(args),
             ),
         },
-        Some(Commands::Ui(args)) => match args.command {
-            crate::ui::UiVerb::Init(args) => crate::ui::generate(&args),
-            crate::ui::UiVerb::Dev(args) => crate::ui::dev(&args),
-            crate::ui::UiVerb::Pack(args) => crate::ui::pack(&args),
-            crate::ui::UiVerb::Inspect(args) => crate::ui::inspect(&args),
+        Some(Commands::Preset(args)) => match args.command {
+            crate::preset::PresetVerb::Init(args) => crate::preset::generate(&args),
+            crate::preset::PresetVerb::Dev(args) => crate::preset::dev(&args),
+            crate::preset::PresetVerb::Pack(args) => crate::preset::pack(&args),
+            crate::preset::PresetVerb::Inspect(args) => crate::preset::inspect(&args),
+        },
+        Some(Commands::Plugin(args)) => match args.command {
+            crate::plugin::PluginVerb::Init(args) => crate::plugin::init(&args),
+            crate::plugin::PluginVerb::Build(args) => crate::plugin::build(&args),
         },
         Some(Commands::Ci(args)) => crate::ci::run(args),
         Some(Commands::Schema(args)) => crate::manifest_tools::run_schema(args),
@@ -394,7 +398,9 @@ pub enum Commands {
     /// Manage the zup binaries a build composes an artifact from.
     Toolchain(crate::toolchain_cli::ToolchainCommand),
     /// Build and inspect preset packages.
-    Ui(crate::ui::UiCommand),
+    Preset(crate::preset::PresetCommand),
+    /// Author and build installation plugins.
+    Plugin(crate::plugin::PluginCommand),
     /// Print the authoritative zup.toml JSON Schema.
     Schema(SchemaCommand),
     /// Format zup.toml without losing its comments.

@@ -1,12 +1,12 @@
-//! `zup ui inspect` against real packages, real ones and broken ones.
+//! `zup preset inspect` against real packages, real ones and broken ones.
 //!
 //! Inspect is the read side of the whole artifact pipeline: what a publisher
 //! checks before shipping, and what a consumer would check before trusting a
 //! package somebody else built. Neither can run the preset, so every failure it
 //! reports has to come from the bytes - which is what these cases break.
 
-use zup::ui::{InspectCommand, inspect};
-use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
+use zup::preset::{InspectCommand, inspect};
+use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::TargetTriple;
 use zup_preset_protocol::{PresetDescription, Capabilities, Capability};
 

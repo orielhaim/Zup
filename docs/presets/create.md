@@ -3,11 +3,11 @@
 Generate a preset project:
 
 ```bash
-zup ui init aurora
+zup preset init aurora
 cd aurora
 ```
 
-The project contains ordinary Rust source plus `zup.ui.dev.toml` for development data.
+The project contains ordinary Rust source plus `zup.preset.dev.toml` for development data.
 
 ## Minimal preset
 

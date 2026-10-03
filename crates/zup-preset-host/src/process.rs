@@ -1,7 +1,7 @@
 //! The host's end of a live preset session.
 //!
 //! Launching a preset and talking to it is the same work whichever host is doing
-//! it, so it is here rather than in either. `zup ui dev` swaps a child process
+//! it, so it is here rather than in either. `zup preset dev` swaps a child process
 //! every time a source file changes, and it has to be the *same* create-handshake-
 //! publish-read loop a fresh install runs, or a preset author would be developing
 //! against a transport that behaves slightly differently from the one their users

@@ -15,7 +15,7 @@
 //!
 //! What is left here is the part that is about *this* machine: the embedded
 //! package, the installed content store, the engine, and the elevation it needs.
-//! The state machine and the session are in `zup-preset-host`, so that `zup ui dev`
+//! The state machine and the session are in `zup-preset-host`, so that `zup preset dev`
 //! runs the same ones.
 
 pub mod preset;
@@ -28,7 +28,7 @@ pub use session::{
 };
 
 // The host half of the UI protocol, re-exported so a caller that already names
-// this module does not have to learn a second one. `zup ui dev` names
+// this module does not have to learn a second one. `zup preset dev` names
 // `zup_preset_host` directly; this is a convenience for the installer's own callers,
 // not a second path.
 pub use zup_preset_host::{

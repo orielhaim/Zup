@@ -12217,6 +12217,7 @@ dependencies = [
 name = "zup-plugin-build"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",

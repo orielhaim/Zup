@@ -3,7 +3,7 @@
 //! Two things in this repository are called a host and they are the same thing:
 //! the process that owns a machine's presentation state and speaks
 //! `zup-preset-protocol` to a preset. One runs inside an installer, driving a real
-//! engine. The other runs inside `zup ui dev`, driving a simulation of one. They
+//! engine. The other runs inside `zup preset dev`, driving a simulation of one. They
 //! share this crate so that a preset developed against the simulator meets the
 //! same state machine, the same refusals, and the same progress a preset installed
 //! from a release would.

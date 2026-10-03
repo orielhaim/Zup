@@ -1,4 +1,4 @@
-//! `zup ui pack` and `zup ui inspect`: producing and looking at a `.zupui`.
+//! `zup preset pack` and `zup preset inspect`: producing and looking at a `.zupui`.
 //!
 //! A preset is a Rust project, so publishing one is a Cargo build followed by
 //! packaging. Cargo is asked where its output actually is - through the
@@ -17,7 +17,7 @@ use std::process::Command;
 pub mod init;
 
 use clap::{Args, Subcommand, ValueHint};
-use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
+use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::TargetTriple;
 use zup_preset_protocol::{MAX_DESCRIBE_BYTES, PresetDescription};
 
@@ -36,13 +36,13 @@ pub struct BinarySource {
 
 /// Author and look at preset packages.
 #[derive(Debug, Args)]
-pub struct UiCommand {
+pub struct PresetCommand {
     #[command(subcommand)]
-    pub command: UiVerb,
+    pub command: PresetVerb,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum UiVerb {
+pub enum PresetVerb {
     /// Create a preset project.
     Init(InitCommand),
     /// Build and run the preset in this project, against a simulated installer.
@@ -74,7 +74,7 @@ pub struct DevCommand {
     pub profile: String,
 }
 
-/// Run `zup ui dev`.
+/// Run `zup preset dev`.
 pub fn dev(args: &DevCommand) -> miette::Result<()> {
     // What the session prints is its product, and a redirected stdout is block
     // buffered by default, so a development tool would say nothing at all for
@@ -84,18 +84,18 @@ pub fn dev(args: &DevCommand) -> miette::Result<()> {
     let root = match args.project.clone() {
         Some(project) => project,
         None => std::env::current_dir()
-            .map_err(|error| failure::error("zup.ui.dev_cwd", error.to_string()))?,
+            .map_err(|error| failure::error("zup.preset.dev_cwd", error.to_string()))?,
     };
     zup_preset_dev::develop(root, &args.profile)
-        .map_err(|error| failure::error("zup.ui.dev", error.to_string()))
+        .map_err(|error| failure::error("zup.preset.dev", error.to_string()))
 }
 
-/// Run `zup ui init`.
+/// Run `zup preset init`.
 pub fn generate(args: &InitCommand) -> miette::Result<()> {
     let parent = match args.directory.clone() {
         Some(directory) => directory,
         None => std::env::current_dir()
-            .map_err(|error| failure::error("zup.ui.init_cwd", error.to_string()))?,
+            .map_err(|error| failure::error("zup.preset.init_cwd", error.to_string()))?,
     };
     init::init(&args.name, &parent)
 }
@@ -195,7 +195,7 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
         .map_err(|error| miette::miette!("{error}"))?;
     write_durably(&output, &bytes)?;
 
-    // The package on disk is read back through the same reader `zup ui inspect`
+    // The package on disk is read back through the same reader `zup preset inspect`
     // uses, so a package that was written but cannot be read is not reported as
     // a success.
     let reopened = std::fs::read(&output).map_err(|error| miette::miette!("{error}"))?;
@@ -235,7 +235,7 @@ pub fn inspect(args: &InspectCommand) -> miette::Result<()> {
 
     println!("preset        {} {}", view.name(), view.version());
     println!("package       schema {}", package.schema);
-    println!("ui protocol   {}", package.ui_protocol);
+    println!("preset protocol   {}", package.ui_protocol);
     println!(
         "capabilities  {}",
         if package.required_capabilities.is_empty() {

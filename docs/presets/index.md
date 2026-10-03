@@ -36,11 +36,11 @@ A preset does not define files, services, privileges, transactions or update pol
 ## Workflow
 
 ```text
-zup ui init aurora
+zup preset init aurora
     ↓
-zup ui dev
+zup preset dev
     ↓
-zup ui pack --build <target>
+zup preset pack --build <target>
     ↓
 [ui] preset = "./aurora.zupui"
     ↓

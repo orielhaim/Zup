@@ -270,7 +270,7 @@ fn fixture_root() -> PathBuf {
 ///
 /// Deliberately a plain `Command`: this is a build that runs to completion and is
 /// waited on before the test proceeds, so nothing outlives it to be terminated as
-/// a group. The same command in `zup ui dev` is managed, because there a build is
+/// a group. The same command in `zup preset dev` is managed, because there a build is
 /// something a session stops waiting for.
 fn fixture_build(root: &Path) -> Command {
     let cargo = std::env::var_os("CARGO")

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The development environment zup ui dev runs a preset in"
+description = "The development environment zup preset dev runs a preset in"
 publish = false
 
 [dependencies]

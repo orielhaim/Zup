@@ -1,7 +1,7 @@
 //! The SDK's own contract, tested without a host.
 //!
 //! The transport needs a real pipe and a real installer, so it is exercised by
-//! the default preset's integration tests and by `zup ui dev` rather than here.
+//! the default preset's integration tests and by `zup preset dev` rather than here.
 //! What *is* here is everything a preset author depends on before any of that
 //! happens: the bootstrap it is launched with, the describe document its build
 //! reads, and the schema that document carries.

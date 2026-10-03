@@ -1,19 +1,28 @@
+//! Building a Zup plugin: turning a core module into a component, and a
+//! component into the ahead-of-time artifact an installer carries.
+//!
+//! Both are Zup's steps rather than a plugin author's. The first because a
+//! componentiser has to match the runtime that will load the result; the second
+//! because only the build machine knows which engine will execute it.
+
 #![forbid(unsafe_code)]
+
+mod component;
 
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-use thiserror::Error;
+pub use component::{ComponentError, componentize};
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
 use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PluginArtifact};
-use zup_core::{MAX_PLUGIN_ARTIFACTS, Sha256Digest, TargetTriple};
-use zup_core::{ResolvedPlugin, TargetBuildPlan};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, ResolvedPlugin, Sha256Digest, TargetBuildPlan, TargetTriple};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,
     WASMTIME_VERSION, wit_package_digest,
 };
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PluginBuildError {

@@ -1,23 +1,29 @@
-//! `zup ui init`: a preset project, from nothing.
+//! `zup preset init`: a preset project, from nothing.
 //!
-//! The generated project is a normal Cargo project that depends on the SDK, and
-//! it is small enough to read in one sitting. There is no `preset.toml`, no
-//! layout file, no screen abstraction and no component wrappers, because every
-//! one of those is a thing a preset author would have to learn before drawing
-//! anything, and GPUI already exists.
+//! The generated project depends on `zup-sdk` and nothing else. That is the
+//! whole claim this file has to keep true: a preset author should not have to
+//! know that `serde`, `schemars` and `gpui-kit` are how settings and windows are
+//! built, or that the versions of those have to line up with Zup's.
 //!
-//! The two things that are not obvious are generated anyway, because getting
-//! them wrong is expensive and nobody discovers it until a build takes four
-//! minutes: the dependency versions, which must resolve against the published
-//! SDK rather than a path, and the development profile, which makes the GPUI
-//! stack compile once instead of every time.
+//! It is also small on purpose. There is no `preset.toml`, no layout file, no
+//! screen abstraction and no component wrappers, because every one of those is a
+//! thing a preset author would have to learn before drawing anything, and GPUI
+//! already exists.
+//!
+//! The one thing that is not obvious is generated anyway, because getting it
+//! wrong costs four minutes per build: the development profile, which makes the
+//! GPUI stack compile once instead of every time.
 
 use std::path::Path;
 
 use crate::failure;
 
 /// A name that is usable as a Cargo package and a directory.
-fn package_name(raw: &str) -> Result<String, String> {
+///
+/// Shared with `zup plugin init`, because a package name is a package name: the
+/// two generators differ in what they write, not in what they may call the
+/// result.
+pub fn package_name(raw: &str) -> Result<String, String> {
     let name: String = raw
         .trim()
         .to_owned()
@@ -45,22 +51,22 @@ fn package_name(raw: &str) -> Result<String, String> {
 
 /// Create a preset project named `name` in `parent`.
 pub fn init(name: &str, parent: &Path) -> miette::Result<()> {
-    let name = package_name(name).map_err(|error| failure::error("zup.ui.init_name", error))?;
+    let name = package_name(name).map_err(|error| failure::error("zup.preset.init_name", error))?;
     let root = parent.join(&name);
     if root.exists() {
         return Err(failure::error(
-            "zup.ui.init_exists",
+            "zup.preset.init_exists",
             format!("`{}` already exists", root.display()),
         ));
     }
     std::fs::create_dir_all(root.join("src")).map_err(|error| {
-        failure::error("zup.ui.init_write", format!("{}: {error}", root.display()))
+        failure::error("zup.preset.init_write", format!("{}: {error}", root.display()))
     })?;
 
     for (relative, contents) in [
         ("Cargo.toml", manifest(&name)),
         ("src/main.rs", MAIN.to_owned()),
-        ("zup.ui.dev.toml", DEVELOPMENT.to_owned()),
+        ("zup.preset.dev.toml", DEVELOPMENT.to_owned()),
         (".gitignore", GITIGNORE.to_owned()),
     ] {
         write(&root.join(relative), &contents)?;
@@ -72,13 +78,13 @@ fn write(path: &Path, contents: &str) -> miette::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             failure::error(
-                "zup.ui.init_write",
+                "zup.preset.init_write",
                 format!("{}: {error}", parent.display()),
             )
         })?;
     }
     std::fs::write(path, contents).map_err(|error| {
-        failure::error("zup.ui.init_write", format!("{}: {error}", path.display()))
+        failure::error("zup.preset.init_write", format!("{}: {error}", path.display()))
     })
 }
 
@@ -91,11 +97,10 @@ edition = "2024"
 description = "A zup installer preset"
 publish = false
 
+# The whole of what a preset needs. The GPUI stack this builds against, and the
+# crates its settings are built from, are the ones this SDK was built with.
 [dependencies]
-zup-preset-sdk = {{ version = "0.1.0" }}
-gpui-kit = "0.7"
-serde = {{ version = "1", features = ["derive"] }}
-schemars = "1"
+zup-sdk = {{ version = "0.1.0", features = ["preset"] }}
 
 # GPUI is a very large dependency tree, and compiling it at `opt-level = 0` is
 # both slow and, for a text and layout engine, surprisingly slow at run time.
@@ -161,16 +166,15 @@ opt-level = 2
     )
 }
 
-const MAIN: &str = r#"use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::prelude::gpui::Window;
+const MAIN: &str = r#"use zup_sdk::preset::prelude::*;
 
 /// What an application may configure about how this preset looks.
 ///
-/// Every field is optional and every one has a default, because an application
-/// that configures nothing has to work. The schema this generates is what
-/// validates an application's `[ui.settings]`, so a field added here is a field
-/// an application can set without a second definition anywhere.
-#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+/// `#[settings]` gives this the three things Zup needs - a default, the
+/// deserializer the host's configuration arrives through, and the JSON Schema
+/// that validates an application's settings - so this project depends on the SDK
+/// alone.
+#[zup_sdk::preset::settings]
 pub struct Settings {
     /// A line above the product name.
     pub hero: Option<String>,
@@ -182,7 +186,7 @@ pub struct Settings {
 
 struct Preset;
 
-impl zup_preset_sdk::Preset for Preset {
+impl Preset for Preset {
     const NAME: &'static str = env!("CARGO_PKG_NAME");
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -222,7 +226,7 @@ impl zup_preset_sdk::Preset for Preset {
 /// Nothing in here is a Zup concept: a preset is a GPUI program that draws what
 /// the host published and asks for what it wants.
 struct View {
-    session: UiSession,
+    session: Session,
     state: Entity<SessionState>,
     settings: PresetSettings<Settings>,
     _state: Subscription,
@@ -290,14 +294,14 @@ impl Render for View {
 }
 
 fn main() {
-    if let Err(error) = zup_preset_sdk::run::<Preset>() {
+    if let Err(error) = zup_sdk::preset::run::<Preset>() {
         eprintln!("{error}");
         std::process::exit(1);
     }
 }
 "#;
 
-const DEVELOPMENT: &str = r##"# The application `zup ui dev` presents.
+const DEVELOPMENT: &str = r##"# The application `zup preset dev` presents.
 #
 # Settings are validated against the schema your `Settings` type generates, and
 # an invalid one leaves the last valid settings in force, so a typo here cannot

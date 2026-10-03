@@ -3,14 +3,14 @@
 Run a preset against a simulated installer:
 
 ```bash
-zup ui dev
+zup preset dev
 ```
 
-`zup ui dev` builds the preset project and opens it with development state. It is the preset-author equivalent of application-level `zup preview`.
+`zup preset dev` builds the preset project and opens it with development state. It is the preset-author equivalent of application-level `zup preview`.
 
 ## Development configuration
 
-The generated `zup.ui.dev.toml` supplies preset settings and application assets:
+The generated `zup.preset.dev.toml` supplies preset settings and application assets:
 
 ```toml
 [settings]

@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use jsonschema::error::ValidationErrorKind;
-use zup_artifact::ui::PresetPackageView;
+use zup_artifact::preset::PresetPackageView;
 use zup_core::{
     Installer, NonEmptyString, ProjectPath, ResolvedAsset, TargetTriple, Ui, UiAsset, UiPreset,
 };
@@ -110,7 +110,7 @@ pub struct Resolved {
 /// check the protocol and capabilities, validate the settings against the
 /// schema the package carries, resolve the assets the settings named - in that
 /// order, so a corrupt package is refused before anything is read out of it.
-/// This is the flow `zup ui inspect` already walks, because a consumer that
+/// This is the flow `zup preset inspect` already walks, because a consumer that
 /// parsed the format differently from a publisher's inspector would be two
 /// implementations of one format.
 ///
@@ -208,7 +208,7 @@ pub struct Prepared {
 
 /// Read and verify a package, and select one target's binary from it.
 ///
-/// The same reader `zup ui inspect` uses, and the same full verification: a
+/// The same reader `zup preset inspect` uses, and the same full verification: a
 /// package is proven before a single byte of it is used for anything.
 pub fn open(path: &Path) -> Result<(PresetPackageView, String), PresetProblem> {
     let bytes = std::fs::read(path).map_err(|error| PresetProblem::Unreadable {
@@ -394,7 +394,7 @@ fn asset_name(setting: &str) -> Result<NonEmptyString, PresetProblem> {
 /// actually doing, because `maintenance` is a fact about the session rather than
 /// about the application; the build cannot know it and must not pretend to.
 pub fn host_capabilities(installer: &Installer) -> Capabilities {
-    zup_artifact::ui::offers(installer)
+    zup_artifact::preset::offers(installer)
 }
 
 /// The settings names this schema marks as Zup-managed assets.

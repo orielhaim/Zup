@@ -83,7 +83,7 @@ acme-brand does not accept the configured settings: ui.settings.accent: string i
 The bundled preset is inspected like any other:
 
 ```bash
-zup ui inspect ./acme-brand.zupui
+zup preset inspect ./acme-brand.zupui
 ```
 
 ```text

@@ -1,7 +1,7 @@
 //! A whole session, driven by two [`Session`] values and nothing else.
 //!
 //! No pipe, no window, no runtime. A host and a preset running the same state
-//! machine is what makes "the same protocol in production and in `zup ui dev`"
+//! machine is what makes "the same protocol in production and in `zup preset dev`"
 //! a fact rather than an intention, and it can only be checked if a test can
 //! drive one end of a session without a process.
 //!

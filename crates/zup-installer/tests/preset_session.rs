@@ -281,7 +281,7 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
         settings: serde_json::json!({}),
         assets: Vec::new(),
     };
-    let offered = zup_artifact::ui::offers_for(&installer, false);
+    let offered = zup_artifact::preset::offers_for(&installer, false);
     assert!(
         !offered.contains(Capability::Updates),
         "this application configures no updates, so it cannot offer that capability"
@@ -323,7 +323,7 @@ fn a_preset_from_another_protocol_generation_is_its_own_refusal() {
 #[test]
 fn a_preset_whose_assets_are_absent_is_refused() {
     let installer = installer();
-    let offered = zup_artifact::ui::offers_for(&installer, false);
+    let offered = zup_artifact::preset::offers_for(&installer, false);
     let preset = UiPreset {
         name: NonEmptyString::new("needy").expect("name"),
         version: semver::Version::parse("1.0.0").expect("version"),
@@ -368,8 +368,8 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     let directory = tempfile::tempdir().expect("a directory");
     let child_bytes = std::fs::read(child()).expect("the child preset is built");
 
-    // A real package, written the way `zup ui pack` writes one.
-    let mut writer = zup_artifact::ui::PresetPackageWriter::new(
+    // A real package, written the way `zup preset pack` writes one.
+    let mut writer = zup_artifact::preset::PresetPackageWriter::new(
         zup_preset_protocol::PresetDescription::new("e2e", "1.0.0", settings_schema())
             .with_capabilities(Capabilities::new([Capability::Components])),
     )
@@ -381,7 +381,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
         )
         .expect("one binary for the host");
     let package = writer.finish().expect("a verified package");
-    let view = zup_artifact::ui::PresetPackageView::open(package).expect("opens");
+    let view = zup_artifact::preset::PresetPackageView::open(package).expect("opens");
     view.verify().expect("verifies");
     // What a build selects out of it: the target's native binary, not the package.
     let selected = view
@@ -459,7 +459,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     );
 
     // The host reads the composed installer and materializes from it.
-    let offered = zup_artifact::ui::offers_for(&installer, false);
+    let offered = zup_artifact::preset::offers_for(&installer, false);
     let composed = preset::materialize(
         &preset::Source::Composed {
             executable: &output,

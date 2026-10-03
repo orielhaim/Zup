@@ -23,10 +23,10 @@ Common project selection flags include `--manifest` and repeatable `--target`. C
 
 | Command | Purpose |
 | --- | --- |
-| `zup ui init <name>` | create a preset project |
-| `zup ui dev` | run a preset against a simulated installer |
-| `zup ui pack` | package target binaries into `.zupui` |
-| `zup ui inspect <file>` | inspect a preset package |
+| `zup preset init <name>` | create a preset project |
+| `zup preset dev` | run a preset against a simulated installer |
+| `zup preset pack` | package target binaries into `.zupui` |
+| `zup preset inspect <file>` | inspect a preset package |
 
 ## Release
 
@@ -50,7 +50,7 @@ Use command help as the authoritative flag reference for the installed Zup versi
 ```bash
 zup --help
 zup build --help
-zup ui pack --help
+zup preset pack --help
 zup publish github --help
 ```
 

@@ -74,7 +74,7 @@ mod release;
 mod select;
 mod store;
 mod table;
-pub mod ui;
+pub mod preset;
 mod variant;
 mod web;
 

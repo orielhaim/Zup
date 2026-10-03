@@ -13,7 +13,7 @@
 
 use sha2::Digest;
 
-use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
+use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::{
     Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, TargetTriple, Template,
@@ -637,7 +637,7 @@ fn selecting_the_same_package_twice_gives_the_same_thing() {
     assert_eq!(first.required_capabilities, second.required_capabilities);
 }
 
-/// The package a build consumes is the package `zup ui inspect` reads, which is
+/// The package a build consumes is the package `zup preset inspect` reads, which is
 /// what makes "verify before composing" the same statement in both commands.
 #[test]
 fn a_build_and_an_inspector_read_one_package() {

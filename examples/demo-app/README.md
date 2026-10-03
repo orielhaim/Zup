@@ -157,7 +157,7 @@ application can say `logo = "branding/logo.svg"` under `[ui.settings]` and have
 Zup resolve, hash and hand over the bytes.
 
 The bundled preset takes exactly one setting, `hero`, and marks nothing as an
-asset. `zup ui inspect` on a packed copy of it says so:
+asset. `zup preset inspect` on a packed copy of it says so:
 
 ```
 preset        zup-preset-default 0.0.1
@@ -180,7 +180,7 @@ struct Settings {
 }
 ```
 
-`zup ui pack` that preset, then set in `zup.toml`:
+`zup preset pack` that preset, then set in `zup.toml`:
 
 ```toml
 [ui]

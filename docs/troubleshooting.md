@@ -126,7 +126,7 @@ no staged preset cannot draw a window. See
 Check what the preset actually accepts:
 
 ```bash
-zup ui inspect ./acme-brand.zupui
+zup preset inspect ./acme-brand.zupui
 ```
 
 The output lists the settings it takes, and whether it permits others. A key that

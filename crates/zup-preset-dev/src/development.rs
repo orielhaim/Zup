@@ -6,7 +6,7 @@
 //! seen a real one of either is a preset that meets its first application on a
 //! user's machine.
 //!
-//! So `zup ui dev` presents an application, described in the preset's own
+//! So `zup preset dev` presents an application, described in the preset's own
 //! project. It is a source file rather than something under the development
 //! state directory, because it is the thing being authored: it belongs in the
 //! same commit as the code it exercises, and a `.zup` directory is by
@@ -27,7 +27,7 @@ use serde::Deserialize;
 ///
 /// Public because it is a thing a preset author puts in a commit and a thing the
 /// watcher has to recognise, and both of those are outside this file.
-pub const FILE_NAME: &str = "zup.ui.dev.toml";
+pub const FILE_NAME: &str = "zup.preset.dev.toml";
 
 /// Why a development document could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +40,7 @@ pub enum DevelopmentError {
     AssetWithoutFile { name: String },
 }
 
-/// The application `zup ui dev` presents.
+/// The application `zup preset dev` presents.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Development {

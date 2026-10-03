@@ -8,7 +8,7 @@
 
 use rstest::rstest;
 use zup_artifact::ArtifactError;
-use zup_artifact::ui::{
+use zup_artifact::preset::{
     HEADER_BYTES, PACKAGE_SCHEMA, PresetPackage, PresetPackageView, PresetPackageWriter,
     decode_metadata, encode_metadata,
 };

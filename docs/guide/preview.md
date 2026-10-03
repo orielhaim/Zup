@@ -47,4 +47,4 @@ zup preview
 
 Preview resolves the same preset and `[ui.settings]` the build uses, then runs that UI against a simulated machine. It does not write application files, PATH entries, shortcuts, services or uninstall state.
 
-Use `zup preview` when authoring an application. Preset authors use [`zup ui dev`](/presets/develop), which builds the preset source and supplies a development scenario.
+Use `zup preview` when authoring an application. Preset authors use [`zup preset dev`](/presets/develop), which builds the preset source and supplies a development scenario.

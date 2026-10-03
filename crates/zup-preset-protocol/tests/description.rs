@@ -1,7 +1,7 @@
 //! What a preset says about itself, and what a publisher can do with that
 //! without running it.
 //!
-//! `zup ui pack` is the only moment a preset executable runs, and it runs in the
+//! `zup preset pack` is the only moment a preset executable runs, and it runs in the
 //! preset author's build. Everything after that - packaging, inspecting,
 //! validating an application's settings, composing an installer - has to work
 //! from the document alone, so each rule here is tested by breaking the
@@ -48,7 +48,7 @@ fn a_preset_that_needs_nothing_says_so() {
     assert!(plain.required_capabilities.is_empty());
 }
 
-/// The describe flag is the whole of the contract between `zup ui pack` and a
+/// The describe flag is the whole of the contract between `zup preset pack` and a
 /// preset executable, so it is a constant rather than a string repeated at both
 /// ends.
 #[test]
@@ -81,7 +81,7 @@ fn a_settings_schema_that_is_not_an_object_is_refused() {
 }
 
 /// The describe document round-trips through JSON unchanged, because the whole
-/// of `zup ui pack` is a process printing it and another process reading it.
+/// of `zup preset pack` is a process printing it and another process reading it.
 #[test]
 fn the_describe_document_survives_json() {
     let described = description();

@@ -9,7 +9,7 @@ serious commitment: you build it for every target you support.
 ## Create one
 
 ```bash
-zup ui init acme-brand
+zup preset init acme-brand
 cd acme-brand
 ```
 
@@ -17,7 +17,7 @@ cd acme-brand
 acme-brand/
   Cargo.toml
   src/main.rs
-  zup.ui.dev.toml
+  zup.preset.dev.toml
   .gitignore
 ```
 
@@ -28,7 +28,7 @@ a button per component.
 ## Develop it
 
 ```bash
-zup ui dev
+zup preset dev
 ```
 
 Builds and runs the preset against a simulated installer, and watches three
@@ -37,14 +37,14 @@ things:
 | Change | What happens |
 | --- | --- |
 | A `.rs` file | Rebuild and replace the preset |
-| `zup.ui.dev.toml` | Resend the configuration |
+| `zup.preset.dev.toml` | Resend the configuration |
 | An asset file | Rematerialize it |
 
 Cheapest first, so editing an asset does not cost a rebuild. The session shows
 the compiler's diagnostics, and a build that fails leaves the previous preset
 running rather than taking the window down.
 
-`zup.ui.dev.toml` is not a preset format and is never read by a build. It is a
+`zup.preset.dev.toml` is not a preset format and is never read by a build. It is a
 development convenience:
 
 ```toml
@@ -166,7 +166,7 @@ network.
 ## Pack it
 
 ```bash
-zup ui pack --build x86_64-pc-windows-msvc
+zup preset pack --build x86_64-pc-windows-msvc
 ```
 
 Writes `acme-brand-1.0.0.zupui` here. `--build` builds a target with Cargo and
@@ -188,7 +188,7 @@ preset = "./acme-brand-1.0.0.zupui"
 ## Check a package
 
 ```bash
-zup ui inspect acme-brand-1.0.0.zupui
+zup preset inspect acme-brand-1.0.0.zupui
 ```
 
 Reports the name, version, schema, UI protocol, required capabilities, the

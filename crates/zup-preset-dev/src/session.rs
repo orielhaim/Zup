@@ -269,7 +269,7 @@ impl Session {
         }
     }
 
-    /// What the preset says it is, read the way `zup ui pack` reads it.
+    /// What the preset says it is, read the way `zup preset pack` reads it.
     ///
     /// The same document, produced by the same code, so a preset that cannot be
     /// developed against is refused for the reason a build would refuse it

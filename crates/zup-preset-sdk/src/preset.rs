@@ -53,7 +53,7 @@ use crate::transport::{Bootstrap, Channel, Identity, Opened, TransportError};
 
 /// A preset's typed settings.
 ///
-/// `serde` carries them and `schemars` generates the schema `zup ui pack` puts
+/// `serde` carries them and `schemars` generates the schema `zup preset pack` puts
 /// in the package, so an application's `[ui.settings]` is validated against the
 /// preset's own types without the preset being executed and without a second
 /// definition language beside Cargo and Rust.
@@ -138,7 +138,7 @@ impl<TSettings> PresetContext<TSettings> {
 /// ```
 ///
 /// The two constants are Cargo's own package identity, read with `env!` in the
-/// *preset's* crate. `zup ui pack` cross-checks them against the same fields
+/// *preset's* crate. `zup preset pack` cross-checks them against the same fields
 /// from `cargo metadata`, so a preset whose executable disagrees with its
 /// manifest is refused rather than packaged under a name nobody can trace.
 pub trait Preset: 'static {
@@ -232,7 +232,7 @@ pub fn run<P: Preset>() -> Result<(), PresetError> {
     serve::<P>(bootstrap)
 }
 
-/// Print what this preset is, for `zup ui pack`.
+/// Print what this preset is, for `zup preset pack`.
 ///
 /// A build and publishing concern, and the only time a preset executable runs.
 /// The schema is generated from the preset's own `Settings` type, so the

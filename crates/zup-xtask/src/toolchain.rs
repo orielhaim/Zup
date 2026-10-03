@@ -184,7 +184,40 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
     let peer = build_and_stage_test_preset(root, &staged, profile)?;
     println!("  preset-peer        {}", component_name(&peer));
     written.push(peer);
+
+    build_example_plugin(root)?;
     Ok(written)
+}
+
+/// The example plugin, built the way an author builds one.
+///
+/// Not staged as a toolchain component, because it is not one: nothing an
+/// installer ships reads it. It is built here because a test that loads it has
+/// to be loading something current. Built through `zup plugin build` rather than
+/// by invoking cargo and a componentiser directly, so the path those tests
+/// depend on is the path an author produces.
+fn build_example_plugin(root: &Path) -> Result<(), String> {
+    let project = root.join("examples").join("plugins").join("configure");
+    if !project.is_dir() {
+        return Err(format!(
+            "no example plugin at {}",
+            project.display()
+        ));
+    }
+    cargo(
+        root,
+        &[
+            "run",
+            "--quiet",
+            "-p",
+            "zup",
+            "--",
+            "plugin",
+            "build",
+            "--project",
+            &project.to_string_lossy(),
+        ],
+    )
 }
 
 /// Pack the default preset and stage it for this machine.
@@ -222,7 +255,7 @@ fn build_and_stage_test_preset(
     Ok(destination)
 }
 
-/// Published through `zup ui pack` rather than by writing a package here, so the
+/// Published through `zup preset pack` rather than by writing a package here, so the
 /// preset Zup ships is produced by the same publisher a third-party author uses
 /// and a build that consumes it is consuming something a user could have
 /// downloaded. The package carries every target it was built for, so the staged
@@ -248,7 +281,7 @@ fn build_and_stage_preset(
             "--profile",
             profile,
             "--",
-            "ui",
+            "preset",
             "pack",
             "--manifest",
             &root.join(PRESET_DIRECTORY).to_string_lossy(),

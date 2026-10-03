@@ -1,6 +1,6 @@
 //! `zup preview`: the application's real installer window, over a simulated machine.
 //!
-//! This is for an application author. `zup ui dev` is for a preset author, and
+//! This is for an application author. `zup preset dev` is for a preset author, and
 //! the two differ in what they watch and in where the window comes from: a preset
 //! author compiles Rust, and an application author resolves a package. Below that
 //! they are the same thing, because both run the same [`zup_preview`] against the
@@ -443,7 +443,7 @@ impl Session {
 
     /// One line of the control surface, and what it did to the simulated machine.
     ///
-    /// The same controls `zup ui dev` offers, on the same session, because there
+    /// The same controls `zup preset dev` offers, on the same session, because there
     /// is one machine being simulated and one set of things a person can do to it.
     pub fn control(&mut self, line: &str) -> ControlOutcome {
         self.runtime.control(line)

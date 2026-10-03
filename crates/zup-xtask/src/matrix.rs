@@ -85,7 +85,7 @@ pub const PORTABLE_CORE: &[&str] = &[
     // reimplementing any of it.
     "zup-preset-ipc",
     // The host side of the UI protocol, with no engine behind it. Portable because a
-    // preset author meets it in zup ui dev before they meet an installer, and a
+    // preset author meets it in zup preset dev before they meet an installer, and a
     // state machine only one platform can run is not one they can develop against.
     "zup-preset-host",
     // Which window an application presents, and what it is given. Portable because
@@ -99,7 +99,7 @@ pub const PORTABLE_CORE: &[&str] = &[
     // one platform can run is an environment nobody outside that platform can
     // develop a portable preset with.
     "zup-preview",
-    // The source half of `zup ui dev`: the Cargo project a preset author edits
+    // The source half of `zup preset dev`: the Cargo project a preset author edits
     // and the compiler that has to run for it. Portable for the same reason.
     "zup-preset-dev",
     "zup-update",

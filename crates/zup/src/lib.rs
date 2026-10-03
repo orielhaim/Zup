@@ -26,6 +26,8 @@ mod init;
 mod inspect_artifact;
 mod manifest_tools;
 mod packages;
+pub mod plugin;
+pub mod preset;
 pub mod preview;
 pub mod project;
 mod publish;
@@ -34,7 +36,6 @@ pub mod report;
 mod signing;
 mod toolchain;
 pub mod toolchain_cli;
-pub mod ui;
 
 use std::path::{Path, PathBuf};
 

@@ -39,7 +39,7 @@ zup preview
 Preset author:
 
 ```bash
-zup ui dev
+zup preset dev
 ```
 
 Use `preview` to test a project's selected preset and settings. Use `ui dev` to iterate on preset source.
@@ -49,7 +49,7 @@ Use `preview` to test a project's selected preset and settings. Use `ui dev` to 
 Inspect the package:
 
 ```bash
-zup ui inspect path/to/preset.zupui
+zup preset inspect path/to/preset.zupui
 ```
 
 Then compare `[ui.settings]` with the preset's schema. Settings belong to the selected preset; they are not global Zup options.

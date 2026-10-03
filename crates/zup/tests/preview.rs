@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zup::preview::Session;
-use zup_artifact::ui::PresetPackageWriter;
+use zup_artifact::preset::PresetPackageWriter;
 use zup_preview::ControlOutcome;
 use zup_toolchain::ToolchainComponent;
 use zup_preset_compose::resolve;
