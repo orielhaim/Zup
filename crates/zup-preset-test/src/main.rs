@@ -197,8 +197,15 @@ fn main() {
         );
     }
 
-    // And then the window closes, which is how a preset ends a session.
-    pending.push(session.frame(Message::Closed).expect("a preset may close"));
+    // And then the window closes. An action rather than a bare `Closed` frame,
+    // because that is what a shipped preset sends when a person closes its
+    // window, and a peer that tore the transport down instead would never
+    // exercise the production close.
+    pending.push(
+        session
+            .frame(Message::Action(Action::Close))
+            .expect("a preset may ask to close"),
+    );
 
     let sender = channel.sender().clone();
     std::thread::Builder::new()

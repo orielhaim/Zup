@@ -197,8 +197,9 @@ fn a_real_child_completes_the_handshake_and_its_action_is_validated() {
     let report = std::fs::read_to_string(&report).expect("the child reported what it received");
     assert_eq!(
         session.decisions,
-        ["acknowledged", "run", "acknowledged"],
-        "the child chose a component, asked to install, and closed; it said: {report}"
+        ["plan", "run", "acknowledged"],
+        "the child chose a component - which this installer replans for, because it \
+         offers a plan preview - asked to install, and closed; it said: {report}"
     );
     assert!(
         session.running_after,
@@ -504,18 +505,14 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     let reader = process.take_reader();
     let mut decisions = Vec::new();
     while let Some(action) = reader.next() {
-        decisions.push(match state.accept(action.clone()) {
-            HostDecision::Run { .. } => "run",
-            HostDecision::Acknowledged => "acknowledged",
-            other => Box::leak(format!("{other:?}").into_boxed_str()),
-        });
+        decisions.push(describe(state.accept(action.clone())));
         if action == Action::Close {
             break;
         }
     }
     assert_eq!(
         decisions,
-        ["acknowledged", "run", "acknowledged"],
+        ["plan", "run", "acknowledged"],
         "the preset the installer carried drove a real session"
     );
 

@@ -1240,7 +1240,14 @@ mod tests {
         let diagnostic =
             DiagnosticPresentation::from_message("blocked by running applications", false);
         assert_eq!(diagnostic.kind, DiagnosticKind::Blocked);
-        assert!(diagnostic.recovery.contains("Retry"));
+        // The words are the blocked screen's own button label, because the copy
+        // and the control it points at have to agree; a copy that names an action
+        // the window does not offer is worse than none.
+        assert!(
+            diagnostic.recovery.contains("try again"),
+            "a blocked diagnostic says what to do, not only what happened: {}",
+            diagnostic.recovery
+        );
     }
 
     #[test]

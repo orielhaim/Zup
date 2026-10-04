@@ -191,10 +191,10 @@ const MAIN: &str = r#"use zup_sdk::preset::prelude::*;
 
 /// What an application may configure about how this preset looks.
 ///
-/// `#[settings]` gives this the three things Zup needs - a default, the
+/// `#[settings]` applies the three things Zup needs: a default, the
 /// deserializer the host's configuration arrives through, and the JSON Schema
-/// that validates an application's settings - so this project depends on the SDK
-/// alone.
+/// that validates an application's settings. That is why this project declares
+/// the SDK and nothing else.
 #[zup_sdk::preset::settings]
 pub struct Settings {
     /// A line above the product name.
@@ -250,8 +250,7 @@ impl Preset for Aurora {
 ///
 /// Nothing in here is a Zup concept: a preset is a GPUI program that draws what
 /// the host published and asks for what it wants.
-struct View {
-    session: Session,
+struct View {    session: Session,
     state: Entity<SessionState>,
     settings: PresetSettings<Settings>,
     _state: Subscription,

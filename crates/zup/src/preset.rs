@@ -143,7 +143,7 @@ fn parse_binary(raw: &str) -> Result<BinarySource, String> {
 /// Build or collect preset binaries into a `.zupui`.
 pub fn pack(args: &PackCommand) -> miette::Result<()> {
     let root = repository_root(args.manifest.as_deref())?;
-    let cargo = cargo_executable();
+    let cargo = crate::project::cargo_executable();
     let identity = PresetIdentity::read(&root)?;
 
     let mut sources: Vec<BinarySource> = args.binaries.clone();
@@ -341,48 +341,9 @@ struct PresetIdentity {
 }
 
 impl PresetIdentity {
-    /// Read a project's own package, which is where a preset's identity comes
-    /// from.
-    ///
-    /// Both sides of the comparison are canonicalized, because on Windows a
-    /// canonicalized path and the one Cargo reports can differ in their prefix and
-    /// comparing two spellings of one directory has no useful answer. A preset
-    /// that is a workspace member has no root package, so the member whose
-    /// manifest sits in the requested directory is the one that was asked for.
     fn read(root: &Path) -> miette::Result<Self> {
-        let mut command = cargo_metadata::MetadataCommand::new();
-        command.no_deps().current_dir(root);
-        let metadata = command
-            .exec()
-            .map_err(|error| miette::miette!("could not read Cargo metadata: {error}"))?;
-        let wanted = std::fs::canonicalize(root)
-            .map_err(|error| miette::miette!("`{}`: {error}", root.display()))?;
-        let package = metadata
-            .packages
-            .iter()
-            .find(|package| {
-                package
-                    .manifest_path
-                    .parent()
-                    .and_then(|directory| std::fs::canonicalize(directory).ok())
-                    .is_some_and(|directory| directory == wanted)
-            })
-            .ok_or_else(|| {
-                miette::miette!(
-                    "`{}` holds no Cargo package; a preset is a project of its own",
-                    root.display()
-                )
-            })?;
-        let binary = package
-            .targets
-            .iter()
-            .find(|target| target.kind.iter().any(|kind| kind.to_string() == "bin"))
-            .ok_or_else(|| {
-                miette::miette!(
-                    "the package `{}` builds no binary, so it is not a preset",
-                    package.name
-                )
-            })?;
+        let package = crate::project::own_package(root)?;
+        let binary = crate::project::target_of_kind(&package, "bin")?;
         Ok(Self {
             name: package.name.as_str().to_owned(),
             version: package.version.to_string(),
@@ -510,14 +471,8 @@ fn repository_root(manifest: Option<&Path>) -> miette::Result<PathBuf> {
         .map_err(|error| miette::miette!("`{}`: {error}", root.display()))
 }
 
-fn cargo_executable() -> PathBuf {
-    std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"))
-}
-
 fn write_durably(path: &Path, bytes: &[u8]) -> miette::Result<()> {
-    let temporary = path.with_extension("zupui.tmp");
+    let temporary = path.with_extension("zup-tmp");
     std::fs::write(&temporary, bytes)
         .map_err(|error| miette::miette!("`{}`: {error}", temporary.display()))?;
     std::fs::rename(&temporary, path).map_err(|error| {

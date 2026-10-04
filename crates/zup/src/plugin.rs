@@ -208,7 +208,7 @@ pub fn build(args: &PluginBuildCommand) -> miette::Result<()> {
             .map_err(|error| failure::error("zup.plugin.build_cwd", error.to_string()))?,
     };
     let project = Project::read(&root)?;
-    let cargo = cargo_executable();
+    let cargo = crate::project::cargo_executable();
 
     // Before anything asks Cargo to build: a plugin author is not expected to
     // know which target a plugin is compiled for, so Zup does not let them find
@@ -264,40 +264,8 @@ struct Project {
 impl Project {
     /// Read the project's own package, which is where its identity comes from.
     fn read(root: &Path) -> miette::Result<Self> {
-        let mut command = cargo_metadata::MetadataCommand::new();
-        command.no_deps().current_dir(root);
-        let metadata = command
-            .exec()
-            .map_err(|error| miette::miette!("could not read Cargo metadata: {error}"))?;
-        let wanted = std::fs::canonicalize(root)
-            .map_err(|error| miette::miette!("`{}`: {error}", root.display()))?;
-        let package = metadata
-            .packages
-            .iter()
-            .find(|package| {
-                package
-                    .manifest_path
-                    .parent()
-                    .and_then(|directory| std::fs::canonicalize(directory).ok())
-                    .is_some_and(|directory| directory == wanted)
-            })
-            .ok_or_else(|| {
-                miette::miette!(
-                    "`{}` holds no Cargo package; a plugin is a project of its own",
-                    root.display()
-                )
-            })?;
-        let library = package
-            .targets
-            .iter()
-            .find(|target| target.kind.iter().any(|kind| kind.to_string() == "cdylib"))
-            .ok_or_else(|| {
-                miette::miette!(
-                    "the package `{}` builds no cdylib; a plugin is compiled to a \
-                     WebAssembly component and its manifest has to say `crate-type = [\"cdylib\"]`",
-                    package.name
-                )
-            })?;
+        let package = crate::project::own_package(root)?;
+        let library = crate::project::target_of_kind(&package, "cdylib")?;
         Ok(Self {
             name: package.name.as_str().to_owned(),
             library: library.name.clone(),
@@ -371,12 +339,6 @@ fn artifact_executable(line: &[u8], library: &str) -> Option<String> {
         .and_then(|files| files.first())
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-}
-
-fn cargo_executable() -> PathBuf {
-    std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"))
 }
 
 #[cfg(test)]

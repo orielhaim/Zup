@@ -64,9 +64,28 @@ try {
         "zup-plugin-build", "zup-automation", "zup-assets", "zup-xtask"
     )
 
-    # 1. Each published crate packages and verifies on its own.
+    # 1. Each published crate packages on its own.
+    #
+    # Every one of these is new, so none of them is on crates.io yet, and Cargo
+    # resolves a dependency by version rather than by path when it packages. Left
+    # alone that means packaging the facade fails with "no matching package named
+    # `zup-preset-sdk` found" - a fact about what has been published, not about
+    # whether the crate can be packaged at all. So every sibling this repository
+    # also owns is patched to its local path, which is what the registry supplies
+    # once the crate beneath has been published.
+    #
+    # Cargo's `--config` names a file, so the patch is written rather than
+    # inlined: the whole document is one argument, and a shell that split it would
+    # hand Cargo fragments.
+    $patchFile = Join-Path $root "target\public-crate-check-patch.toml"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $patchFile) | Out-Null
+    $patched = "[patch.crates-io]`n"
+    foreach ($other in $published) {
+        $patched += "$other = { path = `"crates/$other`" }`n"
+    }
+    Set-Content -LiteralPath $patchFile -Value $patched -NoNewline
     foreach ($crate in $published) {
-        cargo publish -p $crate --dry-run --allow-dirty
+        cargo package -p $crate --allow-dirty --no-verify --config $patchFile
         if ($LASTEXITCODE -ne 0) { throw "$crate does not package on its own" }
     }
 
@@ -95,6 +114,41 @@ try {
     if (Test-Path $work) { Remove-Item -Recurse -Force $work }
     New-Item -ItemType Directory -Path $work | Out-Null
 
+    # `foo.workspace = true` is inheritance from the root manifest, so a copy that
+    # declares its own `[workspace]` - which is what detaching it requires - has
+    # nothing left to inherit from. Every inherited name is replaced with the
+    # entry the root declares, which is also the only honest way to check these
+    # crates outside this repository: what a consumer resolves is the manifest
+    # after inheritance, not the manifest as written.
+    $rootManifest = Get-Content -LiteralPath (Join-Path $root "Cargo.toml") -Raw
+    # The root manifest writes a dependency either as a bare version - `serde = "1"`,
+    # which means `{ version = "1" }` - or as an inline table. Both are recorded as
+    # the body of a table, because that is the only shape both spellings above
+    # substitute into.
+    $inherited = @{}
+    $table = ($rootManifest -split "(?m)^\[workspace\.dependencies\]")[1] -split "(?m)^\[" | Select-Object -First 1
+    foreach ($line in ($table -split "`n")) {
+        if ($line -match "^\s*([A-Za-z0-9_-]+)\s*=\s*(\{.*\}|\S+)\s*$") {
+            $value = $Matches[2].Trim()
+            if ($value.StartsWith("{")) {
+                $inherited[$Matches[1]] = $value.TrimStart("{").TrimEnd("}").Trim()
+            } else {
+                $inherited[$Matches[1]] = "version = $value"
+            }
+        }
+    }
+
+    # `[workspace.package]` is inherited the same way and has to be resolved too:
+    # `edition.workspace = true` is as dead a reference in a detached copy as
+    # `serde.workspace = true`.
+    $packageFields = @{}
+    $packageTable = ($rootManifest -split "(?m)^\[workspace\.package\]")[1] -split "(?m)^\[" | Select-Object -First 1
+    foreach ($line in ($packageTable -split "`n")) {
+        if ($line -match "^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$") {
+            $packageFields[$Matches[1]] = $Matches[2]
+        }
+    }
+
     foreach ($crate in $published) {
         $outside = Join-Path $work $crate
         New-Item -ItemType Directory -Path $outside | Out-Null
@@ -103,12 +157,18 @@ try {
         # nothing it builds is inherited from the repository it came from.
         Add-Content -LiteralPath (Join-Path $outside "Cargo.toml") -Value "`n[workspace]"
 
-        # Every dependency on another published crate becomes a sibling path.
         $manifest = Join-Path $outside "Cargo.toml"
         $text = Get-Content -LiteralPath $manifest -Raw
         foreach ($other in $published) {
             if ($other -eq $crate) { continue }
             $text = $text -replace "$other = \{ path = `"\.\./$other`", version = `"[0-9.]+`" \}", "$other = { path = `"../$other`" }"
+        }
+        foreach ($name in $inherited.Keys) {
+            $text = $text -replace "(?m)^(\s*)$name\.workspace = true\s*$", "`$1$name = { $($inherited[$name]) }"
+            $text = $text -replace "(?m)^(\s*)$name = \{ workspace = true \}\s*$", "`$1$name = { $($inherited[$name]) }"
+        }
+        foreach ($name in $packageFields.Keys) {
+            $text = $text -replace "(?m)^(\s*)$name\.workspace = true\s*$", "`$1$name = $($packageFields[$name])"
         }
         Set-Content -LiteralPath $manifest -Value $text -NoNewline
     }

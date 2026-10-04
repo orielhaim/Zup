@@ -12,3 +12,21 @@ slow-timeout = "180s"
 [[profile.default.overrides]]
 filter = 'test(/measurements/)'
 slow-timeout = "120s"
+
+# These suites each run real installers and real preset children as separate
+# processes, and several wait on another process exiting for up to a minute. At
+# the default parallelism on a many-core machine they starve each other, and the
+# failure lands on whichever test lost the race rather than on anything wrong
+# with the code. Few threads is what a machine running an installer can actually
+# do at once, which is the only condition these tests describe.
+[[profile.default.overrides]]
+filter = 'test(/^(frontends|lifecycle|generated_files|preset_session|preset_persistence)::/)'
+slow-timeout = "180s"
+test-threads = 4
+
+# `zup-preview` stages a real preset executable, launches it per generation, and
+# waits on its report beside that generation's own file. Same shape, same reason.
+[[profile.default.overrides]]
+filter = 'test(/^runtime::/)'
+slow-timeout = "180s"
+test-threads = 4

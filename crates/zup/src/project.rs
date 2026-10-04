@@ -105,6 +105,74 @@ impl From<&ProjectSelection> for TargetOverrideArgs {
     }
 }
 
+/// A project directory a caller named, and the Cargo package that owns it.
+///
+/// A preset and a plugin are both projects of their own, and both need the same
+/// answer to "what is this directory called and what does it build". A preset
+/// that is a workspace member has no root package, so the member whose manifest
+/// sits in the requested directory is the one that was asked for.
+///
+/// Both sides of the comparison are canonicalized, because on Windows a
+/// canonicalized path and the one Cargo reports can differ in their prefix, and
+/// comparing two spellings of one directory has no useful answer.
+pub fn own_package(root: &Path) -> miette::Result<cargo_metadata::Package> {
+    let mut command = cargo_metadata::MetadataCommand::new();
+    command.no_deps().current_dir(root);
+    let metadata = command
+        .exec()
+        .map_err(|error| miette::miette!("could not read Cargo metadata: {error}"))?;
+    let wanted = std::fs::canonicalize(root)
+        .map_err(|error| miette::miette!("`{}`: {error}", root.display()))?;
+    metadata
+        .packages
+        .into_iter()
+        .find(|package| {
+            package
+                .manifest_path
+                .parent()
+                .and_then(|directory| std::fs::canonicalize(directory).ok())
+                .is_some_and(|directory| directory == wanted)
+        })
+        .ok_or_else(|| {
+            miette::miette!(
+                "`{}` holds no Cargo package; a preset and a plugin are projects of their own",
+                root.display()
+            )
+        })
+}
+
+/// One target of `package`, by the kind Cargo reports it as.
+///
+/// The kind is the argument rather than a fixed name because a preset builds a
+/// binary and a plugin builds a `cdylib`, and both refusals have to name what
+/// was looked for.
+pub fn target_of_kind<'a>(
+    package: &'a cargo_metadata::Package,
+    kind: &str,
+) -> miette::Result<&'a cargo_metadata::Target> {
+    package
+        .targets
+        .iter()
+        .find(|target| target.kind.iter().any(|reported| reported.to_string() == kind))
+        .ok_or_else(|| {
+            miette::miette!(
+                "the package `{}` builds no {kind}; its manifest has to say `crate-type = [\"cdylib\"]` \
+                 for a plugin, and a preset is a binary",
+                package.name
+            )
+        })
+}
+
+/// Cargo, as this process found it.
+///
+/// Cargo puts itself in the environment for anything it runs, so a nested build
+/// uses the same one rather than whatever happens to be first on `PATH`.
+pub fn cargo_executable() -> PathBuf {
+    std::env::var_os("CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
 /// A directory a caller named, as a path template.
 ///
 /// A template variable in a chosen path is a refusal rather than a literal

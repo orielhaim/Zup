@@ -183,6 +183,16 @@ fn report(snapshot: &zup_preset_protocol::Snapshot, configuration: &Configuratio
     ));
     seen.push_str(&format!("surface={:?}\n", snapshot.surface));
     seen.push_str(&format!("state={:?}\n", snapshot.state));
+    // How far along the operation is, because a host that republished a fresh
+    // state to a child replacing an earlier one would send a replacement back to
+    // the beginning of an installation, and only the child can tell.
+    seen.push_str(&format!(
+        "progress={:?}\n",
+        snapshot
+            .progress
+            .as_ref()
+            .and_then(zup_preset_protocol::ProgressPresentation::percent)
+    ));
     seen.push_str(&format!(
         "components={}\n",
         snapshot
@@ -445,7 +455,10 @@ fn runtime(state: StateDirectory) -> Runtime {
 }
 
 /// Present the fixture, which is only possible once it has opened its session.
-fn present(runtime: &mut Runtime) {
+///
+/// The generation is returned because each one stages the child into a directory
+/// of its own, and what a particular child was told is only readable there.
+fn present(runtime: &mut Runtime) -> u64 {
     let generation = runtime
         .present(&preset(), &preset_bytes())
         .expect("the fixture opens a session");
@@ -454,6 +467,7 @@ fn present(runtime: &mut Runtime) {
         runtime.is_running(),
         "and the child is the one that is running"
     );
+    generation
 }
 
 /// Present the fixture and wait until its action has been through the host.
@@ -462,6 +476,11 @@ fn present(runtime: &mut Runtime) {
 /// scope, and the host applying it is the only way the snapshot's scope becomes
 /// something the child chose. That proves the action crossed the transport and
 /// was validated by the state machine, which is the whole claim.
+///
+/// Only usable while nothing is running. A host with an operation in flight is
+/// right to refuse a change of scope, so on that path the ask is evidence of
+/// nothing; a caller that needs to know a child is connected reads what the
+/// child was told instead.
 fn present_and_wait_for_the_ask(runtime: &mut Runtime) {
     present(runtime);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -512,7 +531,8 @@ fn a_preset_reaches_the_runtime_over_the_production_transport() {
 
 #[test]
 fn the_state_a_replaced_child_connects_to_is_the_state_the_host_owns() {
-    let (_directory, state) = scratch();
+    let (directory, state) = scratch();
+    let root = state.root().to_path_buf();
     let mut runtime = runtime(state);
     present(&mut runtime);
     // Put the simulated machine halfway through an installation, which is the
@@ -528,23 +548,31 @@ fn the_state_a_replaced_child_connects_to_is_the_state_the_host_owns() {
         .progress
         .as_ref()
         .expect("an operation is running")
-        .percent();
-    assert!(percent.is_some(), "and it reports a position");
+        .percent()
+        .expect("and it reports a position");
 
-    present_and_wait_for_the_ask(&mut runtime);
-    let after = runtime.snapshot();
-    assert_eq!(
-        after.state, before.state,
-        "the replaced child reconnects to the state it was in, not to a fresh one"
+    // The replacement's own report is the evidence, because the host's snapshot
+    // is what it would say either way. Asking the replacement to change scope
+    // would prove nothing here: a host with an operation in flight refuses that,
+    // correctly, and the refusal would be indistinguishable from a child that
+    // never arrived.
+    let generation = present(&mut runtime);
+    let report = await_report(&root, generation, |text| text.contains("progress=Some"));
+
+    assert!(
+        report.contains(&format!("state={:?}", before.state)),
+        "the replaced child is told the state the host is in, not a fresh one: {report}"
+    );
+    assert!(
+        report.contains(&format!("progress=Some({percent})")),
+        "including how far along it is: {report}"
     );
     assert_eq!(
-        after
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.percent()),
-        percent,
-        "including how far along it is"
+        runtime.snapshot().state,
+        before.state,
+        "and the host is still where the operation left it"
     );
+    drop(directory);
     runtime.shutdown();
 }
 
