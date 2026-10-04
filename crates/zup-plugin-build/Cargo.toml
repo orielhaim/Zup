@@ -13,8 +13,8 @@ anyhow = "1"
 # author's, because the componentiser's version has to agree with the runtime
 # that will load the result. It is pinned to the version the host was built
 # against rather than discovered from whatever happens to be installed.
-wit-component = { version = "=0.260.0", features = ["dummy-module"] }
-wit-parser = "=0.260.0"
+wit-component = { version = "=0.261", features = ["dummy-module"] }
+wit-parser = "=0.261"
 zup-plugin-abi.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 sha2.workspace = true

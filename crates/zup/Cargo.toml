@@ -59,6 +59,6 @@ tempfile.workspace = true
 zstd.workspace = true
 wat = "1"
 windows-registry.workspace = true
-wit-component = { version = "=0.260.0", features = ["dummy-module"] }
-wit-parser = "=0.260.0"
+wit-component = { version = "=0.261", features = ["dummy-module"] }
+wit-parser = "=0.261"
 zup-xtask.workspace = true

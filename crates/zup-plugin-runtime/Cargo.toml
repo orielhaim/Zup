@@ -22,7 +22,7 @@ semver.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 wat = "1"
-wit-component = { version = "=0.260.0", features = ["dummy-module"] }
-wit-parser = "=0.260.0"
+wit-component = { version = "=0.261", features = ["dummy-module"] }
+wit-parser = "=0.261"
 zup-build.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }

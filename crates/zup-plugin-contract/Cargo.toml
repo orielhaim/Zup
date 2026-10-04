@@ -25,8 +25,8 @@ rstest.workspace = true
 # Components built from the canonical contract rather than from a fixture, so
 # the shape the host refuses a bad component for is exercised against what an
 # author would actually produce.
-wit-component = { version = "=0.260.0", features = ["dummy-module"] }
-wit-parser = "=0.260.0"
+wit-component = { version = "=0.261", features = ["dummy-module"] }
+wit-parser = "=0.261"
 wat = "1"
 
 [[test]]
