@@ -198,7 +198,7 @@ impl Preset for Aurora {
     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
         let session = context.session().clone();
         let settings = context.settings().clone();
-        let state = session.SessionState();
+        let state = session.state();
 
         gpui::open_window(gpui::WindowOptions::default(), cx, move |_window, cx| {
             let view = cx.new(|_| View {

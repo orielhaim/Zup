@@ -307,6 +307,10 @@ fn a_generated_project_says_which_of_its_files_are_its_own() {
 /// have: it is found by the first person to use it, on their machine, with
 /// nothing to point at. Checking that it compiles is therefore not optional, and
 /// not something a manifest resolution can stand in for.
+///
+/// Ignored because it compiles the GPUI stack, which is minutes rather than
+/// seconds. Run it with `cargo test -p zup --test generated_projects -- --ignored`
+/// before changing the template.
 #[test]
 #[ignore = "compiles the GPUI stack, which takes longer than the rest of this suite"]
 fn a_generated_project_compiles() {

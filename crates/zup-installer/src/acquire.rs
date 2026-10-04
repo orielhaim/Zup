@@ -706,8 +706,8 @@ mod tests {
             "and the executable is fetched beside them"
         );
         assert!(
-            plan.wire_size_by_group().contains_key("window"),
-            "and a progress report can account for the whole window at once"
+            plan.wire_size_by_group().contains_key("preset"),
+            "and a progress report can account for the whole preset at once"
         );
     }
 

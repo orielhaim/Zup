@@ -217,8 +217,6 @@ fn build_example_plugin(root: &Path) -> Result<(), String> {
     )
 }
 
-/// Pack the default preset and stage it for this machine.
-///
 /// Build and stage the peer preset the runtime's end-to-end tests install.
 ///
 /// A real preset, written against the public SDK, staged beside the components a

@@ -1,5 +1,11 @@
 //! The choices an installation offers: where, for whom, and with what.
 
+// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
+// that re-exports it, so a module deriving one has to be able to name that
+// crate. Aliased through the SDK so it is the version this preset builds with.
+#[allow(unused_imports)]
+use zup_preset_sdk::gpui_kit;
+
 use zup_preset_sdk::gpui_kit::assets::IconName;
 use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariants};
 use zup_preset_sdk::gpui_kit::component::checkbox::Checkbox;

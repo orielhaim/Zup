@@ -4,6 +4,12 @@
 //! of thing it touches. It is for a person deciding whether to go ahead, so it
 //! reads as a list of consequences rather than a transaction log.
 
+// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
+// that re-exports it, so a module deriving one has to be able to name that
+// crate. Aliased through the SDK so it is the version this preset builds with.
+#[allow(unused_imports)]
+use zup_preset_sdk::gpui_kit;
+
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
