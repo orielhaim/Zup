@@ -1,6 +1,15 @@
 [profile.default]
 slow-timeout = { period = "60s" }
 
+# A cap, because a handful of suites run real installers and real preset children
+# as separate processes and several wait on another process exiting for up to a
+# minute. At one thread per core on a many-core machine those starve each other,
+# and the failure lands on whichever test lost the race rather than on anything
+# wrong with the code - a different test each run. This is a per-profile setting
+# rather than a per-override one: nextest has no `test-threads` in an override,
+# and putting it there is ignored with a warning.
+test-threads = 16
+
 [[profile.default.overrides]]
 filter = 'package(zup-installer) and test(/^frontends::|^lifecycle::|^generated_files::/)'
 slow-timeout = "180s"
@@ -13,20 +22,15 @@ slow-timeout = "180s"
 filter = 'test(/measurements/)'
 slow-timeout = "120s"
 
-# These suites each run real installers and real preset children as separate
-# processes, and several wait on another process exiting for up to a minute. At
-# the default parallelism on a many-core machine they starve each other, and the
-# failure lands on whichever test lost the race rather than on anything wrong
-# with the code. Few threads is what a machine running an installer can actually
-# do at once, which is the only condition these tests describe.
+# The suites that spawn real processes get longer before nextest calls one slow,
+# which is only a label and not a failure. The parallelism that actually matters
+# is `test-threads` above, because nextest applies it per profile.
 [[profile.default.overrides]]
 filter = 'test(/^(frontends|lifecycle|generated_files|preset_session|preset_persistence)::/)'
 slow-timeout = "180s"
-test-threads = 4
 
 # `zup-preview` stages a real preset executable, launches it per generation, and
-# waits on its report beside that generation's own file. Same shape, same reason.
+# waits on its report beside that generation's own file. Same shape.
 [[profile.default.overrides]]
 filter = 'test(/^runtime::/)'
 slow-timeout = "180s"
-test-threads = 4
