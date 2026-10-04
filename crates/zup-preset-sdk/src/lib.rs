@@ -29,7 +29,14 @@ mod transport;
 pub mod prelude;
 pub mod presentation;
 
-pub use asset::{ApplicationAssets, AssetRef, PresetAssets};
+/// The GPUI stack a preset is written against.
+///
+/// Re-exported rather than depended on directly, so the GPUI stack a preset
+/// builds against is the one this crate was built against and there is nothing
+/// to keep in step.
+pub use gpui_kit;
+
+pub use asset::{ApplicationAssets, AssetRef};
 pub use preset::{
     Describe, NoSettings, Preset, PresetContext, PresetError, Settings, describe, run, serve,
 };

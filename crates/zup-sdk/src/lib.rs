@@ -120,11 +120,11 @@ pub mod plugin {
 /// that crate happens to export.
 #[cfg(feature = "preset")]
 pub mod preset {
+    pub use zup_preset_sdk::gpui_kit;
     pub use zup_preset_sdk::{
         ActionSender, ApplicationAssets, AssetRef, NoSettings, Preset, PresetContext, PresetError,
         PresetSettings, Session, SessionState, run, settings,
     };
-    pub use zup_preset_sdk::gpui_kit;
     pub mod prelude {
         pub use zup_preset_sdk::prelude::*;
     }

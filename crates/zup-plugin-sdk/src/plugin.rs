@@ -1,7 +1,9 @@
 //! The question a plugin is asked, and the trait that answers it.
 
+use crate::exports::zup::plugin::planner::{
+    Context as WitContext, InstallScope, InstallationPlan, PluginError,
+};
 use crate::plan::{Error, Plan};
-use crate::planner::{Context as WitContext, InstallScope, InstallationPlan, PluginError};
 
 /// Who the application is installing for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

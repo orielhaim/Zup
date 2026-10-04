@@ -1,44 +1,8 @@
 //! The contract a preset implements, and the one function that starts it.
 //!
-//! A preset is a normal Rust program that happens to talk to a zup installer.
-//! That is the whole idea, and it is why this crate is small: it hands a
-//! preset a [`Session`], its settings, and its assets, and then gets out of
-//! the way. There is no layout abstraction, no screen abstraction, no widget
-//! vocabulary, and nothing to subclass - a preset draws with GPUI directly,
-//! which means it can draw anything GPUI can draw, including things zup never
-//! imagined.
-//!
-//! ```no_run
-//! use zup_preset_sdk::prelude::*;
-//!
-//! #[derive(Default, serde::Deserialize, schemars::JsonSchema)]
-//! struct Settings {
-//!     hero: Option<String>,
-//!     logo: Option<AssetRef>,
-//!     accent: Option<String>,
-//! }
-//!
-//! struct Aurora;
-//!
-//! impl Preset for Aurora {
-//!     const NAME: &'static str = env!("CARGO_PKG_NAME");
-//!     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-//!     type Settings = Settings;
-//!
-//!     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
-//!         let session = context.session();
-//!         // Settings are an entity: they are read through the application, and
-//!         // `PresetSettings::observe` is how a preset re-renders when the host
-//!         // replaces them.
-//!         let accent = context.settings().read(cx).accent.clone().unwrap_or_default();
-//!         let _ = (session, accent);
-//!     }
-//! }
-//!
-//! fn main() {
-//!     zup_preset_sdk::run::<Aurora>();
-//! }
-//! ```
+//! [`Preset`] is a trait, an identity, and one method. Everything else a preset
+//! needs is ordinary GPUI, and nothing in the trait is a place a layout decision
+//! could hide.
 
 use futures_channel::mpsc::UnboundedReceiver;
 use futures_util::StreamExt;
@@ -56,7 +20,8 @@ use crate::transport::{Bootstrap, Channel, Identity, Opened, TransportError};
 /// `serde` carries them and `schemars` generates the schema `zup preset pack` puts
 /// in the package, so an application's `[ui.settings]` is validated against the
 /// preset's own types without the preset being executed and without a second
-/// definition language beside Cargo and Rust.
+/// definition language beside Cargo and Rust. A preset applies the
+/// [`settings`](crate::settings) attribute rather than naming either crate.
 ///
 /// The bound is `Default` because an application that configures nothing has
 /// to work: the host sends an empty document, and a settings type has to be
@@ -90,7 +55,7 @@ pub struct PresetContext<TSettings> {
     session: Session,
     settings: PresetSettings<TSettings>,
     assets: ApplicationAssets,
-    host: zup_preset_protocol::HostHello,
+    capabilities: Capabilities,
 }
 
 impl<TSettings> PresetContext<TSettings> {
@@ -113,9 +78,15 @@ impl<TSettings> PresetContext<TSettings> {
         &self.assets
     }
 
-    /// What the host says it is.
-    pub fn host(&self) -> &zup_preset_protocol::HostHello {
-        &self.host
+    /// What the host said it can do.
+    ///
+    /// The host states its capabilities before the preset is launched, so this
+    /// is known for the whole of a session rather than discovered later. A
+    /// preset uses it to disable what it cannot present; what it requires is
+    /// the other side of the same arrangement, in
+    /// [`Preset::required_capabilities`].
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
     }
 }
 
@@ -170,8 +141,9 @@ pub trait Preset: 'static {
 
     /// Draw the installer.
     ///
-    /// Called once the handshake is done and the first snapshot has arrived,
-    /// so `context.session().handshake()` already has the state to draw.
+    /// Called once the handshake is done and the first snapshot has arrived, so
+    /// `context.session().state()` already has the state to draw. Ordinary
+    /// GPUI, and free to open as many windows as it likes.
     fn launch(context: PresetContext<Self::Settings>, cx: &mut App);
 }
 
@@ -293,7 +265,7 @@ pub fn serve<P: Preset>(bootstrap: Bootstrap) -> Result<(), PresetError> {
                     session,
                     settings,
                     assets,
-                    host,
+                    capabilities: host.capabilities,
                 },
                 cx,
             );

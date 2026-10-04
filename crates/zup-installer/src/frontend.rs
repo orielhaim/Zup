@@ -36,7 +36,7 @@ pub fn graphical(
     }
 }
 
-/// The uninstall confirmation window, for Apps & Features on a GUI package.
+/// The uninstall confirmation window, for Apps & Features on a GUI frontend.
 pub fn graphical_uninstall(
     context: RuntimeContext,
     executable: &Path,

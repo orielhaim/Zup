@@ -27,11 +27,11 @@ limit regardless.
 | `path_entry` | `Path::new(dir)` |
 | `service` | `Service::new(id, name, binary)` |
 | `protocol` | `Protocol::new(scheme, exec)` |
-| `file_association` | `FileAssociation::for_extension(ext, exec)` |
-| `resource` | a `ResourceItem` the SDK has no constructor for |
+| `file_association` | `FileAssociation::new(id, ext, exec)` |
 
 Each constructor supplies the defaults, so a plugin names the field it means
-rather than the shape of the whole record.
+rather than the shape of the whole record. A new resource kind gets a constructor
+of its own when the WIT grows one.
 
 ## Launchers
 
@@ -57,12 +57,15 @@ should survive a version bump. The `name` is the internal service name.
 
 ```rust
 Protocol::new("acme", "${launcher}").with_arguments(["--open"])
-FileAssociation::for_extension("acme", "${launcher}").with_description("Acme document")
+FileAssociation::new("Acme.Document", ".acme", "${launcher}")
+    .with_description("Acme document")
 ```
 
-A file association's id is derived from the extension, because it has to be
-stable across versions and unique on the machine, and the extension is the only
-part of it an author chooses.
+The association's id is the identity of the registration on the machine, so it
+is yours to choose and has to be stable across versions. Deriving it from the
+extension does not work: every application on the machine can claim `.acme`, and
+two of them claiming the same id is indistinguishable from one application
+claiming it twice. On Windows this is the ProgID the shell matches against.
 
 ## Ownership
 

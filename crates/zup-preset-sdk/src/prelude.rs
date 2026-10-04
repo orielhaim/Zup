@@ -14,7 +14,9 @@ pub use crate::{
 };
 
 /// The GPUI stack, and the names a preset's signatures need.
-pub use gpui_kit::{self as gpui, App, AppContext, AsyncApp, Context, Entity, IntoElement, Render, Subscription};
+pub use gpui_kit::{
+    self as gpui, App, AppContext, AsyncApp, Context, Entity, IntoElement, Render, Subscription,
+};
 
 /// What a person chose, and what the installer is offering them.
 ///
@@ -26,9 +28,9 @@ pub use gpui_kit::{self as gpui, App, AppContext, AsyncApp, Context, Entity, Int
 /// decides what that is. A preset that presents more than the state reaches
 /// [`crate::presentation`].
 pub use zup_preset_protocol::{
-    Action, ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence,
-    InstallScope, InstallerState, MaintenanceState, OperationKind, ProductIdentity,
-    SelectionRequirement, Snapshot, Surface, format_bytes,
+    Action, ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence, InstallScope,
+    InstallerState, MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement,
+    Snapshot, Surface, format_bytes,
 };
 
 /// What the host said it can do.

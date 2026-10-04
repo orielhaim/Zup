@@ -47,4 +47,4 @@ zup preset pack --build <target>
 zup preview
 ```
 
-Start with [Use a preset](./use) if you are configuring an application. Start with [Create a preset](./create) if you are authoring the UI package itself.
+Start with [Use a preset](./use) if you are configuring an application. Start with [Create a preset](./create) if you are authoring one.

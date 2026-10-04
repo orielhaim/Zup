@@ -7,13 +7,10 @@
 
 use zup_plugin_abi as abi;
 
-use crate::planner::{LauncherLocation, PathEntry, PluginError, ResourceItem, ServiceStart};
-
-// The resource records are the WIT's own, re-exported from `crate::planner`.
-// They are re-exported here too so a plugin can name them without a second
-// import, and so the constructors below are visibly methods on the same types
-// rather than on look-alikes.
-pub use crate::planner::{FileAssociation, GeneratedFile, Launcher, Protocol, Service};
+pub use crate::exports::zup::plugin::planner::{
+    FileAssociation, GeneratedFile, Launcher, LauncherLocation, Protocol, Service, ServiceStart,
+};
+use crate::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
 /// Why a plugin cannot produce a plan.
 ///
@@ -186,17 +183,22 @@ impl Protocol {
 }
 
 impl FileAssociation {
-    /// An association for one file extension.
+    /// An association, under an identifier the application chooses.
     ///
-    /// The identifier is derived from the extension because it has to be stable
-    /// across versions and unique on the machine, and the extension is the only
-    /// part of this an author actually chooses.
-    pub fn for_extension(extension: impl Into<String>, executable: impl Into<String>) -> Self {
-        let extension = extension.into();
-        let id = format!("Zup.{}", extension.trim_start_matches('.').to_uppercase());
+    /// The identifier becomes the machine-wide identity of the association: two
+    /// applications that both handle `.foo` must not claim the same one, because
+    /// that is what tells an upgrade from this application from an upgrade from
+    /// the other, and on Windows it is the ProgID the shell matches against. An
+    /// extension is shared by every application on the machine and cannot supply
+    /// it, so it is spelled out here.
+    pub fn new(
+        id: impl Into<String>,
+        extension: impl Into<String>,
+        executable: impl Into<String>,
+    ) -> Self {
         Self {
-            extension,
-            id,
+            extension: extension.into(),
+            id: id.into(),
             description: None,
             executable: executable.into(),
         }
@@ -304,25 +306,9 @@ impl Plan {
         self
     }
 
-    /// Add a resource the SDK does not have a constructor for.
-    pub fn resource(mut self, resource: ResourceItem) -> Self {
-        self.resources.push(resource);
-        self
-    }
-
-    /// What this plan declares, in the order it was added.
-    pub fn resources(&self) -> &[ResourceItem] {
-        &self.resources
-    }
-
     /// Take what this plan declares.
     pub(crate) fn into_resources(self) -> Vec<ResourceItem> {
         self.resources
-    }
-
-    /// Whether this plan declares nothing.
-    pub fn is_empty(&self) -> bool {
-        self.resources.is_empty()
     }
 
     /// Refuse a plan larger than the ABI allows, before it reaches the host.

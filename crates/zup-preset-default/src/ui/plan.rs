@@ -22,11 +22,10 @@ use zup_preset_sdk::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
-use zup_preset_sdk::host::{
-    ChangeGroup, ChangeKind, PlannedChange, RequirementPresentation, RequirementStatus,
+use zup_preset_sdk::presentation::{
+    ChangeGroup, ChangeKind, PlanStatus, PlannedChange, RequirementPresentation, RequirementStatus,
     ResourceCategory,
 };
-use zup_preset_sdk::prelude::*;
 
 use crate::model;
 use crate::theme::{size, space, text};

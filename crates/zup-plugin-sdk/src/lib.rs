@@ -6,58 +6,30 @@
 //! declaration, Zup decides whether that declaration is safe, and Zup performs
 //! the install.
 //!
-//! ```no_run
-//! use zup_plugin_sdk::prelude::*;
+//! The implementation layer beneath `zup_sdk::plugin`.
 //!
-//! struct Configure;
+//! A plugin has no way to run a command, write a registry key, elevate, or reach
+//! the network: the world it implements imports nothing at all, which the host
+//! verifies before it will load the component. Everything it declares is checked
+//! against the application's own manifest before it is applied, so a plan that
+//! contradicts what the application declares is refused rather than obeyed.
 //!
-//! impl Plugin for Configure {
-//!     fn plan(context: Context) -> Result<Plan, Error> {
-//!         Ok(Plan::new().generated_file(GeneratedFile::text(
-//!             "${install}/configure.txt",
-//!             format!("installing {} for {}", context.app_name, context.plugin_id),
-//!         )))
-//!     }
-//! }
-//!
-//! zup_plugin_sdk::export!(Configure);
-//! ```
-//!
-//! # What a plugin can do
-//!
-//! Return resources. A plugin has no way to run a command, write a registry
-//! key, elevate, or reach the network: the world it implements imports nothing
-//! at all, which the host verifies before it will load the component. Everything
-//! a plugin declares is checked against the application's own manifest before it
-//! is applied, so a plan that contradicts what the application declares is
-//! refused rather than obeyed.
-//!
-//! # What a plugin needs to know
-//!
-//! Only what the host tells it in [`Context`]. There is no ambient state to read
-//! and nothing to look up: a plugin is handed the answer to the question it is
-//! being asked.
+//! A plugin learns only what the host tells it in [`Context`]. There is no
+//! ambient state to read and nothing to look up: it is handed the answer to the
+//! question it is being asked.
 //!
 //! # The build
 //!
 //! A plugin compiles to `wasm32-unknown-unknown` as a `cdylib`, and
 //! `zup plugin build` turns that into a component. The WIT is not vendored into
-//! your project and `wit-bindgen` is not a dependency you declare; this crate
-//! owns both.
+//! your project, `wit-bindgen` is not a dependency you declare, and no
+//! Component Model tool is something you have to install: this crate owns the
+//! contract and Zup owns the rest.
 
 #![deny(unsafe_code)]
 
-// Generate the guest bindings for the `plugin` world, from the WIT the ABI
-// crate owns.
-//
-// `pub_export_macro` is deliberately off. On, the generator publishes a macro
-// called `export` that takes a bare type name and looks for the bindings beside
-// itself - correct only when a plugin and its bindings are one crate, which is
-// not the shape an author has, and it collides with the macro below. With it
-// off, the generator still emits `__export_plugin_impl`, which takes the module
-// to look in and is what `plugin_export!` calls.
-// Generate the guest bindings for the `plugin` world, from the WIT the ABI
-// crate owns.
+// Generate the guest bindings for the `plugin` world, from the WIT the ABI crate
+// owns.
 //
 // `export_macro_name` is renamed because the generator emits
 // `use __export_plugin_impl as <that name>` at this crate's root, and a
@@ -77,7 +49,6 @@ wit_bindgen::generate!({
 });
 
 mod export;
-
 mod plan;
 mod plugin;
 
@@ -87,19 +58,13 @@ pub use plan::{Error, FileAssociation, Launcher, Path, Plan, Protocol, Service};
 pub use plugin::{Context, Plugin, Scope};
 
 /// The conversion between a plugin's own types and the ABI's.
-///
-/// Named here so `plugin_export!` has one place to point at; not part of the
-/// authoring surface.
 pub use plugin::__answer;
 
-/// The types the WIT defines, under the names the WIT gives them.
+/// The bindings [`export!`] expands to.
 ///
-/// A plugin author reaches these through [`prelude`], which presents them as
-/// ordinary Rust. They are public because `export!` expands to code that names
-/// them, and because the components of a plan are these values.
+/// Hidden because a plugin author names [`Plugin`] and the plan constructors,
+/// not the generated shapes the macro writes on their behalf.
+#[doc(hidden)]
 pub mod planner {
-    pub use crate::exports::zup::plugin::planner::{
-        Context, FileAssociation, GeneratedFile, Guest, InstallScope, InstallationPlan, Launcher,
-        LauncherLocation, PathEntry, PluginError, Protocol, ResourceItem, Service, ServiceStart,
-    };
+    pub use crate::exports::zup::plugin::planner::{Context, Guest, InstallationPlan, PluginError};
 }

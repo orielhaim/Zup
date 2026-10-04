@@ -4,12 +4,11 @@
 //! group, and nowhere else. Prominence says how clearly the decision is
 //! exposed. Whether the defaults are enough to install is a separate question.
 
-// `InstallOptions` is only named by the tests in this module, which build one
-// by hand to present; the resolution below reads it through `Surface`.
-#[cfg(test)]
-use zup_preset_sdk::host::InstallOptions;
-use zup_preset_sdk::host::{ComponentGroupOption, ComponentProminence, SelectionRequirement};
 use zup_preset_sdk::prelude::*;
+// `InstallOptions` is only named by the tests in this module, which build one by
+// hand to present; the resolution below reads it through `Surface`.
+#[cfg(test)]
+use zup_preset_sdk::presentation::{InstallOptions, PlanStatus};
 
 use crate::model::{self, ComponentRow};
 

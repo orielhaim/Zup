@@ -13,7 +13,7 @@
 
 use zup_preset_ipc::Bootstrap;
 use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::{Describe, PresetContext, describe, host::Configuration};
+use zup_preset_sdk::{Describe, PresetContext, describe};
 use zup_sdk::__private::schemars as _;
 use zup_sdk::__private::serde as _;
 
@@ -213,44 +213,4 @@ fn an_asset_reference_is_the_name_an_application_wrote() {
     let read: AssetRef =
         serde_json::from_value(serde_json::json!("branding/logo.svg")).expect("reads");
     assert_eq!(read, asset);
-}
-
-/// Assets arrive as a name-to-file mapping, and a preset finds its own by name.
-#[test]
-fn assets_are_looked_up_by_name() {
-    let configuration = Configuration {
-        settings: serde_json::json!({ "logo": "branding/logo.svg" }),
-        assets: [(
-            "branding/logo.svg".to_owned(),
-            "C:/Temp/zup/ui/logo".to_owned(),
-        )]
-        .into_iter()
-        .collect(),
-    };
-    let assets = ApplicationAssets::from_configuration(&configuration);
-    assert_eq!(
-        assets.path(&AssetRef::new("branding/logo.svg")),
-        Some(std::path::PathBuf::from("C:/Temp/zup/ui/logo"))
-    );
-    assert!(
-        assets
-            .path(&AssetRef::new("branding/missing.svg"))
-            .is_none()
-    );
-    assert_eq!(assets.names(), ["branding/logo.svg"]);
-}
-
-/// A re-resolved configuration replaces the table rather than adding to it, so
-/// an asset an application removed stops resolving.
-#[test]
-fn a_re_resolved_configuration_replaces_the_asset_table() {
-    let assets = ApplicationAssets::default();
-    assets.replace(
-        [("logo".to_owned(), "C:/Temp/zup/ui/logo".to_owned())]
-            .into_iter()
-            .collect(),
-    );
-    assert!(assets.path(&AssetRef::new("logo")).is_some());
-    assets.replace(Default::default());
-    assert!(assets.path(&AssetRef::new("logo")).is_none());
 }

@@ -72,9 +72,6 @@ selected_components   Vec<String>
 | `service(Service)` | a Windows service |
 | `protocol(Protocol)` | a URL scheme to register |
 | `file_association(FileAssociation)` | a file type to associate |
-| `resource(ResourceItem)` | a resource the SDK has no constructor for |
-| `resources()` | what this plan declares, in order |
-| `is_empty()` | whether it declares nothing |
 | `validate()` | refuse an oversized plan before it reaches a host |
 
 ## Resource constructors
@@ -121,8 +118,12 @@ Protocol::new(scheme, executable).with_arguments([...])
 ### `FileAssociation`
 
 ```rust
-FileAssociation::for_extension(extension, executable).with_description("...")
+FileAssociation::new(id, extension, executable).with_description("...")
 ```
+
+The `id` is the machine-wide identity of the registration and has to be stable
+across versions, so it is named rather than derived: an extension is shared by
+every application on the machine and cannot make an id unique.
 
 ## `Error`
 

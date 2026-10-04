@@ -1,12 +1,12 @@
 //! `zup plugin init` and `zup plugin build`: authoring a plugin without knowing
 //! how one is componentised.
 //!
-//! The mechanical parts of building a Zup plugin are the same every time, and
-//! every one of them is a detail of the Component Model rather than of the
-//! plugin: compile to `wasm32-unknown-unknown` as a `cdylib`, then turn the
-//! resulting core module into a component that implements the plugin world. Both
-//! happen here so an author runs one command instead of pinning a `wasm-tools`
-//! version they have to keep in step with Zup's.
+//! Building a Zup plugin is the same every time, and every part of it is a
+//! detail of the Component Model rather than of the plugin: compile to
+//! `wasm32-unknown-unknown` as a `cdylib`, then turn the resulting core module
+//! into a component that implements the plugin world. Both happen here, so an
+//! author runs one command instead of pinning a `wasm-tools` version they would
+//! have to keep in step with Zup's.
 //!
 //! The WIT is not involved either. The SDK generates its bindings from the
 //! contract Zup owns, so a plugin project contains no copy of it and there is no
@@ -26,6 +26,72 @@ use crate::failure;
 /// that runs it is the one that decides which interpreter executes it. A
 /// cross-compile here would produce a module the host cannot load.
 const GUEST_TARGET: &str = "wasm32-unknown-unknown";
+
+/// Why the guest target could not be made available.
+#[derive(Debug, thiserror::Error)]
+pub enum GuestTargetError {
+    #[error("could not run rustup: {0}")]
+    Rustup(#[source] std::io::Error),
+    #[error(
+        "`{GUEST_TARGET}` is not installed for this toolchain, and rustup could not install it:\n\
+         {stderr}\n\nInstall it with `rustup target add {GUEST_TARGET}` and try again."
+    )]
+    Install { stderr: String },
+    #[error(
+        "`{GUEST_TARGET}` is not installed for this toolchain and rustup is not available to \
+         install it.\n\nInstall the target with `rustup target add {GUEST_TARGET}` and try again, \
+         or build this plugin on a machine whose Rust toolchain has it."
+    )]
+    Unmanaged,
+}
+
+/// Make sure the guest target is installed before anything asks Cargo to build it.
+///
+/// The claim this command makes is that a plugin author has nothing to install
+/// but zup, and a bare `cargo build --target` breaks that on any machine that
+/// has not happened to add the target already: the failure arrives as
+/// `can't find crate for core`, which says nothing about the fix.
+///
+/// The toolchain in use is the one asked, rather than one Zup would bring
+/// along, because that is the one whose output a host will run. `rustup` is the
+/// thing that knows which toolchain is active - the default one, whatever a
+/// `rust-toolchain.toml` in the project selects - and the only thing that can
+/// add a target to it. A Rust installation without rustup can still have the
+/// target, so a missing `rustup` is a refusal with instructions rather than a
+/// guess at what to do.
+pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
+    let installed = Command::new("rustup")
+        .current_dir(root)
+        .args(["target", "list", "--installed"])
+        .output()
+        .map_err(GuestTargetError::Rustup)?;
+    let listed = String::from_utf8_lossy(&installed.stdout);
+    if target_is_installed(&listed, GUEST_TARGET) {
+        return Ok(());
+    }
+
+    let added = Command::new("rustup")
+        .current_dir(root)
+        .args(["target", "add", GUEST_TARGET])
+        .output()
+        .map_err(GuestTargetError::Rustup)?;
+    if !added.status.success() {
+        return Err(GuestTargetError::Install {
+            stderr: String::from_utf8_lossy(&added.stderr).trim().to_owned(),
+        });
+    }
+    println!("installed the `{GUEST_TARGET}` target for this toolchain");
+    Ok(())
+}
+
+/// Whether a `rustup target list --installed` listing includes `target`.
+///
+/// One target per line and nothing padded, so the answer is a whole-line match
+/// rather than a substring: `wasm32-unknown-unknown` is not installed by the
+/// fact that some longer target starts with it.
+fn target_is_installed(listing: &str, target: &str) -> bool {
+    listing.lines().any(|line| line.trim() == target)
+}
 
 /// Author and build a plugin.
 #[derive(Debug, Args)]
@@ -68,55 +134,24 @@ pub struct PluginBuildCommand {
 
 /// Create a plugin project named `name` in `parent`.
 pub fn init(args: &PluginInitCommand) -> miette::Result<()> {
-    let name = crate::preset::init::package_name(&args.name)
-        .map_err(|error| failure::error("zup.plugin.init_name", error))?;
     let parent = match args.directory.clone() {
         Some(directory) => directory,
         None => std::env::current_dir()
             .map_err(|error| failure::error("zup.plugin.init_cwd", error.to_string()))?,
     };
-    let root = parent.join(&name);
-    if root.exists() {
-        return Err(failure::error(
-            "zup.plugin.init_exists",
-            format!("`{}` already exists", root.display()),
-        ));
-    }
-    std::fs::create_dir_all(root.join("src")).map_err(|error| {
-        failure::error(
-            "zup.plugin.init_write",
-            format!("{}: {error}", root.display()),
-        )
-    })?;
-
-    for (relative, contents) in [
+    let project = crate::preset::init::Generator::new(&args.name, &parent, "zup.plugin.init")
+        .map_err(|error| failure::error("zup.plugin.init_name", error))?;
+    let name = project.name().to_owned();
+    let root = project.root().to_path_buf();
+    project.create(&[
         ("Cargo.toml", manifest(&name)),
         ("src/lib.rs", LIB.to_owned()),
         (".gitignore", GITIGNORE.to_owned()),
-    ] {
-        write(&root.join(relative), &contents)?;
-    }
+    ])?;
     println!("Created the plugin `{name}` in {}", root.display());
     println!("  cd {name}");
     println!("  zup plugin build");
     Ok(())
-}
-
-fn write(path: &Path, contents: &str) -> miette::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            failure::error(
-                "zup.plugin.init_write",
-                format!("{}: {error}", parent.display()),
-            )
-        })?;
-    }
-    std::fs::write(path, contents).map_err(|error| {
-        failure::error(
-            "zup.plugin.init_write",
-            format!("{}: {error}", path.display()),
-        )
-    })
 }
 
 fn manifest(name: &str) -> String {
@@ -174,6 +209,12 @@ pub fn build(args: &PluginBuildCommand) -> miette::Result<()> {
     };
     let project = Project::read(&root)?;
     let cargo = cargo_executable();
+
+    // Before anything asks Cargo to build: a plugin author is not expected to
+    // know which target a plugin is compiled for, so Zup does not let them find
+    // out by being handed a `can't find crate for core`.
+    ensure_guest_target(&root)
+        .map_err(|error| failure::error("zup.plugin.build_target", error.to_string()))?;
 
     // Step one: the ordinary Cargo build, for the target a plugin is compiled
     // for. Cargo is asked where its output actually is rather than having a path
@@ -332,13 +373,28 @@ fn artifact_executable(line: &[u8], library: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The target a plugin is compiled for, as this CLI spells it.
-pub const fn guest_target() -> &'static str {
-    GUEST_TARGET
-}
-
 fn cargo_executable() -> PathBuf {
     std::env::var_os("CARGO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// The answer to "is this target installed" is a whole-line match, so a
+    /// target that merely starts with the one being asked about is not one.
+    #[rstest]
+    #[case("wasm32-unknown-unknown", true)]
+    #[case("wasm32-unknown-unknown\nwasm32-wasip1", true)]
+    #[case("wasm32-unknown-unknown-preview", false)]
+    #[case("wasm32-wasip1", false)]
+    #[case("", false)]
+    #[case("\n\n", false)]
+    fn the_listing_is_read_a_line_at_a_time(#[case] listing: &str, #[case] expected: bool) {
+        assert_eq!(target_is_installed(listing, GUEST_TARGET), expected);
+    }
 }

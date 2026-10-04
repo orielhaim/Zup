@@ -105,7 +105,7 @@ pub struct ApplicationAssets {
 
 impl ApplicationAssets {
     /// The files the host materialized.
-    pub fn from_configuration(configuration: &zup_preset_protocol::Configuration) -> Self {
+    pub(crate) fn from_configuration(configuration: &zup_preset_protocol::Configuration) -> Self {
         Self {
             files: Arc::new(RwLock::new(
                 configuration
@@ -137,7 +137,7 @@ impl ApplicationAssets {
     }
 
     /// Replace the table, for a session whose assets were re-resolved.
-    pub fn replace(&self, assets: BTreeMap<String, String>) {
+    pub(crate) fn replace(&self, assets: BTreeMap<String, String>) {
         *self.files.write().expect("asset table") = assets
             .into_iter()
             .map(|(name, path)| (name, PathBuf::from(path)))
@@ -152,7 +152,7 @@ impl ApplicationAssets {
 /// has, so `img("logo.svg")` and the SVG renderer are unchanged - there is no
 /// second image-loading stack, and a preset does not learn which kind of asset
 /// a name refers to.
-pub struct PresetAssets {
+pub(crate) struct PresetAssets {
     /// Assets the application configured.
     application: ApplicationAssets,
     /// Assets compiled into the preset.
@@ -162,7 +162,7 @@ pub struct PresetAssets {
 }
 
 impl PresetAssets {
-    pub fn new(application: ApplicationAssets, own: impl AssetSource) -> Self {
+    pub(crate) fn new(application: ApplicationAssets, own: impl AssetSource) -> Self {
         Self {
             application,
             own: Box::new(own),
@@ -202,5 +202,50 @@ impl AssetSource for PresetAssets {
         listed.sort();
         listed.dedup();
         Ok(listed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assets arrive as a name-to-file mapping, and a preset finds its own by
+    /// name.
+    #[test]
+    fn assets_are_looked_up_by_name() {
+        let assets = ApplicationAssets::from_configuration(&zup_preset_protocol::Configuration {
+            settings: serde_json::json!({}),
+            assets: [(
+                "branding/logo.svg".to_owned(),
+                "C:/Temp/zup/ui/logo".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        });
+        assert_eq!(
+            assets.path(&AssetRef::new("branding/logo.svg")),
+            Some(PathBuf::from("C:/Temp/zup/ui/logo"))
+        );
+        assert!(
+            assets
+                .path(&AssetRef::new("branding/missing.svg"))
+                .is_none()
+        );
+        assert_eq!(assets.names(), ["branding/logo.svg"]);
+    }
+
+    /// A re-resolved configuration replaces the table rather than adding to it,
+    /// so an asset an application removed stops resolving.
+    #[test]
+    fn a_re_resolved_configuration_replaces_the_asset_table() {
+        let assets = ApplicationAssets::default();
+        assets.replace(
+            [("logo".to_owned(), "C:/Temp/zup/ui/logo".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(assets.path(&AssetRef::new("logo")).is_some());
+        assets.replace(Default::default());
+        assert!(assets.path(&AssetRef::new("logo")).is_none());
     }
 }

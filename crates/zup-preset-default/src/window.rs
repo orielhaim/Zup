@@ -21,8 +21,8 @@ use zup_preset_sdk::gpui_kit::{
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
     Window, WindowBounds, WindowOptions, div, px, relative, size,
 };
-use zup_preset_sdk::host::ResourceCategory;
 use zup_preset_sdk::prelude::*;
+use zup_preset_sdk::presentation::ResourceCategory;
 
 use crate::Settings;
 use crate::model::{self, Screen};
@@ -49,7 +49,7 @@ pub fn keep_process_on_close() {
 pub fn open(context: PresetContext<Settings>, cx: &mut App) {
     let session = context.session().clone();
     let settings: Entity<Settings> = (**context.settings()).clone();
-    let capabilities = context.host().capabilities.clone();
+    let capabilities = context.capabilities().clone();
     let options = window_options(cx);
     zup_preset_sdk::gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| Installer::new(session, settings, capabilities, window, cx))

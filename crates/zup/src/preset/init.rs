@@ -14,16 +14,70 @@
 //! wrong costs four minutes per build: the development profile, which makes the
 //! GPUI stack compile once instead of every time.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::failure;
 
-/// A name that is usable as a Cargo package and a directory.
+/// A generated project: a name, a directory of files, and the diagnostic code
+/// every failure writing one is reported under.
 ///
-/// Shared with `zup plugin init`, because a package name is a package name: the
-/// two generators differ in what they write, not in what they may call the
-/// result.
-pub fn package_name(raw: &str) -> Result<String, String> {
+/// Shared by both generators because a generated project is a generated project:
+/// they differ in the files they write, not in how they name one or how a
+/// failure to write one is reported.
+pub struct Generator {
+    name: String,
+    root: PathBuf,
+    write_code: &'static str,
+}
+
+impl Generator {
+    /// A project named `raw` in `parent`, reported under `code`.
+    pub fn new(raw: &str, parent: &Path, code: &'static str) -> Result<Self, String> {
+        let name = package_name(raw)?;
+        let root = parent.join(&name);
+        if root.exists() {
+            return Err(format!("`{}` already exists", root.display()));
+        }
+        Ok(Self {
+            name,
+            root,
+            write_code: code,
+        })
+    }
+
+    /// The name it was asked for, normalised into a package name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Where the project will be.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Write the project, failing under this generator's own code.
+    pub fn create(self, files: &[(&str, String)]) -> miette::Result<()> {
+        for (relative, contents) in files {
+            self.write(relative, contents)?;
+        }
+        Ok(())
+    }
+
+    fn write(&self, relative: &str, contents: &str) -> miette::Result<()> {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| self.write_failed(parent, error))?;
+        }
+        std::fs::write(&path, contents).map_err(|error| self.write_failed(&path, error))
+    }
+
+    fn write_failed(&self, path: &Path, error: std::io::Error) -> miette::Report {
+        failure::error(self.write_code, format!("{}: {error}", path.display()))
+    }
+}
+
+/// A name usable as a Cargo package and a directory.
+fn package_name(raw: &str) -> Result<String, String> {
     let name: String = raw
         .trim()
         .to_owned()
@@ -51,47 +105,15 @@ pub fn package_name(raw: &str) -> Result<String, String> {
 
 /// Create a preset project named `name` in `parent`.
 pub fn init(name: &str, parent: &Path) -> miette::Result<()> {
-    let name = package_name(name).map_err(|error| failure::error("zup.preset.init_name", error))?;
-    let root = parent.join(&name);
-    if root.exists() {
-        return Err(failure::error(
-            "zup.preset.init_exists",
-            format!("`{}` already exists", root.display()),
-        ));
-    }
-    std::fs::create_dir_all(root.join("src")).map_err(|error| {
-        failure::error(
-            "zup.preset.init_write",
-            format!("{}: {error}", root.display()),
-        )
-    })?;
-
-    for (relative, contents) in [
+    let project = Generator::new(name, parent, "zup.preset.init")
+        .map_err(|error| failure::error("zup.preset.init_name", error))?;
+    let name = project.name().to_owned();
+    project.create(&[
         ("Cargo.toml", manifest(&name)),
         ("src/main.rs", MAIN.to_owned()),
         ("zup.preset.dev.toml", DEVELOPMENT.to_owned()),
         (".gitignore", GITIGNORE.to_owned()),
-    ] {
-        write(&root.join(relative), &contents)?;
-    }
-    Ok(())
-}
-
-fn write(path: &Path, contents: &str) -> miette::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            failure::error(
-                "zup.preset.init_write",
-                format!("{}: {error}", parent.display()),
-            )
-        })?;
-    }
-    std::fs::write(path, contents).map_err(|error| {
-        failure::error(
-            "zup.preset.init_write",
-            format!("{}: {error}", path.display()),
-        )
-    })
+    ])
 }
 
 fn manifest(name: &str) -> String {

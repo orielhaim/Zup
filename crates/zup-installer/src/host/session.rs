@@ -71,7 +71,7 @@ impl Launch {
         }
     }
 
-    /// The uninstall confirmation window, for Apps & Features on a GUI package.
+    /// The uninstall confirmation window, for Apps & Features on a GUI frontend.
     pub fn uninstall_confirmation(args: &crate::uninstall::UninstallArgs) -> Self {
         Self {
             maintenance: true,
