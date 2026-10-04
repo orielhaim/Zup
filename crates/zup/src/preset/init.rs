@@ -250,7 +250,8 @@ impl Preset for Aurora {
 ///
 /// Nothing in here is a Zup concept: a preset is a GPUI program that draws what
 /// the host published and asks for what it wants.
-struct View {    session: Session,
+struct View {
+    session: Session,
     state: Entity<SessionState>,
     settings: PresetSettings<Settings>,
     _state: Subscription,

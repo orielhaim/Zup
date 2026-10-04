@@ -30,43 +30,58 @@ const GUEST_TARGET: &str = "wasm32-unknown-unknown";
 /// Why the guest target could not be made available.
 #[derive(Debug, thiserror::Error)]
 pub enum GuestTargetError {
-    #[error("could not run rustup: {0}")]
-    Rustup(#[source] std::io::Error),
+    #[error("could not run `{compiler}` to ask whether `{GUEST_TARGET}` is available: {source}")]
+    Probe {
+        compiler: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(
-        "`{GUEST_TARGET}` is not installed for this toolchain, and rustup could not install it:\n\
-         {stderr}\n\nInstall it with `rustup target add {GUEST_TARGET}` and try again."
+        "`{GUEST_TARGET}` is not available and rustup could not install it:\n{stderr}\n\n\
+         Install it with `rustup target add {GUEST_TARGET}` and try again."
     )]
     Install { stderr: String },
     #[error(
-        "`{GUEST_TARGET}` is not installed for this toolchain and rustup is not available to \
-         install it.\n\nInstall the target with `rustup target add {GUEST_TARGET}` and try again, \
-         or build this plugin on a machine whose Rust toolchain has it."
+        "`{GUEST_TARGET}` is not available to this Rust toolchain, and rustup is not \
+         installed to add it.\n\nInstall the target with `rustup target add {GUEST_TARGET}` and \
+         try again, or build this plugin on a machine whose Rust toolchain has it."
     )]
     Unmanaged,
 }
 
-/// Make sure the guest target is installed before anything asks Cargo to build it.
+/// The compiler, as this process found it.
+///
+/// Cargo puts both in the environment for anything it runs, so a nested build uses
+/// the same compiler rather than whatever is first on `PATH` - which is the
+/// difference between a plugin being built by the toolchain Zup is testing and by
+/// whatever happens to sit beside it.
+fn rustc_executable() -> PathBuf {
+    std::env::var_os("RUSTC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("rustc"))
+}
+
+/// Make sure the guest target is usable before anything asks Cargo to build it.
 ///
 /// The claim this command makes is that a plugin author has nothing to install
 /// but zup, and a bare `cargo build --target` breaks that on any machine that
 /// has not happened to add the target already: the failure arrives as
 /// `can't find crate for core`, which says nothing about the fix.
 ///
-/// The toolchain in use is the one asked, rather than one Zup would bring
-/// along, because that is the one whose output a host will run. `rustup` is the
-/// thing that knows which toolchain is active - the default one, whatever a
-/// `rust-toolchain.toml` in the project selects - and the only thing that can
-/// add a target to it. A Rust installation without rustup can still have the
-/// target, so a missing `rustup` is a refusal with instructions rather than a
-/// guess at what to do.
+/// The question is asked of the compiler rather than of rustup, because the
+/// answer that matters is whether the compiler about to be used can build for
+/// this target. A Rust installation with no rustup at all can have the target -
+/// from a distribution package, a custom toolchain, or a hand-copied sysroot -
+/// and asking rustup first would refuse to build a plugin that already builds.
+/// rustup is the official way to *add* a target, so it is used for that, and
+/// only after the compiler has said the target is missing.
+///
+/// Everything runs in the plugin's own directory, because that is what selects
+/// the toolchain: a `rust-toolchain.toml` beside the plugin, or rustup's proxy
+/// machinery, both choose from the working directory rather than from anywhere
+/// zup happens to be invoked.
 pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
-    let installed = Command::new("rustup")
-        .current_dir(root)
-        .args(["target", "list", "--installed"])
-        .output()
-        .map_err(GuestTargetError::Rustup)?;
-    let listed = String::from_utf8_lossy(&installed.stdout);
-    if target_is_installed(&listed, GUEST_TARGET) {
+    if target_is_available(root) {
         return Ok(());
     }
 
@@ -74,23 +89,63 @@ pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
         .current_dir(root)
         .args(["target", "add", GUEST_TARGET])
         .output()
-        .map_err(GuestTargetError::Rustup)?;
+        // rustup is only being asked to add a target the compiler has already
+        // said is missing, so a missing rustup is the one failure with a useful
+        // thing to say about it.
+        .map_err(|_| GuestTargetError::Unmanaged)?;
     if !added.status.success() {
         return Err(GuestTargetError::Install {
             stderr: String::from_utf8_lossy(&added.stderr).trim().to_owned(),
+        });
+    }
+
+    // rustup reporting success is not the same as the target being there. It
+    // installs into the toolchain it selected, and which toolchain that is
+    // depends on the directory it was run from, so the only way to know is to
+    // ask the compiler again.
+    if !target_is_available(root) {
+        return Err(GuestTargetError::Install {
+            stderr: format!(
+                "rustup reported installing `{GUEST_TARGET}`, but {} still cannot build for it",
+                rustc_executable().display()
+            ),
         });
     }
     println!("installed the `{GUEST_TARGET}` target for this toolchain");
     Ok(())
 }
 
-/// Whether a `rustup target list --installed` listing includes `target`.
+/// Whether the compiler Zup is about to use can already build for the guest target.
 ///
-/// One target per line and nothing padded, so the answer is a whole-line match
-/// rather than a substring: `wasm32-unknown-unknown` is not installed by the
-/// fact that some longer target starts with it.
-fn target_is_installed(listing: &str, target: &str) -> bool {
-    listing.lines().any(|line| line.trim() == target)
+/// `rustc --print target-libdir` names the directory a target's standard library
+/// is installed into whether or not it is installed, so the answer is whether
+/// that directory exists - which is the property that actually decides whether
+/// the build will find `core`.
+fn target_is_available(root: &Path) -> bool {
+    let compiler = rustc_executable();
+    let Ok(output) = Command::new(&compiler)
+        .current_dir(root)
+        .args(["--print", "target-libdir", "--target", GUEST_TARGET])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    library_directory(&output.stdout).is_some_and(|directory| directory.is_dir())
+}
+
+/// The target's standard-library directory, as `rustc --print target-libdir`
+/// reported it, or `None` when it named nothing.
+///
+/// `rustc` prints the path whether or not the target is installed, so the caller
+/// has to check the directory itself; this only reads what was said, so that
+/// reading it can be tested without a toolchain to ask.
+fn library_directory(stdout: &[u8]) -> Option<PathBuf> {
+    let reported = String::from_utf8_lossy(stdout);
+    let directory = reported.trim().lines().last()?.trim();
+    (!directory.is_empty()).then(|| PathBuf::from(directory))
 }
 
 /// Author and build a plugin.
@@ -347,16 +402,72 @@ mod tests {
 
     use super::*;
 
-    /// The answer to "is this target installed" is a whole-line match, so a
-    /// target that merely starts with the one being asked about is not one.
+    /// The directory is the last thing printed, with the newline and any trailing
+    /// space as rustfmt would leave it. Anything shorter is not a path and is not
+    /// treated as one.
     #[rstest]
-    #[case("wasm32-unknown-unknown", true)]
-    #[case("wasm32-unknown-unknown\nwasm32-wasip1", true)]
-    #[case("wasm32-unknown-unknown-preview", false)]
-    #[case("wasm32-wasip1", false)]
-    #[case("", false)]
-    #[case("\n\n", false)]
-    fn the_listing_is_read_a_line_at_a_time(#[case] listing: &str, #[case] expected: bool) {
-        assert_eq!(target_is_installed(listing, GUEST_TARGET), expected);
+    #[case::path("/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\n", true)]
+    #[case::path_with_a_carriage_return(
+        "/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\r\n",
+        true
+    )]
+    #[case::last_of_several(
+        "warning: something\n/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\n",
+        true
+    )]
+    #[case::empty("", false)]
+    #[case::only_newlines("\n\n", false)]
+    fn the_library_directory_is_the_last_thing_the_compiler_printed(
+        #[case] stdout: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(library_directory(stdout.as_bytes()).is_some(), expected);
+    }
+
+    /// `rustc` prints the path whether or not the target is installed, so the
+    /// directory itself is what decides. A toolchain without this target names a
+    /// directory that does not exist, and that is what sends the caller to rustup
+    /// rather than to a build that would fail with a missing `core`.
+    #[test]
+    fn a_named_directory_that_does_not_exist_is_not_a_target() {
+        let missing = std::env::temp_dir().join("zup-no-such-target-libdir");
+        assert!(!missing.is_dir(), "the stand-in does not exist");
+        let named = library_directory(format!("{}\n", missing.display()).as_bytes())
+            .expect("a directory was named");
+        assert!(
+            !named.is_dir(),
+            "so it is not a target this toolchain can build"
+        );
+    }
+
+    /// A plugin on this machine can be built, and the point of asking the compiler
+    /// rather than rustup is that the question has an answer wherever the
+    /// toolchain came from - including one rustup knows nothing about.
+    #[test]
+    fn the_guest_target_is_asked_of_the_compiler() {
+        assert!(
+            target_is_available(Path::new(".")),
+            "`{GUEST_TARGET}` is available to this toolchain"
+        );
+    }
+
+    /// Every failure a plugin author can hit names what to do about it, and none
+    /// asks for a toolchain Zup is not responsible for providing.
+    #[test]
+    fn the_failures_name_the_one_thing_the_author_can_do() {
+        let unmanaged = GuestTargetError::Unmanaged.to_string();
+        assert!(
+            unmanaged.contains(&format!("rustup target add {GUEST_TARGET}")),
+            "without rustup, the instruction is the command to run by hand: {unmanaged}"
+        );
+
+        let failed = GuestTargetError::Install {
+            stderr: "error: no such toolchain".to_owned(),
+        }
+        .to_string();
+        assert!(
+            failed.contains("no such toolchain"),
+            "a failed installation keeps what rustup said: {failed}"
+        );
     }
 }

@@ -14,6 +14,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use rstest::rstest;
+
 /// The SDK's own crates, resolved from this checkout.
 ///
 /// A preset outside the workspace reaches the SDK through crates.io, and that is
@@ -40,21 +42,7 @@ fn patch(crates: &[(&str, &str)]) -> String {
     format!("[patch.crates-io]\n{}\n", entries.join("\n"))
 }
 
-/// Every crate the published SDK resolves through, in publish order.
-///
-/// A generated project that names only `zup-sdk` still pulls the crates beneath
-/// it, and Cargo resolves each of them from crates.io. Listing them here is what
-/// makes the test prove the whole chain resolves rather than only the top.
-fn sdk_chain() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("zup-sdk", "zup-sdk"),
-        ("zup-preset-sdk", "zup-preset-sdk"),
-        ("zup-preset-sdk-macros", "zup-preset-sdk-macros"),
-        ("zup-preset-protocol", "zup-preset-protocol"),
-        ("zup-preset-ipc", "zup-preset-ipc"),
-    ]
-}
-
+/// Every crate the published preset SDK resolves through, in publish order.
 fn cargo() -> Command {
     let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -66,19 +54,91 @@ fn generated(directory: &Path) -> std::path::PathBuf {
     directory.join("aurora")
 }
 
+/// Which generator produced a project, where each one writes its Rust.
+///
+/// The two differ in the crate type they build and nothing else, and the checks
+/// that have to hold for both are the ones worth writing once.
+#[derive(Debug, Clone, Copy)]
+enum Generated {
+    Preset,
+    Plugin,
+}
+
+impl Generated {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Preset => "preset",
+            Self::Plugin => "plugin",
+        }
+    }
+
+    /// The Rust file a generated project is written as.
+    fn source(self) -> &'static str {
+        match self {
+            Self::Preset => "src/main.rs",
+            Self::Plugin => "src/lib.rs",
+        }
+    }
+}
+
+fn plugin(directory: &Path) -> std::path::PathBuf {
+    zup::plugin::init(&zup::plugin::PluginInitCommand {
+        name: "configure".to_owned(),
+        directory: Some(directory.to_path_buf()),
+    })
+    .expect("the project is generated");
+    directory.join("configure")
+}
+
 /// Generate a project with the whole SDK chain patched to this checkout.
 fn generated_with_local_sdk(directory: &Path) -> std::path::PathBuf {
     let root = generated(directory);
+    append_patch(&root, &sdk_chain(Generated::Preset));
+    root
+}
+
+/// Generate a plugin with the whole SDK chain patched to this checkout.
+fn generated_plugin_with_local_sdk(directory: &Path) -> std::path::PathBuf {
+    let root = plugin(directory);
+    append_patch(&root, &sdk_chain(Generated::Plugin));
+    root
+}
+
+/// Every crate the published SDK resolves through for one role, in publish order.
+///
+/// A generated project names only `zup-sdk`, and Cargo still resolves the crates
+/// beneath it from crates.io. Listing them is what makes the tests prove the
+/// whole chain resolves rather than only the top, and the two roles resolve
+/// different chains because they depend on different crates.
+fn sdk_chain(role: Generated) -> Vec<(&'static str, &'static str)> {
+    let mut chain = vec![("zup-sdk", "zup-sdk")];
+    chain.extend(match role {
+        Generated::Preset => vec![
+            ("zup-preset-sdk", "zup-preset-sdk"),
+            ("zup-preset-sdk-macros", "zup-preset-sdk-macros"),
+            ("zup-preset-protocol", "zup-preset-protocol"),
+            ("zup-preset-ipc", "zup-preset-ipc"),
+        ],
+        Generated::Plugin => vec![
+            ("zup-plugin-sdk", "zup-plugin-sdk"),
+            ("zup-plugin-abi", "zup-plugin-abi"),
+        ],
+    });
+    chain
+}
+
+/// Point every crate in `chain` at this checkout, in the generated manifest.
+fn append_patch(root: &Path, chain: &[(&str, &str)]) {
+    let manifest = root.join("Cargo.toml");
     std::fs::write(
-        root.join("Cargo.toml"),
+        &manifest,
         format!(
             "{}\n{}\n",
-            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest"),
-            patch(&sdk_chain())
+            std::fs::read_to_string(&manifest).expect("the manifest"),
+            patch(chain)
         ),
     )
     .expect("the patch is appended");
-    root
 }
 
 /// A generated project is a Cargo project, and Cargo can resolve it.
@@ -268,6 +328,45 @@ fn a_generated_project_teaches_the_public_api_and_nothing_else() {
     );
 }
 
+/// Generated Rust is formatted Rust.
+///
+/// A template is a string, so nothing in the build complains when two of its
+/// lines are joined: the first thing an author sees is a window full of
+/// indentation that is wrong in a way that looks like their mistake. This is
+/// `rustfmt --check` run against what the generator actually produced, so a
+/// template that stops being canonical source is a failure here rather than in
+/// the first project someone generates.
+#[rstest]
+#[case::preset(Generated::Preset)]
+#[case::plugin(Generated::Plugin)]
+fn generated_rust_is_formatted(#[case] kind: Generated) {
+    let directory = tempfile::tempdir().expect("a scratch directory");
+    let root = match kind {
+        Generated::Preset => generated(directory.path()),
+        Generated::Plugin => plugin(directory.path()),
+    };
+
+    let output = rustfmt()
+        .arg("--edition")
+        .arg("2024")
+        .arg("--check")
+        .arg(root.join(kind.source()))
+        .output()
+        .expect("rustfmt runs");
+    assert!(
+        output.status.success(),
+        "a generated {} is rustfmt-clean:\n{}",
+        kind.name(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+fn rustfmt() -> Command {
+    let mut command = Command::new(std::env::var_os("RUSTFMT").unwrap_or_else(|| "rustfmt".into()));
+    command.current_dir(env!("CARGO_MANIFEST_DIR"));
+    command
+}
+
 /// The development document is a source file, not development state.
 ///
 /// It is the thing a preset author edits, so it belongs in the same commit as the
@@ -344,25 +443,7 @@ fn a_generated_project_compiles() {
 #[ignore = "compiles the bindings generator for Wasm, which takes a while"]
 fn a_generated_plugin_compiles_and_componentises() {
     let directory = tempfile::tempdir().expect("a scratch directory");
-    zup::plugin::init(&zup::plugin::PluginInitCommand {
-        name: "configure".to_owned(),
-        directory: Some(directory.path().to_path_buf()),
-    })
-    .expect("the project is generated");
-    let root = directory.path().join("configure");
-    std::fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "{}\n{}\n",
-            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest"),
-            patch(&[
-                ("zup-sdk", "zup-sdk"),
-                ("zup-plugin-sdk", "zup-plugin-sdk"),
-                ("zup-plugin-abi", "zup-plugin-abi"),
-            ])
-        ),
-    )
-    .expect("the patch is appended");
+    let root = generated_plugin_with_local_sdk(directory.path());
 
     let output = cargo()
         .current_dir(&root)
@@ -398,26 +479,7 @@ fn a_generated_plugin_compiles_and_componentises() {
 #[test]
 fn a_generated_plugin_resolves_against_the_published_sdk() {
     let directory = tempfile::tempdir().expect("a scratch directory");
-    zup::plugin::init(&zup::plugin::PluginInitCommand {
-        name: "configure".to_owned(),
-        directory: Some(directory.path().to_path_buf()),
-    })
-    .expect("the project is generated");
-
-    let root = directory.path().join("configure");
-    std::fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "{}\n{}\n",
-            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest"),
-            patch(&[
-                ("zup-sdk", "zup-sdk"),
-                ("zup-plugin-sdk", "zup-plugin-sdk"),
-                ("zup-plugin-abi", "zup-plugin-abi"),
-            ])
-        ),
-    )
-    .expect("the patch is appended");
+    let root = generated_plugin_with_local_sdk(directory.path());
 
     let output = cargo()
         .arg("metadata")
