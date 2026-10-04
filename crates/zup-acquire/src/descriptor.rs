@@ -394,6 +394,14 @@ impl RelativeContentPath {
         if value.len() >= 2 && value.as_bytes()[1] == b':' {
             return Err("a content path cannot name a drive");
         }
+        // A colon anywhere else is just as able to leave the root: Windows reads
+        // `dir/file:stream` as an alternate data stream on `dir/file`, and a
+        // later segment may name a drive of its own. Refusing the drive position
+        // alone let `a:b` through, which is a path the filesystem resolves to
+        // somewhere this check never looked.
+        if value.contains(':') {
+            return Err("a content path cannot contain a colon");
+        }
         if value.contains('\\') {
             return Err("a content path uses `/` separators");
         }

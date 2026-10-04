@@ -47,6 +47,11 @@ pub enum GuestTargetError {
          try again, or build this plugin on a machine whose Rust toolchain has it."
     )]
     Unmanaged,
+    #[error("`{GUEST_TARGET}` is not available and rustup could not be run to add it: {source}")]
+    Rustup {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The compiler, as this process found it.
@@ -81,7 +86,7 @@ fn rustc_executable() -> PathBuf {
 /// machinery, both choose from the working directory rather than from anywhere
 /// zup happens to be invoked.
 pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
-    if target_is_available(root) {
+    if target_is_available(root)? {
         return Ok(());
     }
 
@@ -89,10 +94,13 @@ pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
         .current_dir(root)
         .args(["target", "add", GUEST_TARGET])
         .output()
-        // rustup is only being asked to add a target the compiler has already
-        // said is missing, so a missing rustup is the one failure with a useful
-        // thing to say about it.
-        .map_err(|_| GuestTargetError::Unmanaged)?;
+        .map_err(|source| match source.kind() {
+            // Not being installed at all is the one failure with something the
+            // author can do about it by hand, and it is worth saying so rather
+            // than reporting that rustup could not be run.
+            std::io::ErrorKind::NotFound => GuestTargetError::Unmanaged,
+            _ => GuestTargetError::Rustup { source },
+        })?;
     if !added.status.success() {
         return Err(GuestTargetError::Install {
             stderr: String::from_utf8_lossy(&added.stderr).trim().to_owned(),
@@ -103,7 +111,7 @@ pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
     // installs into the toolchain it selected, and which toolchain that is
     // depends on the directory it was run from, so the only way to know is to
     // ask the compiler again.
-    if !target_is_available(root) {
+    if !target_is_available(root)? {
         return Err(GuestTargetError::Install {
             stderr: format!(
                 "rustup reported installing `{GUEST_TARGET}`, but {} still cannot build for it",
@@ -121,19 +129,25 @@ pub fn ensure_guest_target(root: &Path) -> Result<(), GuestTargetError> {
 /// is installed into whether or not it is installed, so the answer is whether
 /// that directory exists - which is the property that actually decides whether
 /// the build will find `core`.
-fn target_is_available(root: &Path) -> bool {
+///
+/// A compiler that cannot be run at all is a failure rather than an absent
+/// target. The two are different problems with different fixes, and folding them
+/// together would send a broken toolchain down the rustup path and report the
+/// wrong one.
+fn target_is_available(root: &Path) -> Result<bool, GuestTargetError> {
     let compiler = rustc_executable();
-    let Ok(output) = Command::new(&compiler)
+    let output = Command::new(&compiler)
         .current_dir(root)
         .args(["--print", "target-libdir", "--target", GUEST_TARGET])
         .output()
-    else {
-        return false;
-    };
+        .map_err(|source| GuestTargetError::Probe {
+            compiler: compiler.display().to_string(),
+            source,
+        })?;
     if !output.status.success() {
-        return false;
+        return Ok(false);
     }
-    library_directory(&output.stdout).is_some_and(|directory| directory.is_dir())
+    Ok(library_directory(&output.stdout).is_some_and(|directory| directory.is_dir()))
 }
 
 /// The target's standard-library directory, as `rustc --print target-libdir`
@@ -443,11 +457,55 @@ mod tests {
     /// A plugin on this machine can be built, and the point of asking the compiler
     /// rather than rustup is that the question has an answer wherever the
     /// toolchain came from - including one rustup knows nothing about.
+    ///
+    /// Asserted through a compiler that is not a compiler, which is the only way
+    /// to test the probe without assuming anything about the machine running the
+    /// suite. Whether a real toolchain has `{GUEST_TARGET}` is exactly the
+    /// question the suite must not assume: the whole point is to handle machines
+    /// where it is absent.
     #[test]
-    fn the_guest_target_is_asked_of_the_compiler() {
+    fn a_compiler_that_cannot_be_run_is_not_reported_as_a_missing_target() {
+        let missing = "zup-no-such-rustc";
+        let error = Command::new(missing)
+            .args(["--print", "target-libdir"])
+            .output()
+            .expect_err("a compiler that does not exist cannot be run");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let reported = GuestTargetError::Probe {
+            compiler: missing.to_owned(),
+            source: error,
+        }
+        .to_string();
         assert!(
-            target_is_available(Path::new(".")),
-            "`{GUEST_TARGET}` is available to this toolchain"
+            reported.contains("could not run") && reported.contains(missing),
+            "a compiler that cannot be run is a different problem from an absent target, and \
+             is reported as one: {reported}"
+        );
+    }
+
+    /// Not having rustup and not being able to run it are different failures, and
+    /// only the first one has an instruction to follow.
+    #[test]
+    fn a_missing_rustup_is_distinct_from_one_that_will_not_run() {
+        let refused = GuestTargetError::Unmanaged.to_string();
+        assert!(
+            refused.contains("rustup is not installed"),
+            "so it says rustup is absent: {refused}"
+        );
+
+        let denied = GuestTargetError::Rustup {
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access is denied"),
+        }
+        .to_string();
+        assert!(
+            denied.contains("access is denied"),
+            "and a rustup that would not run keeps the reason rather than being reported as \
+             absent: {denied}"
+        );
+        assert!(
+            !denied.contains("rustup is not installed"),
+            "which would send the author looking for a rustup that is installed"
         );
     }
 
