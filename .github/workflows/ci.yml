@@ -29,6 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: i686-pc-windows-msvc, wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -103,6 +104,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -126,6 +129,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:

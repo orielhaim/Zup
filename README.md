@@ -38,9 +38,17 @@ Zup is still pre-release. Until packaged releases are published, build it from s
 git clone https://github.com/orielhaim/Zup.git
 cd Zup
 
+rustup target add i686-pc-windows-msvc   # the dispatcher's machine, see below
+
 cargo xtask toolchain build
 cargo run -p zup -- --version
 ```
+
+The dispatcher is built for `i686-pc-windows-msvc` because it has to run on the
+narrowest machine any variant can serve: natively on x86, under WOW64 on x64, and
+under the x86 compatibility layer on arm64. That is the only target to add by
+hand — the WebAssembly target a plugin builds for is installed for you the first
+time `zup plugin build` needs it.
 
 ## Quick start
 
