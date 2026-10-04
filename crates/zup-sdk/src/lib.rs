@@ -23,6 +23,11 @@
 //! ```no_run
 //! use zup_sdk::preset::prelude::*;
 //!
+//! #[zup_sdk::preset::settings]
+//! struct Settings {
+//!     hero: Option<String>,
+//! }
+//!
 //! struct MyPreset;
 //!
 //! impl Preset for MyPreset {
@@ -33,11 +38,6 @@
 //!     fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
 //!         // Ordinary GPUI, with the installer's state already published.
 //!     }
-//! }
-//!
-//! #[zup_sdk::preset::settings]
-//! struct Settings {
-//!     hero: Option<String>,
 //! }
 //!
 //! fn main() {
@@ -113,7 +113,25 @@ pub mod plugin {
     }
 }
 
+/// The window an installer presents.
+///
+/// Listed rather than globbed, so that publishing something new in the crate
+/// beneath is a decision to publish it here rather than an accident of what
+/// that crate happens to export.
 #[cfg(feature = "preset")]
 pub mod preset {
-    pub use zup_preset_sdk::*;
+    pub use zup_preset_sdk::{
+        ActionSender, ApplicationAssets, AssetRef, NoSettings, Preset, PresetContext, PresetError,
+        PresetSettings, Session, SessionState, run, settings,
+    };
+    pub use zup_preset_sdk::gpui_kit;
+    pub mod prelude {
+        pub use zup_preset_sdk::prelude::*;
+    }
+    pub mod presentation {
+        pub use zup_preset_sdk::presentation::*;
+    }
+    /// GPUI's headless test harness, for a preset that tests its own windows.
+    #[cfg(feature = "test-support")]
+    pub use zup_preset_sdk::test_support;
 }
