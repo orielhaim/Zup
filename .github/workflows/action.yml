@@ -93,17 +93,25 @@ jobs:
         run: cargo build --release --bin zup
 
       - name: A project for it
+        # Three projects, because three steps below point at three directories.
+        # Headless, and deliberately so: this job is about the action - its
+        # outputs, its summary, and how it reports a failure - and it builds only
+        # the `zup` binary, so nothing here has staged a preset. The default
+        # frontend is graphical, and a graphical project refuses to be checked
+        # without one, so `zup check` failed with `preset_unavailable` and every
+        # assertion below was about a step that had already stopped.
         run: |
-          $project = Join-Path $env:RUNNER_TEMP 'acme'
-          New-Item -ItemType Directory -Force -Path (Join-Path $project 'dist') | Out-Null
-          Set-Content -Path (Join-Path $project 'dist/app.bin') -Value 'payload' -NoNewline
-          @'
+          function New-ZupProject([string] $Root, [string] $Version) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $Root 'dist') | Out-Null
+            Set-Content -Path (Join-Path $Root 'dist/app.bin') -Value 'payload' -NoNewline
+            @"
           schema = 1
+          frontend = "headless"
 
           [app]
           id = "com.acme.e2e"
           name = "Acme"
-          version = "1.4.0"
+          version = "$Version"
           main = "app.bin"
 
           [build]
@@ -116,12 +124,26 @@ jobs:
           scope = "user"
 
           [install.directory]
-          user = "${location.user_data}/Acme"
+          user = "`${location.user_data}/Acme"
 
           [[files]]
           source = "**/*"
-          destination = "${install}"
-          '@ | Set-Content -Path (Join-Path $project 'zup.toml') -NoNewline
+          destination = "`${install}"
+          "@ | Set-Content -Path (Join-Path $Root 'zup.toml') -NoNewline
+          }
+
+          $project = Join-Path $env:RUNNER_TEMP 'acme'
+          New-ZupProject $project '1.4.0'
+
+          # A second copy at a path with a space, because an argument that is
+          # passed as one value is the whole claim that step makes.
+          New-ZupProject (Join-Path $env:RUNNER_TEMP 'my project') '1.4.0'
+
+          # A manifest that is present and wrong, rather than a directory that is
+          # absent. Both make the step fail, but only this one proves the failure
+          # came from reading the project and naming a line in it.
+          New-ZupProject (Join-Path $env:RUNNER_TEMP 'broken') 'not-a-version'
+
           "PROJECT=$project" >> $env:GITHUB_ENV
           "ZUP=$env:GITHUB_WORKSPACE\target\release\zup.exe" >> $env:GITHUB_ENV
 
