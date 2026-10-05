@@ -19,14 +19,13 @@ use zup_transaction::{
 };
 
 use crate::FilePrecondition;
-use crate::durable::InstallationLock;
-use crate::durable::LockScope;
 use crate::file_executor::{NullProgress, WindowsFileExecutor, apply_node};
 use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
     verify_payload_overlay,
 };
 use zup_protocol::failure;
+use zup_transaction::{InstallationLock, LockScope};
 
 use crate::pipe::{ClientReader, ClientWriter, PipeError, frame_client};
 use crate::transport::{UserSid, verify_server_pid};

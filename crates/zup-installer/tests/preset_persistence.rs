@@ -410,27 +410,45 @@ fn an_installation_whose_preset_is_missing_says_so_rather_than_opening_another()
         .join(&app.id)
         .join("user")
         .join(&app.version);
-    let executable = zup_windows::preset_runtime::preset_path(&directory, &ui.executable);
+    let executable = zup_bundle::preset_path(
+        &directory,
+        &ui.executable,
+        support::project::host_target().executable_suffix(),
+    );
     std::fs::write(&executable, b"not the preset").expect("the content is replaced");
 
-    let error = zup_windows::preset_runtime::resolve(&directory, &ui)
+    let error = resolve_installed(&directory, &ui)
         .expect_err("content that is not what the installation recorded");
     assert!(
         error.to_string().contains("hashes to"),
         "the refusal says the content is wrong, not that something is missing: {error}"
     );
-    let asset = zup_windows::preset_runtime::asset_path(
-        &directory,
-        "branding/logo.svg",
-        &ui.preset.assets[0].sha256,
-    );
+    let asset =
+        zup_bundle::asset_path(&directory, "branding/logo.svg", &ui.preset.assets[0].sha256);
     std::fs::remove_file(&asset).expect("the asset is removed");
-    let error = zup_windows::preset_runtime::resolve(&directory, &ui)
-        .expect_err("an asset the settings named is gone");
+    let error =
+        resolve_installed(&directory, &ui).expect_err("an asset the settings named is gone");
     assert!(
         error.to_string().contains("branding/logo.svg"),
         "the refusal names the asset the application configured: {error}"
     );
+}
+
+/// The installed window's content, proved the way the host proves it.
+///
+/// The test asks the portable owner rather than reaching into the installation's
+/// own directories, because that is the contract the host holds itself to: a
+/// caller is handed a path only once every byte behind it has been checked.
+fn resolve_installed(
+    directory: &Path,
+    ui: &zup_core::InstalledPreset,
+) -> Result<zup_bundle::Resolved, zup_bundle::PresetContentError> {
+    zup_bundle::resolve_preset_content(
+        directory,
+        ui,
+        support::project::host_target().executable_suffix(),
+        zup_windows::plain_path_text,
+    )
 }
 
 /// The window survives every verb that is not an uninstall.
@@ -468,7 +486,7 @@ fn modify_and_repair_leave_the_same_window_in_place() {
         2,
         "and the same content, not a second copy: {owned:?}"
     );
-    let asset = zup_windows::preset_runtime::asset_path(
+    let asset = zup_bundle::asset_path(
         &state
             .path()
             .join("maintenance")

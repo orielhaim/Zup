@@ -81,12 +81,12 @@ fn content_files(
 ) -> Vec<(PathBuf, Sha256Digest)> {
     let directory = content_directory(state_root, scope, &version());
     let mut files = vec![(
-        zup_windows::preset_runtime::preset_path(&directory, &ui.executable),
+        zup_bundle::preset_path(&directory, &ui.executable, target().executable_suffix()),
         ui.executable,
     )];
     files.extend(ui.preset.assets.iter().map(|asset| {
         (
-            zup_windows::preset_runtime::asset_path(&directory, asset.name.as_str(), &asset.sha256),
+            zup_bundle::asset_path(&directory, asset.name.as_str(), &asset.sha256),
             asset.sha256,
         )
     }));
@@ -355,7 +355,7 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
         }
         for (path, _) in content_files(state_root.path(), scope, &ui) {
             assert!(
-                zup_windows::preset_runtime::is_content_path(
+                zup_bundle::is_content_path(
                     &zup_windows::maintenance_root(state_root.path(), &app_id(), scope),
                     &zup_windows::plain_path_text(&path),
                 ),

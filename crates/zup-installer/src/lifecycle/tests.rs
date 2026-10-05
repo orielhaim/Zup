@@ -326,7 +326,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
     let app = AppId::new("com.example.window").expect("an app id");
     let version = semver::Version::parse("1.0.0").expect("a version");
     let source = |name: &str| -> miette::Result<Vec<u8>> {
-        Ok(if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        Ok(if name == zup_bundle::PRESET_SOURCE {
             PRESET_EXECUTABLE.to_vec()
         } else {
             LOGO.to_vec()
@@ -356,12 +356,17 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
             "and the executable is named by content"
         );
 
-        let executable = zup_windows::preset_runtime::preset_path(&directory, &runtime.executable);
-        let asset = zup_windows::preset_runtime::asset_path(
+        let executable = zup_bundle::preset_path(
             &directory,
-            "branding/logo.svg",
-            &zup_core::hash_bytes(LOGO),
+            &runtime.executable,
+            // The name the installation persisted its window under, which follows
+            // the target's own naming rule rather than this host's.
+            zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
+                .expect("a target")
+                .executable_suffix(),
         );
+        let asset =
+            zup_bundle::asset_path(&directory, "branding/logo.svg", &zup_core::hash_bytes(LOGO));
         assert_eq!(
             target.files.len(),
             2,
@@ -391,7 +396,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
         }
         assert_eq!(
             target.files[0].source_relative.as_str(),
-            zup_windows::preset_runtime::PRESET_SOURCE,
+            zup_bundle::PRESET_SOURCE,
             "and the plan names where the bytes come from rather than a file to copy"
         );
         assert_eq!(
@@ -437,7 +442,7 @@ fn an_asset_that_is_not_the_configured_content_is_refused() {
     let root = TempDir::new().expect("a scratch directory");
     let mut target = empty_target(SelectedScope::User, "com.example.mismatch");
     let source = |name: &str| -> miette::Result<Vec<u8>> {
-        Ok(if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        Ok(if name == zup_bundle::PRESET_SOURCE {
             PRESET_EXECUTABLE.to_vec()
         } else {
             b"something else".to_vec()
@@ -505,14 +510,17 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
         .collect();
     destinations.sort();
     let mut expected = vec![
-        zup_windows::plain_path_text(&zup_windows::preset_runtime::asset_path(
+        zup_windows::plain_path_text(&zup_bundle::asset_path(
             &directory,
             "branding/logo.svg",
             &recorded.preset.assets[0].sha256,
         )),
-        zup_windows::plain_path_text(&zup_windows::preset_runtime::preset_path(
+        zup_windows::plain_path_text(&zup_bundle::preset_path(
             &directory,
             &recorded.executable,
+            zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
+                .expect("a target")
+                .executable_suffix(),
         )),
     ];
     expected.sort();
@@ -530,7 +538,10 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
     assert_eq!(
         sources,
         [
-            "__zup_preset__.exe",
+            // The reserved slot carries no executable suffix: it is a slot in a
+            // payload, not a file name, and a slot that ended in one platform's
+            // convention could not be the same slot on another.
+            zup_bundle::PRESET_SOURCE,
             "__zup_preset_asset__/branding/logo.svg",
         ],
         "and the plan names where the bytes come from, rather than a build-machine path"

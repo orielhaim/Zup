@@ -295,7 +295,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     // The staged runtime is the maintenance runtime: the same native executable
     // an installation would persist, named for that role rather than for the
     // installer medium a person downloads.
-    let runtime_path = handoff_root.join(zup_windows::MAINTENANCE_EXECUTABLE_NAME);
+    let runtime_path = handoff_root.join(zup_windows::MAINTENANCE_RUNTIME_DIRECTORY);
     if let Err(detail) = write_runtime(&runtime_path, &verified) {
         return Outcome::AcquisitionFailed { detail };
     }

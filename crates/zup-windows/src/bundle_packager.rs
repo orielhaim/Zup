@@ -333,12 +333,12 @@ impl PayloadSource for EmbeddedPayloadSource {
         if path.as_str() == "__zup_maintenance__.exe" {
             return self.open_maintenance(path, expected_sha256, expected_size);
         }
-        if path.as_str() == crate::preset_runtime::PRESET_SOURCE {
+        if path.as_str() == zup_bundle::PRESET_SOURCE {
             return self.open_preset(path, expected_sha256, expected_size);
         }
         if let Some(name) = path
             .as_str()
-            .strip_prefix(crate::preset_runtime::ASSET_SOURCE_PREFIX)
+            .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
             .and_then(|rest| rest.strip_prefix('/'))
         {
             let (asset, bytes) = EmbeddedBundle::open(&self.executable)
@@ -449,7 +449,7 @@ pub fn sidecar_package_path(executable: &Path) -> PathBuf {
     executable
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(crate::content_store::MAINTENANCE_PACKAGE_NAME)
+        .join(crate::MAINTENANCE_PACKAGE_NAME)
 }
 
 /// Whether an image is a universal artifact rather than a payload root.

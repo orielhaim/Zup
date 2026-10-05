@@ -9,6 +9,7 @@
 mod acquired;
 mod format;
 mod payload;
+mod preset;
 
 pub use acquired::{AcquiredPayloadSource, refuse_self_verified};
 pub use format::{
@@ -19,4 +20,8 @@ pub use format::{
 pub use payload::{
     AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,
     PayloadSource,
+};
+pub use preset::{
+    ASSET_SOURCE_PREFIX, PRESET_SOURCE, PresetContentError, Resolved, asset_path,
+    asset_source_name, is_content_path, preset_path, resolve as resolve_preset_content,
 };

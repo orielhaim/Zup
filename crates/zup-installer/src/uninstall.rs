@@ -73,7 +73,7 @@ pub fn run(context: RuntimeContext, args: UninstallArgs) -> miette::Result<()> {
     // would wait for a result that can only be produced after the script's own
     // child is gone. The runner inherits this process's exit intent through the
     // verb and the arguments it was given; its own outcome is its own to report.
-    if zup_windows::is_maintenance_executable(&executable) {
+    if zup_windows::is_maintenance_path(&executable) {
         launch_runner(&executable, &args, false)?;
         return Ok(());
     }

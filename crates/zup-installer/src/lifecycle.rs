@@ -1063,7 +1063,7 @@ fn attach_maintenance_copy(
         state_root,
         app_id,
         scope,
-        &target.app.version.to_string(),
+        &target.app.version,
         &target.target,
     )?;
     target.files.push(zup_platform::TargetFile {
@@ -1097,7 +1097,7 @@ fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Ve
         let bundle = zup_windows::EmbeddedBundle::open(&executable).map_err(|error| {
             miette::miette!("installer package {}: {error}", executable.display())
         })?;
-        if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        if name == zup_bundle::PRESET_SOURCE {
             return bundle
                 .preset()
                 .map(<[u8]>::to_vec)
@@ -1115,7 +1115,7 @@ fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Ve
 /// The logical asset name inside a reserved preset source name.
 fn ui_asset_name(source: &str) -> Option<&str> {
     source
-        .strip_prefix(zup_windows::preset_runtime::ASSET_SOURCE_PREFIX)
+        .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
         .and_then(|rest| rest.strip_prefix('/'))
 }
 
@@ -1137,7 +1137,7 @@ fn acquired_ui_source(
             miette::miette!("this release presents a window but carries no native image for it")
         });
     move |name| {
-        if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        if name == zup_bundle::PRESET_SOURCE {
             let digest = executable
                 .as_ref()
                 .map_err(|error| miette::miette!("{error}"))?;
@@ -1180,7 +1180,7 @@ fn attach_ui_runtime(
     preset: &zup_core::PresetRuntime,
     bytes: &impl Fn(&str) -> miette::Result<Vec<u8>>,
 ) -> miette::Result<()> {
-    let executable = bytes(zup_windows::preset_runtime::PRESET_SOURCE).map_err(|error| {
+    let executable = bytes(zup_bundle::PRESET_SOURCE).map_err(|error| {
         miette::miette!(
             "this application presents the preset `{}`, and its executable could not be read: \
              {error}",
@@ -1189,18 +1189,20 @@ fn attach_ui_runtime(
     })?;
     let executable_digest = zup_core::hash_bytes(&executable);
     let mut files = vec![(
-        zup_windows::preset_runtime::preset_path(runtime_directory, &executable_digest),
+        zup_bundle::preset_path(
+            runtime_directory,
+            &executable_digest,
+            target.target.executable_suffix(),
+        ),
         executable_digest,
         executable.len() as u64,
-        zup_core::RelativePath::new(zup_windows::preset_runtime::PRESET_SOURCE)
+        zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
             .expect("a reserved source name is always relative"),
     )];
     for asset in &preset.assets {
-        let content =
-            bytes(zup_windows::preset_runtime::asset_source_name(asset.name.as_str()).as_str())
-                .map_err(|error| {
-                    miette::miette!("the asset `{}` could not be read: {error}", asset.name)
-                })?;
+        let content = bytes(zup_bundle::asset_source_name(asset.name.as_str()).as_str()).map_err(
+            |error| miette::miette!("the asset `{}` could not be read: {error}", asset.name),
+        )?;
         if content.len() as u64 != asset.size || zup_core::hash_bytes(&content) != asset.sha256 {
             return Err(miette::miette!(
                 "the asset `{}` is not the content this application configured",
@@ -1208,14 +1210,10 @@ fn attach_ui_runtime(
             ));
         }
         files.push((
-            zup_windows::preset_runtime::asset_path(
-                runtime_directory,
-                asset.name.as_str(),
-                &asset.sha256,
-            ),
+            zup_bundle::asset_path(runtime_directory, asset.name.as_str(), &asset.sha256),
             asset.sha256,
             asset.size,
-            zup_windows::preset_runtime::asset_source_name(asset.name.as_str()),
+            zup_bundle::asset_source_name(asset.name.as_str()),
         ));
     }
 

@@ -24,7 +24,6 @@ mod pe_resources;
 mod pipe;
 mod planning;
 mod prerequisites;
-pub mod preset_runtime;
 mod process;
 mod registry;
 mod resolve;
@@ -61,14 +60,11 @@ pub use cmdline::{
     parse_command_line, quote_arg, split_command_line,
 };
 pub use content_store::{
-    CONTENT_STORE_DIRECTORY, ContentStoreError, ContentStoreIdentity, MAINTENANCE_EXECUTABLE_NAME,
-    MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, content_store_base, ensure_directory,
-    maintenance_directory, maintenance_root, preset_executable_name, remove_store,
+    ContentStoreError, content_store_base, ensure_directory, preset_executable_name, remove_store,
     validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{
-    DurableError, InstallationLock, LockScope, copy_new_durable, create_durable, move_durable,
-    volume_root, write_durable,
+    DurableError, copy_new_durable, create_durable, move_durable, volume_root, write_durable,
 };
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
@@ -93,8 +89,7 @@ pub use lowering::{
     windows_target_path_identity,
 };
 pub use machine_state::{
-    MachineStateError, default_state_root, ensure_state_root, is_maintenance_executable,
-    maintenance_destination, plain_path_text, resolve_state_root,
+    MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,
 };
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,
@@ -155,3 +150,13 @@ pub use worker_rt::run_worker;
 pub use worker_rt::run_worker_for_test;
 pub use zup_bundle::AcquiredPayloadSource;
 pub use zup_transaction::FilePrecondition;
+pub use zup_transaction::is_maintenance_path;
+/// The portable half of what `content_store` used to own: identity, layout, and
+/// the generation directories. See `zup_transaction`.
+pub use zup_transaction::{
+    CONTENT_STORE_DIRECTORY, ContentStoreIdentity, MAINTENANCE_INDEX_NAME,
+    MAINTENANCE_PACKAGE_NAME, MAINTENANCE_RUNTIME_DIRECTORY, maintenance_directory,
+    maintenance_root, maintenance_runtime_path,
+};
+/// The installation lock, which `zup-transaction` owns.
+pub use zup_transaction::{InstallationLock, LockScope};

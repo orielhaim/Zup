@@ -47,7 +47,7 @@ impl Launch {
     /// A double-click: no arguments, and whatever the path says about the role.
     pub fn from_path(executable: &Path) -> Self {
         Self {
-            maintenance: zup_windows::is_maintenance_executable(executable),
+            maintenance: zup_windows::is_maintenance_path(executable),
             auto_uninstall: false,
             scope: None,
             state_root: None,
@@ -127,6 +127,9 @@ pub enum PresetSource {
     Installed {
         runtime: zup_core::InstalledPreset,
         directory: PathBuf,
+        /// The target this installation installed for, which decides the name its
+        /// content was persisted under.
+        target: zup_core::TargetTriple,
     },
 }
 
@@ -142,9 +145,15 @@ impl PresetSource {
                 preset,
                 bundle,
             },
-            Self::Installed { runtime, directory } => {
-                preset::Source::Installed { directory, runtime }
-            }
+            Self::Installed {
+                runtime,
+                directory,
+                target,
+            } => preset::Source::Installed {
+                directory,
+                runtime,
+                target,
+            },
         }
     }
 }
@@ -225,7 +234,11 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
                 scope,
                 &ledger.version,
             );
-            PresetSource::Installed { runtime, directory }
+            PresetSource::Installed {
+                runtime,
+                directory,
+                target: installer.target.clone(),
+            }
         }
         None => PresetSource::Composed {
             preset: installer

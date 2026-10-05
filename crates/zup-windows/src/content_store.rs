@@ -1,52 +1,33 @@
-//! The maintenance content store.
+//! The Windows half of the content store.
 //!
-//! A selected variant's content does not have to live inside the executable that
-//! runs it. It may live in a single-target artifact's own resources, in a
-//! universal artifact, or in a store the installation persisted. This module is
-//! the last of those: a versioned, per-scope, per-variant directory holding the
-//! selected variant's native runtime, its content package, and the artifact
-//! index that describes both.
+//! A content store's *identity* and *layout* are portable installation semantics
+//! and live in `zup-transaction`; what is left here is the two questions only
+//! Windows can answer:
 //!
-//! Two properties matter and are enforced here rather than trusted:
+//! - **Where a store's base root sits.** A user-scope store lives in the scope's
+//!   own state root. A machine-scope store cannot: a launcher has no authority
+//!   over the machine state root, so it stages into a per-user directory named for
+//!   the identity that is allowed to write there. That is a statement about
+//!   Windows' privilege model, not about content stores.
+//! - **Whether a directory is safe to write through.** Every directory on the way
+//!   is checked for being a real directory rather than a reparse point, because on
+//!   Windows a reparse point redirects a write without presenting as a link.
 //!
-//! - **A store belongs to one application, one scope, one target, and one
-//!   artifact.** The directory name is a digest over exactly those, so a store
-//!   for an ARM64 variant can never be mistaken for an x64 one, and a store from
-//!   a different release is a different directory.
-//! - **A privileged worker is never handed an arbitrary path.** The base root is
-//!   one of two, derived from the scope and bound to the calling user's
-//!   identity, and every directory on the way is checked for being a real
-//!   directory rather than a reparse point.
+//! The split matters because those are exactly the two things a Linux backend
+//! answers differently - `/tmp` versus a `0700` staging directory, and symlinks
+//! rather than reparse points - and neither of them is a property of a content
+//! store.
 
 use std::path::{Component, Path, PathBuf};
 
-use semver::Version;
 use sha2::{Digest, Sha256};
-use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
+use zup_core::{SelectedScope, Sha256Digest};
 
 use crate::transport::UserSid;
 
-/// The directory a store lives in, under its base root.
-pub const CONTENT_STORE_DIRECTORY: &str = ".zup-content";
 /// The machine-scope base directory prefix, outside the machine state root so
 /// an unelevated dispatcher can stage into it.
 const MACHINE_CONTENT_BASE_DIRECTORY: &str = "zup-content";
-const IDENTITY_DOMAIN: &[u8] = b"zup/content-store/identity/v1\0";
-const APP_DOMAIN: &[u8] = b"zup/content-store/app/v1\0";
-
-/// The file name of an installed maintenance executable.
-///
-/// Not `Setup.exe`. The file a person downloads is an installation medium named
-/// for the application; the file an installation persists beside the application
-/// is the runtime that maintains it, and it is named for that role. The two are
-/// the same bytes with different jobs, and Apps & Features, the restart manager,
-/// and the recovery path all address the persisted one by this name.
-pub const MAINTENANCE_EXECUTABLE_NAME: &str = "maintenance.exe";
-/// The file name of the selected variant's content package, beside the
-/// maintenance executable.
-pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";
-/// The file name of the artifact index, beside the maintenance executable.
-pub const MAINTENANCE_INDEX_NAME: &str = "artifact.json";
 
 /// The file name an installer image's own preset is written out under, before
 /// anything has been committed.
@@ -79,83 +60,6 @@ pub enum ContentStoreError {
         #[source]
         source: std::io::Error,
     },
-}
-
-/// Which application, release, and machine a store belongs to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentStoreIdentity {
-    app_id: AppId,
-    version: Version,
-    scope: SelectedScope,
-    target: TargetTriple,
-    /// The digest of the artifact the content came from, which is what makes two
-    /// stores for the same version and target distinguishable.
-    artifact: Sha256Digest,
-}
-
-impl ContentStoreIdentity {
-    /// Create an identity, refusing an empty or unparsable one.
-    pub fn new(
-        app_id: AppId,
-        version: Version,
-        scope: SelectedScope,
-        target: TargetTriple,
-        artifact: Sha256Digest,
-    ) -> Self {
-        Self {
-            app_id,
-            version,
-            scope,
-            target,
-            artifact,
-        }
-    }
-
-    /// The digest this identity is stored under.
-    pub fn digest(&self) -> Sha256Digest {
-        let mut hasher = Sha256::new();
-        field(&mut hasher, IDENTITY_DOMAIN);
-        field(&mut hasher, self.app_id.as_str().as_bytes());
-        field(&mut hasher, self.version.to_string().as_bytes());
-        field(&mut hasher, self.scope.to_string().as_bytes());
-        field(&mut hasher, self.target.as_str().as_bytes());
-        field(&mut hasher, self.artifact.as_bytes());
-        Sha256Digest::from_hasher(hasher)
-    }
-
-    /// The store directory for this identity under `base_root`.
-    pub fn path_under(&self, base_root: &Path) -> PathBuf {
-        let mut app_hasher = Sha256::new();
-        field(&mut app_hasher, APP_DOMAIN);
-        field(&mut app_hasher, self.app_id.as_str().as_bytes());
-        let app = Sha256Digest::from_hasher(app_hasher).to_hex();
-        base_root
-            .join(CONTENT_STORE_DIRECTORY)
-            .join(app)
-            .join(self.scope.to_string())
-            .join(self.digest().to_hex())
-    }
-
-    pub fn target(&self) -> &TargetTriple {
-        &self.target
-    }
-
-    pub fn scope(&self) -> SelectedScope {
-        self.scope
-    }
-
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
-
-    pub fn app_id(&self) -> &AppId {
-        &self.app_id
-    }
-}
-
-fn field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
-    hasher.update(value);
 }
 
 /// The base root a store of `scope` may live under.
@@ -221,41 +125,6 @@ pub fn validate_content_store_base(
     }
 }
 
-/// The maintenance directory an installed copy lives in, which is where a
-/// store's contents end up after the transaction commits.
-pub fn maintenance_directory(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    version: &Version,
-) -> PathBuf {
-    let scope_name = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    state_root
-        .join("maintenance")
-        .join(app_id.as_str())
-        .join(scope_name)
-        .join(version.to_string())
-}
-
-/// The directory every version of one application's maintenance runtime lives in.
-///
-/// The version is one level below this, so a question asked of "what this
-/// installation's window content is" has to span all of them: an update owns two
-/// generations until the old one is retired.
-pub fn maintenance_root(state_root: &Path, app_id: &AppId, scope: SelectedScope) -> PathBuf {
-    let scope_name = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    state_root
-        .join("maintenance")
-        .join(app_id.as_str())
-        .join(scope_name)
-}
-
 /// Create `directory` and every missing parent, refusing anything that is not a
 /// real directory.
 pub fn ensure_directory(path: &Path) -> Result<(), ContentStoreError> {
@@ -312,57 +181,34 @@ fn verify_one(path: &Path) -> Result<(), ContentStoreError> {
 }
 
 /// Remove a store directory and the empty namespaces above it.
+///
+/// The shape check is `zup-transaction`'s, because the shape is the layout's; what
+/// is left here is the Windows half - refusing to delete through a reparse point,
+/// which on Windows is the thing that makes a recursive delete unsafe.
 pub fn remove_store(base_root: &Path, store: &Path) -> Result<(), ContentStoreError> {
-    let namespace = base_root.join(CONTENT_STORE_DIRECTORY);
-    let relative = store
-        .strip_prefix(&namespace)
-        .map_err(|_| ContentStoreError::UnsafePath {
-            path: store.display().to_string(),
-            reason: "a store is outside the content store namespace".into(),
-        })?;
-    let mut parts = relative.components();
-    let (
-        Some(Component::Normal(app)),
-        Some(Component::Normal(scope)),
-        Some(Component::Normal(identity)),
-        None,
-    ) = (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(ContentStoreError::UnsafePath {
-            path: store.display().to_string(),
-            reason: "a content store directory has an unexpected shape".into(),
-        });
+    let namespace = base_root.join(zup_transaction::CONTENT_STORE_DIRECTORY);
+    let unsafe_path = |reason: &str| ContentStoreError::UnsafePath {
+        path: store.display().to_string(),
+        reason: reason.to_owned(),
     };
-    let (Some(app), Some(scope), Some(identity)) =
-        (app.to_str(), scope.to_str(), identity.to_str())
-    else {
-        return Err(ContentStoreError::UnsafePath {
-            path: store.display().to_string(),
-            reason: "a content store directory identity is not text".into(),
-        });
-    };
-    let hex = |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
-    if !hex(app) || !hex(identity) {
-        return Err(ContentStoreError::UnsafePath {
-            path: store.display().to_string(),
-            reason: "a content store directory identity is not a digest".into(),
-        });
+    if store.strip_prefix(&namespace).is_err() {
+        return Err(unsafe_path(
+            "a store is outside the content store namespace",
+        ));
     }
-    if !matches!(scope, "user" | "machine") {
-        return Err(ContentStoreError::UnsafePath {
-            path: store.display().to_string(),
-            reason: "a content store scope is not one this build knows".into(),
-        });
+    if !zup_transaction::is_store_shape(store) {
+        return Err(unsafe_path(
+            "a content store directory has an unexpected shape",
+        ));
     }
     match std::fs::symlink_metadata(store) {
         Ok(metadata) if !is_reparse_point(store, &metadata) && metadata.is_dir() => {
             std::fs::remove_dir_all(store).map_err(|source| io_error(store, source))?
         }
         Ok(_) => {
-            return Err(ContentStoreError::UnsafePath {
-                path: store.display().to_string(),
-                reason: "a content store is a reparse point or special file".into(),
-            });
+            return Err(unsafe_path(
+                "a content store is a reparse point or special file",
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => return Err(io_error(store, source)),
@@ -399,37 +245,6 @@ fn io_error(path: &Path, source: std::io::Error) -> ContentStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn identity() -> ContentStoreIdentity {
-        ContentStoreIdentity::new(
-            AppId::new("com.acme.desktop").unwrap(),
-            Version::parse("1.4.0").unwrap(),
-            SelectedScope::User,
-            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-            Sha256Digest::from_bytes([7; 32]),
-        )
-    }
-
-    #[test]
-    fn an_identity_depends_on_every_domain_field() {
-        let base = identity();
-        let other_target = ContentStoreIdentity::new(
-            base.app_id().clone(),
-            base.version().clone(),
-            base.scope(),
-            TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
-            Sha256Digest::from_bytes([7; 32]),
-        );
-        let other_artifact = ContentStoreIdentity::new(
-            base.app_id().clone(),
-            base.version().clone(),
-            base.scope(),
-            base.target().clone(),
-            Sha256Digest::from_bytes([8; 32]),
-        );
-        assert_ne!(base.digest(), other_target.digest());
-        assert_ne!(base.digest(), other_artifact.digest());
-    }
 
     /// A user-scope store is the caller's state root, and a machine-scope store
     /// is a directory named for the identity that is allowed to write it. Neither

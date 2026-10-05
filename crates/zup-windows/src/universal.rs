@@ -473,7 +473,15 @@ pub fn stage_variant(
         })?;
     let runtime_bytes = artifact.view().read(&runtime_descriptor)?;
     std::fs::create_dir_all(directory)?;
-    let runtime = directory.join(crate::MAINTENANCE_EXECUTABLE_NAME);
+    // The staged runtime is named the way *this artifact's* target names an
+    // executable, which is why the suffix is read off the variant rather than
+    // hard-coded: the same composition writes both, and the maintenance file it
+    // leaves behind has to be the one a later run looks for.
+    let runtime = directory.join(format!(
+        "{}{}",
+        zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY,
+        variant.target.executable_suffix()
+    ));
     write_durable(&runtime, &runtime_bytes)?;
     let package = directory.join(crate::MAINTENANCE_PACKAGE_NAME);
     write_variant_package(artifact, &manifest, &package)?;

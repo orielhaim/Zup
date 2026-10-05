@@ -332,15 +332,13 @@ impl InstallLedgerStore {
         plan: &TransactionPlan,
         ledger: Option<&InstallLedger>,
     ) -> Result<(), LedgerError> {
-        let root = crate::plain_path_text(&crate::content_store::maintenance_root(
-            &self.root, app_id, scope,
-        ));
+        let root = crate::plain_path_text(&crate::maintenance_root(&self.root, app_id, scope));
         let owned: BTreeMap<&str, &Sha256Digest> = ledger
             .into_iter()
             .flat_map(|ledger| ledger.resources.iter())
             .filter_map(|(key, resource)| match (key, resource) {
                 (ResourceKey::File { destination }, OwnedResource::File { sha256, .. })
-                    if crate::preset_runtime::is_content_path(Path::new(&root), destination) =>
+                    if zup_bundle::is_content_path(Path::new(&root), destination) =>
                 {
                     Some((destination.as_str(), sha256))
                 }
@@ -370,22 +368,21 @@ impl InstallLedgerStore {
         // ownership, and this is one of the things that stores it.
         let wanted: BTreeMap<String, Sha256Digest> = match &plan.preset {
             Some(ui) => {
-                let directory = crate::content_store::maintenance_directory(
-                    &self.root,
-                    app_id,
-                    scope,
-                    app_version,
-                );
+                let directory =
+                    crate::maintenance_directory(&self.root, app_id, scope, app_version);
                 std::iter::once((
-                    crate::plain_path_text(&crate::preset_runtime::preset_path(
+                    crate::plain_path_text(&zup_bundle::preset_path(
                         &directory,
                         &ui.executable,
+                        // The persisted maintenance runtime is the target's own
+                        // executable, so its name carries that target's suffix.
+                        plan.target.executable_suffix(),
                     )),
                     ui.executable,
                 ))
                 .chain(ui.preset.assets.iter().map(|asset| {
                     (
-                        crate::plain_path_text(&crate::preset_runtime::asset_path(
+                        crate::plain_path_text(&zup_bundle::asset_path(
                             &directory,
                             asset.name.as_str(),
                             &asset.sha256,

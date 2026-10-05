@@ -1,20 +1,21 @@
-//! Windows installed-machine policy: where state lives and what it is called.
+//! Windows placement for an installation's state.
 //!
-//! These are decisions about *this machine*, not about an installation plan. The
-//! state root a scope owns, the shape a path is written to disk as, and the name
-//! the persisted maintenance executable is given all belong to the Windows
-//! backend, because a different backend answers them differently and because the
-//! developer CLI has no business implementing any of them. Which directory a
-//! scope's state sits *in* is `host_dirs`' question, not this one's.
+//! What lives here is the Windows answer to *where* a scope's state sits and *how*
+//! a path is spelled for storage. Both are decisions about this machine rather
+//! than about an installation, and a different backend answers them differently -
+//! `$XDG_STATE_HOME` and `/var/lib` are not `%LOCALAPPDATA%` and `%ProgramData%`.
+//!
+//! What is deliberately *not* here is the shape of that state. The directories an
+//! installation keeps, and the names of the generations inside them, are portable
+//! installation semantics and live in `zup-transaction`; a Windows path lowering
+//! that reached into `zup-windows` for them would be a plan naming a Windows
+//! directory.
 
 use std::path::{Path, PathBuf};
 
-use zup_core::{AppId, SelectedScope};
+use zup_core::SelectedScope;
 
 use crate::host_dirs::{self, HostDirError};
-
-/// The directory name every zup state root ends in.
-const STATE_FOLDER: &str = "zup";
 
 /// Failures produced while resolving machine state.
 #[derive(Debug, thiserror::Error)]
@@ -47,10 +48,12 @@ pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
 /// check that runs before elevation has no business making the directory.
 pub fn default_state_root(scope: SelectedScope) -> Result<PathBuf, MachineStateError> {
     match scope {
-        SelectedScope::User => ensure_state_root(&host_dirs::user_data()?.join(STATE_FOLDER)),
+        SelectedScope::User => {
+            ensure_state_root(&host_dirs::user_data()?.join(zup_transaction::STATE_FOLDER))
+        }
         SelectedScope::Machine => {
             let base = host_dirs::shared_data()?;
-            canonical(&base).map(|base| base.join(STATE_FOLDER))
+            canonical(&base).map(|base| base.join(zup_transaction::STATE_FOLDER))
         }
     }
 }
@@ -111,43 +114,6 @@ pub fn plain_path_text(path: &Path) -> String {
     }
 }
 
-/// Whether this process is the maintenance copy an installation persisted.
-///
-/// The maintenance copy is recognized by where it lives rather than by what it
-/// is called, so the name stays free to change and an installer the user renamed
-/// is still recognized for what it is.
-pub fn is_maintenance_executable(path: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .contains("\\maintenance\\")
-}
-
-/// Where an installation persists the maintenance runtime for one scope.
-///
-/// Versioned, so an upgrade stages the new copy beside the old one and the
-/// transaction engine can roll back to bytes that are still on disk. The file
-/// name is deliberately not `Setup.exe`: the user-facing installer a person
-/// downloads is an installation medium, and the executable that persists beside
-/// an installed application is a maintenance runtime, and calling the second one
-/// the first is how a support conversation starts in the wrong place.
-pub fn maintenance_destination(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    version: &str,
-) -> PathBuf {
-    let scope_name = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    state_root
-        .join("maintenance")
-        .join(app_id.as_str())
-        .join(scope_name)
-        .join(version)
-        .join(crate::MAINTENANCE_EXECUTABLE_NAME)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,19 +168,5 @@ mod tests {
             !machine.exists(),
             "creating the machine root is the elevated worker's job, not a check's"
         );
-    }
-
-    #[test]
-    fn the_maintenance_copy_is_recognized_by_where_it_lives() {
-        let root = Path::new(r"C:\Users\dev\AppData\Local\zup");
-        assert!(is_maintenance_executable(&maintenance_destination(
-            root,
-            &AppId::new("com.example.acme").expect("valid"),
-            SelectedScope::User,
-            "1.2.0",
-        )));
-        assert!(!is_maintenance_executable(Path::new(
-            r"C:\Users\dev\Downloads\Acme-Setup.exe"
-        )));
     }
 }

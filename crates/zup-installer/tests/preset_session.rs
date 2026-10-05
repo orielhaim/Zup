@@ -298,6 +298,7 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )
@@ -349,6 +350,7 @@ fn a_preset_whose_assets_are_absent_is_refused() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )

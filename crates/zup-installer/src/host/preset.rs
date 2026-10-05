@@ -29,7 +29,7 @@ pub enum PresetError {
     #[error("this host cannot present the preset: {0}")]
     Incompatible(String),
     #[error("the installed UI content cannot be used: {0}")]
-    Integrity(#[from] zup_windows::preset_runtime::PresetContentError),
+    Integrity(#[from] zup_bundle::PresetContentError),
     #[error("the preset could not be prepared for launch: {0}")]
     Prepare(#[source] io::Error),
 }
@@ -53,6 +53,9 @@ pub enum Source<'a> {
         /// The installation's maintenance directory, where its content is kept.
         directory: &'a Path,
         runtime: &'a zup_core::InstalledPreset,
+        /// The target this installation installed for, which decides the file name
+        /// its content was persisted under.
+        target: &'a zup_core::TargetTriple,
     },
 }
 
@@ -83,8 +86,22 @@ pub fn materialize(
         .map_err(PresetError::Incompatible)?;
 
     let (executable, assets) = match source {
-        Source::Installed { directory, runtime } => {
-            let resolved = zup_windows::preset_runtime::resolve(directory, runtime)?;
+        Source::Installed {
+            directory,
+            runtime,
+            target,
+        } => {
+            // The suffix is the installation's target's, so the path this resolves
+            // is the one the installation actually wrote under its own naming rule.
+            let resolved = zup_bundle::resolve_preset_content(
+                directory,
+                runtime,
+                target.executable_suffix(),
+                // How a resolved path is spelled for display is the host's business:
+                // Windows hands back extended-length paths that are an
+                // implementation detail of the call, and no other host does.
+                zup_windows::plain_path_text,
+            )?;
             (resolved.executable, resolved.assets)
         }
         Source::Composed {
