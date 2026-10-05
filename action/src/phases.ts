@@ -36,7 +36,7 @@ import type { Inputs } from './inputs.js'
 import type { Operation } from './protocol.js'
 
 /** The workflow steps this action can run. */
-export type Phase = 'build' | 'compose' | 'finalize' | 'attest' | 'publish'
+export type Phase = 'check' | 'build' | 'compose' | 'finalize' | 'attest' | 'publish'
 
 /** The release manifest file name zup writes. */
 export const RELEASE_MANIFEST_NAME = 'zup-release.json'
@@ -57,6 +57,8 @@ export const FORMAT_JSONL = 'jsonl'
  */
 export function operationFor(phase: Phase): Operation | undefined {
   switch (phase) {
+    case 'check':
+      return 'check'
     case 'build':
       return 'build'
     case 'compose':
@@ -78,6 +80,8 @@ export function operationFor(phase: Phase): Operation | undefined {
  */
 export function phasesFor(operation: string): Phase[] {
   switch (operation) {
+    case 'check':
+      return ['check']
     case 'build':
       return ['build']
     case 'compose':
@@ -116,6 +120,11 @@ function phaseArguments(phase: Phase, inputs: Inputs): string[] {
 
 function commandFor(phase: Phase, inputs: Inputs): string[] {
   switch (phase) {
+    case 'check':
+      // No path and no target: `zup check` answers from the project the working
+      // directory names, which is the question a check is - whether this project
+      // can be built - rather than a question about one target's output.
+      return ['check']
     case 'build': {
       const args = ['build']
       for (const target of inputs.targets) {

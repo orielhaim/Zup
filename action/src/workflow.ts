@@ -727,6 +727,8 @@ function report(inputs: Inputs, outcome: Outcome, log: Log): void {
 
 function titleFor(phase: Phase): string {
   switch (phase) {
+    case 'check':
+      return 'Check'
     case 'build':
       return 'Build'
     case 'compose':

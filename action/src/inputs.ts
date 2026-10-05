@@ -22,6 +22,7 @@ import * as core from '@actions/core'
 /** What this step does. */
 export type Operation =
   | 'setup'
+  | 'check'
   | 'build'
   | 'compose'
   | 'finalize'
@@ -85,6 +86,7 @@ export class InputError extends Error {
 
 const OPERATIONS: readonly Operation[] = [
   'setup',
+  'check',
   'build',
   'compose',
   'finalize',

@@ -16,7 +16,9 @@ branding:
 inputs:
   operation:
     description: >-
-      What this step does. `setup` installs zup and stops. `build` runs
+      What this step does. `setup` installs zup and stops. `check` runs
+      `zup check`, which resolves and validates the project and builds nothing.
+      `build` runs
       `zup build`. `compose` folds per-target output into one release with
       `zup publish stage`. `finalize` runs `zup sign verify`, which checks every
       signature and rewrites the release description with the identity that will
