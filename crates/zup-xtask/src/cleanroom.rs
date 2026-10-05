@@ -87,18 +87,21 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         "init",
     )?;
     step(&zup, work, &["check"], "check")?;
+    // `zup doctor`'s report is its answer, on stdout; stderr carries what went
+    // wrong while producing it. A failure prints only the latter, which is why a
+    // failure below quotes both.
     let doctor = capture(&zup, work, &["doctor"])?;
     if !doctor.success {
-        return Err(format!("`zup doctor` failed:\n{}", doctor.output));
+        return Err(format!("`zup doctor` failed:\n{}", doctor.report()));
     }
-    if !doctor.output.contains("ready:") {
+    if !doctor.stdout.contains("ready:") {
         return Err(format!(
             "`zup doctor` did not report readiness:\n{}",
-            doctor.output
+            doctor.report()
         ));
     }
     let readiness = doctor
-        .output
+        .stdout
         .lines()
         .find(|line| line.contains("ready:"))
         .unwrap_or_default()
@@ -216,12 +219,14 @@ fn verify_components_come_from_the_release(
     if !outcome.success {
         return Err(format!(
             "`zup toolchain status` failed:\n{}",
-            outcome.output
+            outcome.report()
         ));
     }
-    let report: serde_json::Value = serde_json::from_str(&outcome.output)
+    let report: serde_json::Value = serde_json::from_str(&outcome.stdout)
         .map_err(|error| format!("`zup toolchain status` printed no report: {error}"))?;
-    let components = report["components"]
+    // An operation's payload is under `details`, everywhere in the automation
+    // contract; the envelope's own fields are the ones every operation shares.
+    let components = report["details"]["components"]
         .as_array()
         .ok_or("`zup toolchain status` reported no components")?;
     if components.is_empty() {
@@ -317,7 +322,25 @@ fn environment() -> Vec<(String, Option<String>)> {
 
 struct Outcome {
     success: bool,
-    output: String,
+    /// What the command printed as its answer.
+    ///
+    /// Only stdout. A command asked for a machine-readable report prints it here
+    /// and its human-readable one to stderr, so joining the two before a caller
+    /// parses this hands it a report with prose appended to it.
+    stdout: String,
+    /// What the command said to a person.
+    stderr: String,
+}
+
+impl Outcome {
+    /// Both streams, for a message about a failure: a command that failed says
+    /// why on one stream or the other, and a diagnostic quoting only the quiet
+    /// one hides half of what it said.
+    fn report(&self) -> String {
+        let mut report = self.stdout.clone();
+        report.push_str(&self.stderr);
+        report
+    }
 }
 
 fn capture(program: &Path, work: &Path, arguments: &[&str]) -> Result<Outcome, String> {
@@ -332,14 +355,10 @@ fn capture(program: &Path, work: &Path, arguments: &[&str]) -> Result<Outcome, S
     let output = command
         .output()
         .map_err(|error| format!("run `{}`: {error}", program.display()))?;
-    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
-    // Appended rather than concatenated with `+`: the two streams are two different
-    // losses and joining them with an operator that needs both to be `String` says they
-    // are one.
-    captured.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(Outcome {
         success: output.status.success(),
-        output: captured,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
@@ -348,7 +367,7 @@ fn step(program: &Path, work: &Path, arguments: &[&str], name: &str) -> Result<(
     if !outcome.success {
         return Err(format!(
             "`zup {name}` failed in a clean room:\n{}",
-            outcome.output
+            outcome.report()
         ));
     }
     Ok(())

@@ -1,14 +1,19 @@
 [profile.default]
 slow-timeout = { period = "60s" }
 
-# A cap, because a handful of suites run real installers and real preset children
-# as separate processes and several wait on another process exiting for up to a
-# minute. At one thread per core on a many-core machine those starve each other,
-# and the failure lands on whichever test lost the race rather than on anything
-# wrong with the code - a different test each run. This is a per-profile setting
-# rather than a per-override one: nextest has no `test-threads` in an override,
-# and putting it there is ignored with a warning.
-test-threads = 16
+# A cap, because about thirty suites run real installers and real preset children
+# as separate processes and several wait on another process exiting against a
+# one-minute deadline. At one thread per core those starve each other: measured on
+# this repository, the heaviest of them took 19s alone and 56s at sixteen threads,
+# which is inside the deadline it is racing. The failure lands on whichever test
+# lost rather than on anything wrong with the code, and it is a different test
+# each run.
+#
+# This is a per-profile setting rather than a per-override one because nextest has
+# no `test-threads` in an override: putting it there is ignored, with a warning on
+# every run, and the suite still starves. That is why the cap is one blunt number
+# rather than a limit on only the suites that need it.
+test-threads = 8
 
 [[profile.default.overrides]]
 filter = 'package(zup-installer) and test(/^frontends::|^lifecycle::|^generated_files::/)'
