@@ -43,6 +43,8 @@
 #[cfg(target_os = "linux")]
 mod carrier;
 #[cfg(target_os = "linux")]
+mod fs;
+#[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
 mod lowering;
@@ -53,6 +55,11 @@ mod state;
 
 #[cfg(target_os = "linux")]
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
+#[cfg(target_os = "linux")]
+pub use fs::{
+    EntryKind, EXECUTABLE_PAYLOAD_MODE, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,
+    STATE_DIRECTORY_MODE, STATE_FILE_MODE, sync_directory,
+};
 #[cfg(target_os = "linux")]
 pub use host::{
     HostError, additional_architectures, host_execution, host_version, native_architecture,
