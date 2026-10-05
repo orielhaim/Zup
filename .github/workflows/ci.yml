@@ -142,7 +142,7 @@ jobs:
         run: cargo nextest run -p zup-dispatch --all-features --run-ignored all -E 'test(a_thin_bootstrapper)'
 
   ubuntu-portable:
-    name: ubuntu (portable)
+    name: ubuntu (portable + linux backend)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -161,19 +161,36 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146,cargo-machete
 
+      # Both lists come from the package matrices rather than from this workflow.
+      # A hand-maintained list would be a second place a package could be dropped
+      # from coverage, and the boundary's whole job is that there is only one.
       - name: Package matrices
         run: |
           cargo xtask emit-portable-matrix
-          core="$(cargo xtask emit-portable-matrix --matrix portable-core --format cargo-args)"
-          formats="$(cargo xtask emit-portable-matrix --matrix portable-file-format --format cargo-args)"
-          tests="$(cargo xtask emit-portable-matrix --matrix portable-tests --format cargo-args)"
-          printf 'PORTABLE=%s %s %s\n' "$core" "$formats" "$tests" >> "$GITHUB_ENV"
+          cargo xtask emit-host-packages --host any
+          cargo xtask emit-host-packages --host linux
+          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
+          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
+          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable $linux" "$linux" >> "$GITHUB_ENV"
 
+      # The two structural gates run on Linux as well as Windows, because both are
+      # read from Cargo metadata rather than from anything host-specific: a
+      # backend-isolation or portable-dependency violation is the same violation
+      # whichever machine runs the check.
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries
 
+      - name: Dependency graph
+        run: cargo xtask verify-dependency-graph
+
       - name: Check
         run: cargo check --all-features $PORTABLE
+
+      # The Linux backend's own suite runs natively rather than being cross-checked,
+      # because what it tests is filesystem semantics - symlinks, permission bits,
+      # XDG resolution - that a build check cannot establish.
+      - name: Linux backend tests
+        run: cargo nextest run --all-features $LINUX
 
       - name: Tests
         run: cargo nextest run --all-features $PORTABLE

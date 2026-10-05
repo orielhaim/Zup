@@ -133,8 +133,7 @@ fn a_complete_workspace_classifies_every_member() {
 /// Every table and every target scope is checked, because a rule that reads only
 /// `[dependencies]` is a rule a contributor routes around. `dev-dependencies` and
 /// `build-dependencies` are the two that get forgotten, so they are the two that
-/// are pinned; `[dependencies]` and the workspace's own Windows crate are already
-/// covered by the clean-workspace control and the enforcer case.
+/// are pinned.
 #[rstest]
 #[case::dev_dependencies(
     "[dev-dependencies]\nwindows = \"0.62\"\n",
@@ -150,13 +149,25 @@ fn a_complete_workspace_classifies_every_member() {
 )]
 #[case::a_windows_target_scope(
     "[target.'cfg(windows)'.dependencies]\nwindows-link = \"0.100\"\n",
-    vec![Rule::ForbiddenDependency, Rule::WindowsTargetScope]
+    vec![Rule::ForbiddenDependency, Rule::PlatformTargetScope]
 )]
 #[case::a_windows_target_scope_over_a_portable_dependency(
     "[target.'cfg(windows)'.dependencies]\nserde = \"1\"\n",
-    vec![Rule::WindowsTargetScope]
+    vec![Rule::PlatformTargetScope]
 )]
-fn a_manifest_that_reaches_for_windows_is_reported(
+#[case::the_repositorys_own_linux_crate(
+    "[dependencies]\nzup-linux = { path = \"../zup-linux\" }\n",
+    vec![Rule::ForbiddenDependency]
+)]
+#[case::a_linux_target_scope(
+    "[target.'cfg(target_os = \"linux\")'.dependencies]\nserde = \"1\"\n",
+    vec![Rule::PlatformTargetScope]
+)]
+#[case::the_linux_syscall_crate(
+    "[dependencies]\nrustix = \"1.1\"\n",
+    vec![Rule::ForbiddenDependency]
+)]
+fn a_manifest_that_reaches_for_a_native_backend_is_reported(
     #[case] table: &str,
     #[case] expected: Vec<Rule>,
 ) {
@@ -181,7 +192,7 @@ fn a_windows_cfg_branch_in_production_source_is_reported() {
              #[cfg(not(windows))]\n    {\n        false\n    }\n}\n",
         )],
     );
-    assert_eq!(rules(root.path()), vec![Rule::WindowsCfgBranch]);
+    assert_eq!(rules(root.path()), vec![Rule::PlatformCfgBranch]);
     let reported = findings(root.path());
     assert_eq!(reported.len(), 2, "{reported:?}");
     assert!(
@@ -196,24 +207,40 @@ fn a_windows_cfg_branch_in_production_source_is_reported() {
     assert!(reported[1].contains("cfg(not(windows))"), "{reported:?}");
 }
 
+/// The Linux half of the same rule. A portable crate that branched on the host
+/// operating system would be exactly as platform-shaped as one that branched on
+/// the host architecture family, and only one of them would be caught.
+#[rstest]
+#[case::the_operating_system("#[cfg(target_os = \"linux\")]\npub fn f() {}\n")]
+#[case::the_target_family("#[cfg(target_family = \"unix\")]\npub fn f() {}\n")]
+#[case::the_posix_predicate("#[cfg(unix)]\npub fn f() {}\n")]
+#[case::its_negation("#[cfg(not(unix))]\npub fn f() {}\n")]
+fn a_linux_cfg_branch_in_production_source_is_reported(#[case] source: &str) {
+    let root = workspace_with("zup-core", &manifest("zup-core"), &[("src/lib.rs", source)]);
+    assert_eq!(
+        rules(root.path()),
+        vec![Rule::PlatformCfgBranch],
+        "{source}"
+    );
+}
+
 /// An import nested inside a function is still an import. A scanner that only
 /// matched at the top of a file would let every portable crate re-acquire the
-/// Windows filesystem API behind one level of indentation.
-#[test]
-fn a_platform_specific_std_import_is_reported() {
-    let root = workspace_with(
-        "zup-core",
-        &manifest("zup-core"),
-        &[(
-            "src/lib.rs",
-            "pub fn attributes() -> u32 {\n    use std::os::windows::fs::MetadataExt;\n    0\n}\n",
-        )],
-    );
-    assert_eq!(rules(root.path()), vec![Rule::OsWindowsImport]);
+/// platform filesystem API behind one level of indentation.
+#[rstest]
+#[case::windows(
+    "pub fn attributes() -> u32 {\n    use std::os::windows::fs::MetadataExt;\n    0\n}\n"
+)]
+#[case::unix("pub fn attributes() -> u32 {\n    use std::os::unix::fs::MetadataExt;\n    0\n}\n")]
+fn a_platform_specific_std_import_is_reported(#[case] source: &str) {
+    let root = workspace_with("zup-core", &manifest("zup-core"), &[("src/lib.rs", source)]);
+    assert_eq!(rules(root.path()), vec![Rule::OsPlatformImport], "{source}");
 }
 
 /// A ban that matched the `windows` crate exactly would be routed around by
-/// `windows_bindgen` or `winapi`, so the namespace rule is a prefix rule.
+/// `windows_bindgen` or `winapi`, so the namespace rule is a prefix rule - and
+/// the same has to hold on the other side, or the Linux backend's syscall
+/// surface is one alias away from a portable crate.
 #[rstest]
 #[case::a_crate_that_starts_with_the_windows_prefix("use windows_bindgen::Generator;")]
 #[case::the_legacy_crate("use winapi::um::winbase;")]
@@ -225,7 +252,7 @@ fn a_windows_api_namespace_is_reported(#[case] token: &str) {
     );
     assert_eq!(
         rules(root.path()),
-        vec![Rule::WindowsApiNamespace],
+        vec![Rule::NativeApiNamespace],
         "{token}"
     );
 }
@@ -246,26 +273,104 @@ fn every_banned_portable_identifier_is_reported() {
     }
 }
 
-/// The exemption for a windows-only package must be an exemption, not a gap. A
-/// rule that failed to fire on `zup-windows` would also fail to fire on a
-/// portable crate that merely claimed to be windows-only, which is why the matrix
-/// is what grants the exemption and not the crate's own say-so.
-#[test]
-fn a_windows_only_package_may_use_everything() {
+/// The exemption for a native backend must be an exemption, not a gap. A rule
+/// that failed to fire on a backend would also fail to fire on a portable crate
+/// that merely claimed to be one, which is why the matrix is what grants the
+/// exemption and not the crate's own say-so.
+#[rstest]
+#[case::windows(
+    "zup-windows",
+    "[target.'cfg(windows)'.dependencies]\nwindows = \"0.62\"\n",
+    "use std::os::windows::fs::MetadataExt;\n\
+     pub struct Shortcut;\n\
+     pub fn shell() -> windows::Win32::Foundation::HANDLE { todo!() }\n"
+)]
+#[case::linux(
+    "zup-linux",
+    "[target.'cfg(target_os = \"linux\")'.dependencies]\nrustix = \"1.1\"\n",
+    "use rustix::fs::stat;\n\
+     use std::os::unix::fs::MetadataExt;\n\
+     pub struct SystemdUnit;\n\
+     pub fn unit() -> String { String::from(\"acme.service\") }\n"
+)]
+fn a_native_backend_package_may_use_everything(
+    #[case] package: &str,
+    #[case] table: &str,
+    #[case] source: &str,
+) {
     let root = workspace_with(
-        "zup-windows",
-        &format!(
-            "{}[target.'cfg(windows)'.dependencies]\nwindows = \"0.62\"\n",
-            manifest("zup-windows")
-        ),
-        &[(
-            "src/lib.rs",
-            "use std::os::windows::fs::MetadataExt;\n\
-             pub struct Shortcut;\n\
-             pub fn shell() -> windows::Win32::Foundation::HANDLE { todo!() }\n",
-        )],
+        package,
+        &format!("{}{table}", manifest(package)),
+        &[("src/lib.rs", source)],
     );
     assert_eq!(findings(root.path()), Vec::<String>::new());
+}
+
+/// The two backends are siblings, and the exemption is what each one holds for
+/// itself. A portable crate that reached into either is the failure this whole
+/// module exists to prevent, so it is pinned on both sides at once.
+#[test]
+fn a_portable_crate_may_not_reach_either_backend() {
+    for backend in matrix::backends() {
+        let root = workspace_with(
+            "zup-core",
+            &format!(
+                "[package]\nname = \"zup-core\"\nversion = \"0.0.1\"\nedition = \"2024\"\n\
+                 \n[dependencies]\n{backend} = {{ path = \"../{backend}\" }}\n"
+            ),
+            &[],
+        );
+        let reported = findings(root.path());
+        assert_eq!(reported.len(), 1, "{backend}: {reported:?}");
+        assert!(
+            reported[0].contains(&format!("declares {backend}")),
+            "{backend}: {reported:?}"
+        );
+    }
+}
+
+/// The declared permission relaxation is only worth having if it is narrow. A
+/// package holding it may reach the Unix mode API, and nothing else it did not
+/// hold before: not a Windows permission model, and not a native backend.
+#[test]
+fn a_permission_relaxation_does_not_become_a_platform_exemption() {
+    let relaxed = workspace_with(
+        "zup-preview",
+        &manifest("zup-preview"),
+        &[(
+            "src/lib.rs",
+            "#[cfg(unix)]\npub fn run(path: &std::path::Path) {\n    \
+             use std::os::unix::fs::PermissionsExt;\n    \
+             let mode = std::fs::metadata(path).unwrap().permissions().mode();\n    \
+             let _ = mode | 0o100;\n}\n",
+        )],
+    );
+    assert_eq!(findings(relaxed.path()), Vec::<String>::new());
+
+    let widened = workspace_with(
+        "zup-preview",
+        &manifest("zup-preview"),
+        &[("src/lib.rs", "#[cfg(windows)]\npub fn f() {}\n")],
+    );
+    assert_eq!(
+        rules(widened.path()),
+        vec![Rule::PlatformCfgBranch],
+        "the relaxation buys a mode bit, not a choice between two backends"
+    );
+
+    let reached = workspace_with(
+        "zup-preview",
+        &format!(
+            "{}\n[dependencies]\nrustix = \"1.1\"\n",
+            manifest("zup-preview")
+        ),
+        &[],
+    );
+    assert_eq!(
+        rules(reached.path()),
+        vec![Rule::ForbiddenDependency],
+        "and it grants no backend dependency either"
+    );
 }
 
 /// Test code names the vocabulary it is testing, so a `#[cfg(test)]` module and a

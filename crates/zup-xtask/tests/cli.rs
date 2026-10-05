@@ -131,7 +131,7 @@ fn the_boundary_check_reports_a_fixture_violation_and_exits_nonzero() {
         message.contains("1 portable boundary violation"),
         "{message}"
     );
-    assert!(message.contains("os-windows-import"), "{message}");
+    assert!(message.contains("os-platform-import"), "{message}");
     assert!(message.contains("zup-core/src/lib.rs:1"), "{message}");
 }
 

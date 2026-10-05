@@ -21,12 +21,20 @@
 //!   repository, so an internal crate in either graph is a type that a preset
 //!   author cannot name. The fix is always a conversion at the host boundary, never
 //!   a dependency.
+//! - **One native backend reaching another.** `zup-windows` and `zup-linux` are
+//!   siblings: they share the portable crates beneath them and nothing with each
+//!   other. The moment a backend reaches its sibling, the shared shape stops being
+//!   portable and one of the two is no longer a backend at all - it is an
+//!   implementation of the other. That rule is derived from the package matrices
+//!   rather than listed here, so a third backend joins it without an edit.
 //!
-//! All three are checked by reading Cargo metadata, so they run offline and take
-//! milliseconds, and all three fail with the offending edge rather than a count.
+//! All four are checked by reading Cargo metadata, so they run offline and take
+//! milliseconds, and all four fail with the offending edge rather than a count.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+use crate::matrix;
 
 /// What the gate found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +222,10 @@ pub fn check(root: &Path) -> Result<Findings, String> {
         duplicates: workspace_duplicates(&metadata),
         intrusions: intrusions(&edges),
         crossings: crossings(&metadata, &edges),
-        isolations: isolations(&metadata, &edges),
+        isolations: isolations(&metadata, &edges)
+            .into_iter()
+            .chain(backend_crossings(&metadata, &edges))
+            .collect(),
     })
 }
 
@@ -418,6 +429,39 @@ fn isolations(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
                 "{}: {} (`{}`)",
                 path.join(" -> "),
                 reason,
+                path[path.len() - 1]
+            ));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One native backend reaching another.
+///
+/// Derived from [`crate::matrix`] rather than declared here, so adding a platform
+/// adds its isolation rule with the platform. A backend is refused every sibling,
+/// which is what keeps "backends are siblings" a property of the graph instead of
+/// a fact somebody has to remember: the Windows backend was written when there
+/// were no siblings, and it is the one most likely to grow a dependency on one.
+fn backend_crossings(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for platform in matrix::Platform::ALL {
+        let crate_name = platform.crate_name();
+        if !is_workspace_member(metadata, crate_name) {
+            continue;
+        }
+        let siblings: BTreeSet<&str> = matrix::sibling_backends(*platform)
+            .into_iter()
+            .filter(|sibling| is_workspace_member(metadata, sibling))
+            .collect();
+        for path in paths_to(edges, &[crate_name], &siblings) {
+            out.push(format!(
+                "{}: `{}` is a native backend and may not reach `{}`, which is another platform's \
+                 mechanism layer",
+                path.join(" -> "),
+                crate_name,
                 path[path.len() - 1]
             ));
         }
@@ -712,6 +756,83 @@ mod tests {
                 .map(|name| dependency(name, "0.0.1"))
                 .collect(),
         }
+    }
+
+    /// The sibling rule is derived from the matrices, so the test is about the
+    /// derivation rather than about two hand-written rows: whichever platform is
+    /// added next, the same check has to catch it, and it has to catch the
+    /// *existing* pair in both directions.
+    #[test]
+    fn a_backend_may_not_reach_its_sibling_in_either_direction() {
+        let members: BTreeSet<String> = matrix::backends()
+            .iter()
+            .map(|backend| (*backend).to_owned())
+            .collect();
+        let windows = "zup-windows";
+        let linux = "zup-linux";
+
+        let clean = Metadata {
+            nodes: vec![
+                node(windows, &["zup-core"]),
+                node(linux, &["zup-core"]),
+                node("zup-core", &[]),
+            ],
+            workspace_members: members.clone(),
+        };
+        assert_eq!(
+            backend_crossings(&clean, &edges(&clean)),
+            Vec::<String>::new()
+        );
+
+        // Windows reaching Linux is the direction that would happen by accident:
+        // the Windows backend existed first and is the one with the larger surface
+        // for a Linux-shaped convenience to be added to.
+        let leaked = Metadata {
+            nodes: vec![
+                node(windows, &["zup-linux"]),
+                node(linux, &["zup-core"]),
+                node("zup-core", &[]),
+            ],
+            workspace_members: members.clone(),
+        };
+        let reported = backend_crossings(&leaked, &edges(&leaked));
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert!(
+            reported[0].contains("zup-windows -> zup-linux"),
+            "{reported:?}"
+        );
+
+        // And the other direction, through a shared crate rather than directly,
+        // because an indirect edge is the one a reviewer's eye misses.
+        let indirect = Metadata {
+            nodes: vec![
+                node(linux, &["zup-core"]),
+                node(windows, &["zup-core"]),
+                node("zup-core", &["zup-linux"]),
+            ],
+            workspace_members: members,
+        };
+        let reported = backend_crossings(&indirect, &edges(&indirect));
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert!(
+            reported[0].contains("zup-windows -> zup-core -> zup-linux"),
+            "{reported:?}"
+        );
+    }
+
+    /// A backend that is not yet a workspace member is skipped rather than
+    /// reported. The rule describes a graph that exists, and a matrix entry with
+    /// no crate behind it is a coverage question the boundary already asks.
+    #[test]
+    fn a_backend_absent_from_the_workspace_is_skipped() {
+        let metadata = Metadata {
+            nodes: vec![node("zup-windows", &["zup-core"]), node("zup-core", &[])],
+            workspace_members: BTreeSet::from(["zup-windows".to_owned(), "zup-core".to_owned()]),
+        };
+        assert_eq!(
+            backend_crossings(&metadata, &edges(&metadata)),
+            Vec::<String>::new()
+        );
     }
 
     fn dependency(name: &str, version: &str) -> Dependency {

@@ -2,7 +2,21 @@
 //!
 //! This module is the only place a package is classified. Every command, test
 //! fixture, documentation example, and CI job derives its package list from
-//! here, so a new crate is portable or host-specific by construction.
+//! here, so a new crate is portable, a native backend, or composition by
+//! construction.
+//!
+//! # Two questions, not one
+//!
+//! [`Host`] says which machines verify a package. [`Kind`] says what it is
+//! allowed to reach. They are separate because a composition crate - the
+//! developer CLI, an installer runtime - is verified on a native host *and*
+//! reaches a backend deliberately, so a single axis would force it to be called
+//! portable or called Windows, and it is neither.
+//!
+//! A third platform adds a [`Platform`] variant, a backend matrix, and its own
+//! entry in [`Platform::ALL`]. Every rule that reads this module picks the new
+//! platform up from there, so the boundary does not grow a one-off exception per
+//! operating system.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -10,10 +24,99 @@ use std::fmt::Write as _;
 /// Which build hosts a matrix is verified on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
-    /// Compiles and tests on every host, including non-Windows hosts.
+    /// Compiles and tests on every host, including hosts with no native backend.
     Any,
     /// Requires a Windows build host.
     Windows,
+    /// Requires a Linux build host.
+    Linux,
+}
+
+/// A native platform backend.
+///
+/// A backend owns one operating system's mechanisms and is named for it. Backends
+/// are siblings: they share the portable crates beneath them and nothing with
+/// each other, and that independence is the property that makes a second one
+/// cheap to add and a third one possible.
+///
+/// A new operating system becomes a variant here and a new matrix below, rather
+/// than another branch in every rule that reads this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Platform {
+    Windows,
+    Linux,
+}
+
+impl Platform {
+    /// The backend package that owns this platform's mechanisms.
+    pub const fn crate_name(self) -> &'static str {
+        match self {
+            Self::Windows => "zup-windows",
+            Self::Linux => "zup-linux",
+        }
+    }
+
+    /// Every backend the repository has.
+    pub const ALL: &'static [Platform] = &[Platform::Windows, Platform::Linux];
+
+    /// The build host this platform's backend requires.
+    pub const fn host(self) -> Host {
+        match self {
+            Self::Windows => Host::Windows,
+            Self::Linux => Host::Linux,
+        }
+    }
+
+    /// The backends a build host of `host` can run.
+    ///
+    /// `Host::Any` builds no native backend at all: a portable package is
+    /// portable precisely because it needs none.
+    pub const fn on(host: Host) -> &'static [Platform] {
+        match host {
+            Host::Any => &[],
+            Host::Windows => &[Platform::Windows],
+            Host::Linux => &[Platform::Linux],
+        }
+    }
+}
+
+/// What a package *is*, independent of where it builds.
+///
+/// [`Host`] answers "which machines verify this"; this answers "what may it
+/// reach". The two are separate questions because composition tooling is built on
+/// more than one native host at once, and a matrix that could only say "portable"
+/// or "Windows" would force such a package to be called one or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Genuinely portable: no native backend dependency, no platform branch.
+    Portable,
+    /// One native backend. Reaches the portable crates beneath it and no other
+    /// backend.
+    Backend(Platform),
+    /// Composition or tooling that is intentionally built on more than one
+    /// native host, and is therefore verified wherever the union of those hosts
+    /// builds.
+    Composition,
+}
+
+impl Kind {
+    /// Whether this package may be verified on a host with no native backend.
+    pub const fn is_portable(self) -> bool {
+        matches!(self, Self::Portable)
+    }
+
+    /// Whether this package reaches a native backend by design.
+    pub const fn is_composition(self) -> bool {
+        matches!(self, Self::Composition)
+    }
+
+    /// The backend this package *is*, and `None` for anything else.
+    pub const fn backend(self) -> Option<Platform> {
+        match self {
+            Self::Backend(platform) => Some(platform),
+            _ => None,
+        }
+    }
 }
 
 /// Whose vocabulary a matrix's packages are allowed to use.
@@ -45,6 +148,7 @@ pub struct Matrix {
     /// Shown next to the name in the emitted text view.
     pub summary: &'static str,
     pub host: Host,
+    pub kind: Kind,
     pub vocabulary: Vocabulary,
     /// Declaration order, preserved in every emitted view.
     pub packages: &'static [&'static str],
@@ -166,18 +270,54 @@ pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 /// tree is mine". A host that owns a child has to name which one it is using, and
 /// the two names compile to the same guarantee on both platforms.
 ///
-/// What is still refused for these packages, unchanged: a Windows dependency, a
-/// Windows-only manifest target, `std::os::windows`, and a Win32 namespace. The
-/// branch may only choose between the two wrappers `process-wrap` documents, and a
-/// package gains this by appearing here rather than by a line added beside the
-/// code it silences.
+/// What is still refused for these packages, unchanged: a native backend
+/// dependency, a single-platform manifest target, `std::os::windows`, and a Win32
+/// namespace. The branch may only choose between the two wrappers `process-wrap`
+/// documents, and a package gains this by appearing here rather than by a line
+/// added beside the code it silences.
 pub const PORTABLE_PLATFORM_DELEGATING: &[&str] = &["zup-preset-host", "zup-preset-dev"];
 
-/// Crates that require a Windows build host: the Windows adapter, the
-/// composition CLI, the runtime an installer embeds, the native frontends, and
-/// the small dispatcher a universal artifact starts through.
-pub const WINDOWS_ONLY: &[&str] = &[
-    "zup-windows",
+/// Portable packages that must write a POSIX mode bit.
+///
+/// `std` has no portable spelling for "this file has to be runnable": the
+/// executable bit is a permission, and permissions are per-platform. A preview
+/// environment that stages a preset and then runs it needs that bit and has no
+/// other way to have it.
+///
+/// This is narrower than [`PORTABLE_PLATFORM_DELEGATING`] in what it grants and
+/// wider in none: it exempts one `cfg` spelling and one `std` import, and
+/// nothing else. A package listed here may still not depend on a backend, may
+/// not select a single-platform manifest table, may not name a Win32 namespace,
+/// and is held to every concept table in [`crate::boundary`]. It does not become
+/// a general escape hatch for platform code - `cfg(windows)` stays refused even
+/// here, because a Windows permission model is a *backend* question rather than a
+/// portable one, and that is the distinction this list exists to preserve.
+pub const PORTABLE_POSIX_PERMISSIONS: &[&str] = &["zup-preview"];
+
+/// The Windows backend.
+///
+/// Its own matrix rather than a member of a Windows-only list, because it is not
+/// one product among several that happens to need a Windows host: it is the
+/// mechanism layer every Windows-side decision below it is lowered onto, and the
+/// rules that read this module have to be able to name it as *a* backend rather
+/// than as "whatever the Windows one is".
+pub const WINDOWS_BACKEND: &[&str] = &["zup-windows"];
+
+/// The Linux backend.
+pub const LINUX_BACKEND: &[&str] = &["zup-linux"];
+
+/// The native backends, in [`Platform::ALL`] order.
+pub const NATIVE_BACKENDS: &[&str] = &["zup-windows", "zup-linux"];
+
+/// Crates that require a Windows build host and are not the Windows backend:
+/// the composition CLI, the runtime an installer embeds, the native frontends,
+/// and the small dispatcher a universal artifact starts through.
+///
+/// These are [`Kind::Composition`]: they reach a backend deliberately, because
+/// reaching one is what they are for. What they may not do is pretend to be
+/// portable, which is why the boundary holds them to the platform rules and
+/// still refuses to let the list's membership decide what code they contain.
+pub const WINDOWS_COMPOSITION: &[&str] = &[
     "zup-dispatch",
     "zup",
     "zup-installer",
@@ -208,8 +348,9 @@ pub const WINDOWS_ONLY: &[&str] = &[
 pub const MATRICES: &[Matrix] = &[
     Matrix {
         name: "portable-core",
-        summary: "crates that build and test on a non-Windows host",
+        summary: "crates that build and test on a host with no native backend",
         host: Host::Any,
+        kind: Kind::Portable,
         vocabulary: Vocabulary::Domain,
         packages: PORTABLE_CORE,
     },
@@ -217,6 +358,7 @@ pub const MATRICES: &[Matrix] = &[
         name: "portable-file-format",
         summary: "crates whose domain is a platform file format, read the same way on every host",
         host: Host::Any,
+        kind: Kind::Portable,
         vocabulary: Vocabulary::FileFormat,
         packages: PORTABLE_FILE_FORMAT,
     },
@@ -224,15 +366,33 @@ pub const MATRICES: &[Matrix] = &[
         name: "portable-tests",
         summary: "portable crates that verify the stack instead of shipping in an installer",
         host: Host::Any,
+        kind: Kind::Portable,
         vocabulary: Vocabulary::Domain,
         packages: PORTABLE_TESTS,
     },
     Matrix {
-        name: "windows-only",
-        summary: "crates that require a Windows build host",
+        name: "windows-backend",
+        summary: "the Windows mechanism layer",
         host: Host::Windows,
+        kind: Kind::Backend(Platform::Windows),
         vocabulary: Vocabulary::Domain,
-        packages: WINDOWS_ONLY,
+        packages: WINDOWS_BACKEND,
+    },
+    Matrix {
+        name: "linux-backend",
+        summary: "the Linux mechanism layer",
+        host: Host::Linux,
+        kind: Kind::Backend(Platform::Linux),
+        vocabulary: Vocabulary::Domain,
+        packages: LINUX_BACKEND,
+    },
+    Matrix {
+        name: "windows-composition",
+        summary: "composition and tooling that is built on the Windows backend",
+        host: Host::Windows,
+        kind: Kind::Composition,
+        vocabulary: Vocabulary::Domain,
+        packages: WINDOWS_COMPOSITION,
     },
 ];
 
@@ -246,12 +406,55 @@ pub fn matrix(name: &str) -> Option<&'static Matrix> {
     MATRICES.iter().find(|matrix| matrix.name == name)
 }
 
-/// Whether `package` is verified on any build host.
+/// Whether `package` is genuinely portable.
+///
+/// True only for a [`Kind::Portable`] package, and false for composition
+/// tooling: being *verifiable* on several hosts is not the same as being
+/// platform-neutral, and the boundary's whole job depends on telling them
+/// apart.
 pub fn is_portable(package: &str) -> bool {
+    kind_of(package).is_some_and(Kind::is_portable)
+}
+
+/// What `package` is, and `None` for a package no matrix claims.
+pub fn kind_of(package: &str) -> Option<Kind> {
     MATRICES
         .iter()
-        .filter(|matrix| matrix.host == Host::Any)
-        .any(|matrix| matrix.packages.contains(&package))
+        .find(|matrix| matrix.packages.contains(&package))
+        .map(|matrix| matrix.kind)
+}
+
+/// Whether `package` reaches a native backend by design.
+pub fn is_composition(package: &str) -> bool {
+    kind_of(package).is_some_and(Kind::is_composition)
+}
+
+/// Whether `package` is one specific platform's mechanism layer.
+pub fn is_backend(package: &str) -> bool {
+    kind_of(package).is_some_and(|kind| kind.backend().is_some())
+}
+
+/// The packages a build host of `host` verifies.
+///
+/// What a CI job for that host builds and tests. Derived here rather than in a
+/// workflow, so a job's coverage is a fact about the model: a package the model
+/// does not classify for a host is a package that host does not claim to cover,
+/// and a package it classifies is one the job cannot silently drop.
+pub fn packages_for_host(host: Host) -> Vec<&'static str> {
+    MATRICES
+        .iter()
+        .filter(|matrix| matrix.host == host)
+        .flat_map(|matrix| matrix.packages.iter().copied())
+        .collect()
+}
+
+/// The name a build host is called by, for a report that has to say which.
+pub fn host_name(host: Host) -> &'static str {
+    match host {
+        Host::Any => "any",
+        Host::Windows => "windows",
+        Host::Linux => "linux",
+    }
 }
 
 /// Every package, in matrix order and then declaration order.
@@ -266,8 +469,29 @@ pub fn all() -> Vec<&'static str> {
 pub fn portable() -> Vec<&'static str> {
     MATRICES
         .iter()
-        .filter(|matrix| matrix.host == Host::Any)
+        .filter(|matrix| matrix.kind.is_portable())
         .flat_map(|matrix| matrix.packages.iter().copied())
+        .collect()
+}
+
+/// Every native backend package, in [`Platform::ALL`] order.
+///
+/// The dependency-prefix table in [`crate::boundary`] and the isolation rules in
+/// [`crate::graph`] both read this rather than naming a backend each, which is
+/// what keeps a third platform from needing an edit in three places.
+pub fn backends() -> Vec<&'static str> {
+    Platform::ALL
+        .iter()
+        .map(|platform| platform.crate_name())
+        .collect()
+}
+
+/// Every native backend package except `platform`'s own.
+pub fn sibling_backends(platform: Platform) -> Vec<&'static str> {
+    Platform::ALL
+        .iter()
+        .filter(|other| **other != platform)
+        .map(|other| other.crate_name())
         .collect()
 }
 
@@ -291,6 +515,16 @@ pub fn vocabulary_of(package: &str) -> Vocabulary {
 /// answer.
 pub fn delegates_platform_lifecycle(package: &str) -> bool {
     PORTABLE_PLATFORM_DELEGATING.contains(&package)
+}
+
+/// Whether a portable package may write a POSIX mode bit.
+///
+/// Separate from [`delegates_platform_lifecycle`] because the thing being
+/// delegated is different: that one picks between a dependency's own two
+/// wrappers, and this one spells a permission the standard library declines to
+/// abstract. Merging them would make the second grant the first one's reasoning.
+pub fn writes_posix_permissions(package: &str) -> bool {
+    PORTABLE_POSIX_PERMISSIONS.contains(&package)
 }
 
 /// Packages listed in more than one matrix. A package belongs to exactly one.

@@ -12,10 +12,15 @@ xtask emit-portable-matrix [--matrix <name>]... [--format <text|cargo-args>]
     Print the package matrices. --format cargo-args prints `-p <package>`
     arguments for cargo and needs exactly one --matrix.
 
+xtask emit-host-packages --host <windows|linux> [--format <text|cargo-args>]
+    Print every package verified on one build host, as `-p` arguments by default.
+    Derived from the same matrices as emit-portable-matrix, so a CI job derives its
+    own package list rather than a workflow maintaining a second one.
+
 xtask verify-portable-boundaries [--root <dir>]
-    Report every way a portable package depends on Windows, reintroduces a
-    Windows-specific identifier, or spells a Windows concept in a string
-    literal.
+    Report every way a portable package depends on a native backend,
+    reintroduces a native-backend identifier, or spells a native concept in a
+    string literal.
 
 xtask github-action-pins check [--root <dir>] [--online]
     Check github-actions.lock.json: syntax, version and SHA agreement, that
@@ -50,8 +55,9 @@ xtask release clean-room [--material <dir>] [--work <dir>]
 xtask verify-dependency-graph [--root <dir>]
     Refuse a dependency graph that grew by accident. Fails when a workspace
     package reaches two versions of one external crate, when development tooling
-    has reached the graph of a binary that ships to users, and when a published
-    published crate has reached a crate that exists only in this repository.
+    has reached the graph of a binary that ships to users, when one native
+    backend has reached another's, and when a published crate has reached a
+    crate that exists only in this repository.
 
 xtask automation generate [--root <dir>]
     Write the artifacts derived from the automation contract: the JSON Schema, the
@@ -64,6 +70,9 @@ xtask automation check [--root <dir>]
 
 options:
     --root <dir>         workspace to inspect (default: this repository)
+    --matrix <name>      matrix to emit (repeatable)
+    --host <name>        build host whose packages to emit
+    --format <format>    text or cargo-args
     --online             reach GitHub to report newer releases
     --add <owner/name>   add an action to the lock before refreshing
     --profile <name>     cargo profile to build and stage beside (default: dev)
@@ -81,6 +90,7 @@ exit codes:
 const OPTIONS: &[&str] = &[
     "--root",
     "--matrix",
+    "--host",
     "--format",
     "--online",
     "--add",
@@ -101,6 +111,7 @@ enum Format {
 struct Options {
     root: Option<PathBuf>,
     matrices: Vec<String>,
+    host: Option<String>,
     format: Format,
     online: bool,
     add: Vec<String>,
@@ -131,6 +142,7 @@ fn run() -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "emit-portable-matrix" => emit(&mut arguments),
+        "emit-host-packages" => emit_host(&mut arguments),
         "verify-portable-boundaries" => verify(&mut arguments),
         "github-action-pins" => action_pins(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
@@ -156,6 +168,50 @@ fn emit(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String
         return Ok(ExitCode::SUCCESS);
     }
     print!("{}", matrix::render(&selected));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print the package list one build host verifies.
+///
+/// Derived from the matrices rather than from a workflow's own list, so a job
+/// cannot claim to cover a package the model does not classify for its host - and
+/// so a new backend gets a CI job's package list without anyone editing YAML.
+fn emit_host(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let options = parse(arguments, "emit-host-packages", &["--host", "--format"])?;
+    let Some(name) = options.host else {
+        return Err("emit-host-packages needs --host <windows|linux>".to_owned());
+    };
+    let host = match name.as_str() {
+        "windows" => matrix::Host::Windows,
+        "linux" => matrix::Host::Linux,
+        // The host with no native backend: everything the model classifies as
+        // portable, which is what a Linux CI job needs alongside the Linux
+        // backend's own packages.
+        "any" | "portable" => matrix::Host::Any,
+        // A matrix name resolves to the host that verifies it, so a caller can
+        // ask for a package set and the host that owns it in the same breath.
+        other => matrix::matrix(other)
+            .map(|entry| entry.host)
+            .ok_or_else(|| {
+                format!("unknown host `{other}`; expected windows, linux, any, or a matrix name")
+            })?,
+    };
+    let packages = matrix::packages_for_host(host);
+    if options.format == Format::CargoArgs {
+        println!(
+            "{}",
+            packages
+                .iter()
+                .map(|package| format!("-p {package}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("{}:", matrix::host_name(host));
+    for package in packages {
+        println!("  {package}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -453,6 +509,7 @@ fn parse(
         match flag.as_str() {
             "--root" => options.root = Some(PathBuf::from(value)),
             "--matrix" => options.matrices.push(value),
+            "--host" => options.host = Some(value),
             "--add" => options.add.push(value),
             "--profile" => options.profile = Some(value),
             "--out" => options.out = Some(PathBuf::from(value)),
