@@ -41,6 +41,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(target_os = "linux")]
+mod carrier;
+#[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
 mod lowering;
@@ -49,6 +51,8 @@ mod source_policy;
 #[cfg(target_os = "linux")]
 mod state;
 
+#[cfg(target_os = "linux")]
+pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
 #[cfg(target_os = "linux")]
 pub use host::{
     HostError, additional_architectures, host_execution, host_version, native_architecture,

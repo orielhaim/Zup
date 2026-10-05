@@ -13,6 +13,8 @@ thiserror.workspace = true
 typed-path.workspace = true
 xdg.workspace = true
 zup-artifact.workspace = true
+zup-binary.workspace = true
+zup-bundle.workspace = true
 zup-core.workspace = true
 zup-platform.workspace = true
 
