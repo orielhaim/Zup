@@ -373,6 +373,11 @@ fn resolve_output_slots(
     slots
 }
 
+/// The file name a derived output is given.
+///
+/// The suffix is the *target's*, not the build host's. A derived name that carried
+/// the host's suffix would name a file no composition for that target writes, and
+/// the error would surface much later - when something tried to run it.
 fn derived_output_path(
     app_name: &str,
     manifest_path: &Path,
@@ -381,23 +386,25 @@ fn derived_output_path(
     used: &mut BTreeMap<PathBuf, ()>,
 ) -> PathBuf {
     let parent = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = if targets.len() == 1 {
-        format!("{app_name}-Setup.exe")
+    let suffix = target.target.executable_suffix();
+    let stem = if targets.len() == 1 {
+        format!("{app_name}-Setup")
     } else {
         format!(
-            "{app_name}-Setup-{}.exe",
+            "{app_name}-Setup-{}",
             sanitized_file_stem(target.profile.as_str(), "target")
         )
     };
-    let mut file_name = name.clone();
+    let mut file_name = format!("{stem}{suffix}");
     let mut candidate = parent.join(&file_name);
     if targets.len() > 1 {
-        let base = name.trim_end_matches(".exe").to_owned();
-        let mut suffix = 2;
+        // A disambiguating number belongs before the suffix, or the second
+        // candidate is a different file from the first rather than the same one.
+        let mut number = 2;
         while used.contains_key(&normalized_path(&candidate)) {
-            file_name = format!("{base}-{suffix}.exe");
+            file_name = format!("{stem}-{number}{suffix}");
             candidate = parent.join(&file_name);
-            suffix += 1;
+            number += 1;
         }
     }
     used.insert(normalized_path(&candidate), ());
@@ -416,19 +423,28 @@ pub fn default_build_target() -> String {
     }
 }
 
-/// Whether the current build host can run the implemented Windows backend.
-pub const fn windows_backend_available() -> bool {
-    cfg!(windows)
-}
-
 /// Backend support for one target on this build host.
+///
+/// The three answers are the portable selection model's own: a host that can
+/// lower this target natively, a host that has the target's backend but is not
+/// the platform it belongs to, and a target no implemented backend answers for.
+///
+/// Nothing here names Windows. A vocabulary whose only members are `Windows...`
+/// is a vocabulary that will be wrong the moment the second backend lands, and the
+/// failure it produces - "WindowsBackendUnavailable" on a Linux host - reads as
+/// though Windows were the universal backend rather than the one that happens to
+/// be implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSupport {
-    /// The implemented Windows backend can build this target here.
+    /// The host's backend can lower this target here.
     Ready,
-    /// A Windows target on a host that cannot lower Windows targets.
-    WindowsBackendUnavailable,
-    /// A target whose platform backend is not implemented.
+    /// The target's backend is implemented, but not on this build host.
+    ///
+    /// A Windows target on a Linux build host, or the reverse. The backend exists;
+    /// the *host* cannot run it, so the answer is about this machine rather than
+    /// about the target.
+    HostBackendUnavailable,
+    /// A target no implemented backend answers for.
     NotImplemented,
 }
 
@@ -437,11 +453,13 @@ impl BackendSupport {
     pub fn reason(self, target: &TargetTriple) -> Option<String> {
         match self {
             Self::Ready => None,
-            Self::WindowsBackendUnavailable => Some(format!(
-                "backend unavailable: Windows target lowering for `{target}` requires a Windows build host"
+            Self::HostBackendUnavailable => Some(format!(
+                "backend unavailable: lowering `{target}` requires a {} build host",
+                platform_name(target.operating_system())
             )),
             Self::NotImplemented => Some(
-                "backend not implemented: only Windows targets have an implemented backend"
+                "backend not implemented: no implemented backend answers for this target's \
+                 platform"
                     .to_owned(),
             ),
         }
@@ -455,14 +473,57 @@ impl BackendSupport {
 }
 
 /// Classify one target against the backends this host implements.
+///
+/// Two questions, in this order, because they have different answers and the
+/// second is the one that used to be conflated with "no backend exists": does an
+/// implemented backend own this target's platform at all, and can this build host
+/// run it.
 pub fn backend_support(target: &TargetTriple) -> BackendSupport {
-    if target.operating_system() != TargetOperatingSystem::Windows {
+    let implemented = matches!(
+        target.operating_system(),
+        TargetOperatingSystem::Windows | TargetOperatingSystem::Linux
+    );
+    if !implemented {
         return BackendSupport::NotImplemented;
     }
-    if windows_backend_available() {
+    if host_can_lower(target.operating_system()) {
         BackendSupport::Ready
     } else {
-        BackendSupport::WindowsBackendUnavailable
+        BackendSupport::HostBackendUnavailable
+    }
+}
+
+/// Whether this build host can lower a target for `os`.
+///
+/// Each platform's own build host, and nothing inferred: a developer CLI that
+/// claimed it could lower a target for a platform it has no backend for would be
+/// claiming a capability the build could not honour.
+const fn host_can_lower(os: TargetOperatingSystem) -> bool {
+    match os {
+        TargetOperatingSystem::Windows => cfg!(windows),
+        // The Linux backend exists and this phase implements its foundation, but a
+        // *build* needs the carrier and executor composition that Phase 2 owns, so
+        // an unprivileged Linux host is reported as a backend it cannot lower for
+        // rather than as a host that can.
+        TargetOperatingSystem::Linux => false,
+        _ => false,
+    }
+}
+
+/// The portable name of a target platform, for a diagnostic that has to say which.
+///
+/// `target_lexicon`'s `Display` is the triple spelling - `windows`, `linux` - which
+/// is already the name a person reading the diagnostic would use, so the mapping
+/// is only needed to normalise the ones whose `Debug` is not lower case.
+fn platform_name(os: TargetOperatingSystem) -> String {
+    // `target_lexicon` spells an operating system through its own `Display`, which
+    // is already the lower-case triple spelling a diagnostic would use, and the two
+    // names this backend distinguishes are spelled out because a diagnostic should
+    // not depend on a foreign type's `Display` staying as it is.
+    match os {
+        TargetOperatingSystem::Windows => "windows".to_owned(),
+        TargetOperatingSystem::Linux => "linux".to_owned(),
+        other => other.to_string(),
     }
 }
 
@@ -570,33 +631,51 @@ mod tests {
         let windows = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
         let linux = TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap();
         let macos = TargetTriple::parse("aarch64-apple-darwin").unwrap();
-        assert_eq!(backend_support(&linux), BackendSupport::NotImplemented);
         assert_eq!(backend_support(&macos), BackendSupport::NotImplemented);
         assert!(
-            backend_support(&linux)
-                .reason(&linux)
+            backend_support(&macos)
+                .reason(&macos)
                 .unwrap()
-                .contains("backend not implemented")
+                .contains("backend not implemented"),
+            "a platform no backend owns has no backend *anywhere*, which is a different answer \
+             from one this host cannot run"
         );
         assert!(
-            backend_support(&linux)
-                .build_error(&linux)
+            backend_support(&macos)
+                .build_error(&macos)
                 .unwrap()
                 .starts_with("unsupported backend for target")
         );
         let windows_support = backend_support(&windows);
-        if windows_backend_available() {
-            assert_eq!(windows_support, BackendSupport::Ready);
-            assert!(windows_support.reason(&windows).is_none());
-        } else {
-            assert_eq!(windows_support, BackendSupport::WindowsBackendUnavailable);
+        assert_eq!(
+            windows_support,
+            if cfg!(windows) {
+                BackendSupport::Ready
+            } else {
+                BackendSupport::HostBackendUnavailable
+            },
+            "a Windows target is a question about the build host, not about whether a backend \
+             exists"
+        );
+        if let Some(reason) = windows_support.reason(&windows) {
+            assert!(reason.contains("backend unavailable"), "{reason}");
             assert!(
-                windows_support
-                    .reason(&windows)
-                    .unwrap()
-                    .contains("backend unavailable")
+                !reason.contains("WindowsBackend"),
+                "the diagnostic names the host and the target, never a variant"
             );
         }
+
+        // Linux is a platform an implemented backend now owns, which is a different
+        // answer from "no backend answers for this" and must not be reported as it.
+        let linux_support = backend_support(&linux);
+        assert_eq!(linux_support, BackendSupport::HostBackendUnavailable);
+        assert!(
+            linux_support
+                .reason(&linux)
+                .unwrap()
+                .contains("requires a linux build host"),
+            "the reason names the platform the target belongs to"
+        );
     }
 
     /// A resolver that finds nothing, so a test is about the shape of a problem

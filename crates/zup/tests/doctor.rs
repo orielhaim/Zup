@@ -525,12 +525,12 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
     assert_eq!(statuses(&rows, "build_backend"), only("fail"));
     let backend = find(&rows, "build_backend");
+    // A Linux target has an implemented backend, so the finding is about *this
+    // host* not being able to run it - on a Windows host and on a Linux host
+    // alike. "not implemented" would be a different claim: that no backend answers
+    // for the platform anywhere.
     assert!(
-        message(backend).contains(if ON_WINDOWS {
-            "backend not implemented"
-        } else {
-            "backend unavailable"
-        }),
+        message(backend).contains("backend unavailable"),
         "{}",
         message(backend)
     );

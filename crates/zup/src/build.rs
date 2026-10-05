@@ -759,7 +759,7 @@ fn finish(
             format!("release description: {error}"),
         )
     })?;
-    zup_windows::write_durable(&path, &bytes).map_err(|error| {
+    zup_platform::publish(&path, &bytes).map_err(|error| {
         crate::failure::error(
             "zup.build.release_unwritable",
             format!("release description: {error}"),
@@ -769,7 +769,7 @@ fn finish(
     let plan = signing_plan(&release, &root, args.signing_subject.as_deref())?;
     let pending = plan.pre_compose().count() + plan.post_compose().count();
     let plan_path = path.with_file_name(zup_signing::SIGNING_PLAN_NAME);
-    zup_windows::write_durable(
+    zup_platform::publish(
         &plan_path,
         &plan.encode().map_err(|error| {
             crate::failure::error(
@@ -837,8 +837,12 @@ fn signing_plan(
     // toolchain owns those bytes and a release pipeline stages the *signed* copy
     // there before composing - so the path recorded is the one verification will
     // look at, and it is written by whatever signed it.
-    for (variant, _carriers) in embedded_by_variant(release) {
-        let path = format!("runtime/{variant}.exe");
+    for (variant, target, _carriers) in embedded_by_variant(release) {
+        // The suffix is the *variant's* target's, not the build host's: this plan
+        // describes artifacts for every variant in the release, and a release
+        // description that named a Linux runtime `.exe` would be naming a file no
+        // Linux composition ever writes.
+        let path = format!("runtime/{variant}{}", target.executable_suffix());
         let file = root.join(&path);
         plan.push(zup_signing::SigningStep::new(
             zup_signing::SigningRole::NativeRuntime,
@@ -886,25 +890,44 @@ fn signing_plan(
     Ok(plan)
 }
 
-/// The variants a release's universal artifacts embed, as `runtime/<variant>.exe`.
+/// The variants a release's universal artifacts embed, each with its target.
 ///
 /// Only universal artifacts embed a runtime, because only a universal artifact is
 /// built around a dispatcher: the dispatcher is the base image, and each variant's
 /// runtime is a resource inside it. A single-target installer *is* its runtime.
-fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, Vec<String>)> {
-    let mut by_variant: BTreeMap<String, Vec<String>> = BTreeMap::new();
+///
+/// The target comes back with the id because the caller needs it to name the
+/// runtime file: an artifact may carry variants for several platforms, and the one
+/// name each gets is a fact about its target rather than about the machine that
+/// composed it.
+fn embedded_by_variant(
+    release: &zup_artifact::ReleaseManifest,
+) -> Vec<(String, zup_core::TargetTriple, Vec<String>)> {
+    let targets: BTreeMap<&str, &zup_core::TargetTriple> = release
+        .variants
+        .iter()
+        .map(|variant| (variant.id.as_str(), &variant.target))
+        .collect();
+    let mut by_variant: BTreeMap<String, (zup_core::TargetTriple, Vec<String>)> = BTreeMap::new();
     for artifact in &release.artifacts {
         if artifact.kind != zup_artifact::ArtifactKind::Universal {
             continue;
         }
         for variant in &artifact.variants {
+            let Some(target) = targets.get(variant.as_str()) else {
+                continue;
+            };
             by_variant
                 .entry(variant.clone())
-                .or_default()
+                .or_insert_with(|| ((*target).clone(), Vec::new()))
+                .1
                 .push(artifact.id.clone());
         }
     }
-    by_variant.into_iter().collect()
+    by_variant
+        .into_iter()
+        .map(|(variant, (target, artifacts))| (variant, target, artifacts))
+        .collect()
 }
 
 fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProject) {

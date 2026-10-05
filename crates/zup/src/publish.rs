@@ -725,7 +725,7 @@ fn compose_release(
             format!("composing the release description: {error}"),
         )
     })?;
-    zup_windows::write_durable(&path, &bytes).map_err(|error| {
+    zup_platform::publish(&path, &bytes).map_err(|error| {
         crate::failure::error(
             "zup.publish.release_unwritable",
             format!("`{}`: {error}", path.display()),
