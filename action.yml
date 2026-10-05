@@ -8,7 +8,6 @@ author: zup
 runs:
   using: node24
   main: action/dist/index.js
-  minimum: "2.327.1"
 
 branding:
   icon: package
