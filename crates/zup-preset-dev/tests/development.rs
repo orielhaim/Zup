@@ -245,11 +245,21 @@ fn a_directory_with_no_manifest_is_refused_and_nothing_is_created() {
         matches!(error, zup_preset_dev::ProjectError::Metadata(..)),
         "and the refusal is Cargo's own, because a preset is a Cargo project: {error}"
     );
+    // Compared as a directory rather than as one string, because a path has more
+    // than one spelling: `TEMP` hands out the 8.3 short form of a directory whose
+    // long form is what cargo resolves and then reports, and the claim is that a
+    // person can tell which directory was refused. Either spelling identifies it,
+    // so either one appearing is the claim holding. Portable on purpose - this
+    // crate builds on every platform, so it cannot reach for a Windows-only helper
+    // to normalise the path.
+    let mut spellings = vec![directory.path().display().to_string()];
+    if let Ok(resolved) = std::fs::canonicalize(directory.path()) {
+        spellings.push(resolved.display().to_string());
+    }
+    let message = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains(&directory.path().display().to_string()),
-        "which names the directory, so the refusal is actionable: {error}"
+        spellings.iter().any(|spelling| message.contains(spelling)),
+        "which names the directory, so the refusal is actionable: {message}"
     );
     let after: Vec<PathBuf> = std::fs::read_dir(directory.path())
         .expect("still a directory")
