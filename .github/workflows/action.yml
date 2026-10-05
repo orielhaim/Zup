@@ -137,14 +137,22 @@ jobs:
 
           # A second copy at a path with a space, because an argument that is
           # passed as one value is the whole claim that step makes.
-          New-ZupProject (Join-Path $env:RUNNER_TEMP 'my project') '1.4.0'
+          $spaced = Join-Path $env:RUNNER_TEMP 'my project'
+          New-ZupProject $spaced '1.4.0'
 
           # A manifest that is present and wrong, rather than a directory that is
           # absent. Both make the step fail, but only this one proves the failure
           # came from reading the project and naming a line in it.
-          New-ZupProject (Join-Path $env:RUNNER_TEMP 'broken') 'not-a-version'
+          $broken = Join-Path $env:RUNNER_TEMP 'broken'
+          New-ZupProject $broken 'not-a-version'
 
+          # Every path a later step names is written here, rather than each
+          # spelling out `${{ env.RUNNER_TEMP }}` again. That expression does not
+          # carry the runner's own variables - they live in the `runner` context -
+          # so it expanded to nothing and the step was handed `\my project`.
           "PROJECT=$project" >> $env:GITHUB_ENV
+          "SPACED=$spaced" >> $env:GITHUB_ENV
+          "BROKEN=$broken" >> $env:GITHUB_ENV
           "ZUP=$env:GITHUB_WORKSPACE\target\release\zup.exe" >> $env:GITHUB_ENV
 
       - name: Setup
@@ -191,7 +199,7 @@ jobs:
         uses: ./
         with:
           operation: check
-          project-path: ${{ env.RUNNER_TEMP }}\my project
+          project-path: ${{ env.SPACED }}
           zup-path: ${{ env.ZUP }}
 
       - name: A failing zup fails the step
@@ -200,7 +208,7 @@ jobs:
         uses: ./
         with:
           operation: check
-          project-path: ${{ env.RUNNER_TEMP }}\broken
+          project-path: ${{ env.BROKEN }}
           zup-path: ${{ env.ZUP }}
 
       - name: The failure came from the result, with its code
