@@ -57,6 +57,77 @@ pub const PLAN_FUNCTION_NAME: &str = "plan";
 /// Written into every compiled plugin artifact and checked when one is loaded,
 /// so a component built against a different contract is refused rather than
 /// called with a signature its author never wrote.
+///
+/// Hashed as the contract reads rather than as it sits on disk. A checkout
+/// rewrites line endings - git leaves a Windows working tree CRLF and a Unix one
+/// LF - so hashing the bytes would make the digest identify the platform the
+/// contract was checked out on rather than the contract, and an artifact built on
+/// one would be refused by a host on the other for a difference no guest ever
+/// observed. The WIT parser reads both the same way, so normalising to `\n`
+/// hashes what the parser actually sees.
 pub fn wit_package_digest() -> [u8; 32] {
-    Sha256::digest(WIT_PACKAGE.as_bytes()).into()
+    digest_canonical(WIT_PACKAGE)
+}
+
+/// Hash one WIT document's text, the way [`wit_package_digest`] hashes the
+/// canonical one.
+///
+/// Split out so the line-ending rule is testable without a second checkout: this
+/// is what makes the digest a property of the contract rather than of the
+/// platform it was read on.
+fn digest_canonical(wit: &str) -> [u8; 32] {
+    let mut canonical = Vec::with_capacity(wit.len());
+    let mut bytes = wit.as_bytes().iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\r' {
+            if bytes.peek() == Some(&b'\n') {
+                bytes.next();
+            }
+            canonical.push(b'\n');
+        } else {
+            canonical.push(byte);
+        }
+    }
+    Sha256::digest(&canonical).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The digest identifies the contract, and a checkout's line endings are not
+    /// part of it.
+    ///
+    /// Without this, a Windows working tree and a Unix one produce two digests
+    /// for one contract, and every artifact built on one is refused by a host on
+    /// the other.
+    #[test]
+    fn the_digest_does_not_depend_on_line_endings() {
+        let unix = "package zup:plugin@1.0.0;\nworld plugin {}\n";
+        assert_eq!(
+            digest_canonical(unix),
+            digest_canonical("package zup:plugin@1.0.0;\r\nworld plugin {}\r\n"),
+            "CRLF and LF describe the same contract"
+        );
+        assert_eq!(
+            digest_canonical(unix),
+            digest_canonical("package zup:plugin@1.0.0;\rworld plugin {}\r"),
+            "and so does a lone carriage return"
+        );
+        assert_ne!(
+            digest_canonical(unix),
+            digest_canonical("package zup:plugin@1.0.0;\nworld plugin { }\n"),
+            "while a change to the contract does move it"
+        );
+    }
+
+    /// The shipped contract hashes to the value recorded in artifacts.
+    #[test]
+    fn the_digest_is_the_one_artifacts_record() {
+        assert_eq!(
+            wit_package_digest().to_vec(),
+            digest_canonical(WIT_PACKAGE),
+            "the published digest and the published contract agree"
+        );
+    }
 }

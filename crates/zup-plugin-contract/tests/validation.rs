@@ -287,6 +287,10 @@ fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]
 /// point is that the digest covers its inputs, and the WIT contract is one of
 /// them. A change here means the contract or the engine configuration changed,
 /// which is exactly the event an ahead-of-time artifact has to be rebuilt for.
+///
+/// The value is the same on every platform, which is what makes pinning it
+/// possible at all: the contract is hashed as it reads rather than as a checkout
+/// stored it, so a Windows working tree and a Unix one agree.
 #[test]
 fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
     let first = engine_fingerprint("x86_64-pc-windows-msvc");
@@ -302,6 +306,6 @@ fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
     );
     assert_eq!(
         first.to_hex(),
-        "55c7a6d0e0e7bd14f5cdd0b3a6176a2691a7ae54b99efa994ae4954990318a08"
+        "bb10e7c2044e5f55ace87ae79d15a4f4846e61d3614101e3dbff11b0f0a918ef"
     );
 }
