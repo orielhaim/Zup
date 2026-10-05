@@ -92,7 +92,7 @@ fn context() -> Context {
     Never::Ask
 )]
 #[case::trap("unreachable", Refusal::Trap, Never::Ask)]
-#[case::out_of_fuel("(loop (br 0)) unreachable", Refusal::FuelExhausted, Never::Ask)]
+#[case::never_finishes("(loop (br 0)) unreachable", Refusal::Bound, Never::Ask)]
 #[case::out_of_memory(
     "(drop (memory.grow (i32.const 513))) (i32.const 0)",
     Refusal::MemoryLimit,
@@ -126,7 +126,16 @@ fn a_guest_that_misbehaves_is_mapped_to_its_own_failure(
 enum Refusal {
     OutputLimit,
     Trap,
-    FuelExhausted,
+    /// Stopped by one of the two bounds, whichever ran out first.
+    ///
+    /// A guest that never finishes spends its fuel and its wall-clock at the same
+    /// time, so a machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
+    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
+    /// deadline. Both are the guest being stopped, and which one fired is a fact
+    /// about the machine rather than about the engine. That each bound is mapped
+    /// from its own trap is proved directly, over the traps, in
+    /// `runtime::a_trap_is_reported_as_its_own_failure`.
+    Bound,
     MemoryLimit,
     Cancelled,
 }
@@ -137,7 +146,8 @@ impl Refusal {
             (self, error),
             (Refusal::OutputLimit, InvocationError::OutputLimit { .. })
                 | (Refusal::Trap, InvocationError::Trap { .. })
-                | (Refusal::FuelExhausted, InvocationError::FuelExhausted)
+                | (Refusal::Bound, InvocationError::FuelExhausted)
+                | (Refusal::Bound, InvocationError::Timeout)
                 | (Refusal::MemoryLimit, InvocationError::MemoryLimit)
                 | (Refusal::Cancelled, InvocationError::Cancelled)
         )

@@ -427,4 +427,41 @@ mod tests {
         });
         assert_eq!(cancelled, Err(InvocationError::Cancelled));
     }
+
+    /// Each way a guest can go wrong is reported as its own failure.
+    ///
+    /// Proved from the traps rather than by running guests that provoke them. A
+    /// guest that spins spends its fuel and its wall-clock together, so which of
+    /// the two bounds stops it is a fact about the machine rather than about the
+    /// mapping - and a mapping rule that held only on a fast machine would not be
+    /// a rule. This is the half of the behaviour that is deterministic; the
+    /// end-to-end case in `validation` covers that a misbehaving guest is stopped
+    /// at all.
+    #[test]
+    fn a_trap_is_reported_as_its_own_failure() {
+        let classify = |trap: Trap| classify_error(&trap.into(), WatchdogCause::None);
+        assert_eq!(
+            classify(Trap::OutOfFuel),
+            InvocationError::FuelExhausted,
+            "a guest that burned its fuel budget is reported as having done that"
+        );
+        assert!(
+            matches!(
+                classify(Trap::MemoryOutOfBounds),
+                InvocationError::InvalidOutput { .. }
+            ),
+            "and a guest that walked off the end of its memory is reported as that"
+        );
+        assert!(
+            matches!(classify(Trap::Interrupt), InvocationError::Timeout),
+            "an interrupt with no cancellation pending is a timeout"
+        );
+        assert!(
+            matches!(
+                classify(Trap::UnreachableCodeReached),
+                InvocationError::Trap { .. }
+            ),
+            "and anything else keeps the trap, so the guest is told what it did"
+        );
+    }
 }
