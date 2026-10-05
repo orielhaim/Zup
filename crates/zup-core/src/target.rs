@@ -193,6 +193,35 @@ impl TargetTriple {
     pub fn operating_system(&self) -> OperatingSystem {
         self.as_lexicon().operating_system
     }
+
+    /// The suffix a native executable of this target is named with.
+    ///
+    /// A property of the target's operating system rather than of the machine
+    /// running the build, which is the distinction that matters: a release
+    /// description written on one host describes artifacts for several targets,
+    /// and the name it records for a Linux runtime must not carry the suffix of
+    /// the host that happened to write it.
+    ///
+    /// Empty for every operating system that has no such convention, which is
+    /// every Unix one: a Linux or macOS executable is named without a suffix, and
+    /// an empty string here produces exactly that rather than a special case at
+    /// each call site.
+    pub fn executable_suffix(&self) -> &'static str {
+        executable_suffix(self.operating_system())
+    }
+}
+
+/// The suffix a native executable is named with on `os`.
+///
+/// A free function rather than an inherent method because
+/// [`TargetOperatingSystem`] is `target_lexicon`'s own type: zup reads it, and
+/// adding to it would be a claim zup cannot keep. The rule therefore lives here,
+/// beside the triple it is read through.
+pub const fn executable_suffix(os: OperatingSystem) -> &'static str {
+    match os {
+        OperatingSystem::Windows => ".exe",
+        _ => "",
+    }
 }
 
 /// The architecture this process runs as, in canonical triple spelling.
