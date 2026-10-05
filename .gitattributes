@@ -5,3 +5,15 @@
 # on three megabyte-long lines and makes `bun run check:dist` fail on a bundle
 # that is byte-identical to the committed one. Git must not touch these bytes.
 action/dist/** -text
+
+# Everything `cargo xtask automation check` generates is compared byte for byte.
+#
+# That check proves the committed files are exactly what the Rust types produce,
+# so a checkout that rewrites their line endings makes it fail on bytes nothing
+# changed: a fresh Windows checkout with `core.autocrlf=true` turned them CRLF, and
+# all sixteen files were reported as 28 to 63 bytes "longer" than what was
+# generated. They are LF in the index and LF out of the generator, so marking them
+# `-text` is what makes the comparison mean what it says on every platform.
+schema/automation-v1.schema.json -text
+action/src/protocol.generated.ts -text
+fixtures/automation/** -text
