@@ -111,7 +111,11 @@ impl PresetProcess {
             .map_err(|error| SessionError::Handshake(error.to_string()))?;
         self.reading = Some(channel);
         match self.session.lock().expect("the session").receive(envelope) {
-            Ok(zup_preset_protocol::SessionProgress::Send(answer)) => self.send(&answer),
+            Ok(zup_preset_protocol::SessionProgress::Send(answer)) => {
+                self.send(&answer).map_err(|error| {
+                    SessionError::Handshake(format!("answering the greeting: {error}"))
+                })
+            }
             Ok(_) => Err(SessionError::Handshake(
                 "the preset did not open with a hello".into(),
             )),

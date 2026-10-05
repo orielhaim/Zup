@@ -83,7 +83,27 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     let root = directory.path();
     let project = zup_preset_dev::Project::read(root).expect("the probe is a preset project");
     let development = Development::read(root).expect("a document");
-    let mut watcher = zup_preset_dev::Watcher::start(&project, &development).expect("it watches");
+    let watcher = zup_preset_dev::Watcher::start(&project, &development).expect("it watches");
+
+    // Read on a thread, because `next_change` blocks and a test that has to tell
+    // "nothing has happened" from "something has" needs its own deadline rather
+    // than a wait that never ends.
+    let (seen, events) = std::sync::mpsc::channel();
+    let mut watcher = watcher;
+    std::thread::spawn(move || {
+        while let Some(event) = watcher.next_change() {
+            if seen.send(event).is_err() {
+                return;
+            }
+        }
+    });
+
+    // A watch reports the tree it was pointed at as it takes it in, which is not a
+    // change to the project and must not be read as one. Draining it is part of
+    // starting the session, and a test that asserted over it would be asserting
+    // that a fresh watcher says nothing at all - a claim about the backend's
+    // startup, not about what a save is named.
+    settle(&events);
 
     // Content that differs from what is on disk, because a write of identical
     // bytes is a write a filesystem is entitled not to report.
@@ -92,7 +112,7 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     std::fs::write(&source, edited).expect("the source is saved");
     assert!(
         matches!(
-            wait_for(&mut watcher),
+            wait_for(&events),
             Some(zup_preset_dev::Watched::Changed(
                 zup_preset_dev::Change::Source
             ))
@@ -107,7 +127,7 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     .expect("the document is saved");
     assert!(
         matches!(
-            wait_for(&mut watcher),
+            wait_for(&events),
             Some(zup_preset_dev::Watched::Changed(
                 zup_preset_dev::Change::Configuration
             ))
@@ -116,20 +136,31 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     );
 }
 
+/// Discard whatever the watch reported while it was still starting up.
+///
+/// Bounded by the same patience every wait here uses, and by a quiet period rather
+/// than by a fixed sleep, so a backend that reports more of its own startup later
+/// than this one still gets drained and one that reports nothing costs nothing.
+fn settle(events: &std::sync::mpsc::Receiver<zup_preset_dev::Watched>) {
+    let mut quiet = Instant::now();
+    while Instant::now() - quiet < Duration::from_secs(2) {
+        match events.recv_timeout(Duration::from_millis(250)) {
+            Ok(_) => quiet = Instant::now(),
+            Err(_) => continue,
+        }
+    }
+}
+
 /// The next thing the watcher saw, within a time a person would wait for.
 ///
 /// Generous, because a filesystem notification has no upper bound and this runs
 /// beside suites that keep every core busy. It is a deadline rather than a sleep:
 /// it costs nothing when the event is prompt, and it fails the test rather than
 /// passing one that saw nothing.
-fn wait_for(watcher: &mut zup_preset_dev::Watcher) -> Option<zup_preset_dev::Watched> {
-    let deadline = Instant::now() + Duration::from_secs(90);
-    while Instant::now() < deadline {
-        if let Some(seen) = watcher.next_change() {
-            return Some(seen);
-        }
-    }
-    None
+fn wait_for(
+    events: &std::sync::mpsc::Receiver<zup_preset_dev::Watched>,
+) -> Option<zup_preset_dev::Watched> {
+    events.recv_timeout(Duration::from_secs(90)).ok()
 }
 
 #[test]

@@ -365,7 +365,12 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     if let Some(selection) = state.plan_request() {
         plans.request(selection, &reports);
     }
-    publish(&preset, &state, &configuration)?;
+    // Whether the preset can still be written to. It starts true and goes false the
+    // first time a write finds the transport gone, which is a preset that has closed
+    // its window and left. The questions it already asked are still answered - it
+    // asked before it went, and the host owns the installation either way - so the
+    // loop runs out of questions rather than out of window.
+    let mut deliverable = publish(&mut preset, &state, &configuration);
 
     loop {
         if !preset.is_running() {
@@ -392,7 +397,9 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     }
                     Report::RepairDrift(resources) => state.set_repair_drift(resources),
                 }
-                publish(&preset, &state, &configuration)?;
+                if deliverable {
+                    deliverable = publish(&mut preset, &state, &configuration);
+                }
             }
             asked = questions.recv() => {
                 let Some(action) = asked else { break };
@@ -409,7 +416,9 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     &mut inbox,
                     &mut plans,
                 );
-                publish(&preset, &state, &configuration)?;
+                if deliverable {
+                    deliverable = publish(&mut preset, &state, &configuration);
+                }
             }
         }
     }
@@ -433,21 +442,34 @@ fn lagged(error: tokio::sync::broadcast::error::RecvError) -> miette::Report {
     }
 }
 
-/// Tell the preset the whole state, in full.
+/// Tell the preset the whole state, in full, and say whether it heard.
 ///
 /// Every message, not every change: a snapshot is complete, so republishing it
 /// costs one frame and removes every question about whether the preset missed
 /// something. The configuration rides with the first one only - the settings and
 /// asset table are what the application configured, and they do not change while
 /// one session runs - so a republish after a click carries the state alone.
+///
+/// `false` means the transport is gone and the caller should stop trying. A
+/// preset sends its last question and goes: it closed its window, which is what a
+/// person closing a window looks like from here, and it has by definition not
+/// waited to hear the answer. Nothing after this can be delivered, so a failed
+/// write is a fact about delivery rather than about the installation - and the
+/// host owns the installation whether or not anybody is watching it happen.
+/// Failing the run on it would report an installation that completed as one that
+/// did not.
+///
+/// Asking about the pipe rather than about the process is deliberate. Whether the
+/// child has been reaped yet is a separate fact with its own timing, and it is not
+/// the one being asked about here.
 fn publish(
-    preset: &preset::PresetProcess,
+    preset: &mut preset::PresetProcess,
     state: &HostState,
     configuration: &zup_preset_protocol::Configuration,
-) -> miette::Result<()> {
+) -> bool {
     preset
         .publish(configuration.clone(), Box::new(state.snapshot().clone()))
-        .map_err(|error| miette::miette!("{error}"))
+        .is_ok()
 }
 
 /// The plans this session has asked for.
