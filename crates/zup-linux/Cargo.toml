@@ -1,0 +1,21 @@
+[package]
+name = "zup-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux backend for zup"
+publish = false
+
+[dependencies]
+rustix.workspace = true
+thiserror.workspace = true
+typed-path.workspace = true
+xdg.workspace = true
+zup-artifact.workspace = true
+zup-core.workspace = true
+zup-platform.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

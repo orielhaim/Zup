@@ -11383,6 +11383,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
+name = "xdg"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
+
+[[package]]
 name = "xim-ctext"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12021,6 +12027,8 @@ name = "zup-bundle"
 version = "0.0.1"
 dependencies = [
  "proptest",
+ "rstest",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -12146,6 +12154,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-linux"
+version = "0.0.1"
+dependencies = [
+ "rstest",
+ "rustix",
+ "tempfile",
+ "thiserror 2.0.21",
+ "typed-path 0.12.3",
+ "xdg",
+ "zup-artifact",
+ "zup-core",
+ "zup-platform",
+]
+
+[[package]]
 name = "zup-manifest"
 version = "0.0.1"
 dependencies = [
@@ -12198,9 +12221,11 @@ dependencies = [
 name = "zup-platform"
 version = "0.0.1"
 dependencies = [
+ "atomic-write-file",
  "rstest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "typed-path 0.12.3",
  "zup-core",

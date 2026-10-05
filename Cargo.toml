@@ -82,6 +82,7 @@ zup-preset-dev = { path = "crates/zup-preset-dev" }
 zup-preset-sdk = { path = "crates/zup-preset-sdk", version = "0.1.0" }
 zup-preset-ipc = { path = "crates/zup-preset-ipc", version = "0.1.0" }
 zup-windows = { path = "crates/zup-windows" }
+zup-linux = { path = "crates/zup-linux" }
 zup-update = { path = "crates/zup-update" }
 zup-plugin-abi = { path = "crates/zup-plugin-abi", version = "0.1.0" }
 zup-plugin-sdk = { path = "crates/zup-plugin-sdk", version = "0.1.0" }
@@ -105,6 +106,19 @@ process-wrap = { version = "10", default-features = false, features = [
   "process-group",
   "std",
 ] }
+
+# A Linux mechanism layer needs exactly two things `std` does not provide: raw
+# filesystem semantics that are not racy with respect to the entry being asked
+# about, and the base-directory model the specification defines. `rustix` supplies
+# both safely, so no backend needs `unsafe` for either. `nix` is deliberately not
+# here as well: it overlaps `rustix` rather than complementing it, and a workspace
+# that reaches for both has two answers to every question.
+rustix = { version = "1.1", default-features = false, features = [
+  "fs",
+  "std",
+  "system",
+] }
+xdg = "3"
 
 # Build / filesystem
 atomic-write-file = "0.3"
