@@ -76,7 +76,7 @@ pub enum Error {
     GreetingTimeout,
 
     #[error("the preset's transport failed: {0}")]
-    Transport(String),
+    Transport(#[source] std::io::Error),
 
     #[error("the peer sent a message this transport cannot carry: {0}")]
     Protocol(#[from] zup_preset_protocol::WireError),
@@ -85,6 +85,64 @@ pub enum Error {
         "this program is a zup installer preset; it is launched by an installer, not run directly"
     )]
     NotLaunchedByAHost,
+}
+
+impl Error {
+    /// Whether this is the other end of the transport having gone, rather than
+    /// something having gone wrong with it.
+    ///
+    /// The distinction a host needs: a preset that closed its window leaves a
+    /// transport nobody is reading, which is the end of delivery and not a fault,
+    /// while a pipe that failed for any other reason is. Nothing here is specific
+    /// to a direction - a read and a write both fail this way once the peer is
+    /// gone - and a preset that crashes looks exactly like one that closed, which
+    /// is correct: the host cannot tell them apart over a pipe, and neither can it
+    /// act differently.
+    pub fn peer_gone(&self) -> bool {
+        let Self::Transport(error) = self else {
+            return false;
+        };
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof
+        ) {
+            return true;
+        }
+        error
+            .raw_os_error()
+            .is_some_and(|code| PEER_GONE_CODES.contains(&code))
+    }
+}
+
+/// The operating system's own codes for a channel whose other end has gone.
+///
+/// The kinds above cover a broken or unconnected channel and a read that reached
+/// the end, which is most of it. One does not arrive as a kind at all: the Windows
+/// pipe layer reports a closed peer as the code for "no data available", which
+/// `std` files under `Uncategorized` and hands back as the raw value. It is
+/// enumerated here rather than behind a build-host branch because this crate is
+/// portable production code and may not carry one; on a platform that reports
+/// something else these simply never match.
+const PEER_GONE_CODES: &[i32] = &[
+    // "No data available", as the pipe layer surfaces it.
+    0x8007_00E8_u32 as i32,
+    // "The pipe is being closed" and "No pipe process is listening".
+    109,
+    233,
+];
+
+/// A transport failure that carries no operating system's code of its own.
+///
+/// The bootstrap and greeting paths fail through channels and handshakes rather
+/// than through the pipe, so there is no code to read and no claim to make: these
+/// are startup failures, and startup failing is a refusal rather than the end of a
+/// session. The message is kept exactly as the underlying error wrote it.
+fn other(error: impl std::fmt::Display) -> Error {
+    Error::Transport(std::io::Error::other(error.to_string()))
 }
 
 /// What a host has created, before a preset has collected it.
@@ -116,7 +174,7 @@ impl Endpoint {
         let server = self.server.take().expect("a live endpoint");
         let (collected, _wait) = one_shot(server);
         let payload = match collected.recv_timeout(ACCEPT_TIMEOUT) {
-            Ok(payload) => payload.map_err(Error::Transport)?,
+            Ok(payload) => payload.map_err(other)?,
             Err(_) => return Err(Error::AcceptTimeout),
         };
         Ok(Channel {
@@ -217,8 +275,8 @@ impl Bootstrap {
     /// end of each. Each side therefore holds exactly the half it needs and
     /// cannot reach a direction it was not given.
     pub fn collect(&self) -> Result<Channel, Error> {
-        let sender: IpcSender<Collected> = IpcSender::connect(self.name.clone())
-            .map_err(|error| Error::Transport(error.to_string()))?;
+        let sender: IpcSender<Collected> =
+            IpcSender::connect(self.name.clone()).map_err(Error::Transport)?;
         let (outbound, read_actions) =
             ipc_channel::ipc::bytes_channel().map_err(Error::Bootstrap)?;
         let (write_snapshots, inbound) =
@@ -230,7 +288,7 @@ impl Bootstrap {
                 read_actions,
                 write_snapshots,
             })
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(other)?;
         Ok(Channel {
             sender: Sender { session, outbound },
             inbound,
@@ -300,13 +358,13 @@ impl Channel {
                 let received = inbound.recv();
                 let _ = read.send((inbound, received));
             })
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(Error::Transport)?;
         let (inbound, body) = match waiting.recv_timeout(budget) {
             Ok(received) => received,
             Err(_) => return Err(Error::GreetingTimeout),
         };
         let channel = Self { sender, inbound };
-        let body = body.map_err(|error| Error::Transport(error.to_string()))?;
+        let body = body.map_err(other)?;
         if body.len() > MAX_FRAME_BYTES {
             return Err(Error::Protocol(
                 zup_preset_protocol::WireError::FrameTooLarge {
@@ -326,10 +384,7 @@ impl Channel {
     /// already crossed the operating system's boundary by this point, so this is
     /// a bound on what is interpreted rather than on what is transferred.
     fn bounded(&self, max: usize) -> Result<Envelope, Error> {
-        let body = self
-            .inbound
-            .recv()
-            .map_err(|error| Error::Transport(error.to_string()))?;
+        let body = self.inbound.recv().map_err(other)?;
         if body.len() > max {
             return Err(Error::Protocol(
                 zup_preset_protocol::WireError::FrameTooLarge { max },
@@ -375,9 +430,7 @@ impl Sender {
                 },
             ));
         }
-        self.outbound
-            .send(&body)
-            .map_err(|error| Error::Transport(error.to_string()))
+        self.outbound.send(&body).map_err(Error::Transport)
     }
 }
 
@@ -478,6 +531,56 @@ mod tests {
             session,
             "and the channel comes back, because greeting is one read rather than the only one"
         );
+    }
+
+    /// A preset that has gone is told apart from a transport that failed some other
+    /// way, because a host stops writing on the first and reports the second.
+    ///
+    /// Over the real transport rather than a hand-built error: the point is that
+    /// the code this reads is the one the platform actually hands back, and on
+    /// Windows that is a code `std` files under `Uncategorized` - so a classifier
+    /// written against `ErrorKind` alone would pass here and miss the case that
+    /// actually happens.
+    #[test]
+    fn a_gone_peer_is_told_from_a_transport_that_failed() {
+        let (writer, reader) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        let (outbound, unread) = ipc_channel::ipc::bytes_channel().expect("a channel");
+        drop(unread);
+        let channel = Channel {
+            sender: Sender {
+                session: Uuid::now_v7(),
+                outbound,
+            },
+            inbound: reader,
+        };
+        let closing = Envelope {
+            version: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+            session: zup_preset_protocol::SessionId(Uuid::now_v7()),
+            sequence: 1,
+            message: zup_preset_protocol::Message::Closed,
+        };
+        let gone = channel
+            .sender
+            .send(&closing)
+            .expect_err("a write onto a peer that has gone fails");
+        assert!(
+            gone.peer_gone(),
+            "and it says the peer is gone rather than that something broke: {gone}"
+        );
+
+        // A frame the transport cannot carry is a refusal, not a disconnection:
+        // the peer is still there and the host still has something to fix.
+        let refused = Error::Protocol(zup_preset_protocol::WireError::FrameTooLarge { max: 16 });
+        assert!(
+            !refused.peer_gone(),
+            "and a peer that sent something unreadable is still a peer: {refused}"
+        );
+        let broken = Error::Transport(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(
+            !broken.peer_gone(),
+            "as is a pipe this host was not allowed to write to: {broken}"
+        );
+        drop(writer);
     }
 
     /// A preset that has gone is the end of the session, not a hang. This is

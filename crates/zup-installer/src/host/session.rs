@@ -370,7 +370,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     // its window and left. The questions it already asked are still answered - it
     // asked before it went, and the host owns the installation either way - so the
     // loop runs out of questions rather than out of window.
-    let mut deliverable = publish(&mut preset, &state, &configuration);
+    let mut deliverable = publish(&mut preset, &state, &configuration)?;
 
     loop {
         if !preset.is_running() {
@@ -398,7 +398,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     Report::RepairDrift(resources) => state.set_repair_drift(resources),
                 }
                 if deliverable {
-                    deliverable = publish(&mut preset, &state, &configuration);
+                    deliverable = publish(&mut preset, &state, &configuration)?;
                 }
             }
             asked = questions.recv() => {
@@ -417,7 +417,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     &mut plans,
                 );
                 if deliverable {
-                    deliverable = publish(&mut preset, &state, &configuration);
+                    deliverable = publish(&mut preset, &state, &configuration)?;
                 }
             }
         }
@@ -450,26 +450,30 @@ fn lagged(error: tokio::sync::broadcast::error::RecvError) -> miette::Report {
 /// asset table are what the application configured, and they do not change while
 /// one session runs - so a republish after a click carries the state alone.
 ///
-/// `false` means the transport is gone and the caller should stop trying. A
-/// preset sends its last question and goes: it closed its window, which is what a
-/// person closing a window looks like from here, and it has by definition not
-/// waited to hear the answer. Nothing after this can be delivered, so a failed
-/// write is a fact about delivery rather than about the installation - and the
-/// host owns the installation whether or not anybody is watching it happen.
-/// Failing the run on it would report an installation that completed as one that
-/// did not.
+/// `false` means the preset is no longer on the other end and the caller should
+/// stop trying. That is one failure out of the several a publish can have, and it
+/// is the only one that is not a fault: a preset sends its last question and goes.
+/// It closed its window, which is what a person closing a window looks like from
+/// here, and it has by definition not waited to hear the answer. Nothing after it
+/// can be delivered, so the fact is about delivery rather than about the
+/// installation, and the host owns the installation whether or not anybody is
+/// watching it happen.
 ///
-/// Asking about the pipe rather than about the process is deliberate. Whether the
-/// child has been reaped yet is a separate fact with its own timing, and it is not
-/// the one being asked about here.
+/// Everything else still fails the run. A protocol or configuration error, or a
+/// transport that broke for some reason other than the peer having gone, is a real
+/// fault and is reported as one: `is_ok()` here once swallowed those too, so a
+/// broken publish and a closed window were indistinguishable to the caller and
+/// both were read as "the window is gone".
 fn publish(
     preset: &mut preset::PresetProcess,
     state: &HostState,
     configuration: &zup_preset_protocol::Configuration,
-) -> bool {
-    preset
-        .publish(configuration.clone(), Box::new(state.snapshot().clone()))
-        .is_ok()
+) -> miette::Result<bool> {
+    match preset.publish(configuration.clone(), Box::new(state.snapshot().clone())) {
+        Ok(()) => Ok(true),
+        Err(preset::SessionError::Disconnected(_)) => Ok(false),
+        Err(error) => Err(miette::miette!("{error}")),
+    }
 }
 
 /// The plans this session has asked for.

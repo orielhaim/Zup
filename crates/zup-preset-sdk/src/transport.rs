@@ -77,7 +77,7 @@ impl Channel {
         std::thread::Builder::new()
             .name("zup-preset-session".into())
             .spawn(move || read(transport, rules, messages))
-            .map_err(|error| TransportError::Transport(error.to_string()))?;
+            .map_err(TransportError::Transport)?;
 
         Ok(Opened {
             channel: Channel {
@@ -156,9 +156,9 @@ fn read(
             return;
         }
     }
-    let _ = messages.unbounded_send(Err(TransportError::Transport(
-        "the host closed the session".into(),
-    )));
+    let _ = messages.unbounded_send(Err(TransportError::Transport(std::io::Error::other(
+        "the host closed the session",
+    ))));
 }
 
 /// Say hello and read the host's answer.

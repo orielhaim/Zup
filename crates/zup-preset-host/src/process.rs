@@ -43,6 +43,18 @@ pub enum SessionError {
     Handshake(String),
     #[error("the session ended: {0}")]
     Session(String),
+
+    /// The preset is no longer on the other end of the transport.
+    ///
+    /// Its own case, because a caller acts on it differently from every other
+    /// failure. A preset that closed its window, or crashed, leaves a pipe nobody
+    /// reads: nothing further can be delivered, and there is nothing to fix. The
+    /// installation is exactly where the state machine left it, and the host is
+    /// the authority on that - so a host stops writing and keeps answering what
+    /// was already asked, rather than reporting an installation that completed as
+    /// one that did not. Every other session failure is a fault and stays one.
+    #[error("the preset closed its session: {0}")]
+    Disconnected(String),
 }
 
 /// The process, the writing half of the channel, and the protocol `Session` that
@@ -83,9 +95,13 @@ impl PresetProcess {
 
     /// Write one frame to the preset.
     pub fn send(&self, envelope: &Envelope) -> Result<(), SessionError> {
-        self.to_preset
-            .send(envelope)
-            .map_err(|error| SessionError::Session(error.to_string()))
+        self.to_preset.send(envelope).map_err(|error| {
+            if error.peer_gone() {
+                SessionError::Disconnected(error.to_string())
+            } else {
+                SessionError::Session(error.to_string())
+            }
+        })
     }
 
     /// The preset's first frame, which the host answers.
