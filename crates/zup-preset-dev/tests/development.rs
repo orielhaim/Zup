@@ -111,12 +111,7 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     let edited = PRESET.to_owned() + "\n// edited\n";
     std::fs::write(&source, edited).expect("the source is saved");
     assert!(
-        matches!(
-            wait_for(&events),
-            Some(zup_preset_dev::Watched::Changed(
-                zup_preset_dev::Change::Source
-            ))
-        ),
+        wait_for(&events, is_source).is_some(),
         "a save to the preset's own code is a source change"
     );
 
@@ -126,12 +121,7 @@ fn a_save_is_seen_and_named_for_what_it_changed() {
     )
     .expect("the document is saved");
     assert!(
-        matches!(
-            wait_for(&events),
-            Some(zup_preset_dev::Watched::Changed(
-                zup_preset_dev::Change::Configuration
-            ))
-        ),
+        wait_for(&events, is_configuration).is_some(),
         "a save to the document is not a source change, so it costs no compiler"
     );
 }
@@ -151,16 +141,49 @@ fn settle(events: &std::sync::mpsc::Receiver<zup_preset_dev::Watched>) {
     }
 }
 
-/// The next thing the watcher saw, within a time a person would wait for.
+/// The first change of the kind asked for, within a time a person would wait for.
 ///
-/// Generous, because a filesystem notification has no upper bound and this runs
-/// beside suites that keep every core busy. It is a deadline rather than a sleep:
-/// it costs nothing when the event is prompt, and it fails the test rather than
-/// passing one that saw nothing.
+/// Skipping the other kinds is not a weaker claim, it is the claim. A save to the
+/// document is named `Configuration` if and only if a `Configuration` arrives, so a
+/// document save misread as a source change still fails - by never producing the
+/// event being waited for, which the deadline reports. What this stops asserting is
+/// how many notifications the platform makes for one save, which is a fact about
+/// the platform: Linux reports a save as a burst that settles some way after the
+/// write, and a trailing batch can arrive after any fixed quiet period on a busy
+/// runner. A test that read one event and named it was asserting that burst is one
+/// notification, and failed on the runner rather than on anything here.
 fn wait_for(
     events: &std::sync::mpsc::Receiver<zup_preset_dev::Watched>,
+    wanted: impl Fn(&zup_preset_dev::Watched) -> bool,
 ) -> Option<zup_preset_dev::Watched> {
-    events.recv_timeout(Duration::from_secs(90)).ok()
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match events.recv_timeout(remaining) {
+            Ok(event) if wanted(&event) => return Some(event),
+            Ok(_) => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// A change naming the preset's own code.
+fn is_source(event: &zup_preset_dev::Watched) -> bool {
+    matches!(
+        event,
+        zup_preset_dev::Watched::Changed(zup_preset_dev::Change::Source)
+    )
+}
+
+/// A change naming the development document.
+fn is_configuration(event: &zup_preset_dev::Watched) -> bool {
+    matches!(
+        event,
+        zup_preset_dev::Watched::Changed(zup_preset_dev::Change::Configuration)
+    )
 }
 
 #[test]
