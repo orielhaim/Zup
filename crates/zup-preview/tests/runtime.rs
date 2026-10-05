@@ -859,11 +859,32 @@ fn a_watcher_reports_a_save_and_ignores_what_the_session_wrote() {
     let own = state.asset_directory(zup_core::hash_bytes(b"logo"));
     std::fs::create_dir_all(own.parent().expect("a parent")).expect("the state directory");
     std::fs::write(&own, b"x").expect("the session writes its own file");
+    // Collected rather than asserted through `within`, because the claim is about
+    // *which* paths came back: a failure has to name them to be worth anything.
+    let mut leaked = Vec::new();
+    let until = Instant::now() + Duration::from_millis(750);
+    while let Some(remaining) = until.checked_duration_since(Instant::now()) {
+        match seen.recv_timeout(remaining) {
+            Ok(zup_preview::Seen::Changed(paths)) => leaked.push(paths),
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    // Judged on the session's own files rather than on there being no event at
+    // all. The manifest was saved a moment ago and the platform is free to
+    // report that one save as several events - Linux does, and the assertion
+    // above already consumed one of them - so "an event arrived" is not the claim.
+    // "Nothing under the state directory came back" is, and it is the one that
+    // would make a session replace the window it just started.
+    let replayed: Vec<&std::path::PathBuf> = leaked
+        .iter()
+        .flatten()
+        .filter(|path| path.starts_with(state.root()))
+        .collect();
     assert!(
-        !within(&seen, Duration::from_millis(750), |event| {
-            matches!(event, zup_preview::Seen::Changed(_))
-        }),
-        "and nothing the session materialized is reported back to it"
+        replayed.is_empty(),
+        "and nothing the session materialized is reported back to it: {replayed:?} (state root {:?}, wrote {own:?})",
+        state.root()
     );
     // The reader is not joined. It is blocked in the watcher's own `recv`, which
     // is what a session's watch thread does for as long as the session runs, and

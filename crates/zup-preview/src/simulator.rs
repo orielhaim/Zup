@@ -304,13 +304,22 @@ pub struct Candidate {
     pub generation: u64,
 }
 
-/// Write a file so that a reader never sees a half-written one.
+/// Write an executable so that a reader never sees a half-written one.
 ///
 /// A temporary beside it and a rename over it, which is the same durability the
 /// rest of this repository asks for and the reason a preset that reads a
 /// just-materialized asset reads a whole one. The temporary's name is unique per
 /// call, because two writers racing on one name is a way for one of them to
 /// rename a file the other is still writing.
+///
+/// The permissions are set on the temporary, before the rename, because a file
+/// that is briefly present and not executable is a file a concurrent launch can
+/// fail on, and because setting them after would leave the same window. A file
+/// created with `File::create` is mode `0666` on Unix - readable and writable,
+/// never runnable - so a preset staged this way could be written and then
+/// refused by `execve` with `EACCES`. Windows has no execute bit, so this is the
+/// one platform where the distinction does not exist; naming the executable in
+/// the call is what makes it the writer's job rather than the caller's.
 fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static WRITES: AtomicU64 = AtomicU64::new(0);
@@ -331,6 +340,7 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
+    make_executable(&temporary)?;
     match std::fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -338,4 +348,26 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             Err(error)
         }
     }
+}
+
+/// Give a file the owner's execute bit, keeping what it already had.
+///
+/// Unix only, and deliberately additive: a staged preset was created `0666`, and
+/// the one thing it is missing is the bit that lets it run. Reading and writing
+/// are left as they were rather than widened, because this file is a copy of a
+/// preset and nothing about staging it grants anything else. `Owned` rather than
+/// the whole mask, because `0777` would make every staged file world-writable -
+/// another process on the machine editing the preset this host is about to run.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
