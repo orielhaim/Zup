@@ -143,6 +143,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
             component: None,
             condition: None,
+            executable: name.ends_with(".exe"),
         });
     }
 
@@ -154,6 +155,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             component: None,
             when: None,
             allow_empty: false,
+            executable: file.executable,
         })
         .collect();
     installer_files.sort_by(|left, right| {

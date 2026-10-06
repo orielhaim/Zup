@@ -72,7 +72,10 @@ pub const EXECUTABLE_PAYLOAD_MODE: Mode = Mode::from_bits_truncate(0o744);
 #[derive(Debug, thiserror::Error)]
 pub enum FileSystemError {
     #[error("`{path}` is not a {expected}")]
-    UnexpectedKind { path: String, expected: &'static str },
+    UnexpectedKind {
+        path: String,
+        expected: &'static str,
+    },
 
     #[error("`{path}` already exists")]
     AlreadyExists { path: String },
@@ -226,7 +229,8 @@ impl OwnedDirectory {
     /// step `std` has no equivalent of, and the step that makes a published name
     /// survive a power cut rather than merely appearing to.
     pub fn sync(&self) -> Result<(), FileSystemError> {
-        rustix::fs::fsync(self.file.as_fd()).map_err(|error| FileSystemError::errno(&self.path, error))
+        rustix::fs::fsync(self.file.as_fd())
+            .map_err(|error| FileSystemError::errno(&self.path, error))
     }
 
     /// What kind of entry `name` is, without following it.
@@ -241,7 +245,9 @@ impl OwnedDirectory {
     pub fn kind_or_absent(&self, name: &str) -> Result<Option<EntryKind>, FileSystemError> {
         match self.entry_kind(name) {
             Ok(kind) => Ok(Some(kind)),
-            Err(FileSystemError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(FileSystemError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -363,11 +369,14 @@ impl OwnedDirectory {
     /// owns.
     pub fn open_regular_read(&self, name: &str) -> Result<std::fs::File, FileSystemError> {
         let path = self.child(name);
-        let file =
-            rustix::fs::open(&path, OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW, Mode::empty())
-                .map_err(|error| FileSystemError::refuse_or_io(&path, error))?;
-        let stat =
-            rustix::fs::fstat(file.as_fd()).map_err(|error| FileSystemError::errno(&path, error))?;
+        let file = rustix::fs::open(
+            &path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| FileSystemError::refuse_or_io(&path, error))?;
+        let stat = rustix::fs::fstat(file.as_fd())
+            .map_err(|error| FileSystemError::errno(&path, error))?;
         if EntryKind::from_raw_mode(stat.st_mode) != EntryKind::Regular {
             return Err(FileSystemError::UnexpectedKind {
                 path: path.display().to_string(),
@@ -416,8 +425,8 @@ impl OwnedDirectory {
             Mode::empty(),
         )
         .map_err(|error| FileSystemError::errno(&self.child(name), error))?;
-        let mut entries =
-            rustix::fs::Dir::new(file).map_err(|error| FileSystemError::errno(&self.child(name), error))?;
+        let mut entries = rustix::fs::Dir::new(file)
+            .map_err(|error| FileSystemError::errno(&self.child(name), error))?;
         Ok(entries.next().is_none())
     }
 
@@ -432,8 +441,9 @@ impl OwnedDirectory {
             .map_err(|error| FileSystemError::io(&self.path, error))?;
         for entry in entries {
             let entry = entry.map_err(|error| FileSystemError::io(&self.path, error))?;
-            let file_type =
-                entry.file_type().map_err(|error| FileSystemError::io(&entry.path(), error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| FileSystemError::io(&entry.path(), error))?;
             if file_type.is_dir() {
                 OwnedDirectory::open(&entry.path())?.remove_tree()?;
             }
@@ -478,7 +488,8 @@ impl OwnedDirectory {
             .map_err(|error| FileSystemError::io(&path, error))?;
         // Contents first, then the name. The reverse order can leave a name that
         // refers to contents a crash never wrote.
-        file.sync_all().map_err(|error| FileSystemError::io(&path, error))
+        file.sync_all()
+            .map_err(|error| FileSystemError::io(&path, error))
     }
 
     /// A temporary name beside `name`, unique within this process.
@@ -515,19 +526,22 @@ mod tests {
     fn a_durable_write_is_readable_afterwards() {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
-        owned.write_durable("ledger", b"the ledger", STATE_FILE_MODE).expect("write");
-        assert_eq!(
-            owned.read_regular("ledger").expect("read"),
-            b"the ledger"
-        );
+        owned
+            .write_durable("ledger", b"the ledger", STATE_FILE_MODE)
+            .expect("write");
+        assert_eq!(owned.read_regular("ledger").expect("read"), b"the ledger");
     }
 
     #[test]
     fn a_durable_write_replaces_what_was_there() {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
-        owned.write_durable("ledger", b"v1", STATE_FILE_MODE).expect("first");
-        owned.write_durable("ledger", b"v2", STATE_FILE_MODE).expect("second");
+        owned
+            .write_durable("ledger", b"v1", STATE_FILE_MODE)
+            .expect("first");
+        owned
+            .write_durable("ledger", b"v2", STATE_FILE_MODE)
+            .expect("second");
         assert_eq!(owned.read_regular("ledger").expect("read"), b"v2");
     }
 
@@ -538,10 +552,18 @@ mod tests {
     fn a_durable_write_leaves_no_temporary_behind() {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
-        owned.write_durable("ledger", b"v1", STATE_FILE_MODE).expect("write");
+        owned
+            .write_durable("ledger", b"v1", STATE_FILE_MODE)
+            .expect("write");
         let names: Vec<_> = std::fs::read_dir(root.path())
             .expect("read dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(names, vec!["ledger".to_string()]);
     }
@@ -582,11 +604,9 @@ mod tests {
         // evidence that the mode was applied after creation and not merely passed
         // to `mkdir`, which is the only way the requested mode is the resulting
         // mode regardless of who started the installer.
-        let owned = OwnedDirectory::create(
-            &root.path().join("state"),
-            Mode::from_bits_truncate(0o777),
-        )
-        .expect("create");
+        let owned =
+            OwnedDirectory::create(&root.path().join("state"), Mode::from_bits_truncate(0o777))
+                .expect("create");
         assert_eq!(
             rustix::fs::fstat(owned.as_fd()).expect("stat").st_mode & 0o777,
             0o777,
@@ -598,8 +618,8 @@ mod tests {
     #[test]
     fn zup_state_is_private() {
         let root = directory();
-        let owned =
-            OwnedDirectory::create(&root.path().join("state"), STATE_DIRECTORY_MODE).expect("create");
+        let owned = OwnedDirectory::create(&root.path().join("state"), STATE_DIRECTORY_MODE)
+            .expect("create");
         assert_eq!(
             rustix::fs::fstat(owned.as_fd()).expect("stat").st_mode & 0o777,
             0o700,
@@ -642,7 +662,10 @@ mod tests {
             EntryKind::Symlink => {
                 let other = directory();
                 std::fs::write(other.path().join("target"), b"elsewhere")?;
-                std::os::unix::fs::symlink(other.path().join("target"), owned.path().join("thing"))?;
+                std::os::unix::fs::symlink(
+                    other.path().join("target"),
+                    owned.path().join("thing"),
+                )?;
             }
             EntryKind::Directory => {
                 OwnedDirectory::create(&owned.path().join("thing"), STATE_DIRECTORY_MODE)?;
@@ -665,20 +688,38 @@ mod tests {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
 
-        owned.write_payload("tool", b"#!/bin/sh\n", true).expect("as executable");
-        assert_eq!(mode_of(&owned.path().join("tool")) & 0o111, 0o100, "owner-executable");
+        owned
+            .write_payload("tool", b"#!/bin/sh\n", true)
+            .expect("as executable");
+        assert_eq!(
+            mode_of(&owned.path().join("tool")) & 0o111,
+            0o100,
+            "owner-executable"
+        );
 
-        owned.write_payload("data", b"plain\n", false).expect("as data");
-        assert_eq!(mode_of(&owned.path().join("data")) & 0o111, 0, "not executable");
+        owned
+            .write_payload("data", b"plain\n", false)
+            .expect("as data");
+        assert_eq!(
+            mode_of(&owned.path().join("data")) & 0o111,
+            0,
+            "not executable"
+        );
 
         // The same name reverting to data: the earlier mode must not survive.
-        owned.write_payload("tool", b"now a data file\n", false).expect("as data");
+        owned
+            .write_payload("tool", b"now a data file\n", false)
+            .expect("as data");
         assert_eq!(
             mode_of(&owned.path().join("tool")) & 0o111,
             0,
             "an existing file's mode is set explicitly, or a retired executable stays executable"
         );
-        assert_eq!(mode_of(&owned.path().join("tool")) & 0o222, 0o200, "and nothing became writable");
+        assert_eq!(
+            mode_of(&owned.path().join("tool")) & 0o222,
+            0o200,
+            "and nothing became writable"
+        );
     }
 
     fn mode_of(path: &Path) -> u32 {
@@ -700,8 +741,12 @@ mod tests {
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
         let install = OwnedDirectory::create(&owned.path().join("install"), STATE_DIRECTORY_MODE)
             .expect("create install");
-        install.write_payload("payload", b"zup's", false).expect("payload");
-        install.write_payload("user-notes.txt", b"the user's", false).expect("user file");
+        install
+            .write_payload("payload", b"zup's", false)
+            .expect("payload");
+        install
+            .write_payload("user-notes.txt", b"the user's", false)
+            .expect("user file");
 
         assert!(matches!(
             owned.remove_empty_directory("install"),
@@ -727,7 +772,10 @@ mod tests {
 
         owned.remove_tree().expect("remove");
 
-        assert!(victim.exists(), "the linked-to file is outside the tree and survives");
+        assert!(
+            victim.exists(),
+            "the linked-to file is outside the tree and survives"
+        );
         assert!(!root.path().exists(), "the work tree itself is gone");
     }
 
@@ -738,8 +786,12 @@ mod tests {
     fn removing_an_absent_tree_is_not_a_failure() {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
-        let work = OwnedDirectory::create(&owned.path().join("work"), STATE_DIRECTORY_MODE).expect("create");
+        let work = OwnedDirectory::create(&owned.path().join("work"), STATE_DIRECTORY_MODE)
+            .expect("create");
         work.remove_tree().expect("first removal");
-        assert!(matches!(work.remove_tree(), Err(FileSystemError::Io { .. })));
+        assert!(matches!(
+            work.remove_tree(),
+            Err(FileSystemError::Io { .. })
+        ));
     }
 }

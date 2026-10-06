@@ -205,6 +205,7 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             size: file.size,
             sha256: file.sha256,
             privilege: default_privilege,
+            executable: file.executable,
         });
     }
 

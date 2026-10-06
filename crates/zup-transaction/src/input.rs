@@ -72,6 +72,15 @@ pub struct FileWork {
     pub expected_sha256: Sha256Digest,
     pub expected_size: u64,
     pub privilege: Privilege,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    ///
+    /// Recorded in the transaction input because the executor is the only place
+    /// that can honour it. The intent is meaningless to a planner that never
+    /// touches a filesystem, and a backend that cannot honour it has to say so
+    /// before the transaction runs - not write the payload and then drop the
+    /// intent.
+    #[serde(default)]
+    pub executable: bool,
     pub delta: FileDelta,
 }
 

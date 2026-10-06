@@ -851,6 +851,10 @@ impl MergeContext<'_> {
             size,
             sha256,
             privilege,
+            // A plugin's payload is data the plugin reads. A plugin that needs a
+            // runnable helper is a capability question, not an accident of the
+            // bytes it emitted.
+            executable: false,
         });
         self.generated_files.push(GeneratedFile {
             source_relative,

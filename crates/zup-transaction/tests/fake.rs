@@ -125,6 +125,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 destination: "destination".into(),
                 installed_sha256: digest,
                 installed_size: 1,
+                executable: operation.meta.executable.unwrap_or(false),
                 created_directories: Vec::new(),
             },
             _ => OperationReceipt::ReplaceFile {
@@ -134,6 +135,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 backup_path: "backup".into(),
                 new_sha256: digest,
                 new_size: 1,
+                executable: operation.meta.executable.unwrap_or(false),
             },
         },
         NodeKind::FileRemoval { .. } => {

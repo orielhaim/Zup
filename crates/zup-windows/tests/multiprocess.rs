@@ -43,6 +43,7 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
         expected_size: bytes.len() as u64,
         privilege: Privilege::User,
         delta: FileDelta::Create,
+        executable: false,
     });
     input
 }

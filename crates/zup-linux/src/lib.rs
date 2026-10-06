@@ -57,7 +57,7 @@ mod state;
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
 #[cfg(target_os = "linux")]
 pub use fs::{
-    EntryKind, EXECUTABLE_PAYLOAD_MODE, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,
+    EXECUTABLE_PAYLOAD_MODE, EntryKind, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,
     STATE_DIRECTORY_MODE, STATE_FILE_MODE, sync_directory,
 };
 #[cfg(target_os = "linux")]

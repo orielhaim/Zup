@@ -513,6 +513,7 @@ pub(crate) fn compile_execution_plan(
             expected_sha256: file.expected_sha256,
             expected_size: file.expected_size,
             privilege: file.privilege,
+            executable: file.executable,
             delta: file_delta(file.kind)?,
         });
     }

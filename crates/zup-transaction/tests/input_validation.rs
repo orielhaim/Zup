@@ -38,6 +38,7 @@ fn file_work(key: ResourceKey, source: &str, destination: TargetPath) -> FileWor
         expected_size: contents.len() as u64,
         privilege: Privilege::User,
         delta: FileDelta::Create,
+        executable: false,
     }
 }
 

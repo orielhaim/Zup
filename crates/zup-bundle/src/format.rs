@@ -231,6 +231,13 @@ pub struct PayloadEntry {
     pub blob: Sha256Digest,
     pub component: Option<ComponentId>,
     pub condition: Option<Condition>,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    ///
+    /// Defaults to false so a package written before executable intent existed is
+    /// still readable: an absent key means "not executable", which is what every
+    /// file in an older package meant.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +494,7 @@ impl Package {
                     sha256: entry.sha256,
                     component: entry.component.clone(),
                     condition: entry.condition.clone(),
+                    executable: entry.executable,
                 })
             })
             .collect::<Result<Vec<_>, PackageError>>()?;
@@ -1364,6 +1372,7 @@ impl BundleWriter {
                 blob: file.sha256,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let prerequisite_artifacts = canonical_prerequisites(plan)?;
@@ -1492,6 +1501,7 @@ impl BundleWriter {
                 blob: digest,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let prerequisite_artifacts = canonical_prerequisites(plan)?;
@@ -1715,6 +1725,7 @@ impl BundleWriter {
                 blob: file.sha256,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let ui_assets = canonical_ui_assets(plan)?;

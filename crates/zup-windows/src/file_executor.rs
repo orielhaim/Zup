@@ -32,6 +32,8 @@ pub struct CreateFileReceipt {
     pub destination: String,
     pub installed_sha256: Sha256Digest,
     pub installed_size: u64,
+    /// Whether the installed file is executable. See the journal receipt.
+    pub executable: bool,
     /// Directories created by zup for this operation (rollback candidates).
     pub created_directories: Vec<String>,
 }
@@ -45,6 +47,8 @@ pub struct ReplaceFileReceipt {
     pub backup_path: String,
     pub new_sha256: Sha256Digest,
     pub new_size: u64,
+    /// Whether the installed file is executable. See the journal receipt.
+    pub executable: bool,
 }
 
 /// Typed operation receipt (journal schema).
@@ -121,6 +125,13 @@ pub struct WindowsFileExecutor<P: PayloadSource> {
     preconditions: BTreeMap<String, FilePrecondition>,
     /// operation id → desired digest/size
     desired: BTreeMap<String, (Sha256Digest, u64)>,
+    /// The suffix a runnable payload carries on the target this executor
+    /// installs for.
+    ///
+    /// Read from the target rather than the host: an executor holds a plan for
+    /// a target, and the two differ whenever zup is preparing another
+    /// machine's installation.
+    executable_suffix: &'static str,
     progress: Box<dyn ProgressSink>,
 }
 
@@ -146,6 +157,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 installed_sha256,
                 installed_size,
                 created_directories,
+                ..
             } => {
                 let path = Path::new(destination);
                 let expected = installed_sha256.parse::<Sha256Digest>().map_err(|_| {
@@ -176,6 +188,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 new_size,
                 previous_sha256,
                 previous_size,
+                ..
             } => {
                 let path = Path::new(destination);
                 let new_hash = new_sha256.parse::<Sha256Digest>().map_err(|_| {
@@ -281,6 +294,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                         destination: destination.display().to_string(),
                         installed_sha256: expected.1.to_hex(),
                         installed_size: expected.0,
+                        executable: node.meta.executable.unwrap_or(false),
                         created_directories: Vec::new(),
                     },
                 )),
@@ -316,6 +330,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                                 backup_path: backup.display().to_string(),
                                 new_sha256: expected.1.to_hex(),
                                 new_size: expected.0,
+                                executable: node.meta.executable.unwrap_or(false),
                             },
                         ))
                     }
@@ -331,6 +346,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         payload: P,
         work_root: PathBuf,
         tx_id: String,
+        executable_suffix: &'static str,
         progress: Box<dyn ProgressSink>,
     ) -> Self {
         Self {
@@ -339,6 +355,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             tx_id,
             preconditions: BTreeMap::new(),
             desired: BTreeMap::new(),
+            executable_suffix,
             progress,
         }
     }
@@ -614,6 +631,13 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             id: op.id.to_string(),
         });
         self.verify_precondition(dest, &FilePrecondition::Absent)?;
+        // Refused here rather than after the write: an unrunnable file published
+        // and reported as installed is worse than a refused transaction.
+        let executable = assert_runnable(
+            dest,
+            op.meta.executable.unwrap_or(false),
+            self.executable_suffix,
+        )?;
 
         // Create missing parents deliberately (rollback candidates).
         let mut created_dirs = Vec::new();
@@ -684,6 +708,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             destination: dest.display().to_string(),
             installed_sha256: sha256,
             installed_size: size,
+            executable,
             created_directories: created_dirs,
         }))
     }
@@ -701,6 +726,11 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             id: op.id.to_string(),
         });
         self.verify_precondition(dest, precondition)?;
+        let executable = assert_runnable(
+            dest,
+            op.meta.executable.unwrap_or(false),
+            self.executable_suffix,
+        )?;
         let FilePrecondition::Exact {
             size: prev_size,
             sha256: prev_hash,
@@ -762,6 +792,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             backup_path: backup.display().to_string(),
             new_sha256: sha256,
             new_size: size,
+            executable,
         }))
     }
 
@@ -851,6 +882,42 @@ pub fn apply_node<P: PayloadSource>(
     }
 }
 
+/// Whether a payload path is executable on Windows.
+///
+/// Windows has no execute bit: a file is runnable because of what it *is*, not
+/// because of a permission. So the intent is not applied here - there is nothing
+/// to apply - but it is not ignored either. A payload declared executable that is
+/// not a Windows image would install as a file nothing can run, which is exactly
+/// the outcome the manifest said should not happen, and the only honest response
+/// to that is to refuse before the file is written rather than publish it and
+/// report success.
+///
+/// The reverse is not a failure: Windows legitimately needs no mode change for the
+/// same intent that Linux lowers into a permission bit. The manifest's portable
+/// claim is "this file should be runnable", and a PE image at that path satisfies
+/// it with no filesystem state at all.
+fn assert_runnable(
+    dest: &Path,
+    executable: bool,
+    suffix: &str,
+) -> Result<bool, WindowsFileExecutorError> {
+    if !executable {
+        return Ok(false);
+    }
+    if !suffix.is_empty()
+        && !dest
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with(&suffix.to_lowercase())
+    {
+        return Err(WindowsFileExecutorError::Verification {
+            path: dest.display().to_string(),
+            reason: "declared executable but is not a Windows executable".into(),
+        });
+    }
+    Ok(true)
+}
+
 /// Lower a Windows file receipt to the transaction journal's receipt shape.
 pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::OperationReceipt {
     use zup_transaction::OperationReceipt as Journal;
@@ -865,6 +932,7 @@ pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::Operat
             destination: receipt.destination,
             installed_sha256: receipt.installed_sha256.to_hex(),
             installed_size: receipt.installed_size,
+            executable: receipt.executable,
             created_directories: receipt.created_directories,
         },
         OperationReceipt::ReplaceFile(receipt) => Journal::ReplaceFile {
@@ -874,6 +942,7 @@ pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::Operat
             backup_path: receipt.backup_path,
             new_sha256: receipt.new_sha256.to_hex(),
             new_size: receipt.new_size,
+            executable: receipt.executable,
         },
     }
 }
@@ -923,6 +992,7 @@ pub fn verify_installed_file(
             new_size,
             previous_sha256,
             previous_size,
+            ..
         } => {
             let installed = (*new_size, digest_of(new_sha256, destination)?);
             expect_identity(

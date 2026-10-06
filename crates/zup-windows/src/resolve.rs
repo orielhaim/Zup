@@ -130,6 +130,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             destination,
             size: file.size,
             sha256: file.sha256,
+            executable: file.executable,
             privilege: file.privilege,
         });
     }

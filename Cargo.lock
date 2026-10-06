@@ -12164,6 +12164,8 @@ dependencies = [
  "typed-path 0.12.3",
  "xdg",
  "zup-artifact",
+ "zup-binary",
+ "zup-bundle",
  "zup-core",
  "zup-platform",
 ]

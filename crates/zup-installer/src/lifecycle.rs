@@ -1079,6 +1079,10 @@ fn attach_maintenance_copy(
         // The maintenance executable lives in the scope's own state root, so it
         // needs that scope's authority and no more.
         privilege: scope.authorization(),
+        // The maintenance runtime is the one file in an installation that is
+        // meant to be run, so it carries the intent even where the backend
+        // satisfies it with no filesystem state.
+        executable: true,
     });
     target.summary.file_count += 1;
     target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
@@ -1188,6 +1192,10 @@ fn attach_ui_runtime(
         )
     })?;
     let executable_digest = zup_core::hash_bytes(&executable);
+    // The runtime's executable is the one file here meant to be run; the assets
+    // beside it are the window's images and stylesheets. Marking the whole
+    // directory runnable would declare a logo executable, which is the mistake
+    // this tuple exists to keep from happening again.
     let mut files = vec![(
         zup_bundle::preset_path(
             runtime_directory,
@@ -1198,6 +1206,7 @@ fn attach_ui_runtime(
         executable.len() as u64,
         zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
             .expect("a reserved source name is always relative"),
+        true,
     )];
     for asset in &preset.assets {
         let content = bytes(zup_bundle::asset_source_name(asset.name.as_str()).as_str()).map_err(
@@ -1214,11 +1223,12 @@ fn attach_ui_runtime(
             asset.sha256,
             asset.size,
             zup_bundle::asset_source_name(asset.name.as_str()),
+            false,
         ));
     }
 
     let triple = target.target.clone();
-    for (path, digest, size, source) in files {
+    for (path, digest, size, source, executable) in files {
         let destination =
             zup_platform::TargetPath::new(triple.clone(), zup_windows::plain_path_text(&path))
                 .map_err(|error| miette::miette!("preset runtime destination: {error}"))?;
@@ -1230,6 +1240,7 @@ fn attach_ui_runtime(
             size,
             sha256: digest,
             privilege: scope.authorization(),
+            executable,
         });
         target.summary.file_count += 1;
         target.summary.resource_count += 1;

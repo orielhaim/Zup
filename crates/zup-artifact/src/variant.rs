@@ -279,6 +279,7 @@ impl DistributionVariant {
                 blob: file.sha256,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         // A variant manifest is canonical, so its payload entries are ordered the

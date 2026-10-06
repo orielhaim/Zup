@@ -374,6 +374,7 @@ async fn run_worker_inner(
             payload,
             work_root,
             record.transaction_id.to_string(),
+            record.target.executable_suffix(),
             Box::new(NullProgress),
         ),
         cancel: TokenProbe(cancel.clone()),

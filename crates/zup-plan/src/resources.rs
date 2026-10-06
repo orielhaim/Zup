@@ -48,6 +48,9 @@ pub struct PlannedFile {
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// One active application launcher.

@@ -246,6 +246,20 @@ pub struct FileMapping {
     /// Allow a pattern that matches zero files. Default: reject.
     #[serde(default)]
     pub allow_empty: bool,
+    /// This file is intended to be executable.
+    ///
+    /// The intent is portable; how it is honoured is not. A backend that has
+    /// filesystem modes applies one, and a backend that does not has nothing to
+    /// change. What is *not* portable is a raw mode, so there is deliberately no
+    /// way to write `0755` here: a build machine on Windows has no meaningful mode
+    /// bits to preserve, and a mode authored on Linux would silently disagree with
+    /// the same manifest built elsewhere.
+    ///
+    /// Not inferred from the file's bytes either. A script, a data file and an ELF
+    /// are each identifiable without permission bits, but a file happening to be
+    /// ELF does not make it something a user should be able to run.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// Portable application launcher location.

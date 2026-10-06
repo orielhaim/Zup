@@ -421,6 +421,7 @@ fn plan(
                 sha256,
                 component: component_of(entry),
                 condition: None,
+                executable: false,
             }
         })
         .collect::<Vec<_>>();

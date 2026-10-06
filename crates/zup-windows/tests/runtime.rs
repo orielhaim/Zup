@@ -51,6 +51,7 @@ fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
             Privilege::User
         },
         delta: FileDelta::Create,
+        executable: false,
     });
     input
 }
@@ -215,7 +216,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let state_root = root.path().join("state");
     let payload_root = root.path().join("payload");
     let install_directory = root.path().join("install");
-    let maintenance = install_directory.join("maintenance.bin");
+    let maintenance = install_directory.join("maintenance.exe");
     std::fs::create_dir_all(&payload_root).unwrap();
     std::fs::create_dir_all(&install_directory).unwrap();
     std::fs::write(payload_root.join("maintenance.bin"), b"maintenance").unwrap();
@@ -257,6 +258,9 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
             size: 11,
             sha256: digest(b"maintenance"),
             privilege: Privilege::User,
+            // The maintenance executable is the one file in a Windows
+            // installation that is genuinely runnable.
+            executable: true,
         }],
         launchers: Vec::new(),
         path_entries: Vec::new(),

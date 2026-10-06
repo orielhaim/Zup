@@ -58,6 +58,9 @@ pub struct TargetFile {
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// One desired application launcher with a concrete launcher path.

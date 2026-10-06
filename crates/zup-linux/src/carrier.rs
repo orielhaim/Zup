@@ -85,7 +85,9 @@ pub enum CarrierError {
     #[error("`{path}` carries no zup package footer")]
     NoFooter { path: String },
 
-    #[error("`{path}` declares carrier format {found}, which this build does not understand (expected {expected})")]
+    #[error(
+        "`{path}` declares carrier format {found}, which this build does not understand (expected {expected})"
+    )]
     UnsupportedVersion {
         path: String,
         found: u32,
@@ -106,7 +108,9 @@ pub enum CarrierError {
     #[error("`{path}` declares a {length}-byte package, which is not plausible")]
     ImplausibleLength { path: String, length: u64 },
 
-    #[error("`{path}` carries a package that hashes to {found}, not the {expected} its footer declares")]
+    #[error(
+        "`{path}` carries a package that hashes to {found}, not the {expected} its footer declares"
+    )]
     PackageDigestMismatch {
         path: String,
         expected: Sha256Digest,
@@ -117,10 +121,7 @@ pub enum CarrierError {
     Package(#[from] PackageError),
 
     #[error("the carrier image is {found}, but the package installs {expected}")]
-    TargetMismatch {
-        found: String,
-        expected: String,
-    },
+    TargetMismatch { found: String, expected: String },
 
     #[error("carrier I/O at `{path}`: {source}")]
     Io {
@@ -188,7 +189,11 @@ impl CarrierFooter {
 /// The footer is addressed from the end, which is why the file's length is a
 /// parameter rather than something re-derived: it is the one fact the footer
 /// cannot state about itself without being found first.
-fn read_footer(file: &mut std::fs::File, path: &Path, file_size: u64) -> Result<CarrierFooter, CarrierError> {
+fn read_footer(
+    file: &mut std::fs::File,
+    path: &Path,
+    file_size: u64,
+) -> Result<CarrierFooter, CarrierError> {
     if file_size < FOOTER_LEN {
         return Err(CarrierError::TooShort {
             path: path.display().to_string(),
@@ -272,21 +277,18 @@ impl Carrier {
             .map_err(|error| CarrierError::io(path.as_ref(), error))?
             .len();
         let footer = read_footer(&mut file, path.as_ref(), file_size)?;
-        let range = footer
-            .package_range(file_size)
-            .map_err(|(offset, end)| CarrierError::PackageOutsideFile {
+        let range = footer.package_range(file_size).map_err(|(offset, end)| {
+            CarrierError::PackageOutsideFile {
                 path: path.as_ref().display().to_string(),
                 offset,
                 end,
                 size: file_size,
-            })?;
+            }
+        })?;
 
         file.seek(SeekFrom::Start(range.start))
             .map_err(|error| CarrierError::io(path.as_ref(), error))?;
-        let mut bytes = vec![
-            0u8;
-            usize::try_from(range.end - range.start).unwrap_or(usize::MAX)
-        ];
+        let mut bytes = vec![0u8; usize::try_from(range.end - range.start).unwrap_or(usize::MAX)];
         file.read_exact(&mut bytes)
             .map_err(|error| CarrierError::io(path.as_ref(), error))?;
 
@@ -309,12 +311,11 @@ impl Carrier {
         // install Windows paths, or worse, succeed at lowering them into Linux
         // locations nobody intended.
         let expected = package.plan().installer.target.clone();
-        let image = zup_binary::Executable::read(&executable).map_err(|error| {
-            CarrierError::Io {
+        let image =
+            zup_binary::Executable::read(&executable).map_err(|error| CarrierError::Io {
                 path: path.as_ref().display().to_string(),
                 source: std::io::Error::other(error.to_string()),
-            }
-        })?;
+            })?;
         image
             .refuse_target(&expected)
             .map_err(|error| CarrierError::TargetMismatch {
@@ -322,7 +323,10 @@ impl Carrier {
                 expected: expected.to_string(),
             })?;
 
-        Ok(Self { executable, package })
+        Ok(Self {
+            executable,
+            package,
+        })
     }
 
     /// The path this carrier was opened from.
@@ -372,7 +376,8 @@ pub fn compose(
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| CarrierError::io(parent, error))?;
 
-    let mut image = std::fs::File::open(runtime).map_err(|error| CarrierError::io(runtime, error))?;
+    let mut image =
+        std::fs::File::open(runtime).map_err(|error| CarrierError::io(runtime, error))?;
     let runtime_len = image
         .metadata()
         .map_err(|error| CarrierError::io(runtime, error))?
@@ -637,7 +642,10 @@ mod tests {
         let mut tampered = std::fs::read(&output).expect("read");
         footer_put(&mut tampered, 73, 999);
         assert!(
-            matches!(raw_open(&tampered), Err(CarrierError::UnsupportedFlags { .. })),
+            matches!(
+                raw_open(&tampered),
+                Err(CarrierError::UnsupportedFlags { .. })
+            ),
             "a different footer layout is not this build's to read"
         );
     }
@@ -683,7 +691,10 @@ mod tests {
 
     fn assert_outside(bytes: Vec<u8>) {
         assert!(
-            matches!(raw_open(&bytes), Err(CarrierError::PackageOutsideFile { .. })),
+            matches!(
+                raw_open(&bytes),
+                Err(CarrierError::PackageOutsideFile { .. })
+            ),
             "an offset outside the file is refused"
         );
     }

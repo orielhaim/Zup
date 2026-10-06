@@ -542,6 +542,7 @@ impl InstallLedgerStore {
                         installed_sha256,
                         installed_size,
                         created_directories,
+                        ..
                     } => {
                         let mut directories = created_directories
                             .iter()

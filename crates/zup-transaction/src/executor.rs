@@ -28,6 +28,16 @@ pub enum OperationReceipt {
         destination: String,
         installed_sha256: String,
         installed_size: u64,
+        /// Whether the installed file is executable.
+        ///
+        /// Recorded rather than assumed, because the two backends satisfy the
+        /// intent by different means: a backend with filesystem modes sets a bit
+        /// it can re-read, and a backend where an executable is identifiable by
+        /// its form has nothing to set and reports what it delivered. A receipt
+        /// that omitted this would let a transaction report success for a file
+        /// that is not runnable, and reconcile would have nothing to compare
+        /// against.
+        executable: bool,
         created_directories: Vec<String>,
     },
     ReplaceFile {
@@ -37,6 +47,8 @@ pub enum OperationReceipt {
         backup_path: String,
         new_sha256: String,
         new_size: u64,
+        /// Whether the installed file is executable. See [`CreateFile`].
+        executable: bool,
     },
     RemoveFile {
         destination: TargetPath,

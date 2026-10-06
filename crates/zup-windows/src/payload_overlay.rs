@@ -848,6 +848,7 @@ mod tests {
                 destination: generated.destination,
                 size: generated.size,
                 sha256: generated.sha256,
+                executable: true,
                 privilege: zup_core::Privilege::User,
             }],
             launchers: Vec::new(),
@@ -899,6 +900,7 @@ mod tests {
             expected_size: install.files[0].size,
             // A file node carries the privilege its own plan assigned.
             privilege: install.files[0].privilege,
+            executable: install.files[0].executable,
             delta: FileDelta::Create,
         });
         let transaction = compile_transaction(&input).unwrap();

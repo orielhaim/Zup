@@ -129,6 +129,13 @@ pub struct NodeMeta {
     pub expected_sha256: Option<Sha256Digest>,
     pub expected_size: Option<u64>,
     pub privilege: Option<Privilege>,
+    /// This file is intended to be executable.
+    ///
+    /// On the node because the node is what a journal is replayed from. An
+    /// executor that recovers a transaction months later has the plan, not the
+    /// original manifest, so an intent that lived only in the manifest would be
+    /// unavailable exactly when the executor needs it.
+    pub executable: Option<bool>,
     pub backend: Option<BackendOperation>,
     pub removal: Option<FileRemoval>,
 }
@@ -650,6 +657,7 @@ fn file_meta(file: &FileWork) -> NodeMeta {
         expected_sha256: Some(file.expected_sha256),
         expected_size: Some(file.expected_size),
         privilege: Some(file.privilege),
+        executable: Some(file.executable),
         ..Default::default()
     }
 }

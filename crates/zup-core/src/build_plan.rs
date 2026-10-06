@@ -39,6 +39,9 @@ pub struct ResolvedFile {
     pub component: Option<ComponentId>,
     /// Install condition, if any. Not evaluated here.
     pub condition: Option<Condition>,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// A prerequisite package that was found and hashed at build time.

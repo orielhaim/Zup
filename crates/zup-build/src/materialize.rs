@@ -593,6 +593,7 @@ fn expand_mapping(
             sha256,
             component: mapping.component.clone(),
             condition: mapping.when.clone(),
+            executable: mapping.executable,
         });
     }
 

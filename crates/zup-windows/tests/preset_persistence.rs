@@ -108,6 +108,7 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -
             expected_size: 1,
             privilege: scope.authorization(),
             delta: FileDelta::Create,
+            executable: false,
         });
     }
     input.preset = Some(ui.clone());
@@ -236,6 +237,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
             expected_size: 1,
             privilege: zup_core::Privilege::User,
             delta: FileDelta::Create,
+            executable: false,
         });
     }
     for (path, sha256) in content_files(state_root.path(), SelectedScope::User, &first) {
