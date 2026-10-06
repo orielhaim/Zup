@@ -81,10 +81,7 @@ fn install_creates_desktop_integration() {
     assert!(launcher.contains("Type=Application\n"), "{launcher}");
     assert!(launcher.contains("Name=Tool\n"), "{launcher}");
     assert!(
-        launcher.contains(&format!(
-            "Exec={}\n",
-            install.join("tool").display()
-        )),
+        launcher.contains(&format!("Exec={}\n", install.join("tool").display())),
         "{launcher}"
     );
     assert!(launcher.contains("Icon=com.example.tool\n"), "{launcher}");
@@ -93,10 +90,7 @@ fn install_creates_desktop_integration() {
 
     let uri = read(&applications().join("com.example.tool-uri.desktop"));
     assert!(uri.contains("NoDisplay=true\n"), "{uri}");
-    assert!(
-        uri.contains("MimeType=x-scheme-handler/acme;\n"),
-        "{uri}"
-    );
+    assert!(uri.contains("MimeType=x-scheme-handler/acme;\n"), "{uri}");
     assert!(uri.contains("--url %u"), "{uri}");
 
     let files = read(&applications().join("com.example.tool-files.desktop"));
@@ -108,7 +102,10 @@ fn install_creates_desktop_integration() {
     assert!(files.contains("%f"), "{files}");
 
     let package = read(&mime_packages().join("com.example.tool.xml"));
-    assert!(package.contains("application/x-com.example.tool-foo"), "{package}");
+    assert!(
+        package.contains("application/x-com.example.tool-foo"),
+        "{package}"
+    );
     assert!(package.contains("*.foo"), "{package}");
     assert!(package.contains("Foo document"), "{package}");
 
@@ -202,7 +199,11 @@ fn upgrade_updates_and_retires_integration() {
     install_v1(&user, scratch.path());
 
     let unrelated = applications().join("unrelated.desktop");
-    std::fs::write(&unrelated, b"[Desktop Entry]\nType=Application\nName=Other\n").expect("neighbor");
+    std::fs::write(
+        &unrelated,
+        b"[Desktop Entry]\nType=Application\nName=Other\n",
+    )
+    .expect("neighbor");
 
     let installer = compose_integration_fixture(
         scratch.path(),
@@ -223,19 +224,32 @@ fn upgrade_updates_and_retires_integration() {
     let launcher = read(&applications().join("com.example.tool.desktop"));
     assert!(launcher.contains("Name=Tool Renamed\n"), "{launcher}");
     assert!(
-        !applications().join("com.example.tool Renamed.desktop").exists(),
+        !applications()
+            .join("com.example.tool Renamed.desktop")
+            .exists(),
         "no second entry appears beside the renamed one"
     );
     let package = read(&mime_packages().join("com.example.tool.xml"));
     assert!(!package.contains(".foo"), "{package}");
-    assert!(package.contains("application/x-com.example.tool-bar"), "{package}");
+    assert!(
+        package.contains("application/x-com.example.tool-bar"),
+        "{package}"
+    );
     let globs = read(&data_home().join("mime/globs2"));
-    assert!(!globs.contains("application/x-com.example.tool-foo"), "{globs}");
-    assert!(globs.contains("application/x-com.example.tool-bar"), "{globs}");
+    assert!(
+        !globs.contains("application/x-com.example.tool-foo"),
+        "{globs}"
+    );
+    assert!(
+        globs.contains("application/x-com.example.tool-bar"),
+        "{globs}"
+    );
     let uri = read(&applications().join("com.example.tool-uri.desktop"));
     assert!(uri.contains("x-scheme-handler/acme"), "{uri}");
     assert!(
-        !icons().join("hicolor/48x48/apps/com.example.tool.png").exists(),
+        !icons()
+            .join("hicolor/48x48/apps/com.example.tool.png")
+            .exists(),
         "the retired icon size is gone"
     );
     assert_eq!(
@@ -363,24 +377,46 @@ fn uninstall_removes_only_owned_integration() {
     );
     assert!(!applications().join("com.example.tool.desktop").exists());
     assert!(!applications().join("com.example.tool-uri.desktop").exists());
-    assert!(!applications().join("com.example.tool-files.desktop").exists());
+    assert!(
+        !applications()
+            .join("com.example.tool-files.desktop")
+            .exists()
+    );
     assert!(!mime_packages().join("com.example.tool.xml").exists());
-    assert!(!icons().join("hicolor/48x48/apps/com.example.tool.png").exists());
+    assert!(
+        !icons()
+            .join("hicolor/48x48/apps/com.example.tool.png")
+            .exists()
+    );
     for (neighbor, bytes) in neighbors.iter().zip(before) {
         assert_eq!(std::fs::read(neighbor).expect("a neighbor survives"), bytes);
     }
-    assert_eq!(read(&mimeapps), preferences, "user preferences are untouched");
-    assert!(applications().exists(), "shared directories are not removed");
-    assert!(mime_packages().exists(), "shared directories are not removed");
+    assert_eq!(
+        read(&mimeapps),
+        preferences,
+        "user preferences are untouched"
+    );
+    assert!(
+        applications().exists(),
+        "shared directories are not removed"
+    );
+    assert!(
+        mime_packages().exists(),
+        "shared directories are not removed"
+    );
     let globs = read(&data_home().join("mime/globs2"));
-    assert!(!globs.contains("application/x-com.example.tool-foo"), "{globs}");
+    assert!(
+        !globs.contains("application/x-com.example.tool-foo"),
+        "{globs}"
+    );
 }
 
 /// A refresh failure after the files applied rolls everything back: the
 /// authoritative sources are restored, the databases regenerate from the
 /// restored state, and a later run with a working tool commits.
 #[test]
-fn failed_refresh_rolls_back_and_recovers() {    let user = IsolatedUser::isolate();
+fn failed_refresh_rolls_back_and_recovers() {
+    let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let tools = FakeTools::install();
     let flag = scratch.path().join("mime-ok");
@@ -540,9 +576,7 @@ fn which(name: &str) -> Option<PathBuf> {
             .find(|candidate| {
                 candidate.is_file()
                     && std::os::unix::fs::PermissionsExt::mode(
-                        &std::fs::metadata(candidate)
-                            .expect("stat")
-                            .permissions(),
+                        &std::fs::metadata(candidate).expect("stat").permissions(),
                     ) & 0o111
                         != 0
             })

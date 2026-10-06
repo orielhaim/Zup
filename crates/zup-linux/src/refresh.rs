@@ -79,7 +79,9 @@ impl RefreshRequest {
     }
 
     pub fn key(&self) -> ResourceKey {
-        ResourceKey::Backend { id: self.backend_id() }
+        ResourceKey::Backend {
+            id: self.backend_id(),
+        }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -88,7 +90,9 @@ impl RefreshRequest {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RefreshError> {
         if bytes.len() > zup_transaction::MAX_BACKEND_PAYLOAD_BYTES {
-            return Err(RefreshError::Refused("refresh payload exceeds the transaction limit".into()));
+            return Err(RefreshError::Refused(
+                "refresh payload exceeds the transaction limit".into(),
+            ));
         }
         let request: RefreshRequest = serde_json::from_slice(bytes)
             .map_err(|error| RefreshError::Refused(format!("invalid refresh payload: {error}")))?;
@@ -99,7 +103,9 @@ impl RefreshRequest {
             )));
         }
         if request.directory.is_empty() || !request.directory.starts_with('/') {
-            return Err(RefreshError::Refused("refresh directory is not absolute".into()));
+            return Err(RefreshError::Refused(
+                "refresh directory is not absolute".into(),
+            ));
         }
         Ok(request)
     }
@@ -192,7 +198,6 @@ pub fn has_sources(request: &RefreshRequest) -> bool {
 }
 
 #[cfg(test)]
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,7 +205,12 @@ mod tests {
     #[test]
     fn identities_are_backend_keys() {
         let request = RefreshRequest::mime("/home/u/.local/share/mime");
-        assert_eq!(request.key(), ResourceKey::Backend { id: request.backend_id() });
+        assert_eq!(
+            request.key(),
+            ResourceKey::Backend {
+                id: request.backend_id()
+            }
+        );
         assert_eq!(request.backend_id().as_str(), REFRESH_MIME_ID);
         let request = RefreshRequest::desktop("/home/u/.local/share/applications");
         assert_eq!(request.backend_id().as_str(), REFRESH_DESKTOP_ID);
@@ -237,6 +247,9 @@ mod tests {
             directory: "/data/mime".into(),
         };
         let error = preflight(&request).expect_err("the tool is absent");
-        assert!(error.to_string().contains("definitely-not-a-zup-tool"), "{error}");
+        assert!(
+            error.to_string().contains("definitely-not-a-zup-tool"),
+            "{error}"
+        );
     }
 }

@@ -173,12 +173,10 @@ pub(crate) fn pack_linux_icons(
                 reason: error.to_string(),
             }
         })?;
-        let source_relative =
-            RelativePath::new(&format!("__zup_icons__/{}", artifact.name)).map_err(|error| {
-                BuildError::PathNotRepresentable {
-                    path: artifact.name.clone(),
-                    reason: error.to_string(),
-                }
+        let source_relative = RelativePath::new(&format!("__zup_icons__/{}", artifact.name))
+            .map_err(|error| BuildError::PathNotRepresentable {
+                path: artifact.name.clone(),
+                reason: error.to_string(),
             })?;
         packed.push(ResolvedFile {
             source,

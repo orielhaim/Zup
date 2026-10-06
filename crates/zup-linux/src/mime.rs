@@ -79,14 +79,18 @@ fn sanitize(text: &str) -> String {
 
 /// Validate a derived or supplied custom type name.
 pub fn validate_mime_type(value: &str) -> Result<(), MimeRenderError> {
-    let valid = value
-        .split_once('/')
-        .is_some_and(|(major, minor)| {
-            !major.is_empty()
-                && !minor.is_empty()
-                && major.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '!' | '#' | '$' | '&' | '^' | '_' | '.' | '+' | '-'))
-                && minor.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '!' | '#' | '$' | '&' | '^' | '_' | '.' | '+' | '-'))
-        });
+    let valid = value.split_once('/').is_some_and(|(major, minor)| {
+        !major.is_empty()
+            && !minor.is_empty()
+            && major.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '!' | '#' | '$' | '&' | '^' | '_' | '.' | '+' | '-')
+            })
+            && minor.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '!' | '#' | '$' | '&' | '^' | '_' | '.' | '+' | '-')
+            })
+    });
     if valid {
         Ok(())
     } else {
@@ -102,7 +106,9 @@ pub fn validate_mime_type(value: &str) -> Result<(), MimeRenderError> {
 pub fn render_package(definitions: &[MimeTypeDefinition]) -> Result<String, MimeRenderError> {
     let mut sorted = definitions.to_vec();
     sorted.sort_by(|left, right| left.mime_type.cmp(&right.mime_type));
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n");
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n",
+    );
     for definition in &sorted {
         validate_mime_type(&definition.mime_type)?;
         if !definition.extension.starts_with('.')
@@ -114,13 +120,15 @@ pub fn render_package(definitions: &[MimeTypeDefinition]) -> Result<String, Mime
                 extension: definition.extension.clone(),
             });
         }
-        let comment = escape_xml(&definition.comment).map_err(|reason| {
-            MimeRenderError::InvalidComment {
+        let comment =
+            escape_xml(&definition.comment).map_err(|reason| MimeRenderError::InvalidComment {
                 mime: definition.mime_type.clone(),
                 reason: reason.to_owned(),
-            }
-        })?;
-        let glob = format!("*.{}", escape_xml(&definition.extension[1..]).expect("extension is escapable"));
+            })?;
+        let glob = format!(
+            "*.{}",
+            escape_xml(&definition.extension[1..]).expect("extension is escapable")
+        );
         out.push_str(&format!(
             "  <mime-type type=\"{}\">\n    <comment>{}</comment>\n    <glob pattern=\"{}\"/>\n  </mime-type>\n",
             definition.mime_type, comment, glob
@@ -175,10 +183,8 @@ mod tests {
             },
         ];
         let first = render_package(&definitions).expect("renders");
-        let reversed = render_package(
-            &definitions.iter().rev().cloned().collect::<Vec<_>>(),
-        )
-        .expect("renders");
+        let reversed = render_package(&definitions.iter().rev().cloned().collect::<Vec<_>>())
+            .expect("renders");
         assert_eq!(first, reversed, "order of input does not matter");
         let expected = concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",

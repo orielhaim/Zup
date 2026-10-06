@@ -231,10 +231,8 @@ impl LinuxLedgerStore {
                     if backend.key != *key {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                     }
-                    let request =
-                        crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|_| {
-                            LinuxLedgerError::Ownership(node.id.to_string())
-                        })?;
+                    let request = crate::refresh::RefreshRequest::decode(&backend.payload)
+                        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
                     if request.key() != *key {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                     }

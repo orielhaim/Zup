@@ -97,9 +97,10 @@ fn quote_word(text: &str) -> Result<String, DesktopRenderError> {
     if escaped.is_empty() {
         return Ok("\"\"".to_owned());
     }
-    let safe = escaped
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@' | ','));
+    let safe = escaped.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    });
     if safe {
         return Ok(escaped);
     }
@@ -133,9 +134,7 @@ fn escape_string(text: &str) -> Result<String, DesktopRenderError> {
     if text.chars().any(|c| c.is_control() && c != '\t') {
         return Err(invalid("a name cannot contain control characters"));
     }
-    Ok(text
-        .replace('\\', "\\\\")
-        .replace('\t', "\\t"))
+    Ok(text.replace('\\', "\\\\").replace('\t', "\\t"))
 }
 
 /// One application or handler desktop entry.
@@ -310,9 +309,11 @@ mod tests {
         };
         let rendered = entry.render().expect("renders");
         assert!(rendered.contains("Exec=/opt/tool %u\n"), "{rendered}");
-        assert!(rendered.contains(
-            "MimeType=x-scheme-handler/acme;application/x-com-example-tool-foo;\n"
-        ), "{rendered}");
+        assert!(
+            rendered
+                .contains("MimeType=x-scheme-handler/acme;application/x-com-example-tool-foo;\n"),
+            "{rendered}"
+        );
         assert!(rendered.contains("NoDisplay=true\n"), "{rendered}");
     }
 
@@ -370,7 +371,10 @@ mod tests {
             hidden: false,
         };
         let rendered = entry.render().expect("renders");
-        assert!(rendered.contains("Name=My Tool\\t2000 \\\\ Pro\n"), "{rendered}");
+        assert!(
+            rendered.contains("Name=My Tool\\t2000 \\\\ Pro\n"),
+            "{rendered}"
+        );
     }
 
     #[test]

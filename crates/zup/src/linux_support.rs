@@ -165,7 +165,11 @@ pub fn linux_capability_errors(
              does not add",
             installer.path.len(),
             if installer.path.len() == 1 { "" } else { "s" },
-            if installer.path.len() == 1 { "is" } else { "are" },
+            if installer.path.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
         ));
     }
     errors.extend(protocol_errors(&installer.protocols));
@@ -383,13 +387,15 @@ mod tests {
             args: vec!["%1".into()],
             when: None,
         });
-        plan.installer.file_associations.push(zup_core::FileAssociation {
-            extension: zup_core::FileExtension::new(".foo").unwrap(),
-            id: zup_core::FileAssociationId::new("acme.foo").unwrap(),
-            description: None,
-            executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
-            when: None,
-        });
+        plan.installer
+            .file_associations
+            .push(zup_core::FileAssociation {
+                extension: zup_core::FileExtension::new(".foo").unwrap(),
+                id: zup_core::FileAssociationId::new("acme.foo").unwrap(),
+                description: None,
+                executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+                when: None,
+            });
         let errors = linux_capability_errors(&config, &plan);
         assert!(errors.is_empty(), "{errors:?}");
     }

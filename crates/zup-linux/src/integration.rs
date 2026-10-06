@@ -30,7 +30,9 @@ use zup_core::{LauncherLocation, ResourceKey, SelectedScope, TargetTriple};
 use zup_plan::InstallPlan;
 use zup_platform::TargetPath;
 
-use crate::desktop::{DesktopEntry, DesktopRenderError, ExecArgument, ExecCommand, FieldCode, stable_stem};
+use crate::desktop::{
+    DesktopEntry, DesktopRenderError, ExecArgument, ExecCommand, FieldCode, stable_stem,
+};
 use crate::locations::user_data_home;
 use crate::mime::{MimeRenderError, MimeTypeDefinition, mime_type_for, render_package};
 
@@ -95,8 +97,7 @@ pub fn lower_integration(plan: &InstallPlan) -> Result<IntegrationOutput, Integr
             plan.target.as_str()
         )));
     }
-    if plan.launchers.is_empty() && plan.protocols.is_empty() && plan.file_associations.is_empty()
-    {
+    if plan.launchers.is_empty() && plan.protocols.is_empty() && plan.file_associations.is_empty() {
         return Ok(IntegrationOutput::default());
     }
     lower_integration_in(plan, &user_data_home()?)
@@ -119,8 +120,7 @@ pub fn lower_integration_in(
         .filter(|launcher| launcher.location == LauncherLocation::Menu)
         .collect();
     menu_launchers.sort_by(|a, b| {
-        (a.target.to_string(), a.name.to_string())
-            .cmp(&(b.target.to_string(), b.name.to_string()))
+        (a.target.to_string(), a.name.to_string()).cmp(&(b.target.to_string(), b.name.to_string()))
     });
     for (index, launcher) in menu_launchers.iter().enumerate() {
         let file_name = if index == 0 {
@@ -128,8 +128,10 @@ pub fn lower_integration_in(
         } else {
             format!("{stem}-launcher-{}.desktop", index + 1)
         };
-        let destination =
-            xdg_target(&plan.target, &data_home.join("applications").join(&file_name))?;
+        let destination = xdg_target(
+            &plan.target,
+            &data_home.join("applications").join(&file_name),
+        )?;
         let target = resolve_install_template(&plan.target, &launcher.target)?;
         let working_directory = launcher
             .working_directory
@@ -147,10 +149,7 @@ pub fn lower_integration_in(
                     .collect(),
             },
             icon: Some(icon.clone()),
-            working_directory: working_directory
-                .as_ref()
-                .map(host_text)
-                .transpose()?,
+            working_directory: working_directory.as_ref().map(host_text).transpose()?,
             mime_types: Vec::new(),
             hidden: false,
         };
@@ -163,7 +162,11 @@ pub fn lower_integration_in(
     }
 
     if !plan.protocols.is_empty() {
-        let mut schemes: Vec<String> = plan.protocols.iter().map(|p| p.scheme.to_string()).collect();
+        let mut schemes: Vec<String> = plan
+            .protocols
+            .iter()
+            .map(|p| p.scheme.to_string())
+            .collect();
         schemes.sort();
         schemes.dedup();
         let mut arguments = Vec::new();
@@ -192,7 +195,9 @@ pub fn lower_integration_in(
         }
         let destination = xdg_target(
             &plan.target,
-            &data_home.join("applications").join(format!("{stem}-uri.desktop")),
+            &data_home
+                .join("applications")
+                .join(format!("{stem}-uri.desktop")),
         )?;
         let entry = DesktopEntry {
             name: plan.app.name.to_string(),
@@ -235,16 +240,20 @@ pub fn lower_integration_in(
             mime_types.push(mime.clone());
             definitions.push(MimeTypeDefinition {
                 mime_type: mime,
-                comment: association.description.clone().unwrap_or_else(|| {
-                    format!("{} document", association.extension.as_str())
-                }),
+                comment: association
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{} document", association.extension.as_str())),
                 extension: association.extension.to_string(),
             });
         }
         let package = render_package(&definitions)?;
         let package_destination = xdg_target(
             &plan.target,
-            &data_home.join("mime").join("packages").join(format!("{stem}.xml")),
+            &data_home
+                .join("mime")
+                .join("packages")
+                .join(format!("{stem}.xml")),
         )?;
         output.needs_mime_refresh = true;
         output.files.push(generated(
@@ -254,7 +263,9 @@ pub fn lower_integration_in(
         )?);
         let destination = xdg_target(
             &plan.target,
-            &data_home.join("applications").join(format!("{stem}-files.desktop")),
+            &data_home
+                .join("applications")
+                .join(format!("{stem}-files.desktop")),
         )?;
         let entry = DesktopEntry {
             name: plan.app.name.to_string(),
@@ -364,8 +375,8 @@ pub fn load_generated(
         path: path.display().to_string(),
         reason: error.to_string(),
     })?;
-    let text: std::collections::BTreeMap<String, String> =
-        serde_json::from_slice(&serialized).map_err(|error| IntegrationError::InvalidPath {
+    let text: std::collections::BTreeMap<String, String> = serde_json::from_slice(&serialized)
+        .map_err(|error| IntegrationError::InvalidPath {
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
@@ -380,7 +391,9 @@ pub fn load_generated(
 /// The portable vector is verbatim author text plus one `%1` URI placeholder.
 /// Exactly one placeholder becomes `%u`; any other arrangement cannot
 /// faithfully receive one URI and is refused rather than guessed.
-fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgument>, IntegrationError> {
+fn protocol_args(
+    protocol: &zup_plan::PlannedProtocol,
+) -> Result<Vec<ExecArgument>, IntegrationError> {
     if zup_core::uri_placeholder_count(&protocol.args) != 1 {
         return Err(IntegrationError::Unsupported(format!(
             "protocol handler arguments must carry exactly one `%1` URI placeholder (found {}): Linux delivers the URI through `%u` and any other shape cannot be represented faithfully",
@@ -401,7 +414,11 @@ fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgumen
 }
 
 fn refuse_unsupported(plan: &InstallPlan) -> Result<(), IntegrationError> {
-    if plan.launchers.iter().any(|l| l.location == LauncherLocation::Desktop) {
+    if plan
+        .launchers
+        .iter()
+        .any(|l| l.location == LauncherLocation::Desktop)
+    {
         return Err(IntegrationError::Unsupported(
             "a `desktop` launcher is not supported on Linux in this phase: a file in \
              `$XDG_DATA_HOME/applications` makes an application discoverable, which the \
@@ -416,8 +433,16 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), IntegrationError> {
              PATH mutation is not command exposure, and Linux command exposure without editing \
              shell configuration needs a portable `command` semantic this phase does not add",
             plan.path_entries.len(),
-            if plan.path_entries.len() == 1 { "" } else { "s" },
-            if plan.path_entries.len() == 1 { "is" } else { "are" },
+            if plan.path_entries.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if plan.path_entries.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
         )));
     }
     if !plan.services.is_empty() {
@@ -425,15 +450,27 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), IntegrationError> {
             "{} service resource{} {} not supported on Linux in this phase",
             plan.services.len(),
             if plan.services.len() == 1 { "" } else { "s" },
-            if plan.services.len() == 1 { "is" } else { "are" },
+            if plan.services.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
         )));
     }
     if !plan.prerequisites.is_empty() {
         return Err(IntegrationError::Unsupported(format!(
             "{} package-manager prerequisite resource{} {} not supported on Linux in this phase",
             plan.prerequisites.len(),
-            if plan.prerequisites.len() == 1 { "" } else { "s" },
-            if plan.prerequisites.len() == 1 { "is" } else { "are" },
+            if plan.prerequisites.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if plan.prerequisites.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
         )));
     }
     Ok(())
@@ -483,12 +520,11 @@ fn generated(
     destination: TargetPath,
     bytes: Vec<u8>,
 ) -> Result<GeneratedFile, IntegrationError> {
-    let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).map_err(|_| {
-        IntegrationError::InvalidPath {
+    let (size, sha256) =
+        zup_core::hash_reader(bytes.as_slice()).map_err(|_| IntegrationError::InvalidPath {
             path: destination.to_string(),
             reason: "generated content does not hash".into(),
-        }
-    })?;
+        })?;
     Ok(GeneratedFile {
         key: ResourceKey::File {
             destination: destination.to_string(),

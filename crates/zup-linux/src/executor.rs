@@ -390,12 +390,10 @@ impl LinuxFileExecutor {
                 crate::refresh::preflight(&request)?;
                 Ok(())
             }
-            NodeKind::BackendRemoval { .. } => {
-                Err(LinuxFileExecutorError::PlanDrift {
-                    path: node.id.to_string(),
-                    reason: "a backend removal is not a Linux operation".into(),
-                })
-            }
+            NodeKind::BackendRemoval { .. } => Err(LinuxFileExecutorError::PlanDrift {
+                path: node.id.to_string(),
+                reason: "a backend removal is not a Linux operation".into(),
+            }),
         }
     }
 
@@ -481,12 +479,10 @@ impl LinuxFileExecutor {
                     payload: request.encode(),
                 })
             }
-            NodeKind::BackendRemoval { .. } => {
-                Err(LinuxFileExecutorError::PlanDrift {
-                    path: node.id.to_string(),
-                    reason: "a backend removal is not a Linux operation".into(),
-                })
-            }
+            NodeKind::BackendRemoval { .. } => Err(LinuxFileExecutorError::PlanDrift {
+                path: node.id.to_string(),
+                reason: "a backend removal is not a Linux operation".into(),
+            }),
         }
     }
 
@@ -1027,7 +1023,9 @@ impl LinuxFileExecutor {
 }
 
 /// A refresh request from a backend node's journaled payload.
-fn refresh_request(node: &TransactionNode) -> Result<crate::refresh::RefreshRequest, LinuxFileExecutorError> {
+fn refresh_request(
+    node: &TransactionNode,
+) -> Result<crate::refresh::RefreshRequest, LinuxFileExecutorError> {
     let missing = || LinuxFileExecutorError::PlanDrift {
         path: node.id.to_string(),
         reason: "a refresh node without its request".into(),

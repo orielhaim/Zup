@@ -441,9 +441,10 @@ fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), Linu
         let Some(backend) = &node.meta.backend else {
             continue;
         };
-        let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
-            LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
-        })?;
+        let request =
+            crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
+                LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
+            })?;
         if !crate::refresh::has_sources(&request) {
             continue;
         }
@@ -468,9 +469,10 @@ fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), Linu
                 node.id
             )));
         };
-        let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
-            LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
-        })?;
+        let request =
+            crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
+                LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
+            })?;
         crate::refresh::preflight(&request).map_err(LinuxFileExecutorError::from)?;
     }
     Ok(())

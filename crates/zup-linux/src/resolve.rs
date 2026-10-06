@@ -165,31 +165,28 @@ pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveErro
     // Portable integration intent lowers into generated native files here, so
     // the snapshot, delta, transaction, and ledger below all treat a desktop
     // entry or MIME package as what it is: a file Zup owns.
-    let integration =
-        crate::integration::lower_integration(plan).map_err(|error| match error {
-            crate::integration::IntegrationError::Unsupported { .. } => {
-                LinuxResolveError::Unsupported {
-                    reasons: error.to_string(),
-                }
+    let integration = crate::integration::lower_integration(plan).map_err(|error| match error {
+        crate::integration::IntegrationError::Unsupported { .. } => {
+            LinuxResolveError::Unsupported {
+                reasons: error.to_string(),
             }
-            crate::integration::IntegrationError::DataHome(source) => {
-                LinuxResolveError::Template {
-                    kind: "XDG data home",
-                    source: zup_platform::TemplateResolveError::InstallLocation(
-                        zup_platform::InstallLocationError::ResolutionFailed {
-                            location: zup_core::InstallLocation::UserData,
-                            scope: plan.scope,
-                            source: Box::new(source),
-                        },
-                    ),
-                }
-            }
-            other => LinuxResolveError::InvalidPath {
-                kind: "integration resource",
-                path: String::new(),
-                reason: other.to_string(),
-            },
-        })?;
+        }
+        crate::integration::IntegrationError::DataHome(source) => LinuxResolveError::Template {
+            kind: "XDG data home",
+            source: zup_platform::TemplateResolveError::InstallLocation(
+                zup_platform::InstallLocationError::ResolutionFailed {
+                    location: zup_core::InstallLocation::UserData,
+                    scope: plan.scope,
+                    source: Box::new(source),
+                },
+            ),
+        },
+        other => LinuxResolveError::InvalidPath {
+            kind: "integration resource",
+            path: String::new(),
+            reason: other.to_string(),
+        },
+    })?;
     for generated in &integration.files {
         install_bytes = install_bytes.saturating_add(generated.size);
         claim(
@@ -199,12 +196,13 @@ pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveErro
         )?;
         files.push(TargetFile {
             key: generated.key.clone(),
-            source_relative: zup_core::RelativePath::new(&generated.source_relative)
-                .map_err(|_| LinuxResolveError::InvalidPath {
+            source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
+                |_| LinuxResolveError::InvalidPath {
                     kind: "integration source",
                     path: generated.source_relative.clone(),
                     reason: "generated source name is not a relative path".into(),
-                })?,
+                },
+            )?,
             destination: generated.destination.clone(),
             size: generated.size,
             sha256: generated.sha256,
