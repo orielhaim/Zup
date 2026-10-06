@@ -53,16 +53,19 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{Sha256Digest, hash_reader};
+use zup_bundle::{PayloadError, PayloadSource};
+use zup_core::{RelativePath, ResourceKey, Sha256Digest, hash_reader};
+use zup_platform::TargetPath;
 use zup_transaction::{
-    FileDelta, FilePrecondition, NodeKind, OperationId, OperationReceipt, ReconcileResult,
-    TransactionNode,
+    FileDelta, FilePrecondition, NodeKind, OperationExecutor, OperationId, OperationReceipt,
+    ReconcileResult, TransactionNode, TransactionPlan,
 };
 
 use crate::fs::{
     EXECUTABLE_PAYLOAD_MODE, EntryKind, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,
     STATE_DIRECTORY_MODE, STATE_FILE_MODE,
 };
+use crate::lowering::to_host_path;
 
 /// Why a Linux file operation could not be carried out.
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +90,13 @@ pub enum LinuxFileExecutorError {
 
     #[error("`{path}` does not exist")]
     Missing { path: String },
+
+    #[error("payload for `{path}` could not be staged: {source}")]
+    Payload {
+        path: String,
+        #[source]
+        source: PayloadError,
+    },
 
     #[error("i/o at `{path}`: {source}")]
     Io {
@@ -161,9 +171,26 @@ impl FileIntent {
 }
 
 /// Carries out a Linux file transaction.
-#[derive(Debug, Default)]
+///
+/// A payload source is attached separately from registration because the two
+/// come from different places: the plan says *what* each operation installs,
+/// and the package says *where the bytes are*. An executor with no payload
+/// source can still verify, roll back, and reconcile from receipts - it just
+/// cannot stage.
+#[derive(Default)]
 pub struct LinuxFileExecutor {
     files: BTreeMap<String, FileWork>,
+    payload: Option<Box<dyn PayloadSource>>,
+}
+
+impl std::fmt::Debug for LinuxFileExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LinuxFileExecutor")
+            .field("files", &self.files)
+            .field("has_payload", &self.payload.is_some())
+            .finish()
+    }
 }
 
 impl LinuxFileExecutor {
@@ -175,9 +202,96 @@ impl LinuxFileExecutor {
         Self::default()
     }
 
+    /// Attach the package this transaction stages its bytes from.
+    pub fn with_payload(mut self, payload: impl PayloadSource + 'static) -> Self {
+        self.payload = Some(Box::new(payload));
+        self
+    }
+
     /// Record where one operation's file goes and what it should hold.
     pub fn register(&mut self, id: &OperationId, file: FileWork) {
         self.files.insert(id.to_string(), file);
+    }
+
+    /// Record every file operation in a compiled transaction plan.
+    ///
+    /// The destinations come from the nodes' own keys lowered for this host,
+    /// and the intent and preconditions from the nodes' metadata - the same
+    /// record a recovery run replays. A plan whose nodes name a destination the
+    /// target cannot spell, or omit the identity a file operation needs, is
+    /// refused here rather than halfway through the transaction.
+    pub fn register_plan(&mut self, plan: &TransactionPlan) -> Result<(), LinuxFileExecutorError> {
+        for node in &plan.nodes {
+            let key = match &node.kind {
+                NodeKind::StageFile { key }
+                | NodeKind::FileMutation { key, .. }
+                | NodeKind::FileRemoval { key } => key,
+                _ => continue,
+            };
+            let destination_text = match key {
+                ResourceKey::File { destination } => destination,
+                ResourceKey::Maintenance { destination, .. } => destination,
+                other => {
+                    return Err(LinuxFileExecutorError::PlanDrift {
+                        path: node.id.to_string(),
+                        reason: format!("{other:?} is not a file resource"),
+                    });
+                }
+            };
+            let destination =
+                TargetPath::new(plan.target.clone(), destination_text).map_err(|error| {
+                    LinuxFileExecutorError::PlanDrift {
+                        path: destination_text.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            let host_path =
+                to_host_path(&destination).map_err(|error| LinuxFileExecutorError::PlanDrift {
+                    path: destination_text.clone(),
+                    reason: error.to_string(),
+                })?;
+            // Removal nodes carry no payload identity: there is nothing to
+            // install, so there is nothing to describe. The placeholder is
+            // never read on that path, and inventing a digest for it would be
+            // worse than admitting it is absent.
+            let removal = matches!(node.kind, NodeKind::FileRemoval { .. });
+            let intent = if removal {
+                FileIntent {
+                    sha256: Sha256Digest::from_bytes([0; 32]),
+                    size: 0,
+                    executable: false,
+                }
+            } else {
+                let (Some(sha256), Some(size)) =
+                    (node.meta.expected_sha256, node.meta.expected_size)
+                else {
+                    return Err(LinuxFileExecutorError::PlanDrift {
+                        path: node.id.to_string(),
+                        reason: "a file operation without payload identity".into(),
+                    });
+                };
+                FileIntent {
+                    sha256,
+                    size,
+                    executable: node.meta.executable.unwrap_or(false),
+                }
+            };
+            self.register(
+                &node.id,
+                FileWork {
+                    destination,
+                    host_path,
+                    intent,
+                    precondition: node
+                        .meta
+                        .file_precondition
+                        .unwrap_or(FilePrecondition::Absent),
+                    staged: None,
+                    created_directories: Vec::new(),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// One operation's recorded work.
@@ -205,15 +319,128 @@ impl LinuxFileExecutor {
         let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
         directory.write_durable(&name, bytes, STATE_FILE_MODE)?;
         let staged = directory.path().join(&name);
-        if let Some(recorded) = self.files.get_mut(id.as_str()) {
-            recorded.staged = Some(staged.clone());
-            recorded.created_directories = created_directories;
+        // The staging node and the mutation node that publishes its bytes are
+        // different operations over the same destination, so the staged path
+        // is shared by destination rather than by operation id. A mutation
+        // that looked only at its own record would find nothing staged and
+        // refuse work whose bytes are sitting beside its destination.
+        let destination = file.destination.to_string();
+        for recorded in self.files.values_mut() {
+            if recorded.destination.to_string() == destination {
+                recorded.staged = Some(staged.clone());
+                recorded.created_directories = created_directories.clone();
+            }
         }
         Ok(OperationReceipt::StageFile {
             staged_path: staged.display().to_string(),
             size: file.intent.size,
             sha256: file.intent.sha256.to_hex(),
         })
+    }
+
+    /// Check one node before the transaction mutates anything.
+    ///
+    /// Observe-only: a prepare that changed state would defeat the barrier it
+    /// guards. A node whose precondition already fails is refused here rather
+    /// than halfway through the transaction, which is the entire purpose of a
+    /// preflight.
+    pub fn prepare(&mut self, node: &TransactionNode) -> Result<(), LinuxFileExecutorError> {
+        match &node.kind {
+            NodeKind::Barrier => Ok(()),
+            NodeKind::StageFile { .. } => {
+                let _ = self.file(node.id.as_str())?;
+                Self::payload_identity(node)?;
+                Ok(())
+            }
+            NodeKind::FileMutation { .. } => {
+                let file = self.file(node.id.as_str())?.clone();
+                match file.precondition {
+                    FilePrecondition::Absent => match observe(&file.host_path)? {
+                        None => Ok(()),
+                        Some(_) => Err(LinuxFileExecutorError::PlanDrift {
+                            path: file.host_path.display().to_string(),
+                            reason: "the destination a create requires to be absent is present"
+                                .into(),
+                        }),
+                    },
+                    FilePrecondition::Exact { size, sha256 } => {
+                        verify_precondition(&file.host_path, size, sha256)
+                    }
+                }
+            }
+            NodeKind::FileRemoval { .. } => {
+                let file = self.file(node.id.as_str())?.clone();
+                match observe(&file.host_path)? {
+                    None => Err(LinuxFileExecutorError::PlanDrift {
+                        path: file.host_path.display().to_string(),
+                        reason: "there is nothing to remove".into(),
+                    }),
+                    Some(_) => Ok(()),
+                }
+            }
+            NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+                Err(LinuxFileExecutorError::PlanDrift {
+                    path: node.id.to_string(),
+                    reason: "a backend resource is not a file operation".into(),
+                })
+            }
+        }
+    }
+
+    /// Stage one node from the attached payload source.
+    ///
+    /// The coordinator drives every node through `apply`, so staging-bytes has
+    /// to happen here rather than only through the lower-level [`Self::stage`]
+    /// a caller drives by hand. The identity comes from the node's own
+    /// metadata - the same record a recovery run replays - and the bytes are
+    /// verified by the payload source on open, so what is staged is what the
+    /// plan asked for.
+    fn stage_node(
+        &mut self,
+        node: &TransactionNode,
+    ) -> Result<OperationReceipt, LinuxFileExecutorError> {
+        use std::io::Read as _;
+        let _ = self.file(node.id.as_str())?;
+        let (source, sha256, size) = Self::payload_identity(node)?;
+        let payload = self
+            .payload
+            .as_ref()
+            .ok_or_else(|| LinuxFileExecutorError::PlanDrift {
+                path: node.id.to_string(),
+                reason: "no payload source is attached".into(),
+            })?;
+        let mut reader = payload.open(&source, &sha256, size).map_err(|error| {
+            LinuxFileExecutorError::Payload {
+                path: source.to_string(),
+                source: error,
+            }
+        })?;
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|error| LinuxFileExecutorError::Payload {
+                path: source.to_string(),
+                source: PayloadError::Read {
+                    path: source.to_string(),
+                    source: error,
+                },
+            })?;
+        self.stage(&node.id, &bytes)
+    }
+
+    /// What a staging node must carry: where its bytes live and what they are.
+    fn payload_identity(
+        node: &TransactionNode,
+    ) -> Result<(RelativePath, Sha256Digest, u64), LinuxFileExecutorError> {
+        let missing = || LinuxFileExecutorError::PlanDrift {
+            path: node.id.to_string(),
+            reason: "a staging node without payload identity".into(),
+        };
+        Ok((
+            node.meta.source_relative.clone().ok_or_else(missing)?,
+            node.meta.expected_sha256.ok_or_else(missing)?,
+            node.meta.expected_size.ok_or_else(missing)?,
+        ))
     }
 
     /// Apply one transaction node.
@@ -223,10 +450,7 @@ impl LinuxFileExecutor {
     ) -> Result<OperationReceipt, LinuxFileExecutorError> {
         match &node.kind {
             NodeKind::Barrier => Ok(OperationReceipt::Control),
-            NodeKind::StageFile { .. } => Err(LinuxFileExecutorError::PlanDrift {
-                path: node.id.to_string(),
-                reason: "a staged file is written with `stage`, not applied".into(),
-            }),
+            NodeKind::StageFile { .. } => self.stage_node(node),
             NodeKind::FileMutation { delta, .. } => match delta {
                 FileDelta::Create | FileDelta::RestoreOwned => self.create(node),
                 FileDelta::Replace | FileDelta::RepairOwned => self.replace(node),
@@ -408,13 +632,22 @@ impl LinuxFileExecutor {
     }
 
     /// Decide what a node's state is, for a transaction that crashed.
+    ///
+    /// Two cases. With a receipt, the destination is compared against what the
+    /// receipt says was installed. Without one - a node the journal caught
+    /// mid-flight - the destination is compared against the registered intent:
+    /// a file that already holds exactly what the transaction would publish is
+    /// applied, whatever else is either absent or ambiguous. Reconciliation
+    /// never invents a receipt for work it cannot prove happened, which is why
+    /// the no-receipt applied case reports [`ReconcileResult::Applied`] rather
+    /// than a reconstructed record of backups that may never have been taken.
     pub fn reconcile(
         &self,
-        _node: &TransactionNode,
+        node: &TransactionNode,
         receipt: Option<&OperationReceipt>,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
         let Some(receipt) = receipt else {
-            return Ok(ReconcileResult::NotApplied);
+            return self.reconcile_interrupted(node);
         };
         match receipt {
             OperationReceipt::CreateFile {
@@ -457,6 +690,153 @@ impl LinuxFileExecutor {
                 Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
             }
             OperationReceipt::Backend { .. } => Ok(ReconcileResult::Ambiguous),
+        }
+    }
+
+    /// Reconcile a node the journal caught mid-flight, with no receipt.
+    ///
+    /// A bare `Applied` cannot be journaled for a file node - the journal
+    /// requires a kind-matching receipt - so an applied conclusion is reported
+    /// with a reconstructed receipt instead. The reconstruction is conservative
+    /// by construction: a create is only rebuilt from the installed bytes
+    /// themselves, and a replace or removal additionally requires the backup to
+    /// hold the bytes the receipt claims. Anything less is `Ambiguous`, which
+    /// is the only honest answer when the proofs do not all agree.
+    fn reconcile_interrupted(
+        &self,
+        node: &TransactionNode,
+    ) -> Result<ReconcileResult, LinuxFileExecutorError> {
+        match &node.kind {
+            NodeKind::Barrier => Ok(ReconcileResult::Applied),
+            // Re-staging is idempotent - it overwrites the same derived name -
+            // so there is no state to recover, only work to redo.
+            NodeKind::StageFile { .. } => Ok(ReconcileResult::NotApplied),
+            NodeKind::FileMutation { delta, .. } => match delta {
+                FileDelta::Create | FileDelta::RestoreOwned => {
+                    self.reconcile_interrupted_create(node)
+                }
+                FileDelta::Replace | FileDelta::RepairOwned => {
+                    self.reconcile_interrupted_replace(node)
+                }
+                FileDelta::NoOp => Ok(ReconcileResult::NotApplied),
+                FileDelta::Conflict | FileDelta::Drift => Ok(ReconcileResult::Ambiguous),
+            },
+            NodeKind::FileRemoval { .. } => self.reconcile_interrupted_removal(node),
+            NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+                Ok(ReconcileResult::Ambiguous)
+            }
+        }
+    }
+
+    /// A create whose publish may or may not have happened.
+    ///
+    /// The destination holding exactly the intended bytes is the proof: a
+    /// no-clobber publish either installed those bytes or refused, so matching
+    /// bytes mean the publish happened. The rebuilt receipt carries no created
+    /// directories - that record died with the crashed process - which is a
+    /// known concession, not a silent one.
+    fn reconcile_interrupted_create(
+        &self,
+        node: &TransactionNode,
+    ) -> Result<ReconcileResult, LinuxFileExecutorError> {
+        let file = self.file(node.id.as_str())?.clone();
+        match observe(&file.host_path)? {
+            None => Ok(ReconcileResult::NotApplied),
+            Some((size, sha256)) if size == file.intent.size && sha256 == file.intent.sha256 => Ok(
+                ReconcileResult::AppliedWithReceipt(OperationReceipt::CreateFile {
+                    destination: file.host_path.display().to_string(),
+                    installed_sha256: file.intent.sha256.to_hex(),
+                    installed_size: file.intent.size,
+                    executable: file.intent.executable,
+                    created_directories: Vec::new(),
+                }),
+            ),
+            Some(_) => Ok(ReconcileResult::Ambiguous),
+        }
+    }
+
+    /// A replace whose publish may or may not have happened.
+    ///
+    /// Both halves must agree: the destination holds the new bytes *and* the
+    /// backup beside it holds the previous ones. A new destination with no
+    /// backup is not a completed replace - the backup is flushed before the
+    /// publish, so its absence means the publish never happened or never
+    /// finished proving itself.
+    fn reconcile_interrupted_replace(
+        &self,
+        node: &TransactionNode,
+    ) -> Result<ReconcileResult, LinuxFileExecutorError> {
+        let file = self.file(node.id.as_str())?.clone();
+        let FilePrecondition::Exact { size, sha256 } = file.precondition else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
+        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
+        let backup_name = format!("backup-{}.bin", short_digest(node.id.as_str()));
+        let backup_ok = match directory.read_regular(&backup_name) {
+            Ok(previous) => hash_reader(previous.as_slice())
+                .map(|(found_size, found)| found_size == size && found == sha256)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        match observe(&file.host_path)? {
+            None => Ok(ReconcileResult::NotApplied),
+            Some((found_size, found))
+                if found_size == file.intent.size && found == file.intent.sha256 && backup_ok =>
+            {
+                Ok(ReconcileResult::AppliedWithReceipt(
+                    OperationReceipt::ReplaceFile {
+                        destination: file.host_path.display().to_string(),
+                        previous_sha256: sha256.to_hex(),
+                        previous_size: size,
+                        backup_path: directory.path().join(&backup_name).display().to_string(),
+                        new_sha256: file.intent.sha256.to_hex(),
+                        new_size: file.intent.size,
+                        executable: file.intent.executable,
+                    },
+                ))
+            }
+            Some(_) => Ok(ReconcileResult::Ambiguous),
+        }
+    }
+
+    /// A removal whose unlink may or may not have happened.
+    ///
+    /// The backup is the proof in both directions: an absent destination with
+    /// the removed bytes beside it means the unlink happened, and a present
+    /// destination holding the expected bytes means it did not.
+    fn reconcile_interrupted_removal(
+        &self,
+        node: &TransactionNode,
+    ) -> Result<ReconcileResult, LinuxFileExecutorError> {
+        let Some(removal) = &node.meta.removal else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
+        let file = self.file(node.id.as_str())?.clone();
+        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
+        let backup_name = format!("removed-{}.bin", short_digest(node.id.as_str()));
+        let backup_ok = match directory.read_regular(&backup_name) {
+            Ok(saved) => hash_reader(saved.as_slice())
+                .map(|(found_size, found)| found_size == removal.size && found == removal.sha256)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        match observe(&file.host_path)? {
+            None if backup_ok => Ok(ReconcileResult::AppliedWithReceipt(
+                OperationReceipt::RemoveFile {
+                    destination: removal.destination.clone(),
+                    backup_path: as_target(
+                        &removal.destination,
+                        &directory.path().join(&backup_name),
+                    )?,
+                    sha256: removal.sha256,
+                    size: removal.size,
+                },
+            )),
+            None => Ok(ReconcileResult::Ambiguous),
+            Some((found_size, found)) if found_size == removal.size && found == removal.sha256 => {
+                Ok(ReconcileResult::NotApplied)
+            }
+            Some(_) => Ok(ReconcileResult::Ambiguous),
         }
     }
 
@@ -603,6 +983,49 @@ impl LinuxFileExecutor {
             sha256,
             size,
         })
+    }
+}
+
+/// The portable coordinator contract, implemented with Linux semantics.
+///
+/// This is what lets the real [`TransactionCoordinator`] drive this executor:
+/// the same prepare / apply / verify / commit phases as every other backend,
+/// the same journal format, the same recovery. Nothing here re-states the
+/// transaction protocol; it only answers each step with this platform's
+/// mechanisms.
+impl OperationExecutor for LinuxFileExecutor {
+    type Error = LinuxFileExecutorError;
+
+    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+        LinuxFileExecutor::prepare(self, operation)
+    }
+
+    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+        LinuxFileExecutor::apply(self, operation)
+    }
+
+    fn verify(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        LinuxFileExecutor::verify(self, operation, receipt)
+    }
+
+    fn rollback(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        LinuxFileExecutor::rollback(self, operation, receipt)
+    }
+
+    fn reconcile(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: Option<&OperationReceipt>,
+    ) -> Result<ReconcileResult, Self::Error> {
+        LinuxFileExecutor::reconcile(self, operation, receipt)
     }
 }
 
