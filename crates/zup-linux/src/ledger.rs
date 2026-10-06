@@ -219,10 +219,27 @@ impl LinuxLedgerStore {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                     }
                 }
-                // A Linux transaction holds no backend operations: the
-                // capability gate guarantees none were planned, so one here
-                // means the plan did not come from this backend.
-                NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+                // A refresh regenerates derived freedesktop databases from the
+                // authoritative files above. It owns no bytes, so the ledger
+                // records nothing for it; validation only proves the node is
+                // one this backend emitted, with a bounded, well-formed
+                // request. Anything else backend-shaped is foreign.
+                NodeKind::BackendOperation { key, .. } => {
+                    let Some(backend) = &node.meta.backend else {
+                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                    };
+                    if backend.key != *key {
+                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                    }
+                    let request =
+                        crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|_| {
+                            LinuxLedgerError::Ownership(node.id.to_string())
+                        })?;
+                    if request.key() != *key {
+                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                    }
+                }
+                NodeKind::BackendRemoval { .. } => {
                     return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                 }
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}

@@ -79,6 +79,9 @@ pub enum LinuxFileExecutorError {
     #[error("rollback cannot restore `{path}`: {reason}")]
     RollbackDrift { path: String, reason: String },
 
+    #[error("integration refresh failed: {0}")]
+    Refresh(#[from] crate::refresh::RefreshError),
+
     #[error("`{path}` is not a {expected}")]
     UnexpectedKind {
         path: String,
@@ -378,10 +381,19 @@ impl LinuxFileExecutor {
                     Some(_) => Ok(()),
                 }
             }
-            NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+            NodeKind::BackendOperation { .. } => {
+                // The one backend operation this executor answers: regenerating
+                // a derived freedesktop database. The tool must resolve before
+                // anything mutates, and only transactions carrying integration
+                // sources hold such an operation.
+                let request = refresh_request(node)?;
+                crate::refresh::preflight(&request)?;
+                Ok(())
+            }
+            NodeKind::BackendRemoval { .. } => {
                 Err(LinuxFileExecutorError::PlanDrift {
                     path: node.id.to_string(),
-                    reason: "a backend resource is not a file operation".into(),
+                    reason: "a backend removal is not a Linux operation".into(),
                 })
             }
         }
@@ -461,10 +473,18 @@ impl LinuxFileExecutor {
                 }),
             },
             NodeKind::FileRemoval { .. } => self.remove(node),
-            NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+            NodeKind::BackendOperation { .. } => {
+                let request = refresh_request(node)?;
+                crate::refresh::run_refresh(&request)?;
+                Ok(OperationReceipt::Backend {
+                    key: request.key(),
+                    payload: request.encode(),
+                })
+            }
+            NodeKind::BackendRemoval { .. } => {
                 Err(LinuxFileExecutorError::PlanDrift {
                     path: node.id.to_string(),
-                    reason: "a backend resource is not a file operation".into(),
+                    reason: "a backend removal is not a Linux operation".into(),
                 })
             }
         }
@@ -476,7 +496,7 @@ impl LinuxFileExecutor {
     /// operation that mutated something here would defeat the barrier.
     pub fn verify(
         &self,
-        node: &TransactionNode,
+        _node: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), LinuxFileExecutorError> {
         match receipt {
@@ -528,10 +548,21 @@ impl LinuxFileExecutor {
                 }
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { .. } => Err(LinuxFileExecutorError::PlanDrift {
-                path: node.id.to_string(),
-                reason: "a backend receipt is not verified by the file executor".into(),
-            }),
+            OperationReceipt::Backend { payload, .. } => {
+                // A refresh regenerates derived state deterministically, so
+                // verification confirms the tool still resolves and the
+                // database directory still exists. The authoritative files
+                // carry their own verification above.
+                let request = crate::refresh::RefreshRequest::decode(payload)?;
+                crate::refresh::preflight(&request)?;
+                match std::fs::symlink_metadata(&request.directory) {
+                    Ok(metadata) if metadata.is_dir() => Ok(()),
+                    _ => Err(LinuxFileExecutorError::Verification {
+                        path: request.directory.clone(),
+                        reason: "the refreshed database directory is not there".into(),
+                    }),
+                }
+            }
         }
     }
 
@@ -624,10 +655,15 @@ impl LinuxFileExecutor {
                 Ok(())
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { .. } => Err(LinuxFileExecutorError::PlanDrift {
-                path: String::new(),
-                reason: "a backend receipt is not rolled back by the file executor".into(),
-            }),
+            OperationReceipt::Backend { payload, .. } => {
+                // Rollback regenerates from whatever sources exist: the file
+                // rollbacks that follow restore the authoritative state, and
+                // the runner sweeps once more after rollback so the final
+                // on-disk databases always reflect the restored sources.
+                let request = crate::refresh::RefreshRequest::decode(payload)?;
+                crate::refresh::run_refresh(&request)?;
+                Ok(())
+            }
         }
     }
 
@@ -689,7 +725,11 @@ impl LinuxFileExecutor {
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => {
                 Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
             }
-            OperationReceipt::Backend { .. } => Ok(ReconcileResult::Ambiguous),
+            // A refresh is idempotent regeneration with no owned bytes: after
+            // a crash it is re-run rather than reconstructed. Recovery replays
+            // it from the journaled payload, which names the tool and the
+            // database directory.
+            OperationReceipt::Backend { .. } => Ok(ReconcileResult::NotApplied),
         }
     }
 
@@ -722,9 +762,11 @@ impl LinuxFileExecutor {
                 FileDelta::Conflict | FileDelta::Drift => Ok(ReconcileResult::Ambiguous),
             },
             NodeKind::FileRemoval { .. } => self.reconcile_interrupted_removal(node),
-            NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
-                Ok(ReconcileResult::Ambiguous)
-            }
+            // A refresh with no receipt never established anything: it is
+            // re-run on recovery. A backend removal is foreign to this
+            // backend and stays ambiguous.
+            NodeKind::BackendOperation { .. } => Ok(ReconcileResult::NotApplied),
+            NodeKind::BackendRemoval { .. } => Ok(ReconcileResult::Ambiguous),
         }
     }
 
@@ -984,6 +1026,28 @@ impl LinuxFileExecutor {
             size,
         })
     }
+}
+
+/// A refresh request from a backend node's journaled payload.
+fn refresh_request(node: &TransactionNode) -> Result<crate::refresh::RefreshRequest, LinuxFileExecutorError> {
+    let missing = || LinuxFileExecutorError::PlanDrift {
+        path: node.id.to_string(),
+        reason: "a refresh node without its request".into(),
+    };
+    let backend = node.meta.backend.clone().ok_or_else(missing)?;
+    let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
+        LinuxFileExecutorError::PlanDrift {
+            path: node.id.to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    if backend.key != request.key() || backend.id != request.backend_id() {
+        return Err(LinuxFileExecutorError::PlanDrift {
+            path: node.id.to_string(),
+            reason: "a refresh node whose identity is not its request".into(),
+        });
+    }
+    Ok(request)
 }
 
 /// The portable coordinator contract, implemented with Linux semantics.

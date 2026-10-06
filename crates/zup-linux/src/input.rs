@@ -9,12 +9,23 @@
 //! would compile cleanly and then fail at apply time, which is exactly the
 //! install-files-then-fail-on-services outcome the capability boundary exists
 //! to prevent.
+//!
+//! Generated integration files (desktop entries, MIME packages) lower as
+//! ordinary files. When such a file is created, replaced, repaired, or
+//! removed, the derived database it feeds must be regenerated: a typed
+//! refresh operation joins the transaction, ordered after the files by the
+//! transaction graph.
 
+use zup_core::Privilege;
 use zup_exec::{ExecutionPlan, FileOperationKind, OwnedResource};
 use zup_platform::TargetPlan;
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork, TransactionInput,
+    BackendOperation, FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
+    TransactionInput,
 };
+
+use crate::integration::GENERATED_PREFIX;
+use crate::refresh::RefreshRequest;
 
 /// Why an execution plan cannot become a Linux transaction input.
 #[derive(Debug, thiserror::Error)]
@@ -49,7 +60,29 @@ pub fn compile_execution_plan(
     // presenter, which is content without a consumer.
     input.preset = None;
 
+    let mut mime_directory: Option<String> = None;
+    let mut desktop_directory: Option<String> = None;
+
     for file in &execution.files {
+        let source = file.source_relative.as_str();
+        if is_generated_source(source) && !matches!(file.kind, FileOperationKind::NoOp) {
+            let (mime, desktop) = refresh_for_generated(source);
+            if mime {
+                mime_directory = mime_directory.or_else(|| {
+                    file.destination
+                        .parent()
+                        .and_then(|packages| packages.parent())
+                        .map(|directory| directory.to_string())
+                });
+            }
+            if desktop {
+                desktop_directory = desktop_directory.or_else(|| {
+                    file.destination
+                        .parent()
+                        .map(|directory| directory.to_string())
+                });
+            }
+        }
         input.files.push(FileWork {
             key: file.key.clone(),
             source_relative: file.source_relative.clone(),
@@ -89,6 +122,27 @@ pub fn compile_execution_plan(
                 created_directories,
                 ..
             } => {
+                let source = removal
+                    .owned
+                    .source_relative()
+                    .map(|source| source.as_str())
+                    .unwrap_or_default();
+                if is_generated_source(source) {
+                    let (mime, desktop) = refresh_for_generated(source);
+                    if mime {
+                        mime_directory = mime_directory.or_else(|| {
+                            destination
+                                .parent()
+                                .and_then(|packages| packages.parent())
+                                .map(|directory| directory.to_string())
+                        });
+                    }
+                    if desktop {
+                        desktop_directory = desktop_directory.or_else(|| {
+                            destination.parent().map(|directory| directory.to_string())
+                        });
+                    }
+                }
                 input.removals.push(FileRemoval {
                     key: removal.key.clone(),
                     kind: match removal.kind {
@@ -112,6 +166,29 @@ pub fn compile_execution_plan(
         }
     }
 
+    // The derived databases regenerate from the authoritative sources above:
+    // one MIME refresh when a package source changed, one desktop refresh
+    // when a desktop entry changed. No other operation kind reaches this
+    // backend, so these are the only refreshes a Linux transaction can hold.
+    if let Some(directory) = mime_directory {
+        let request = RefreshRequest::mime(&directory);
+        input.backend_operations.push(BackendOperation::apply(
+            request.key(),
+            request.backend_id(),
+            Privilege::User,
+            request.encode(),
+        ));
+    }
+    if let Some(directory) = desktop_directory {
+        let request = RefreshRequest::desktop(&directory);
+        input.backend_operations.push(BackendOperation::apply(
+            request.key(),
+            request.backend_id(),
+            Privilege::User,
+            request.encode(),
+        ));
+    }
+
     for (kind, count) in [
         ("launcher", execution.launchers.len()),
         ("PATH entry", execution.path_entries.len()),
@@ -125,4 +202,19 @@ pub fn compile_execution_plan(
     }
 
     Ok(input)
+}
+
+/// Whether a payload source is generated integration content rather than
+/// package content.
+fn is_generated_source(source: &str) -> bool {
+    source == GENERATED_PREFIX || source.starts_with(&format!("{GENERATED_PREFIX}/"))
+}
+
+/// Which derived database a generated source feeds, by its stable prefix.
+/// Unknown generated names refresh nothing: a future generated kind must opt
+/// into its refresh explicitly rather than inherit one.
+fn refresh_for_generated(source: &str) -> (bool, bool) {
+    let mime = source.starts_with(&format!("{GENERATED_PREFIX}/mime/"));
+    let desktop = source.starts_with(&format!("{GENERATED_PREFIX}/applications/"));
+    (mime, desktop)
 }

@@ -31,6 +31,7 @@ use crate::capabilities::validate_target_plan;
 use crate::carrier::{Carrier, CarrierError};
 use crate::executor::{LinuxFileExecutor, LinuxFileExecutorError};
 use crate::input::{LinuxInputError, compile_execution_plan};
+use crate::integration::{load_generated, save_generated};
 use crate::ledger::{LinuxLedgerError, LinuxLedgerStore};
 use crate::resolve::{LinuxResolveError, resolve_target};
 use crate::snapshot::snapshot_target;
@@ -122,6 +123,9 @@ pub enum LinuxRunError {
 
     #[error("transaction input: {0}")]
     Input(#[from] LinuxInputError),
+
+    #[error("integration: {0}")]
+    Integration(#[from] crate::integration::IntegrationError),
 
     #[error("transaction plan: {0}")]
     Compile(#[from] zup_transaction::TransactionPlanError),
@@ -253,6 +257,13 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
     let input = compile_execution_plan(&execution, &target)?;
     let plan = zup_transaction::compile_transaction(&input)?;
     ledger_store.validate_plan(&target.app.id, request.scope, &target.app.version, &plan)?;
+    // Generated integration bytes are rendered from the manifest, not carried
+    // by the package, so they are persisted beside the state a recovery run
+    // can always read. The render is deterministic, so what recovery serves
+    // is what this run planned.
+    let generated = crate::integration::generated_map(&install)?;
+    save_generated(&state_root, &target.app.id, request.scope, &generated)?;
+    let generated = load_generated(&state_root, &target.app.id, request.scope)?;
 
     let store = FilesystemTransactionStore::new(&state_root);
     let coordinator = TransactionCoordinator::new(store);
@@ -262,7 +273,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
         target.app.version.clone(),
         plan.clone(),
     )?;
-    let payload = RunnerPayload::open(&carrier, &request.installer)?;
+    let payload = RunnerPayload::open(&carrier, &request.installer, generated)?;
     let mut executor = LinuxFileExecutor::new().with_payload(payload);
     executor.register_plan(&plan)?;
     let (record, outcome) = coordinator.execute(record, &mut executor)?;
@@ -288,7 +299,14 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
                 version: ledger.version,
             })
         }
-        TransactionOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+        TransactionOutcome::RolledBack => {
+            // File rollbacks restore the authoritative sources; the derived
+            // databases are regenerated from the restored state here, because
+            // the transaction graph rolls backend nodes back before the files
+            // they derive from.
+            sweep_refresh(&record)?;
+            Ok(LinuxOutcome::RolledBack)
+        }
         TransactionOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
             transaction: record.transaction_id.to_string(),
         }),
@@ -328,7 +346,8 @@ pub fn recover_transaction(
         record.target.executable_suffix(),
     );
     let carrier = Carrier::open(&maintenance)?;
-    let payload = RunnerPayload::open(&carrier, carrier.executable())?;
+    let generated = load_generated(state_root, app_id, scope)?;
+    let payload = RunnerPayload::open(&carrier, carrier.executable(), generated)?;
     let lock_key = InstallationLock::lock_key(app_id.as_str(), scope_token(scope));
     let _lock = match InstallationLock::try_acquire(state_root, &lock_key)? {
         Some(lock) => lock,
@@ -344,7 +363,10 @@ pub fn recover_transaction(
                 version: record.app_version.clone(),
             })
         }
-        TransactionOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+        TransactionOutcome::RolledBack => {
+            sweep_refresh(&record)?;
+            Ok(LinuxOutcome::RolledBack)
+        }
         TransactionOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
             transaction: record.transaction_id.to_string(),
         }),
@@ -395,6 +417,27 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), LinuxRunError> {
         if file_type.is_symlink() {
             return Err(refused(entry.path(), "a state entry is a symbolic link"));
         }
+    }
+    Ok(())
+}
+
+/// Regenerate every derived database a transaction's refresh nodes name.
+///
+/// Runs after rollback, when the authoritative sources are restored but the
+/// transaction graph has already rolled its refresh nodes back. Idempotent by
+/// nature: regenerating from current sources can only converge.
+fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), LinuxRunError> {
+    for node in &record.plan.nodes {
+        let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
+            continue;
+        };
+        let Some(backend) = &node.meta.backend else {
+            continue;
+        };
+        let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
+            LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
+        })?;
+        crate::refresh::run_refresh(&request).map_err(LinuxFileExecutorError::from)?;
     }
     Ok(())
 }
@@ -636,10 +679,15 @@ struct RunnerPayload {
     maintenance: Vec<u8>,
     maintenance_sha256: Sha256Digest,
     maintenance_size: u64,
+    generated: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl RunnerPayload {
-    fn open(carrier: &Carrier, installer: &Path) -> Result<Self, LinuxRunError> {
+    fn open(
+        carrier: &Carrier,
+        installer: &Path,
+        generated: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<Self, LinuxRunError> {
         let maintenance = std::fs::read(installer).map_err(|source| LinuxRunError::Io {
             path: installer.display().to_string(),
             source,
@@ -654,6 +702,7 @@ impl RunnerPayload {
             maintenance,
             maintenance_sha256: sha256,
             maintenance_size: size,
+            generated,
         })
     }
 }
@@ -673,6 +722,19 @@ impl PayloadSource for RunnerPayload {
                 });
             }
             return Ok(Box::new(std::io::Cursor::new(self.maintenance.clone())));
+        }
+        if let Some(bytes) = self.generated.get(path.as_str()) {
+            let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).map_err(|_| {
+                PayloadError::DigestMismatch {
+                    path: path.to_string(),
+                }
+            })?;
+            if sha256 != *expected_sha256 || size != expected_size {
+                return Err(PayloadError::DigestMismatch {
+                    path: path.to_string(),
+                });
+            }
+            return Ok(Box::new(std::io::Cursor::new(bytes.clone())));
         }
         self.package.open(path, expected_sha256, expected_size)
     }
