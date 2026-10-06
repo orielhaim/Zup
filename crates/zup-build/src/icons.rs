@@ -173,7 +173,7 @@ pub(crate) fn pack_linux_icons(
                 reason: error.to_string(),
             }
         })?;
-        let source_relative = RelativePath::new(&format!("__zup_icons__/{}", artifact.name))
+        let source_relative = RelativePath::new(format!("__zup_icons__/{}", artifact.name))
             .map_err(|error| BuildError::PathNotRepresentable {
                 path: artifact.name.clone(),
                 reason: error.to_string(),
@@ -189,7 +189,7 @@ pub(crate) fn pack_linux_icons(
             executable: false,
         });
     }
-    packed.sort_by(|a, b| a.destination.to_string().cmp(&b.destination.to_string()));
+    packed.sort_by_key(|a| a.destination.to_string());
     Ok(packed)
 }
 
