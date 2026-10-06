@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(windows)]
 use crate::dispatcher;
 
 /// The package that produces the runtime templates.
@@ -44,18 +45,33 @@ pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
 /// The three runtime templates, as `(feature, frontend)`.
+///
+/// Windows stages all three; Linux stages console and headless only. A GUI
+/// template on Linux would be a binary whose only behavior is refusing to
+/// run, and staging it would let a build resolve a "Linux GUI runtime" that
+/// cannot install anything.
+#[cfg(windows)]
 pub const FRONTENDS: &[(&str, &str)] = &[
     ("gui", "zup-setup-gui"),
     ("console", "zup-setup-console"),
     ("headless", "zup-setup-headless"),
 ];
 
+/// The runtime templates a Linux host stages: console and headless.
+///
+/// No GUI, no dispatchers, no presets: the Linux Phase 2 installer is a
+/// self-contained binary run directly, not a dispatcher/launcher/preset host.
+#[cfg(not(windows))]
+pub const FRONTENDS: &[(&str, &str)] = &[
+    ("console", "zup-setup-console"),
+    ("headless", "zup-setup-headless"),
+];
+
 /// The four dispatcher images, as `(feature, binary, subsystem)`.
 ///
-/// The `online` flavour is the same source built with a feature, not a separate
-/// binary, and it is named separately in the staging directory because the two
-/// differ by megabytes and a build that measured the wrong one would report a
-/// number nobody could reproduce.
+/// Windows-only: dispatchers are launcher images, and a Linux toolchain has
+/// nothing to dispatch through.
+#[cfg(windows)]
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
     ("online", "zup-dispatch", "gui"),
@@ -137,6 +153,9 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
         written.push(staged_file);
     }
 
+    // Dispatchers are Windows launcher images. A Linux toolchain has nothing
+    // to dispatch through: the installer binary runs directly.
+    #[cfg(windows)]
     for (feature, binary, subsystem) in DISPATCHERS {
         let online = !feature.is_empty();
         let mut args = vec![
@@ -177,18 +196,26 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
         written.push(staged_file);
     }
 
-    let preset = build_and_stage_preset(root, &staged, &version, profile)?;
-    println!("  preset             {}", component_name(&preset));
-    written.push(preset);
+    // Presets, the test peer, and the example plugin are Windows-presentation
+    // machinery: a preset host, a window peer, and a demo plugin. None of them
+    // is part of a Linux console/headless installer, so a Linux toolchain
+    // stages runtimes and stops.
+    #[cfg(windows)]
+    {
+        let preset = build_and_stage_preset(root, &staged, &version, profile)?;
+        println!("  preset             {}", component_name(&preset));
+        written.push(preset);
 
-    let peer = build_and_stage_test_preset(root, &staged, profile)?;
-    println!("  preset-peer        {}", component_name(&peer));
-    written.push(peer);
+        let peer = build_and_stage_test_preset(root, &staged, profile)?;
+        println!("  preset-peer        {}", component_name(&peer));
+        written.push(peer);
 
-    build_example_plugin(root)?;
+        build_example_plugin(root)?;
+    }
     Ok(written)
 }
 
+#[cfg(windows)]
 /// The example plugin, built the way an author builds one.
 ///
 /// Not staged as a toolchain component, because it is not one: nothing an
@@ -196,6 +223,10 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
 /// to be loading something current. Built through `zup plugin build` rather than
 /// by invoking cargo and a componentiser directly, so the path those tests
 /// depend on is the path an author produces.
+///
+/// Windows-only with the rest of the plugin demo machinery: no Linux
+/// installer in this phase plans a plugin.
+#[cfg(windows)]
 fn build_example_plugin(root: &Path) -> Result<(), String> {
     let project = root.join("examples").join("plugins").join("configure");
     if !project.is_dir() {
@@ -224,6 +255,10 @@ fn build_example_plugin(root: &Path) -> Result<(), String> {
 /// that the whole test run is one build: a test that shelled out to cargo would
 /// be a second build inside a build, and two tests doing it at once would race
 /// for the same output.
+///
+/// Windows-only: the test peer is a window the runtime's end-to-end tests
+/// launch, and Linux console/headless installers present no window.
+#[cfg(windows)]
 fn build_and_stage_test_preset(
     root: &Path,
     staged: &Path,
@@ -255,6 +290,9 @@ fn build_and_stage_test_preset(
 /// and a build that consumes it is consuming something a user could have
 /// downloaded. The package carries every target it was built for, so the staged
 /// component is one file rather than one per target.
+///
+/// Windows-only: presets are presented windows, which Linux Phase 2 does not have.
+#[cfg(windows)]
 fn build_and_stage_preset(
     root: &Path,
     staged: &Path,
@@ -308,6 +346,7 @@ fn build_and_stage_preset(
 ///
 /// `-C lto` must not reach RUSTFLAGS: it conflicts with the bitcode settings LTO
 /// needs.
+#[cfg(windows)]
 const LAUNCHER_PROFILE: &[(&str, &str)] = &[
     ("CARGO_PROFILE_RELEASE_LTO", "fat"),
     ("CARGO_PROFILE_RELEASE_OPT_LEVEL", "z"),
@@ -347,11 +386,21 @@ fn output_directory(profile: &str) -> &str {
 }
 
 /// The machine this host is, in the spelling a component file name uses.
+///
+/// The host's own triple, not a guess: a toolchain stages runtimes for the
+/// machine that built them, and a Linux host stages Linux runtimes the same
+/// way a Windows host stages Windows ones.
 fn machine_suffix() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64-pc-windows-msvc"
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-pc-windows-msvc"
+        } else {
+            "x86_64-pc-windows-msvc"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
     } else {
-        "x86_64-pc-windows-msvc"
+        "x86_64-unknown-linux-gnu"
     }
 }
 
@@ -628,7 +677,7 @@ mod tests {
             "the peer is named by the contract crate, so this test would notice it moving"
         );
         let listed = zup_toolchain::host_components(
-            &zup_core::TargetTriple::parse(dispatcher::TARGET).expect("a valid triple"),
+            &zup_core::TargetTriple::parse(machine_suffix()).expect("a valid triple"),
         );
         for component in &listed {
             assert_ne!(
@@ -689,8 +738,8 @@ mod tests {
     /// The stager and the contract must agree on what a host needs.
     ///
     /// `FRONTENDS`, `DISPATCHERS` and `PRESET_PACKAGE` say which cargo
-    /// invocation produces each component; `zup_toolchain::host_components` says
-    /// which components that is. They are two lists because one is a build plan
+    /// invocation produces each component; `supported_components` says which
+    /// components that is. They are two lists because one is a build plan
     /// and the other is a contract, and they are checked against each other here
     /// because a build that stages seven of the eight components succeeds at
     /// staging and fails at the first composition that needs the eighth.
@@ -698,7 +747,7 @@ mod tests {
     fn the_stager_produces_exactly_the_components_the_contract_names() {
         let target = zup_core::TargetTriple::parse(machine_suffix())
             .expect("the host's own target triple is valid");
-        let wanted: Vec<String> = zup_toolchain::host_components(&target)
+        let wanted: Vec<String> = zup_toolchain::supported_components(&target)
             .iter()
             .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
             .collect();
@@ -708,7 +757,13 @@ mod tests {
             .map(|(feature, _)| {
                 zup_toolchain::file_name(&runtime_component(feature), EXECUTABLE_SUFFIX)
             })
-            .chain(DISPATCHERS.iter().map(|(feature, _, subsystem)| {
+            .collect();
+        // Dispatchers and the preset host are Windows launcher machinery: a
+        // Linux toolchain stages runtimes and nothing else, and the contract
+        // above agrees.
+        #[cfg(windows)]
+        {
+            staged.extend(DISPATCHERS.iter().map(|(feature, _, subsystem)| {
                 zup_toolchain::file_name(
                     &zup_toolchain::ToolchainComponent::Dispatcher {
                         subsystem: if *subsystem == "gui" {
@@ -720,12 +775,12 @@ mod tests {
                     },
                     EXECUTABLE_SUFFIX,
                 )
-            }))
-            .chain(std::iter::once(zup_toolchain::file_name(
+            }));
+            staged.push(zup_toolchain::file_name(
                 &zup_toolchain::ToolchainComponent::Preset,
                 EXECUTABLE_SUFFIX,
-            )))
-            .collect();
+            ));
+        }
         staged.sort();
         let mut wanted = wanted;
         wanted.sort();

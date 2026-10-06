@@ -198,6 +198,29 @@ pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponen
     out
 }
 
+/// The components a target's toolchain actually stages.
+///
+/// Windows stages everything: runtimes for every frontend, dispatchers, and
+/// the preset host. Linux stages console and headless runtimes only - no GUI
+/// presenter, nothing to dispatch through, and no preset host exist there, so
+/// staging them would resolve components no build may use.
+pub fn supported_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponent> {
+    if target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+        vec![
+            ToolchainComponent::Runtime {
+                target: target.clone(),
+                frontend: Frontend::Console,
+            },
+            ToolchainComponent::Runtime {
+                target: target.clone(),
+                frontend: Frontend::Headless,
+            },
+        ]
+    } else {
+        host_components(target)
+    }
+}
+
 /// The descriptor written beside a component.
 pub fn descriptor_file_name(component: &ToolchainComponent, executable_suffix: &str) -> String {
     format!(
