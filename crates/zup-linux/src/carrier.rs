@@ -58,6 +58,7 @@
 //! filesystem mutation.
 
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -436,13 +437,21 @@ pub fn compose(
     // manual `chmod` before it could run - which is a build that produces a
     // file it cannot execute. Only permission bits travel: nothing else about
     // the template's metadata is the installer's business.
-    let template_mode = std::fs::symlink_metadata(runtime)
-        .map_err(|error| CarrierError::io(runtime, error))?
-        .permissions()
-        .mode()
-        & 0o777;
-    std::fs::set_permissions(output, std::fs::Permissions::from_mode(template_mode))
-        .map_err(|error| CarrierError::io(output, error))?;
+    //
+    // Unix-only, and deliberately so: the artifact's bytes are authoritative,
+    // and the mode at the final native destination is a separate concern. An
+    // installer composed on Windows is byte-correct; the executable bit is
+    // established when it lands on a Unix filesystem, not from NTFS state.
+    #[cfg(unix)]
+    {
+        let template_mode = std::fs::symlink_metadata(runtime)
+            .map_err(|error| CarrierError::io(runtime, error))?
+            .permissions()
+            .mode()
+            & 0o777;
+        std::fs::set_permissions(output, std::fs::Permissions::from_mode(template_mode))
+            .map_err(|error| CarrierError::io(output, error))?;
+    }
 
     Ok(CarrierFooter {
         version: CARRIER_VERSION,

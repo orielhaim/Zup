@@ -28,21 +28,27 @@
 //! native mechanism
 //! ```
 //!
-//! # This crate is Linux-only
+//! # Where this crate runs
 //!
-//! Every module is gated on the target operating system, so on any other host the
-//! crate compiles to nothing and exports nothing. That is deliberate rather than a
-//! limitation: a backend that answers on a platform it has no mechanisms for would
-//! be a backend whose answers are guesses, and the honest thing for a host without
-//! this backend is to have no symbols to call. The package matrix records the same
-//! fact - `zup-linux` is verified where Linux can be built - so a CI job that wants
-//! to prove anything about this crate has to be a Linux job.
+//! Every mechanism module is gated on the target operating system, so on any
+//! other host the crate compiles to nothing and exports nothing. That is
+//! deliberate rather than a limitation: a backend that answers on a platform
+//! it has no mechanisms for would be a backend whose answers are guesses, and
+//! the honest thing for a host without this backend is to have no symbols to
+//! call. The package matrix records the same fact - `zup-linux` is verified
+//! where Linux can be built - so a CI job that wants to prove anything about
+//! this crate has to be a Linux job.
+//!
+//! The one exception is [`carrier`]. Composing and opening a carrier is bytes,
+//! not mechanism: a Windows build host composes the Linux installer it cannot
+//! run, and inspects one the same way, so the carrier compiles everywhere. Only
+//! the Unix executable bit it preserves is platform-gated, and its absence on a
+//! non-Unix host changes no byte of the artifact.
 
 #![forbid(unsafe_code)]
 
 #[cfg(target_os = "linux")]
 mod capabilities;
-#[cfg(target_os = "linux")]
 mod carrier;
 #[cfg(target_os = "linux")]
 mod executor;
@@ -71,7 +77,6 @@ mod state;
 
 #[cfg(target_os = "linux")]
 pub use capabilities::{LinuxCapabilityError, validate_target_plan};
-#[cfg(target_os = "linux")]
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
 #[cfg(target_os = "linux")]
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, LinuxFileExecutorError};
