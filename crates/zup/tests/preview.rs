@@ -1,5 +1,11 @@
 //! `zup preview`: the application's own window, resolved as a build resolves it.
 //!
+//! Windows-only: previewing presents a window through the Windows preset host,
+//! and the fixtures are Windows GUI projects with PE templates. A Linux
+//! console installer presents no window, so there is nothing to preview there.
+
+#![cfg(windows)]
+//!
 //! Every claim here is about reuse, and reuse is invisible when it is missing, so
 //! each test states the same thing a build would state about the same project and
 //! then checks that the preview says it too.
