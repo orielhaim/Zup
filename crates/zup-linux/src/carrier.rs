@@ -58,6 +58,7 @@
 //! filesystem mutation.
 
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use zup_bundle::{Package, PackageError};
@@ -415,6 +416,19 @@ pub fn compose(
         source: std::io::Error::other(error.to_string()),
     })?;
     let _ = std::fs::remove_file(&temporary);
+
+    // The composed image keeps the runtime's own mode. A template is an
+    // executable, and a published installer that lost the bit would need a
+    // manual `chmod` before it could run - which is a build that produces a
+    // file it cannot execute. Only permission bits travel: nothing else about
+    // the template's metadata is the installer's business.
+    let template_mode = std::fs::symlink_metadata(runtime)
+        .map_err(|error| CarrierError::io(runtime, error))?
+        .permissions()
+        .mode()
+        & 0o777;
+    std::fs::set_permissions(output, std::fs::Permissions::from_mode(template_mode))
+        .map_err(|error| CarrierError::io(output, error))?;
 
     Ok(CarrierFooter {
         version: CARRIER_VERSION,

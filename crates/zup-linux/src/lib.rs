@@ -53,11 +53,15 @@ mod host;
 #[cfg(target_os = "linux")]
 mod input;
 #[cfg(target_os = "linux")]
+mod ledger;
+#[cfg(target_os = "linux")]
 mod locations;
 #[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
 mod resolve;
+#[cfg(target_os = "linux")]
+mod run;
 #[cfg(target_os = "linux")]
 mod snapshot;
 #[cfg(target_os = "linux")]
@@ -83,6 +87,8 @@ pub use host::{
 #[cfg(target_os = "linux")]
 pub use input::{LinuxInputError, compile_execution_plan};
 #[cfg(target_os = "linux")]
+pub use ledger::{LinuxLedgerError, LinuxLedgerStore};
+#[cfg(target_os = "linux")]
 pub use locations::{
     LinuxInstallLocationResolver, LinuxLocationError, user_data_home, user_data_home_in,
     user_programs_root, user_programs_root_in,
@@ -93,6 +99,10 @@ pub use lowering::{
 };
 #[cfg(target_os = "linux")]
 pub use resolve::{LinuxResolveError, resolve_target, resolve_target_for};
+#[cfg(target_os = "linux")]
+pub use run::{
+    LinuxAction, LinuxOutcome, LinuxRunError, LinuxRunRequest, recover_transaction, run,
+};
 #[cfg(target_os = "linux")]
 pub use snapshot::snapshot_target;
 #[cfg(target_os = "linux")]

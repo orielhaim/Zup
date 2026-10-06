@@ -9,8 +9,11 @@ publish = false
 
 [dependencies]
 rustix.workspace = true
+semver.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 typed-path.workspace = true
+uuid.workspace = true
 xdg.workspace = true
 zup-artifact.workspace = true
 zup-binary.workspace = true
@@ -25,5 +28,3 @@ zup-transaction.workspace = true
 rstest.workspace = true
 semver.workspace = true
 tempfile.workspace = true
-zup-platform.workspace = true
-zup-transaction.workspace = true
