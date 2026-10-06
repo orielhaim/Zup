@@ -30,3 +30,4 @@ zup-transaction.workspace = true
 rstest.workspace = true
 semver.workspace = true
 tempfile.workspace = true
+zup-toolchain.workspace = true

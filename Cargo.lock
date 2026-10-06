@@ -12176,6 +12176,7 @@ dependencies = [
  "zup-manifest",
  "zup-plan",
  "zup-platform",
+ "zup-toolchain",
  "zup-transaction",
 ]
 
