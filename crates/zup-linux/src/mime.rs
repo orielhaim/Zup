@@ -17,11 +17,11 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MimeRenderError {
     #[error("MIME comment for `{mime}` cannot be represented: {reason}")]
-    InvalidComment { mime: String, reason: String },
+    Comment { mime: String, reason: String },
     #[error("file extension `{extension}` is not a valid glob extension")]
-    InvalidExtension { extension: String },
+    Extension { extension: String },
     #[error("MIME type `{value}` is not a valid custom type name")]
-    InvalidType { value: String },
+    Type { value: String },
 }
 
 /// One custom file type in the application package.
@@ -43,7 +43,7 @@ pub struct MimeTypeDefinition {
 /// is lossy a hash suffix keeps two identities from sharing one type.
 pub fn mime_type_for(app_id: &str, extension: &str) -> String {
     let app = sanitize(&app_id.to_lowercase());
-    let ext = sanitize(&extension.to_lowercase().trim_start_matches('.'));
+    let ext = sanitize(extension.to_lowercase().trim_start_matches('.'));
     let base = format!("application/x-{app}-{ext}");
     if app == app_id.to_lowercase() && ext == extension.to_lowercase().trim_start_matches('.') {
         return base;
@@ -58,10 +58,7 @@ fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last_dash = true;
     for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-            last_dash = false;
-        } else if matches!(c, '-' | '_' | '.') {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
             out.push(c);
             last_dash = false;
         } else if !last_dash {
@@ -94,7 +91,7 @@ pub fn validate_mime_type(value: &str) -> Result<(), MimeRenderError> {
     if valid {
         Ok(())
     } else {
-        Err(MimeRenderError::InvalidType {
+        Err(MimeRenderError::Type {
             value: value.to_owned(),
         })
     }
@@ -116,12 +113,12 @@ pub fn render_package(definitions: &[MimeTypeDefinition]) -> Result<String, Mime
             || definition.extension.contains(['/', '\\', '\0', '*', '?'])
             || definition.extension.chars().any(char::is_control)
         {
-            return Err(MimeRenderError::InvalidExtension {
+            return Err(MimeRenderError::Extension {
                 extension: definition.extension.clone(),
             });
         }
         let comment =
-            escape_xml(&definition.comment).map_err(|reason| MimeRenderError::InvalidComment {
+            escape_xml(&definition.comment).map_err(|reason| MimeRenderError::Comment {
                 mime: definition.mime_type.clone(),
                 reason: reason.to_owned(),
             })?;

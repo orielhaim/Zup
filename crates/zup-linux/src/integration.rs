@@ -24,7 +24,7 @@
 //!   open"), never default ownership, and that is exactly what `MimeType=`
 //!   plus Shared MIME-info expresses. User preferences are never touched.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use zup_core::{LauncherLocation, ResourceKey, SelectedScope, TargetTriple};
 use zup_plan::InstallPlan;
@@ -226,7 +226,7 @@ pub fn lower_integration_in(
         let mut mime_types = Vec::new();
         let mut executable: Option<String> = None;
         let mut sorted: Vec<_> = plan.file_associations.iter().collect();
-        sorted.sort_by(|a, b| a.extension.to_string().cmp(&b.extension.to_string()));
+        sorted.sort_by_key(|a| a.extension.to_string());
         for association in sorted {
             let target = resolve_install_template(&plan.target, &association.executable)?;
             let text = host_text(&target)?;
@@ -498,7 +498,7 @@ fn resolve_install_template(
     Ok(path)
 }
 
-fn xdg_target(target: &TargetTriple, path: &PathBuf) -> Result<TargetPath, IntegrationError> {
+fn xdg_target(target: &TargetTriple, path: &Path) -> Result<TargetPath, IntegrationError> {
     let text = path.to_string_lossy().into_owned();
     TargetPath::new(target.clone(), &text).map_err(|error| IntegrationError::InvalidPath {
         path: text,

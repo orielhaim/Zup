@@ -309,7 +309,7 @@ pub fn package_bytes_full(
         let (size, sha256) = hash_reader(icon.bytes.as_slice()).expect("an icon hashes");
         resolved.push(ResolvedFile {
             source,
-            source_relative: RelativePath::new(&format!("__zup_icons__/{}", icon.name))
+            source_relative: RelativePath::new(format!("__zup_icons__/{}", icon.name))
                 .expect("an icon name"),
             destination: Template::parse(&format!("${{location.user_data}}/icons/{}", icon.name))
                 .expect("an icon destination"),
@@ -393,6 +393,7 @@ pub fn compose_fixture(
 }
 
 /// Compose an installer carrying the standard integration set.
+#[allow(clippy::too_many_arguments)]
 pub fn compose_integration_fixture(
     scratch: &Path,
     file_name: &str,
