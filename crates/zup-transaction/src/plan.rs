@@ -455,6 +455,7 @@ pub fn compile_transaction(
 
     let mut backend_ids = BTreeMap::new();
     let mut backend_node_ids = Vec::new();
+    let mut backend_removal_ids = std::collections::BTreeSet::new();
     for operation in &input.backend_operations {
         let id = OperationId::resource(
             match operation.intent {
@@ -464,6 +465,9 @@ pub fn compile_transaction(
             &operation.key,
         );
         backend_ids.insert(operation.key.clone(), id.clone());
+        if operation.intent == BackendOperationIntent::Remove {
+            backend_removal_ids.insert(id.clone());
+        }
         let kind = match operation.intent {
             BackendOperationIntent::Apply => NodeKind::BackendOperation {
                 key: operation.key.clone(),
@@ -492,6 +496,7 @@ pub fn compile_transaction(
     }
 
     let mut file_removal_ids = Vec::new();
+    let mut removal_ids_by_key = std::collections::BTreeMap::new();
     for removal in &input.removals {
         if removal.kind == FileRemovalKind::Drift {
             audit.drifted_removals += 1;
@@ -515,6 +520,7 @@ pub fn compile_transaction(
             &mut order,
             &mut nodes,
         );
+        removal_ids_by_key.insert(removal.key.clone(), id.clone());
         file_removal_ids.push(id);
     }
 
@@ -570,7 +576,8 @@ pub fn compile_transaction(
         for dependency in &operation.dependencies {
             let from = backend_ids
                 .get(dependency)
-                .or_else(|| file_ids_by_key.get(dependency));
+                .or_else(|| file_ids_by_key.get(dependency))
+                .or_else(|| removal_ids_by_key.get(dependency));
             let from = from.ok_or_else(|| TransactionPlanError::UnknownDependency {
                 id: format!("{:?}", dependency),
             })?;
@@ -580,17 +587,26 @@ pub fn compile_transaction(
             });
         }
     }
+    // Removals run after the mutations and backend removals they retire.
+    // Backend applies are deliberately not predecessors here: an apply that
+    // must follow removals (regenerating a derived database from the removed
+    // state) says so with an explicit dependency, and a blanket edge would
+    // forbid exactly that ordering as a cycle.
     for file in &file_removal_ids {
-        for predecessor in file_ids
-            .iter()
-            .chain(backend_node_ids.iter())
-            .chain(std::iter::once(&commit_intent))
-        {
+        for predecessor in file_ids.iter().chain(
+            backend_node_ids
+                .iter()
+                .filter(|id| backend_removal_ids.contains(*id)),
+        ) {
             edges.push(Dependency {
                 from: predecessor.clone(),
                 to: file.clone(),
             });
         }
+        edges.push(Dependency {
+            from: commit_intent.clone(),
+            to: file.clone(),
+        });
     }
     let tails = file_ids
         .iter()

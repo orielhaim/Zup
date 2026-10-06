@@ -303,9 +303,16 @@ impl TransactionInput {
                 });
             }
         }
+        // A backend apply may follow removals (regenerating derived state
+        // from the removed world), so removal keys are valid dependencies.
+        let removal_keys: std::collections::BTreeSet<_> =
+            self.removals.iter().map(|removal| &removal.key).collect();
         for operation in &self.backend_operations {
             for dependency in &operation.dependencies {
-                if !backend_keys.contains(dependency) && !file_keys.contains(dependency) {
+                if !backend_keys.contains(dependency)
+                    && !file_keys.contains(dependency)
+                    && !removal_keys.contains(dependency)
+                {
                     return Err(TransactionInputError::UnknownDependency {
                         resource: TransactionResource::key(&operation.key),
                         dependency: TransactionResource::key(dependency),
