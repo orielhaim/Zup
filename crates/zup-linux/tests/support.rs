@@ -10,6 +10,7 @@
 //! Each integration test target compiles its own copy of this module and uses
 //! a different subset, so unused helpers are normal rather than dead code.
 //! The allow keeps one target's subset from failing another's build.
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
 use std::os::unix::fs::PermissionsExt as _;
