@@ -162,6 +162,57 @@ pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveErro
         });
     }
 
+    // Portable integration intent lowers into generated native files here, so
+    // the snapshot, delta, transaction, and ledger below all treat a desktop
+    // entry or MIME package as what it is: a file Zup owns.
+    let integration =
+        crate::integration::lower_integration(plan).map_err(|error| match error {
+            crate::integration::IntegrationError::Unsupported { .. } => {
+                LinuxResolveError::Unsupported {
+                    reasons: error.to_string(),
+                }
+            }
+            crate::integration::IntegrationError::DataHome(source) => {
+                LinuxResolveError::Template {
+                    kind: "XDG data home",
+                    source: zup_platform::TemplateResolveError::InstallLocation(
+                        zup_platform::InstallLocationError::ResolutionFailed {
+                            location: zup_core::InstallLocation::UserData,
+                            scope: plan.scope,
+                            source: Box::new(source),
+                        },
+                    ),
+                }
+            }
+            other => LinuxResolveError::InvalidPath {
+                kind: "integration resource",
+                path: String::new(),
+                reason: other.to_string(),
+            },
+        })?;
+    for generated in &integration.files {
+        install_bytes = install_bytes.saturating_add(generated.size);
+        claim(
+            &generated.destination,
+            "integration destination",
+            OwnedKind::File,
+        )?;
+        files.push(TargetFile {
+            key: generated.key.clone(),
+            source_relative: zup_core::RelativePath::new(&generated.source_relative)
+                .map_err(|_| LinuxResolveError::InvalidPath {
+                    kind: "integration source",
+                    path: generated.source_relative.clone(),
+                    reason: "generated source name is not a relative path".into(),
+                })?,
+            destination: generated.destination.clone(),
+            size: generated.size,
+            sha256: generated.sha256,
+            executable: false,
+            privilege: zup_core::Privilege::User,
+        });
+    }
+
     let file_count = files.len();
     Ok(TargetPlan {
         app: plan.app.clone(),
@@ -227,6 +278,11 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Linu
 
 /// Refuse every active resource this backend has no mechanism for, in one
 /// diagnostic.
+///
+/// Launchers, protocols, and file associations are not refused here: they
+/// lower into generated integration files above, and only the shapes with no
+/// honest mapping (a literal desktop icon, a directory PATH mutation) are
+/// refused by that lowering with their reasons.
 fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
     let mut refused: Vec<String> = Vec::new();
     let mut unsupported = |kind: &str, count: usize| {
@@ -239,10 +295,6 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
         }
     };
     unsupported("service", plan.services.len());
-    unsupported("launcher", plan.launchers.len());
-    unsupported("PATH entry", plan.path_entries.len());
-    unsupported("URI protocol", plan.protocols.len());
-    unsupported("file association", plan.file_associations.len());
     unsupported("package-manager prerequisite", plan.prerequisites.len());
     if plan.scope != SelectedScope::User {
         refused
@@ -402,6 +454,8 @@ mod tests {
             start: zup_core::ServiceStart::Automatic,
             privilege: zup_core::Privilege::System,
         });
+        // A menu launcher is not part of this refusal: it lowers into a
+        // generated desktop entry rather than being refused.
         input.launchers.push(zup_plan::PlannedLauncher {
             key: ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
@@ -418,7 +472,6 @@ mod tests {
         let error = resolve_target(&input).expect_err("services refuse");
         let message = error.to_string();
         assert!(message.contains("service"), "{message}");
-        assert!(message.contains("launcher"), "{message}");
     }
 
     #[test]
