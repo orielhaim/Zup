@@ -460,7 +460,7 @@ impl Inspection<'_> {
             self.manifest_path,
             self.manifest,
             selection,
-            &zup_windows::WindowsSourceFilePolicy,
+            crate::project::source_policy_for(&config.target),
             zup_build::Writes::None,
         ) {
             Ok(build) => PlanOutcome::Ready(Box::new(build)),
@@ -810,7 +810,8 @@ impl TargetChecks<'_> {
             BackendSupport::Ready => self.pass(
                 CheckKind::BuildBackend,
                 format!(
-                    "the implemented Windows backend is ready on this build host for `{target}`"
+                    "the implemented {} backend is ready on this build host for `{target}`",
+                    backend_name(target)
                 ),
                 None,
             ),
@@ -848,7 +849,10 @@ impl TargetChecks<'_> {
                     .join(", ");
                 self.pass(
                     CheckKind::TargetLowering,
-                    format!("Windows lowering resolved for scope(s) {scopes}"),
+                    format!(
+                        "{} lowering resolved for scope(s) {scopes}",
+                        lowering_name(&self.config.target)
+                    ),
                     None,
                 );
             }
@@ -916,6 +920,27 @@ impl TargetChecks<'_> {
                 Some(&output),
             ),
         }
+    }
+}
+
+/// The backend name a readiness report uses for `target`.
+///
+/// The target's own platform, never the build host's: a Windows host building
+/// a Linux target reports on the Linux backend.
+fn backend_name(target: &zup_core::TargetTriple) -> &'static str {
+    match target.operating_system() {
+        zup_core::TargetOperatingSystem::Windows => "Windows",
+        zup_core::TargetOperatingSystem::Linux => "Linux",
+        _ => "platform",
+    }
+}
+
+/// The lowering name a readiness report uses for `target`.
+fn lowering_name(target: &zup_core::TargetTriple) -> &'static str {
+    match target.operating_system() {
+        zup_core::TargetOperatingSystem::Windows => "Windows",
+        zup_core::TargetOperatingSystem::Linux => "Linux",
+        _ => "target",
     }
 }
 

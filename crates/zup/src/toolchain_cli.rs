@@ -656,10 +656,16 @@ fn report(
 }
 
 /// The components a build on this machine can need.
+///
+/// The host's own target triple, answered by the contract's per-target set: a
+/// Windows host needs runtimes, dispatchers, and the preset host, while a
+/// Linux host needs the console and headless runtimes and nothing else.
+/// `host_components` would name eight components on every machine, including
+/// ones no Linux build may use.
 fn host_components() -> Vec<ToolchainComponent> {
     let target = zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
         .expect("the build host's own target triple is valid");
-    zup_toolchain::host_components(&target)
+    zup_toolchain::supported_components(&target)
 }
 
 /// Remove cached toolchains this executable cannot use.
@@ -831,14 +837,35 @@ fn directory_size(directory: &Path) -> u64 {
 mod tests {
     use super::*;
 
-    /// A component's bytes: a PE image that agrees with its descriptor.
+    /// A component's bytes: an image that agrees with its descriptor.
     ///
     /// The resolver reads a component two ways - the descriptor beside it and the
     /// file's own header - and refuses it if either disagrees. A fixture of plain
     /// bytes would pass the first and fail the second, so a test that installed
     /// one and asserted "a build will find it" would be asserting something the
-    /// build refuses.
+    /// build refuses. A Linux runtime gets a header-only ELF with the machine
+    /// the target names; an ELF records no subsystem, so the frontend comes from
+    /// the descriptor alone, exactly as in production.
     fn image(component: &ToolchainComponent) -> Vec<u8> {
+        if let ToolchainComponent::Runtime { target, .. } = component
+            && target.operating_system() == zup_core::TargetOperatingSystem::Linux
+        {
+            let machine: u16 = if target.as_str().starts_with("aarch64") {
+                183
+            } else {
+                62
+            };
+            let mut bytes = vec![0u8; 64];
+            bytes[..4].copy_from_slice(b"\x7fELF");
+            bytes[4] = 2;
+            bytes[5] = 1;
+            bytes[6] = 1;
+            bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+            bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+            bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+            bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
+            return bytes;
+        }
         if let ToolchainComponent::Preset = component {
             // A package, not a PE image, and a real one: the resolver verifies it
             // with the same reader a build consumes it with, so a fixture that
@@ -904,11 +931,17 @@ mod tests {
         let target = zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
             .expect("a valid target");
         let mut index = ToolchainRelease::new(crate::ZUP_VERSION, target.as_str());
-        let cli = root.join(format!("zup{}", std::env::consts::EXE_SUFFIX));
+        // The CLI name carries the host's own suffix, because the release
+        // holds the binary this machine runs.
+        let cli_name = format!("zup{}", std::env::consts::EXE_SUFFIX);
+        let cli = root.join(&cli_name);
         std::fs::write(&cli, b"a cli").expect("write the cli");
-        index.cli = zup_toolchain::ReleaseFile::of("zup.exe", &cli).expect("measure the cli");
-        for component in zup_toolchain::host_components(&target) {
-            let name = zup_toolchain::file_name(&component, std::env::consts::EXE_SUFFIX);
+        index.cli = zup_toolchain::ReleaseFile::of(&cli_name, &cli).expect("measure the cli");
+        // The components this host's builds need, named by each component's
+        // own target suffix: a Linux release holds the two extensionless
+        // runtimes and nothing else.
+        for component in zup_toolchain::supported_components(&target) {
+            let name = zup_toolchain::file_name(&component, component_suffix(&component));
             let path = staged.join(&name);
             std::fs::write(&path, image(&component)).expect("write a component");
             let descriptor =
@@ -951,6 +984,16 @@ mod tests {
 
     fn file_name_of(path: &str) -> String {
         path.rsplit('/').next().expect("a file name").to_owned()
+    }
+
+    /// The suffix a fixture component is stored under: its own target's, never
+    /// the writing host's.
+    fn component_suffix(component: &ToolchainComponent) -> &'static str {
+        match component {
+            ToolchainComponent::Runtime { target, .. } => target.executable_suffix(),
+            ToolchainComponent::Dispatcher { .. } => ".exe",
+            ToolchainComponent::Preset => "",
+        }
     }
 
     /// The cache is the only arm that has a producer, and this is the proof that

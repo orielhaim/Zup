@@ -292,7 +292,7 @@ impl Session {
             installer,
             target,
             &shipped,
-            &zup_windows::WindowsSourceFilePolicy,
+            crate::project::source_policy_for(target),
         )?)
     }
 

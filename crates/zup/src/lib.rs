@@ -24,6 +24,7 @@ pub mod doctor;
 pub mod failure;
 mod init;
 mod inspect_artifact;
+mod linux_support;
 mod manifest_tools;
 mod packages;
 pub mod plugin;
@@ -72,14 +73,28 @@ pub fn command() -> clap::Command {
 ///
 /// A developer's machine has exactly one zup state root per scope, and the
 /// toolchain cache belongs beside everything else zup keeps there rather than in
-/// a directory of its own invention. Fallible rather than defaulted: a cache
-/// search that silently fell back to the working directory would find a
-/// developer's staged toolchain on a colleague's machine and nothing on a
-/// clean one, which reads as a missing component rather than as a machine that
-/// could not name its own directories.
+/// a directory of its own invention. Which root that is depends on the *build
+/// host*, never on the target being built: a Windows host staging a Linux
+/// installer still caches its toolchain in its Windows state root.
 pub fn toolchain_state_root() -> miette::Result<PathBuf> {
-    zup_windows::default_state_root(zup_core::SelectedScope::User)
-        .map_err(|error| failure::error("zup.toolchain.state_root", error.to_string()))
+    host_state_root().map_err(|error| failure::error("zup.toolchain.state_root", error))
+}
+
+/// The developer state root on this build host.
+fn host_state_root() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        zup_windows::default_state_root(zup_core::SelectedScope::User)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        zup_linux::state_root(zup_core::SelectedScope::User).map_err(|error| error.to_string())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Err("this build host has no zup state root".to_owned())
+    }
 }
 
 /// The resolver a build and a readiness report share.
@@ -93,8 +108,19 @@ pub fn resolver(toolchain_root: Option<PathBuf>) -> miette::Result<ToolchainReso
 }
 
 /// A build-machine path, without the Windows verbatim prefix.
+///
+/// The prefix is a Windows API detail, not part of the path, so it is stripped
+/// where the build host is Windows. On any other host a path has no such
+/// prefix and is rendered as written.
 pub fn plain_path(path: &Path) -> String {
-    zup_windows::plain_path_text(path)
+    #[cfg(windows)]
+    {
+        zup_windows::plain_path_text(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
 }
 
 #[cfg(test)]

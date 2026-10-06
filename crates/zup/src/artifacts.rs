@@ -87,6 +87,13 @@ impl ArtifactProfile {
     }
 
     /// The filename this artifact's build writes.
+    ///
+    /// Universal names the Windows dispatcher experience: universal artifacts
+    /// are composed into a dispatcher launcher, which only exists on Windows
+    /// in this phase, so a universal file name is a Windows file name. A
+    /// Linux target never reaches this - it ships one self-contained installer
+    /// per target and composition is refused before naming - which is what
+    /// keeps a portable artifact kind from implying a Linux dispatcher.
     pub fn file_name(&self, app_name: &str, version: &semver::Version) -> String {
         if let Some(output) = &self.output {
             return output.clone();

@@ -33,9 +33,27 @@ use zup_toolchain::{ComponentDescriptor, Subsystem, ToolchainComponent, Toolchai
 /// The environment variable that names a toolchain root.
 pub const TOOLCHAIN_ENV: &str = "ZUP_TOOLCHAIN";
 
-/// The suffix this machine writes executables with, which is part of the name a
-/// component is stored under.
-const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
+/// The executable suffix a component is stored under.
+///
+/// A component is stored under the suffix of the machine it runs on, which is
+/// a property of the component - not of the machine resolving it. A Windows
+/// host resolving a Linux runtime looks for the extensionless name the Linux
+/// toolchain staged; a host suffix here would name a file no composition ever
+/// writes, on every cross-build.
+fn suffix_for(component: &ToolchainComponent) -> &'static str {
+    match component {
+        ToolchainComponent::Runtime { target, .. } => target.executable_suffix(),
+        // Dispatchers are Windows launcher images.
+        ToolchainComponent::Dispatcher { .. } => ".exe",
+        // A package holds every target, so no executable suffix.
+        ToolchainComponent::Preset => "",
+    }
+}
+
+/// The file name a component is stored under, addressed by the component.
+fn file_name_for(component: &ToolchainComponent) -> String {
+    zup_toolchain::file_name(component, suffix_for(component))
+}
 
 /// The directory a staged toolchain lives in, beside the executable.
 pub const STAGED_DIRECTORY: &str = "toolchain";
@@ -140,7 +158,7 @@ impl ToolchainResolver {
         }
         let mut searched = Vec::new();
         for (root, source) in self.roots() {
-            let path = root.join(zup_toolchain::file_name(component, EXECUTABLE_SUFFIX));
+            let path = root.join(file_name_for(component));
             searched.push(path.display().to_string());
             if !path.is_file() {
                 continue;
@@ -404,6 +422,27 @@ mod tests {
             resolver.roots()[1].0,
             state.join("toolchain").join("0.1.0"),
             "the cache is keyed by the exact zup version, so a pinned build is reproducible"
+        );
+    }
+
+    #[test]
+    fn a_component_is_stored_under_its_own_target_suffix() {
+        let linux = runtime_for(
+            &zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("valid"),
+            Frontend::Console,
+        );
+        let name = file_name_for(&linux);
+        assert!(
+            name == "zup-setup-console-x86_64-unknown-linux-gnu",
+            "a Linux template is extensionless even when resolved on a Windows host: {name}"
+        );
+        let windows = runtime_for(
+            &zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
+            Frontend::Console,
+        );
+        assert_eq!(
+            file_name_for(&windows),
+            "zup-setup-console-x86_64-pc-windows-msvc.exe"
         );
     }
 

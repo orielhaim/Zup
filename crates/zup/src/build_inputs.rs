@@ -412,7 +412,14 @@ fn derived_output_path(
 }
 
 /// The default target triple for a new manifest on this build host.
+///
+/// The host's own platform, not a fixed triple: a generated project should
+/// build where it was created. A Linux host gets the one Linux target this
+/// Zup version builds; any other host keeps the Windows default it always had.
 pub fn default_build_target() -> String {
+    if cfg!(target_os = "linux") {
+        return crate::linux_support::SUPPORTED_LINUX_TARGET.to_owned();
+    }
     #[cfg(target_arch = "aarch64")]
     {
         "aarch64-pc-windows-msvc".to_owned()
@@ -495,19 +502,15 @@ pub fn backend_support(target: &TargetTriple) -> BackendSupport {
 
 /// Whether this build host can lower a target for `os`.
 ///
-/// Each platform's own build host, and nothing inferred: a developer CLI that
-/// claimed it could lower a target for a platform it has no backend for would be
-/// claiming a capability the build could not honour.
+/// Composing an installer is bytes, not execution: any host composes a Linux
+/// installer out of a runtime template and a package without running either,
+/// so Linux lowers everywhere its templates resolve. Windows composition runs
+/// Windows-only machinery, so a Windows target still needs a Windows host.
+/// Host-specific behavior stays here; everything target-specific lives in the
+/// capability checks behind [`check_target_lowering`].
 const fn host_can_lower(os: TargetOperatingSystem) -> bool {
-    match os {
-        TargetOperatingSystem::Windows => cfg!(windows),
-        // The Linux backend exists and this phase implements its foundation, but a
-        // *build* needs the carrier and executor composition that Phase 2 owns, so
-        // an unprivileged Linux host is reported as a backend it cannot lower for
-        // rather than as a host that can.
-        TargetOperatingSystem::Linux => false,
-        _ => false,
-    }
+    matches!(os, TargetOperatingSystem::Linux)
+        || (matches!(os, TargetOperatingSystem::Windows) && cfg!(windows))
 }
 
 /// The portable name of a target platform, for a diagnostic that has to say which.
@@ -539,12 +542,62 @@ pub fn check_backend_support(config: &ResolvedTargetConfig) -> miette::Result<()
     }
 }
 
-/// Whether Windows target lowering resolves for every install scope of a target.
+/// Whether target lowering resolves for every install scope of a target.
+///
+/// The dispatch is on the *target's* operating system, never on the build
+/// host's: a Windows host building a Linux target takes the Linux arm, and a
+/// Linux host asked about a Windows target takes the Windows arm. Host
+/// behavior (which template bytes, which syscalls) stays behind the
+/// composition each arm calls; the decision of which arm answers is purely
+/// about what is being built.
 pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
     check_backend_support(config)?;
+    match config.target.operating_system() {
+        TargetOperatingSystem::Linux => check_linux_lowering(build, config),
+        _ => check_windows_lowering(build, config),
+    }
+}
+
+/// Prove a Linux target lowers, on any build host.
+///
+/// The capability check reads the portable installer IR and the materialized
+/// plan, so a Windows host answers the same question a Linux host answers. On
+/// a Linux host the portable answer is then confirmed by the real thing: the
+/// semantic plan lowers through the Linux backend exactly as an install would.
+/// A cross host cannot run that confirmation, and does not need to: nothing it
+/// confirms is about the bytes being composed.
+fn check_linux_lowering(
+    build: &zup_build::BuildPlan,
+    config: &ResolvedTargetConfig,
+) -> miette::Result<Vec<SelectedScope>> {
+    let plan = build
+        .target_by_triple(&config.target)
+        .ok_or_else(|| miette::miette!("no materialized plan for target `{}`", config.target))?;
+    let errors = crate::linux_support::linux_capability_errors(config, plan);
+    if !errors.is_empty() {
+        return Err(miette::miette!("{}", errors.join("\n")));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let request = zup_plan::PlanRequest::new(config.target.clone(), SelectedScope::User);
+        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
+            miette::miette!("semantic plan for target `{}`: {error}", config.target)
+        })?;
+        zup_linux::resolve_target(&install).map_err(|error| {
+            miette::miette!("Linux lowering for target `{}`: {error}", config.target)
+        })?;
+    }
+    Ok(vec![SelectedScope::User])
+}
+
+/// Whether Windows target lowering resolves for every install scope of a target.
+fn check_windows_lowering(
+    build: &zup_build::BuildPlan,
+    config: &ResolvedTargetConfig,
+) -> miette::Result<Vec<SelectedScope>> {
     let scopes = match config.install.scope {
         zup_core::InstallScope::User => vec![SelectedScope::User],
         zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
@@ -665,16 +718,14 @@ mod tests {
             );
         }
 
-        // Linux is a platform an implemented backend now owns, which is a different
-        // answer from "no backend answers for this" and must not be reported as it.
+        // Linux is a platform an implemented backend owns on every build host:
+        // composing a Linux installer is bytes, not execution, so any host that
+        // resolves a runtime template lowers the target.
         let linux_support = backend_support(&linux);
-        assert_eq!(linux_support, BackendSupport::HostBackendUnavailable);
+        assert_eq!(linux_support, BackendSupport::Ready);
         assert!(
-            linux_support
-                .reason(&linux)
-                .unwrap()
-                .contains("requires a linux build host"),
-            "the reason names the platform the target belongs to"
+            linux_support.reason(&linux).is_none(),
+            "a ready backend has no reason"
         );
     }
 

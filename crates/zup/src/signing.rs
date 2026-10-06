@@ -57,11 +57,13 @@ use std::path::{Path, PathBuf};
 use zup_automation::{
     AutomationResult, ByteCount, Details, Diagnostic, Digest, Identifier, LogLevel, SignSubject,
 };
+#[cfg(windows)]
+use zup_signing::TimestampRequirement;
 use zup_signing::{
     Measured as FileMeasured, SIGNING_PLAN_NAME, SigningPlan, SigningReason, SigningRole,
-    SigningStage, SigningStep, SigningSubject, TimestampRequirement, covers_bytes, publisher,
-    timestamp,
+    SigningStage, SigningStep, SigningSubject, covers_bytes, publisher, timestamp,
 };
+#[cfg(windows)]
 use zup_windows::signing::{SignaturePolicy, Timestamp};
 
 use crate::cli::{SignPrepareCommand, SignVerifyCommand};
@@ -341,6 +343,10 @@ fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, 
 ///
 /// The two vocabularies state the same requirements, and this is the one place
 /// they are translated, so a new field has to be answered twice or not at all.
+///
+/// Windows-only: only Authenticode verification reads the policy, and only a
+/// Windows host performs it.
+#[cfg(windows)]
 fn policy(plan: &SigningPlan, online_revocation: bool) -> SignaturePolicy {
     SignaturePolicy {
         require_trusted_chain: plan.requirement.trusted_chain,
@@ -363,11 +369,46 @@ struct Finding {
     measured: Option<(zup_core::Sha256Digest, u64)>,
 }
 
+/// Whether a signing step belongs to Linux installers only.
+///
+/// Resolved through the release description rather than the file: an outer
+/// artifact names its path, a pre-compose runtime names its variant, and the
+/// release says which targets those are. An unresolvable subject is not Linux,
+/// so the Windows verification path reports what is wrong with it instead of
+/// this one claiming it.
+fn step_is_linux(release: &zup_artifact::ReleaseManifest, step: &SigningStep) -> bool {
+    let mut targets = Vec::new();
+    if step.role == SigningRole::OuterArtifact {
+        if let Some(artifact) = release
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == step.subject.path)
+        {
+            for variant in &artifact.variants {
+                if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
+                    targets.push(entry.target.clone());
+                }
+            }
+        }
+    } else {
+        for variant in &step.subject.variants {
+            if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
+                targets.push(entry.target.clone());
+            }
+        }
+    }
+    !targets.is_empty()
+        && targets
+            .iter()
+            .all(|target| target.operating_system() == zup_core::TargetOperatingSystem::Linux)
+}
+
 /// Verify every signature and finalize the release description.
 pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let mut release = read_manifest(&root)?;
     let plan = read_plan(&root)?;
+    #[cfg(windows)]
     let policy = policy(&plan, args.online_revocation);
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -375,10 +416,86 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
     // digests kept, because step 5 compares them against what an artifact
     // actually embeds. A runtime discovered later in the list is still verified
     // before any artifact is finalized: the plan's order is the order.
+    //
+    // Windows-only map: only Authenticode verification records signed digests,
+    // and only a Windows host performs it.
+    #[cfg(windows)]
     let mut signed_runtimes: std::collections::BTreeMap<String, zup_core::Sha256Digest> =
         std::collections::BTreeMap::new();
     for file in &plan.steps {
+        #[cfg(windows)]
         let path = file.subject.resolve(&root);
+        // A Linux installer has no platform-native signature in this phase, so
+        // there is nothing to verify and pretending to check would be a dummy
+        // signer. Its authenticity is its artifact digest and release identity,
+        // which finalization records. `--allow-unsigned` finalizes those measured
+        // bytes; without it the finding says exactly that instead of "failed".
+        if step_is_linux(&release, file) {
+            // Without `--allow-unsigned` nothing is measured or recorded: the
+            // finding is the refusal, and the release stays unfinalized.
+            if !args.allow_unsigned {
+                findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: "this Linux installer carries no platform-native signature: its \
+                             artifact digest and release identity are its authenticity; re-run \
+                             with `--allow-unsigned` to finalize the measured bytes"
+                        .to_owned(),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                });
+                continue;
+            }
+            match unsigned_finalize(&mut release, &root, file) {
+                Ok(detail) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail,
+                    ok: true,
+                    measured: measured_of(&root, file),
+                }),
+                Err(problem) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: format!("it cannot be finalized unsigned: {problem}"),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                }),
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
+        {
+            // Authenticode verification answers about the Windows trust store,
+            // which only a Windows host has. Measuring and finalizing unsigned
+            // bytes is portable, so `--allow-unsigned` works the same as on
+            // Windows; anything else is a refusal about the host, not the file.
+            if !args.allow_unsigned {
+                findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: "signature verification for this Windows artifact requires a \
+                             Windows build host; re-run with `--allow-unsigned` to finalize \
+                             the measured bytes instead"
+                        .to_owned(),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                });
+                continue;
+            }
+            match unsigned_finalize(&mut release, &root, file) {
+                Ok(detail) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail,
+                    ok: true,
+                    measured: measured_of(&root, file),
+                }),
+                Err(problem) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: format!("it cannot be finalized unsigned: {problem}"),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                }),
+            }
+            continue;
+        }
+        #[cfg(windows)]
         match zup_windows::signing::verify(&path, &policy) {
             Ok(verified) => {
                 let measured = FileMeasured::of(&path).map_err(|error| {
@@ -463,6 +580,22 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
         if !path.is_file() {
             continue;
         }
+        // Reading a runtime back out of a dispatcher artifact is Windows
+        // composition machinery. A Linux release never embeds one, so this
+        // pass is empty for it; a composed Windows artifact verified anywhere
+        // else cannot prove its embedded runtime here.
+        #[cfg(not(windows))]
+        if !plan.embeds(step).is_empty() {
+            findings.push(Finding {
+                path: step.subject.path.clone(),
+                detail: "this composed artifact embeds a native runtime that can only be proven \
+                         on a Windows build host"
+                    .to_owned(),
+                ok: false,
+                measured: measured_of(&root, step),
+            });
+        }
+        #[cfg(windows)]
         for embedded in plan.embeds(step) {
             let runtime_path = embedded.subject.path.clone();
             let Some(signed) = signed_runtimes.get(&runtime_path) else {
@@ -646,14 +779,44 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
     let unsigned = release.unsigned();
     reporter.log(LogLevel::Info, finalize_text(&release, &unsigned, &path));
     if !unsigned.is_empty() {
+        // SmartScreen is a Windows statement about Windows artifacts. A Linux
+        // installer carries no platform-native signature by design, so warning
+        // about SmartScreen for one would be noise about another platform.
+        let all_linux = unsigned.iter().all(|id| {
+            release
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == *id)
+                .is_some_and(|artifact| {
+                    artifact.variants.iter().all(|variant| {
+                        release
+                            .variants
+                            .iter()
+                            .find(|entry| entry.id == *variant)
+                            .is_some_and(|entry| {
+                                entry.target.operating_system()
+                                    == zup_core::TargetOperatingSystem::Linux
+                            })
+                    })
+                })
+        });
         reporter.log(
             LogLevel::Warning,
-            format!(
-                "\n! {} artifact(s) are unsigned: {}\n  Windows SmartScreen will warn about them. \
-                 See docs/signing.md.",
-                unsigned.len(),
-                unsigned.join(", ")
-            ),
+            if all_linux {
+                format!(
+                    "\n! {} artifact(s) carry no platform-native signature: {}\n  Linux \
+                     installers are authenticated by their artifact digest and release identity.",
+                    unsigned.len(),
+                    unsigned.join(", ")
+                )
+            } else {
+                format!(
+                    "\n! {} artifact(s) are unsigned: {}\n  Windows SmartScreen will warn about them. \
+                     See docs/signing.md.",
+                    unsigned.len(),
+                    unsigned.join(", ")
+                )
+            },
         );
     }
     result = result.with_details(Details::SignVerify(zup_automation::SignVerifyDetails {
@@ -732,6 +895,7 @@ fn measured_of(root: &Path, step: &SigningStep) -> Option<(zup_core::Sha256Diges
 /// chosen from the words rather than parsed out of a string. Anything unrecognised
 /// falls back to `zup.signing.failed`, which is still better than a code per possible
 /// platform message.
+#[cfg(windows)]
 fn signing_diagnostic_code(
     error: &zup_windows::signing::VerificationError,
 ) -> Option<&'static str> {
@@ -757,6 +921,18 @@ fn signing_diagnostic_code(
 /// different policy would be a second opinion from a laxer question. What is
 /// wanted here is the *evidence* about a file whose signature has already been
 /// accepted, not a fresh decision about whether to accept it.
+///
+/// Windows-only: Authenticode evidence comes from the platform. Anywhere else
+/// there is no signature to read evidence from, so there is none.
+#[cfg(not(windows))]
+fn signed_evidence_of(
+    _root: &Path,
+    _step: &SigningStep,
+) -> Option<Vec<zup_signing::SigningEvidence>> {
+    None
+}
+
+#[cfg(windows)]
 fn signed_evidence_of(
     root: &Path,
     step: &SigningStep,
@@ -814,6 +990,7 @@ fn unsigned_finalize(
     ))
 }
 
+#[cfg(windows)]
 fn timestamp_text(timestamp: Timestamp) -> &'static str {
     match timestamp {
         Timestamp::Rfc3161 => "RFC 3161 timestamp",
@@ -842,6 +1019,10 @@ fn artifact_id(release: &zup_artifact::ReleaseManifest, path: &str) -> miette::R
 /// Read out of the artifact rather than taken from the release description,
 /// because the question is what the bytes are, not what anybody claimed about
 /// them. A resource-addressed store is the only place they exist.
+///
+/// Windows-only: only a dispatcher artifact embeds a runtime this way, and only
+/// a Windows host composes one.
+#[cfg(windows)]
 fn embedded_runtime_digest(
     artifact: &Path,
     variant: &str,
@@ -896,6 +1077,10 @@ mod tests {
     /// A production requirement is the only one that may demand a trusted chain
     /// and a real TSA. Nothing in a test can prove a signature verifies, so the
     /// property pinned here is the policy those two booleans drive.
+    ///
+    /// Windows-only: the policy is the Authenticode verification policy, which
+    /// only a Windows host applies.
+    #[cfg(windows)]
     #[test]
     fn a_production_requirement_becomes_a_production_policy() {
         let policy = policy(
@@ -912,6 +1097,9 @@ mod tests {
     /// TSA - so it cannot produce a policy that demands a timestamp it has already
     /// stopped requiring. The two old flags could be passed separately and reach
     /// that contradiction; the single `TimestampRequirement` cannot.
+    ///
+    /// Windows-only, with the production case above.
+    #[cfg(windows)]
     #[test]
     fn a_development_requirement_relaxes_the_whole_timestamp_rule() {
         let policy = policy(&plan(zup_signing::SigningRequirement::development()), false);

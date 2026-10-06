@@ -23,6 +23,7 @@ use zup_automation::{
     Artifact, AutomationResult, ByteCount, Details, LogLevel, Publication, PublishStageDetails,
     StagedPackage,
 };
+#[cfg(windows)]
 use zup_core::InstallScope;
 
 use crate::cli::{PublishGithubCommand, PublishStageCommand};
@@ -69,7 +70,7 @@ pub fn run_stage(
         let mut natives = if thin {
             vec![(
                 zup_artifact::MediaType::RUNTIME,
-                plan_only_runtime(&runtimes[index], plan)?,
+                plan_only_runtime(&runtimes[index], plan, config)?,
             )]
         } else {
             let path = &runtimes[index];
@@ -281,18 +282,44 @@ fn resolve_runtimes(
 /// The plan is *proved* here - every declared file is read and checked against
 /// its own size and digest - so a plan whose files do not exist is refused at
 /// publish time rather than at install time on a user's machine.
+///
+/// Windows-only machinery: a thin runtime is a plan-only PE with an online
+/// dispatcher, and neither exists for Linux in this phase.
 fn plan_only_runtime(
     template: &Path,
     plan: &zup_build::TargetBuildPlan,
+    config: &zup_core::ResolvedTargetConfig,
 ) -> miette::Result<Vec<u8>> {
-    zup_windows::plan_only_runtime_bytes(template, plan, &[])
-        .map(|(bytes, _)| bytes)
-        .map_err(|error| {
-            crate::failure::error(
-                "zup.publish.thin_runtime_failed",
-                format!("building the thin runtime: {error}"),
-            )
-        })
+    if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+        return Err(crate::failure::error_with_help(
+            "zup.publish.linux_thin_unsupported",
+            format!(
+                "thin releases are not supported for Linux target `{}` (`{}`): the Linux \
+                 backend ships self-contained installers with no online launcher",
+                config.profile, config.target
+            ),
+            "Publish without `--thin`.",
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (template, plan);
+        Err(crate::failure::error(
+            "zup.publish.unsupported_host",
+            "building a thin runtime requires a Windows build host",
+        ))
+    }
+    #[cfg(windows)]
+    {
+        zup_windows::plan_only_runtime_bytes(template, plan, &[])
+            .map(|(bytes, _)| bytes)
+            .map_err(|error| {
+                crate::failure::error(
+                    "zup.publish.thin_runtime_failed",
+                    format!("building the thin runtime: {error}"),
+                )
+            })
+    }
 }
 
 /// Write the two thin installers.
@@ -304,6 +331,55 @@ fn plan_only_runtime(
 /// Everything else about them is identical, which is the point: they are one
 /// artifact with two promises, not two artifacts.
 fn stage_thin_installers(
+    args: &PublishStageCommand,
+    loaded: &LoadedProject,
+    variants: &[&zup_artifact::DistributionVariant],
+    tree: &Path,
+    resolver: &ToolchainResolver,
+    reporter: &Reporter,
+) -> miette::Result<Vec<Artifact>> {
+    // Thin installers are dispatcher artifacts, which the Linux backend has no
+    // equivalent of. Refused before the updates check so a Linux project hears
+    // the categorical answer rather than a missing-section one.
+    if let Some(config) = loaded
+        .selected_targets
+        .iter()
+        .find(|config| config.target.operating_system() == zup_core::TargetOperatingSystem::Linux)
+    {
+        return Err(crate::failure::error_with_help(
+            "zup.publish.linux_thin_unsupported",
+            format!(
+                "thin installers are not supported for Linux target `{}` (`{}`): the Linux \
+                 backend ships self-contained installers with no online launcher",
+                config.profile, config.target
+            ),
+            "Publish without `--thin`.",
+        ));
+    }
+    // The host refusal comes after the target one: on a Linux host staging a
+    // Linux thin installer, the categorical answer above is the one that
+    // matters, and this one only answers for Windows targets elsewhere.
+    #[cfg(windows)]
+    {
+        stage_thin_windows(args, loaded, variants, tree, resolver, reporter)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (args, loaded, variants, tree, resolver, reporter);
+        Err(crate::failure::error(
+            "zup.publish.unsupported_host",
+            "staging thin installers requires a Windows build host",
+        ))
+    }
+}
+
+/// The Windows thin installers: dispatcher artifacts with an online launcher.
+///
+/// Windows-only machinery, so this is a separate function rather than a
+/// branch: a non-Windows host never compiles it, and the dispatcher above
+/// stays the one place that decides which host answers.
+#[cfg(windows)]
+fn stage_thin_windows(
     args: &PublishStageCommand,
     loaded: &LoadedProject,
     variants: &[&zup_artifact::DistributionVariant],
@@ -445,12 +521,17 @@ fn stage_thin_installers(
                 |resolved| Ok(resolved.path),
             )?;
         let file = output.join(&graph.index().artifact.output);
+        #[cfg(windows)]
         zup_windows::compose_universal_executable(&dispatcher, &file, &graph).map_err(|error| {
             crate::failure::error(
                 "zup.publish.thin_unwritable",
                 format!("`{}`: {error}", file.display()),
             )
         })?;
+        #[cfg(not(windows))]
+        {
+            let _ = (&dispatcher, &file, &graph);
+        }
         crate::build::stamp_application_icon(&file, &loaded.build)?;
         written.push((label, file));
     }

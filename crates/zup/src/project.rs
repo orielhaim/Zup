@@ -11,6 +11,76 @@ use zup_toolchain::ToolchainComponent;
 
 use crate::toolchain::ToolchainResolver;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
+use zup_platform::SourceFilePolicy;
+
+#[cfg(windows)]
+static WINDOWS_SOURCE_POLICY: zup_windows::WindowsSourceFilePolicy =
+    zup_windows::WindowsSourceFilePolicy;
+#[cfg(target_os = "linux")]
+static LINUX_SOURCE_POLICY: zup_linux::LinuxSourceFilePolicy = zup_linux::LinuxSourceFilePolicy;
+static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
+    zup_platform::PortableSourceFilePolicy;
+
+/// The source-inspection policy for one target.
+///
+/// A property of the target being built *and* the host reading the tree. A
+/// Linux target read on a Linux host gets the Linux policy with its
+/// special-file refusal; the same target read on another host gets the
+/// portable policy, which still refuses links through `std::fs` (and there are
+/// no FIFOs on NTFS to miss). A Windows target keeps the Windows reparse-point
+/// policy where it exists, and the portable one where no Windows host is doing
+/// the reading.
+pub fn source_policy_for(target: &zup_core::TargetTriple) -> &'static dyn SourceFilePolicy {
+    match target.operating_system() {
+        zup_core::TargetOperatingSystem::Linux => {
+            #[cfg(target_os = "linux")]
+            {
+                &LINUX_SOURCE_POLICY
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &PORTABLE_SOURCE_POLICY
+            }
+        }
+        _ => {
+            #[cfg(windows)]
+            {
+                &WINDOWS_SOURCE_POLICY
+            }
+            #[cfg(not(windows))]
+            {
+                &PORTABLE_SOURCE_POLICY
+            }
+        }
+    }
+}
+
+/// The source-inspection policy for one materialization.
+///
+/// One policy covers the whole selection, so a mixed Windows-plus-Linux
+/// selection takes the Windows policy where a Windows host is reading: it
+/// refuses every reparse point the portable one sees and more, which is safe
+/// for a Linux tree that cannot hold the one thing the Linux policy adds
+/// (special files do not exist on the reading host). An all-Linux selection
+/// gets the Linux policy where it exists.
+pub fn source_policy_for_selection(
+    targets: &[ResolvedTargetConfig],
+) -> &'static dyn SourceFilePolicy {
+    let all_linux = targets
+        .iter()
+        .all(|target| target.target.operating_system() == zup_core::TargetOperatingSystem::Linux);
+    if all_linux && !targets.is_empty() {
+        return source_policy_for(&targets[0].target);
+    }
+    #[cfg(windows)]
+    {
+        &WINDOWS_SOURCE_POLICY
+    }
+    #[cfg(not(windows))]
+    {
+        &PORTABLE_SOURCE_POLICY
+    }
+}
 
 use zup_core::Frontend;
 
@@ -271,7 +341,19 @@ pub fn materialize_project(
     let mut compiled = Vec::with_capacity(selected_targets.len());
     let mut ui_assets = BTreeMap::new();
     let mut executables = Vec::with_capacity(selected_targets.len());
+    let policy = source_policy_for_selection(&selected_targets);
     for config in &selected_targets {
+        // A Linux GUI target never reaches preset resolution: there is no Linux
+        // GUI runtime to present a window with, and the preset machinery would
+        // otherwise report a missing package where the real answer is an
+        // unsupported frontend.
+        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
+            && config.frontend == Frontend::Gui
+        {
+            let errors =
+                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            return Err(miette::miette!("{}", errors.join("\n")));
+        }
         let mut installer =
             zup_manifest::compile(&manifest, config, overrides.get(&config.profile)).map_err(
                 |error| miette::Report::new(error.with_source_named(&source, &manifest_name)),
@@ -294,7 +376,7 @@ pub fn materialize_project(
                 &installer,
                 &config.target,
                 &shipped,
-                &zup_windows::WindowsSourceFilePolicy,
+                policy,
             )
             .map_err(preset_problem)?;
             installer.preset = Some(resolved.runtime);
@@ -311,7 +393,7 @@ pub fn materialize_project(
         &manifest,
         compiled,
         &ui_assets,
-        &zup_windows::WindowsSourceFilePolicy,
+        policy,
         writes,
     )
     .map_err(miette::Report::new)?;
@@ -376,9 +458,20 @@ pub fn load_for_build(
 ) -> miette::Result<LoadedProject> {
     let selected = select_project(path, selectors, args, false)?;
     // The backend boundary reads no files, so an unsupported target is refused
-    // before the source tree is walked and prerequisites are resolved.
+    // before the source tree is walked and prerequisites are resolved. The
+    // Linux selection check joins it here: a target or frontend Linux cannot
+    // build is known from selection alone, and refusing it here - rather than
+    // in preset resolution - is what reports "no GUI runtime" instead of a
+    // missing preset.
     for config in &selected.selected_targets {
         crate::build_inputs::check_backend_support(config)?;
+        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+            let errors =
+                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            if !errors.is_empty() {
+                return Err(miette::miette!("{}", errors.join("\n")));
+            }
+        }
     }
     let loaded = materialize_project(selected, resolver, writes)?;
     for config in &loaded.selected_targets {

@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use zup_artifact::ArtifactError;
 use zup_automation::{Application, AutomationResult, Details, LogLevel, Target};
+#[cfg(windows)]
 use zup_windows::UniversalArtifact;
 
 use crate::report::Reporter;
@@ -104,10 +105,15 @@ pub struct InspectedTrust {
 pub enum InspectError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
+    #[cfg(windows)]
     #[error(transparent)]
     Universal(#[from] zup_windows::UniversalError),
     #[error(transparent)]
     Portable(#[from] zup_pe::PeError),
+    #[error(transparent)]
+    Package(#[from] zup_bundle::PackageError),
+    #[error(transparent)]
+    Carrier(#[from] zup_linux::CarrierError),
     #[error("artifact I/O: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -154,8 +160,106 @@ pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<Automatio
 }
 
 /// Read one artifact and describe it.
+///
+/// A dispatcher artifact is read the way the machine that has to install it
+/// reads it. A Linux self-contained installer is a carrier, not a dispatcher
+/// artifact, and is read the way its own runtime opens it: footer, package
+/// digest, package, and image/target pairing.
 pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
-    let artifact = UniversalArtifact::open(path)?;
+    #[cfg(windows)]
+    {
+        Ok(match UniversalArtifact::open(path) {
+            Ok(artifact) => inspect_composed(path, &artifact)?,
+            // Not a dispatcher artifact: it may still be a Linux carrier, which
+            // is read below. The dispatcher error is kept for the report when it
+            // is neither.
+            Err(first) => match inspect_carrier(path) {
+                Ok(inspection) => inspection,
+                Err(_) => return Err(InspectError::Universal(first)),
+            },
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        inspect_carrier(path)
+    }
+}
+
+/// Read one Linux self-contained installer and describe it.
+///
+/// Opening the carrier verifies it completely - footer, package digest,
+/// package parse, and image/target pairing - so a report never describes an
+/// installer its own runtime would refuse.
+fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
+    let carrier = zup_linux::Carrier::open(path)?;
+    let plan = carrier
+        .package()
+        .build_plan()?
+        .targets
+        .into_iter()
+        .next()
+        .ok_or(InspectError::Package(zup_bundle::PackageError::Invalid))?;
+    let installer = &plan.installer;
+    let file_size = std::fs::metadata(path)?.len();
+    let target_matches_binary = match zup_binary::Executable::read(path) {
+        Err(error) => format!("unreadable: {error}"),
+        Ok(runtime) => match runtime.refuse_target(&installer.target) {
+            Ok(()) => "matches".to_owned(),
+            Err(error) => format!("mismatch: {error}"),
+        },
+    };
+    let pin = zup_artifact::ArtifactPin::Pinned {
+        version: installer.app.version.clone(),
+    };
+    Ok(Inspection {
+        artifact: crate::automation::release_path(&crate::plain_path(path)),
+        application: installer.app.name.to_string(),
+        application_version: installer.app.version.to_string(),
+        kind: zup_artifact::ArtifactKind::Single.as_str().to_owned(),
+        mode: zup_artifact::ArtifactMode::Offline.as_str().to_owned(),
+        pin: pin.label(),
+        subsystem: zup_artifact::frontend_subsystem(installer.frontend)
+            .as_str()
+            .to_owned(),
+        variants: vec![InspectedVariant {
+            id: installer.target.to_string(),
+            target: installer.target.to_string(),
+            frontend: installer.frontend.as_str().to_owned(),
+            logical_size: plan.total_size,
+            file_count: plan.files.len() as u64,
+            prerequisite_count: plan.prerequisites.len() as u64,
+            plugin_count: plan.plugins.len() as u64,
+            native_execution: false,
+            target_matches_binary,
+        }],
+        content: InspectedContent {
+            logical_size: plan.total_size,
+            stored_size: plan.total_size,
+            content_size: plan.total_size,
+            shared_size: 0,
+            exclusive_size: plan.total_size,
+            unique_blob_count: carrier.package().blob_count() as u64,
+            file_size,
+        },
+        trust: InspectedTrust {
+            authenticode: "not applicable: a Linux installer carries no Authenticode structure"
+                .to_owned(),
+            index: "valid".to_owned(),
+            content_digests: "valid".to_owned(),
+            variants: "valid".to_owned(),
+        },
+    })
+}
+
+/// Read one dispatcher artifact and describe it.
+///
+/// Every content digest is verified, so a report never describes content the
+/// artifact cannot actually produce.
+#[cfg(windows)]
+fn inspect_composed(
+    path: &std::path::Path,
+    artifact: &UniversalArtifact,
+) -> Result<Inspection, InspectError> {
     let index = artifact.index();
     let table = artifact.view().table();
     let store = artifact.view().store();
@@ -256,6 +360,10 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
 /// `zup sign verify`'s question, which asks the platform. So this reports
 /// "digest matches" and never "signed" - a word that would be read as a claim
 /// about a trust store this command never consulted.
+///
+/// Windows-only: only dispatcher artifacts carry a certificate table, and only
+/// a Windows host composes one.
+#[cfg(windows)]
 fn authenticode(path: &std::path::Path) -> String {
     let signature = match zup_pe::embedded_signature(path) {
         Ok(Some(signature)) => signature,
@@ -287,12 +395,25 @@ impl Inspection {
             "{} {}\n",
             self.application, self.application_version
         ));
-        let kind = match (self.kind.as_str(), self.mode.as_str()) {
-            ("universal", "offline") => "Windows universal offline installer".to_owned(),
-            ("universal", "thin") => "Windows universal bootstrapper".to_owned(),
-            ("single", "offline") => "Windows installer".to_owned(),
-            ("single", "thin") => "Windows bootstrapper".to_owned(),
-            (kind, mode) => format!("{kind} {mode} artifact"),
+        // The artifact's own platform, read from its variants rather than
+        // assumed: a single offline installer is a Windows PE on one target
+        // and a Linux ELF on another, and the summary names which.
+        let linux = self.variants.iter().any(|variant| {
+            variant
+                .target
+                .parse::<zup_core::TargetTriple>()
+                .is_ok_and(|target| {
+                    target.operating_system() == zup_core::TargetOperatingSystem::Linux
+                })
+        });
+        let kind = match (self.kind.as_str(), self.mode.as_str(), linux) {
+            ("universal", "offline", _) => "Windows universal offline installer".to_owned(),
+            ("universal", "thin", _) => "Windows universal bootstrapper".to_owned(),
+            ("single", "offline", true) => "Linux installer".to_owned(),
+            ("single", "thin", true) => "Linux bootstrapper".to_owned(),
+            ("single", "offline", false) => "Windows installer".to_owned(),
+            ("single", "thin", false) => "Windows bootstrapper".to_owned(),
+            (kind, mode, _) => format!("{kind} {mode} artifact"),
         };
         out.push_str(&kind);
         out.push_str(&format!("\n  pinned to    {}\n", self.pin));

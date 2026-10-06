@@ -6,13 +6,17 @@
 //! re-implements the build's own traversal is a check that agrees with the build
 //! until the day it does not.
 
+#[cfg(windows)]
 use std::path::Path;
 
 use zup_automation::{
-    AutomationResult, ByteCount, CheckDetails, Composition, Details, Diagnostic, Identifier,
-    LogLevel, PlanDetails,
+    AutomationResult, CheckDetails, Composition, Details, Diagnostic, Identifier, LogLevel,
 };
+#[cfg(windows)]
+use zup_automation::{ByteCount, PlanDetails};
+#[cfg(windows)]
 use zup_core::SelectedScope;
+#[cfg(windows)]
 use zup_exec::LifecycleAction;
 
 use crate::cli::{CheckCommand, PlanCommand};
@@ -125,6 +129,22 @@ fn composition(
         .map(|config| config.profile.to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    // Linux targets ship one self-contained installer each: there is no Linux
+    // dispatcher to compose them through. Compatibility would otherwise report
+    // two Linux console variants as composable, which names an artifact no
+    // backend can build.
+    if borrowed.iter().any(|variant| {
+        variant.target().operating_system() == zup_core::TargetOperatingSystem::Linux
+    }) {
+        return Some(Composition {
+            composable: false,
+            dimension: Some(Identifier::fixed("platform")),
+            detail: format!(
+                "{names} ship one self-contained Linux installer each and cannot be composed: \
+                 build them separately with `zup build --target <profile>`"
+            ),
+        });
+    }
     // Composition is refused loudly rather than suggested quietly, because a project
     // that silently ships two installers where one would do has a problem nobody was
     // told about.
@@ -180,13 +200,59 @@ pub fn run_plan(
     toolchain_root: Option<std::path::PathBuf>,
 ) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
-    let loaded = project::load_single_project(
+    // Selection reads the manifest and resolves the target, and nothing else,
+    // so a target `plan` cannot preview is refused before the source tree is
+    // walked.
+    let selected = project::select_project(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
-        &crate::resolver(toolchain_root)?,
-        zup_build::Writes::None,
+        true,
     )?;
+    let config = selected
+        .selected_targets
+        .first()
+        .expect("a single-target selection has one target");
+    // `plan` previews a Windows installation transaction. A Linux target has a
+    // different transaction with a different ledger, and previewing one through
+    // the other would describe an install that cannot happen.
+    if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+        return Err(crate::failure::error_with_help(
+            "zup.plan.linux_target",
+            format!(
+                "`zup plan` previews a Windows installation and cannot plan Linux target \
+                 `{}`",
+                config.target
+            ),
+            "Build the Linux installer and run it to see what it does.",
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&reporter, &selected, config, &toolchain_root);
+        Err(crate::failure::error(
+            "zup.plan.unsupported_host",
+            "Windows lowering requires a Windows build host",
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let loaded = project::materialize_project(
+            selected,
+            &crate::resolver(toolchain_root)?,
+            zup_build::Writes::None,
+        )?;
+        plan_windows(args, &reporter, &loaded)
+    }
+}
+
+/// The Windows installation preview, on the host that can lower it.
+#[cfg(windows)]
+fn plan_windows(
+    args: PlanCommand,
+    reporter: &Reporter,
+    loaded: &LoadedProject,
+) -> miette::Result<AutomationResult> {
     let config = loaded
         .selected_targets
         .first()
@@ -269,6 +335,10 @@ pub fn run_plan(
 ///
 /// `--install-directory` is honoured only where the project permits one. A plan
 /// that silently ignored the flag would describe an install the user cannot get.
+///
+/// Windows-only: it serves the Windows installation preview, which only a
+/// Windows host lowers.
+#[cfg(windows)]
 fn choose_directory(
     explicit: Option<&Path>,
     prior: Option<&zup_exec::InstallLedger>,

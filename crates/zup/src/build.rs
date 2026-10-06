@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_automation::{AutomationResult, BuildDetails, Details, LogLevel};
-use zup_core::ResolvedTargetConfig;
+use zup_core::{ResolvedTargetConfig, TargetOperatingSystem};
 
 use crate::artifacts::ArtifactProfile;
 use crate::build_inputs::{self, Overwrite};
@@ -239,20 +239,14 @@ fn build_variants(
             ),
         );
         let size = project::write_staged(output, args.force, |written| {
-            let (size, _) = zup_windows::build_self_contained_executable(
+            compose_target_installer(
+                config,
                 runtime,
                 written,
                 target_plan,
                 plugin_artifacts,
                 preset,
             )
-            .map_err(|error| {
-                crate::failure::error(
-                    "zup.build.compose_failed",
-                    format!("installer output: {error}"),
-                )
-            })?;
-            Ok(size)
         })?;
         let payload_bytes: u64 = target_plan.files.iter().map(|file| file.size).sum();
         report_single(
@@ -281,6 +275,81 @@ fn build_variants(
             })?;
     }
     finish(args, loaded, &outputs, release, reporter)
+}
+
+/// Compose one self-contained installer for its own target.
+///
+/// The dispatch is on the target being built, and there is one composer per
+/// target rather than a shared abstraction pretending they are one operation.
+/// A Windows target embeds the normal package in its PE runtime; a Linux
+/// target appends the same normal package behind its ELF runtime through the
+/// carrier `zup-linux` owns - the exact composition Phase 2 proved, called
+/// here rather than reimplemented. Anything else was refused at the backend
+/// boundary before materialization, so reaching it is a defect rather than a
+/// configuration.
+fn compose_target_installer(
+    config: &ResolvedTargetConfig,
+    runtime: &Path,
+    output: &Path,
+    plan: &zup_build::TargetBuildPlan,
+    plugin_artifacts: &[zup_bundle::CompiledPluginArtifact],
+    preset: Option<&[u8]>,
+) -> miette::Result<u64> {
+    match config.target.operating_system() {
+        TargetOperatingSystem::Linux => {
+            let package =
+                zup_bundle::BundleWriter::encode(plan, plugin_artifacts).map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("installer package for `{}`: {error}", config.profile),
+                    )
+                })?;
+            zup_linux::compose(runtime, output, &package).map_err(|error| {
+                crate::failure::error(
+                    "zup.build.compose_failed",
+                    format!("installer output: {error}"),
+                )
+            })?;
+            std::fs::metadata(output)
+                .map(|meta| meta.len())
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.output_unreadable",
+                        format!("installer output: {error}"),
+                    )
+                })
+        }
+        _ => {
+            #[cfg(windows)]
+            {
+                let (size, _) = zup_windows::build_self_contained_executable(
+                    runtime,
+                    output,
+                    plan,
+                    plugin_artifacts,
+                    preset,
+                )
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("installer output: {error}"),
+                    )
+                })?;
+                Ok(size)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (runtime, output, plan, plugin_artifacts, preset);
+                Err(crate::failure::error(
+                    "zup.build.unsupported_target",
+                    format!(
+                        "Windows lowering for target `{}` requires a Windows build host",
+                        config.target
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 /// What one per-target build says, for a person.
@@ -348,6 +417,11 @@ fn single_target(
 }
 
 /// Build the composed artifacts a run asked for.
+///
+/// Composed artifacts are built around a dispatcher launcher, which is Windows
+/// machinery: a Linux target has no dispatcher to compose into. A run that
+/// selects a Linux target for an artifact is refused here, before any payload
+/// work, with the native alternative spelled out.
 fn build_artifacts(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -355,6 +429,22 @@ fn build_artifacts(
     resolver: &ToolchainResolver,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
+    if let Some(config) = loaded
+        .selected_targets
+        .iter()
+        .find(|config| config.target.operating_system() == TargetOperatingSystem::Linux)
+    {
+        return Err(crate::failure::error_with_help(
+            "zup.build.linux_composed_artifact",
+            format!(
+                "target `{}` (`{}`) cannot be composed into a dispatcher artifact: the Linux \
+                 backend ships one self-contained installer per target and has no universal \
+                 launcher",
+                config.profile, config.target
+            ),
+            "Build it separately with `zup build --target <profile>`.",
+        ));
+    }
     report_icon_warnings(reporter, loaded);
     let app = &loaded.manifest.app;
     let runtimes = resolve_runtimes(args, loaded, resolver)?;
@@ -451,25 +541,8 @@ fn build_artifacts(
             )
         })?;
         let dispatcher = resolve_dispatcher(args, profile, &composed, output, resolver)?;
-        let size = project::write_staged(output, args.force, |written| {
-            zup_windows::compose_universal_executable(&dispatcher, written, &graph).map_err(
-                |error| {
-                    crate::failure::error(
-                        "zup.build.compose_failed",
-                        format!("artifact `{id}`: {error}"),
-                    )
-                },
-            )?;
-            stamp_application_icon(written, &loaded.build)?;
-            std::fs::metadata(written)
-                .map(|meta| meta.len())
-                .map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.output_unreadable",
-                        format!("artifact output: {error}"),
-                    )
-                })
-        })?;
+        let size =
+            compose_universal_artifact(&dispatcher, output, &graph, &loaded.build, args.force, id)?;
         let savings = graph.savings();
         release
             .add_artifact(
@@ -506,6 +579,52 @@ fn build_artifacts(
         );
     }
     finish(args, loaded, &outputs, release, reporter)
+}
+
+/// Compose one dispatcher artifact from its resolved graph.
+///
+/// Windows-only machinery: the dispatcher is a launcher image every variant's
+/// runtime is embedded into. A non-Windows host never reaches this - the
+/// backend boundary refused the target before materialization - so the fallback
+/// is a refusal rather than a second implementation.
+fn compose_universal_artifact(
+    dispatcher: &Path,
+    output: &Path,
+    graph: &zup_artifact::ArtifactGraph,
+    build: &zup_build::BuildPlan,
+    force: bool,
+    id: &str,
+) -> miette::Result<u64> {
+    #[cfg(windows)]
+    {
+        project::write_staged(output, force, |written| {
+            zup_windows::compose_universal_executable(dispatcher, written, graph).map_err(
+                |error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("artifact `{id}`: {error}"),
+                    )
+                },
+            )?;
+            stamp_application_icon(written, build)?;
+            std::fs::metadata(written)
+                .map(|meta| meta.len())
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.output_unreadable",
+                        format!("artifact output: {error}"),
+                    )
+                })
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dispatcher, output, graph, build, force, id);
+        Err(crate::failure::error(
+            "zup.build.unsupported_host",
+            "composing a dispatcher artifact requires a Windows build host",
+        ))
+    }
 }
 
 /// One resolved distribution variant: a target with its runtime template.
@@ -938,6 +1057,11 @@ fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProj
     }
 }
 
+/// Stamp the Windows application icon onto a composed dispatcher artifact.
+///
+/// Windows-only: the icon lives in PE resources, which a Linux carrier has no
+/// equivalent of. Linux installers skip this step entirely.
+#[cfg(windows)]
 pub(crate) fn stamp_application_icon(
     path: &Path,
     plan: &zup_build::BuildPlan,

@@ -318,8 +318,8 @@ pub const LINUX_BACKEND: &[&str] = &["zup-linux"];
 pub const NATIVE_BACKENDS: &[&str] = &["zup-windows", "zup-linux"];
 
 /// Crates that require a Windows build host and are not the Windows backend:
-/// the composition CLI, the native frontends, and the small dispatcher a
-/// universal artifact starts through.
+/// the small dispatcher a universal artifact starts through, and the presets
+/// this repository builds.
 ///
 /// These are [`Kind::Composition`]: they reach a backend deliberately, because
 /// reaching one is what they are for. What they may not do is pretend to be
@@ -328,10 +328,12 @@ pub const NATIVE_BACKENDS: &[&str] = &["zup-windows", "zup-linux"];
 ///
 /// `zup-installer` used to live here. It no longer does: it builds on Windows
 /// and Linux both, so it belongs to the multi-platform matrix below rather
-/// than to either single-host one.
+/// than to either single-host one. `zup` used to live here for the same reason
+/// in the other direction: the developer CLI now builds Linux installers as an
+/// ordinary target on either host, so it belongs below with the installer
+/// runtime rather than to either single-host matrix.
 pub const WINDOWS_COMPOSITION: &[&str] = &[
     "zup-dispatch",
-    "zup",
     // The default installer interface, which is a GPUI application like any
     // other preset and is built by the toolchain rather than shipped inside an
     // installer as a link-time dependency.
@@ -362,7 +364,11 @@ pub const WINDOWS_COMPOSITION: &[&str] = &[
 /// own list rather than an entry in both single-host ones: the boundary
 /// refuses a package claimed twice, and rightly so, because a list that
 /// silently shared members would stop meaning "verified here".
-pub const MULTI_PLATFORM_COMPOSITION: &[&str] = &["zup-installer"];
+///
+/// The developer CLI is here because building a Linux installer is an ordinary
+/// `zup build` invocation on either host: target selection, not the build
+/// machine, decides which backend composes the artifact.
+pub const MULTI_PLATFORM_COMPOSITION: &[&str] = &["zup", "zup-installer"];
 
 pub const MATRICES: &[Matrix] = &[
     Matrix {

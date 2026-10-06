@@ -93,6 +93,11 @@ struct Answers {
 /// A non-interactive run is a script, and a script that did not say what the
 /// application is called cannot be answered for it. Guessing `app` would produce
 /// a project whose identity nobody chose.
+///
+/// The defaults that depend on the machine are the build host's, so a project
+/// created on Linux builds on Linux: the default target comes from the same
+/// function the build reads, the default main executable carries no Windows
+/// suffix there, and the default frontend is one the host's backend ships.
 fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Result<Answers> {
     let directory_name = manifest_path
         .parent()
@@ -148,7 +153,7 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
         if main.is_none() {
             main = Some(
                 inquire::Text::new("Main executable")
-                    .with_default("app.exe")
+                    .with_default(default_main())
                     .prompt()
                     .map_err(|error| miette::miette!("prompt: {error}"))?,
             );
@@ -163,10 +168,30 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
         app_id,
         version: args.version,
         source: source.unwrap_or_else(|| "dist".into()),
-        main: main.unwrap_or_else(|| "app.exe".into()),
+        main: main.unwrap_or_else(|| default_main().to_owned()),
         scope: scope.unwrap_or(ScopeArg::User),
-        frontend: args.frontend.map(Into::into).unwrap_or_default(),
+        frontend: args
+            .frontend
+            .map(Into::into)
+            .unwrap_or_else(default_frontend),
     })
+}
+
+/// The default main executable on this build host: a native executable name,
+/// which carries a suffix on Windows and none elsewhere.
+fn default_main() -> &'static str {
+    if cfg!(windows) { "app.exe" } else { "app" }
+}
+
+/// The default installer frontend on this build host: the Linux backend ships
+/// no GUI runtime, so a project created there starts with the console
+/// installer its backend can build.
+fn default_frontend() -> zup_core::Frontend {
+    if cfg!(target_os = "linux") {
+        zup_core::Frontend::Console
+    } else {
+        zup_core::Frontend::default()
+    }
 }
 
 fn absolute(manifest: &Path) -> PathBuf {
