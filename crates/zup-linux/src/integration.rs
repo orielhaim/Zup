@@ -385,7 +385,7 @@ pub fn load_generated(
         .map(|(name, content)| (name, content.into_bytes()))
         .collect())
 }
-///
+
 /// Convert portable protocol arguments into an `Exec=` argument list.
 ///
 /// The portable vector is verbatim author text plus one `%1` URI placeholder.
