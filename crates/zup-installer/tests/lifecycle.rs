@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The lifecycle an end user performs, end to end against a real installer.
 //!
 //! Everything here runs a composed `Setup.exe` - the file a person double-clicks -

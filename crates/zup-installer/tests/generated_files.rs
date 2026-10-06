@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! A file a plugin generates, tracked as an owned resource for the whole
 //! lifecycle.
 //!

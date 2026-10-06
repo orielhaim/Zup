@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The three frontends, driven as the three different things they are.
 //!
 //! The runtime ships as three binaries because a person meets three situations: a

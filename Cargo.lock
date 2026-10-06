@@ -12138,6 +12138,7 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-exec",
+ "zup-linux",
  "zup-plan",
  "zup-platform",
  "zup-plugin-abi",

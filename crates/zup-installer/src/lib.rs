@@ -18,28 +18,45 @@
 //! process-wide override to read back: a command reaches the frontend it was
 //! given, or it does not compile.
 
+#[cfg(windows)]
 mod acquire;
+#[cfg(windows)]
 mod bootstrap;
+#[cfg(windows)]
 mod cli;
-#[cfg(feature = "console")]
+#[cfg(all(windows, feature = "console"))]
 mod console;
+#[cfg(windows)]
 mod context;
 pub mod entry;
+#[cfg(windows)]
 mod execute;
+#[cfg(windows)]
 mod frontend;
+#[cfg(windows)]
 mod handoff;
-#[cfg(feature = "gui")]
+#[cfg(all(windows, feature = "gui"))]
 pub mod host;
+#[cfg(windows)]
 mod lifecycle;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(windows)]
 mod package;
+#[cfg(windows)]
 mod recovery;
+#[cfg(windows)]
 mod state;
+#[cfg(windows)]
 mod uninstall;
+#[cfg(windows)]
 mod update;
+#[cfg(windows)]
 mod worker;
 
 use zup_presentation::ProcessOutcome;
 
+#[cfg(windows)]
 use crate::context::RuntimeContext;
 
 /// The process exit code a failure reports.
@@ -57,6 +74,11 @@ pub fn process_exit_code(error: &miette::Report) -> u8 {
 /// The entry point, the error report, the machine-readable failure, and the exit
 /// code are decided here, once, so the three presentation binaries cannot drift
 /// apart. They are three lines long and call this.
+///
+/// Native selection lives here and in `entry`, nowhere else: Windows runs the
+/// worker-based lifecycle, Linux runs the in-process one. No other module
+/// chooses a backend.
+#[cfg(windows)]
 pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
     let cli = cli::parse();
     let output = cli.output_format();
@@ -74,8 +96,19 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
     result
 }
 
+/// Run the runtime as the frontend its binary was built for, on Linux.
+///
+/// The same three-binaries-one-entry shape as Windows, with the in-process
+/// Linux lifecycle behind it. No worker, no escalation: user scope means this
+/// process owns every directory it touches.
+#[cfg(target_os = "linux")]
+pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
+    crate::linux::run(frontend)
+}
+
 /// The runtime's own parser, for the product-surface tests and for documentation
 /// generation.
+#[cfg(windows)]
 pub fn command() -> clap::Command {
     cli::parser()
 }
@@ -85,6 +118,7 @@ pub fn command() -> clap::Command {
 /// Human output goes to stderr through the binary's own error path; the machine
 /// formats go to stdout, because stdout is the channel an automation system is
 /// reading and a failure it cannot parse is a failure it will misreport.
+#[cfg(windows)]
 fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) {
     use zup_presentation::{DiagnosticPresentation, InstallerEvent, InstallerResult};
 
@@ -119,5 +153,5 @@ fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests;

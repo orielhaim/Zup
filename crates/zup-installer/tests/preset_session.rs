@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The production chain, from a host that launches a preset to a real child
 //! process answering over the real transport.
 //!

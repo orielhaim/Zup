@@ -11,6 +11,12 @@ use zup_core::Frontend;
 
 /// Run as the graphical frontend.
 pub fn gui() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        eprintln!("the graphical installer is not supported on Linux in this phase");
+        ExitCode::from(3)
+    }
+    #[cfg(not(target_os = "linux"))]
     match run(Frontend::Gui) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -59,6 +65,7 @@ fn run(frontend: Frontend) -> miette::Result<()> {
 /// click. The uninstall confirmation is the other case: Apps & Features starts it
 /// with arguments, and a person is watching, and a silent failure there looks
 /// exactly like a broken uninstall.
+#[cfg(not(target_os = "linux"))]
 fn was_launched_interactively() -> bool {
     let arguments = std::env::args_os().skip(1);
     let mut arguments = arguments.peekable();
@@ -88,7 +95,7 @@ fn show_error(message: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 fn show_error(message: &str) {
     eprintln!("{message}");
 }

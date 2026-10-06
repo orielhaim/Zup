@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The selected preset as part of what an installation owns.
 //!
 //! Everything here crosses a process boundary and a filesystem boundary, because

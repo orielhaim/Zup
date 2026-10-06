@@ -47,10 +47,21 @@ required-features = ["gui"]
 [dependencies]
 clap = { workspace = true }
 miette.workspace = true
+thiserror.workspace = true
+zup-core.workspace = true
+zup-presentation.workspace = true
+cliclack = { workspace = true, optional = true }
+console = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 opener.workspace = true
 semver.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
@@ -66,45 +77,38 @@ zup-acquire.workspace = true
 zup-artifact.workspace = true
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
-zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
 zup-platform.workspace = true
 zup-plugin-runtime.workspace = true
-zup-presentation.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-preset-host.workspace = true
 zup-preset-protocol.workspace = true
 zup-update.workspace = true
 zup-windows.workspace = true
-cliclack = { workspace = true, optional = true }
-console = { workspace = true, optional = true }
-indicatif = { workspace = true, optional = true }
 
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
-  "Win32_Foundation",
-  "Win32_UI_WindowsAndMessaging",
-] }
+[target.'cfg(target_os = "linux")'.dependencies]
+zup-linux.workspace = true
 
 [dev-dependencies]
-zup-plugin-abi = { workspace = true }
 # The runtime's tests compose their own installer from a literal plan and a real
 # staged runtime template. They do not depend on the build plane: a dev-dependency
 # on the compiler that produces this package's artifacts would put the boundary
 # this package exists to hold back into its own graph, and would let a runtime
 # test keep passing if the boundary moved.
-#
+tempfile.workspace = true
+rstest.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
 # `compiler` is the plugin *contract*'s Wasmtime compiler, needed so a test can
 # produce a genuinely precompiled plugin rather than a stand-in for one. It is the
 # contract crate, not the build plane, and it is a dev-dependency.
-tempfile.workspace = true
-rstest.workspace = true
+zup-plugin-abi = { workspace = true }
 wat = "1"
 windows-registry.workspace = true
 wit-component = { version = "=0.261", features = ["dummy-module"] }
 wit-parser = "=0.261"
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 zup-toolchain.workspace = true
-uuid.workspace = true
