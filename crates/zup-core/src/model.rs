@@ -352,6 +352,25 @@ pub struct Protocol {
     pub when: Option<Condition>,
 }
 
+impl Protocol {
+    /// How many URI-delivery placeholders (`%1`) the launch arguments carry.
+    ///
+    /// Portable authoring writes the placeholder Windows-style; a backend that
+    /// delivers the URI another way (Linux `%u`) converts exactly one, and
+    /// any other count has no faithful lowering.
+    pub fn uri_placeholder_count(&self) -> usize {
+        uri_placeholder_count(&self.args)
+    }
+}
+
+/// How many URI-delivery placeholders (`%1`) an argument vector carries.
+///
+/// The free form of [`Protocol::uri_placeholder_count`], for planned
+/// protocols that carry the same vector without the manifest wrapper.
+pub fn uri_placeholder_count(args: &[String]) -> usize {
+    args.iter().filter(|arg| arg.as_str() == "%1").count()
+}
+
 /// File extension registration intent. Does not set default handlers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]

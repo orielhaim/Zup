@@ -168,6 +168,8 @@ pub fn linux_capability_errors(
             if installer.path.len() == 1 { "is" } else { "are" },
         ));
     }
+    errors.extend(protocol_errors(&installer.protocols));
+    errors.extend(association_errors(&installer.file_associations));
     if installer.preset.is_some() {
         errors.push(
             "a preset window is not supported by the Linux backend yet: console and headless \
@@ -177,6 +179,58 @@ pub fn linux_capability_errors(
     }
     errors.extend(main_executable_errors(config, plan));
     errors
+}
+
+/// Whether protocol handlers lower faithfully onto Linux.
+///
+/// Linux delivers the URI through one `%u`, so every protocol must carry
+/// exactly one `%1` placeholder, and every protocol must name the same
+/// handler command: one hidden desktop entry dispatches all schemes, and
+/// distinct commands would need distinct entries this phase does not lower.
+fn protocol_errors(protocols: &[zup_core::Protocol]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for protocol in protocols {
+        if protocol.uri_placeholder_count() != 1 {
+            errors.push(format!(
+                "protocol `{}` is not supported by the Linux backend yet: handler arguments \
+                 must carry exactly one `%1` URI placeholder (found {}), because Linux delivers \
+                 the URI through `%u`",
+                protocol.scheme,
+                protocol.uri_placeholder_count(),
+            ));
+        }
+    }
+    if let Some(first) = protocols.first()
+        && protocols
+            .iter()
+            .any(|protocol| protocol.executable != first.executable || protocol.args != first.args)
+    {
+        errors.push(
+            "protocols with different handler commands are not supported by the Linux backend \
+             yet: one hidden desktop entry dispatches every scheme"
+                .to_owned(),
+        );
+    }
+    errors
+}
+
+/// Whether file associations lower faithfully onto Linux.
+///
+/// One hidden desktop entry opens every associated type with `%f`, so every
+/// association must name the same executable.
+fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String> {
+    if let Some(first) = associations.first()
+        && associations
+            .iter()
+            .any(|association| association.executable != first.executable)
+    {
+        return vec![
+            "file associations with different executables are not supported by the Linux backend \
+             yet: one hidden desktop entry opens every associated type"
+                .to_owned(),
+        ];
+    }
+    Vec::new()
 }
 
 /// Whether the declared application main resolves to an executable payload file.
@@ -338,6 +392,25 @@ mod tests {
         });
         let errors = linux_capability_errors(&config, &plan);
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn protocols_without_one_placeholder_are_refused() {
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::User,
+        );
+        let mut plan = plan();
+        plan.installer.protocols.push(zup_core::Protocol {
+            scheme: zup_core::ProtocolScheme::new("acme").unwrap(),
+            executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            args: vec!["--serve".into()],
+            when: None,
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        let text = errors.join("\n");
+        assert!(text.contains("%1"), "{text}");
     }
 
     #[test]

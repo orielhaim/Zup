@@ -46,7 +46,7 @@ pub use model::{
     App, Component, ComponentGroup, ComponentProminence, FileAssociation, FileExtension,
     FileMapping, Frontend, Install, InstallDirectory, InstallScope, Launcher, LauncherLocation,
     MAX_PRESET_SETTINGS_BYTES, PathEntry, PluginBinding, Privilege, Protocol, SelectionRequirement,
-    Service, ServiceStart, Source, Ui,
+    Service, ServiceStart, Source, Ui, uri_placeholder_count,
 };
 pub use path::{RelativePath, RelativePathError};
 pub use prerequisite::{

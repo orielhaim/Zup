@@ -177,7 +177,7 @@ pub fn lower_integration_in(
                 ));
             }
             executable = Some(text);
-            arguments.push(protocol_args(&protocol.args)?);
+            arguments.push(protocol_args(protocol)?);
         }
         let Some(executable) = executable else {
             return Err(IntegrationError::Unsupported("no protocol handler".into()));
@@ -377,17 +377,18 @@ pub fn load_generated(
 ///
 /// Convert portable protocol arguments into an `Exec=` argument list.
 ///
-/// The portable vector is verbatim author text plus Windows `%1` URI
-/// placeholders. Exactly one `%1` becomes `%u`; any other arrangement cannot
+/// The portable vector is verbatim author text plus one `%1` URI placeholder.
+/// Exactly one placeholder becomes `%u`; any other arrangement cannot
 /// faithfully receive one URI and is refused rather than guessed.
-fn protocol_args(args: &[String]) -> Result<Vec<ExecArgument>, IntegrationError> {
-    let placeholders = args.iter().filter(|a| a.as_str() == "%1").count();
-    if placeholders != 1 {
+fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgument>, IntegrationError> {
+    if zup_core::uri_placeholder_count(&protocol.args) != 1 {
         return Err(IntegrationError::Unsupported(format!(
-            "protocol handler arguments must carry exactly one `%1` URI placeholder (found {placeholders}): Linux delivers the URI through `%u` and any other shape cannot be represented faithfully"
+            "protocol handler arguments must carry exactly one `%1` URI placeholder (found {}): Linux delivers the URI through `%u` and any other shape cannot be represented faithfully",
+            zup_core::uri_placeholder_count(&protocol.args)
         )));
     }
-    Ok(args
+    Ok(protocol
+        .args
         .iter()
         .map(|argument| {
             if argument == "%1" {
