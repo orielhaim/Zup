@@ -62,6 +62,8 @@ pub fn compile_execution_plan(
 
     let mut mime_directory: Option<String> = None;
     let mut desktop_directory: Option<String> = None;
+    let mut mime_after: Vec<zup_core::ResourceKey> = Vec::new();
+    let mut desktop_after: Vec<zup_core::ResourceKey> = Vec::new();
 
     for file in &execution.files {
         let source = file.source_relative.as_str();
@@ -136,11 +138,13 @@ pub fn compile_execution_plan(
                                 .and_then(|packages| packages.parent())
                                 .map(|directory| directory.to_string())
                         });
+                        mime_after.push(removal.key.clone());
                     }
                     if desktop {
                         desktop_directory = desktop_directory.or_else(|| {
                             destination.parent().map(|directory| directory.to_string())
                         });
+                        desktop_after.push(removal.key.clone());
                     }
                 }
                 input.removals.push(FileRemoval {
@@ -168,25 +172,34 @@ pub fn compile_execution_plan(
 
     // The derived databases regenerate from the authoritative sources above:
     // one MIME refresh when a package source changed, one desktop refresh
-    // when a desktop entry changed. No other operation kind reaches this
-    // backend, so these are the only refreshes a Linux transaction can hold.
+    // when a desktop entry changed. A refresh that follows removals names
+    // them as dependencies, so the database regenerates from the removed
+    // world rather than from the sources about to be deleted. No other
+    // operation kind reaches this backend, so these are the only refreshes a
+    // Linux transaction can hold.
     if let Some(directory) = mime_directory {
         let request = RefreshRequest::mime(&directory);
-        input.backend_operations.push(BackendOperation::apply(
-            request.key(),
-            request.backend_id(),
-            Privilege::User,
-            request.encode(),
-        ));
+        input.backend_operations.push(
+            BackendOperation::apply(
+                request.key(),
+                request.backend_id(),
+                Privilege::User,
+                request.encode(),
+            )
+            .with_dependencies(mime_after),
+        );
     }
     if let Some(directory) = desktop_directory {
         let request = RefreshRequest::desktop(&directory);
-        input.backend_operations.push(BackendOperation::apply(
-            request.key(),
-            request.backend_id(),
-            Privilege::User,
-            request.encode(),
-        ));
+        input.backend_operations.push(
+            BackendOperation::apply(
+                request.key(),
+                request.backend_id(),
+                Privilege::User,
+                request.encode(),
+            )
+            .with_dependencies(desktop_after),
+        );
     }
 
     for (kind, count) in [

@@ -257,6 +257,10 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
     let input = compile_execution_plan(&execution, &target)?;
     let plan = zup_transaction::compile_transaction(&input)?;
     ledger_store.validate_plan(&target.app.id, request.scope, &target.app.version, &plan)?;
+    // Required tools resolve before anything mutates: installing the files
+    // and then discovering the database cannot be regenerated is exactly the
+    // half-installation the capability boundary exists to prevent.
+    preflight_refresh(&plan)?;
     // Generated integration bytes are rendered from the manifest, not carried
     // by the package, so they are persisted beside the state a recovery run
     // can always read. The render is deterministic, so what recovery serves
@@ -355,6 +359,7 @@ pub fn recover_transaction(
     };
     let mut executor = LinuxFileExecutor::new().with_payload(payload);
     executor.register_plan(&record.plan)?;
+    preflight_refresh(&record.plan)?;
     let (record, outcome) = zup_transaction::recover(record, &store, &mut executor)?;
     match outcome {
         TransactionOutcome::Committed => {
@@ -425,7 +430,9 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), LinuxRunError> {
 ///
 /// Runs after rollback, when the authoritative sources are restored but the
 /// transaction graph has already rolled its refresh nodes back. Idempotent by
-/// nature: regenerating from current sources can only converge.
+/// nature: regenerating from current sources can only converge. Refreshes
+/// whose sources are gone (an install rolled back to nothing) are skipped:
+/// there is nothing to derive from.
 fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), LinuxRunError> {
     for node in &record.plan.nodes {
         let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
@@ -437,7 +444,34 @@ fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), Linu
         let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
             LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
         })?;
+        if !crate::refresh::has_sources(&request) {
+            continue;
+        }
         crate::refresh::run_refresh(&request).map_err(LinuxFileExecutorError::from)?;
+    }
+    Ok(())
+}
+
+/// Preflight every refresh a plan holds, before anything mutates.
+///
+/// The coordinator only prepares barriers, so backend preflight cannot live
+/// in the executor: a missing tool must fail the run here, with the payload
+/// and integration sources still untouched, rather than halfway through.
+fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), LinuxRunError> {
+    for node in &plan.nodes {
+        let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
+            continue;
+        };
+        let Some(backend) = &node.meta.backend else {
+            return Err(LinuxRunError::Executor(format!(
+                "a refresh node without its request: {}",
+                node.id
+            )));
+        };
+        let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
+            LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
+        })?;
+        crate::refresh::preflight(&request).map_err(LinuxFileExecutorError::from)?;
     }
     Ok(())
 }

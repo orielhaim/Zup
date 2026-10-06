@@ -655,13 +655,11 @@ impl LinuxFileExecutor {
                 Ok(())
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { payload, .. } => {
-                // Rollback regenerates from whatever sources exist: the file
-                // rollbacks that follow restore the authoritative state, and
-                // the runner sweeps once more after rollback so the final
-                // on-disk databases always reflect the restored sources.
-                let request = crate::refresh::RefreshRequest::decode(payload)?;
-                crate::refresh::run_refresh(&request)?;
+            OperationReceipt::Backend { .. } => {
+                // Nothing to undo: a refresh owns no bytes, and re-running it
+                // here would regenerate from sources the file rollbacks below
+                // are about to restore. The runner sweeps once more after
+                // rollback, when the authoritative state is final.
                 Ok(())
             }
         }

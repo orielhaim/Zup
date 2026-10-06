@@ -174,6 +174,25 @@ pub fn run_refresh(request: &RefreshRequest) -> Result<(), RefreshError> {
     })
 }
 
+/// Whether a refresh has sources to derive from.
+///
+/// A refresh regenerates from authoritative files. When rollback removed
+/// those files, there is nothing to regenerate and the tool itself would
+/// refuse the absent directory; skipping is the honest answer, not an error.
+/// The next install or repair regenerates from its own sources.
+pub fn has_sources(request: &RefreshRequest) -> bool {
+    let sources = if request.tool == MIME_REFRESH_TOOL {
+        std::path::Path::new(&request.directory).join("packages")
+    } else {
+        std::path::Path::new(&request.directory).to_path_buf()
+    };
+    std::fs::symlink_metadata(&sources)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+
 #[cfg(test)]
 mod tests {
     use super::*;
