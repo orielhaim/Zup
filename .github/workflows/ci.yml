@@ -280,6 +280,17 @@ jobs:
       - name: Linux toolchain templates
         run: cargo xtask toolchain build
 
+      # Phase 4 integration tests exercise the real freedesktop database
+      # tools rather than only fakes, and validate generated entries with
+      # the specification validator where it exists.
+      - name: Freedesktop integration tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils shared-mime-info
+          command -v update-mime-database
+          command -v update-desktop-database
+          command -v desktop-file-validate
+
       # The Linux backend's own suite runs natively rather than being cross-checked,
       # because what it tests is filesystem semantics - symlinks, permission bits,
       # XDG resolution - that a build check cannot establish. This is the full
@@ -306,6 +317,7 @@ jobs:
           id = "com.example.tool"
           name = "Tool"
           version = "1.0.0"
+          icon = "icon.svg"
 
           [build]
 
@@ -328,9 +340,26 @@ jobs:
           [[files]]
           source = "keep.dat"
           destination = "${install}"
+
+          [[launchers]]
+          location = "menu"
+          name = "Tool"
+          target = "${install}/tool"
+
+          [[protocols]]
+          scheme = "tool"
+          executable = "${install}/tool"
+          args = ["--url", "%1"]
+
+          [[file_associations]]
+          extension = ".tool"
+          id = "example.tool"
+          description = "Tool document"
+          executable = "${install}/tool"
           EOF
-          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "tool 1.0.0"; exit 0; fi\nexit 1\n' > /tmp/zup-public-linux/dist/tool
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "tool 1.0.0"; exit 0; fi\nif [ "$1" = "--url" ]; then echo "opened $2"; exit 0; fi\nexit 1\n' > /tmp/zup-public-linux/dist/tool
           printf 'keep-v1' > /tmp/zup-public-linux/dist/keep.dat
+          printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#00ff00"/></svg>' > /tmp/zup-public-linux/icon.svg
           cargo run -p zup -- check --manifest /tmp/zup-public-linux/zup.toml --target linux
           cargo run -p zup -- doctor --manifest /tmp/zup-public-linux/zup.toml --target linux
           cargo run -p zup -- build --manifest /tmp/zup-public-linux/zup.toml --target linux
@@ -347,8 +376,27 @@ jobs:
           mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
           /tmp/zup-public-linux/Tool-Setup --state-root /tmp/zup-public-state
           /tmp/zup-public-home/.local/lib/zup/apps/tool/tool --version | grep 'tool 1.0.0'
+          # Phase 4 desktop integration from the public build path.
+          test -f "$XDG_DATA_HOME/applications/com.example.tool.desktop"
+          grep -q '^Type=Application$' "$XDG_DATA_HOME/applications/com.example.tool.desktop"
+          grep -q '^Name=Tool$' "$XDG_DATA_HOME/applications/com.example.tool.desktop"
+          grep -q 'x-scheme-handler/tool' "$XDG_DATA_HOME/applications/com.example.tool-uri.desktop"
+          grep -q 'application/x-com.example.tool-tool' "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
+          test -f "$XDG_DATA_HOME/mime/packages/com.example.tool.xml"
+          grep -q 'application/x-com.example.tool-tool' "$XDG_DATA_HOME/mime/globs2"
+          test -f "$XDG_DATA_HOME/icons/hicolor/48x48/apps/com.example.tool.png"
+          test -f "$XDG_DATA_HOME/icons/hicolor/scalable/apps/com.example.tool.svg"
+          desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool.desktop"
+          desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool-uri.desktop"
+          desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
+          /tmp/zup-public-home/.local/lib/zup/apps/tool/tool --url tool:hello | grep 'opened tool:hello'
           /tmp/zup-public-linux/Tool-Setup uninstall --state-root /tmp/zup-public-state
           test ! -e /tmp/zup-public-home/.local/lib/zup/apps/tool/tool
+          test ! -e "$XDG_DATA_HOME/applications/com.example.tool.desktop"
+          test ! -e "$XDG_DATA_HOME/applications/com.example.tool-uri.desktop"
+          test ! -e "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
+          test ! -e "$XDG_DATA_HOME/mime/packages/com.example.tool.xml"
+          test ! -e "$XDG_DATA_HOME/icons/hicolor/48x48/apps/com.example.tool.png"
 
       - name: Tests
         run: cargo nextest run --all-features $PORTABLE

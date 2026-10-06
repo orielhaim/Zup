@@ -160,11 +160,12 @@ pub(crate) fn pack_linux_icons(
         if !linux {
             continue;
         }
+        // An in-memory compile has no file behind the icon. That is the
+        // `zup check` shape: validation without an installer, where icon
+        // metadata is checked but no bytes ship. A real build compiles
+        // through the on-disk cache, so its artifacts always have sources.
         let Some(source) = artifact.source.clone() else {
-            return Err(BuildError::Icon {
-                path: artifact.name.clone(),
-                message: "a Linux icon has no cached file to ship".into(),
-            });
+            continue;
         };
         let name = RelativePath::new(&artifact.name).map_err(|error| {
             BuildError::PathNotRepresentable {
