@@ -5,10 +5,15 @@
 //! compatibility descriptor beside whatever it finds. None of that requires a
 //! network, and none of it requires a contributor to know it exists.
 //!
-//! This is the step that *produces* a toolchain. It builds the three runtime
-//! templates and the two dispatchers, names each one for the machine and
-//! frontend it is for, writes its descriptor, and copies the whole set beside
-//! `zup` so the resolver's staged-directory search finds it.
+//! This is the step that *produces* a toolchain. On Windows it builds the three
+//! runtime templates, the dispatchers, and the preset package, names each one
+//! for the machine and frontend it is for, writes its descriptor, and copies
+//! the whole set beside `zup` so the resolver's staged-directory search finds
+//! it. On Linux it builds the console and headless runtimes and stops there:
+//! there is nothing to dispatch through and no preset host. With `--target
+//! x86_64-unknown-linux-gnu` it cross-builds the Linux runtimes from another
+//! host with `cargo zigbuild`, so a Windows machine can stage what a Linux
+//! `zup build` composes.
 //!
 //! Repository development and product use are different jobs with different
 //! ergonomics, and both are meant to be good. A person who installed `zup` gets
@@ -123,7 +128,18 @@ pub fn version() -> Result<String, String> {
 }
 
 /// Build the toolchain and stage it beside `zup`.
-pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
+///
+/// `target` names a cross-build target, and `None` means this host. A cross
+/// target is how a Windows host stages the Linux runtime templates a Linux
+/// `zup build` composes: the templates are built with `cargo zigbuild`, which
+/// owns the cross linker, and staged under the same target-qualified names a
+/// native build stages. Only Linux cross targets are supported: dispatchers
+/// and presets are Windows launcher machinery with no cross equivalent in this
+/// phase.
+pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    if let Some(target) = target {
+        return build_cross(root, profile, target);
+    }
     let version = version()?;
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
@@ -213,6 +229,92 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
         build_example_plugin(root)?;
     }
     Ok(written)
+}
+
+/// Stage runtime templates for a Linux target from another host.
+///
+/// The application developer never runs this: `zup build --target
+/// x86_64-unknown-linux-gnu` resolves its templates through the toolchain
+/// model, and this is the contributor-side producer that puts them where the
+/// resolver looks. `cargo zigbuild` owns the cross linker; this owns which
+/// binaries are built, what they are staged as, and the descriptors that make
+/// them usable.
+fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>, String> {
+    let component_target =
+        zup_core::TargetTriple::parse(target).map_err(|error| format!("`{target}`: {error}"))?;
+    if component_target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+        return Err(format!(
+            "cross toolchain builds support Linux targets; `{target}` is not one"
+        ));
+    }
+    if component_target.architecture() != zup_core::TargetArchitecture::X86_64 {
+        return Err(format!(
+            "cross toolchain builds support `{SUPPORTED_CROSS_TARGET}`; `{target}` is not one"
+        ));
+    }
+    let version = version()?;
+    let staged = staging_directory(root, profile, &version);
+    std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
+    let mut written = Vec::new();
+    for frontend in ["console", "headless"] {
+        let binary = format!("zup-setup-{frontend}");
+        zigbuild(
+            root,
+            &[
+                "--target",
+                target,
+                "-p",
+                INSTALLER_PACKAGE,
+                "--no-default-features",
+                "--features",
+                frontend,
+                "--bin",
+                &binary,
+                "--profile",
+                profile,
+            ],
+        )?;
+        let built = target_directory(root, target)
+            .join(output_directory(profile))
+            .join(&binary);
+        let component = zup_toolchain::ToolchainComponent::Runtime {
+            target: component_target.clone(),
+            frontend: match frontend {
+                "console" => zup_core::Frontend::Console,
+                _ => zup_core::Frontend::Headless,
+            },
+        };
+        let staged_file = stage_component(&built, &staged, &component, &version)?;
+        println!("  runtime  {frontend:<8} {}", component_name(&staged_file));
+        written.push(staged_file);
+    }
+    Ok(written)
+}
+
+/// The one cross-build target a contributor can stage from another host.
+const SUPPORTED_CROSS_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// Run one `cargo zigbuild` command.
+///
+/// `cargo zigbuild` is the cross linker this repository's Linux templates are
+/// built with from other hosts. It needs `zig` beside it; when it is missing
+/// the refusal names it rather than reporting a linker error.
+fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
+    let mut command = Command::new(cargo_executable());
+    command.current_dir(root).arg("zigbuild");
+    for argument in args {
+        command.arg(argument);
+    }
+    let status = command.status().map_err(|error| {
+        format!(
+            "run `cargo zigbuild {}`: {error}; `cargo zigbuild` needs `zig` on PATH",
+            args.join(" ")
+        )
+    })?;
+    if !status.success() {
+        return Err(format!("`cargo zigbuild {}` failed", args.join(" ")));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -419,6 +521,10 @@ fn runtime_component(frontend: &str) -> zup_toolchain::ToolchainComponent {
 
 /// Copy one built component into the staging directory under its real name, and
 /// write the descriptor that makes it usable.
+///
+/// The staged name carries the component's own target suffix, not the staging
+/// host's: a Linux template staged from Windows is extensionless, exactly as a
+/// native Linux build stages it, because the resolver searches for that name.
 fn stage_component(
     built: &Path,
     staged: &Path,
@@ -429,7 +535,7 @@ fn stage_component(
     // write. A stager that composed its own name from the binary's would produce
     // a toolchain the resolver cannot find, and the failure would be a missing
     // file rather than a wrong one.
-    let file_name = zup_toolchain::file_name(component, EXECUTABLE_SUFFIX);
+    let file_name = zup_toolchain::file_name(component, component_suffix(component));
     let destination = staged.join(&file_name);
     let _ = std::fs::remove_file(&destination);
     std::fs::copy(built, &destination).map_err(|error| {
@@ -444,6 +550,23 @@ fn stage_component(
     std::fs::write(&descriptor_path, descriptor.encode())
         .map_err(|error| format!("{}: {error}", descriptor_path.display()))?;
     Ok(destination)
+}
+
+/// The suffix a staged component is stored under: its own target's, never the
+/// staging host's.
+///
+/// A Linux template staged from Windows is extensionless, exactly as a native
+/// Linux build stages it. Staging it with the host's `.exe` would produce a
+/// toolchain the resolver - which searches for the component's own name - can
+/// never find.
+fn component_suffix(component: &zup_toolchain::ToolchainComponent) -> &'static str {
+    match component {
+        zup_toolchain::ToolchainComponent::Runtime { target, .. } => target.executable_suffix(),
+        // Dispatchers are Windows launcher images, built on Windows for Windows.
+        zup_toolchain::ToolchainComponent::Dispatcher { .. } => ".exe",
+        // A package holds every target, so no executable suffix.
+        zup_toolchain::ToolchainComponent::Preset => "",
+    }
 }
 
 /// The name a staged component was written under, for a report line.
@@ -733,6 +856,32 @@ mod tests {
             zup_toolchain::file_name(&offline, EXECUTABLE_SUFFIX),
             zup_toolchain::file_name(&online, EXECUTABLE_SUFFIX)
         );
+    }
+
+    /// A cross-staged Linux toolchain is extensionless and holds exactly the
+    /// components the contract names for that target - no GUI runtime, no
+    /// dispatchers, no preset - whatever host staged it.
+    #[test]
+    fn a_cross_staged_linux_toolchain_is_named_by_its_target() {
+        let target = zup_core::TargetTriple::parse(SUPPORTED_CROSS_TARGET).expect("a Linux target");
+        let wanted: Vec<String> = zup_toolchain::supported_components(&target)
+            .iter()
+            .map(|component| zup_toolchain::file_name(component, component_suffix(component)))
+            .collect();
+        assert_eq!(
+            wanted,
+            vec![
+                format!("zup-setup-console-{SUPPORTED_CROSS_TARGET}"),
+                format!("zup-setup-headless-{SUPPORTED_CROSS_TARGET}"),
+            ],
+            "console and headless, extensionless, and nothing else"
+        );
+        for name in &wanted {
+            assert!(
+                !name.ends_with(".exe"),
+                "a Linux component carries no executable suffix: {name}"
+            );
+        }
     }
 
     /// The stager and the contract must agree on what a host needs.

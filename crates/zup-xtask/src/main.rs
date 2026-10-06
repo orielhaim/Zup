@@ -34,11 +34,14 @@ xtask github-action-pins refresh [--root <dir>] [--add <owner/name>]...
     are pinned here too, because a runner that installs a different Bun produces
     a bundle nobody can reproduce.
 
-xtask toolchain build [--profile <name>]
+xtask toolchain build [--profile <name>] [--target <triple>]
     Build the runtime templates and dispatchers this repository produces, and
     stage them beside `zup` with the descriptors the toolchain resolver checks.
     Run it once per profile; a contributor running `cargo test` or `cargo run`
-    needs the debug profile, which is the default.
+    needs the debug profile, which is the default. `--target
+    x86_64-unknown-linux-gnu` cross-builds the Linux runtime templates from
+    another host with `cargo zigbuild`, so a Windows machine can stage what a
+    Linux `zup build` composes.
 
 xtask toolchain package [--profile <name>] [--out <dir>]
     Assemble one directory that is a complete zup release: `zup`, the toolchain
@@ -76,6 +79,7 @@ options:
     --online             reach GitHub to report newer releases
     --add <owner/name>   add an action to the lock before refreshing
     --profile <name>     cargo profile to build and stage beside (default: dev)
+    --target <triple>      cross-build target for `toolchain build` (Linux only)
     --out <dir>          where to write the packaged release
     --material <dir>     release material to test (default: target/release-material/<version>)
     --work <dir>         an empty directory to run in (default: a fresh temp directory)
@@ -95,6 +99,7 @@ const OPTIONS: &[&str] = &[
     "--online",
     "--add",
     "--profile",
+    "--target",
     "--out",
     "--material",
     "--work",
@@ -116,6 +121,7 @@ struct Options {
     online: bool,
     add: Vec<String>,
     profile: Option<String>,
+    target: Option<String>,
     out: Option<PathBuf>,
     material: Option<PathBuf>,
     work: Option<PathBuf>,
@@ -280,7 +286,7 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
         return Err("toolchain needs `build` or `package`\n\n".to_owned() + USAGE);
     };
     let allowed: &[&str] = match subcommand.as_str() {
-        "build" => &["--root", "--profile"],
+        "build" => &["--root", "--profile", "--target"],
         "package" => &["--root", "--profile", "--out"],
         unknown => {
             return Err(format!(
@@ -318,7 +324,7 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
     }
 
     println!("Building the zup {version} toolchain ({profile})");
-    let written = zup_xtask::toolchain::build(&root, &profile)?;
+    let written = zup_xtask::toolchain::build(&root, &profile, options.target.as_deref())?;
     let staged = zup_xtask::toolchain::staging_directory(&root, &profile, &version);
     println!();
     println!(
@@ -512,6 +518,7 @@ fn parse(
             "--host" => options.host = Some(value),
             "--add" => options.add.push(value),
             "--profile" => options.profile = Some(value),
+            "--target" => options.target = Some(value),
             "--out" => options.out = Some(PathBuf::from(value)),
             "--material" => options.material = Some(PathBuf::from(value)),
             "--work" => options.work = Some(PathBuf::from(value)),
