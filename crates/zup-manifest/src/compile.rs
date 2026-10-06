@@ -254,12 +254,12 @@ fn validate_ui(ui: &Ui) -> Result<(), ManifestError> {
         src: None,
         span: None,
     })?;
-    if encoded.len() > zup_core::MAX_UI_SETTINGS_BYTES {
+    if encoded.len() > zup_core::MAX_PRESET_SETTINGS_BYTES {
         return Err(ManifestError::Invalid {
             message: format!(
                 "[ui.settings] is {} bytes; the limit is {}",
                 encoded.len(),
-                zup_core::MAX_UI_SETTINGS_BYTES
+                zup_core::MAX_PRESET_SETTINGS_BYTES
             ),
             src: None,
             span: None,

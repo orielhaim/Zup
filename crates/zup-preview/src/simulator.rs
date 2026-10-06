@@ -22,9 +22,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use zup_core::{Sha256Digest, UiPreset};
+use zup_core::{PresetRuntime, Sha256Digest};
+use zup_preset_protocol::{Action, Configuration, Snapshot, UpdateState};
 use zup_runtime::{InstallOutcome, RuntimeEvent};
-use zup_ui_protocol::{UiAction, UiConfiguration, UiSnapshot, UpdateState};
 
 use crate::machine::{Machine, Scenario};
 use crate::state::StateDirectory;
@@ -48,15 +48,15 @@ pub enum StageError {
 pub struct Simulator {
     state: StateDirectory,
     machine: Machine,
-    configuration: UiConfiguration,
-    child: Option<zup_ui_host::PresetProcess>,
+    configuration: Configuration,
+    child: Option<zup_preset_host::PresetProcess>,
     generation: u64,
 }
 
 impl Simulator {
     /// A session with no child yet, which is the state before anything is shown.
     pub fn new(state: StateDirectory, scenario: Scenario) -> Self {
-        let configuration = UiConfiguration {
+        let configuration = Configuration {
             settings: serde_json::json!({}),
             assets: BTreeMap::new(),
         };
@@ -70,7 +70,7 @@ impl Simulator {
     }
 
     /// The state a preset would see right now.
-    pub fn snapshot(&self) -> &UiSnapshot {
+    pub fn snapshot(&self) -> &Snapshot {
         self.machine.snapshot()
     }
 
@@ -85,7 +85,7 @@ impl Simulator {
     }
 
     /// What the preset is told the application configured.
-    pub fn configuration(&self) -> &UiConfiguration {
+    pub fn configuration(&self) -> &Configuration {
         &self.configuration
     }
 
@@ -96,7 +96,7 @@ impl Simulator {
 
     /// Reopen the session on a different machine.
     ///
-    /// A surface change is not a `UiAction`: choosing between a fresh install
+    /// A surface change is not a `Action`: choosing between a fresh install
     /// and a maintenance session is a fact about the machine, and the protocol
     /// has no action for it because a preset cannot decide it. The state machine
     /// is rebuilt from the new scenario and everything the host still owns - the
@@ -139,8 +139,8 @@ impl Simulator {
     /// be overwritten on the platform this product targets, so each generation
     /// gets its own file and an earlier one is only removed once nothing is
     /// running from it.
-    pub fn stage(&self, bytes: &[u8], preset: &UiPreset) -> Result<Candidate, StageError> {
-        zup_ui_host::process::check_presentable(preset, self.machine.capabilities())
+    pub fn stage(&self, bytes: &[u8], preset: &PresetRuntime) -> Result<Candidate, StageError> {
+        zup_preset_host::process::check_presentable(preset, self.machine.capabilities())
             .map_err(StageError::Incompatible)?;
         let generation = self.generation + 1;
         write_durable(&self.state.run_executable(generation), bytes)
@@ -160,9 +160,9 @@ impl Simulator {
     pub fn adopt(
         &mut self,
         candidate: Candidate,
-        asked: Sender<UiAction>,
-    ) -> Result<(), zup_ui_host::SessionError> {
-        let mut process = zup_ui_host::launch(
+        asked: Sender<Action>,
+    ) -> Result<(), zup_preset_host::SessionError> {
+        let mut process = zup_preset_host::launch(
             &candidate.executable,
             self.machine.capabilities().clone(),
             self.machine.snapshot().product.clone(),
@@ -184,7 +184,7 @@ impl Simulator {
                     }
                 }
             })
-            .map_err(|error| zup_ui_host::SessionError::Handshake(error.to_string()))?;
+            .map_err(|error| zup_preset_host::SessionError::Handshake(error.to_string()))?;
 
         // Only now is the previous child finished with. Until this point the
         // working window was still up, and a failure above leaves it up. The tree
@@ -199,7 +199,7 @@ impl Simulator {
 
     /// Feed one action to the state machine, whether a preset or a control sent
     /// it.
-    pub fn act(&mut self, action: UiAction) -> zup_ui_host::HostDecision {
+    pub fn act(&mut self, action: Action) -> zup_preset_host::HostDecision {
         self.machine.act(action)
     }
 
@@ -228,7 +228,7 @@ impl Simulator {
     }
 
     /// Send the current state to the running child.
-    pub fn publish(&self) -> Result<(), zup_ui_host::SessionError> {
+    pub fn publish(&self) -> Result<(), zup_preset_host::SessionError> {
         let Some(child) = self.child.as_ref() else {
             return Ok(());
         };
@@ -304,13 +304,22 @@ pub struct Candidate {
     pub generation: u64,
 }
 
-/// Write a file so that a reader never sees a half-written one.
+/// Write an executable so that a reader never sees a half-written one.
 ///
 /// A temporary beside it and a rename over it, which is the same durability the
 /// rest of this repository asks for and the reason a preset that reads a
 /// just-materialized asset reads a whole one. The temporary's name is unique per
 /// call, because two writers racing on one name is a way for one of them to
 /// rename a file the other is still writing.
+///
+/// The permissions are set on the temporary, before the rename, because a file
+/// that is briefly present and not executable is a file a concurrent launch can
+/// fail on, and because setting them after would leave the same window. A file
+/// created with `File::create` is mode `0666` on Unix - readable and writable,
+/// never runnable - so a preset staged this way could be written and then
+/// refused by `execve` with `EACCES`. Windows has no execute bit, so this is the
+/// one platform where the distinction does not exist; naming the executable in
+/// the call is what makes it the writer's job rather than the caller's.
 fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static WRITES: AtomicU64 = AtomicU64::new(0);
@@ -331,6 +340,7 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
+    make_executable(&temporary)?;
     match std::fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -338,4 +348,26 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             Err(error)
         }
     }
+}
+
+/// Give a file the owner's execute bit, keeping what it already had.
+///
+/// Unix only, and deliberately additive: a staged preset was created `0666`, and
+/// the one thing it is missing is the bit that lets it run. Reading and writing
+/// are left as they were rather than widened, because this file is a copy of a
+/// preset and nothing about staging it grants anything else. `Owned` rather than
+/// the whole mask, because `0777` would make every staged file world-writable -
+/// another process on the machine editing the preset this host is about to run.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }

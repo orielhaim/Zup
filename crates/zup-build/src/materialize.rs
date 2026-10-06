@@ -77,7 +77,7 @@ pub enum Writes {
     None,
 }
 
-/// Materialize selected target sources, carrying the UI assets a preset named.
+/// Materialize selected target sources, carrying the preset assets a preset named.
 ///
 /// The assets arrive already resolved: reading a project's files is this crate's
 /// job and a caller that resolved them elsewhere would have had to reimplement

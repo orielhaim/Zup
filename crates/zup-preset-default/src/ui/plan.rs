@@ -4,19 +4,28 @@
 //! of thing it touches. It is for a person deciding whether to go ahead, so it
 //! reads as a list of consequences rather than a transaction log.
 
+// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
+// that re-exports it, so a module deriving one has to be able to name that
+// crate. Aliased through the SDK so it is the version this preset builds with.
+#[allow(unused_imports)]
+use zup_preset_sdk::gpui_kit;
+
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::spinner::Spinner;
-use zup_ui_sdk::gpui_kit::component::tag::Tag;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
+use zup_preset_sdk::gpui_kit::component::tag::Tag;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
-use zup_ui_sdk::prelude::*;
+use zup_preset_sdk::presentation::{
+    ChangeGroup, ChangeKind, PlanStatus, PlannedChange, RequirementPresentation, RequirementStatus,
+    ResourceCategory,
+};
 
 use crate::model;
 use crate::theme::{size, space, text};

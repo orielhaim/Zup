@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use zup_core::ReleaseIdentity;
 use zup_core::{
-    AppId, BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, SelectedScope,
-    ServiceStart, Sha256Digest, TargetTriple, UiRuntime,
+    AppId, BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
+    SelectedScope, ServiceStart, Sha256Digest, TargetTriple,
 };
 use zup_platform::{CommandSpec, TargetPath};
 
@@ -33,13 +33,18 @@ pub struct InstallLedger {
     /// rather than pretending to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<ReleaseIdentity>,
-    /// The window this installation presents, as durable runtime facts.
+    /// The preset this installation presents, as durable runtime facts.
     ///
-    /// `None` for an installation with no window. Always written, never defaulted
-    /// on read: a ledger that omitted the field would be indistinguishable from
-    /// one that recorded no window, and a graphical installation that has lost
-    /// this has lost the ability to open at all.
-    pub ui: Option<UiRuntime>,
+    /// `None` for an installation with no preset. Always written, never
+    /// defaulted on read: a ledger that omitted the field would be
+    /// indistinguishable from one that recorded no preset, and a graphical
+    /// installation that has lost this has lost the ability to open at all.
+    ///
+    /// Serialized as `preset`. There is no older format to stay compatible
+    /// with, and a record this build cannot read is one it should refuse rather
+    /// than guess at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<InstalledPreset>,
     pub committed_transaction: String,
     #[serde(with = "resource_map")]
     pub resources: BTreeMap<ResourceKey, OwnedResource>,
@@ -82,7 +87,7 @@ impl InstallLedger {
             selected_components: Vec::new(),
             install_directory: None,
             release: None,
-            ui: None,
+            preset: None,
             committed_transaction: String::new(),
             resources: BTreeMap::new(),
         }
@@ -97,9 +102,9 @@ impl InstallLedger {
         self.release.as_ref()
     }
 
-    /// The window this installation presents, if it has one.
-    pub fn ui(&self) -> Option<&UiRuntime> {
-        self.ui.as_ref()
+    /// The preset this installation presents, if it has one.
+    pub fn preset(&self) -> Option<&InstalledPreset> {
+        self.preset.as_ref()
     }
 }
 

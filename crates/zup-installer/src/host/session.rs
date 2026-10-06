@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use zup_core::{Frontend, Installer, SelectedScope};
 use zup_exec::{InstallLedger, LifecycleAction};
+use zup_preset_protocol::{Action, UpdateState};
 use zup_runtime::{CancellationHandle, RuntimeEvent};
-use zup_ui_protocol::{UiAction, UpdateState};
 
 use super::preset::{self, PresetError};
 use super::{HostDecision, HostState, Selection};
@@ -71,7 +71,7 @@ impl Launch {
         }
     }
 
-    /// The uninstall confirmation window, for Apps & Features on a GUI package.
+    /// The uninstall confirmation window, for Apps & Features on a GUI frontend.
     pub fn uninstall_confirmation(args: &crate::uninstall::UninstallArgs) -> Self {
         Self {
             maintenance: true,
@@ -112,7 +112,7 @@ pub struct Opening {
     ///
     /// An installation reads what it owns; an install that has committed nothing
     /// reads the image it was launched from. There is no third option and no
-    /// fallback between them: an installation whose recorded UI content is gone
+    /// fallback between them: an installation whose recorded preset content is gone
     /// has a problem to report, not a window to open some other way.
     pub ui: PresetSource,
     pub placement: Placement,
@@ -122,10 +122,10 @@ pub struct Opening {
 /// The window this launch will present, and where its bytes are.
 pub enum PresetSource {
     /// Not installed yet: this image's own preset, and nothing committed.
-    Composed { preset: zup_core::UiPreset },
+    Composed { preset: zup_core::PresetRuntime },
     /// Installed: the window the ledger recorded, under the runtime's directory.
     Installed {
-        runtime: zup_core::UiRuntime,
+        runtime: zup_core::InstalledPreset,
         directory: PathBuf,
     },
 }
@@ -166,21 +166,22 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
         return Err(miette::miette!("the installed application was not found"));
     }
 
-    let launchers = zup_ui_host::surface::launchers(&installer);
+    let launchers = zup_preset_host::surface::launchers(&installer);
     let state = match &installed {
         Some((scope, ledger)) => {
-            let maintenance = zup_ui_host::surface::maintenance_state(&installer, ledger, *scope);
+            let maintenance =
+                zup_preset_host::surface::maintenance_state(&installer, ledger, *scope);
             HostState::maintenance(
-                zup_ui_host::surface::product(&installer),
+                zup_preset_host::surface::product(&installer),
                 maintenance,
-                zup_ui_host::surface::capabilities(&installer, true),
+                zup_preset_host::surface::capabilities(&installer, true),
             )
         }
         None => {
             let scope = launch
                 .scope
-                .unwrap_or_else(|| zup_ui_host::surface::default_scope(&installer));
-            let options = zup_ui_host::surface::install_options(
+                .unwrap_or_else(|| zup_preset_host::surface::default_scope(&installer));
+            let options = zup_preset_host::surface::install_options(
                 &installer,
                 scope,
                 None,
@@ -188,9 +189,9 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
                 None,
             );
             HostState::install(
-                zup_ui_host::surface::product(&installer),
+                zup_preset_host::surface::product(&installer),
                 options,
-                zup_ui_host::surface::capabilities(&installer, false),
+                zup_preset_host::surface::capabilities(&installer, false),
             )
         }
     }
@@ -199,7 +200,9 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     let scope = installed
         .as_ref()
         .map(|(scope, _)| *scope)
-        .unwrap_or_else(|| zup_ui_host::convert::engine_scope(state.snapshot().surface.scope()));
+        .unwrap_or_else(|| {
+            zup_preset_host::convert::engine_scope(state.snapshot().surface.scope())
+        });
     let state_root = state::resolve_state_root(launch.state_root.clone(), scope)?;
     let placement = Placement {
         scope,
@@ -209,7 +212,7 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
     };
     let ui = match &installed {
         Some((_, ledger)) => {
-            let runtime = ledger.ui().cloned().ok_or_else(|| {
+            let runtime = ledger.preset().cloned().ok_or_else(|| {
                 miette::miette!(
                     "{} is installed with no recorded window, and its maintenance runtime cannot \
                      present one.\n\nReinstall it to restore the window it was installed with.",
@@ -246,9 +249,9 @@ fn find_installation(
     installer: &Installer,
     state_root: Option<&Path>,
 ) -> miette::Result<Option<(SelectedScope, InstallLedger)>> {
-    for scope in zup_ui_host::surface::scopes(installer)
+    for scope in zup_preset_host::surface::scopes(installer)
         .into_iter()
-        .map(zup_ui_host::convert::engine_scope)
+        .map(zup_preset_host::convert::engine_scope)
     {
         let root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)?;
         let ledger = zup_windows::InstallLedgerStore::new(root)
@@ -341,7 +344,7 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     {
         let reader = preset.take_reader();
         std::thread::Builder::new()
-            .name("zup-ui-preset".into())
+            .name("zup-preset-actions".into())
             .spawn(move || {
                 while let Some(action) = reader.next() {
                     if asked.send(action).is_err() {
@@ -357,12 +360,17 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
     let mut plans = Plans::default();
 
     if launch.auto_uninstall {
-        state.accept(UiAction::RequestUninstall);
+        state.accept(Action::RequestUninstall);
     }
     if let Some(selection) = state.plan_request() {
         plans.request(selection, &reports);
     }
-    publish(&preset, &state, &configuration)?;
+    // Whether the preset can still be written to. It starts true and goes false the
+    // first time a write finds the transport gone, which is a preset that has closed
+    // its window and left. The questions it already asked are still answered - it
+    // asked before it went, and the host owns the installation either way - so the
+    // loop runs out of questions rather than out of window.
+    let mut deliverable = publish(&mut preset, &state, &configuration)?;
 
     loop {
         if !preset.is_running() {
@@ -389,11 +397,13 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     }
                     Report::RepairDrift(resources) => state.set_repair_drift(resources),
                 }
-                publish(&preset, &state, &configuration)?;
+                if deliverable {
+                    deliverable = publish(&mut preset, &state, &configuration)?;
+                }
             }
             asked = questions.recv() => {
                 let Some(action) = asked else { break };
-                if action == UiAction::Close {
+                if action == Action::Close {
                     break;
                 }
                 act(
@@ -406,7 +416,9 @@ pub async fn run(executable: &Path, launch: Launch) -> miette::Result<()> {
                     &mut inbox,
                     &mut plans,
                 );
-                publish(&preset, &state, &configuration)?;
+                if deliverable {
+                    deliverable = publish(&mut preset, &state, &configuration)?;
+                }
             }
         }
     }
@@ -430,21 +442,38 @@ fn lagged(error: tokio::sync::broadcast::error::RecvError) -> miette::Report {
     }
 }
 
-/// Tell the preset the whole state, in full.
+/// Tell the preset the whole state, in full, and say whether it heard.
 ///
 /// Every message, not every change: a snapshot is complete, so republishing it
 /// costs one frame and removes every question about whether the preset missed
 /// something. The configuration rides with the first one only - the settings and
 /// asset table are what the application configured, and they do not change while
 /// one session runs - so a republish after a click carries the state alone.
+///
+/// `false` means the preset is no longer on the other end and the caller should
+/// stop trying. That is one failure out of the several a publish can have, and it
+/// is the only one that is not a fault: a preset sends its last question and goes.
+/// It closed its window, which is what a person closing a window looks like from
+/// here, and it has by definition not waited to hear the answer. Nothing after it
+/// can be delivered, so the fact is about delivery rather than about the
+/// installation, and the host owns the installation whether or not anybody is
+/// watching it happen.
+///
+/// Everything else still fails the run. A protocol or configuration error, or a
+/// transport that broke for some reason other than the peer having gone, is a real
+/// fault and is reported as one: `is_ok()` here once swallowed those too, so a
+/// broken publish and a closed window were indistinguishable to the caller and
+/// both were read as "the window is gone".
 fn publish(
-    preset: &preset::PresetProcess,
+    preset: &mut preset::PresetProcess,
     state: &HostState,
-    configuration: &zup_ui_protocol::UiConfiguration,
-) -> miette::Result<()> {
-    preset
-        .publish(configuration.clone(), Box::new(state.snapshot().clone()))
-        .map_err(|error| miette::miette!("{error}"))
+    configuration: &zup_preset_protocol::Configuration,
+) -> miette::Result<bool> {
+    match preset.publish(configuration.clone(), Box::new(state.snapshot().clone())) {
+        Ok(()) => Ok(true),
+        Err(preset::SessionError::Disconnected(_)) => Ok(false),
+        Err(error) => Err(miette::miette!("{error}")),
+    }
 }
 
 /// The plans this session has asked for.
@@ -476,7 +505,7 @@ fn act(
     state: &mut HostState,
     installer: &Installer,
     placement: &Placement,
-    action: UiAction,
+    action: Action,
     active: &Arc<Mutex<Active>>,
     reports: &Reports,
     inbox: &mut Inbox,
@@ -848,6 +877,6 @@ fn preset_error(error: PresetError) -> miette::Report {
     miette::miette!("{error}")
 }
 
-fn session_error(error: zup_ui_host::SessionError) -> miette::Report {
+fn session_error(error: zup_preset_host::SessionError) -> miette::Report {
     miette::miette!("{error}")
 }

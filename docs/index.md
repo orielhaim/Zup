@@ -32,7 +32,7 @@ hero:
   </a>
   <a class="zup-surface" href="/presets/">
     <h3>Presets</h3>
-    <p>Native installer UIs written in Rust with GPUI and the Zup UI SDK.</p>
+    <p>Native installer UIs written in Rust with GPUI and the zup preset SDK.</p>
   </a>
   <a class="zup-surface" href="/plugins/">
     <h3>Plugins</h3>

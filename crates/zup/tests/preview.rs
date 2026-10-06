@@ -5,7 +5,7 @@
 //! then checks that the preview says it too.
 //!
 //! The window is `zup-preset-test`: a real preset, built against the public
-//! `zup-ui-sdk` and nothing else, staged by the same run as every other real
+//! `zup-preset-sdk` and nothing else, staged by the same run as every other real
 //! binary. It is the right thing to preview with because it behaves like a
 //! third-party preset rather than like a test: it reads the settings the
 //! application configured, reports what it received to a path those settings
@@ -29,10 +29,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zup::preview::Session;
-use zup_artifact::ui::PresetPackageWriter;
+use zup_artifact::preset::PresetPackageWriter;
+use zup_preset_compose::resolve;
 use zup_preview::ControlOutcome;
 use zup_toolchain::ToolchainComponent;
-use zup_ui_compose::resolve;
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
@@ -62,9 +62,9 @@ fn schema() -> serde_json::Value {
 /// writer so a preview reads a package exactly as a build would.
 fn package(binary: Vec<u8>) -> Vec<u8> {
     let description =
-        zup_ui_protocol::PresetDescription::new("e2e", env!("CARGO_PKG_VERSION"), schema())
-            .with_capabilities(zup_ui_protocol::UiCapabilities::new([
-                zup_ui_protocol::UiCapability::Components,
+        zup_preset_protocol::PresetDescription::new("e2e", env!("CARGO_PKG_VERSION"), schema())
+            .with_capabilities(zup_preset_protocol::Capabilities::new([
+                zup_preset_protocol::Capability::Components,
             ]));
     let mut writer = PresetPackageWriter::new(description).expect("a valid description");
     writer

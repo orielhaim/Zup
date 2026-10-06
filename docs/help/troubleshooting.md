@@ -39,30 +39,36 @@ zup preview
 Preset author:
 
 ```bash
-zup ui dev
+zup preset dev
 ```
 
-Use `preview` to test a project's selected preset and settings. Use `ui dev` to iterate on preset source.
+Use `preview` to test a project's selected preset and settings. Use
+`zup preset dev` to iterate on preset source.
 
 ## Preset settings are rejected
 
 Inspect the package:
 
 ```bash
-zup ui inspect path/to/preset.zupui
+zup preset inspect path/to/preset.zupui
 ```
 
-Then compare `[ui.settings]` with the preset's schema. Settings belong to the selected preset; they are not global Zup options.
+Then compare `[ui.settings]` with the preset's schema. Settings belong to the
+selected preset; they are not global Zup options.
 
-## Plugin planning fails
-
-Confirm the file is a WebAssembly component exporting the current Zup planner world:
+## A plugin does not build
 
 ```bash
-wasm-tools component wit plugin.component.wasm
+zup plugin build
 ```
 
-Then run `zup check`. If the plugin runs but returns the wrong resources, reduce it to one context-dependent resource and inspect `zup plan`.
+Run it from inside the plugin project, or pass `--project <dir>`. The project
+needs `zup-sdk` with the `plugin` feature and `crate-type = ["cdylib"]`; `zup
+plugin build` compiles for `wasm32-unknown-unknown` and componentises the result,
+so there is nothing else to install and nothing to configure.
+
+Then run `zup check`. If the plugin loads but returns the wrong resources, reduce
+it to one context-dependent resource and inspect `zup plan`.
 
 ## Release workflow is stale
 

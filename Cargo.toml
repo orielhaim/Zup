@@ -74,18 +74,22 @@ zup-distribute-github = { path = "crates/zup-distribute-github" }
 zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
 zup-presentation = { path = "crates/zup-presentation" }
-zup-ui-protocol = { path = "crates/zup-ui-protocol", version = "0.1.0" }
-zup-ui-host = { path = "crates/zup-ui-host" }
-zup-ui-compose = { path = "crates/zup-ui-compose" }
+zup-preset-protocol = { path = "crates/zup-preset-protocol", version = "0.1.0" }
+zup-preset-host = { path = "crates/zup-preset-host" }
+zup-preset-compose = { path = "crates/zup-preset-compose" }
 zup-preview = { path = "crates/zup-preview" }
-zup-ui-dev = { path = "crates/zup-ui-dev" }
-zup-ui-sdk = { path = "crates/zup-ui-sdk", version = "0.1.0" }
-zup-ui-ipc = { path = "crates/zup-ui-ipc", version = "0.1.0" }
+zup-preset-dev = { path = "crates/zup-preset-dev" }
+zup-preset-sdk = { path = "crates/zup-preset-sdk", version = "0.1.0" }
+zup-preset-ipc = { path = "crates/zup-preset-ipc", version = "0.1.0" }
 zup-windows = { path = "crates/zup-windows" }
 zup-update = { path = "crates/zup-update" }
+zup-plugin-abi = { path = "crates/zup-plugin-abi", version = "0.1.0" }
+zup-plugin-sdk = { path = "crates/zup-plugin-sdk", version = "0.1.0" }
 zup-plugin-contract = { path = "crates/zup-plugin-contract" }
 zup-plugin-build = { path = "crates/zup-plugin-build" }
 zup-plugin-runtime = { path = "crates/zup-plugin-runtime" }
+zup-preset-sdk-macros = { path = "crates/zup-preset-sdk-macros", version = "0.1.0" }
+zup-sdk = { path = "crates/zup-sdk", version = "0.1.0" }
 zup-xtask = { path = "crates/zup-xtask" }
 
 # Graph

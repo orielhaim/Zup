@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_core::{
-    ComponentId, Privilege, RelativePath, ResourceKey, Sha256Digest, TargetTriple, UiRuntime,
+    ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey, Sha256Digest, TargetTriple,
 };
 use zup_platform::TargetPath;
 
@@ -160,12 +160,12 @@ pub struct TransactionPlan {
     pub audit: TransactionAudit,
     pub execution_order: Vec<OperationId>,
     pub rollback_order: Vec<OperationId>,
-    /// The UI runtime this plan makes durable, or leaves absent.
+    /// The preset runtime this plan makes durable, or leaves absent.
     ///
     /// Journalled with the rest of the plan so that a recovery run, which sees
-    /// nothing but this record, can still state which window the installation
+    /// nothing but this record, can still state which preset the installation
     /// presents.
-    pub ui: Option<UiRuntime>,
+    pub preset: Option<InstalledPreset>,
 }
 
 impl TransactionPlan {
@@ -621,7 +621,7 @@ pub fn compile_transaction(
         audit,
         execution_order,
         rollback_order,
-        ui: input.ui.clone(),
+        preset: input.preset.clone(),
     };
     plan.validate()?;
     Ok(plan)

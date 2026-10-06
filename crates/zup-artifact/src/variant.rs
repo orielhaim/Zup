@@ -313,7 +313,7 @@ impl DistributionVariant {
             ui_assets: plan
                 .ui_assets
                 .iter()
-                .map(|asset| zup_core::UiAsset {
+                .map(|asset| zup_core::PresetAsset {
                     name: asset.name.clone(),
                     size: asset.size,
                     sha256: asset.sha256,

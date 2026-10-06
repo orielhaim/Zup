@@ -41,6 +41,11 @@ const REFUSED: &[&str] = &[
     "./here",
     "empty//segment",
     "trailing/",
+    // A colon anywhere, not only in the drive position: Windows reads a later
+    // one as an alternate data stream, which resolves outside the root this is
+    // checked against.
+    "stream:data",
+    "segment/with:colon",
 ];
 
 fn check_path(data: &[u8]) {

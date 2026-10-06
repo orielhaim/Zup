@@ -131,6 +131,12 @@ zup.check.plugin_compile_failed: plugin `acme-integrations` exhausted its fuel b
 
 ## Building
 
+Write the plugin against `zup-sdk` and let Zup build the component:
+
+```bash
+zup plugin build
+```
+
 Zup compiles the plugin ahead of time when it builds the installer, hashes it,
 and records the Wasmtime version, the AOT format version, the plugin API version
 and the WIT digest alongside it. Changing any sandbox limit invalidates cached
@@ -139,4 +145,5 @@ AOT artifacts rather than silently reusing one built under different rules.
 A plugin that fails to compile fails `zup check` and `zup build`. Nothing is
 written.
 
-Next: [machine-readable output](/advanced/automation).
+Next: [Create a plugin](/plugins/create), or
+[machine-readable output](/advanced/automation).

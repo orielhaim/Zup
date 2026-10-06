@@ -1,6 +1,6 @@
 //! `zup preview`: the application's real installer window, over a simulated machine.
 //!
-//! This is for an application author. `zup ui dev` is for a preset author, and
+//! This is for an application author. `zup preset dev` is for a preset author, and
 //! the two differ in what they watch and in where the window comes from: a preset
 //! author compiles Rust, and an application author resolves a package. Below that
 //! they are the same thing, because both run the same [`zup_preview`] against the
@@ -27,11 +27,11 @@ use std::sync::mpsc::Sender;
 
 use clap::{Args, ValueHint};
 use zup_core::{Frontend, Installer, Sha256Digest, TargetTriple, hash_bytes};
+use zup_preset_compose::{PresetProblem, Resolved};
 use zup_preview::{
     ControlOutcome, Driver, Event, Runtime, Scenario, Seen, StateDirectory, Watcher, serve,
 };
 use zup_toolchain::ToolchainComponent;
-use zup_ui_compose::{PresetProblem, Resolved};
 
 use crate::failure;
 use crate::project::{SelectedProject, TargetOverrideArgs};
@@ -286,7 +286,7 @@ impl Session {
                 .map(|resolved| resolved.path)
                 .map_err(|error| error.to_string())
         };
-        Ok(zup_ui_compose::resolve(
+        Ok(zup_preset_compose::resolve(
             &selected.manifest.ui,
             &self.project_root,
             installer,
@@ -400,12 +400,12 @@ impl Session {
     }
 
     /// The state the presented window is drawing.
-    pub fn state(&self) -> &zup_ui_protocol::UiSnapshot {
+    pub fn state(&self) -> &zup_preset_protocol::Snapshot {
         self.runtime.snapshot()
     }
 
     /// What the presented window is told the application configured.
-    pub fn configuration(&self) -> &zup_ui_protocol::UiConfiguration {
+    pub fn configuration(&self) -> &zup_preset_protocol::Configuration {
         self.runtime.configuration()
     }
 
@@ -443,7 +443,7 @@ impl Session {
 
     /// One line of the control surface, and what it did to the simulated machine.
     ///
-    /// The same controls `zup ui dev` offers, on the same session, because there
+    /// The same controls `zup preset dev` offers, on the same session, because there
     /// is one machine being simulated and one set of things a person can do to it.
     pub fn control(&mut self, line: &str) -> ControlOutcome {
         self.runtime.control(line)

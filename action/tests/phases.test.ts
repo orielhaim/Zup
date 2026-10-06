@@ -17,6 +17,7 @@ import { fixture } from './protocol-fixtures.js'
 describe('phasesFor', () => {
   it('maps each operation to the phases it runs', () => {
     expect(phasesFor('setup')).toEqual([])
+    expect(phasesFor('check')).toEqual(['check'])
     expect(phasesFor('build')).toEqual(['build'])
     expect(phasesFor('compose')).toEqual(['compose'])
     expect(phasesFor('finalize')).toEqual(['finalize'])
@@ -42,6 +43,7 @@ describe('operationFor', () => {
     // The two vocabularies are not the same, and conflating them is how the action
     // and the CLI came to disagree about what a step did.
     expect(operationFor('build')).toBe('build')
+    expect(operationFor('check')).toBe('check')
     expect(operationFor('compose')).toBe('publish.stage')
     expect(operationFor('finalize')).toBe('sign.verify')
     expect(operationFor('publish')).toBe('publish.github')
@@ -57,6 +59,14 @@ describe('operationFor', () => {
 })
 
 describe('argumentsFor', () => {
+  it('checks the project in the streaming format, and names no output of its own', () => {
+    // A check answers from the project the working directory names, so it carries
+    // no `--output` and no `--target`: those are questions about a build's result,
+    // and a check produces none. The workflow's own `real zup` job asks for this
+    // operation, and the action refused it as unknown until it was here.
+    expect(argumentsFor('check', inputs())).toEqual(['check', '--format', 'jsonl'])
+  })
+
   it('builds the zup build command in the streaming format', () => {
     // `jsonl` rather than `json`, because a build that reports a failing check in
     // the first second is a build somebody can stop.

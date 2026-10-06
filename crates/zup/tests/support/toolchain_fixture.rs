@@ -147,11 +147,11 @@ pub fn not_an_image() -> Vec<u8> {
 
 /// A real preset package carrying one binary per named target.
 ///
-/// The same writer `zup ui pack` uses, because a fixture that hand-rolled a
+/// The same writer `zup preset pack` uses, because a fixture that hand-rolled a
 /// package would be a test of the fixture rather than of the path a build takes.
 pub fn package(targets: &[&str]) -> Vec<u8> {
-    let mut writer = zup_artifact::ui::PresetPackageWriter::new(
-        zup_ui_protocol::PresetDescription::new("aurora", "1.0.0", settings_schema()),
+    let mut writer = zup_artifact::preset::PresetPackageWriter::new(
+        zup_preset_protocol::PresetDescription::new("aurora", "1.0.0", settings_schema()),
     )
     .expect("a valid description");
     for target in targets {

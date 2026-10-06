@@ -14,7 +14,7 @@ Three frontends are available.
 frontend = "gui"
 ```
 
-The normal desktop installer. GUI packages use a [preset](/presets/) for install and maintenance presentation.
+The normal desktop installer. A GUI frontend uses a [preset](/presets/) for install and maintenance presentation.
 
 `zup preview` is available for GUI targets because there is a window to present.
 

@@ -29,7 +29,7 @@ pub struct Installer {
     /// verified `.zupui`; nothing in this IR records where that package lived,
     /// because the runtime has no use for a build-machine fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset: Option<UiPreset>,
+    pub preset: Option<PresetRuntime>,
     pub updates: Option<UpdateConfig>,
     pub install: Install,
     #[serde(default)]
@@ -51,7 +51,7 @@ pub struct Installer {
 /// The preset an installer will present, resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UiPreset {
+pub struct PresetRuntime {
     /// The preset's own name, from its Cargo package.
     pub name: NonEmptyString,
     pub version: Version,
@@ -67,20 +67,20 @@ pub struct UiPreset {
     /// names the settings used. Their bytes live in the package's content store
     /// under `sha256`, so a preset never learns a source path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assets: Vec<UiAsset>,
+    pub assets: Vec<PresetAsset>,
 }
 
 /// One application-provided asset, identified by content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UiAsset {
+pub struct PresetAsset {
     /// The name the application's settings used.
     pub name: NonEmptyString,
     pub size: u64,
     pub sha256: Sha256Digest,
 }
 
-/// The UI runtime one installed application will present.
+/// The preset runtime one installed application will present.
 ///
 /// The same value in three places, deliberately: the plan a transaction will
 /// commit, the journal that survives a crash, and the ledger that says what the
@@ -94,11 +94,11 @@ pub struct UiAsset {
 /// bytes, and a digest is the one name for bytes that both dedup and verify.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UiRuntime {
+pub struct InstalledPreset {
     /// The preset, as the runtime model: identity, protocol, capabilities,
     /// settings validated when the application was built, and the assets its
     /// settings named.
-    pub preset: UiPreset,
+    pub preset: PresetRuntime,
     /// The preset executable this installation will launch.
     pub executable: Sha256Digest,
 }

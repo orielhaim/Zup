@@ -1,0 +1,13 @@
+[package]
+name = "zup-plugin-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/orielhaim/zup"
+description = "Author a Zup installation plugin"
+publish = true
+build = "build.rs"
+
+[dependencies]
+zup-plugin-abi = { path = "../zup-plugin-abi", version = "0.1.0" }
+wit-bindgen = "=0.62.0"

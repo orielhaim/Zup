@@ -73,35 +73,49 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-protocol",
     "zup-runtime",
     "zup-presentation",
-    // The published UI contract. Portable because a preset outside this repository
-    // compiles it, and a contract only one platform can compile is not one they can
-    // consume. It is deliberately free of GPUI, Windows APIs and Tokio, so nothing
-    // about it is platform-shaped.
-    "zup-ui-protocol",
+    // The published preset contract. Portable because a preset outside this
+    // repository compiles it, and a contract only one platform can compile is not
+    // one they can consume. It is deliberately free of GPUI, Windows APIs and
+    // Tokio, so nothing about it is platform-shaped.
+    "zup-preset-protocol",
     // The transport a preset and its host speak over. Portable for the same
     // reason the contract is: it is what makes a preset source portable, and a
     // transport only one platform can compile is not a portable one. It is
     // portable by using the operating system's own IPC rather than by
     // reimplementing any of it.
-    "zup-ui-ipc",
-    // The host side of the UI protocol, with no engine behind it. Portable because a
-    // preset author meets it in zup ui dev before they meet an installer, and a
-    // state machine only one platform can run is not one they can develop against.
-    "zup-ui-host",
+    "zup-preset-ipc",
+    // The plugin contract: the WIT, its digest, and the limits a guest is held
+    // to. Portable because it is pure data that both sides read, and a contract
+    // only one platform can compile is not one a guest can be built against.
+    "zup-plugin-abi",
+    // The guest authoring SDK. Portable because a plugin is Wasm and every
+    // plugin author builds one on the same platform; what it must never reach is
+    // the engine that runs it, which the dependency graph gate enforces rather
+    // than this matrix.
+    "zup-plugin-sdk",
+    // The attribute macro behind the preset SDK's settings. Portable because it
+    // expands at compile time in the preset's own build and is platform-shaped
+    // by whatever the preset targets.
+    "zup-preset-sdk-macros",
+    // The host side of the preset contract, with no engine behind it. Portable
+    // because a preset author meets it in `zup preset dev` before they meet an
+    // installer, and a state machine only one platform can run is not one they
+    // can develop against.
+    "zup-preset-host",
     // Which window an application presents, and what it is given. Portable because
     // a Linux CI job that checks a project does not become unable to answer the
     // question, and a rule only one platform can apply is a rule only one platform
     // is checking.
-    "zup-ui-compose",
+    "zup-preset-compose",
     // The machine a preset is previewed against, with no engine behind it.
     // Portable because it spawns processes, watches a directory and drives a
     // state machine, none of which is a platform, and a preview environment only
     // one platform can run is an environment nobody outside that platform can
     // develop a portable preset with.
     "zup-preview",
-    // The source half of `zup ui dev`: the Cargo project a preset author edits
+    // The source half of `zup preset dev`: the Cargo project a preset author edits
     // and the compiler that has to run for it. Portable for the same reason.
-    "zup-ui-dev",
+    "zup-preset-dev",
     "zup-update",
     "zup-plugin-contract",
     "zup-plugin-build",
@@ -157,7 +171,7 @@ pub const PORTABLE_TESTS: &[&str] = &["zup-xtask"];
 /// branch may only choose between the two wrappers `process-wrap` documents, and a
 /// package gains this by appearing here rather than by a line added beside the
 /// code it silences.
-pub const PORTABLE_PLATFORM_DELEGATING: &[&str] = &["zup-ui-host", "zup-ui-dev"];
+pub const PORTABLE_PLATFORM_DELEGATING: &[&str] = &["zup-preset-host", "zup-preset-dev"];
 
 /// Crates that require a Windows build host: the Windows adapter, the
 /// composition CLI, the runtime an installer embeds, the native frontends, and
@@ -171,11 +185,17 @@ pub const WINDOWS_ONLY: &[&str] = &[
     // other preset and is built by the toolchain rather than shipped inside an
     // installer as a link-time dependency.
     //
-    // The SDK is here rather than in the portable core because its platform is
-    // GPUI's, not Zup's: a preset author writes the same source on every host
-    // and the GPUI stack decides which of them it builds for. The transport
-    // underneath it is portable, and is `zup-ui-ipc`.
-    "zup-ui-sdk",
+    // The preset SDK is here rather than in the portable core because its
+    // platform is GPUI's, not Zup's: a preset author writes the same source on
+    // every host and the GPUI stack decides which of them it builds for. The
+    // transport underneath it is portable, and is `zup-preset-ipc`.
+    "zup-preset-sdk",
+    // The facade a preset author depends on. Windows-only for the same reason
+    // the crate beneath it is: with no feature selected it is empty, and with
+    // `preset` selected it carries GPUI. It is here rather than in the portable
+    // core because a matrix is a statement about what builds on this machine,
+    // and this is the crate whose `plugin` half does not build here at all.
+    "zup-sdk",
     // The two presets this repository builds. `zup-preset-default` is the one a
     // graphical install presents unless an application names another, and
     // `zup-preset-test` is the child the installer's end-to-end test launches;

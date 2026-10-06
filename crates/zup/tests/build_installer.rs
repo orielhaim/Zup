@@ -31,7 +31,7 @@ mod staged;
 #[path = "support/toolchain_fixture.rs"]
 mod toolchain_fixture;
 
-const PLUGIN_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 const X64: &str = "x86_64-pc-windows-msvc";
 const ARM64: &str = "aarch64-pc-windows-msvc";

@@ -1,3 +1,12 @@
 [toolchain]
 channel = "1.99"
 components = ["rustfmt", "clippy"]
+# The two targets this repository cross-compiles to. Both are declared here
+# rather than in a CI workflow because the requirement belongs to the project,
+# not to the pipeline: rustup installs these with the pinned toolchain, so
+# `cargo xtask toolchain build` works the same on a contributor's machine, in
+# every job, and for anything added later that builds the same targets.
+#
+# `i686-pc-windows-msvc` is the dispatcher's machine. `wasm32-unknown-unknown`
+# is what a plugin compiles to.
+targets = ["i686-pc-windows-msvc", "wasm32-unknown-unknown"]

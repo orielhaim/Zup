@@ -176,18 +176,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    #[error("UI accent must be a six-digit hex color such as #2563eb")]
-    #[diagnostic(
-        code(zup_manifest::invalid_ui_accent),
-        help("use a value such as \"#2563eb\" or omit [ui].accent")
-    )]
-    InvalidUiAccent {
-        #[source_code]
-        src: Option<Src>,
-        #[label("invalid UI accent")]
-        span: Option<SourceSpan>,
-    },
-
     /// Two components share an id.
     #[error("duplicate component id `{id}`")]
     #[diagnostic(code(zup_manifest::duplicate_component))]
@@ -381,13 +369,6 @@ impl ManifestError {
                 src: existing,
             } => Self::Invalid {
                 message,
-                span: span.or(inferred),
-                src: existing.or(src),
-            },
-            Self::InvalidUiAccent {
-                span,
-                src: existing,
-            } => Self::InvalidUiAccent {
                 span: span.or(inferred),
                 src: existing.or(src),
             },
@@ -667,7 +648,6 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
         | ManifestError::InvalidResolvedTargetConfig { profile, .. } => source
             .find(profile.as_str())
             .map(|start| source_span(start..start + profile.len())),
-        ManifestError::InvalidUiAccent { .. } => value_span(source, "accent"),
         ManifestError::DuplicateComponent { id, .. }
         | ManifestError::UnknownComponent { id, .. }
         | ManifestError::ComponentSelfDependency { id, .. }

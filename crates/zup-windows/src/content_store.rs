@@ -48,7 +48,7 @@ pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";
 /// The file name of the artifact index, beside the maintenance executable.
 pub const MAINTENANCE_INDEX_NAME: &str = "artifact.json";
 
-/// The file name an installer image's own UI preset is written out under, before
+/// The file name an installer image's own preset is written out under, before
 /// anything has been committed.
 ///
 /// An install that has committed does not use this: its preset is installed

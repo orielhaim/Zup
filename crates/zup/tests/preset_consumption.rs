@@ -13,14 +13,14 @@
 
 use sha2::Digest;
 
-use zup_artifact::ui::{PresetPackageView, PresetPackageWriter};
+use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::{
     Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, TargetTriple, Template,
 };
 use zup_platform::PortableSourceFilePolicy;
-use zup_ui_compose::{PresetProblem, asset_settings, select, validate_settings};
-use zup_ui_protocol::{PresetDescription, UiCapabilities, UiCapability};
+use zup_preset_compose::{PresetProblem, asset_settings, select, validate_settings};
+use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
@@ -58,7 +58,7 @@ fn schema() -> serde_json::Value {
 
 fn description() -> PresetDescription {
     PresetDescription::new("aurora", "1.4.2", schema())
-        .with_capabilities(UiCapabilities::new([UiCapability::Components]))
+        .with_capabilities(Capabilities::new([Capability::Components]))
 }
 
 /// A package carrying one binary per named target.
@@ -147,7 +147,10 @@ fn a_user_package_is_selected_and_its_settings_accepted() {
 
     assert_eq!(selected.name, "aurora");
     assert_eq!(selected.version.to_string(), "1.4.2");
-    assert_eq!(selected.protocol, zup_ui_protocol::UI_PROTOCOL_VERSION);
+    assert_eq!(
+        selected.protocol,
+        zup_preset_protocol::PRESET_PROTOCOL_VERSION
+    );
     assert_eq!(
         selected.executable,
         format!("native preset for {HOST}").repeat(32).into_bytes(),
@@ -220,7 +223,7 @@ fn a_target_the_package_does_not_carry_names_what_it_has() {
 fn a_preset_from_another_protocol_generation_is_refused_as_such() {
     let directory = tempfile::tempdir().expect("a directory");
     let mut described = description();
-    described.ui_protocol = zup_ui_protocol::UI_PROTOCOL_VERSION + 1;
+    described.ui_protocol = zup_preset_protocol::PRESET_PROTOCOL_VERSION + 1;
     let mut writer = PresetPackageWriter::new(described).expect("a description");
     writer
         .add_binary(target(HOST), b"a preset".to_vec())
@@ -236,7 +239,7 @@ fn a_preset_from_another_protocol_generation_is_refused_as_such() {
     )
     .expect_err("this package speaks another protocol generation");
     let message = error.to_string();
-    assert!(message.contains("UI protocol"), "{message}");
+    assert!(message.contains("preset protocol"), "{message}");
     assert!(
         !message.contains("capabilit"),
         "a different axis: {message}"
@@ -250,7 +253,7 @@ fn a_preset_from_another_protocol_generation_is_refused_as_such() {
 fn a_capability_this_application_cannot_provide_is_named() {
     let directory = tempfile::tempdir().expect("a directory");
     let needy = PresetDescription::new("needy", "1.0.0", schema())
-        .with_capabilities(UiCapabilities::new([UiCapability::Maintenance]));
+        .with_capabilities(Capabilities::new([Capability::Maintenance]));
     let mut writer = PresetPackageWriter::new(needy).expect("a description");
     writer
         .add_binary(target(HOST), b"a preset".to_vec())
@@ -273,7 +276,7 @@ fn a_capability_this_application_cannot_provide_is_named() {
     );
 
     let updater = PresetDescription::new("updater", "1.0.0", schema())
-        .with_capabilities(UiCapabilities::new([UiCapability::Updates]));
+        .with_capabilities(Capabilities::new([Capability::Updates]));
     let mut writer = PresetPackageWriter::new(updater).expect("a description");
     writer
         .add_binary(target(HOST), b"a preset".to_vec())
@@ -290,7 +293,7 @@ fn a_capability_this_application_cannot_provide_is_named() {
     let message = error.to_string();
     assert!(message.contains("updates"), "{message}");
     assert!(
-        !message.contains("UI protocol"),
+        !message.contains("preset protocol"),
         "a different axis: {message}"
     );
 }
@@ -337,7 +340,7 @@ fn an_undeclared_setting_follows_the_presets_own_schema() {
     strict["additionalProperties"] = serde_json::json!(false);
     let mut writer = PresetPackageWriter::new(
         PresetDescription::new("aurora", "1.4.2", strict)
-            .with_capabilities(UiCapabilities::new([UiCapability::Components])),
+            .with_capabilities(Capabilities::new([Capability::Components])),
     )
     .expect("a description");
     writer
@@ -426,7 +429,7 @@ fn the_asset_settings_are_read_from_the_packages_own_schema() {
 /// Identical bytes under two names are one stored blob.
 #[test]
 fn an_application_asset_is_resolved_hashed_and_deduplicated() {
-    use zup_ui_compose::prepare;
+    use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);
@@ -496,7 +499,7 @@ fn an_asset_path_that_leaves_the_project_is_refused_while_reading_the_settings(
 /// worse than a build that stops.
 #[test]
 fn an_asset_that_is_not_there_is_refused_before_anything_is_composed() {
-    use zup_ui_compose::prepare;
+    use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);
@@ -519,7 +522,7 @@ fn an_asset_that_is_not_there_is_refused_before_anything_is_composed() {
 /// mistake that would otherwise become an unreadable file beside the runtime.
 #[test]
 fn an_asset_that_is_a_directory_is_refused() {
-    use zup_ui_compose::prepare;
+    use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);
@@ -538,7 +541,7 @@ fn an_asset_that_is_a_directory_is_refused() {
 /// An asset over the build's limit is refused, and the limit is stated.
 #[test]
 fn an_asset_over_the_size_limit_is_refused() {
-    use zup_ui_compose::{MAX_ASSET_BYTES, prepare};
+    use zup_preset_compose::{MAX_ASSET_BYTES, prepare};
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);
@@ -557,13 +560,13 @@ fn an_asset_over_the_size_limit_is_refused() {
     let error = prepare(directory.path(), &selected, &PortableSourceFilePolicy)
         .expect_err("an asset this large is not one a preset draws with");
     let message = error.to_string();
-    assert!(message.contains("UI asset"), "{message}");
+    assert!(message.contains("preset asset"), "{message}");
 }
 
 /// Changing the asset's bytes changes its digest, because identity is content.
 #[test]
 fn changed_asset_bytes_change_the_digest() {
-    use zup_ui_compose::prepare;
+    use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);
@@ -598,7 +601,7 @@ fn an_application_that_configures_nothing_against_a_preset_that_needs_nothing() 
     let directory = tempfile::tempdir().expect("a directory");
     let mut writer = PresetPackageWriter::new(
         PresetDescription::new("bare", "1.0.0", serde_json::json!({ "type": "object" }))
-            .with_capabilities(UiCapabilities::new([UiCapability::Components])),
+            .with_capabilities(Capabilities::new([Capability::Components])),
     )
     .expect("a description");
     writer
@@ -637,7 +640,7 @@ fn selecting_the_same_package_twice_gives_the_same_thing() {
     assert_eq!(first.required_capabilities, second.required_capabilities);
 }
 
-/// The package a build consumes is the package `zup ui inspect` reads, which is
+/// The package a build consumes is the package `zup preset inspect` reads, which is
 /// what makes "verify before composing" the same statement in both commands.
 #[test]
 fn a_build_and_an_inspector_read_one_package() {
@@ -670,7 +673,7 @@ fn a_build_and_an_inspector_read_one_package() {
 /// a source path eventually reached a user's machine.
 #[test]
 fn the_runtime_model_names_assets_without_where_they_live() {
-    use zup_ui_compose::prepare;
+    use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
     let path = write_package(directory.path(), &[HOST]);

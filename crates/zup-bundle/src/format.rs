@@ -209,14 +209,14 @@ pub struct PortableBuildPlan {
     pub entries: Vec<PayloadEntry>,
     #[serde(default)]
     pub prerequisite_artifacts: Vec<PrerequisiteArtifact>,
-    /// The application-provided UI assets this installer presents.
+    /// The application-provided preset assets this installer presents.
     ///
     /// Not payload entries: these are the installer's own runtime data, handed to
     /// a preset rather than installed into the application, so they have no
     /// destination template. Their bytes live in the same content store as
     /// everything else, addressed by the digest recorded here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ui_assets: Vec<zup_core::UiAsset>,
+    pub ui_assets: Vec<zup_core::PresetAsset>,
     pub plugins: Vec<PluginArtifact>,
     pub total_size: u64,
 }
@@ -617,14 +617,14 @@ impl Package {
         Ok(bytes)
     }
 
-    /// The bytes of one application-provided UI asset, proved against the digest
+    /// The bytes of one application-provided preset asset, proved against the digest
     /// the plan recorded.
     ///
     /// The host's path from "an application named a logo" to "the preset can
     /// load a logo" runs through here, so it is a verifying read rather than a
     /// lookup: an asset that does not hash to what the plan says is not handed
     /// to a preset.
-    pub fn ui_asset(&self, name: &str) -> Result<(&zup_core::UiAsset, Vec<u8>), PackageError> {
+    pub fn ui_asset(&self, name: &str) -> Result<(&zup_core::PresetAsset, Vec<u8>), PackageError> {
         let asset = self
             .metadata
             .plan
@@ -651,7 +651,7 @@ impl Package {
         Ok((asset, bytes))
     }
 
-    /// Every application-provided UI asset this package carries, by name.
+    /// Every application-provided preset asset this package carries, by name.
     pub fn ui_asset_names(&self) -> Vec<&str> {
         self.metadata
             .plan
@@ -1210,7 +1210,7 @@ struct Spool {
 /// Compress one build-machine source into the spool directory, once per digest.
 ///
 /// Every kind of package content goes through here: payload files, application
-/// UI assets, and embedded prerequisites are all "read these bytes, prove they
+/// preset assets, and embedded prerequisites are all "read these bytes, prove they
 /// are the bytes the plan names, compress them". A source whose digest is
 /// already spooled is only re-proved, so identical content is stored once and a
 /// second reference to it cannot smuggle in different bytes.
@@ -1260,12 +1260,12 @@ fn spool_source(
     Ok(())
 }
 
-/// The UI assets a plan resolved, in the order the package records them.
+/// The preset assets a plan resolved, in the order the package records them.
 ///
 /// Sorted by name and checked against the preset that will present them, so a
 /// package cannot name an asset its own preset never declared, and two builds of
 /// the same application produce the same list.
-fn canonical_ui_assets(plan: &TargetBuildPlan) -> Result<Vec<zup_core::UiAsset>, PackageError> {
+fn canonical_ui_assets(plan: &TargetBuildPlan) -> Result<Vec<zup_core::PresetAsset>, PackageError> {
     let Some(preset) = plan.installer.preset.as_ref() else {
         return if plan.ui_assets.is_empty() {
             Ok(Vec::new())

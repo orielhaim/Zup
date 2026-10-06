@@ -9,7 +9,7 @@
 //! being developed against.
 //!
 //! One set, because there is one thing being controlled. A preset author running
-//! `zup ui dev` and an application author running `zup preview` are both driving
+//! `zup preset dev` and an application author running `zup preview` are both driving
 //! the same machine, and two lists of controls would drift into two different
 //! sets of states a real installation could be in.
 //!
@@ -19,8 +19,8 @@
 //! preset's component list has no heading, no scrolling, and no way to say "and
 //! four more".
 
+use zup_preset_protocol::{ComponentOption, InstallScope, InstallationHealth, UpdateState};
 use zup_runtime::{InstallOutcome, RuntimeEvent};
-use zup_ui_protocol::{ComponentOption, InstallScope, InstallationHealth, UpdateState};
 
 use crate::machine::{Scenario, Surface};
 use crate::simulator::Simulator;
@@ -51,7 +51,7 @@ impl Components {
     /// The options this shape puts on the surface.
     pub fn options(self) -> Vec<ComponentOption> {
         let component = |id: &str, name: &str, required: bool, selected: bool| ComponentOption {
-            id: zup_ui_protocol::ComponentId::new(id).expect("a component id is never empty"),
+            id: zup_preset_protocol::ComponentId::new(id).expect("a component id is never empty"),
             name: name.to_owned(),
             description: None,
             required,
@@ -239,7 +239,7 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
         }
         Command::Scope(scope) => {
             scenario.scope = scope;
-            let decision = simulator.act(zup_ui_protocol::UiAction::SetScope { scope });
+            let decision = simulator.act(zup_preset_protocol::Action::SetScope { scope });
             refused_with(simulator, decision)
         }
         Command::Components(layout) => {
@@ -250,9 +250,9 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
             publish(simulator)
         }
         Command::Run => {
-            let decision = simulator.act(zup_ui_protocol::UiAction::Install);
+            let decision = simulator.act(zup_preset_protocol::Action::Install);
             match decision {
-                zup_ui_host::HostDecision::Run { .. } => Effect::Running,
+                zup_preset_host::HostDecision::Run { .. } => Effect::Running,
                 other => refused_with(simulator, other),
             }
         }
@@ -305,9 +305,9 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
     }
 }
 
-fn refused_with(simulator: &mut Simulator, decision: zup_ui_host::HostDecision) -> Effect {
+fn refused_with(simulator: &mut Simulator, decision: zup_preset_host::HostDecision) -> Effect {
     match decision {
-        zup_ui_host::HostDecision::Refused(refusal) => Effect::Refused(refusal.to_string()),
+        zup_preset_host::HostDecision::Refused(refusal) => Effect::Refused(refusal.to_string()),
         _ => publish(simulator),
     }
 }

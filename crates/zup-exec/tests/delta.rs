@@ -114,7 +114,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             prerequisite_count: 0,
             download_bytes: 0,
         },
-        ui: None,
+        preset: None,
     }
 }
 

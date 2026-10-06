@@ -1,37 +1,53 @@
 # State and actions
 
-A preset renders the current `UiSnapshot` and sends typed `UiAction` requests.
+A preset renders the current `Snapshot` and sends typed `Action` requests.
 
-That is the public control model. Do not infer installer state from which button was last pressed.
+That is the whole control model. Do not infer installer state from which button
+was last pressed.
 
 ## Snapshot
 
-The snapshot exposes the information a window needs to render:
+The snapshot is the complete state of the installation, published by the host:
 
 | Area | Contains |
 | --- | --- |
-| Product | name, publisher, version, description |
-| Surface | fresh install or maintenance |
-| Choices | scope, components, component groups, install directory |
-| State | options, running, blocked, success, failure, recovery |
-| Operation | install, upgrade, modify, repair, uninstall |
-| Progress | current operation progress |
-| Plan | what current choices would change |
-| Diagnostic | user-facing failure/blocker information |
-| Update | update status when configured |
-| Launch | application launch target when available |
+| `product` | name, publisher, version, description |
+| `surface` | fresh install or maintenance, with its component options |
+| `state` | options, running, blocked, success, failure, recovery |
+| `operation` | install, upgrade, modify, repair, uninstall |
+| `progress` | current operation progress |
+| `plan` | what the current choices would change |
+| `diagnostic` | user-facing failure or blocker information |
+| `update` | update status when configured |
+| `repair_drift` | resources a repair found changed |
+| `launch` | the application launch target when available |
 
-Observe `session.state()` and render from the latest snapshot.
+```rust
+let Some(snapshot) = self.state.read(cx).snapshot() else {
+    return div().child("Waiting for the installer…");
+};
+
+for component in snapshot.surface.components() {
+    // component.id, component.name, component.required, component.selected
+}
+```
+
+`session.state()` is a GPUI entity, so observing it redraws the view when the
+host publishes a new one. There is no polling and no reconciliation: a snapshot
+is the whole state, so a preset that starts late or missed a message still renders
+correctly from what it was handed.
 
 ## Actions
 
-`UiAction` expresses user intent:
+`Action` expresses what a person asked for:
 
 ```rust
-session.send(UiAction::Install);
+session.send(Action::SetComponent {
+    component: component.id.clone(),
+    selected: !component.selected,
+});
+session.send(Action::Install);
 ```
-
-Main action groups:
 
 | Group | Actions |
 | --- | --- |
@@ -42,10 +58,17 @@ Main action groups:
 | Support | `OpenLog`, `CopyDiagnostics` |
 | Finish | `Launch`, `Close` |
 
-The installer validates an action against its current state. The preset should therefore enable controls from the snapshot instead of maintaining a separate lifecycle state machine.
+Actions are intent, not interaction. There is no "button was pressed", no widget
+id and no generic command channel. The host validates every action against the
+state it owns, so sending `Install` twice does not start two installations, and a
+preset should enable controls from the snapshot rather than keep a lifecycle
+state machine of its own.
 
 ## Component groups
 
-Render component groups from the snapshot rather than re-reading `zup.toml`. Groups carry display metadata (`label`, `description`, `prominence`, `selection`) plus component IDs.
+Render component groups from the snapshot rather than re-reading `zup.toml`.
+Groups carry display metadata - `label`, `description`, `prominence`, `selection`
+- plus the component ids they contain.
 
-`prominence` is product intent, not a required layout. A preset may present primary and secondary groups differently as long as the choice remains clear.
+`prominence` is product intent, not a required layout. A preset may present
+primary and secondary groups differently as long as the choice stays clear.

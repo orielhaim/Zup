@@ -7,11 +7,10 @@ use rstest::rstest;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 use zup_plugin_contract::{
-    Context, ContractError, EngineFingerprint, InstallScope, InvocationError, PluginEngine,
-    engine_fingerprint,
+    Context, ContractError, InstallScope, InvocationError, PluginEngine, engine_fingerprint,
 };
 
-const VALID_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_wit(wit: &str) -> Vec<u8> {
     let mut resolve = Resolve::default();
@@ -93,7 +92,7 @@ fn context() -> Context {
     Never::Ask
 )]
 #[case::trap("unreachable", Refusal::Trap, Never::Ask)]
-#[case::out_of_fuel("(loop (br 0)) unreachable", Refusal::FuelExhausted, Never::Ask)]
+#[case::never_finishes("(loop (br 0)) unreachable", Refusal::Bound, Never::Ask)]
 #[case::out_of_memory(
     "(drop (memory.grow (i32.const 513))) (i32.const 0)",
     Refusal::MemoryLimit,
@@ -127,7 +126,16 @@ fn a_guest_that_misbehaves_is_mapped_to_its_own_failure(
 enum Refusal {
     OutputLimit,
     Trap,
-    FuelExhausted,
+    /// Stopped by one of the two bounds, whichever ran out first.
+    ///
+    /// A guest that never finishes spends its fuel and its wall-clock at the same
+    /// time, so a machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
+    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
+    /// deadline. Both are the guest being stopped, and which one fired is a fact
+    /// about the machine rather than about the engine. That each bound is mapped
+    /// from its own trap is proved directly, over the traps, in
+    /// `runtime::a_trap_is_reported_as_its_own_failure`.
+    Bound,
     MemoryLimit,
     Cancelled,
 }
@@ -138,7 +146,8 @@ impl Refusal {
             (self, error),
             (Refusal::OutputLimit, InvocationError::OutputLimit { .. })
                 | (Refusal::Trap, InvocationError::Trap { .. })
-                | (Refusal::FuelExhausted, InvocationError::FuelExhausted)
+                | (Refusal::Bound, InvocationError::FuelExhausted)
+                | (Refusal::Bound, InvocationError::Timeout)
                 | (Refusal::MemoryLimit, InvocationError::MemoryLimit)
                 | (Refusal::Cancelled, InvocationError::Cancelled)
         )
@@ -280,11 +289,31 @@ fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]
     );
 }
 
+/// The fingerprint is what stops a host from loading output a differently
+/// configured engine produced, so two calls have to agree and a change to any
+/// input has to move it.
+///
+/// The expected value is pinned rather than compared to a second call: the
+/// point is that the digest covers its inputs, and the WIT contract is one of
+/// them. A change here means the contract or the engine configuration changed,
+/// which is exactly the event an ahead-of-time artifact has to be rebuilt for.
+///
+/// The value is the same on every platform, which is what makes pinning it
+/// possible at all: the contract is hashed as it reads rather than as a checkout
+/// stored it, so a Windows working tree and a Unix one agree.
 #[test]
-fn fingerprint_is_stable() {
-    let first: EngineFingerprint = engine_fingerprint("x86_64-pc-windows-msvc");
-    let second = engine_fingerprint("x86_64-pc-windows-msvc");
-    assert_eq!(first, second);
+fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
+    let first = engine_fingerprint("x86_64-pc-windows-msvc");
+    assert_eq!(
+        first,
+        engine_fingerprint("x86_64-pc-windows-msvc"),
+        "one configuration is one fingerprint"
+    );
+    assert_ne!(
+        first,
+        engine_fingerprint("aarch64-pc-windows-msvc"),
+        "the target is part of what an engine is"
+    );
     assert_eq!(
         first.to_hex(),
         "bb10e7c2044e5f55ace87ae79d15a4f4846e61d3614101e3dbff11b0f0a918ef"

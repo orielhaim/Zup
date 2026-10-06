@@ -2,7 +2,7 @@
 //! when what it is shown changes.
 //!
 //! Two things in this repository are a host, and this is the part of them that
-//! is neither an installer nor a machine. `zup ui dev` runs it while a preset
+//! is neither an installer nor a machine. `zup preset dev` runs it while a preset
 //! author edits Rust; `zup preview` runs it while an application author edits
 //! `zup.toml`. Below their sources they are the same process doing the same
 //! thing, because a preset author who developed against a different one would

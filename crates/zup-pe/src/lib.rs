@@ -55,7 +55,7 @@ pub const RESOURCE_ID_INDEX: usize = 1;
 /// document sequence begins.
 pub const RESOURCE_ID_BLOB_START: usize = 2;
 
-/// The resource identifier of a self-contained installer's UI preset.
+/// The resource identifier of a self-contained installer's preset.
 ///
 /// Above the payload's own sequence rather than beside the index, because the
 /// payload's identifiers are assigned by position and renumbering them would

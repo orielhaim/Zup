@@ -307,7 +307,7 @@ fn a_published_blob_that_no_longer_hashes_to_its_name_is_refused_everywhere() {
 }
 
 #[test]
-fn a_link_inside_the_cache_is_refused() {
+fn a_blob_behind_a_link_is_never_read_through_it() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let _outside = tempfile::tempdir().expect("a temporary directory");
     let logical = payload(14, 1024);
@@ -320,10 +320,18 @@ fn a_link_inside_the_cache_is_refused() {
     {
         std::os::unix::fs::symlink(_outside.path(), fanout.join(&hex[2..]))
             .expect("the link is created");
-        let cache = ContentCache::open(dir.path(), CachePolicy::Keep);
+        // The cache still opens. What it guarantees is that no operation reads or
+        // writes *through* a link, which is checked against the path each one
+        // touches; refusing to open while a link exists anywhere in the tree would
+        // make opening a cache cost a walk of every blob it holds, and a cache on
+        // a machine that fetched a lot would stop being cheap to open at all.
+        let cache = ContentCache::open(dir.path(), CachePolicy::Keep).expect("the cache opens");
+        let error = cache
+            .probe(&descriptor, Verify::Full)
+            .expect_err("a blob behind a link is not probed through it");
         assert!(
-            cache.is_err(),
-            "a link in the blob tree must stop the cache from opening"
+            matches!(error, zup_acquire::CacheError::Link { .. }),
+            "and the refusal says it was a link: {error}"
         );
     }
     #[cfg(not(unix))]

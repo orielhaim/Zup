@@ -119,7 +119,7 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
     }
 }
 
-/// The uninstall confirmation window, for Apps & Features on a GUI package.
+/// The uninstall confirmation window, for Apps & Features on a GUI frontend.
 ///
 /// A separate process, because the file that would host it is the file Windows is
 /// about to delete.

@@ -143,8 +143,8 @@ fn compiled_plugin(target: &str) -> CompiledPluginArtifact {
     CompiledPluginArtifact::new(plugin_metadata(target), aot).unwrap()
 }
 
-/// What a target's window needs, for a fixture that presents one.
-pub struct WindowSpec {
+/// What a target's preset needs, for a fixture that presents one.
+pub struct PresetSpec {
     /// The application's assets, by the name its settings would use.
     pub assets: Vec<(String, String)>,
     /// Distinguishes one generation's window from another's.
@@ -157,18 +157,18 @@ pub struct WindowSpec {
     reason = "a windowless fixture for the tests that do not present one"
 )]
 pub fn build_target(root: impl AsRef<Path>, target: &FixtureTarget) -> DistributionVariant {
-    build_target_with_window(root, target, None)
+    build_target_with_preset(root, target, None)
 }
 
-/// Build one target, optionally with a window to present.
+/// Build one target, optionally with a preset to present.
 ///
 /// A window is content like any other from here on: the preset is a native image
 /// by digest, and the assets are blobs the plan names. Nothing in the release
 /// model knows what draws them.
-pub fn build_target_with_window(
+pub fn build_target_with_preset(
     root: impl AsRef<Path>,
     target: &FixtureTarget,
-    window: Option<&WindowSpec>,
+    window: Option<&PresetSpec>,
 ) -> DistributionVariant {
     let root = root.as_ref();
     std::fs::create_dir_all(root).unwrap();
@@ -239,7 +239,7 @@ pub fn build_target_with_window(
         .map(|_| vec![compiled_plugin(target.target)])
         .unwrap_or_default();
 
-    // The window's assets are resolved the way a build resolves them: a file on
+    // The preset's assets are resolved the way a build resolves them: a file on
     // this machine, hashed, and recorded by the name the settings used.
     let mut ui_assets = Vec::new();
     let mut settings = serde_json::Map::new();
@@ -265,15 +265,15 @@ pub fn build_target_with_window(
             "generation".to_owned(),
             serde_json::Value::from(window.generation),
         );
-        zup_core::UiPreset {
+        zup_core::PresetRuntime {
             name: NonEmptyString::new(format!("{}-preset", window.generation)).unwrap(),
             version: semver::Version::parse("1.0.0").unwrap(),
-            protocol: zup_ui_protocol::UI_PROTOCOL_VERSION,
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
             required_capabilities: vec!["components".to_owned()],
             settings: serde_json::Value::Object(settings),
             assets: ui_assets
                 .iter()
-                .map(|asset| zup_core::UiAsset {
+                .map(|asset| zup_core::PresetAsset {
                     name: asset.name.clone(),
                     size: asset.size,
                     sha256: asset.sha256,
@@ -332,7 +332,7 @@ pub fn build_target_with_window(
     let mut runtime = filler("runtime-image", 0).into_bytes();
     runtime.extend_from_slice(target.target.as_bytes());
 
-    // The window's native image, distinct per target and per generation so a
+    // The preset's native image, distinct per target and per generation so a
     // test can tell one from the other by content alone.
     let mut natives = vec![(MediaType::RUNTIME, runtime)];
     if let Some(window) = window {

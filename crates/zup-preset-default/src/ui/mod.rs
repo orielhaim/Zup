@@ -24,7 +24,7 @@ pub use parts::{
 
 use std::rc::Rc;
 
-use zup_ui_sdk::gpui_kit::{App, Window};
+use zup_preset_sdk::gpui_kit::{App, Window};
 
 /// What a control does when it is used.
 pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;

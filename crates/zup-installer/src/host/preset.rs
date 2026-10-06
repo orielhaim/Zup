@@ -2,7 +2,7 @@
 //! it.
 //!
 //! Everything after that - the endpoint, the handshake, publishing a snapshot,
-//! reading an action, and ending the child - is in `zup_ui_host::process`,
+//! reading an action, and ending the child - is in `zup_preset_host::process`,
 //! because a development environment does exactly the same and a host with two
 //! launch paths would be a host whose behaviour could not be established from
 //! either.
@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use zup_core::UiPreset;
-use zup_ui_protocol::UiCapabilities;
+use zup_core::PresetRuntime;
+use zup_preset_protocol::Capabilities;
 
 /// Why no window appeared.
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +29,7 @@ pub enum PresetError {
     #[error("this host cannot present the preset: {0}")]
     Incompatible(String),
     #[error("the installed UI content cannot be used: {0}")]
-    Integrity(#[from] zup_windows::ui_runtime::UiContentError),
+    Integrity(#[from] zup_windows::preset_runtime::PresetContentError),
     #[error("the preset could not be prepared for launch: {0}")]
     Prepare(#[source] io::Error),
 }
@@ -45,14 +45,14 @@ pub enum Source<'a> {
     /// The installer image this process is running from, before any commit.
     Composed {
         executable: &'a Path,
-        preset: &'a UiPreset,
+        preset: &'a PresetRuntime,
         bundle: &'a zup_windows::EmbeddedBundle,
     },
     /// What an installed application owns.
     Installed {
         /// The installation's maintenance directory, where its content is kept.
         directory: &'a Path,
-        runtime: &'a zup_core::UiRuntime,
+        runtime: &'a zup_core::InstalledPreset,
     },
 }
 
@@ -66,25 +66,25 @@ pub struct Composed {
     /// The executable to launch.
     pub executable: PathBuf,
     /// What to tell the preset, once its executable is running.
-    pub configuration: zup_ui_protocol::UiConfiguration,
+    pub configuration: zup_preset_protocol::Configuration,
 }
 
 /// Materialize the preset executable and its assets, and check this launch can
 /// present them.
 pub fn materialize(
     source: &Source<'_>,
-    capabilities: &UiCapabilities,
+    capabilities: &Capabilities,
 ) -> Result<Composed, PresetError> {
     let preset = match source {
         Source::Composed { preset, .. } => *preset,
         Source::Installed { runtime, .. } => &runtime.preset,
     };
-    zup_ui_host::process::check_presentable(preset, capabilities)
+    zup_preset_host::process::check_presentable(preset, capabilities)
         .map_err(PresetError::Incompatible)?;
 
     let (executable, assets) = match source {
         Source::Installed { directory, runtime } => {
-            let resolved = zup_windows::ui_runtime::resolve(directory, runtime)?;
+            let resolved = zup_windows::preset_runtime::resolve(directory, runtime)?;
             (resolved.executable, resolved.assets)
         }
         Source::Composed {
@@ -115,7 +115,7 @@ pub fn materialize(
 
     Ok(Composed {
         executable,
-        configuration: zup_ui_protocol::UiConfiguration {
+        configuration: zup_preset_protocol::Configuration {
             settings: preset.settings.clone(),
             assets,
         },
@@ -131,7 +131,7 @@ fn staging_directory(executable: &Path) -> PathBuf {
     executable
         .parent()
         .unwrap_or(Path::new("."))
-        .join("ui-assets")
+        .join("preset-assets")
 }
 
 /// Write the installer image's own embedded preset out beside itself.
@@ -162,4 +162,4 @@ fn locate(executable: &Path) -> Result<PathBuf, PresetError> {
 
 // The session itself. Re-exported rather than reimplemented, so a caller that
 // already names this module keeps naming it.
-pub use zup_ui_host::process::{PresetProcess, PresetReader, SessionError, launch};
+pub use zup_preset_host::process::{PresetProcess, PresetReader, SessionError, launch};

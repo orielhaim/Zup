@@ -4,19 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Ahead-of-time plugin compilation for zup"
+description = "Component and ahead-of-time compilation for zup plugins"
+publish = false
 
 [dependencies]
+anyhow = "1"
+# Turning a plugin's core module into a component is Zup's step, not the
+# author's, because the componentiser's version has to agree with the runtime
+# that will load the result. It is pinned to the version the host was built
+# against rather than discovered from whatever happens to be installed.
+wit-component = { version = "=0.261", features = ["dummy-module"] }
+wit-parser = "=0.261"
+zup-plugin-abi.workspace = true
+zup-plugin-contract = { workspace = true, features = ["compiler"] }
 sha2.workspace = true
 thiserror.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
-zup-plugin-contract = { workspace = true, features = ["compiler"] }
 
 [dev-dependencies]
 zup-build.workspace = true
 tempfile.workspace = true
-zup-manifest.workspace = true
 wat = "1"
-wit-component = { version = "=0.260.0", features = ["dummy-module"] }
-wit-parser = "=0.260.0"
+zup-manifest.workspace = true

@@ -1,40 +1,84 @@
 # Plugin resources
 
-A plugin returns an `installation-plan` containing resource items. Zup merges them into the ordinary plan.
+A plugin returns a `Plan`; Zup merges its resources into the ordinary
+installation plan. `Plan` is a builder, because every plugin writes the same
+shape - start empty, declare two or three things, return it:
 
-## Generated file
+```rust
+use zup_sdk::plugin::prelude::*;
 
-```wit
-record generated-file {
-  destination: string,
-  contents: list<u8>,
-}
+let plan = Plan::new()
+    .generated_file(GeneratedFile::text("${install}/app.ini", contents))
+    .launcher(Launcher::menu("Acme", "${launcher}"))
+    .path_entry(Path::new("${install}/bin"));
+
+plan.validate()?;
+Ok(plan)
 ```
 
-Use this for small configuration or metadata files derived by the plugin.
+`validate()` is optional. It refuses an oversized plan at the point of the
+mistake rather than after a round trip to a host, and the host enforces the same
+limit regardless.
 
-## Launcher
+| Method | Constructor |
+| --- | --- |
+| `generated_file` | `GeneratedFile::new(dest, bytes)` or `GeneratedFile::text(dest, str)` |
+| `launcher` | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)` |
+| `path_entry` | `Path::new(dir)` |
+| `service` | `Service::new(id, name, binary)` |
+| `protocol` | `Protocol::new(scheme, exec)` |
+| `file_association` | `FileAssociation::new(id, ext, exec)` |
 
-A launcher can target `menu` or `desktop` and includes name, target, arguments and optional working directory.
+Each constructor supplies the defaults, so a plugin names the field it means
+rather than the shape of the whole record. A new resource kind gets a constructor
+of its own when the WIT grows one.
 
-## PATH entry
+## Launchers
 
-A path entry contributes one value to the install scope's search path.
+```rust
+Launcher::desktop("Acme", "${launcher}")
+    .with_arguments(["--background"])
+    .with_working_directory("${install}")
+```
 
-## Service
+## Services
 
-A service declares ID, name, optional display name, binary, arguments and start policy (`automatic`, `manual`, `disabled`).
+```rust
+Service::new("acme-agent", "AcmeAgent", "${install}/agent.exe")
+    .with_display_name("Acme Agent")
+    .with_start(ServiceStart::Automatic)
+```
 
-## Protocol
+The `id` is what uninstall refers to and what a later install matches on, so it
+should survive a version bump. The `name` is the internal service name.
+`ServiceStart` is `Automatic`, `Manual` or `Disabled`.
 
-A protocol declares a URI scheme, executable and arguments.
+## Protocols and file associations
 
-## File association
+```rust
+Protocol::new("acme", "${launcher}").with_arguments(["--open"])
+FileAssociation::new("Acme.Document", ".acme", "${launcher}")
+    .with_description("Acme document")
+```
 
-A file association declares extension, ID, optional description and executable.
+The association's id is the identity of the registration on the machine, so it
+is yours to choose and has to be stable across versions. Deriving it from the
+extension does not work: every application on the machine can claim `.acme`, and
+two of them claiming the same id is indistinguishable from one application
+claiming it twice. On Windows this is the ProgID the shell matches against.
 
 ## Ownership
 
-Return only resources the application should own. Once accepted, plugin resources follow the same lifecycle as equivalent manifest resources: they are part of planning, installation, repair, modification, upgrade and uninstall.
+Return only resources the application should own. Once accepted, plugin resources
+follow the same lifecycle as equivalent manifest resources: they are part of
+planning, installation, repair, modification, upgrade and uninstall.
 
-Do not return a fixed resource from a plugin merely to avoid writing it in the manifest. Static declarations are easier to read and audit in `zup.toml`.
+Everything a plugin declares is checked against the application's own manifest
+before it is applied, so a plan that contradicts what the application declares is
+refused rather than obeyed.
+
+Do not return a fixed resource from a plugin merely to avoid writing it in the
+manifest. Static declarations are easier to read and audit in `zup.toml`.
+
+The Rust names above correspond one-to-one with the WIT records in the
+[Plugin API reference](/reference/plugin-api).

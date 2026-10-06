@@ -17,8 +17,8 @@ thiserror.workspace = true
 zup-core.workspace = true
 zup-presentation.workspace = true
 zup-runtime.workspace = true
-zup-ui-host.workspace = true
-zup-ui-protocol.workspace = true
+zup-preset-host.workspace = true
+zup-preset-protocol.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

@@ -16,8 +16,8 @@
 //!   `zup-installer` through a shared dependency, every user of an Acme installer
 //!   ships a GitHub API client they did not ask for. That is a real production
 //!   defect, and it is invisible to a size budget until somebody looks.
-//! - **An internal crate reachable from a published one.** `zup-ui-protocol` and
-//!   `zup-ui-sdk` are consumed by preset projects that have never heard of this
+//! - **An internal crate reachable from a published one.** `zup-preset-protocol` and
+//!   `zup-preset-sdk` are consumed by preset projects that have never heard of this
 //!   repository, so an internal crate in either graph is a type that a preset
 //!   author cannot name. The fix is always a conversion at the host boundary, never
 //!   a dependency.
@@ -37,6 +37,8 @@ pub struct Findings {
     pub intrusions: Vec<String>,
     /// An internal crate reachable from a published one.
     pub crossings: Vec<String>,
+    /// A crate reaching something its role forbids it to reach.
+    pub isolations: Vec<String>,
 }
 
 /// One workspace package carrying two versions of one crate.
@@ -82,11 +84,11 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
     // The preview environments. They belong to the person writing a preset and
     // the person writing an application, and to nobody installing one, so they
     // must never reach an installer through a shared dependency. `zup-preview`
-    // is the machine both of them share; `zup-ui-dev` is the Cargo half of one
-    // of them; `zup-ui-compose` is the build-plane answer both must not invent.
+    // is the machine both of them share; `zup-preset-dev` is the Cargo half of one
+    // of them; `zup-preset-compose` is the build-plane answer both must not invent.
     "zup-preview",
-    "zup-ui-dev",
-    "zup-ui-compose",
+    "zup-preset-dev",
+    "zup-preset-compose",
     // The developer CLI's machine contract. It reaches the CLI and the repository's own
     // tooling, and it must never reach an installer: the wire DTOs are a description of
     // a developer's build, and a user installing an application has no build to
@@ -100,16 +102,109 @@ pub const BUILD_ONLY_PACKAGES: &[&str] = &[
 
 /// The crates published for use outside this repository.
 ///
-/// A preset project depends on the SDK and, if it speaks the protocol or carries
-/// the transport itself, on the two crates beneath it. None of them may reach a
-/// crate that exists only here: a published crate that names `zup-windows` is a
-/// crate that can only be built inside the repository that owns it, which is the
-/// opposite of what publishing one is for.
+/// One author-facing name, and two roles behind it that share almost nothing:
 ///
-/// The three form a chain, and the gate walks all three, so a new edge from any
-/// of them into the engine is caught whether it is written in the SDK, in the
-/// transport, or in the contract.
-pub const PUBLIC_UI_PACKAGES: &[&str] = &["zup-ui-protocol", "zup-ui-ipc", "zup-ui-sdk"];
+/// ```text
+/// zup-sdk                    the facade, one feature per role
+///   preset
+///     zup-preset-sdk         the preset authoring API
+///       zup-preset-sdk-macros
+///       zup-preset-protocol  the wire, read by the SDK and the transport
+///       zup-preset-ipc       the transport that carries it
+///   plugin
+///     zup-plugin-sdk         the plugin authoring API and its bindings
+///       zup-plugin-abi       the Component Model contract, the canonical ABI
+/// ```
+///
+/// An author names `zup-sdk` and one role. Everything below it is published
+/// because Cargo resolves a transitive dependency from crates.io, not because
+/// anyone should reach it directly: a published crate that names `zup-windows` is
+/// a crate that can only be built inside the repository that owns it, which is
+/// the opposite of what publishing one is for.
+///
+/// The gate treats all seven as roots, so a new edge from any of them into the
+/// engine is caught whether it is written in the facade, in a role's API, in a
+/// transport, or in a contract.
+pub const PUBLISHED_PACKAGES: &[&str] = &[
+    "zup-sdk",
+    "zup-preset-sdk",
+    "zup-preset-sdk-macros",
+    "zup-preset-protocol",
+    "zup-preset-ipc",
+    "zup-plugin-sdk",
+    "zup-plugin-abi",
+];
+
+/// What a crate may not reach, because reaching it would defeat a boundary.
+///
+/// Each entry is a rule about one thing rather than a list of crates to check
+/// for, so a new crate is caught by the property it violates rather than by
+/// having to be remembered here. These are the properties the architecture is
+/// made of, and a graph that satisfies them is the graph the design claims.
+pub const ISOLATION: &[(&str, &[&str], &str)] = &[
+    (
+        // A plugin guest is WebAssembly with no host behind it. A runtime in its
+        // graph is a runtime the guest carries into every application it ships
+        // inside, and an engine API is an engine API whether or not the plugin
+        // can call it from inside a sandbox.
+        "zup-plugin-sdk",
+        &[
+            "wasmtime",
+            "zup-plugin-contract",
+            "zup-plugin-runtime",
+            "zup-plugin-build",
+        ],
+        "a plugin guest must not carry the runtime that executes it",
+    ),
+    (
+        // The same reasoning for the contract: it is data both sides read, and a
+        // guest that pulls it also pulls the engine.
+        "zup-plugin-abi",
+        &["wasmtime", "zup-plugin-contract", "zup-plugin-runtime"],
+        "the plugin contract is data, and must not carry the engine that reads it",
+    ),
+    (
+        // A preset is a window. It reaches the GPUI stack and nothing that knows
+        // what an installation is doing underneath it.
+        "zup-preset-sdk",
+        &[
+            "wasmtime",
+            "zup-preset-host",
+            "zup-preset-compose",
+            "zup-preset-dev",
+            "zup-installer",
+            "zup-preview",
+            "zup-runtime",
+            "zup-plan",
+            "zup-transaction",
+            "zup-exec",
+            "zup-windows",
+        ],
+        "a preset draws what the host publishes and reaches nothing beneath it",
+    ),
+    (
+        // The wire contract is pure data by construction, and that is what makes
+        // it publishable at all: anything platform-shaped in it would be a crate
+        // a preset on another platform cannot compile.
+        "zup-preset-protocol",
+        &[
+            "gpui-kit",
+            "wasmtime",
+            "tokio",
+            "zup-core",
+            "zup-preset-ipc",
+        ],
+        "the preset contract is pure data, and carries neither the window nor the engine",
+    ),
+    (
+        // The transport is the operating system's own IPC and the frames above
+        // it. It reaches no engine, because a preset that reaches an engine has a
+        // plan.
+        "zup-preset-ipc",
+        &["wasmtime", "zup-core", "zup-preset-host"],
+        "the preset transport moves frames and reaches nothing that decides anything",
+    ),
+];
 
 /// Check the workspace's graphs.
 pub fn check(root: &Path) -> Result<Findings, String> {
@@ -119,13 +214,17 @@ pub fn check(root: &Path) -> Result<Findings, String> {
         duplicates: workspace_duplicates(&metadata),
         intrusions: intrusions(&edges),
         crossings: crossings(&metadata, &edges),
+        isolations: isolations(&metadata, &edges),
     })
 }
 
 impl Findings {
     /// Whether the gate is clean.
     pub fn is_clean(&self) -> bool {
-        self.duplicates.is_empty() && self.intrusions.is_empty() && self.crossings.is_empty()
+        self.duplicates.is_empty()
+            && self.intrusions.is_empty()
+            && self.crossings.is_empty()
+            && self.isolations.is_empty()
     }
 }
 
@@ -271,8 +370,8 @@ fn intrusions(edges: &Edges<'_>) -> Vec<String> {
 /// somebody has to delete, and two public crates reaching the same internal one is
 /// one mistake rather than two.
 fn crossings(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
-    let public: BTreeSet<&str> = PUBLIC_UI_PACKAGES.iter().copied().collect();
-    let roots: Vec<&str> = PUBLIC_UI_PACKAGES
+    let public: BTreeSet<&str> = PUBLISHED_PACKAGES.iter().copied().collect();
+    let roots: Vec<&str> = PUBLISHED_PACKAGES
         .iter()
         .copied()
         .filter(|root| is_workspace_member(metadata, root))
@@ -297,6 +396,34 @@ fn crossings(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
             path[path.len() - 1]
         ));
     }
+    out
+}
+
+/// A crate reaching something its role forbids.
+///
+/// One report per offending edge, and the path that got there, because the edge
+/// is what somebody has to delete and the path is what tells them which of two
+/// plausible edges actually did it. An isolation rule is skipped for a crate no
+/// matrix claims, rather than reported: the rule describes a role, and a crate
+/// with no role has nothing to violate.
+fn isolations(metadata: &Metadata, edges: &Edges<'_>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (crate_name, forbidden, reason) in ISOLATION {
+        if !is_workspace_member(metadata, crate_name) {
+            continue;
+        }
+        let wanted: BTreeSet<&str> = forbidden.iter().copied().collect();
+        for path in paths_to(edges, &[*crate_name], &wanted) {
+            out.push(format!(
+                "{}: {} (`{}`)",
+                path.join(" -> "),
+                reason,
+                path[path.len() - 1]
+            ));
+        }
+    }
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -511,16 +638,16 @@ mod tests {
             "zup-core",
             "zup-installer",
             "zup-runtime",
-            "zup-ui-protocol",
-            "zup-ui-sdk",
+            "zup-preset-protocol",
+            "zup-preset-sdk",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect();
         let clean = Metadata {
             nodes: vec![
-                node("zup-ui-protocol", &[]),
-                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-preset-protocol", &[]),
+                node("zup-preset-sdk", &["zup-preset-protocol"]),
                 node("zup-installer", &["zup-core", "zup-runtime"]),
                 node("zup-core", &[]),
                 node("zup-runtime", &["zup-core"]),
@@ -531,12 +658,12 @@ mod tests {
 
         // The same graph with one edge added. It is reached through the protocol
         // rather than declared directly, which is the case a reviewer's eye misses
-        // because `zup-ui-sdk -> zup-ui-protocol` is a dependency that is supposed
+        // because `zup-preset-sdk -> zup-preset-protocol` is a dependency that is supposed
         // to be there, and it is reported once, at the edge that is not.
         let leaked = Metadata {
             nodes: vec![
-                node("zup-ui-protocol", &["zup-core"]),
-                node("zup-ui-sdk", &["zup-ui-protocol"]),
+                node("zup-preset-protocol", &["zup-core"]),
+                node("zup-preset-sdk", &["zup-preset-protocol"]),
                 node("zup-installer", &["zup-core"]),
                 node("zup-core", &[]),
                 node("zup-runtime", &["zup-core"]),
@@ -546,7 +673,7 @@ mod tests {
         assert_eq!(
             crossings(&leaked, &edges(&leaked)),
             [
-                "zup-ui-protocol -> zup-core: `zup-core` is an internal zup crate \
+                "zup-preset-protocol -> zup-core: `zup-core` is an internal zup crate \
              and a published crate may not reach it; convert at the host boundary instead"
             ]
         );

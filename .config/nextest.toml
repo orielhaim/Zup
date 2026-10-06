@@ -1,6 +1,20 @@
 [profile.default]
 slow-timeout = { period = "60s" }
 
+# A cap, because about thirty suites run real installers and real preset children
+# as separate processes and several wait on another process exiting against a
+# one-minute deadline. At one thread per core those starve each other: measured on
+# this repository, the heaviest of them took 19s alone and 56s at sixteen threads,
+# which is inside the deadline it is racing. The failure lands on whichever test
+# lost rather than on anything wrong with the code, and it is a different test
+# each run.
+#
+# This is a per-profile setting rather than a per-override one because nextest has
+# no `test-threads` in an override: putting it there is ignored, with a warning on
+# every run, and the suite still starves. That is why the cap is one blunt number
+# rather than a limit on only the suites that need it.
+test-threads = 8
+
 [[profile.default.overrides]]
 filter = 'package(zup-installer) and test(/^frontends::|^lifecycle::|^generated_files::/)'
 slow-timeout = "180s"
@@ -12,3 +26,16 @@ slow-timeout = "180s"
 [[profile.default.overrides]]
 filter = 'test(/measurements/)'
 slow-timeout = "120s"
+
+# The suites that spawn real processes get longer before nextest calls one slow,
+# which is only a label and not a failure. The parallelism that actually matters
+# is `test-threads` above, because nextest applies it per profile.
+[[profile.default.overrides]]
+filter = 'test(/^(frontends|lifecycle|generated_files|preset_session|preset_persistence)::/)'
+slow-timeout = "180s"
+
+# `zup-preview` stages a real preset executable, launches it per generation, and
+# waits on its report beside that generation's own file. Same shape.
+[[profile.default.overrides]]
+filter = 'test(/^runtime::/)'
+slow-timeout = "180s"

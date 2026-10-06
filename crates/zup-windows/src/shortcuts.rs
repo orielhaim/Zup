@@ -203,11 +203,18 @@ mod tests {
     #[test]
     fn native_shortcut_create_update_and_ownership_safe_rollback() {
         let dir = TempDir::new().unwrap();
+        // The resolved directory, not the one `TEMP` named. GitHub's Windows
+        // runners hand out the 8.3 short form of the user's temp directory, and a
+        // shortcut's target comes back the way the shell resolved it - so an
+        // expectation built from the short name was comparing two spellings of one
+        // file, and failing on every runner that hands one out. Resolving once here
+        // keeps the strong claim: the shortcut holds exactly what was written.
+        let root = std::path::PathBuf::from(crate::machine_state::plain_path_text(
+            &std::fs::canonicalize(dir.path()).unwrap(),
+        ));
         let target_triple = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-        let launcher_path =
-            target_path_from_host(&dir.path().join("Acme.lnk"), &target_triple).unwrap();
-        let target =
-            target_path_from_host(&dir.path().join("Acme App.exe"), &target_triple).unwrap();
+        let launcher_path = target_path_from_host(&root.join("Acme.lnk"), &target_triple).unwrap();
+        let target = target_path_from_host(&root.join("Acme App.exe"), &target_triple).unwrap();
         std::fs::write(host_path(&target), b"test").unwrap();
         let mut op = LauncherOperation {
             key: ResourceKey::Launcher {
@@ -218,7 +225,7 @@ mod tests {
             launcher_path: launcher_path.clone(),
             target: target.clone(),
             arguments: vec!["a b".into(), "quoted\"text".into(), "世界".into()],
-            working_directory: Some(target_path_from_host(dir.path(), &target_triple).unwrap()),
+            working_directory: Some(target_path_from_host(&root, &target_triple).unwrap()),
             privilege: zup_core::Privilege::User,
             previous: ObservedLauncherState::Absent,
             conflict: None,

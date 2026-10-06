@@ -21,7 +21,7 @@ use zup_plugin_contract::{
 use zup_plugin_runtime::{LoadError, WasmtimePluginExecutor};
 
 const PLUGIN_ID: &str = "helper";
-const VALID_WIT: &str = include_str!("../../../wit/zup-plugin.wit");
+const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_body(body: &str) -> Vec<u8> {
     let wat = format!(
@@ -279,7 +279,16 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
 enum Expected {
     Cancelled,
     Trapped,
-    OutOfFuel,
+    /// Stopped by one of the two bounds, whichever ran out first.
+    ///
+    /// A plugin that spins spends its fuel and its wall-clock at the same time, so a
+    /// machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
+    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
+    /// deadline. Both are the plugin being contained, and which bound fired is a fact
+    /// about the machine rather than about the executor. That each bound is mapped
+    /// from its own trap is proved directly, over the traps, in
+    /// `zup_plugin_contract`'s `a_trap_is_reported_as_its_own_failure`.
+    Bound,
     OutOfMemory,
     Rejected,
 }
@@ -291,7 +300,8 @@ impl Expected {
             (self, failure),
             (Expected::Cancelled, PluginFailure::Cancelled)
                 | (Expected::Trapped, PluginFailure::Trap { .. })
-                | (Expected::OutOfFuel, PluginFailure::FuelExhausted)
+                | (Expected::Bound, PluginFailure::FuelExhausted)
+                | (Expected::Bound, PluginFailure::Timeout)
                 | (Expected::OutOfMemory, PluginFailure::MemoryLimit)
                 | (Expected::Rejected, PluginFailure::Rejected { .. })
         )
@@ -303,7 +313,7 @@ impl Expected {
 #[rstest]
 #[case::cancelled("fuel", Expected::Cancelled, Cancellation::AfterFirstPoll)]
 #[case::trapped("trap", Expected::Trapped, Cancellation::Never)]
-#[case::out_of_fuel("fuel", Expected::OutOfFuel, Cancellation::Never)]
+#[case::never_finishes("fuel", Expected::Bound, Cancellation::Never)]
 #[case::out_of_memory("memory", Expected::OutOfMemory, Cancellation::Never)]
 #[case::rejected("rejected", Expected::Rejected, Cancellation::Never)]
 fn a_misbehaving_plugin_is_contained_and_named(

@@ -184,11 +184,39 @@ pub fn build(root: &Path, profile: &str) -> Result<Vec<PathBuf>, String> {
     let peer = build_and_stage_test_preset(root, &staged, profile)?;
     println!("  preset-peer        {}", component_name(&peer));
     written.push(peer);
+
+    build_example_plugin(root)?;
     Ok(written)
 }
 
-/// Pack the default preset and stage it for this machine.
+/// The example plugin, built the way an author builds one.
 ///
+/// Not staged as a toolchain component, because it is not one: nothing an
+/// installer ships reads it. It is built here because a test that loads it has
+/// to be loading something current. Built through `zup plugin build` rather than
+/// by invoking cargo and a componentiser directly, so the path those tests
+/// depend on is the path an author produces.
+fn build_example_plugin(root: &Path) -> Result<(), String> {
+    let project = root.join("examples").join("plugins").join("configure");
+    if !project.is_dir() {
+        return Err(format!("no example plugin at {}", project.display()));
+    }
+    cargo(
+        root,
+        &[
+            "run",
+            "--quiet",
+            "-p",
+            "zup",
+            "--",
+            "plugin",
+            "build",
+            "--project",
+            &project.to_string_lossy(),
+        ],
+    )
+}
+
 /// Build and stage the peer preset the runtime's end-to-end tests install.
 ///
 /// A real preset, written against the public SDK, staged beside the components a
@@ -222,7 +250,7 @@ fn build_and_stage_test_preset(
     Ok(destination)
 }
 
-/// Published through `zup ui pack` rather than by writing a package here, so the
+/// Published through `zup preset pack` rather than by writing a package here, so the
 /// preset Zup ships is produced by the same publisher a third-party author uses
 /// and a build that consumes it is consuming something a user could have
 /// downloaded. The package carries every target it was built for, so the staged
@@ -248,7 +276,7 @@ fn build_and_stage_preset(
             "--profile",
             profile,
             "--",
-            "ui",
+            "preset",
             "pack",
             "--manifest",
             &root.join(PRESET_DIRECTORY).to_string_lossy(),
@@ -441,11 +469,20 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
     // without proving the claim would be asserting half of what the release
     // ships.
     let mut components = Vec::new();
+    // The peer preset the runtime's end-to-end tests launch is staged beside the
+    // components so that a test finds it where every other real binary is, and is
+    // deliberately not one of them: `zup_toolchain::host_components` does not
+    // list it, and it carries no descriptor because it is not a component.
+    // Indexing it would put a test binary in every release and assert a claim the
+    // release does not make, which the self-consistency check below is right to
+    // refuse.
+    let test_peer = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&staged)
         .map_err(|error| format!("{}: {error}", staged.display()))?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
+        .filter(|path| component_name(path) != test_peer)
         .collect();
     entries.sort();
     for entry in entries {
@@ -573,6 +610,34 @@ pub fn repository_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A release ships the components a build composes into an installer, and
+    /// nothing else.
+    ///
+    /// The peer preset the runtime's end-to-end tests launch is staged in the same
+    /// directory so a test finds it there, and is deliberately not a component:
+    /// `host_components` does not list it and it carries no descriptor. Indexing
+    /// it put a test binary in every release and made the release fail its own
+    /// self-consistency check, which is how this was found.
+    #[test]
+    fn a_release_does_not_ship_the_test_peer() {
+        let peer = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
+        assert_eq!(
+            peer,
+            format!("zup-preset-test{EXECUTABLE_SUFFIX}"),
+            "the peer is named by the contract crate, so this test would notice it moving"
+        );
+        let listed = zup_toolchain::host_components(
+            &zup_core::TargetTriple::parse(dispatcher::TARGET).expect("a valid triple"),
+        );
+        for component in &listed {
+            assert_ne!(
+                zup_toolchain::file_name(component, EXECUTABLE_SUFFIX),
+                peer,
+                "a component list that included the peer would put it in a release"
+            );
+        }
+    }
 
     /// A staged toolchain is a directory a build writes and a later composition
     /// reads. Keying it by profile and version is what lets a debug and a release

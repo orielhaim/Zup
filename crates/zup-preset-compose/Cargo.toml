@@ -1,0 +1,23 @@
+[package]
+name = "zup-preset-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The build-plane answer to which preset an application presents, and what it is given"
+publish = false
+
+[dependencies]
+jsonschema = { version = "0.58", default-features = false }
+semver.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zup-artifact.workspace = true
+zup-build.workspace = true
+zup-core.workspace = true
+zup-platform.workspace = true
+zup-preset-protocol.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

@@ -1,10 +1,16 @@
 //! An operation in flight, and what it left behind.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::progress::Progress;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
+// that re-exports it, so a module deriving one has to be able to name that
+// crate. Aliased through the SDK so it is the version this preset builds with.
+#[allow(unused_imports)]
+use zup_preset_sdk::gpui_kit;
+
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::progress::Progress;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
     relative,
 };

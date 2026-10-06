@@ -179,6 +179,9 @@ pub(crate) fn run_with_watchdog<T>(
     let cause = Arc::new(AtomicU8::new(0));
     let stop = Arc::new(AtomicU8::new(0));
     let (stop_sender, stop_receiver) = mpsc::channel();
+    // Started before the watchdog thread is spawned, so the budget covers the
+    // invocation rather than however long the spawn takes to be scheduled.
+    let deadline = Instant::now() + INVOCATION_DEADLINE;
     let (operation_result, watchdog_result, spawn_error) = thread::scope(|scope| {
         let watchdog_engine = engine.clone();
         let watchdog_cause = Arc::clone(&cause);
@@ -193,6 +196,7 @@ pub(crate) fn run_with_watchdog<T>(
                     watchdog_stop,
                     &watchdog_cause,
                     stop_receiver,
+                    deadline,
                 )
             });
         let handle = match handle {
@@ -255,14 +259,22 @@ fn cancellation_requested(cancellation: &(dyn Fn() -> bool + Send + Sync)) -> bo
     catch_unwind(AssertUnwindSafe(cancellation)).is_ok_and(|value| value)
 }
 
+/// Poll `cancellation` and stop `engine` when the invocation is cancelled or runs
+/// past `deadline`.
+///
+/// The deadline is passed in rather than computed here, because it is a budget on
+/// the invocation and not on this thread. Starting the clock inside the thread
+/// meant a watchdog scheduled late got to extend the budget by however late it
+/// was, so a loaded machine gave a plugin more time to run than an idle one -
+/// exactly backwards, since load is when a runaway guest is most likely.
 fn watchdog(
     engine: &Engine,
     cancellation: &(dyn Fn() -> bool + Send + Sync),
     stop: Arc<AtomicU8>,
     cause: &AtomicU8,
     stop_receiver: mpsc::Receiver<()>,
+    deadline: Instant,
 ) {
-    let deadline = Instant::now() + INVOCATION_DEADLINE;
     loop {
         if stop.load(Ordering::Acquire) != 0 || stop_receiver.try_recv().is_ok() {
             return;
@@ -376,6 +388,27 @@ mod tests {
         assert_eq!(result, Err(InvocationError::Timeout));
     }
 
+    /// The deadline is a budget on the invocation, not on the watchdog thread.
+    ///
+    /// The watchdog used to start its clock when the thread first ran, so a thread
+    /// scheduled late silently extended the budget by the delay - the busier the
+    /// machine, the longer a runaway plugin was allowed to run. What is asserted
+    /// here is the deadline itself, because a watchdog that notices it has already
+    /// expired must still report a timeout rather than sitting on a fresh one.
+    ///
+    /// The call itself is not what is timed: `interrupt_engine` traps a running
+    /// WebAssembly call, and a plain `thread::sleep` cannot be interrupted, so the
+    /// operation runs to completion and the watchdog's verdict is what is left.
+    #[test]
+    fn a_watchdog_that_finds_its_deadline_already_gone_still_times_out() {
+        let engine = Engine::default();
+        let result = run_with_watchdog(&engine, &|| false, || {
+            std::thread::sleep(Duration::from_millis(INVOCATION_DEADLINE_MILLIS + 250));
+            Ok(())
+        });
+        assert_eq!(result, Err(InvocationError::Timeout));
+    }
+
     /// A call that traps with an interrupt is still classified by the state the watchdog
     /// was in when it noticed, not by the trap itself: the same trap is a timeout under
     /// one cancellation query and a cancellation under another, and the guest has no say
@@ -393,5 +426,42 @@ mod tests {
             Err::<(), _>(Trap::Interrupt.into())
         });
         assert_eq!(cancelled, Err(InvocationError::Cancelled));
+    }
+
+    /// Each way a guest can go wrong is reported as its own failure.
+    ///
+    /// Proved from the traps rather than by running guests that provoke them. A
+    /// guest that spins spends its fuel and its wall-clock together, so which of
+    /// the two bounds stops it is a fact about the machine rather than about the
+    /// mapping - and a mapping rule that held only on a fast machine would not be
+    /// a rule. This is the half of the behaviour that is deterministic; the
+    /// end-to-end case in `validation` covers that a misbehaving guest is stopped
+    /// at all.
+    #[test]
+    fn a_trap_is_reported_as_its_own_failure() {
+        let classify = |trap: Trap| classify_error(&trap.into(), WatchdogCause::None);
+        assert_eq!(
+            classify(Trap::OutOfFuel),
+            InvocationError::FuelExhausted,
+            "a guest that burned its fuel budget is reported as having done that"
+        );
+        assert!(
+            matches!(
+                classify(Trap::MemoryOutOfBounds),
+                InvocationError::InvalidOutput { .. }
+            ),
+            "and a guest that walked off the end of its memory is reported as that"
+        );
+        assert!(
+            matches!(classify(Trap::Interrupt), InvocationError::Timeout),
+            "an interrupt with no cancellation pending is a timeout"
+        );
+        assert!(
+            matches!(
+                classify(Trap::UnreachableCodeReached),
+                InvocationError::Trap { .. }
+            ),
+            "and anything else keeps the trap, so the guest is told what it did"
+        );
     }
 }

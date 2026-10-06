@@ -50,6 +50,13 @@ jobs:
       - name: Tests
         run: cargo nextest run --workspace --all-features
 
+      # The generated projects are the first thing a new author compiles, and a
+      # template that does not build is found by them rather than by us. Ignored by
+      # the run above because they compile the whole GPUI stack and the bindings
+      # generator, which is minutes rather than seconds.
+      - name: Generated projects
+        run: cargo nextest run -p zup --all-features --run-ignored all -E 'test(compiles)'
+
       - name: Doc tests
         run: cargo test --workspace --all-features --doc
 
@@ -68,7 +75,7 @@ jobs:
       - name: Portable boundary
         run: cargo xtask verify-portable-boundaries
 
-      - name: Public UI crates
+      - name: Published authoring surface
         shell: pwsh
         run: ./scripts/verify-public-crates.ps1
 
@@ -132,7 +139,7 @@ jobs:
         run: cargo xtask toolchain build --profile release
 
       - name: Bootstrapper budget
-        run: cargo nextest run -p zup-dispatch --all-features --run-ignored -E 'test(a_thin_bootstrapper)'
+        run: cargo nextest run -p zup-dispatch --all-features --run-ignored all -E 'test(a_thin_bootstrapper)'
 
   ubuntu-portable:
     name: ubuntu (portable)

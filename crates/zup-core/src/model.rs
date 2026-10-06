@@ -56,7 +56,7 @@ pub struct Ui {
 /// The same bound the wire uses, stated here because this is where a manifest is
 /// read: a document the wire would refuse is a document the author should hear
 /// about from `zup check`, not at the end of a build.
-pub const MAX_UI_SETTINGS_BYTES: usize = 256 * 1024;
+pub const MAX_PRESET_SETTINGS_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]

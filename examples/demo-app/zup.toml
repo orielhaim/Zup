@@ -105,7 +105,7 @@ destination = "${install}"
 
 # Ordinary installed artwork, part of the program.
 #
-# This is a *file the payload ships*, not a UI asset. A UI asset is one the window
+# This is a *file the payload ships*, not a preset asset. A preset asset is one the window
 # itself reads, and it only becomes one when the selected preset's settings
 # schema marks it with `x-zup-asset` - the bundled preset marks nothing, so
 # naming a file here is the honest way for this project to ship a logo. See

@@ -6,13 +6,12 @@
 //! installation could be in.
 
 use zup_core::SelectedScope;
-use zup_runtime::{InstallOutcome, RuntimeEvent};
-use zup_ui_host::{HostDecision, HostState, Launchable, Selection};
-use zup_ui_protocol::{
-    ComponentId, ComponentOption, InstallOptions, InstallScope, InstallationHealth, LaunchTarget,
-    MaintenanceState, ProductIdentity, UiAction, UiCapabilities, UiCapability, UiSnapshot,
-    UpdateState,
+use zup_preset_host::{HostDecision, HostState, Launchable, Selection};
+use zup_preset_protocol::{
+    Action, Capabilities, Capability, ComponentId, ComponentOption, InstallOptions, InstallScope,
+    InstallationHealth, LaunchTarget, MaintenanceState, ProductIdentity, Snapshot, UpdateState,
 };
+use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 /// Which surface the simulated machine is presenting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +87,7 @@ pub struct Scenario {
     pub scope: InstallScope,
     pub components: Vec<ComponentOption>,
     /// Declared groups. Empty means one implicit group of every component.
-    pub groups: Vec<zup_ui_protocol::ComponentGroupOption>,
+    pub groups: Vec<zup_preset_protocol::ComponentGroupOption>,
     /// A location the person chose instead of the default.
     pub install_directory: Option<String>,
     /// Where the default location resolves for a per-user install.
@@ -162,10 +161,10 @@ impl Scenario {
             .as_ref());
         let name = installer.app.name.to_string();
         Self {
-            product: zup_ui_host::product(installer),
-            scopes: zup_ui_host::scopes(installer),
-            scope: zup_ui_host::scope(zup_ui_host::default_scope(installer)),
-            components: zup_ui_host::surface_components(installer, None, None),
+            product: zup_preset_host::product(installer),
+            scopes: zup_preset_host::scopes(installer),
+            scope: zup_preset_host::scope(zup_preset_host::default_scope(installer)),
+            components: zup_preset_host::surface_components(installer, None, None),
             user_directory: user.map_or_else(
                 || format!(r"C:\Users\you\AppData\Local\Programs\{name}"),
                 |template| display_location(template, &name, SelectedScope::User),
@@ -200,7 +199,7 @@ impl Scenario {
                     .collect(),
                 ..defaults.footprint.clone()
             },
-            launcher: zup_ui_host::launchers(installer)
+            launcher: zup_preset_host::launchers(installer)
                 .into_iter()
                 .next()
                 .map(|launcher| launcher.target.name),
@@ -212,22 +211,22 @@ impl Scenario {
     ///
     /// Derived over the same capabilities an installer's answer is derived from,
     /// so a preset is refused here for the same reason it would be refused there.
-    pub fn capabilities(&self) -> UiCapabilities {
-        let mut capabilities = UiCapabilities::new([
-            UiCapability::Diagnostics,
-            UiCapability::PlanPreview,
-            UiCapability::InstallDirectory,
+    pub fn capabilities(&self) -> Capabilities {
+        let mut capabilities = Capabilities::new([
+            Capability::Diagnostics,
+            Capability::PlanPreview,
+            Capability::InstallDirectory,
         ]);
         if !self.components.is_empty() {
-            capabilities = capabilities.with(UiCapability::Components);
+            capabilities = capabilities.with(Capability::Components);
         }
         if self.updates_enabled {
-            capabilities = capabilities.with(UiCapability::Updates);
+            capabilities = capabilities.with(Capability::Updates);
         }
         if self.launcher.is_some() {
-            capabilities = capabilities.with(UiCapability::Launch);
+            capabilities = capabilities.with(Capability::Launch);
         }
-        capabilities.with(UiCapability::Maintenance)
+        capabilities.with(Capability::Maintenance)
     }
 
     /// Where the default location resolves for a scope.
@@ -239,19 +238,19 @@ impl Scenario {
     }
 
     /// Groups as the window will see them. An empty declaration is one implicit group.
-    fn resolved_groups(&self) -> Vec<zup_ui_protocol::ComponentGroupOption> {
+    fn resolved_groups(&self) -> Vec<zup_preset_protocol::ComponentGroupOption> {
         if !self.groups.is_empty() {
             return self.groups.clone();
         }
         if self.components.is_empty() {
             return Vec::new();
         }
-        vec![zup_ui_protocol::ComponentGroupOption {
+        vec![zup_preset_protocol::ComponentGroupOption {
             id: String::new(),
             label: None,
             description: None,
-            prominence: zup_ui_protocol::ComponentProminence::Auto,
-            selection: zup_ui_protocol::SelectionRequirement::Defaulted,
+            prominence: zup_preset_protocol::ComponentProminence::Auto,
+            selection: zup_preset_protocol::SelectionRequirement::Defaulted,
             components: self
                 .components
                 .iter()
@@ -293,7 +292,7 @@ impl Scenario {
                     updates_enabled: self.updates_enabled,
                     scope: self.scope,
                     install_directory: Some(self.install_directory.clone().unwrap_or_else(|| {
-                        self.default_directory(zup_ui_host::engine_scope(self.scope))
+                        self.default_directory(zup_preset_host::engine_scope(self.scope))
                             .to_owned()
                     })),
                     health: self.health.clone(),
@@ -597,7 +596,7 @@ impl Machine {
         *self = Self::new(scenario.clone());
     }
 
-    pub fn snapshot(&self) -> &UiSnapshot {
+    pub fn snapshot(&self) -> &Snapshot {
         self.host.snapshot()
     }
 
@@ -605,12 +604,12 @@ impl Machine {
         &self.scenario
     }
 
-    pub fn capabilities(&self) -> &UiCapabilities {
+    pub fn capabilities(&self) -> &Capabilities {
         self.host.capabilities()
     }
 
     /// Feed one action to the state machine, answering any plan it asks for.
-    pub fn act(&mut self, action: UiAction) -> HostDecision {
+    pub fn act(&mut self, action: Action) -> HostDecision {
         let decision = self.host.accept(action);
         if let HostDecision::Plan(selection) = &decision {
             self.answer(selection);

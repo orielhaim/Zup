@@ -94,6 +94,22 @@ if (!/^ {2}using: node24$/m.test(metadata)) {
   problems.push('`runs.using` is not `node24`. The bundle targets Node 24.')
 }
 
+// Every key in `runs`, not just `using` and `main`. GitHub rejects the whole
+// action when `runs` names a key it does not define, and says so only at the point
+// the action is used - so an invented key here fails every job that tries to run
+// it, with a message about the metadata rather than about the code. The checks
+// above cover the inputs, the outputs and the bundle; a key in `runs` was the one
+// thing nothing looked at, which is how `minimum` reached a released action.
+const RUNS_KEYS = new Set(['using', 'main', 'pre', 'pre-if', 'post', 'post-if'])
+for (const name of topLevelKeys(metadata, 'runs').keys()) {
+  if (!RUNS_KEYS.has(name)) {
+    problems.push(
+      `action.yml declares \`runs.${name}\`, which is not a key GitHub defines for a ` +
+        `JavaScript action. Allowed: ${[...RUNS_KEYS].join(', ')}.`,
+    )
+  }
+}
+
 // A released action must default to the zup version it was built and tested
 // against, so TESTED_ZUP_VERSION cannot drift from the workspace version.
 const cargoToml = await readFile(join(root, 'Cargo.toml'), 'utf8')

@@ -7,7 +7,7 @@ Use four commands before a release. They answer different questions.
 | `zup check` | Is the project valid? |
 | `zup doctor` | Can this machine build the selected targets now? |
 | `zup plan` | What would the selected installation change? |
-| `zup preview` | What will the installer UI present? |
+| `zup preview` | What will the installer window present? |
 
 ## Validate the project
 
@@ -39,12 +39,16 @@ zup plan --enable docs --disable samples
 
 Use `plan` to inspect owned files and system resources without installing them.
 
-## Preview the UI
+## Preview the installer
 
 ```bash
 zup preview
 ```
 
-Preview resolves the same preset and `[ui.settings]` the build uses, then runs that UI against a simulated machine. It does not write application files, PATH entries, shortcuts, services or uninstall state.
+Preview resolves the same preset and `[ui.settings]` the build uses, then runs
+that preset against a simulated machine. It does not write application files,
+PATH entries, shortcuts, services or uninstall state.
 
-Use `zup preview` when authoring an application. Preset authors use [`zup ui dev`](/presets/develop), which builds the preset source and supplies a development scenario.
+Use `zup preview` when authoring an application. Preset authors use
+[`zup preset dev`](/presets/develop), which builds the preset source and supplies
+a development scenario.

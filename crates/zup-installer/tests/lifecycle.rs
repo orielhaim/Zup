@@ -108,10 +108,19 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
         "{:?}",
         values["EstimatedSize"]
     );
+    // Compared as the file the path resolves to, not as the text of the path.
+    // A path has more than one spelling - a checkout or an environment variable
+    // may hand out the 8.3 short form of a directory whose long form the runtime
+    // then writes, because the runtime resolves the state root before recording
+    // it - and Apps & Features is named by what the path *is*. Windows resolves
+    // both spellings to the one file, so a test that compares strings reports a
+    // defect that is not there.
+    let persisted = fs::canonicalize(&maintenance).expect("the persisted copy resolves");
+    let persisted = zup_windows::plain_path_text(&persisted);
     for name in ["UninstallString", "ModifyPath", "DisplayIcon"] {
         let value = registered_string(&values, name);
         assert!(
-            value.contains(&maintenance.to_string_lossy().to_string()),
+            value.contains(&persisted),
             "{name} does not point at the persisted maintenance copy: {value}"
         );
     }

@@ -1,9 +1,15 @@
 //! Type, sections, callouts and the action bar.
 
-use zup_ui_sdk::gpui_kit::assets::IconName;
-use zup_ui_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_ui_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_ui_sdk::gpui_kit::{
+// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
+// that re-exports it, so a module deriving one has to be able to name that
+// crate. Aliased through the SDK so it is the version this preset builds with.
+#[allow(unused_imports)]
+use zup_preset_sdk::gpui_kit;
+
+use zup_preset_sdk::gpui_kit::assets::IconName;
+use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
+use zup_preset_sdk::gpui_kit::{
     AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
     Styled, Window, div, relative,
 };
@@ -219,10 +225,10 @@ impl RenderOnce for InstallSummary {
                 let (icon, color, emphasis) = match fact.kind {
                     FactKind::Size => (IconName::HardDrive, theme.muted_foreground, false),
                     FactKind::Download => (IconName::Download, theme.muted_foreground, false),
-                    FactKind::Scope(zup_ui_sdk::prelude::InstallScope::User) => {
+                    FactKind::Scope(zup_preset_sdk::prelude::InstallScope::User) => {
                         (IconName::User, theme.muted_foreground, false)
                     }
-                    FactKind::Scope(zup_ui_sdk::prelude::InstallScope::Machine) => {
+                    FactKind::Scope(zup_preset_sdk::prelude::InstallScope::Machine) => {
                         (IconName::Users, theme.muted_foreground, false)
                     }
                     FactKind::Approval { required: true } => {
