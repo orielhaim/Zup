@@ -51,6 +51,8 @@
 mod capabilities;
 mod carrier;
 #[cfg(target_os = "linux")]
+mod desktop;
+#[cfg(target_os = "linux")]
 mod executor;
 #[cfg(target_os = "linux")]
 mod fs;
@@ -59,11 +61,17 @@ mod host;
 #[cfg(target_os = "linux")]
 mod input;
 #[cfg(target_os = "linux")]
+mod integration;
+#[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
 mod locations;
 #[cfg(target_os = "linux")]
 mod lowering;
+#[cfg(target_os = "linux")]
+mod mime;
+#[cfg(target_os = "linux")]
+mod refresh;
 #[cfg(target_os = "linux")]
 mod resolve;
 #[cfg(target_os = "linux")]
