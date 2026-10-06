@@ -9,11 +9,14 @@
 //! the console and headless frontends (the frontend is a property of the
 //! installer binary, not of the plan, so it is selected by which binary runs).
 //!
-//! Everything else - machine scope, services, launchers, PATH entries, URI
-//! protocols, file associations, desktop and menu integration, and
-//! package-manager prerequisites - is reported here, in one diagnostic that
-//! names every unsupported active resource. One coherent step, not a scatter of
-//! `Unsupported` returns through individual executor methods.
+//! Portable launchers, protocols, and file associations never reach this gate
+//! as target resources: resolution lowers them into generated integration
+//! files (desktop entries, MIME packages) that travel the file path. A target
+//! plan that still names launchers, PATH entries, services, protocols, or
+//! associations directly was not produced by this backend's resolution and is
+//! refused here, in one diagnostic that names every unsupported active
+//! resource. One coherent step, not a scatter of `Unsupported` returns through
+//! individual executor methods.
 
 use zup_core::SelectedScope;
 use zup_platform::TargetPlan;

@@ -18,12 +18,13 @@
 //! frontends: console, headless
 //! artifact:  self-contained native installer (one per target)
 //! scope:     user
+//! desktop:   menu launchers, URI protocols, file associations
 //! ```
 //!
 //! Everything else - GUI, machine scope, dispatcher/universal artifacts,
-//! services, launchers, PATH entries, protocols, file associations,
-//! package-manager prerequisites - is refused here with a diagnostic that
-//! names the configuration, not an internal crate.
+//! services, literal desktop icons, PATH entries, package-manager
+//! prerequisites - is refused here with a diagnostic that names the
+//! configuration, not an internal crate.
 
 use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, TargetBuildPlan, TargetTriple};
 
@@ -120,24 +121,53 @@ pub fn linux_capability_errors(
         ),
     }
     let installer = &plan.installer;
-    let mut unsupported = |kind: &str, count: usize| {
-        if count > 0 {
-            errors.push(format!(
-                "{count} {kind} resource{} {} not supported by the Linux backend yet",
-                if count == 1 { "" } else { "s" },
-                if count == 1 { "is" } else { "are" },
-            ));
-        }
-    };
-    unsupported("service", installer.services.len());
-    unsupported("launcher", installer.launchers.len());
-    unsupported("PATH entry", installer.path.len());
-    unsupported("URI protocol", installer.protocols.len());
-    unsupported("file association", installer.file_associations.len());
-    unsupported(
-        "package-manager prerequisite",
-        installer.prerequisites.len(),
-    );
+    {
+        let mut unsupported = |kind: &str, count: usize| {
+            if count > 0 {
+                errors.push(format!(
+                    "{count} {kind} resource{} {} not supported by the Linux backend yet",
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "is" } else { "are" },
+                ));
+            }
+        };
+        unsupported("service", installer.services.len());
+        unsupported(
+            "package-manager prerequisite",
+            installer.prerequisites.len(),
+        );
+    }
+    // Menu launchers, URI protocols, and file associations lower into
+    // freedesktop desktop entries and Shared MIME-info packages. A literal
+    // desktop icon has no desktop-neutral implementation, and a
+    // directory-level PATH mutation is not command exposure without editing
+    // shell configuration, so those stay refused with their reasons.
+    let desktop_launchers = installer
+        .launchers
+        .iter()
+        .filter(|launcher| launcher.location == zup_core::LauncherLocation::Desktop)
+        .count();
+    if desktop_launchers > 0 {
+        errors.push(format!(
+            "{desktop_launchers} `desktop` launcher resource{} {} not supported by the Linux \
+             backend yet: a file in `$XDG_DATA_HOME/applications` makes an application \
+             discoverable, which the `menu` location provides, but placing a trusted icon on \
+             the user's desktop has no desktop-neutral implementation",
+            if desktop_launchers == 1 { "" } else { "s" },
+            if desktop_launchers == 1 { "is" } else { "are" },
+        ));
+    }
+    if !installer.path.is_empty() {
+        errors.push(format!(
+            "{} PATH entry resource{} {} not supported by the Linux backend yet: a \
+             directory-level PATH mutation is not command exposure, and Linux command exposure \
+             without editing shell configuration needs a portable `command` semantic this phase \
+             does not add",
+            installer.path.len(),
+            if installer.path.len() == 1 { "" } else { "s" },
+            if installer.path.len() == 1 { "is" } else { "are" },
+        ));
+    }
     if installer.preset.is_some() {
         errors.push(
             "a preset window is not supported by the Linux backend yet: console and headless \
@@ -276,6 +306,71 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
     }
 
+    #[test]
+    fn menu_launchers_protocols_and_associations_are_supported() {
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::User,
+        );
+        let mut plan = plan();
+        plan.installer.launchers.push(zup_core::Launcher {
+            location: zup_core::LauncherLocation::Menu,
+            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            arguments: Vec::new(),
+            working_directory: None,
+            component: None,
+            when: None,
+        });
+        plan.installer.protocols.push(zup_core::Protocol {
+            scheme: zup_core::ProtocolScheme::new("acme").unwrap(),
+            executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            args: vec!["%1".into()],
+            when: None,
+        });
+        plan.installer.file_associations.push(zup_core::FileAssociation {
+            extension: zup_core::FileExtension::new(".foo").unwrap(),
+            id: zup_core::FileAssociationId::new("acme.foo").unwrap(),
+            description: None,
+            executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            when: None,
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn desktop_launchers_and_path_entries_stay_refused() {
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::User,
+        );
+        let mut plan = plan();
+        plan.installer.launchers.push(zup_core::Launcher {
+            location: zup_core::LauncherLocation::Desktop,
+            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            arguments: Vec::new(),
+            working_directory: None,
+            component: None,
+            when: None,
+        });
+        plan.installer.path.push(zup_core::PathEntry {
+            value: zup_core::Template::parse("${location.programs}/tool").unwrap(),
+            component: None,
+            when: None,
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        let text = errors.join("\n");
+        assert!(text.contains("`desktop` launcher"), "{text}");
+        assert!(text.contains("PATH entry"), "{text}");
+        assert!(
+            !text.contains("zup-linux"),
+            "diagnostics name the configuration, never an internal crate: {text}"
+        );
+    }
     #[test]
     fn every_unsupported_dimension_is_named() {
         let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::Machine);
