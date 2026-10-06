@@ -78,7 +78,7 @@ pub use executor::{FileIntent, FileWork, LinuxFileExecutor, LinuxFileExecutorErr
 #[cfg(target_os = "linux")]
 pub use fs::{
     EXECUTABLE_PAYLOAD_MODE, EntryKind, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,
-    STATE_DIRECTORY_MODE, STATE_FILE_MODE, sync_directory,
+    STATE_DIRECTORY_MODE, STATE_FILE_MODE, refuse_symlink_ancestors, sync_directory,
 };
 #[cfg(target_os = "linux")]
 pub use host::{

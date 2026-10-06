@@ -169,7 +169,26 @@ pub fn v2_files() -> Vec<FixtureFile> {
 
 /// Build a real package for one fixture application version.
 pub fn package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
-    let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+    package_bytes_for(
+        scratch,
+        &TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target"),
+        version,
+        files,
+    )
+}
+
+/// Build a real package for an explicit target triple.
+///
+/// The target is a parameter rather than a constant so a mismatch test can
+/// pair a genuine Linux runtime with a package for another platform and prove
+/// the carrier refuses the pairing before anything is mutated.
+pub fn package_bytes_for(
+    scratch: &Path,
+    target: &TargetTriple,
+    version: &str,
+    files: &[FixtureFile],
+) -> Vec<u8> {
+    let target = target.clone();
     let payload_dir = scratch.join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
     let resolved = files

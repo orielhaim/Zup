@@ -144,6 +144,9 @@ pub enum LinuxRunError {
     #[error("an installer package holds exactly one target; this one holds {count}")]
     MultipleTargets { count: usize },
 
+    #[error("refused path `{path}`: {reason}")]
+    RefusedPath { path: String, reason: String },
+
     #[error("i/o at `{path}`: {source}")]
     Io {
         path: String,
@@ -182,6 +185,14 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
         })?,
     };
     let ledger_store = LinuxLedgerStore::new(&state_root);
+    // The state hierarchy is zup's own bookkeeping. If any existing part of
+    // it is reached through a symbolic link, the journal, the ledger, and the
+    // lock would all live wherever the link points - so the hierarchy is
+    // refused before anything reads or writes through it. Ancestors are
+    // checked by path; the root's own entries are checked by listing, because
+    // a redirect planted *inside* the root (transactions/, maintenance/) is a
+    // child, not an ancestor, and a prefix walk never sees it.
+    refuse_redirected_hierarchy(&state_root)?;
     // A machine that crashed between commit and publish has a journal that
     // says more than its ledger does. Closing that gap - or refusing when an
     // unfinished transaction needs recovery first - happens before any new
@@ -199,6 +210,23 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
     let mut target = resolve_target(&install)?;
     attach_maintenance_copy(&mut target, &request.installer, &state_root, request.scope)?;
     validate_target_plan(&target)?;
+    // Same rule for where the payload goes: an install directory reached
+    // through a link would land the application wherever the link points.
+    // The executor still enforces its own per-operation refusals below; this
+    // is the up-front statement that the destination tree is what it claims.
+    if let Ok(host) = crate::lowering::to_host_path(&target.install_directory) {
+        crate::fs::refuse_symlink_ancestors(&host).map_err(|error| match error {
+            crate::fs::FileSystemError::UnexpectedKind { path, expected } => {
+                LinuxRunError::RefusedPath {
+                    path,
+                    reason: format!(
+                        "{expected}; the install destination must not pass through a link"
+                    ),
+                }
+            }
+            other => LinuxRunError::Executor(other.to_string()),
+        })?;
+    }
 
     let ledger = ledger_store.load(&target.app.id, request.scope)?;
     let action = resolve_action(request.action, ledger.as_ref(), &target.app.version)?;
@@ -282,6 +310,9 @@ pub fn recover_transaction(
     if scope != SelectedScope::User {
         return Err(LinuxRunError::MachineScope);
     }
+    // Recovery reads the journal and replays it; a redirected hierarchy
+    // would have it read and replay somebody else's record.
+    refuse_redirected_hierarchy(state_root)?;
     let store = FilesystemTransactionStore::new(state_root);
     let record = store.load(transaction)?;
     if record.app_id != *app_id || record.scope != scope {
@@ -318,6 +349,54 @@ pub fn recover_transaction(
             transaction: record.transaction_id.to_string(),
         }),
     }
+}
+
+/// Refuse a state hierarchy that passes through a symbolic link.
+///
+/// Two halves: the root's ancestors by prefix walk, and the root's own
+/// entries by listing. Zup never stores a symlink directly under its state
+/// root - journals, ledgers, generations, and lock files are all real files
+/// and directories - so a link there is either planted or corrupt, and either
+/// way it is not followed.
+fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), LinuxRunError> {
+    let refused = |path: PathBuf, what: &str| LinuxRunError::RefusedPath {
+        path: path.display().to_string(),
+        reason: format!("{what}; the state hierarchy must not pass through a link"),
+    };
+    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| match error {
+        crate::fs::FileSystemError::UnexpectedKind { path, expected } => {
+            LinuxRunError::RefusedPath {
+                path,
+                reason: format!("{expected}; the state hierarchy must not pass through a link"),
+            }
+        }
+        other => LinuxRunError::Executor(other.to_string()),
+    })?;
+    let entries = match std::fs::read_dir(state_root) {
+        Ok(entries) => entries,
+        // Absent is the fresh-machine case, not a redirect.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(LinuxRunError::Io {
+                path: state_root.display().to_string(),
+                source,
+            });
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| LinuxRunError::Io {
+            path: state_root.display().to_string(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| LinuxRunError::Io {
+            path: entry.path().display().to_string(),
+            source,
+        })?;
+        if file_type.is_symlink() {
+            return Err(refused(entry.path(), "a state entry is a symbolic link"));
+        }
+    }
+    Ok(())
 }
 
 /// The scope token the portable lock identity is keyed on.

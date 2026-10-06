@@ -323,6 +323,20 @@ impl Carrier {
                 found: error.to_string(),
                 expected: expected.to_string(),
             })?;
+        // `refuse_target` compares what the image states, and an ELF states
+        // no operating system - so a Linux runtime with a Windows package
+        // passes it on architecture alone. This carrier is ELF by
+        // construction, so both halves are pinned here: the image must be an
+        // ELF and the package must be for Linux. Anything else is a pairing
+        // this format cannot honestly carry.
+        if image.format() != zup_binary::BinaryFormat::Elf
+            || expected.operating_system() != zup_core::TargetOperatingSystem::Linux
+        {
+            return Err(CarrierError::TargetMismatch {
+                found: image.format().to_string(),
+                expected: expected.to_string(),
+            });
+        }
 
         Ok(Self {
             executable,

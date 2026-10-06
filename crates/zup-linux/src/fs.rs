@@ -553,6 +553,42 @@ pub fn sync_directory(path: &Path) -> Result<(), FileSystemError> {
     OwnedDirectory::open(path)?.sync()
 }
 
+/// Refuse a path whose existing ancestors include a symbolic link.
+///
+/// Directory-relative operations protect the final components, but the walk
+/// up to them still resolves through whatever the ancestors name today. A
+/// state root or install directory reached through a link lives wherever the
+/// link points, so a hierarchy zup is about to treat as its own is checked
+/// first: every prefix that exists must *be* a directory, not name one.
+/// Absent prefixes cannot be links, so only what exists is judged.
+///
+/// This is a pre-operation check, not a lock: it converts a planted redirect
+/// into a refusal, while the descriptor-relative operations below remain what
+/// enforces safety moment to moment.
+pub fn refuse_symlink_ancestors(path: &Path) -> Result<(), FileSystemError> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            // Absent means nothing to judge; unreadable for any other reason
+            // is reported rather than skipped, because skipping is how a
+            // hierarchy that cannot be examined becomes one that is trusted.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(FileSystemError::io(&prefix, source));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(FileSystemError::UnexpectedKind {
+                path: prefix.display().to_string(),
+                expected: "a real directory, not a symbolic link",
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
