@@ -30,6 +30,13 @@ pub enum Host {
     Windows,
     /// Requires a Linux build host.
     Linux,
+    /// Verified on Windows and Linux alike.
+    ///
+    /// Composition tooling that reaches a backend deliberately can outgrow one
+    /// host without becoming portable: it still needs a native backend, just
+    /// no longer exactly one of them. A `Both` package is claimed by both
+    /// native jobs and by neither portable one.
+    Both,
 }
 
 /// A native platform backend.
@@ -76,6 +83,7 @@ impl Platform {
             Host::Any => &[],
             Host::Windows => &[Platform::Windows],
             Host::Linux => &[Platform::Linux],
+            Host::Both => &[Platform::Windows, Platform::Linux],
         }
     }
 }
@@ -310,17 +318,20 @@ pub const LINUX_BACKEND: &[&str] = &["zup-linux"];
 pub const NATIVE_BACKENDS: &[&str] = &["zup-windows", "zup-linux"];
 
 /// Crates that require a Windows build host and are not the Windows backend:
-/// the composition CLI, the runtime an installer embeds, the native frontends,
-/// and the small dispatcher a universal artifact starts through.
+/// the composition CLI, the native frontends, and the small dispatcher a
+/// universal artifact starts through.
 ///
 /// These are [`Kind::Composition`]: they reach a backend deliberately, because
 /// reaching one is what they are for. What they may not do is pretend to be
 /// portable, which is why the boundary holds them to the platform rules and
 /// still refuses to let the list's membership decide what code they contain.
+///
+/// `zup-installer` used to live here. It no longer does: it builds on Windows
+/// and Linux both, so it belongs to the multi-platform matrix below rather
+/// than to either single-host one.
 pub const WINDOWS_COMPOSITION: &[&str] = &[
     "zup-dispatch",
     "zup",
-    "zup-installer",
     // The default installer interface, which is a GPUI application like any
     // other preset and is built by the toolchain rather than shipped inside an
     // installer as a link-time dependency.
@@ -344,6 +355,14 @@ pub const WINDOWS_COMPOSITION: &[&str] = &[
     "zup-preset-default",
     "zup-preset-test",
 ];
+
+/// Composition tooling verified on Windows and Linux alike.
+///
+/// A package belongs to exactly one matrix, so multi-host composition is its
+/// own list rather than an entry in both single-host ones: the boundary
+/// refuses a package claimed twice, and rightly so, because a list that
+/// silently shared members would stop meaning "verified here".
+pub const MULTI_PLATFORM_COMPOSITION: &[&str] = &["zup-installer"];
 
 pub const MATRICES: &[Matrix] = &[
     Matrix {
@@ -394,6 +413,14 @@ pub const MATRICES: &[Matrix] = &[
         vocabulary: Vocabulary::Domain,
         packages: WINDOWS_COMPOSITION,
     },
+    Matrix {
+        name: "multi-platform-composition",
+        summary: "composition that builds on the Windows and Linux backends alike",
+        host: Host::Both,
+        kind: Kind::Composition,
+        vocabulary: Vocabulary::Domain,
+        packages: MULTI_PLATFORM_COMPOSITION,
+    },
 ];
 
 /// Every matrix name, in declaration order.
@@ -443,7 +470,7 @@ pub fn is_backend(package: &str) -> bool {
 pub fn packages_for_host(host: Host) -> Vec<&'static str> {
     MATRICES
         .iter()
-        .filter(|matrix| matrix.host == host)
+        .filter(|matrix| matrix.host == host || (matrix.host == Host::Both && host != Host::Any))
         .flat_map(|matrix| matrix.packages.iter().copied())
         .collect()
 }
@@ -454,6 +481,7 @@ pub fn host_name(host: Host) -> &'static str {
         Host::Any => "any",
         Host::Windows => "windows",
         Host::Linux => "linux",
+        Host::Both => "windows+linux",
     }
 }
 

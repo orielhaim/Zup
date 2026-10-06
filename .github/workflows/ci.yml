@@ -184,11 +184,21 @@ jobs:
         run: cargo xtask verify-dependency-graph
 
       - name: Check
-        run: cargo check --all-features $PORTABLE
+        run: cargo check --all-features $PORTABLE $LINUX
+
+      # The process, lifecycle, security, and readiness tests compose and
+      # execute genuine installers from staged runtime templates, so the
+      # toolchain is built first. The templates are products, not fixtures:
+      # no checked-in binary stands in for them.
+      - name: Linux toolchain templates
+        run: cargo xtask toolchain build
 
       # The Linux backend's own suite runs natively rather than being cross-checked,
       # because what it tests is filesystem semantics - symlinks, permission bits,
-      # XDG resolution - that a build check cannot establish.
+      # XDG resolution - that a build check cannot establish. This is the full
+      # product path: fresh install, upgrade, repair, uninstall, recovery, and
+      # carrier security against real ELF installers, executed as child
+      # processes with hermetic environments.
       - name: Linux backend tests
         run: cargo nextest run --all-features $LINUX
 
@@ -199,7 +209,7 @@ jobs:
         run: cargo test --doc --all-features $PORTABLE
 
       - name: Clippy
-        run: cargo clippy --all-features --all-targets $PORTABLE -- -D warnings
+        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
 
       - name: Unused dependencies
         run: cargo machete
