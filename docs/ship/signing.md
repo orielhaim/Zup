@@ -37,6 +37,8 @@ Verification checks the signed files and finalizes the release description again
 
 `zup sign verify --allow-unsigned` can finalize an unsigned development/internal release. Do not present that as equivalent to a publicly trusted Windows release; unsigned public installers will trigger normal Windows trust warnings.
 
+Linux installers carry no platform-native signature in this phase, so a Linux release is always finalized with `--allow-unsigned`. Its authenticity is the artifact digest and release identity the finalized description records, not a publisher signature.
+
 ## Keep credentials out of the manifest
 
 `zup.toml` describes release policy, not secrets. Signing credentials belong in the external signing step or CI secret provider.

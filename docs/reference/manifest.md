@@ -46,7 +46,8 @@ Top-level `frontend` and per-target frontend values are:
 - `console`
 - `headless`
 
-The default is `gui`.
+The default is `gui`. A Linux target with `gui` is refused: the Linux backend
+ships `console` and `headless` runtimes only in this phase.
 
 ## `[build.targets.<profile>]`
 

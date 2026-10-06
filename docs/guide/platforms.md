@@ -15,10 +15,36 @@ The profile name (`windows-x64`) is project-local. The triple is the machine ide
 <div class="platform-state">
   <div>Windows</div><div>Installation backend ships today.</div>
   <div>macOS</div><div>Architecture and public model support a backend; no installation backend ships today.</div>
-  <div>Linux</div><div>Portable parts build and test there; no installation backend ships today.</div>
+  <div>Linux</div><div>User-scope installation backend ships for `x86_64-unknown-linux-gnu` (console and headless).</div>
 </div>
 
-Zup may parse a non-Windows target, but `doctor` and `build` refuse it because there is no backend for that target yet.
+Zup may parse a target no backend answers for, but `doctor` and `build` refuse it because there is no backend for that target yet.
+
+## Linux support
+
+Linux is a normal build target, from either host:
+
+```bash
+zup check --target x86_64-unknown-linux-gnu
+zup build --target x86_64-unknown-linux-gnu
+```
+
+A Linux build produces one self-contained, extensionless installer per target (for example `Acme-Setup`), composed by appending the normal package behind the Linux runtime template. The installer runs the same install, upgrade, repair, and uninstall lifecycle as every other target.
+
+| Capability | Linux status |
+|---|---|
+| Target | `x86_64-unknown-linux-gnu` only |
+| Frontends | console, headless |
+| Scope | user |
+| Artifact | one self-contained installer per target |
+| Signing | no platform-native signature; artifact digest and release identity carry authenticity (`zup sign verify --allow-unsigned` finalizes the measured bytes) |
+| GUI installer | not supported |
+| Machine scope | not supported |
+| Services, launchers, PATH entries, protocols, file associations, package-manager prerequisites | not supported |
+| Universal/dispatcher and thin artifacts | not supported; Windows-only |
+| Desktop integration (`.desktop`, icons, MIME), systemd, D-Bus, PATH integration, package managers | not supported |
+
+A project can declare Windows and Linux target profiles side by side and builds them into separate native artifacts. Unsupported Linux configurations fail during `check`/`build` capability validation with a diagnostic naming the configuration.
 
 ## Multiple targets
 
