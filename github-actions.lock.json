@@ -23,47 +23,52 @@
     "Swatinem/rust-cache": {
       "version": "v2",
       "sha": "49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "actions/attest": {
       "version": "v4",
       "sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "actions/checkout": {
       "version": "v7",
       "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "actions/download-artifact": {
       "version": "v8",
       "sha": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "actions/setup-node": {
       "version": "v7",
       "sha": "820762786026740c76f36085b0efc47a31fe5020",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "actions/upload-artifact": {
       "version": "v7",
       "sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "dtolnay/rust-toolchain": {
       "version": "stable",
-      "sha": "6bed0761d98439e5a578e2877258200ad565ba87",
-      "checkedAt": "2026-09-27"
+      "sha": "89b12181fb390509a0842a86cc55eeb8eb928c1d",
+      "checkedAt": "2026-10-06"
+    },
+    "mlugg/setup-zig": {
+      "version": "v2",
+      "sha": "d1434d08867e3ee9daa34448df10607b98908d29",
+      "checkedAt": "2026-10-06"
     },
     "oven-sh/setup-bun": {
       "version": "v2",
       "sha": "0c5077e51419868618aeaa5fe8019c62421857d6",
-      "checkedAt": "2026-09-27"
+      "checkedAt": "2026-10-06"
     },
     "taiki-e/install-action": {
       "version": "v2",
-      "sha": "4cef1412cce204788f482e778a0b9187f9626a29",
-      "checkedAt": "2026-09-27"
+      "sha": "f7e5d7c961414b23f5b25b2da9294395d08513ad",
+      "checkedAt": "2026-10-06"
     }
   }
 }

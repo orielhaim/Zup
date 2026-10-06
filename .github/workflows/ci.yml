@@ -94,6 +94,93 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-frontend-features.ps1
 
+  cross-linux:
+    name: windows cross (linux target)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-cross-linux
+
+      # Pinned by version: a cross linker that moves under the build is a
+      # toolchain nobody can reproduce.
+      - name: Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.23.4 --locked
+
+      # The contributor-side producer for the templates a Linux `zup build`
+      # composes: cross-built on this host, staged under the same
+      # target-qualified names a native build stages.
+      - name: Linux toolchain templates
+        run: cargo xtask toolchain build --target x86_64-unknown-linux-gnu
+
+      - name: Build zup
+        run: cargo build -p zup
+
+      # The public Windows-host workflow: check, build, and a byte-correct
+      # Linux installer. The artifact cannot execute here, so identity is
+      # proven structurally: ELF magic, an opening carrier for the Linux
+      # target, and release metadata that names no Windows concept.
+      - name: Windows-host Linux-target build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Zup {
+            & .\target\debug\zup.exe @args
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $fixture = Join-Path $env:RUNNER_TEMP 'zup-linux-fixture'
+          Remove-Item -Recurse -Force $fixture -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $fixture, (Join-Path $fixture 'dist') | Out-Null
+          @'
+          schema = 1
+
+          [app]
+          id = "com.example.tool"
+          name = "Tool"
+          version = "1.0.0"
+
+          [build]
+
+          [build.targets.linux]
+          target = "x86_64-unknown-linux-gnu"
+          frontend = "console"
+          source = { directory = "dist" }
+
+          [install]
+          scope = "user"
+
+          [install.directory]
+          user = "${location.programs}/tool"
+
+          [[files]]
+          source = "tool"
+          destination = "${install}"
+          executable = true
+
+          [[files]]
+          source = "keep.dat"
+          destination = "${install}"
+          '@ | Set-Content (Join-Path $fixture 'zup.toml') -NoNewline -Encoding utf8
+          [IO.File]::WriteAllBytes((Join-Path $fixture 'dist/tool'), [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n"))
+          [IO.File]::WriteAllBytes((Join-Path $fixture 'dist/keep.dat'), [Text.Encoding]::UTF8.GetBytes('keep-v1'))
+          $manifest = Join-Path $fixture 'zup.toml'
+          Invoke-Zup check --manifest $manifest --target linux
+          Invoke-Zup doctor --manifest $manifest --target linux
+          Invoke-Zup build --manifest $manifest --target linux
+          Invoke-Zup artifact inspect (Join-Path $fixture 'Tool-Setup')
+          python -c "import json,sys; data = open(r'$fixture\Tool-Setup','rb').read(4); assert data == b'\x7fELF', data; release = json.load(open(r'$fixture\zup-release.json')); assert release['variants'][0]['target'] == 'x86_64-unknown-linux-gnu', release; assert release['artifacts'][0]['path'] == 'Tool-Setup', release; text = json.dumps(release); assert '.exe' not in text and 'Authenticode' not in text, text; print('linux artifact verified')"
+
   clean-room:
     name: clean room
     runs-on: windows-latest
@@ -201,6 +288,67 @@ jobs:
       # processes with hermetic environments.
       - name: Linux backend tests
         run: cargo nextest run --all-features $LINUX
+
+      # The public surface, not only the backend crates: the real `zup`
+      # binary checks, builds, and produces a runnable Linux installer from
+      # a fixture project, then the installer runs install, the installed
+      # application runs, and uninstall cleans up - all with an isolated home
+      # the CI account's own profile never sees.
+      - name: Public Linux build
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/zup-public-linux /tmp/zup-public-home /tmp/zup-public-state
+          mkdir -p /tmp/zup-public-linux/dist /tmp/zup-public-home /tmp/zup-public-state
+          cat > /tmp/zup-public-linux/zup.toml <<'EOF'
+          schema = 1
+
+          [app]
+          id = "com.example.tool"
+          name = "Tool"
+          version = "1.0.0"
+
+          [build]
+
+          [build.targets.linux]
+          target = "x86_64-unknown-linux-gnu"
+          frontend = "console"
+          source = { directory = "dist" }
+
+          [install]
+          scope = "user"
+
+          [install.directory]
+          user = "${location.programs}/tool"
+
+          [[files]]
+          source = "tool"
+          destination = "${install}"
+          executable = true
+
+          [[files]]
+          source = "keep.dat"
+          destination = "${install}"
+          EOF
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "tool 1.0.0"; exit 0; fi\nexit 1\n' > /tmp/zup-public-linux/dist/tool
+          printf 'keep-v1' > /tmp/zup-public-linux/dist/keep.dat
+          cargo run -p zup -- check --manifest /tmp/zup-public-linux/zup.toml --target linux
+          cargo run -p zup -- doctor --manifest /tmp/zup-public-linux/zup.toml --target linux
+          cargo run -p zup -- build --manifest /tmp/zup-public-linux/zup.toml --target linux
+          file /tmp/zup-public-linux/Tool-Setup | grep ELF
+          test -x /tmp/zup-public-linux/Tool-Setup
+          grep -q x86_64-unknown-linux-gnu /tmp/zup-public-linux/zup-release.json
+          test "$(grep -c '\.exe' /tmp/zup-public-linux/zup-release.json || true)" = "0"
+          export HOME=/tmp/zup-public-home
+          export XDG_DATA_HOME=/tmp/zup-public-home/.local/share
+          export XDG_STATE_HOME=/tmp/zup-public-home/.local/state
+          export XDG_CONFIG_HOME=/tmp/zup-public-home/.config
+          export XDG_CACHE_HOME=/tmp/zup-public-home/.cache
+          export XDG_RUNTIME_DIR=/tmp/zup-public-home/run
+          mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
+          /tmp/zup-public-linux/Tool-Setup --state-root /tmp/zup-public-state
+          /tmp/zup-public-home/.local/lib/zup/apps/tool/tool --version | grep 'tool 1.0.0'
+          /tmp/zup-public-linux/Tool-Setup uninstall --state-root /tmp/zup-public-state
+          test ! -e /tmp/zup-public-home/.local/lib/zup/apps/tool/tool
 
       - name: Tests
         run: cargo nextest run --all-features $PORTABLE
