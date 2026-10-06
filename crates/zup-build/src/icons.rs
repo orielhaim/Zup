@@ -7,7 +7,10 @@ use std::fs;
 use std::path::Path;
 
 use zup_assets::{IconCache, IconFormat, IconSource, IconTarget};
-use zup_core::{CompiledIcon, IconRole, Installer, TargetIcons, TargetOperatingSystem, hash_bytes};
+use zup_core::{
+    CompiledIcon, IconRole, Installer, RelativePath, ResolvedFile, TargetIcons,
+    TargetOperatingSystem, Template, hash_bytes,
+};
 use zup_manifest::IconConfig;
 use zup_platform::SourceFilePolicy;
 
@@ -120,6 +123,75 @@ pub(crate) fn compile_icons(
         warnings: compiled.warnings,
         fallback,
     })
+}
+
+/// Pack compiled Linux icons as payload files for the hicolor hierarchy.
+///
+/// Only Linux targets whose installer references icons (a launcher, protocol,
+/// or file association renders `Icon=`) carry them: a headless tool with no
+/// desktop presence must not scatter icon files across the user's data home.
+/// Destinations are `${location.user_data}/icons/…`, resolved on the target
+/// machine like every other payload path.
+pub(crate) fn pack_linux_icons(
+    icons: &TargetIcons,
+    installer: &Installer,
+) -> Result<Vec<ResolvedFile>, BuildError> {
+    if installer.target.operating_system() != TargetOperatingSystem::Linux {
+        return Ok(Vec::new());
+    }
+    if installer.launchers.is_empty()
+        && installer.protocols.is_empty()
+        && installer.file_associations.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let base = Template::parse("${location.user_data}/icons").map_err(|error| {
+        BuildError::PathNotRepresentable {
+            path: "${location.user_data}/icons".into(),
+            reason: error.to_string(),
+        }
+    })?;
+    let mut packed = Vec::new();
+    for artifact in &icons.artifacts {
+        let linux = matches!(
+            artifact.role,
+            IconRole::LinuxSvg | IconRole::LinuxPng { .. }
+        );
+        if !linux {
+            continue;
+        }
+        let Some(source) = artifact.source.clone() else {
+            return Err(BuildError::Icon {
+                path: artifact.name.clone(),
+                message: "a Linux icon has no cached file to ship".into(),
+            });
+        };
+        let name = RelativePath::new(&artifact.name).map_err(|error| {
+            BuildError::PathNotRepresentable {
+                path: artifact.name.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        let source_relative =
+            RelativePath::new(&format!("__zup_icons__/{}", artifact.name)).map_err(|error| {
+                BuildError::PathNotRepresentable {
+                    path: artifact.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        packed.push(ResolvedFile {
+            source,
+            source_relative,
+            destination: base.join_relative(&name),
+            size: artifact.size,
+            sha256: artifact.sha256,
+            component: None,
+            condition: None,
+            executable: false,
+        });
+    }
+    packed.sort_by(|a, b| a.destination.to_string().cmp(&b.destination.to_string()));
+    Ok(packed)
 }
 
 fn icon_target(installer: &Installer) -> Option<IconTarget> {

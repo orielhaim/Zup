@@ -211,22 +211,6 @@ fn materialize_target(
 
     detect_collisions(&resolved)?;
 
-    let mut total_size = 0u64;
-    for file in &resolved {
-        total_size = total_size
-            .checked_add(file.size)
-            .ok_or(BuildError::SizeOverflow)?;
-    }
-
-    resolved.sort_by(|a, b| {
-        TargetBuildPlan::sort_key(a)
-            .cmp(&TargetBuildPlan::sort_key(b))
-            .then_with(|| a.source.cmp(&b.source))
-    });
-
-    let file_count = resolved.len();
-    info!(file_count, total_size, "materialization complete");
-
     let icons = crate::icons::compile_icons(
         project_root,
         icons,
@@ -234,6 +218,25 @@ fn materialize_target(
         &installer,
         policy,
     )?;
+    // Linux hicolor artifacts ship as payload files under the user's data
+    // home; every other target consumes its icons differently (Windows embeds
+    // its ICO in the executable, macOS in its bundle), so only Linux packs.
+    resolved.extend(crate::icons::pack_linux_icons(&icons, &installer)?);
+    resolved.sort_by(|a, b| {
+        TargetBuildPlan::sort_key(a)
+            .cmp(&TargetBuildPlan::sort_key(b))
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    detect_collisions(&resolved)?;
+    let mut total_size = 0u64;
+    for file in &resolved {
+        total_size = total_size
+            .checked_add(file.size)
+            .ok_or(BuildError::SizeOverflow)?;
+    }
+
+    let file_count = resolved.len();
+    info!(file_count, total_size, "materialization complete");
 
     Ok(TargetBuildPlan {
         installer,
