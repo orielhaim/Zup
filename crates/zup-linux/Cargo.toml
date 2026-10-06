@@ -21,6 +21,7 @@ zup-transaction.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+semver.workspace = true
 tempfile.workspace = true
 zup-platform.workspace = true
 zup-transaction.workspace = true

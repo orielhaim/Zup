@@ -41,6 +41,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(target_os = "linux")]
+mod capabilities;
+#[cfg(target_os = "linux")]
 mod carrier;
 #[cfg(target_os = "linux")]
 mod executor;
@@ -49,12 +51,16 @@ mod fs;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
+mod locations;
+#[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
 mod source_policy;
 #[cfg(target_os = "linux")]
 mod state;
 
+#[cfg(target_os = "linux")]
+pub use capabilities::{LinuxCapabilityError, validate_target_plan};
 #[cfg(target_os = "linux")]
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
 #[cfg(target_os = "linux")]
@@ -67,6 +73,11 @@ pub use fs::{
 #[cfg(target_os = "linux")]
 pub use host::{
     HostError, additional_architectures, host_execution, host_version, native_architecture,
+};
+#[cfg(target_os = "linux")]
+pub use locations::{
+    LinuxInstallLocationResolver, LinuxLocationError, user_data_home, user_data_home_in,
+    user_programs_root, user_programs_root_in,
 };
 #[cfg(target_os = "linux")]
 pub use lowering::{

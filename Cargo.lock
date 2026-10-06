@@ -12159,6 +12159,7 @@ version = "0.0.1"
 dependencies = [
  "rstest",
  "rustix",
+ "semver",
  "tempfile",
  "thiserror 2.0.21",
  "typed-path 0.12.3",
