@@ -55,6 +55,8 @@ mod locations;
 #[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
+mod resolve;
+#[cfg(target_os = "linux")]
 mod source_policy;
 #[cfg(target_os = "linux")]
 mod state;
@@ -83,6 +85,8 @@ pub use locations::{
 pub use lowering::{
     LinuxPathLoweringError, linux_target_path, target_path_from_host, to_host_path,
 };
+#[cfg(target_os = "linux")]
+pub use resolve::{LinuxResolveError, resolve_target, resolve_target_for};
 #[cfg(target_os = "linux")]
 pub use source_policy::{LinuxSourceFilePolicy, SourceEntryKind};
 #[cfg(target_os = "linux")]

@@ -12168,6 +12168,7 @@ dependencies = [
  "zup-binary",
  "zup-bundle",
  "zup-core",
+ "zup-plan",
  "zup-platform",
  "zup-transaction",
 ]
