@@ -43,6 +43,8 @@
 #[cfg(target_os = "linux")]
 mod carrier;
 #[cfg(target_os = "linux")]
+mod executor;
+#[cfg(target_os = "linux")]
 mod fs;
 #[cfg(target_os = "linux")]
 mod host;
@@ -55,6 +57,8 @@ mod state;
 
 #[cfg(target_os = "linux")]
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
+#[cfg(target_os = "linux")]
+pub use executor::{FileIntent, FileWork, LinuxFileExecutor, LinuxFileExecutorError};
 #[cfg(target_os = "linux")]
 pub use fs::{
     EXECUTABLE_PAYLOAD_MODE, EntryKind, FileSystemError, OwnedDirectory, PAYLOAD_FILE_MODE,

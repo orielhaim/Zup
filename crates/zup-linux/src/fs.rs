@@ -80,6 +80,9 @@ pub enum FileSystemError {
     #[error("`{path}` already exists")]
     AlreadyExists { path: String },
 
+    #[error("`{path}` does not exist")]
+    Missing { path: String },
+
     #[error("`{path}`: {source}")]
     Io {
         path: String,
@@ -323,6 +326,43 @@ impl OwnedDirectory {
             }),
             Err(error) => Err(FileSystemError::errno(&destination, error)),
         }
+    }
+
+    /// Publish an already-written sibling under `name`, only if it is not there.
+    ///
+    /// The transaction's create step, and the reason it is a primitive rather
+    /// than something a caller composes: the destination's absence has to be a
+    /// condition of the namespace operation, and the only way to make it one is to
+    /// ask the kernel for it. `if !contains(name) { rename(..) }` has a window
+    /// between the check and the rename, and a file that appears in that window
+    /// is the exact thing a create is supposed to refuse.
+    ///
+    /// The source is a sibling rather than an arbitrary path so the rename cannot
+    /// cross a filesystem, where it would become a copy with none of this
+    /// guarantee.
+    pub fn publish_exclusive(&self, name: &str, source: &str) -> Result<(), FileSystemError> {
+        let destination = self.child(name);
+        match renameat_with(
+            self.as_fd(),
+            self.child(source),
+            self.as_fd(),
+            &destination,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => self.sync(),
+            Err(rustix::io::Errno::EXIST) => Err(FileSystemError::AlreadyExists {
+                path: destination.display().to_string(),
+            }),
+            Err(error) => Err(FileSystemError::errno(&destination, error)),
+        }
+    }
+
+    /// Publish an already-written sibling over `name`, replacing whatever is there.
+    pub fn publish_replacing(&self, name: &str, source: &str) -> Result<(), FileSystemError> {
+        let destination = self.child(name);
+        rustix::fs::rename(self.child(source), &destination)
+            .map_err(|error| FileSystemError::errno(&destination, error))?;
+        self.sync()
     }
 
     /// Write a payload file inside this directory.
