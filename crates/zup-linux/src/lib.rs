@@ -51,11 +51,15 @@ mod fs;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
+mod input;
+#[cfg(target_os = "linux")]
 mod locations;
 #[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
 mod resolve;
+#[cfg(target_os = "linux")]
+mod snapshot;
 #[cfg(target_os = "linux")]
 mod source_policy;
 #[cfg(target_os = "linux")]
@@ -77,6 +81,8 @@ pub use host::{
     HostError, additional_architectures, host_execution, host_version, native_architecture,
 };
 #[cfg(target_os = "linux")]
+pub use input::{LinuxInputError, compile_execution_plan};
+#[cfg(target_os = "linux")]
 pub use locations::{
     LinuxInstallLocationResolver, LinuxLocationError, user_data_home, user_data_home_in,
     user_programs_root, user_programs_root_in,
@@ -87,6 +93,8 @@ pub use lowering::{
 };
 #[cfg(target_os = "linux")]
 pub use resolve::{LinuxResolveError, resolve_target, resolve_target_for};
+#[cfg(target_os = "linux")]
+pub use snapshot::snapshot_target;
 #[cfg(target_os = "linux")]
 pub use source_policy::{LinuxSourceFilePolicy, SourceEntryKind};
 #[cfg(target_os = "linux")]
