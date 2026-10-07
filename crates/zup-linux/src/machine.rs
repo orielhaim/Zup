@@ -33,6 +33,14 @@ pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
 pub const MACHINE_STATE_ROOT: &str = "/var/lib/zup";
 /// Application variable-data root for machine scope: `/var/opt`.
 pub const MACHINE_SHARED_DATA_ROOT: &str = "/var/opt";
+/// Canonical Zup service-unit source directory: a systemd unit search path
+/// for locally installed units. The only `/usr` tree the privileged worker
+/// may write, and only for typed `<validated-unit>.service` sources - never
+/// arbitrary files, never `/usr/lib`, never `/run`, never `/etc`.
+pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
+/// Expected mode of an installed unit source: readable by all, writable by
+/// root only.
+pub const SYSTEMD_UNIT_FILE_MODE: u32 = 0o644;
 
 /// The mode of the machine state root and its public subdirectories.
 ///
@@ -167,6 +175,67 @@ pub fn authorize_machine_install_directory(
             })
         }
     }
+}
+
+/// The systemd unit-source root the privileged worker enforces.
+///
+/// Production is [`SYSTEMD_UNIT_DIR`]; tests pass an isolated directory so
+/// no test ever writes the host's unit tree. Like [`MachineRoots`], the
+/// value is a constructor parameter, never environment or IPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemdRoots {
+    /// Canonical unit source directory.
+    pub unit_dir: PathBuf,
+}
+
+impl SystemdRoots {
+    /// The production unit directory.
+    pub fn production() -> Self {
+        Self {
+            unit_dir: PathBuf::from(SYSTEMD_UNIT_DIR),
+        }
+    }
+
+    /// Explicit unit directory, for isolated tests.
+    pub fn new(unit_dir: PathBuf) -> Self {
+        Self { unit_dir }
+    }
+}
+
+/// Authorize one canonical unit source path: exactly
+/// `<unit_dir>/<validated-unit>.service`, never a root, never a traversal,
+/// never any other `/usr` or `/etc` spelling.
+///
+/// The worker rejects any other `/usr` mutation; this function is the only
+/// `/usr` path it permits, and only for typed Zup service-unit sources.
+pub fn authorize_systemd_unit(
+    unit: &str,
+    roots: &SystemdRoots,
+) -> Result<PathBuf, MachinePathPolicyError> {
+    let refused = |reason: &str| MachinePathPolicyError::Refused {
+        path: format!("{}/{}", roots.unit_dir.display(), unit),
+        reason: reason.to_owned(),
+    };
+    if !unit.ends_with(".service") || unit.contains('/') || unit.contains('\0') {
+        return Err(refused("a service unit is a single `<name>.service` file"));
+    }
+    let stem = unit.strip_suffix(".service").unwrap_or_default();
+    if stem.is_empty() {
+        return Err(refused("a service unit names a unit"));
+    }
+    if unit.bytes().any(|b| b == b'\n' || b == b'\r' || b < 0x20) {
+        return Err(refused("a service unit name holds no control characters"));
+    }
+    let path = roots.unit_dir.join(unit);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::CurDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(refused("a service unit path names no `.` or `..`"));
+    }
+    Ok(path)
 }
 
 /// Why machine state could not be established or trusted.

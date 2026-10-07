@@ -190,3 +190,13 @@ lnks = { version = "0.2", default-features = false, features = ["runas"] }
 windows-service = "0.8"
 # Bindings for Windows APIs without an appropriate focused crate.
 windows-bindgen = "0.100"
+
+# systemd manager access for the Linux service backend. Only `zup-linux`
+# reaches this: portable crates stay out via the boundary verifier. Only the
+# generated `systemd1` manager interface plus the Tokio async integration the
+# short-lived worker blocks on; every other generated service would be unused
+# API surface pulled into the installer.
+zbus_systemd = { version = "0.26200.0", default-features = false, features = [
+  "systemd1",
+  "zbus-async-tokio",
+] }

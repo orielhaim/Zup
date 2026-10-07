@@ -8837,6 +8837,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -11518,6 +11519,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
@@ -11576,6 +11578,16 @@ dependencies = [
  "serde",
  "winnow 1.0.4",
  "zvariant",
+]
+
+[[package]]
+name = "zbus_systemd"
+version = "0.26200.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b9e5661e7491cf89fbd8402c1c61320f655c5cf69eaae22c6bd350298b065d"
+dependencies = [
+ "serde",
+ "zbus",
 ]
 
 [[package]]
@@ -12168,9 +12180,11 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "typed-path 0.12.3",
  "uuid",
  "xdg",
+ "zbus_systemd",
  "zup-artifact",
  "zup-binary",
  "zup-build",
