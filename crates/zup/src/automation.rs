@@ -281,6 +281,7 @@ fn check_kind(kind: CheckKind) -> &'static str {
         CheckKind::TargetLowering => "target_lowering",
         CheckKind::OutputParent => "output_parent",
         CheckKind::Elevation => "elevation",
+        CheckKind::ServiceRuntime => "service_runtime",
     }
 }
 

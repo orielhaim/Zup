@@ -19,14 +19,15 @@
 //! artifact:  self-contained native installer (one per target)
 //! scope:     user, machine, either
 //! desktop:   menu launchers, URI protocols, file associations (user scope)
+//! services:  static manifest services (machine scope, systemd system units)
 //! ```
 //!
 //! Machine scope installs through the privileged worker: `zup build` needs
 //! no authority, and elevation through `pkexec` happens only when the
 //! installer runs. Everything else - GUI, dispatcher/universal artifacts,
-//! services, literal desktop icons, PATH entries, package-manager
-//! prerequisites, machine desktop integration - is refused here with a
-//! diagnostic that names the configuration, not an internal crate.
+//! literal desktop icons, PATH entries, package-manager prerequisites,
+//! machine desktop integration - is refused here with a diagnostic that
+//! names the configuration, not an internal crate.
 
 use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, TargetBuildPlan, TargetTriple};
 
@@ -124,6 +125,39 @@ pub fn linux_capability_errors(
         InstallScope::Machine | InstallScope::Either
     );
     let installer = &plan.installer;
+    // System services run through systemd in machine scope only: systemd
+    // user units are deferred past this phase. A machine-only project may
+    // carry static manifest services; user and either scope refuse them (an
+    // either-scope user choice could not be served). A machine leg carrying
+    // services alongside plugins refuses as well: static manifest services
+    // are supported, plugin-generated privileged services are not, and the
+    // privileged worker never executes plugins as root.
+    if !matches!(config.install.scope, InstallScope::Machine) && !installer.services.is_empty() {
+        errors.push(format!(
+            "{} service resource{} {} not supported by the Linux backend yet: system services \
+             need machine scope (systemd system units); user services are deferred past this \
+             phase",
+            installer.services.len(),
+            if installer.services.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if installer.services.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
+        ));
+    }
+    if machine_leg && !installer.plugins.is_empty() && !installer.services.is_empty() {
+        errors.push(
+            "services combined with plugins are not supported for a machine installation: \
+             static manifest services run through systemd, but plugin-generated privileged \
+             services remain refused until a separately designed trust model exists"
+                .to_owned(),
+        );
+    }
     {
         let mut unsupported = |kind: &str, count: usize| {
             if count > 0 {
@@ -134,7 +168,6 @@ pub fn linux_capability_errors(
                 ));
             }
         };
-        unsupported("service", installer.services.len());
         unsupported(
             "package-manager prerequisite",
             installer.prerequisites.len(),
@@ -493,6 +526,66 @@ mod tests {
             !text.contains("zup-linux"),
             "diagnostics name the configuration, never an internal crate: {text}"
         );
+    }
+
+    #[test]
+    fn machine_services_are_supported_without_plugins() {
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::Machine,
+        );
+        let mut plan = plan();
+        plan.installer.services.push(machine_service());
+        let errors = linux_capability_errors(&config, &plan);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn user_and_either_services_stay_refused() {
+        for scope in [InstallScope::User, InstallScope::Either] {
+            let config = config(SUPPORTED_LINUX_TARGET, Frontend::Console, scope);
+            let mut plan = plan();
+            plan.installer.services.push(machine_service());
+            let errors = linux_capability_errors(&config, &plan);
+            let text = errors.join("\n");
+            assert!(
+                text.contains("service"),
+                "{scope:?} with a service is refused: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn machine_services_with_plugins_stay_refused() {
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::Machine,
+        );
+        let mut plan = plan();
+        plan.installer.services.push(machine_service());
+        plan.installer.plugins.push(zup_core::PluginBinding {
+            id: zup_core::PluginId::new("acme.tool").unwrap(),
+            component: None,
+            when: None,
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        let text = errors.join("\n");
+        assert!(text.contains("plugin"), "{text}");
+    }
+
+    fn machine_service() -> zup_core::Service {
+        zup_core::Service {
+            id: zup_core::ServiceId::new("tool").unwrap(),
+            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            display_name: None,
+            binary: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+            arguments: Vec::new(),
+            start: zup_core::ServiceStart::Automatic,
+            component: None,
+            when: None,
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ const OTHER_TARGET: &str = "aarch64-pc-windows-msvc";
 const ON_WINDOWS: bool = cfg!(windows);
 
 /// Every check kind a report must contain for each selected target.
-const CHECK_KINDS: [&str; 11] = [
+const CHECK_KINDS: [&str; 12] = [
     "canonical_target",
     "manifest_compile",
     "source_payload",
@@ -45,6 +45,7 @@ const CHECK_KINDS: [&str; 11] = [
     "build_backend",
     "output_parent",
     "elevation",
+    "service_runtime",
 ];
 
 fn zup() -> Command {

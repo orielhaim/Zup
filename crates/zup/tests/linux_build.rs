@@ -322,12 +322,12 @@ fn a_gui_frontend_is_refused_before_build() {
     assert!(stderr(&result).contains("GUI"), "{}", stderr(&result));
 }
 
-/// A machine scope is refused before any artifact work, naming the scope.
-///
-/// The fixture declares both install directories so the manifest itself is
-/// coherent: what fails is the backend capability, not the authoring.
+/// A machine scope checks cleanly: machine installs run through the
+/// privileged worker at install time, and `check`/`build` need no
+/// authority. Machine desktop integration (not services) is still
+/// refused, naming the deferred capability.
 #[test]
-fn a_machine_scope_is_refused_before_build() {
+fn a_machine_scope_checks_before_build() {
     let project = Project::with_manifest(
         &MANIFEST
             .replace("scope = \"user\"", "scope = \"machine\"")
@@ -338,14 +338,41 @@ fn a_machine_scope_is_refused_before_build() {
     );
     let result = project.zup("check", &["--target", "linux"]);
     assert!(
-        !result.status.success(),
-        "a machine-scope project was accepted"
+        result.status.success(),
+        "a machine-scope project was refused: {}",
+        stderr(&result)
     );
-    let message = stderr(&result);
+}
+
+/// A machine-scope service project checks and builds: static manifest
+/// services lower through systemd, still without authority at build time.
+#[test]
+fn a_machine_service_project_checks_and_builds() {
+    let project = Project::with_manifest(&format!(
+        "{}\n[[services]]\nid = \"tool\"\nname = \"Tool\"\nbinary = \"${{install}}/tool\"\nstart = \"automatic\"\n",
+        MANIFEST
+            .replace("scope = \"user\"", "scope = \"machine\"")
+            .replace(
+                "user = \"${location.programs}/tool\"",
+                "user = \"${location.programs}/tool\"\nmachine = \"${location.programs}/tool\"",
+            ),
+    ));
+    let result = project.zup("check", &["--target", "linux"]);
     assert!(
-        message.contains("machine-scope") || message.contains("machine scope"),
-        "{message}"
+        result.status.success(),
+        "a machine service project was refused: {}",
+        stderr(&result)
     );
+    let result = project.zup("build", &["--target", "linux"]);
+    assert!(
+        result.status.success(),
+        "a machine service project did not build: {}",
+        stderr(&result)
+    );
+    let installer = project.root.path().join("Tool-Setup");
+    assert!(installer.is_file(), "the Linux installer artifact exists");
+    let image = zup_binary::Executable::read(&installer).expect("the image reads");
+    assert_eq!(image.format(), zup_binary::BinaryFormat::Elf);
 }
 
 /// An unsupported native resource is refused during capability validation.

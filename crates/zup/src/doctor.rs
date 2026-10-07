@@ -124,6 +124,12 @@ pub enum CheckKind {
     /// machine. Linux-only: other targets skip, and user-scope-only
     /// projects skip because user scope installs without elevation.
     Elevation,
+    /// Whether the systemd system manager answers on the installing
+    /// machine. Linux-only, and only for projects that declare machine
+    /// services: anything else skips, and a build host that cannot confirm
+    /// (a Windows cross-build host, a container without a bus) skips rather
+    /// than failing a project that builds correctly.
+    ServiceRuntime,
 }
 
 impl CheckKind {
@@ -140,6 +146,7 @@ impl CheckKind {
             Self::TargetLowering => "lowering",
             Self::OutputParent => "output",
             Self::Elevation => "elevation",
+            Self::ServiceRuntime => "services",
         }
     }
 }
@@ -440,6 +447,9 @@ impl Inspection<'_> {
             report.lowering(build);
         }
         report.elevation();
+        if let PlanOutcome::Ready(build) = &plan {
+            report.service_runtime(build);
+        }
         report.input_problems(build_inputs::InputSubject::Output);
         report.output();
         report.finish()
@@ -936,6 +946,71 @@ impl TargetChecks<'_> {
         }
     }
 
+    /// Whether the systemd system manager answers on this machine, for a
+    /// project that declares machine services.
+    ///
+    /// Read-only and never mutating: a probe that names the manager and
+    /// reads one property, never an operation that changes unit state. A
+    /// project with no services skips; a non-Linux target skips; a build
+    /// host that cannot confirm (Windows cross-build, bus unavailable)
+    /// skips with the reason rather than failing the build - systemd is an
+    /// install-time requirement, and `zup build` must stay host-independent.
+    /// `zup check` already proved the services are machine-scope statics.
+    fn service_runtime(&mut self, build: &zup_build::BuildPlan) {
+        let target = &self.config.target;
+        if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+            self.skip(
+                CheckKind::ServiceRuntime,
+                "service runtime is a Linux target concern",
+                None,
+            );
+            return;
+        }
+        if self.checks.iter().any(|check| {
+            check.kind == CheckKind::TargetLowering && check.status == CheckStatus::Fail
+        }) {
+            self.skip(
+                CheckKind::ServiceRuntime,
+                "not evaluated: target lowering failed",
+                None,
+            );
+            return;
+        }
+        let services: usize = build
+            .targets
+            .iter()
+            .map(|plan| plan.installer.services.len())
+            .sum();
+        if services == 0 {
+            self.skip(
+                CheckKind::ServiceRuntime,
+                "no services are declared for this target",
+                None,
+            );
+            return;
+        }
+        if !cfg!(target_os = "linux") {
+            self.skip(
+                CheckKind::ServiceRuntime,
+                "machine services run through the systemd system manager on the Linux installing machine",
+                None,
+            );
+            return;
+        }
+        match system_systemd() {
+            true => self.pass(
+                CheckKind::ServiceRuntime,
+                "systemd system manager answers on this machine",
+                None,
+            ),
+            false => self.skip(
+                CheckKind::ServiceRuntime,
+                "no systemd system manager on this machine: machine services need one on the installing machine",
+                None,
+            ),
+        }
+    }
+
     fn output(&mut self) {
         let slot = &self.inputs.outputs[self.index];
         let output = slot.path.clone();
@@ -1084,6 +1159,20 @@ fn system_pkexec() -> Option<std::path::PathBuf> {
 #[cfg(not(target_os = "linux"))]
 fn system_pkexec() -> Option<std::path::PathBuf> {
     None
+}
+
+/// Whether this Linux machine's systemd system manager answers, without
+/// mutating anything: connect, name the manager, read one property.
+#[cfg(target_os = "linux")]
+fn system_systemd() -> bool {
+    zup_linux::probe_systemd().is_ok()
+}
+
+/// No systemd off Linux: service runtime is a target-runtime concern the
+/// build host reports by skipping, never by failing the project.
+#[cfg(not(target_os = "linux"))]
+fn system_systemd() -> bool {
+    false
 }
 
 /// Whether a directory can be written, read from its permission bits.
