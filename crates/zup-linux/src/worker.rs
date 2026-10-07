@@ -491,7 +491,6 @@ fn prepare_operation(
     // Whoever the client ran, the bytes root trusts are root's.
     let (carrier_path, carrier_pin) = select_trusted_carrier(
         &state_root,
-        &context.roots,
         &context.worker_exe,
         &app_id,
         &app_version,
@@ -900,13 +899,11 @@ fn enforce_machine_policy(
 /// no trusted maintenance exists yet.
 fn select_trusted_carrier(
     state_root: &Path,
-    roots: &MachineRoots,
     worker_exe: &Path,
     app_id: &AppId,
     app_version: &semver::Version,
     target: &zup_core::TargetTriple,
 ) -> Result<(PathBuf, Option<FilePin>), WorkerError> {
-    let _ = roots;
     let maintenance = zup_transaction::maintenance_runtime_path(
         state_root,
         app_id,

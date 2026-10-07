@@ -250,7 +250,11 @@ fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
 /// A plan that went stale while the worker repaired state retries once
 /// against the repaired world, with a fresh plan and a fresh session.
 /// Anything else fails as it fails: retries never reuse an authorization.
-fn run_machine_elevated(
+///
+/// `pub(crate)` for the `test-support` surface, which proves launcher
+/// handling (cancelled, denied, missing, exited-before-handshake) with a
+/// fake launcher and no polkit.
+pub(crate) fn run_machine_elevated(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
 ) -> Result<LinuxOutcome, LinuxRunError> {
@@ -261,7 +265,7 @@ fn run_machine_elevated(
 }
 
 /// One elevated attempt: plan, launch, handshake, execute.
-fn run_machine_elevated_once(
+pub(crate) fn run_machine_elevated_once(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
 ) -> Result<LinuxOutcome, LinuxRunError> {
@@ -281,10 +285,39 @@ fn run_machine_elevated_once(
         "--session".to_owned(),
         session.0.to_string(),
     ];
-    let spawned = launcher
+    let mut spawned = launcher
         .spawn(&worker_exe, &args)
         .map_err(LinuxRunError::Elevation)?;
-    let mut stream = rendezvous.accept(ACCEPT_TIMEOUT).map_err(into_run_error)?;
+    // Wait for the worker's connection in slices, watching the child:
+    // an authorization that fails fast must surface at once, not after
+    // the connection timeout. The deadline still bounds the wait;
+    // authentication timing itself belongs to pkexec/polkit.
+    let mut stream = {
+        let start = std::time::Instant::now();
+        loop {
+            match rendezvous.accept(Duration::from_secs(1)) {
+                Ok(stream) => break stream,
+                Err(crate::socket::SocketError::Timeout) => {
+                    match spawned.try_wait().map_err(LinuxRunError::Elevation)? {
+                        Some(launch) => {
+                            map_launch(&launch).map_err(LinuxRunError::Elevation)?;
+                            return Err(LinuxRunError::Worker(
+                                "the worker exited before connecting".into(),
+                            ));
+                        }
+                        None => {
+                            if start.elapsed() >= ACCEPT_TIMEOUT {
+                                return Err(LinuxRunError::Worker(
+                                    "the worker did not connect".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(error) => return Err(into_run_error(error)),
+            }
+        }
+    };
     // The worker is the process just launched, now root: peer uid 0 and
     // the exact launched pid, pinned against reuse.
     let peer = peer_identity(&stream).map_err(into_run_error)?;

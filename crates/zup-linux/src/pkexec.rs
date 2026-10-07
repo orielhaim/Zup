@@ -79,6 +79,13 @@ pub trait WorkerChild {
     /// The child's process id, for peer verification.
     fn pid(&self) -> u32;
 
+    /// Whether the child already exited, and its outcome if so.
+    ///
+    /// The client watches this while waiting for the worker to connect: an
+    /// authorization that fails fast (a cancelled prompt, a missing
+    /// mechanism) must surface at once, not after the connection timeout.
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError>;
+
     /// Wait for the ending and collect the outcome.
     fn wait(self) -> Result<LaunchOutcome, PkexecError>;
 }
@@ -126,7 +133,10 @@ impl PkexecLauncher for SystemPkexec {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map(|child| SystemWorkerChild { child })
+            .map(|child| SystemWorkerChild {
+                child,
+                collected: None,
+            })
             .map_err(|source| PkexecError::Spawn {
                 path: self.path.display().to_string(),
                 source,
@@ -137,6 +147,8 @@ impl PkexecLauncher for SystemPkexec {
 /// The production worker child.
 pub struct SystemWorkerChild {
     child: std::process::Child,
+    /// An ending already collected by [`WorkerChild::try_wait`].
+    collected: Option<LaunchOutcome>,
 }
 
 impl WorkerChild for SystemWorkerChild {
@@ -144,7 +156,37 @@ impl WorkerChild for SystemWorkerChild {
         self.child.id()
     }
 
-    fn wait(self) -> Result<LaunchOutcome, PkexecError> {
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+        if let Some(outcome) = &self.collected {
+            return Ok(Some(outcome.clone()));
+        }
+        match self.child.try_wait().map_err(|source| {
+            PkexecError::WorkerFailed(format!("waiting for the worker: {source}"))
+        })? {
+            None => Ok(None),
+            Some(status) => {
+                // Exited already: collect the pipes without blocking. The
+                // worker speaks the protocol over the socket, never bulk
+                // output, so bounded reads cannot deadlock it.
+                use std::io::Read as _;
+                let mut stderr = Vec::new();
+                if let Some(pipe) = self.child.stderr.as_mut() {
+                    let _ = pipe.read_to_end(&mut stderr);
+                }
+                let outcome = LaunchOutcome {
+                    code: status.code(),
+                    stderr: String::from_utf8_lossy(&stderr).chars().take(512).collect(),
+                };
+                self.collected = Some(outcome.clone());
+                Ok(Some(outcome))
+            }
+        }
+    }
+
+    fn wait(mut self) -> Result<LaunchOutcome, PkexecError> {
+        if let Some(outcome) = self.collected.take() {
+            return Ok(outcome);
+        }
         let output = self.child.wait_with_output().map_err(|source| {
             PkexecError::WorkerFailed(format!("waiting for the worker: {source}"))
         })?;
@@ -194,6 +236,10 @@ pub struct FakeWorkerChild {
 impl WorkerChild for FakeWorkerChild {
     fn pid(&self) -> u32 {
         self.pid
+    }
+
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+        Ok(None)
     }
 
     fn wait(self) -> Result<LaunchOutcome, PkexecError> {

@@ -1241,3 +1241,100 @@ fn machine_replaced_rendezvous_is_refused() {
         "an unprivate rendezvous refuses"
     );
 }
+
+/// Launcher failures surface at once: a cancelled prompt, a denial, a
+/// missing mechanism, or a worker that exits before connecting never waits
+/// out the connection timeout.
+#[test]
+fn machine_launcher_failures_surface_at_once() {
+    use zup_linux::{LaunchOutcome, PkexecError, PkexecLauncher, WorkerChild};
+
+    #[derive(Debug, Clone)]
+    struct FakeLauncher {
+        pid: u32,
+        exit: Option<LaunchOutcome>,
+    }
+
+    struct FakeChild {
+        pid: u32,
+        exit: Option<LaunchOutcome>,
+    }
+
+    impl PkexecLauncher for FakeLauncher {
+        type Child = FakeChild;
+
+        fn spawn(
+            &self,
+            _executable: &std::path::Path,
+            _args: &[String],
+        ) -> Result<FakeChild, PkexecError> {
+            Ok(FakeChild {
+                pid: self.pid,
+                exit: self.exit.clone(),
+            })
+        }
+    }
+
+    impl WorkerChild for FakeChild {
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+
+        fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+            Ok(self.exit.clone())
+        }
+
+        fn wait(self) -> Result<LaunchOutcome, PkexecError> {
+            self.exit
+                .clone()
+                .ok_or_else(|| PkexecError::WorkerFailed("the fake worker never exited".into()))
+        }
+    }
+
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let cases = [
+        (
+            "dismissal",
+            Some(126),
+            "Error executing command as another user: User dismissed authentication dialog",
+            "cancelled",
+        ),
+        (
+            "denial",
+            Some(126),
+            "Error executing command as another user: Not authorized",
+            "authorization failed",
+        ),
+        ("missing", Some(127), "command not found", "unavailable"),
+        ("vanished", Some(0), "", "exited before connecting"),
+    ];
+    for (name, code, stderr, expect) in cases {
+        let launcher = FakeLauncher {
+            pid: 424242,
+            exit: Some(LaunchOutcome {
+                code,
+                stderr: stderr.to_owned(),
+            }),
+        };
+        let start = std::time::Instant::now();
+        let outcome = zup_linux::test_support::run_machine_elevated_for_test(
+            &installer,
+            &roots.state,
+            LinuxAction::Install,
+            None,
+            &launcher,
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "{name} must surface at once, not after the connection timeout: {elapsed:?}"
+        );
+        let error = outcome.unwrap_err();
+        assert!(
+            error.to_string().contains(expect),
+            "{name}: expected `{expect}` in `{error}`"
+        );
+    }
+}

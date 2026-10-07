@@ -141,6 +141,34 @@ pub fn validate_rendezvous_for_test(
     crate::worker::validate_rendezvous(socket, invoking_uid)
 }
 
+/// Drive one elevated machine operation with an injected launcher, for
+/// launcher-handling tests: cancellations, denials, missing mechanisms,
+/// and workers that exit before the handshake surface here without polkit.
+///
+/// The fake launcher lives in the test, not the library: production
+/// resolution stays strict and never consults the environment.
+///
+/// Like production, the elevated path always enforces the production
+/// roots: isolated roots only affect the loopback tests, never elevation.
+pub fn run_machine_elevated_for_test(
+    installer: &Path,
+    state: &Path,
+    action: LinuxAction,
+    install_dir_override: Option<PathBuf>,
+    launcher: &impl crate::pkexec::PkexecLauncher,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    crate::elevate::run_machine_elevated(
+        &crate::run::LinuxRunRequest {
+            installer: installer.to_path_buf(),
+            scope: zup_core::SelectedScope::Machine,
+            state_root: Some(state.to_path_buf()),
+            action,
+            install_dir_override,
+        },
+        launcher,
+    )
+}
+
 /// Send one envelope on a test stream.
 pub fn send_envelope_on(
     stream: &mut UnixStream,

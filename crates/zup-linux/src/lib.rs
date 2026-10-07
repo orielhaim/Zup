@@ -6,10 +6,12 @@
 //!
 //! What is here in this phase is the part of a Linux backend that is
 //! well-defined independently of a working installer: what this host is, where a
-//! Linux target's paths land, where a scope's persistent state belongs, and what
-//! a build source is allowed to be. What is deliberately absent is the part that
-//! depends on work not done yet - desktop integration, services, privilege
-//! separation, a worker transport. An absent concept is reported as absent at
+//! Linux target's paths land, where a scope's persistent state belongs, what
+//! a build source is allowed to be, and - for machine scope - how a
+//! short-lived privileged worker proves and executes one authorized
+//! transaction. What is deliberately absent is the part that depends on work
+//! not done yet - desktop integration for machine scope, services, privilege
+//! tools beyond `pkexec`. An absent concept is reported as absent at
 //! the capability boundary rather than answered with a function that returns
 //! `Unsupported`.
 //!
