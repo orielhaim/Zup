@@ -62,6 +62,19 @@ pub enum LinuxResolveError {
 /// prerequisites lower normally, and anything else active is refused in one
 /// diagnostic rather than resolved into a plan that could never execute.
 pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveError> {
+    resolve_target_with(plan, &LinuxInstallLocationResolver::default())
+}
+
+/// Resolve with explicit machine roots, for isolated machine-scope runs.
+///
+/// The default above is the production roots; the privileged worker resolves
+/// with its enforced roots, and the unprivileged planner with the same
+/// roots it will ask the worker to enforce, so both sides compute the same
+/// plan digest.
+pub fn resolve_target_with(
+    plan: &InstallPlan,
+    resolver: &LinuxInstallLocationResolver,
+) -> Result<TargetPlan, LinuxResolveError> {
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(LinuxResolveError::UnsupportedTarget {
             target: plan.target.to_string(),
@@ -71,9 +84,8 @@ pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveErro
 
     let scope = plan.scope;
     let resolve = |template: &zup_core::Template, kind: &'static str| {
-        let path =
-            resolve_template_path(template, &plan.target, &LinuxInstallLocationResolver, scope)
-                .map_err(|source| LinuxResolveError::Template { kind, source })?;
+        let path = resolve_template_path(template, &plan.target, resolver, scope)
+            .map_err(|source| LinuxResolveError::Template { kind, source })?;
         validate_linux_path(kind, &path)?;
         Ok::<TargetPath, LinuxResolveError>(path)
     };
@@ -277,10 +289,12 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Linu
 /// Refuse every active resource this backend has no mechanism for, in one
 /// diagnostic.
 ///
-/// Launchers, protocols, and file associations are not refused here: they
-/// lower into generated integration files above, and only the shapes with no
-/// honest mapping (a literal desktop icon, a directory PATH mutation) are
-/// refused by that lowering with their reasons.
+/// Launchers, protocols, and file associations are not refused here for user
+/// scope: they lower into generated integration files above, and only the
+/// shapes with no honest mapping (a literal desktop icon, a directory PATH
+/// mutation) are refused by that lowering with their reasons. Machine scope
+/// has no integration lowering at all - a machine desktop entry is deferred -
+/// so every one of those resources is refused here instead.
 fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
     let mut refused: Vec<String> = Vec::new();
     let mut unsupported = |kind: &str, count: usize| {
@@ -294,9 +308,11 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
     };
     unsupported("service", plan.services.len());
     unsupported("package-manager prerequisite", plan.prerequisites.len());
-    if plan.scope != SelectedScope::User {
-        refused
-            .push("machine scope needs a privilege mechanism this phase does not have".to_owned());
+    if plan.scope == SelectedScope::Machine {
+        unsupported("launcher", plan.launchers.len());
+        unsupported("PATH entry", plan.path_entries.len());
+        unsupported("URI protocol", plan.protocols.len());
+        unsupported("file association", plan.file_associations.len());
     }
     if refused.is_empty() {
         Ok(())

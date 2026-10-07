@@ -113,10 +113,18 @@ process-wrap = { version = "10", default-features = false, features = [
 # both safely, so no backend needs `unsafe` for either. `nix` is deliberately not
 # here as well: it overlaps `rustix` rather than complementing it, and a workspace
 # that reaches for both has two answers to every question.
+# Beyond `fs`/`std`/`system`, the Linux backend uses `rustix` for the privileged
+# worker's peer identity: Unix credential passing on its private IPC socket
+# (`net`), the invoking and peer user ids (`process`), and pinning the
+# authenticated peer against PID reuse (`thread` pidfd).
 rustix = { version = "1.1", default-features = false, features = [
+  "event",
   "fs",
+  "net",
+  "process",
   "std",
   "system",
+  "thread",
 ] }
 xdg = "3"
 

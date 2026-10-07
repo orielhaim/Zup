@@ -53,6 +53,8 @@ mod carrier;
 #[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(target_os = "linux")]
+mod elevate;
+#[cfg(target_os = "linux")]
 mod executor;
 #[cfg(target_os = "linux")]
 mod fs;
@@ -69,7 +71,11 @@ mod locations;
 #[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
+mod machine;
+#[cfg(target_os = "linux")]
 mod mime;
+#[cfg(target_os = "linux")]
+mod pkexec;
 #[cfg(target_os = "linux")]
 mod refresh;
 #[cfg(target_os = "linux")]
@@ -79,9 +85,15 @@ mod run;
 #[cfg(target_os = "linux")]
 mod snapshot;
 #[cfg(target_os = "linux")]
+mod socket;
+#[cfg(target_os = "linux")]
 mod source_policy;
 #[cfg(target_os = "linux")]
 mod state;
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+pub mod test_support;
+#[cfg(target_os = "linux")]
+mod worker;
 
 #[cfg(target_os = "linux")]
 pub use capabilities::{LinuxCapabilityError, validate_target_plan};
@@ -111,7 +123,20 @@ pub use lowering::{
     LinuxPathLoweringError, linux_target_path, target_path_from_host, to_host_path,
 };
 #[cfg(target_os = "linux")]
-pub use resolve::{LinuxResolveError, resolve_target, resolve_target_for};
+pub use machine::{
+    MACHINE_LOCK_FILE_MODE, MACHINE_PRIVATE_DIR_MODE, MACHINE_PRIVATE_FILE_MODE,
+    MACHINE_PROGRAMS_ROOT, MACHINE_PUBLIC_FILE_MODE, MACHINE_SHARED_DATA_ROOT,
+    MACHINE_STATE_DIR_MODE, MACHINE_STATE_ROOT, MachineDestination, MachinePathPolicyError,
+    MachineRoots, MachineStateError, authorize_machine_destination,
+    authorize_machine_install_directory, ensure_machine_state_root, verify_machine_hierarchy,
+    verify_trusted_state_file,
+};
+#[cfg(target_os = "linux")]
+pub use pkexec::{
+    LaunchOutcome, PkexecError, PkexecLauncher, SystemPkexec, WorkerChild, map_launch,
+};
+#[cfg(target_os = "linux")]
+pub use resolve::{LinuxResolveError, resolve_target, resolve_target_for, resolve_target_with};
 #[cfg(target_os = "linux")]
 pub use run::{
     LinuxAction, LinuxOutcome, LinuxRunError, LinuxRunRequest, recover_transaction, run,
@@ -119,6 +144,13 @@ pub use run::{
 #[cfg(target_os = "linux")]
 pub use snapshot::snapshot_target;
 #[cfg(target_os = "linux")]
+pub use socket::{
+    FRAME_TIMEOUT, HANDSHAKE_TIMEOUT, PeerIdentity, PeerPin, Rendezvous, SocketError,
+    peer_identity, pin_peer, worker_socket_path,
+};
+#[cfg(target_os = "linux")]
 pub use source_policy::{LinuxSourceFilePolicy, SourceEntryKind};
 #[cfg(target_os = "linux")]
 pub use state::{LinuxStateError, machine_state_root, state_root, user_state_root};
+#[cfg(target_os = "linux")]
+pub use worker::{EXECUTE_TIMEOUT, FilePin, WorkerContext, WorkerError, run_worker_mode};

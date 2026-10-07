@@ -87,9 +87,18 @@ pub struct IntegrationOutput {
 pub fn lower_integration(plan: &InstallPlan) -> Result<IntegrationOutput, IntegrationError> {
     refuse_unsupported(plan)?;
     if plan.scope != SelectedScope::User {
-        return Err(IntegrationError::Unsupported(
-            "machine scope needs a privilege mechanism this phase does not have".into(),
-        ));
+        // Machine scope lowers no integration: a machine desktop entry is
+        // deferred, so anything integration-shaped was already refused above
+        // and an empty lowering is the honest answer for a files-only plan.
+        if !plan.launchers.is_empty()
+            || !plan.protocols.is_empty()
+            || !plan.file_associations.is_empty()
+        {
+            return Err(IntegrationError::Unsupported(
+                "launchers, URI protocols, and file associations are not supported in machine scope: machine desktop integration is deferred past this phase".into(),
+            ));
+        }
+        return Ok(IntegrationOutput::default());
     }
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(IntegrationError::Unsupported(format!(
@@ -484,7 +493,7 @@ fn resolve_install_template(
     let path = resolve_template_path(
         template,
         target,
-        &crate::locations::LinuxInstallLocationResolver,
+        &crate::locations::LinuxInstallLocationResolver::default(),
         SelectedScope::User,
     )
     .map_err(|error| IntegrationError::InvalidPath {

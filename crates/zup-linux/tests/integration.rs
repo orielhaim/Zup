@@ -288,6 +288,7 @@ fn repair_restores_owned_integration() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Repair { force_files: false },
+        install_dir_override: None,
     })
     .expect("repair reaches a stable outcome");
     assert!(
@@ -305,6 +306,7 @@ fn repair_restores_owned_integration() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Repair { force_files: false },
+        install_dir_override: None,
     });
     assert!(
         outcome.is_err(),
@@ -319,6 +321,7 @@ fn repair_restores_owned_integration() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Repair { force_files: true },
+        install_dir_override: None,
     })
     .expect("forced repair reaches a stable outcome");
     assert!(
@@ -370,6 +373,7 @@ fn uninstall_removes_only_owned_integration() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Uninstall,
+        install_dir_override: None,
     });
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
@@ -441,6 +445,7 @@ fn failed_refresh_rolls_back_and_recovers() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     })
     .expect("a failed refresh still reaches a stable outcome");
     assert!(
@@ -508,6 +513,7 @@ fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     })
     .expect("a failed refresh still reaches a stable outcome");
     assert!(
@@ -558,6 +564,7 @@ fn missing_tools_fail_before_mutation() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     });
     let error = outcome.expect_err("a missing tool refuses the run");
     assert!(
@@ -613,6 +620,7 @@ fn planted_symlinks_are_refused() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     });
     assert!(outcome.is_err(), "a planted link refuses: {outcome:?}");
     assert_eq!(

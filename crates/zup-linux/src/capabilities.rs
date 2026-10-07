@@ -5,20 +5,21 @@
 //! fails on a service leaves a machine with half an installation and a journal
 //! that says the plan was coherent. It was not.
 //!
-//! Supported now: user scope, files, maintenance content, transaction state, and
-//! the console and headless frontends (the frontend is a property of the
-//! installer binary, not of the plan, so it is selected by which binary runs).
+//! Supported now: user and machine scope files, maintenance content,
+//! transaction state, and the console and headless frontends (the frontend is
+//! a property of the installer binary, not of the plan, so it is selected by
+//! which binary runs).
 //!
 //! Portable launchers, protocols, and file associations never reach this gate
-//! as target resources: resolution lowers them into generated integration
-//! files (desktop entries, MIME packages) that travel the file path. A target
-//! plan that still names launchers, PATH entries, services, protocols, or
-//! associations directly was not produced by this backend's resolution and is
-//! refused here, in one diagnostic that names every unsupported active
-//! resource. One coherent step, not a scatter of `Unsupported` returns through
-//! individual executor methods.
+//! as target resources in user scope: resolution lowers them into generated
+//! integration files (desktop entries, MIME packages) that travel the file
+//! path. Machine scope lowers no integration at all. A target plan that still
+//! names launchers, PATH entries, services, protocols, or associations
+//! directly was not produced by this backend's resolution and is refused
+//! here, in one diagnostic that names every unsupported active resource. One
+//! coherent step, not a scatter of `Unsupported` returns through individual
+//! executor methods.
 
-use zup_core::SelectedScope;
 use zup_platform::TargetPlan;
 
 /// A target plan that cannot be installed on Linux in this phase, naming everything
@@ -41,6 +42,11 @@ impl LinuxCapabilityError {
 /// Pure observation: nothing is created, resolved, or mutated. A plan that
 /// passes may still fail at apply time - a disk can fill - but it will not fail
 /// because the plan asked for something this backend has no mechanism for.
+///
+/// Machine scope plans carry files only: machine desktop integration is
+/// deferred, so a machine plan that still names launchers, PATH entries,
+/// services, protocols, or associations was not produced by this backend's
+/// resolution and is refused here.
 pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityError> {
     let mut refused: Vec<String> = Vec::new();
 
@@ -48,12 +54,6 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityErro
         refused.push(format!(
             "target `{}` is not a Linux target",
             plan.target.as_str()
-        ));
-    }
-    if plan.scope != SelectedScope::User {
-        let scope = plan.scope;
-        refused.push(format!(
-            "scope `{scope}` is not supported: machine scope needs a privilege mechanism this phase does not have",
         ));
     }
     let mut unsupported = |kind: &str, count: usize| {
@@ -66,11 +66,15 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityErro
         }
     };
     unsupported("service", plan.services.len());
+    unsupported("package-manager prerequisite", plan.prerequisites.len());
+    // Resolution lowers user-scope launchers, PATH entries, protocols, and
+    // associations into generated files, and defers every machine-scope one;
+    // a target plan that still names them directly was not produced by this
+    // backend's resolution and is refused in both scopes.
     unsupported("launcher", plan.launchers.len());
     unsupported("PATH entry", plan.path_entries.len());
     unsupported("URI protocol", plan.protocols.len());
     unsupported("file association", plan.file_associations.len());
-    unsupported("package-manager prerequisite", plan.prerequisites.len());
 
     if refused.is_empty() {
         Ok(())
@@ -84,6 +88,7 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zup_core::SelectedScope;
 
     fn empty_plan() -> TargetPlan {
         let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
@@ -178,12 +183,18 @@ mod tests {
 
         let error = validate_target_plan(&plan).expect_err("machine scope with services refuses");
         let reasons = error.reasons();
-        assert!(reasons.contains("machine"), "scope is named: {reasons}");
         assert!(reasons.contains("service"), "services are named: {reasons}");
         assert!(
             reasons.contains("launcher"),
             "launchers are named: {reasons}"
         );
+    }
+
+    #[test]
+    fn a_plain_machine_file_plan_is_accepted() {
+        let mut plan = empty_plan();
+        plan.scope = SelectedScope::Machine;
+        assert!(validate_target_plan(&plan).is_ok());
     }
 
     #[test]

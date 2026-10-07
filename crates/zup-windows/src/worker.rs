@@ -200,7 +200,13 @@ impl WorkerSession {
             | Message::Progress(_)
             | Message::TransactionStateChanged(_)
             | Message::Completed(_)
-            | Message::Failed(_) => Err(WorkerError::Protocol("unexpected message".into())),
+            | Message::Failed(_)
+            // The prepare/execute handshake belongs to the Linux worker's
+            // session shape; a Windows worker that receives one is hearing a
+            // session it never opened.
+            | Message::Prepare(_)
+            | Message::Prepared(_)
+            | Message::Execute(_) => Err(WorkerError::Protocol("unexpected message".into())),
         }
     }
 

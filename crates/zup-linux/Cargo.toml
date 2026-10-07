@@ -7,6 +7,13 @@ repository.workspace = true
 description = "Linux backend for zup"
 publish = false
 
+[features]
+# Test-only privileged-worker surface: isolated machine roots and a
+# loopback elevation path for the machine-scope suite. Production binaries
+# never enable this; the real worker always enforces the production roots,
+# and no IPC message or environment variable selects them.
+test-support = []
+
 [dependencies]
 rustix.workspace = true
 semver.workspace = true
@@ -23,6 +30,7 @@ zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
 zup-platform.workspace = true
+zup-protocol.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]

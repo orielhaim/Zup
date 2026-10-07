@@ -90,6 +90,7 @@ zup-windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zup-linux.workspace = true
+zup-protocol.workspace = true
 
 [dev-dependencies]
 # The runtime's tests compose their own installer from a literal plan and a real

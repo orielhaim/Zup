@@ -12149,6 +12149,7 @@ dependencies = [
  "zup-presentation",
  "zup-preset-host",
  "zup-preset-protocol",
+ "zup-protocol",
  "zup-runtime",
  "zup-toolchain",
  "zup-transaction",
@@ -12179,6 +12180,7 @@ dependencies = [
  "zup-manifest",
  "zup-plan",
  "zup-platform",
+ "zup-protocol",
  "zup-toolchain",
  "zup-transaction",
 ]

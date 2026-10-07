@@ -89,6 +89,12 @@ pub struct LinuxRunRequest {
     /// scope's own root, which is the only correct answer outside a test.
     pub state_root: Option<PathBuf>,
     pub action: LinuxAction,
+    /// A caller-chosen install directory, when the project permits one.
+    ///
+    /// For machine scope the worker revalidates the same host path against
+    /// the enforced program tree: an override never widens the privileged
+    /// destination policy, it only chooses within it.
+    pub install_dir_override: Option<PathBuf>,
 }
 
 /// Why a Linux lifecycle could not run.
@@ -96,6 +102,12 @@ pub struct LinuxRunRequest {
 pub enum LinuxRunError {
     #[error("machine scope is not supported on Linux in this phase")]
     MachineScope,
+
+    #[error("elevation: {0}")]
+    Elevation(#[from] crate::pkexec::PkexecError),
+
+    #[error("machine worker: {0}")]
+    Worker(String),
 
     #[error("installer package: {0}")]
     Carrier(#[from] CarrierError),
@@ -167,6 +179,17 @@ impl From<LinuxFileExecutorError> for LinuxRunError {
 
 /// Run one Linux lifecycle to a stable outcome.
 pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
+    match request.scope {
+        SelectedScope::User => run_user(request),
+        SelectedScope::Machine => crate::elevate::run_machine(request),
+    }
+}
+
+/// Run one user-scope lifecycle in this process.
+///
+/// User scope means this process owns every directory it touches: no
+/// worker, no privilege escalation, no second process.
+fn run_user(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
     if request.scope != SelectedScope::User {
         return Err(LinuxRunError::MachineScope);
     }
@@ -212,7 +235,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
         &plan_request,
     )?;
     let mut target = resolve_target(&install)?;
-    attach_maintenance_copy(&mut target, &request.installer, &state_root, request.scope)?;
+    attach_maintenance_copy_for(&mut target, &request.installer, &state_root, request.scope)?;
     validate_target_plan(&target)?;
     // Same rule for where the payload goes: an install directory reached
     // through a link would land the application wherever the link points.
@@ -246,7 +269,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
     };
 
     let snapshot = snapshot_target(&target);
-    let owned_matches = inspect_owned_matches(ledger.as_ref());
+    let owned_matches = inspect_owned_matches_for(ledger.as_ref());
     let execution = plan_lifecycle(
         action,
         (action != LifecycleAction::Uninstall).then_some(&target),
@@ -286,7 +309,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
         TransactionOutcome::Committed => {
             let ledger = ledger_store.publish_committed(&record, request.scope)?;
             if action == LifecycleAction::Upgrade {
-                retire_old_generations(
+                retire_old_generations_for(
                     &state_root,
                     &target.app.id,
                     request.scope,
@@ -498,7 +521,11 @@ fn scope_token(scope: SelectedScope) -> &'static str {
 /// means repair: running the same installer twice must converge rather than
 /// fail, and repair is what convergence is called. Anything newer is a
 /// downgrade, refused rather than installed over.
-fn resolve_action(
+///
+/// Shared by the in-process runner and the privileged worker: both sides
+/// must agree on install versus upgrade versus repair, because the plan
+/// digest binds the exact operation being authorized.
+pub(crate) fn resolve_action(
     action: LinuxAction,
     ledger: Option<&InstallLedger>,
     version: &semver::Version,
@@ -534,7 +561,10 @@ fn resolve_action(
 /// and planning out of that would be planning an install from the output of an
 /// install that may have been rolled back. The file carries executable intent,
 /// because a maintenance copy nothing can run maintains nothing.
-fn attach_maintenance_copy(
+///
+/// Shared with the privileged worker, which attaches the bytes of the carrier
+/// it verified rather than the bytes the client ran.
+pub(crate) fn attach_maintenance_copy_for(
     target: &mut TargetPlan,
     installer: &Path,
     state_root: &Path,
@@ -588,7 +618,10 @@ fn attach_maintenance_copy(
 ///
 /// A read-only observation: the transaction repeats every ownership check
 /// immediately before mutation, so this is planning input, not a verdict.
-fn inspect_owned_matches(ledger: Option<&InstallLedger>) -> BTreeMap<ResourceKey, bool> {
+/// Shared with the privileged worker, which plans from the same observation.
+pub(crate) fn inspect_owned_matches_for(
+    ledger: Option<&InstallLedger>,
+) -> BTreeMap<ResourceKey, bool> {
     let mut matches = BTreeMap::new();
     let Some(ledger) = ledger else {
         return matches;
@@ -649,7 +682,8 @@ fn inspect_owned_matches(ledger: Option<&InstallLedger>) -> BTreeMap<ResourceKey
 /// Only generations holding nothing the ledger still owns: each one is a
 /// directory zup wrote end to end, containing the runtime copy the ledger has
 /// since replaced. A generation that has acquired anything else is left alone.
-fn retire_old_generations(
+/// Shared with the privileged worker, which retires the same way.
+pub(crate) fn retire_old_generations_for(
     state_root: &Path,
     app_id: &AppId,
     scope: SelectedScope,
@@ -716,7 +750,7 @@ fn retire_old_generations(
 /// to plan it - and everything else delegates to the package with its
 /// verification intact. Two sources, one trait, no special case at the call
 /// site.
-struct RunnerPayload {
+pub(crate) struct RunnerPayload {
     package: PackagePayloadSource,
     maintenance: Vec<u8>,
     maintenance_sha256: Sha256Digest,
@@ -725,6 +759,27 @@ struct RunnerPayload {
 }
 
 impl RunnerPayload {
+    /// Assemble a payload from already-verified parts.
+    ///
+    /// The privileged worker pins the carrier bytes at preparation and serves
+    /// them here without re-reading the path, so bytes validated before the
+    /// handshake are the bytes staged after it.
+    pub(crate) fn from_prepared(
+        package: PackagePayloadSource,
+        maintenance: Vec<u8>,
+        maintenance_sha256: Sha256Digest,
+        maintenance_size: u64,
+        generated: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Self {
+        Self {
+            package,
+            maintenance,
+            maintenance_sha256,
+            maintenance_size,
+            generated,
+        }
+    }
+
     fn open(
         carrier: &Carrier,
         installer: &Path,

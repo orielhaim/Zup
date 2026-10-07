@@ -1,0 +1,109 @@
+//! Test-only privileged-worker surface.
+//!
+//! Available only with the `test-support` feature, which production binaries
+//! never enable. Everything here takes explicit isolated roots: no
+//! environment variable and no IPC message selects them, and the real worker
+//! always enforces [`MachineRoots::production`]. These helpers drive the
+//! same worker code the privileged path serves - the transport differs, the
+//! verification does not.
+
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use zup_protocol::{SessionId, WireEnvelope};
+
+use crate::machine::MachineRoots;
+use crate::run::{LinuxAction, LinuxOutcome, LinuxRunError, LinuxRunRequest};
+
+/// Isolated machine roots under a temporary base, for machine-scope tests.
+///
+/// Nothing here touches the host's `/opt` or `/var/lib/zup`: every root
+/// lives under the returned temporary directory, which vanishes on drop.
+pub struct MachineTestRoots {
+    /// Holds the base alive. Dropping removes the whole tree.
+    pub _base: tempfile::TempDir,
+    /// The isolated roots to pass explicitly.
+    pub roots: MachineRoots,
+    /// The isolated state root, for request overrides.
+    pub state: PathBuf,
+}
+
+impl MachineTestRoots {
+    /// Create the isolated tree.
+    pub fn isolate() -> Self {
+        let base = tempfile::tempdir().expect("an isolated machine base");
+        let programs = base.path().join("opt");
+        let state = base.path().join("var").join("lib").join("zup");
+        let shared_data = base.path().join("var").join("opt");
+        for directory in [&programs, &shared_data, state.parent().expect("a parent")] {
+            std::fs::create_dir_all(directory).expect("an isolated root");
+        }
+        let roots = MachineRoots::new(programs, state.clone(), shared_data);
+        Self {
+            _base: base,
+            roots,
+            state,
+        }
+    }
+}
+
+/// Run one machine-scope lifecycle through the loopback worker with isolated
+/// roots: the same plan, path, and policy validation as the privileged
+/// path, with no `pkexec` hop and no host mutation.
+pub fn run_machine_isolated(
+    installer: &PathBuf,
+    roots: &MachineRoots,
+    state: &PathBuf,
+    action: LinuxAction,
+    install_dir_override: Option<PathBuf>,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    crate::elevate::run_machine_loopback_for_test(
+        &LinuxRunRequest {
+            installer: installer.clone(),
+            scope: zup_core::SelectedScope::Machine,
+            state_root: Some(state.clone()),
+            action,
+            install_dir_override,
+        },
+        roots,
+    )
+}
+
+/// Serve one worker session on `stream` with isolated roots, for protocol
+/// attack tests: malformed frames, replays, substitutions, and peer games
+/// speak to the real session driver.
+pub fn serve_worker_isolated(
+    stream: &mut UnixStream,
+    roots: &MachineRoots,
+    invoking_uid: u32,
+    session: SessionId,
+    worker_exe: &PathBuf,
+) -> Result<String, crate::worker::WorkerError> {
+    crate::worker::serve_session(
+        stream,
+        crate::worker::WorkerContext {
+            roots: roots.clone(),
+            invoking_uid,
+            session,
+            worker_exe: worker_exe.clone(),
+            carrier_pin: None,
+        },
+    )
+}
+
+/// Send one envelope on a test stream.
+pub fn send_envelope_on(
+    stream: &mut UnixStream,
+    envelope: &WireEnvelope,
+) -> Result<(), crate::socket::SocketError> {
+    crate::socket::send_envelope(stream, envelope)
+}
+
+/// Receive one envelope on a test stream.
+pub fn recv_envelope_on(
+    stream: &mut UnixStream,
+    timeout: Duration,
+) -> Result<WireEnvelope, crate::socket::SocketError> {
+    crate::socket::recv_envelope(stream, timeout)
+}

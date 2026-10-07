@@ -18,6 +18,12 @@
 //!   data, and not `~/.local/bin`, which is on the user's `PATH` and would make
 //!   every installed payload implicitly executable-by-name.
 //!
+//! Machine scope follows FHS rather than inventing a Linux ProgramData: the
+//! payload root is `/opt` (so `${location.programs}/Acme` becomes
+//! `/opt/Acme`), machine variable data is `/var/opt`, and Zup's own machine
+//! state is `/var/lib/zup` (owned by [`crate::state`], enforced by
+//! [`crate::machine`]). There is no per-user override of these roots.
+//!
 //! The invariant is: payload, data, and state are three different directories,
 //! and a caller that confuses any two of them has a bug this module exists to
 //! prevent.
@@ -39,8 +45,8 @@ pub enum LinuxLocationError {
     #[error("no {0} location on Linux in user scope: {1}")]
     Unsupported(InstallLocation, &'static str),
 
-    #[error("machine scope is not supported on Linux in this phase")]
-    MachineScope,
+    #[error("no {0} location on Linux in machine scope: {1}")]
+    UnsupportedMachine(InstallLocation, &'static str),
 }
 
 /// The XDG data home: `$XDG_DATA_HOME`, else `~/.local/share`.
@@ -87,8 +93,33 @@ pub fn user_programs_root_in(home: &std::path::Path) -> PathBuf {
 }
 
 /// Maps a semantic install location onto a concrete Linux path.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LinuxInstallLocationResolver;
+///
+/// Machine roots ride along for machine scope; user scope never consults
+/// them. The default is the production roots - the only roots a privileged
+/// worker enforces - and isolated tests supply their own explicitly, which
+/// no environment variable and no IPC message can do at runtime.
+#[derive(Debug, Clone)]
+pub struct LinuxInstallLocationResolver {
+    machine: crate::machine::MachineRoots,
+}
+
+impl Default for LinuxInstallLocationResolver {
+    fn default() -> Self {
+        Self {
+            machine: crate::machine::MachineRoots::production(),
+        }
+    }
+}
+
+impl LinuxInstallLocationResolver {
+    /// A resolver with explicit machine roots, for isolated tests.
+    ///
+    /// Production paths use the default; the privileged worker never takes
+    /// roots from anywhere but [`Default`].
+    pub fn with_machine_roots(machine: crate::machine::MachineRoots) -> Self {
+        Self { machine }
+    }
+}
 
 impl InstallLocationResolver for LinuxInstallLocationResolver {
     fn resolve(
@@ -102,27 +133,43 @@ impl InstallLocationResolver for LinuxInstallLocationResolver {
             scope,
             source: Box::new(source),
         };
-        // Machine scope has no Linux policy in this phase: there is no
-        // privilege mechanism to create machine-owned directories, so resolving
-        // one would name a directory the installer could never honestly own.
-        if scope == SelectedScope::Machine {
-            return Err(failed(LinuxLocationError::MachineScope));
-        }
-        let path = match location {
-            InstallLocation::UserData => user_data_home().map_err(failed)?,
-            InstallLocation::Programs => user_programs_root().map_err(failed)?,
-            InstallLocation::SharedData => {
-                return Err(failed(LinuxLocationError::Unsupported(
-                    location,
-                    "there is no machine-wide data root without a privilege mechanism",
-                )));
-            }
-            InstallLocation::Menu | InstallLocation::Desktop => {
-                return Err(failed(LinuxLocationError::Unsupported(
-                    location,
-                    "desktop integration is deferred past this phase",
-                )));
-            }
+        let path = match scope {
+            SelectedScope::User => match location {
+                InstallLocation::UserData => user_data_home().map_err(failed)?,
+                InstallLocation::Programs => user_programs_root().map_err(failed)?,
+                InstallLocation::SharedData => {
+                    return Err(failed(LinuxLocationError::Unsupported(
+                        location,
+                        "there is no machine-wide data root without a privilege mechanism",
+                    )));
+                }
+                InstallLocation::Menu | InstallLocation::Desktop => {
+                    return Err(failed(LinuxLocationError::Unsupported(
+                        location,
+                        "desktop integration is deferred past this phase",
+                    )));
+                }
+            },
+            // FHS, not a ProgramData analogue: payload under `/opt` (so
+            // `${location.programs}/Acme` is `/opt/Acme`), variable data
+            // under `/var/opt`. Machine desktop integration is deferred, so
+            // menu and desktop locations stay refused.
+            SelectedScope::Machine => match location {
+                InstallLocation::Programs => self.machine.programs.clone(),
+                InstallLocation::SharedData => self.machine.shared_data.clone(),
+                InstallLocation::UserData => {
+                    return Err(failed(LinuxLocationError::UnsupportedMachine(
+                        location,
+                        "a machine installation has no per-user data directory",
+                    )));
+                }
+                InstallLocation::Menu | InstallLocation::Desktop => {
+                    return Err(failed(LinuxLocationError::UnsupportedMachine(
+                        location,
+                        "machine desktop integration is deferred past this phase",
+                    )));
+                }
+            },
         };
         TargetPath::new(target, path.to_string_lossy()).map_err(|error| {
             InstallLocationError::ResolutionFailed {
@@ -194,7 +241,7 @@ mod tests {
     /// directory the installer cannot honour.
     #[test]
     fn desktop_and_menu_locations_are_refused() {
-        let resolver = LinuxInstallLocationResolver;
+        let resolver = LinuxInstallLocationResolver::default();
         for location in [InstallLocation::Menu, InstallLocation::Desktop] {
             assert!(
                 resolver
@@ -206,16 +253,62 @@ mod tests {
     }
 
     #[test]
-    fn machine_scope_has_no_linux_policy() {
-        let resolver = LinuxInstallLocationResolver;
-        assert!(
-            resolver
-                .resolve(
-                    InstallLocation::Programs,
-                    SelectedScope::Machine,
-                    &linux_target()
-                )
-                .is_err()
-        );
+    fn machine_scope_follows_fhs() {
+        let resolver = LinuxInstallLocationResolver::default();
+        let programs = resolver
+            .resolve(
+                InstallLocation::Programs,
+                SelectedScope::Machine,
+                &linux_target(),
+            )
+            .expect("machine payload has a policy");
+        assert_eq!(programs.to_string(), "/opt");
+        let shared = resolver
+            .resolve(
+                InstallLocation::SharedData,
+                SelectedScope::Machine,
+                &linux_target(),
+            )
+            .expect("machine variable data has a policy");
+        assert_eq!(shared.to_string(), "/var/opt");
+        for location in [
+            InstallLocation::UserData,
+            InstallLocation::Menu,
+            InstallLocation::Desktop,
+        ] {
+            assert!(
+                resolver
+                    .resolve(location, SelectedScope::Machine, &linux_target())
+                    .is_err(),
+                "{location} has no machine policy"
+            );
+        }
+    }
+
+    #[test]
+    fn machine_payload_data_and_state_are_distinct() {
+        let resolver = LinuxInstallLocationResolver::default();
+        let programs = resolver
+            .resolve(
+                InstallLocation::Programs,
+                SelectedScope::Machine,
+                &linux_target(),
+            )
+            .expect("programs")
+            .to_string();
+        let shared = resolver
+            .resolve(
+                InstallLocation::SharedData,
+                SelectedScope::Machine,
+                &linux_target(),
+            )
+            .expect("shared data")
+            .to_string();
+        assert_ne!(programs, shared);
+        for root in [programs, shared] {
+            assert!(root.starts_with('/'));
+            assert!(!root.starts_with("/home"));
+            assert!(!root.starts_with("/root"));
+        }
     }
 }

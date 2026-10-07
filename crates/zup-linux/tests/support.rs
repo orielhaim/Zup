@@ -555,6 +555,7 @@ pub fn run_installer(installer: &Path, state: &Path, action: LinuxAction) -> Lin
         scope: SelectedScope::User,
         state_root: Some(state.to_path_buf()),
         action,
+        install_dir_override: None,
     })
     .expect("the run reaches a stable outcome")
 }

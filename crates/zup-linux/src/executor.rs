@@ -159,14 +159,15 @@ pub struct FileIntent {
 }
 
 impl FileIntent {
-    /// The mode this backend installs a file with.
+    /// The mode this executor installs a file with: data is always `0644`,
+    /// and executables follow the executor's scope policy.
     ///
-    /// Additive on purpose: `0644` plus the owner's execute bit is `0744`, so a
-    /// file that is meant to be runnable becomes runnable without anything else in
-    /// the install becoming writable.
-    fn mode(self) -> rustix::fs::Mode {
+    /// Additive on purpose: the executable mode adds execute bits without
+    /// making anything writable that was not already, so declaring one
+    /// helper executable never loosens the directory it lands in.
+    fn mode_for(self, executable_mode: rustix::fs::Mode) -> rustix::fs::Mode {
         if self.executable {
-            EXECUTABLE_PAYLOAD_MODE
+            executable_mode
         } else {
             PAYLOAD_FILE_MODE
         }
@@ -180,10 +181,20 @@ impl FileIntent {
 /// and the package says *where the bytes are*. An executor with no payload
 /// source can still verify, roll back, and reconcile from receipts - it just
 /// cannot stage.
-#[derive(Default)]
 pub struct LinuxFileExecutor {
     files: BTreeMap<String, FileWork>,
     payload: Option<Box<dyn PayloadSource>>,
+    executable_mode: rustix::fs::Mode,
+}
+
+impl Default for LinuxFileExecutor {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            payload: None,
+            executable_mode: EXECUTABLE_PAYLOAD_MODE,
+        }
+    }
 }
 
 impl std::fmt::Debug for LinuxFileExecutor {
@@ -208,6 +219,18 @@ impl LinuxFileExecutor {
     /// Attach the package this transaction stages its bytes from.
     pub fn with_payload(mut self, payload: impl PayloadSource + 'static) -> Self {
         self.payload = Some(Box::new(payload));
+        self
+    }
+
+    /// Install executables runnable by every account, for machine scope.
+    ///
+    /// User scope keeps the additive `0744`: a file becomes runnable by its
+    /// owner and nothing else loosens. Machine scope installs programs every
+    /// account may run, so the owner's execute bit extends to group and
+    /// other - `0755` - while nothing becomes writable that was not already.
+    /// Data files stay `0644` in both scopes.
+    pub fn for_machine(mut self) -> Self {
+        self.executable_mode = rustix::fs::Mode::from_bits_truncate(0o755);
         self
     }
 
@@ -912,12 +935,12 @@ impl LinuxFileExecutor {
         // rename preserves the mode the file was given. Setting the bit afterwards
         // would leave a window in which the destination is published and not yet
         // runnable.
-        rustix::fs::chmod(&staged, file.intent.mode()).map_err(|error| {
-            LinuxFileExecutorError::Io {
+        rustix::fs::chmod(&staged, file.intent.mode_for(self.executable_mode)).map_err(
+            |error| LinuxFileExecutorError::Io {
                 path: staged.display().to_string(),
                 source: std::io::Error::from(error),
-            }
-        })?;
+            },
+        )?;
         directory.publish_exclusive(&name, &file_name(&staged)?)?;
 
         verify_installed(&file.host_path, file.intent)?;
@@ -967,12 +990,12 @@ impl LinuxFileExecutor {
         directory.write_durable(&backup_name, &previous, STATE_FILE_MODE)?;
         let backup_path = directory.path().join(&backup_name);
 
-        rustix::fs::chmod(&staged, file.intent.mode()).map_err(|error| {
-            LinuxFileExecutorError::Io {
+        rustix::fs::chmod(&staged, file.intent.mode_for(self.executable_mode)).map_err(
+            |error| LinuxFileExecutorError::Io {
                 path: staged.display().to_string(),
                 source: std::io::Error::from(error),
-            }
-        })?;
+            },
+        )?;
         directory.publish_replacing(&name, &file_name(&staged)?)?;
         verify_installed(&file.host_path, file.intent)?;
 

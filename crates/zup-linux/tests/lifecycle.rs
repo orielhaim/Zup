@@ -197,6 +197,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Repair { force_files: false },
+        install_dir_override: None,
     });
     assert!(
         outcome.is_err(),
@@ -314,6 +315,7 @@ fn a_tampered_package_is_refused_before_mutation() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     });
     assert!(
         outcome.is_err(),
@@ -343,6 +345,7 @@ fn a_truncated_installer_is_refused_without_panicking() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: LinuxAction::Apply,
+        install_dir_override: None,
     });
     assert!(
         outcome.is_err(),

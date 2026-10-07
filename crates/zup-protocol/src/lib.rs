@@ -5,14 +5,18 @@
 #![forbid(unsafe_code)]
 
 mod messages;
+mod session;
 
 pub use messages::{
-    BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteTransaction,
-    FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
-    MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES, Message, PREREQUISITE_BOOTSTRAP_V1,
-    PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport, SequenceTracker,
+    BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteOperation,
+    ExecuteTransaction, FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
+    MAX_INTENT_COMPONENTS, MAX_INTENT_STRING_BYTES, MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES,
+    Message, PREREQUISITE_BOOTSTRAP_V1, PRIVILEGED_OPERATIONS, PROTOCOL_VERSION, ParentHello,
+    PrepareOperation, PreparedOperation, ProgressKind, ProgressReport, SequenceTracker,
     TransactionStateChanged, WireEnvelope, WorkerHello, decode_payload, encode_payload, failure,
+    privileged_operation,
 };
+pub use session::PrivilegedSession;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,6 +30,19 @@ pub struct SessionId(pub Uuid);
 impl SessionId {
     pub fn new_v7() -> Self {
         Self(Uuid::now_v7())
+    }
+
+    /// Parse a session identity, refusing anything that is not a uuid.
+    pub fn parse(text: &str) -> Result<Self, uuid::Error> {
+        text.parse::<Uuid>().map(Self)
+    }
+}
+
+impl std::str::FromStr for SessionId {
+    type Err = uuid::Error;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::parse(text)
     }
 }
 
@@ -53,6 +70,8 @@ pub enum WireError {
     #[error("duplicate sequence {sequence}")]
     DuplicateSequence { sequence: u64 },
 
+    #[error("replayed execute")]
+    Replay,
     #[error("sequence went backwards: {previous} → {next}")]
     SequenceRegression { previous: u64, next: u64 },
 

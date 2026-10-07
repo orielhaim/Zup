@@ -45,6 +45,11 @@ pub mod failure {
     pub const RECOVERY_REQUIRED: &str = "recovery_required";
     /// The operation needs elevation the user did not grant.
     pub const AUTHORIZATION_REQUIRED: &str = "authorization_required";
+    /// The requested operation is outside the privileged path policy.
+    ///
+    /// Refusing with prose would leave the parent guessing whether to retry;
+    /// a policy refusal is never retryable against the same worker.
+    pub const POLICY: &str = "policy";
 }
 
 /// Every failure kind, so a reader can check the vocabulary is complete and a
@@ -57,6 +62,7 @@ pub const FAILURE_KINDS: &[&str] = &[
     failure::CANCELLED,
     failure::RECOVERY_REQUIRED,
     failure::AUTHORIZATION_REQUIRED,
+    failure::POLICY,
 ];
 
 /// Versioned envelope wrapping every message.
@@ -82,6 +88,20 @@ pub enum Message {
     ParentHello(ParentHello),
     ExecuteTransaction(Box<ExecuteTransaction>),
     ExecuteBootstrap(ExecuteBootstrap),
+    /// Propose a privileged operation: intent plus the caller's choices.
+    ///
+    /// The worker independently reconstructs the plan from this intent and
+    /// answers with `Prepared`. No mutation follows from this message alone.
+    Prepare(PrepareOperation),
+    /// The worker's answer: the digest of the plan it reconstructed.
+    ///
+    /// The client must compare this digest with the one it computed itself
+    /// before sending `Execute`. A mismatch means the two sides disagree
+    /// about what was authorized, and the session stops.
+    Prepared(PreparedOperation),
+    /// Authorize exactly one prepared plan. One-shot: a second `Execute`
+    /// against the same prepared plan is a replay and is refused.
+    Execute(ExecuteOperation),
     Cancel,
     Progress(ProgressReport),
     TransactionStateChanged(TransactionStateChanged),
@@ -164,6 +184,132 @@ pub struct ExecuteBootstrap {
     pub quarantine_root: String,
     #[serde(default)]
     pub recovery_id: Option<uuid::Uuid>,
+}
+
+/// Bounds on untrusted intent fields in [`PrepareOperation`].
+///
+/// The frame limit already bounds the whole message; these bound the pieces,
+/// so a worker never sizes a buffer from one hostile string.
+pub const MAX_INTENT_STRING_BYTES: usize = 4096;
+pub const MAX_INTENT_COMPONENTS: usize = 64;
+
+/// The closed vocabulary of [`PrepareOperation::operation`].
+pub mod privileged_operation {
+    pub const INSTALL: &str = "install";
+    pub const UPGRADE: &str = "upgrade";
+    pub const REPAIR: &str = "repair";
+    pub const UNINSTALL: &str = "uninstall";
+    pub const APPLY: &str = "apply";
+}
+
+/// Every privileged operation, so a reader can check the vocabulary is
+/// complete and a worker can refuse anything outside it.
+pub const PRIVILEGED_OPERATIONS: &[&str] = &[
+    privileged_operation::INSTALL,
+    privileged_operation::UPGRADE,
+    privileged_operation::REPAIR,
+    privileged_operation::UNINSTALL,
+    privileged_operation::APPLY,
+];
+
+/// One proposed privileged operation: user intent plus the caller's choices.
+///
+/// Everything in here is untrusted. The worker revalidates every field
+/// against its own package and its own policy before `Prepared` is ever
+/// sent; a field that does not survive that validation refuses the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareOperation {
+    /// One of [`PRIVILEGED_OPERATIONS`].
+    pub operation: String,
+    /// Repair restores present-but-different files too.
+    pub force_files: bool,
+    /// Caller-chosen install directory, if the project permits one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir_override: Option<String>,
+    /// Caller-chosen components, as text.
+    #[serde(default)]
+    pub selected_components: Vec<String>,
+    /// The plan digest the caller computed itself, if it planned first.
+    ///
+    /// The worker compares its independently reconstructed digest with this
+    /// one. An absent digest means the caller shows no plan to bind, which a
+    /// worker may accept only where its own policy says the operation needs
+    /// no client-side confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_plan_digest: Option<String>,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: TargetTriple,
+}
+
+impl PrepareOperation {
+    /// Refuse an intent whose shape already breaks the bounds, before the
+    /// worker spends any authority on it.
+    pub fn validate_shape(&self) -> Result<(), crate::WireError> {
+        if !PRIVILEGED_OPERATIONS.contains(&self.operation.as_str()) {
+            return Err(crate::WireError::Malformed(
+                "unknown privileged operation".into(),
+            ));
+        }
+        let bounded = |value: &str| value.len() <= MAX_INTENT_STRING_BYTES;
+        if !bounded(&self.operation)
+            || !bounded(&self.app_id)
+            || !bounded(&self.app_version)
+            || !bounded(&self.scope)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if let Some(directory) = &self.install_dir_override
+            && !bounded(directory)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if let Some(digest) = &self.expected_plan_digest
+            && !bounded(digest)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if self.selected_components.len() > MAX_INTENT_COMPONENTS {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_COMPONENTS,
+            });
+        }
+        if self.selected_components.iter().any(|name| !bounded(name)) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The worker's answer to [`PrepareOperation`]: the identity of the plan it
+/// reconstructed, plus the summary the caller shows before authorizing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedOperation {
+    /// SHA-256 hex of the canonical plan encoding the worker reconstructed.
+    pub plan_digest: String,
+    pub operation: String,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: TargetTriple,
+    pub file_count: u32,
+}
+
+/// Authorize exactly one prepared plan. The digest must equal the
+/// [`PreparedOperation::plan_digest`] of this session; anything else is a
+/// substitution or a replay and is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteOperation {
+    pub plan_digest: String,
 }
 
 /// Synchronous progress sample / lifecycle notice.

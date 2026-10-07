@@ -1,15 +1,14 @@
-//! The Linux command surface: one installer binary, five verbs.
+//! The Linux command surface: one installer binary, five verbs, two scopes.
 //!
-//! Deliberately small. The Windows CLI carries acquisition, handoff,
-//! prerequisites, presets, and a worker protocol; the Linux Phase 2 installer
-//! carries a package and runs it in this process. Every verb maps onto one
-//! [`zup_linux::LinuxAction`], and the exit codes reuse the stable outcome
-//! vocabulary so a script branches on them the same way.
+//! User scope runs in this process. Machine scope elevates through `pkexec`
+//! into the hidden privileged-worker mode of this same binary: the worker
+//! re-verifies the package, reconstructs the plan, enforces the privileged
+//! path policy, and executes. Zup never handles an administrator password.
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use zup_core::Frontend;
+use zup_core::{Frontend, SelectedScope};
 
 /// The installer command line on Linux.
 ///
@@ -22,6 +21,23 @@ struct Cli {
     #[command(subcommand)]
     verb: Option<Verb>,
 
+    /// Install for the current user or for the whole machine.
+    ///
+    /// A project that fixes its scope needs no flag; a project that allows
+    /// either requires one, because moving an installation between scopes is
+    /// a different decision from reinstalling it. Machine scope requests
+    /// administrator authorization through `pkexec` at execution time.
+    #[arg(long, global = true)]
+    scope: Option<ScopeFlag>,
+
+    /// Install into this directory instead of the manifest's.
+    ///
+    /// Honoured only where the project permits an override, and for machine
+    /// scope only inside the machine program tree: an override never widens
+    /// what the privileged worker may touch, it only chooses within it.
+    #[arg(long, global = true, value_name = "PATH")]
+    install_dir: Option<PathBuf>,
+
     /// Use this state root instead of the scope's own.
     ///
     /// The only correct answer outside a test is the scope's root, which is
@@ -29,6 +45,13 @@ struct Cli {
     /// environment can prove the installer without touching a real profile.
     #[arg(long, global = true)]
     state_root: Option<PathBuf>,
+}
+
+/// The scope flag: an explicit choice, never a silent default to machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ScopeFlag {
+    User,
+    Machine,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -41,6 +64,10 @@ enum Verb {
     Repair(RepairArgs),
     /// Remove the installation.
     Uninstall,
+    /// The privileged worker. An internal implementation detail, not a
+    /// user-facing command: it serves one authorized session and exits.
+    #[command(name = "__privileged-worker", hide = true)]
+    __PrivilegedWorker(WorkerArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -53,6 +80,13 @@ struct RepairArgs {
     force: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct WorkerArgs {
+    /// The session this worker serves.
+    #[arg(long)]
+    session: String,
+}
+
 /// Run the runtime as the frontend its binary was built for.
 pub fn run(frontend: Frontend) -> miette::Result<()> {
     // GUI has no Linux presenter in this phase, and silently running the
@@ -61,6 +95,11 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
         return Err(miette::miette!(
             "the graphical installer is not supported on Linux in this phase; use the console or headless installer"
         ));
+    }
+    // The worker mode is argv-dispatched before anything else reads the
+    // package: it authenticates and serves one session, never a lifecycle.
+    if let Some(session) = worker_session_arg() {
+        return run_worker(session);
     }
     let cli = Cli::parse();
     let action = match cli.verb {
@@ -71,14 +110,17 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             force_files: args.force,
         },
         Some(Verb::Uninstall) => zup_linux::LinuxAction::Uninstall,
+        Some(Verb::__PrivilegedWorker(args)) => return run_worker(args.session),
     };
     let executable =
         std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
+    let scope = resolve_scope(&executable, cli.scope)?;
     match zup_linux::run(&zup_linux::LinuxRunRequest {
         installer: executable,
-        scope: zup_core::SelectedScope::User,
+        scope,
         state_root: cli.state_root,
         action,
+        install_dir_override: cli.install_dir,
     }) {
         Ok(zup_linux::LinuxOutcome::Committed { .. }) => {
             println!("committed");
@@ -92,5 +134,83 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             Err(miette::miette!("another maintenance operation is running"))
         }
         Err(error) => Err(miette::miette!("{error}")),
+    }
+}
+
+/// The worker session when this process started as one, without parsing the
+/// full CLI: worker argv is `__privileged-worker --session <uuid>` in any
+/// position clap would otherwise reject before the worker authenticates.
+fn worker_session_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "__privileged-worker" {
+            while let Some(flag) = args.next() {
+                if flag == "--session" {
+                    return args.next();
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Serve one privileged session and exit with its outcome.
+fn run_worker(session: String) -> miette::Result<()> {
+    let session: zup_protocol::SessionId = session
+        .parse()
+        .map_err(|_| miette::miette!("the worker serves one session, named by uuid"))?;
+    match zup_linux::run_worker_mode(session) {
+        Ok(outcome) => {
+            println!("worker: {outcome}");
+            Ok(())
+        }
+        Err(error) => Err(miette::miette!("{error}")),
+    }
+}
+
+/// Resolve the scope this run installs into.
+///
+/// A project that fixes its scope gets no question and no override. A
+/// project that allows either requires the explicit flag: machine scope is
+/// never the silent answer.
+fn resolve_scope(executable: &PathBuf, flag: Option<ScopeFlag>) -> miette::Result<SelectedScope> {
+    let carrier = zup_linux::Carrier::open(executable)
+        .map_err(|error| miette::miette!("installer package: {error}"))?;
+    let mut targets = carrier
+        .package()
+        .build_plan()
+        .map_err(|error| miette::miette!("installer package: {error}"))?
+        .targets;
+    if targets.len() != 1 {
+        return Err(miette::miette!(
+            "an installer package holds exactly one target; this one holds {}",
+            targets.len()
+        ));
+    }
+    let declared = targets.remove(0).installer.install.scope;
+    let requested = match flag {
+        Some(ScopeFlag::User) => Some(SelectedScope::User),
+        Some(ScopeFlag::Machine) => Some(SelectedScope::Machine),
+        None => None,
+    };
+    match (declared, requested) {
+        (zup_core::InstallScope::User, None) => Ok(SelectedScope::User),
+        (zup_core::InstallScope::Machine, None) => Ok(SelectedScope::Machine),
+        (zup_core::InstallScope::Either, None) => Err(miette::miette!(
+            "this installer serves the current user or the whole machine: choose with --scope user or --scope machine"
+        )),
+        (declared, Some(scope)) if allows(declared, scope) => Ok(scope),
+        (declared, Some(_)) => Err(miette::miette!(
+            "this installer does not serve the requested scope (manifest scope: {declared})"
+        )),
+    }
+}
+
+/// Whether a manifest scope serves a selected one.
+fn allows(declared: zup_core::InstallScope, scope: SelectedScope) -> bool {
+    match scope {
+        SelectedScope::User => declared.allows_user(),
+        SelectedScope::Machine => declared.allows_machine(),
     }
 }
