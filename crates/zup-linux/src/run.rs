@@ -109,6 +109,9 @@ pub enum LinuxRunError {
     #[error("machine worker: {0}")]
     Worker(String),
 
+    #[error("the confirmed plan went stale while the worker repaired state")]
+    StalePlan,
+
     #[error("installer package: {0}")]
     Carrier(#[from] CarrierError),
 

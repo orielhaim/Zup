@@ -71,6 +71,12 @@ pub enum WorkerError {
     #[error("cancelled")]
     Cancelled,
 
+    /// The worker repaired or recovered state while preparing, so the
+    /// client's digest is stale. The client re-plans and retries once with
+    /// a fresh session.
+    #[error("the confirmed plan went stale during preparation")]
+    StalePlan,
+
     #[error("another operation holds this installation's lock")]
     Busy,
 }
@@ -84,6 +90,7 @@ impl WorkerError {
             WorkerError::Policy(_) => failure::POLICY,
             WorkerError::Transaction(_) => failure::TRANSACTION,
             WorkerError::Cancelled => failure::CANCELLED,
+            WorkerError::StalePlan => failure::STALE_PLAN,
             WorkerError::Busy => failure::INSTALLATION_BUSY,
         }
     }
@@ -596,6 +603,13 @@ fn prepare_operation(
     };
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+    // What the ledger said before this session touched it: repair or
+    // recovery below may publish a newer truth, in which case a digest the
+    // client bound beforehand is stale rather than forged.
+    let settled_before = ledger_store
+        .load(&app_id, SelectedScope::Machine)
+        .map_err(|error| WorkerError::Transaction(error.to_string()))?
+        .map(|ledger| ledger.committed_transaction.clone());
     recover_pending(&state_root, &app_id, &carrier, &carrier_path)?;
     // Re-establish the gap repair after recovery: a commit the recovery
     // published must be visible before the new plan reads the ledger.
@@ -655,6 +669,16 @@ fn prepare_operation(
     if let Some(expected) = &intent.expected_plan_digest
         && expected.to_lowercase() != plan_digest
     {
+        // State settled while preparing (a repair published, a recovery
+        // committed) exactly when the client's digest predates it: stale,
+        // not forged. Anything else is a substitution and refuses as one.
+        let settled_after = ledger_store
+            .load(&target_plan.app.id, SelectedScope::Machine)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?
+            .map(|ledger| ledger.committed_transaction.clone());
+        if settled_after != settled_before {
+            return Err(WorkerError::StalePlan);
+        }
         return Err(WorkerError::AuthFailed(
             "the reconstructed plan differs from the authorized one".into(),
         ));

@@ -861,7 +861,6 @@ fn machine_interrupted_transaction_recovers_first() {
     let record = coordinator
         .begin(app.clone(), SelectedScope::Machine, version, plan)
         .expect("a journal begins");
-    let transaction = record.transaction_id;
     drop(record);
     assert!(
         zup_linux::LinuxLedgerStore::new(&roots.state)
@@ -872,7 +871,9 @@ fn machine_interrupted_transaction_recovers_first() {
     );
 
     // The next operation recovers the journal forward, then applies its own
-    // intent against the recovered world.
+    // intent against the recovered world. The first attempt goes stale when
+    // the recovery commits under it and retries once; the terminal state is
+    // what matters, not how many sessions it took.
     let outcome = run_machine_isolated(
         &installer,
         &roots.roots,
@@ -897,11 +898,35 @@ fn machine_interrupted_transaction_recovers_first() {
         .expect("the ledger reads")
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.0.0");
-    assert_eq!(
-        ledger.committed_transaction,
-        transaction.to_string(),
-        "the interrupted transaction is the one that committed"
-    );
+    // No journal is left unfinished: the interrupted transaction reached a
+    // terminal phase through recovery, and the apply committed after it.
+    let store = zup_transaction::FilesystemTransactionStore::new(&roots.state);
+    let mut terminal = 0;
+    for entry in std::fs::read_dir(roots.state.join("transactions")).expect("transactions") {
+        let entry = entry.expect("an entry");
+        let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<uuid::Uuid>().ok())
+        else {
+            continue;
+        };
+        let record = zup_transaction::TransactionStore::load(
+            &store,
+            &zup_transaction::TransactionId::from_uuid(id),
+        )
+        .expect("a journal loads");
+        assert!(
+            matches!(
+                record.phase,
+                zup_transaction::TransactionPhase::Committed
+                    | zup_transaction::TransactionPhase::RolledBack
+            ),
+            "no unfinished journal remains"
+        );
+        terminal += 1;
+    }
+    assert!(terminal >= 2, "the recovery and the apply both journaled");
 }
 
 /// A payload that names a forbidden destination is refused by policy, not

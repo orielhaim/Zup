@@ -246,7 +246,22 @@ fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
 }
 
 /// Drive one elevated machine operation through `pkexec` and the worker.
+///
+/// A plan that went stale while the worker repaired state retries once
+/// against the repaired world, with a fresh plan and a fresh session.
+/// Anything else fails as it fails: retries never reuse an authorization.
 fn run_machine_elevated(
+    request: &LinuxRunRequest,
+    launcher: &impl PkexecLauncher,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    match run_machine_elevated_once(request, launcher) {
+        Err(LinuxRunError::StalePlan) => run_machine_elevated_once(request, launcher),
+        outcome => outcome,
+    }
+}
+
+/// One elevated attempt: plan, launch, handshake, execute.
+fn run_machine_elevated_once(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
 ) -> Result<LinuxOutcome, LinuxRunError> {
@@ -346,6 +361,9 @@ pub(crate) fn drive_client(
             Message::Progress(report) => {
                 println!("{} ", report.detail);
                 continue;
+            }
+            Message::Failed(failed) if failed.kind == zup_protocol::failure::STALE_PLAN => {
+                return Err(LinuxRunError::StalePlan);
             }
             Message::Failed(failed) => {
                 return Err(LinuxRunError::Worker(format!(
@@ -491,7 +509,22 @@ pub(crate) fn run_machine_loopback_for_test(
 }
 
 /// One loopback session: plan, serve, drive, join.
+///
+/// Like the elevated path, a stale plan retries once against the repaired
+/// world with a fresh session.
 fn run_machine_loopback_on(
+    request: &LinuxRunRequest,
+    state_root: &PathBuf,
+    roots: &MachineRoots,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    match run_machine_loopback_once(request, state_root, roots) {
+        Err(LinuxRunError::StalePlan) => run_machine_loopback_once(request, state_root, roots),
+        outcome => outcome,
+    }
+}
+
+/// One loopback attempt: plan, serve, drive, join.
+fn run_machine_loopback_once(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,

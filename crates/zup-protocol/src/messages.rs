@@ -45,6 +45,11 @@ pub mod failure {
     pub const RECOVERY_REQUIRED: &str = "recovery_required";
     /// The operation needs elevation the user did not grant.
     pub const AUTHORIZATION_REQUIRED: &str = "authorization_required";
+    /// The worker repaired or recovered machine state while preparing, so a
+    /// digest the client bound before that repair is stale. The client
+    /// re-plans against the repaired world and tries once more with a fresh
+    /// session - never by reusing the old authorization.
+    pub const STALE_PLAN: &str = "stale_plan";
     /// The requested operation is outside the privileged path policy.
     ///
     /// Refusing with prose would leave the parent guessing whether to retry;
@@ -63,6 +68,7 @@ pub const FAILURE_KINDS: &[&str] = &[
     failure::RECOVERY_REQUIRED,
     failure::AUTHORIZATION_REQUIRED,
     failure::POLICY,
+    failure::STALE_PLAN,
 ];
 
 /// Versioned envelope wrapping every message.

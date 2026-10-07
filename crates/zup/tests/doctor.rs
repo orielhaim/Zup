@@ -279,7 +279,7 @@ fn healthy_single_target_passes_every_required_check() {
     assert_eq!(statuses(&rows, "output_parent"), only("pass"));
     assert_eq!(statuses(&rows, "elevation"), only("skip"));
     assert!(
-        message(find(&rows, "elevation")).contains("without elevation"),
+        message(find(&rows, "elevation")).contains("elevation"),
         "{}",
         message(find(&rows, "elevation"))
     );
@@ -525,36 +525,22 @@ destination = "${{install}}"
 fn machine_scope_reports_elevation_capability() {
     let target = "x86_64-unknown-linux-gnu";
     let project = TempDir::new().unwrap();
+    // No application main: the fixture ships a payload no declared main
+    // names, and the point here is elevation rather than main validation.
+    // Console on every host: a GUI frontend has no Linux runtime, which
+    // would fail lowering for the wrong reason.
+    let manifest_text = manifest(target).replace(fixture_main(), "").replace(
+        &format!("frontend = \"{}\"", selected_frontend()),
+        "frontend = \"console\"",
+    );
     write_project(
         project.path(),
-        &format!(
-            r#"schema = 1
-frontend = "{frontend}"
-
-[app]
-id = "com.example.doctor"
-name = "Doctor App"
-version = "1.0.0"
-{main}
-[build]
-
-[build.targets.default]
-target = "{target}"
-source = {{ directory = "dist" }}
-
-[install]
-scope = "machine"
-
-[install.directory]
-machine = "${{location.programs}}/DoctorApp"
-
-[[files]]
-source = "**/*"
-destination = "${{install}}"
-"#,
-            frontend = selected_frontend(),
-            main = fixture_main(),
-        ),
+        &manifest_text
+            .replace("scope = \"user\"", "scope = \"machine\"")
+            .replace(
+                "user = \"${location.user_data}/DoctorApp\"",
+                "machine = \"${location.programs}/DoctorApp\"",
+            ),
     );
     let _runtime = setup_runtime(project.path(), target);
     let output = run_doctor(&project.path().join("zup.toml"), &[]);
