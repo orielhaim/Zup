@@ -100,7 +100,7 @@ pub struct LinuxRunRequest {
 /// Why a Linux lifecycle could not run.
 #[derive(Debug, thiserror::Error)]
 pub enum LinuxRunError {
-    #[error("machine scope is not supported on Linux in this phase")]
+    #[error("machine scope runs through the privileged worker, not in this process")]
     MachineScope,
 
     #[error("elevation: {0}")]
