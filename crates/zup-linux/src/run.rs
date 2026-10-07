@@ -430,9 +430,14 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), LinuxRunError> {
 ///
 /// Runs after rollback, when the authoritative sources are restored but the
 /// transaction graph has already rolled its refresh nodes back. Idempotent by
-/// nature: regenerating from current sources can only converge. Refreshes
-/// whose sources are gone (an install rolled back to nothing) are skipped:
-/// there is nothing to derive from.
+/// nature: regenerating from current sources can only converge.
+///
+/// The sweep regenerates from the resulting world even when that world holds
+/// no source: a rollback that removed the final package source changed the
+/// authoritative state to the empty one, and the derived cache must follow it
+/// there rather than keep the removed entries. Only an absent database
+/// directory means there is nowhere stale to converge, and only then is a
+/// refresh skipped.
 fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), LinuxRunError> {
     for node in &record.plan.nodes {
         let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
@@ -445,9 +450,10 @@ fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), Linu
             crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
                 LinuxRunError::Executor(format!("invalid refresh payload: {error}"))
             })?;
-        if !crate::refresh::has_sources(&request) {
+        if !crate::refresh::database_present(&request) {
             continue;
         }
+        crate::refresh::ensure_refreshable(&request).map_err(LinuxFileExecutorError::from)?;
         crate::refresh::run_refresh(&request).map_err(LinuxFileExecutorError::from)?;
     }
     Ok(())

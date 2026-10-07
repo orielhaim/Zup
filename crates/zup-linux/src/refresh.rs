@@ -180,21 +180,48 @@ pub fn run_refresh(request: &RefreshRequest) -> Result<(), RefreshError> {
     })
 }
 
-/// Whether a refresh has sources to derive from.
+/// Whether the derived database a refresh regenerates has a location to be
+/// regenerated into.
 ///
-/// A refresh regenerates from authoritative files. When rollback removed
-/// those files, there is nothing to regenerate and the tool itself would
-/// refuse the absent directory; skipping is the honest answer, not an error.
-/// The next install or repair regenerates from its own sources.
-pub fn has_sources(request: &RefreshRequest) -> bool {
-    let sources = if request.tool == MIME_REFRESH_TOOL {
-        std::path::Path::new(&request.directory).join("packages")
-    } else {
-        std::path::Path::new(&request.directory).to_path_buf()
-    };
-    std::fs::symlink_metadata(&sources)
+/// This is about the database directory itself (`mime/`, `applications/`),
+/// not about whether any source remains. A rollback that removed the final
+/// source still changed the authoritative world - to the empty one - and the
+/// derived cache must be regenerated from that world rather than left holding
+/// the removed sources' entries. Treating "no sources" as "nothing to
+/// refresh" confuses the removal with nothing having changed, and leaves the
+/// stale cache behind.
+pub fn database_present(request: &RefreshRequest) -> bool {
+    std::fs::symlink_metadata(&request.directory)
         .map(|metadata| metadata.is_dir())
         .unwrap_or(false)
+}
+
+/// Make a present database refreshable before the sweep regenerates it.
+///
+/// A MIME database regenerates from its `packages/` subdirectory, which a
+/// rollback may have removed along with the final source it held. Recreating
+/// the empty subdirectory lets the tool regenerate the empty world instead of
+/// failing on the absent one. A desktop database regenerates from its own
+/// directory, so there is nothing to prepare.
+pub fn ensure_refreshable(request: &RefreshRequest) -> Result<(), RefreshError> {
+    if request.tool != MIME_REFRESH_TOOL {
+        return Ok(());
+    }
+    let packages = std::path::Path::new(&request.directory).join("packages");
+    if std::fs::symlink_metadata(&packages)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&packages).map_err(|error| RefreshError::Failed {
+        tool: request.tool.clone(),
+        directory: request.directory.clone(),
+        reason: format!(
+            "could not recreate `{}` for the post-rollback sweep: {error}",
+            packages.display()
+        ),
+    })
 }
 
 #[cfg(test)]

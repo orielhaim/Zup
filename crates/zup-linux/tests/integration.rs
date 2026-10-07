@@ -476,6 +476,62 @@ fn failed_refresh_rolls_back_and_recovers() {
     assert!(read(&desktop_log).contains(&applications().display().to_string()));
 }
 
+/// A rollback after one refresh succeeded regenerates the derived databases
+/// from the resulting world, including the world with no source left.
+///
+/// The MIME refresh applies, then the desktop refresh fails, so the
+/// transaction rolls back and removes the final MIME source with it. The
+/// post-rollback sweep must regenerate the MIME cache from the empty world:
+/// the cache must not keep entries for a source that no longer exists.
+#[test]
+fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
+    let user = IsolatedUser::isolate();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let tools = FakeTools::install();
+    // The MIME tool stays the real system one; only the desktop refresh is
+    // forced to fail, after the MIME refresh has already applied.
+    tools.tool("update-desktop-database", "#!/bin/sh\nexit 1\n");
+
+    let (launchers, protocols, associations) = v1_integration();
+    let installer = compose_integration_fixture(
+        scratch.path(),
+        "v1",
+        "1.0.0",
+        &v1_files(),
+        &launchers,
+        &protocols,
+        &associations,
+        &v1_icons(),
+    );
+    let outcome = run(&zup_linux::LinuxRunRequest {
+        installer,
+        scope: SelectedScope::User,
+        state_root: Some(user.state.clone()),
+        action: LinuxAction::Apply,
+    })
+    .expect("a failed refresh still reaches a stable outcome");
+    assert!(
+        matches!(outcome, LinuxOutcome::RolledBack),
+        "a failing desktop refresh rolls back: {outcome:?}"
+    );
+    assert!(
+        !mime_packages().join("com.example.tool.xml").exists(),
+        "the rolled-back source is gone"
+    );
+    // The authoritative world is now empty of Zup MIME sources, so the
+    // derived cache must have been regenerated from that world rather than
+    // left holding the removed source's entries.
+    let globs = data_home().join("mime/globs2");
+    assert!(
+        globs.is_file(),
+        "the sweep regenerates the cache from the empty world instead of skipping it"
+    );
+    assert!(
+        !read(&globs).contains("application/x-com.example.tool-foo"),
+        "no stale entry survives the rollback"
+    );
+}
+
 /// A missing refresh tool fails before anything mutates: the sealed `PATH`
 /// resolves neither database tool, so preflight refuses with the capability
 /// named and the machine keeps no trace of the attempt.
