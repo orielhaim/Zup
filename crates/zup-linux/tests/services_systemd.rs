@@ -1,28 +1,43 @@
 //! Real systemd coverage: the manager answers, units validate, and (as
-//! root, opt-in) a disposable unit round-trips policy without ever
-//! starting anything.
+//! root, opt-in) a disposable service round-trips its full lifecycle
+//! through the real executor, journal, and ledger.
 //!
 //! Read-only tests run wherever the system bus answers and skip honestly
-//! where it does not (containers without systemd, cross hosts). Privileged
-//! tests additionally need uid 0 and an explicit opt-in
-//! (`ZUP_TEST_REAL_SYSTEMD=1`): they install uniquely-named units, never
-//! start them, and always disable, unmask, remove, and reload in a cleanup
-//! guard. `systemd-analyze verify` serves as an additional oracle where
+//! where it does not (containers without systemd, cross hosts). The
+//! privileged lifecycle additionally needs uid 0 and an explicit opt-in
+//! (`ZUP_TEST_REAL_SYSTEMD=1`): it installs a uniquely-named unit into the
+//! real unit directory, drives install, transitions, and uninstall through
+//! the same transaction machinery production serves, never starts
+//! anything, and always retires everything in a cleanup guard.
+//! `systemd-analyze verify` serves as an additional oracle where
 //! available; the renderer and runtime verification stay authoritative.
 
 #![cfg(target_os = "linux")]
 
-use zup_core::ServiceStart;
-use zup_linux::{RealSystemd, SystemdManager as _, probe_systemd};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use zup_bundle::DirectoryPayloadSource;
+use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, TargetTriple};
+use zup_linux::{
+    DesiredService, LinuxFileExecutor, LinuxLedgerStore, MachineRoots, RealSystemd,
+    ServiceCompilation, ServiceSupport, SystemdManager as _, SystemdRoots,
+    compile_machine_execution_plan, probe_systemd, snapshot_services, snapshot_target,
+};
+use zup_platform::{CommandSpec, TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
+use zup_transaction::{
+    FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, compile_transaction,
+};
 
 /// Whether the systemd system manager answers on this machine.
 fn bus_available() -> bool {
     probe_systemd().is_ok()
 }
 
-/// Whether a privileged round-trip may run here: root, bus, and explicit
-/// opt-in. Production architecture stays the pkexec worker; `sudo` in CI
-/// only stages this isolated test environment.
+/// Whether the privileged lifecycle may run here: root, bus, and explicit
+/// opt-in. Production architecture stays the pkexec worker; `sudo -n` in
+/// CI only stages this isolated test environment (the suite itself must
+/// already run as root — nothing here elevates).
 fn privileged_available() -> bool {
     rustix::process::geteuid().as_raw() == 0
         && bus_available()
@@ -48,6 +63,10 @@ fn the_system_manager_answers_where_it_runs() {
     let mut manager = RealSystemd::connect().expect("the manager connects");
     let state = manager.unit_file_state("zup-definitely-not-installed.service");
     eprintln!("unknown unit state: {state:?}");
+    // The manager also reports a parseable version for the baseline gate.
+    let raw = manager.version().expect("the version reads");
+    let major = zup_linux::parse_manager_version(&raw).expect("the version parses");
+    eprintln!("systemd major version: {major}");
 }
 
 /// Every rendered start policy verifies under `systemd-analyze` where the
@@ -102,129 +121,515 @@ fn rendered_units_verify() {
     }
 }
 
-/// A disposable privileged round-trip: unique unit, real manager, real
-/// unit directory, cleanup guard. Proves source recognition, reload,
-/// enable/disable/mask transitions, and that install never starts the
-/// service - without ever calling StartUnit.
+/// A disposable privileged lifecycle against the real manager: install
+/// `Automatic` (enabled), transition to `Manual` (disabled + unmasked),
+/// to `Disabled` (masked, source intact), back to `Automatic`
+/// (unmasked + enabled), then uninstall (everything owned retired) —
+/// through snapshot, planning, typed input, journaled execution, and
+/// ledger publish, exactly as the worker serves them. Nothing is ever
+/// started or stopped: the narrow manager surface has no such call, and
+/// the test asserts the service stays inactive throughout.
 #[test]
-fn a_disposable_unit_round_trips_policy() {
+fn real_systemd_service_lifecycle() {
     if !privileged_available() {
         eprintln!("skipped: needs root, a system bus, and ZUP_TEST_REAL_SYSTEMD=1");
         return;
     }
     let tag = uuid::Uuid::now_v7().simple().to_string();
-    // A tiny real executable under a disposable program tree.
-    let program = std::path::PathBuf::from(format!("/opt/zup-test-{tag}"));
-    std::fs::create_dir_all(&program).expect("a program tree");
-    let binary = program.join("svc");
-    std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").expect("a service binary");
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let mut world = RealWorld::stage(&tag);
+    world.install(ServiceStart::Automatic, "1.0.0");
+    world.assert_policy("enabled");
+    world.assert_fragment();
+    world.assert_inactive("after install");
+    world.analyze_verify();
 
-    let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
-    let executable =
-        zup_platform::TargetPath::new(target.clone(), binary.to_string_lossy().as_ref())
-            .expect("a path");
-    let service = zup_platform::TargetService {
-        key: zup_core::ResourceKey::Service {
-            id: zup_core::ServiceId::new(format!("zup-test-{tag}")).expect("an id"),
-        },
-        id: zup_core::ServiceId::new(format!("zup-test-{tag}")).expect("an id"),
-        name: zup_core::NonEmptyString::new("Zup Test").expect("a name"),
-        display_name: None,
-        command: zup_platform::CommandSpec::new(executable, vec!["--serve".into()]),
-        start: ServiceStart::Automatic,
-        privilege: zup_core::Privilege::System,
-    };
-    // The unit name is the deterministic derivation of the stable
-    // identity: unique here because the service id carries the tag, and
-    // stable across display-name changes by construction.
-    let desired = zup_linux::DesiredService::derive(&service).expect("a service derives");
-    let unit = desired.unit.clone();
-    let path = std::path::Path::new("/usr/local/lib/systemd/system").join(&unit);
-    struct Cleanup {
-        unit: String,
-        path: std::path::PathBuf,
-        program: std::path::PathBuf,
-    }
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            if let Ok(mut manager) = RealSystemd::connect() {
-                let _ = manager.unmask(&self.unit);
-                let _ = manager.disable(&self.unit);
-                std::fs::remove_file(&self.path).ok();
-                let _ = manager.reload();
-            } else {
-                std::fs::remove_file(&self.path).ok();
-            }
-            std::fs::remove_dir_all(&self.program).ok();
+    world.upgrade(ServiceStart::Manual, "2.0.0");
+    world.assert_policy("disabled");
+    world.assert_unmasked();
+    world.assert_owned_link_gone();
+    world.assert_inactive("after Manual transition");
+
+    world.upgrade(ServiceStart::Disabled, "3.0.0");
+    world.assert_policy("masked");
+    assert!(
+        world.source_path().is_file(),
+        "a mask keeps the canonical source intact"
+    );
+    world.assert_inactive("while masked");
+
+    // Foreign integration blocks the way back: a `.requires/` link, a
+    // direct alias, and a runtime `/run` link each refuse the transition
+    // with everything preserved, then the retry converges once removed.
+    world.plant_foreign_links();
+    let refused = world.try_upgrade(ServiceStart::Automatic, "4.0.0");
+    assert!(
+        refused.is_err(),
+        "foreign integration refuses the transition"
+    );
+    world.assert_foreign_links_intact();
+    assert_eq!(
+        world.policy(),
+        "masked",
+        "a refused transition changes nothing"
+    );
+    world.remove_foreign_links();
+    world.upgrade(ServiceStart::Automatic, "4.0.0");
+    world.assert_policy("enabled");
+    world.assert_inactive("after re-enable");
+
+    world.uninstall();
+    assert!(
+        world.source_path().symlink_metadata().is_err(),
+        "the source retires"
+    );
+    assert!(world.load_ledger().is_none(), "the ledger retires");
+}
+
+/// One disposable real system: unique program tree, payload, state, and
+/// unit, with a cleanup guard that best-effort retires everything even
+/// when an assertion panics mid-flight.
+struct RealWorld {
+    tag: String,
+    program: PathBuf,
+    payload: PathBuf,
+    state: PathBuf,
+    unit: String,
+    source: PathBuf,
+    foreign: Vec<PathBuf>,
+    foreign_dirs: Vec<PathBuf>,
+    _scratch: tempfile::TempDir,
+}
+
+impl RealWorld {
+    fn stage(tag: &str) -> Self {
+        // The program tree exists; the binary itself is installed by the
+        // file operation in each transaction, proving file-before-service
+        // ordering through the real coordinator.
+        let program = PathBuf::from(format!("/opt/zup-test-{tag}"));
+        std::fs::create_dir_all(&program).expect("a program tree");
+        let scratch = tempfile::tempdir().expect("a scratch tree");
+        let payload = scratch.path().join("payload");
+        std::fs::create_dir_all(&payload).expect("a payload tree");
+        std::fs::write(payload.join("tool"), b"#!/bin/sh\nexit 0\n").expect("payload bytes");
+        let state = scratch.path().join("state");
+        std::fs::create_dir_all(&state).expect("a state tree");
+        Self {
+            tag: tag.to_owned(),
+            program,
+            payload,
+            state,
+            unit: String::new(),
+            source: PathBuf::new(),
+            foreign: Vec::new(),
+            foreign_dirs: Vec::new(),
+            _scratch: scratch,
         }
     }
-    let _cleanup = Cleanup {
-        unit: unit.clone(),
-        path: path.clone(),
-        program: program.clone(),
-    };
-    // Preflight: a stale identity from a crashed earlier run is cleaned
-    // first (unique tags make this nearly impossible); a foreign unit
-    // with this name would have failed derivation uniqueness instead.
-    // (Fresh tags never collide: the check is the cleanup, not a gate.)
-    std::fs::remove_file(&path).ok();
-    std::fs::write(&path, &desired.bytes).expect("the source installs");
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = std::fs::symlink_metadata(&path).expect("the source stats");
-    assert!(metadata.is_file() && !metadata.file_type().is_symlink());
-    assert_eq!(metadata.uid(), 0);
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
-    let mut manager = RealSystemd::connect().expect("the manager connects");
-    manager.reload().expect("a reload works");
-    // Automatic becomes persistently enabled...
-    let changes = manager.enable(&unit).expect("enable works");
-    assert!(!changes.is_empty(), "enablement reports its changes");
-    assert_eq!(
-        manager.unit_file_state(&unit).expect("a state reads"),
-        "enabled"
-    );
-    let info = manager.load_unit(&unit).expect("the unit loads");
-    assert_eq!(info.fragment_path, path.to_string_lossy());
-    // ...Manual becomes disabled and unmasked...
-    let _ = manager.disable(&unit).expect("disable works");
-    assert_eq!(
-        manager.unit_file_state(&unit).expect("a state reads"),
-        "disabled"
-    );
-    // ...Disabled becomes persistently masked with the source intact...
-    let _ = manager.mask(&unit).expect("mask works");
-    assert_eq!(
-        manager.unit_file_state(&unit).expect("a state reads"),
-        "masked"
-    );
-    assert!(path.is_file(), "a mask keeps the canonical source intact");
-    // ...and back to Automatic removes only the owned mask.
-    let _ = manager.unmask(&unit).expect("unmask works");
-    let _ = manager.enable(&unit).expect("re-enable works");
-    assert_eq!(
-        manager.unit_file_state(&unit).expect("a state reads"),
-        "enabled"
-    );
-    // The service was never started by any of this: running state is not
-    // Zup's to own, and no start API ran.
-    let active = std::process::Command::new("systemctl")
-        .args(["is-active", &unit])
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_default();
-    assert_ne!(
-        active, "active",
-        "install registers policy, it does not start"
-    );
-    // `systemd-analyze verify` as an oracle where available.
-    if std::process::Command::new("systemd-analyze")
-        .arg("verify")
-        .arg(&path)
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("systemd-analyze accepts the installed source");
+
+    fn target() -> TargetTriple {
+        zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target")
+    }
+
+    fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {
+        let binary = TargetPath::new(
+            Self::target(),
+            self.program.join("svc").to_string_lossy().as_ref(),
+        )
+        .expect("a path");
+        let destination = binary.clone();
+        let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
+        let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
+        let service = zup_platform::TargetService {
+            key: ResourceKey::Service {
+                id: zup_core::ServiceId::new(format!("zup-test-{}", self.tag)).expect("an id"),
+            },
+            id: zup_core::ServiceId::new(format!("zup-test-{}", self.tag)).expect("an id"),
+            name: zup_core::NonEmptyString::new("Zup Test").expect("a name"),
+            display_name: None,
+            command: CommandSpec::new(binary, vec!["--serve".into()]),
+            start,
+            privilege: Privilege::System,
+        };
+        TargetPlan {
+            app: zup_core::App {
+                id: AppId::new("com.example.zup-test").expect("an id"),
+                name: zup_core::NonEmptyString::new("Zup Test").expect("a name"),
+                version: semver::Version::parse(version).expect("a version"),
+                publisher: None,
+                main: None,
+                description: None,
+            },
+            target: Self::target(),
+            scope: SelectedScope::Machine,
+            install_directory: TargetPath::new(
+                Self::target(),
+                self.program.to_string_lossy().as_ref(),
+            )
+            .expect("a path"),
+            selected_components: Vec::new(),
+            prerequisites: Vec::new(),
+            files: vec![TargetFile {
+                key: ResourceKey::File {
+                    destination: destination.to_string(),
+                },
+                source_relative: zup_core::RelativePath::new("tool").expect("a path"),
+                destination,
+                size,
+                sha256,
+                privilege: Privilege::System,
+                executable: true,
+            }],
+            launchers: Vec::new(),
+            path_entries: Vec::new(),
+            services: vec![service],
+            protocols: Vec::new(),
+            file_associations: Vec::new(),
+            summary: TargetPlanSummary {
+                file_count: 1,
+                install_bytes: size,
+                resource_count: 1,
+                requires_authorization: true,
+                selected_component_count: 0,
+                prerequisite_count: 0,
+                download_bytes: 0,
+            },
+            preset: None,
+        }
+    }
+
+    fn resolve_unit(&mut self, plan: &TargetPlan) {
+        let desired = DesiredService::derive(&plan.services[0]).expect("a service derives");
+        self.unit = desired.unit;
+        self.source = std::path::Path::new("/usr/local/lib/systemd/system").join(&self.unit);
+    }
+
+    fn ledgers(&self) -> LinuxLedgerStore {
+        LinuxLedgerStore::new(&self.state)
+    }
+
+    fn load_ledger(&self) -> Option<zup_exec::InstallLedger> {
+        self.ledgers()
+            .load(
+                &AppId::new("com.example.zup-test").expect("an id"),
+                SelectedScope::Machine,
+            )
+            .expect("a ledger reads")
+    }
+
+    fn snapshot(&self, plan: &TargetPlan, manager: &mut RealSystemd) -> zup_exec::HostSnapshot {
+        let mut snapshot = snapshot_target(plan);
+        snapshot.services =
+            snapshot_services(plan, manager, &SystemdRoots::production()).expect("a snapshot");
+        snapshot
+    }
+
+    fn owned_matches(
+        ledger: Option<&zup_exec::InstallLedger>,
+        snapshot: &zup_exec::HostSnapshot,
+    ) -> BTreeMap<ResourceKey, bool> {
+        let mut matches = BTreeMap::new();
+        let Some(ledger) = ledger else {
+            return matches;
+        };
+        for (key, owned) in &ledger.resources {
+            let found = match owned {
+                zup_exec::OwnedResource::File {
+                    destination,
+                    sha256,
+                    size,
+                    ..
+                } => std::fs::read(destination.to_string())
+                    .map(|bytes| {
+                        zup_core::hash_reader(bytes.as_slice()).is_ok_and(|(found_size, found)| {
+                            found_size == *size && found == *sha256
+                        })
+                    })
+                    .unwrap_or(false),
+                zup_exec::OwnedResource::Service { installed, .. } => {
+                    snapshot.services.iter().any(|observed| {
+                        observed.key == *key
+                            && match (&observed.state, installed) {
+                                (
+                                    zup_exec::ObservedServiceState::Service {
+                                        display_name,
+                                        command,
+                                        start,
+                                        ..
+                                    },
+                                    zup_exec::ServiceState::Registration {
+                                        display_name: wanted_display,
+                                        command: wanted_command,
+                                        start: wanted_start,
+                                    },
+                                ) => {
+                                    display_name == wanted_display
+                                        && command == wanted_command
+                                        && start == wanted_start
+                                }
+                                _ => false,
+                            }
+                    })
+                }
+                _ => false,
+            };
+            matches.insert(key.clone(), found);
+        }
+        matches
+    }
+
+    /// Drive one lifecycle through snapshot, planning, typed input,
+    /// journaled execution, and publish — the worker's path with a live
+    /// manager instead of the pkexec hop.
+    fn drive(
+        &mut self,
+        plan: &TargetPlan,
+        action: zup_exec::LifecycleAction,
+        force: bool,
+    ) -> Result<TransactionOutcome, String> {
+        let ledgers = self.ledgers();
+        let ledger = self.load_ledger();
+        let mut manager = RealSystemd::connect().map_err(|error| format!("connect: {error}"))?;
+        let snapshot = self.snapshot(plan, &mut manager);
+        let owned_matches = Self::owned_matches(ledger.as_ref(), &snapshot);
+        let execution = zup_exec::plan_lifecycle(
+            action,
+            (action != zup_exec::LifecycleAction::Uninstall).then_some(plan),
+            Some(&snapshot),
+            ledger.as_ref(),
+            &owned_matches,
+        )
+        .map_err(|error| format!("lifecycle: {error}"))?;
+        let input = compile_machine_execution_plan(
+            &execution,
+            plan,
+            ServiceCompilation {
+                roots: &MachineRoots::production(),
+                systemd: &SystemdRoots::production(),
+                manager: &mut manager,
+                force_services: force,
+            },
+        )
+        .map_err(|error| format!("input: {error}"))?;
+        let compiled =
+            compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
+        ledgers
+            .validate_plan(
+                &plan.app.id,
+                SelectedScope::Machine,
+                &plan.app.version,
+                &compiled,
+            )
+            .map_err(|error| format!("ledger validation: {error}"))?;
+        let store = FilesystemTransactionStore::new(&self.state);
+        let coordinator = TransactionCoordinator::new(store);
+        let record = coordinator
+            .begin(
+                plan.app.id.clone(),
+                SelectedScope::Machine,
+                plan.app.version.clone(),
+                compiled,
+            )
+            .map_err(|error| format!("begin: {error}"))?;
+        let mut executor = LinuxFileExecutor::new()
+            .with_payload(DirectoryPayloadSource::new(&self.payload))
+            .for_machine()
+            .with_services(
+                ServiceSupport::production().map_err(|error| format!("support: {error}"))?,
+            );
+        executor
+            .register_plan(&record.plan)
+            .map_err(|error| format!("register: {error}"))?;
+        let (record, outcome) = coordinator
+            .execute(record, &mut executor)
+            .map_err(|error| format!("execute: {error}"))?;
+        match outcome {
+            TransactionOutcome::Committed => {
+                ledgers
+                    .publish_committed(&record, SelectedScope::Machine)
+                    .map_err(|error| format!("publish: {error}"))?;
+                Ok(outcome)
+            }
+            TransactionOutcome::RolledBack | TransactionOutcome::RecoveryRequired => Ok(outcome),
+        }
+    }
+
+    fn install(&mut self, start: ServiceStart, version: &str) {
+        let plan = self.plan(version, start);
+        self.resolve_unit(&plan);
+        let outcome = self
+            .drive(&plan, zup_exec::LifecycleAction::Install, false)
+            .expect("install plans and executes");
+        assert_eq!(outcome, TransactionOutcome::Committed);
+    }
+
+    fn upgrade(&mut self, start: ServiceStart, version: &str) {
+        let plan = self.plan(version, start);
+        self.resolve_unit(&plan);
+        let outcome = self
+            .drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
+            .expect("upgrade plans and executes");
+        assert_eq!(outcome, TransactionOutcome::Committed);
+    }
+
+    fn try_upgrade(
+        &mut self,
+        start: ServiceStart,
+        version: &str,
+    ) -> Result<TransactionOutcome, String> {
+        let plan = self.plan(version, start);
+        self.resolve_unit(&plan);
+        self.drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
+    }
+
+    fn uninstall(&mut self) {
+        let plan = self.plan("4.0.0", ServiceStart::Automatic);
+        let outcome = self
+            .drive(&plan, zup_exec::LifecycleAction::Uninstall, false)
+            .expect("uninstall plans and executes");
+        assert_eq!(outcome, TransactionOutcome::Committed);
+    }
+
+    fn policy(&self) -> String {
+        let mut manager = RealSystemd::connect().expect("the manager connects");
+        manager.unit_file_state(&self.unit).expect("a state reads")
+    }
+
+    fn source_path(&self) -> &std::path::Path {
+        &self.source
+    }
+
+    fn assert_policy(&self, expected: &str) {
+        assert_eq!(
+            self.policy(),
+            expected,
+            "persistent policy reaches {expected}"
+        );
+    }
+
+    fn assert_fragment(&self) {
+        let mut manager = RealSystemd::connect().expect("the manager connects");
+        let info = manager.load_unit(&self.unit).expect("the unit loads");
+        assert_eq!(
+            info.fragment_path,
+            self.source.to_string_lossy(),
+            "systemd resolves the canonical source"
+        );
+    }
+
+    fn assert_unmasked(&self) {
+        assert!(
+            std::fs::symlink_metadata(format!("/etc/systemd/system/{}", self.unit)).is_err(),
+            "no mask link remains"
+        );
+    }
+
+    fn assert_owned_link_gone(&self) {
+        assert!(
+            std::fs::symlink_metadata(format!(
+                "/etc/systemd/system/multi-user.target.wants/{}",
+                self.unit
+            ))
+            .is_err(),
+            "the owned enablement link is gone"
+        );
+    }
+
+    fn assert_inactive(&self, when: &str) {
+        let output = std::process::Command::new("systemctl")
+            .args(["is-active", &self.unit])
+            .output()
+            .expect("systemctl runs");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "inactive",
+            "the service is never started {when}"
+        );
+    }
+
+    fn analyze_verify(&self) {
+        if !analyze_available() {
+            eprintln!("skipped analyze oracle: no systemd-analyze");
+            return;
+        }
+        let output = std::process::Command::new("systemd-analyze")
+            .arg("verify")
+            .arg(&self.source)
+            .output()
+            .expect("systemd-analyze runs");
+        assert!(
+            output.status.success(),
+            "installed source verifies: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Plant foreign integration the backend must refuse around: a
+    /// `.requires/` link, a direct alias, and a runtime `/run` link.
+    fn plant_foreign_links(&mut self) {
+        let canonical = self.source.to_string_lossy().into_owned();
+        let requires = PathBuf::from("/etc/systemd/system/zup-test-alias.target.requires");
+        std::fs::create_dir_all(&requires).expect("a requires tree");
+        let requires_link = requires.join(&self.unit);
+        std::os::unix::fs::symlink(&canonical, &requires_link).expect("a requires link");
+        let alias = PathBuf::from(format!(
+            "/etc/systemd/system/zup-test-{}-alias.service",
+            self.tag
+        ));
+        std::os::unix::fs::symlink(&canonical, &alias).expect("an alias");
+        let run_wants = PathBuf::from("/run/systemd/system/multi-user.target.wants");
+        std::fs::create_dir_all(&run_wants).expect("a runtime wants tree");
+        let run_link = run_wants.join(&self.unit);
+        std::os::unix::fs::symlink(&canonical, &run_link).expect("a runtime link");
+        self.foreign = vec![requires_link, alias, run_link];
+        self.foreign_dirs = vec![requires, run_wants];
+    }
+
+    fn assert_foreign_links_intact(&self) {
+        for link in &self.foreign {
+            assert!(
+                std::fs::symlink_metadata(link)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+                "foreign link preserved: {}",
+                link.display()
+            );
+        }
+    }
+
+    fn remove_foreign_links(&mut self) {
+        for link in self.foreign.drain(..) {
+            std::fs::remove_file(&link).ok();
+        }
+        for dir in self.foreign_dirs.drain(..) {
+            std::fs::remove_dir(&dir).ok();
+        }
+    }
+
+    /// Best-effort, idempotent retirement of everything this test owns:
+    /// foreign links, mask, owned link, source, program tree, reload.
+    /// Never panics: cleanup must survive the failure it follows.
+    fn cleanup_once(&mut self) {
+        if !self.unit.is_empty() {
+            if let Ok(mut manager) = RealSystemd::connect() {
+                let _ = manager.unmask(&self.unit);
+                let _ = manager.remove_owned_enablement(&self.unit, &self.source.to_string_lossy());
+            }
+            for link in self.foreign.drain(..) {
+                std::fs::remove_file(&link).ok();
+            }
+            for dir in self.foreign_dirs.drain(..) {
+                std::fs::remove_dir(&dir).ok();
+            }
+            std::fs::remove_file(&self.source).ok();
+            if let Ok(mut manager) = RealSystemd::connect() {
+                let _ = manager.reload();
+            }
+        }
+        std::fs::remove_dir_all(&self.program).ok();
+    }
+}
+
+impl Drop for RealWorld {
+    fn drop(&mut self) {
+        self.cleanup_once();
     }
 }

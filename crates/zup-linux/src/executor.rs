@@ -1482,8 +1482,15 @@ impl LinuxFileExecutor {
                     &canonical,
                     &crate::service_ops::load_path_dirs(),
                 )?;
-                // systemd answers before anything mutates.
+                // systemd answers, meets the `Type=exec` baseline, and
+                // reports a usable state before anything mutates.
                 let manager = context.manager;
+                crate::service_ops::require_exec_baseline(manager).map_err(|error| {
+                    LinuxFileExecutorError::PlanDrift {
+                        path: derived.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
                 manager.unit_file_state(&derived).map_err(|error| {
                     LinuxFileExecutorError::PlanDrift {
                         path: derived.clone(),

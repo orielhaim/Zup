@@ -24,6 +24,24 @@ use zup_platform::{CommandSpec, TargetService};
 /// Minimum systemd version the rendered units assume.
 pub const MINIMUM_SYSTEMD_VERSION: u32 = 240;
 
+/// Parse a `Manager.Version` string into its major version.
+///
+/// systemd reports strings like `259` or `259.5-0ubuntu3.4`; only the
+/// leading integer run is meaningful here. Anything without leading
+/// digits is unparsable, and unparsable fails closed at preflight rather
+/// than guessing a version the manager never claimed.
+pub fn parse_manager_version(raw: &str) -> Option<u32> {
+    let digits: String = raw
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .map(char::from)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// The `[Service]` type the renderer emits, and why it is here rather than
 /// inferred at install time.
 pub const SERVICE_TYPE: &str = "exec";
@@ -404,6 +422,17 @@ mod tests {
             start,
             privilege: zup_core::Privilege::System,
         }
+    }
+
+    #[test]
+    fn manager_versions_parse_to_their_major() {
+        assert_eq!(parse_manager_version("259"), Some(259));
+        assert_eq!(parse_manager_version("259.5-0ubuntu3.4"), Some(259));
+        assert_eq!(parse_manager_version("240"), Some(MINIMUM_SYSTEMD_VERSION));
+        assert_eq!(parse_manager_version("239"), Some(239));
+        assert_eq!(parse_manager_version(""), None);
+        assert_eq!(parse_manager_version("unknown"), None);
+        assert_eq!(parse_manager_version("v259"), None);
     }
 
     #[test]

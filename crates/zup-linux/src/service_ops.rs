@@ -178,6 +178,31 @@ pub fn policy_for_state(state: &str) -> Option<ServiceStart> {
     }
 }
 
+/// Prove the manager meets the `Type=exec` baseline before any mutation.
+///
+/// The renderer emits `Type=exec`, which needs systemd 240 or newer, so a
+/// plan that names services without a new-enough manager is refused here
+/// rather than after the unit source is written. There is no silent
+/// fallback to `simple`: the rendered bytes and the requirement travel
+/// together. Returns the manager's major version on success.
+pub fn require_exec_baseline(manager: &mut dyn SystemdManager) -> Result<u32, ServiceError> {
+    let raw = manager.version().map_err(ServiceError::from)?;
+    match crate::services::parse_manager_version(&raw) {
+        Some(major) if major >= crate::services::MINIMUM_SYSTEMD_VERSION => Ok(major),
+        Some(major) => Err(ServiceError::refused(
+            "",
+            format!(
+                "systemd {major} is older than the minimum {} for `Type=exec` service units",
+                crate::services::MINIMUM_SYSTEMD_VERSION,
+            ),
+        )),
+        None => Err(ServiceError::refused(
+            "",
+            format!("systemd reports an unparsable version `{raw}`"),
+        )),
+    }
+}
+
 /// Snapshot every target service: canonical source plus persistent policy.
 ///
 /// Filesystem truth first (no-follow, symlink-refusing), then manager
@@ -291,15 +316,28 @@ fn read_regular_no_follow(path: &Path) -> Result<Option<Vec<u8>>, ServiceError> 
 /// the unit. The override replaces the canonical source systemd loads, so
 /// install must not claim beneath it, repair must not delete it, and
 /// uninstall must not silently retire around it.
+///
+/// A symlink resolving to `/dev/null` is a *mask*, not shadowing content:
+/// mask state is policy, read through unit-file state and changed through
+/// the manager. Exempting it is what lets a `Disabled` service transition
+/// back out instead of tripping its own mask as a foreign override.
 pub fn check_no_full_override(unit: &str, dir: &Path) -> Result<(), ServiceError> {
     let override_path = dir.join(unit);
-    if std::fs::symlink_metadata(&override_path).is_ok() {
-        return Err(ServiceError::conflict(
-            unit,
-            "an administrator override shadows the unit; remove it first",
-        ));
+    let metadata = match std::fs::symlink_metadata(&override_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Ok(()),
+    };
+    if metadata.file_type().is_symlink()
+        && std::fs::read_link(&override_path)
+            .is_ok_and(|target| target.to_string_lossy() == "/dev/null")
+    {
+        return Ok(());
     }
-    Ok(())
+    Err(ServiceError::conflict(
+        unit,
+        "an administrator override shadows the unit; remove it first",
+    ))
 }
 
 /// Production override directory: the administrator layer above every

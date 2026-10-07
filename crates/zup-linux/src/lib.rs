@@ -165,7 +165,10 @@ pub use service_ops::{
     validate_changes, validate_executable, validate_executable_live,
 };
 #[cfg(target_os = "linux")]
-pub use services::{DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, UNIT_PREFIX, WANTED_BY};
+pub use services::{
+    DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, UNIT_PREFIX, WANTED_BY,
+    parse_manager_version,
+};
 #[cfg(target_os = "linux")]
 pub use snapshot::{snapshot_services, snapshot_target};
 #[cfg(target_os = "linux")]

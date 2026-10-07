@@ -22,6 +22,8 @@ use zup_plugin_contract::{PluginEngine, WASMTIME_VERSION};
 use crate::build_inputs::{self, BackendSupport, BuildInputs};
 use crate::cli::OutputArg;
 use crate::report::Reporter;
+#[cfg(target_os = "linux")]
+use zup_linux::SystemdManager as _;
 
 /// The remedy `doctor` names when a toolchain component is unusable.
 ///
@@ -998,12 +1000,17 @@ impl TargetChecks<'_> {
             return;
         }
         match system_systemd() {
-            true => self.pass(
+            SystemdReadiness::Ready(version) => self.pass(
                 CheckKind::ServiceRuntime,
-                "systemd system manager answers on this machine",
+                format!("systemd {version} system manager answers on this machine"),
                 None,
             ),
-            false => self.skip(
+            SystemdReadiness::TooOld(version) => self.fail(
+                CheckKind::ServiceRuntime,
+                systemd_too_old_message(version),
+                None,
+            ),
+            SystemdReadiness::Unknown => self.skip(
                 CheckKind::ServiceRuntime,
                 "no systemd system manager on this machine: machine services need one on the installing machine",
                 None,
@@ -1161,18 +1168,100 @@ fn system_pkexec() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Whether this Linux machine's systemd system manager answers, without
-/// mutating anything: connect, name the manager, read one property.
+/// What this Linux machine's systemd system manager reports, without
+/// mutating anything: connect, name the manager, read its version.
 #[cfg(target_os = "linux")]
-fn system_systemd() -> bool {
-    zup_linux::probe_systemd().is_ok()
+fn system_systemd() -> SystemdReadiness {
+    let mut manager = match zup_linux::RealSystemd::connect() {
+        Ok(manager) => manager,
+        Err(_) => return SystemdReadiness::Unknown,
+    };
+    SystemdReadiness::of_version(manager.version().ok().as_deref())
+}
+
+/// Names the `Type=exec` minimum for a too-old manager. Reachable only on
+/// Linux: a non-Linux host never constructs `TooOld`, so its copy just
+/// states the requirement without the constant.
+#[cfg(target_os = "linux")]
+fn systemd_too_old_message(version: u32) -> String {
+    format!(
+        "systemd {version} is older than the minimum {} for `Type=exec` service units",
+        zup_linux::MINIMUM_SYSTEMD_VERSION,
+    )
+}
+
+/// Names the `Type=exec` minimum for a too-old manager. Reachable only on
+/// Linux: a non-Linux host never constructs `TooOld`, so its copy just
+/// states the requirement without the constant.
+#[cfg(not(target_os = "linux"))]
+fn systemd_too_old_message(version: u32) -> String {
+    format!("systemd {version} is too old for `Type=exec` service units")
+}
+/// The systemd readiness of one machine: new enough, too old, or unknown.
+///
+/// Plain data, portable across hosts: only the constructors that probe a
+/// live manager are platform-gated. `Ready`/`TooOld` are constructed on
+/// Linux only; the shared match still names them everywhere.
+#[allow(dead_code)]
+enum SystemdReadiness {
+    Ready(u32),
+    TooOld(u32),
+    Unknown,
+}
+
+impl SystemdReadiness {
+    /// Pure verdict from an optional probed version string: new enough to
+    /// run `Type=exec` units, too old (fail, with the minimum named), or
+    /// unparsable/absent (unknown — the caller skips rather than failing
+    /// a build on a question it could not ask).
+    #[cfg(target_os = "linux")]
+    fn of_version(version: Option<&str>) -> Self {
+        match version.and_then(zup_linux::parse_manager_version) {
+            Some(major) if major >= zup_linux::MINIMUM_SYSTEMD_VERSION => Self::Ready(major),
+            Some(major) => Self::TooOld(major),
+            None => Self::Unknown,
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod readiness_tests {
+    use super::SystemdReadiness;
+
+    #[test]
+    fn versions_verdict_by_the_exec_baseline() {
+        assert!(matches!(
+            SystemdReadiness::of_version(Some("259")),
+            SystemdReadiness::Ready(259)
+        ));
+        assert!(matches!(
+            SystemdReadiness::of_version(Some("259.5-0ubuntu3.4")),
+            SystemdReadiness::Ready(259)
+        ));
+        assert!(matches!(
+            SystemdReadiness::of_version(Some("240")),
+            SystemdReadiness::Ready(240)
+        ));
+        assert!(matches!(
+            SystemdReadiness::of_version(Some("239")),
+            SystemdReadiness::TooOld(239)
+        ));
+        assert!(matches!(
+            SystemdReadiness::of_version(Some("not-a-version")),
+            SystemdReadiness::Unknown
+        ));
+        assert!(matches!(
+            SystemdReadiness::of_version(None),
+            SystemdReadiness::Unknown
+        ));
+    }
 }
 
 /// No systemd off Linux: service runtime is a target-runtime concern the
 /// build host reports by skipping, never by failing the project.
 #[cfg(not(target_os = "linux"))]
-fn system_systemd() -> bool {
-    false
+fn system_systemd() -> SystemdReadiness {
+    SystemdReadiness::Unknown
 }
 
 /// Whether a directory can be written, read from its permission bits.

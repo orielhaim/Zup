@@ -443,6 +443,36 @@ impl OwnedDirectory {
             .map_err(|error| FileSystemError::errno(&self.child(name), error))
     }
 
+    /// Read the target of the symbolic link `name`, refusing anything that
+    /// is not one.
+    ///
+    /// Directory-relative like every other lookup here: the target is read
+    /// from the held descriptor, and `readlinkat` never follows the link
+    /// itself, so the answer names what the entry points at rather than
+    /// where a resolution would land.
+    pub fn read_link_target(&self, name: &str) -> Result<PathBuf, FileSystemError> {
+        match self.kind_or_absent(name)? {
+            Some(EntryKind::Symlink) => {}
+            Some(_) => {
+                return Err(FileSystemError::UnexpectedKind {
+                    path: self.child(name).display().to_string(),
+                    expected: "a symbolic link",
+                });
+            }
+            None => {
+                return Err(FileSystemError::Missing {
+                    path: self.child(name).display().to_string(),
+                });
+            }
+        }
+        use std::os::unix::ffi::OsStrExt as _;
+        let target = rustix::fs::readlinkat(self.as_fd(), name, Vec::new())
+            .map_err(|error| FileSystemError::errno(&self.child(name), error))?;
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(
+            target.as_bytes(),
+        )))
+    }
+
     /// Remove an empty directory, refusing a non-empty one.
     ///
     /// Empty-only on purpose. A recursive delete of an installation directory is

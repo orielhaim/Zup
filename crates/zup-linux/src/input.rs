@@ -312,7 +312,9 @@ pub fn compile_machine_execution_plan(
     }
     // systemd answers before anything is planned against it: a plan that
     // names services without a reachable manager is refused here, before
-    // the transaction exists, rather than after the files install.
+    // the transaction exists, rather than after the files install. The
+    // `Type=exec` baseline rides the same gate: there is no silent
+    // fallback to `simple`.
     if !execution.services.is_empty() || !service_removals.is_empty() {
         manager
             .unit_file_state("zup-preflight.service")
@@ -326,6 +328,7 @@ pub fn compile_machine_execution_plan(
                     reason: format!("systemd is unavailable: {error}"),
                 }),
             })?;
+        crate::service_ops::require_exec_baseline(manager).map_err(into_service)?;
     }
 
     for op in &execution.services {
@@ -353,6 +356,11 @@ pub fn compile_machine_execution_plan(
         )
         .map_err(into_service)?;
         check_no_full_override(&unit).map_err(into_service)?;
+        // Foreign systemd integration refuses before the transaction
+        // exists: an alias, an extra dependency, or a runtime link would
+        // survive owned-link removal and keep the unit enabled behind the
+        // plan's back.
+        crate::service_exec::refuse_foreign_integration(&unit, &canonical).map_err(into_service)?;
         // Policy half of executable validation (no filesystem trust at
         // plan time); the worker revalidates the live filesystem.
         validate_service_binary(op, &target_files, roots, &unit)?;
@@ -473,6 +481,10 @@ pub fn compile_machine_execution_plan(
             })?;
         crate::service_ops::refuse_source_symlink(&unit, &canonical).map_err(into_service)?;
         check_no_full_override(&unit).map_err(into_service)?;
+        // Foreign integration refuses the retirement up front too:
+        // removing Zup's links under a live alias would leave the unit
+        // enabled with no source, so the administrator cleans up first.
+        crate::service_exec::refuse_foreign_integration(&unit, &canonical).map_err(into_service)?;
         let operation = crate::service_exec::remove_operation(
             &removal.key,
             &unit,
@@ -811,6 +823,33 @@ mod tests {
                 .expect("a transition compiles");
             assert_eq!(input.backend_operations.len(), 1, "{from:?} -> {to:?}");
         }
+    }
+
+    /// A manager older than the `Type=exec` baseline refuses planning
+    /// before any mutation, with no silent fallback to `simple`.
+    #[test]
+    fn an_old_manager_refuses_before_mutation() {
+        let (base, roots, systemd) = isolated();
+        let plan = service_plan(&base, ServiceStart::Automatic, vec!["--serve".into()]);
+        let executable = plan.services[0].command.executable.clone();
+        let execution = execution(vec![operation_at(
+            &executable,
+            vec!["--serve".into()],
+            ServiceStart::Automatic,
+            ServiceOperationKind::Create,
+        )]);
+        let mut manager = crate::systemd::FakeSystemd::default();
+        manager.version = "239".into();
+        let error = compile(&plan, &execution, &roots, &systemd, &mut manager, false)
+            .expect_err("systemd 239 cannot run Type=exec units");
+        assert!(error.to_string().contains("239"), "{error}");
+        assert!(
+            std::fs::read_dir(&systemd.unit_dir)
+                .expect("the unit tree reads")
+                .next()
+                .is_none(),
+            "nothing was written before the baseline refused"
+        );
     }
 
     /// Drift refuses without force and restores with it; conflict always

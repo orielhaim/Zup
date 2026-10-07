@@ -78,7 +78,9 @@ pub struct UnitInfo {
 }
 
 /// The narrow control surface: reload, inspection, persistent
-/// enablement/mask transitions. No start, no stop, no restart.
+/// enablement/mask transitions. No start, no stop, no restart, and no
+/// broad disable: enablement is retired by removing exactly the owned
+/// link, never by asking systemd to delete every symlink it knows about.
 pub trait SystemdManager {
     /// Reload systemd's unit configuration after source changes.
     fn reload(&mut self) -> Result<(), SystemdError>;
@@ -86,12 +88,21 @@ pub trait SystemdManager {
     fn unit_file_state(&mut self, unit: &str) -> Result<String, SystemdError>;
     /// Load state plus which fragment systemd resolves for the unit.
     fn load_unit(&mut self, unit: &str) -> Result<UnitInfo, SystemdError>;
+    /// The manager's own version string (`Manager.Version`, e.g. `259`).
+    fn version(&mut self) -> Result<String, SystemdError>;
     /// Persistently enable (never runtime-only, never forced).
     fn enable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError>;
-    /// Remove persistent enablement Zup owns (never forced). Implementations
-    /// must refuse rather than delete unrelated administrator links; see the
-    /// service executor's ownership check.
-    fn disable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError>;
+    /// Remove exactly the owned enablement link for `unit` — the single
+    /// `<wants-dir>/<unit>` symlink pointing at `canonical_source` — and
+    /// nothing else. Refuses (leaving everything in place) when the link
+    /// is absent it reports no change; when it points anywhere else it is
+    /// a conflict. Aliases, `.requires/` links, and runtime links are
+    /// never touched; callers prove their absence up front instead.
+    fn remove_owned_enablement(
+        &mut self,
+        unit: &str,
+        canonical_source: &str,
+    ) -> Result<Vec<UnitChange>, SystemdError>;
     /// Persistently mask (never forced).
     fn mask(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError>;
     /// Remove the persistent mask (never forced).
@@ -172,6 +183,11 @@ impl RealSystemd {
                 .map(|_| ())
                 .map_err(|error| SystemdError::Unavailable(format!("systemd version: {error}")))
         })
+    }
+
+    /// The directory holding the single enablement link this backend owns.
+    fn owned_wants_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from("/etc/systemd/system/multi-user.target.wants")
     }
 
     fn changes(
@@ -273,18 +289,29 @@ impl SystemdManager for RealSystemd {
         })
     }
 
-    fn disable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError> {
+    /// Remove exactly the owned enablement link and nothing else.
+    ///
+    /// Directory-relative throughout: the wants directory is opened once
+    /// with `O_NOFOLLOW`, the entry must be a symlink, its target must
+    /// name the canonical source byte for byte, and only then is that one
+    /// name unlinked. A broad `DisableUnitFiles` would also delete
+    /// aliases, `.requires/` links, and anything else systemd knows
+    /// about; this deletes one proven name or nothing at all.
+    fn remove_owned_enablement(
+        &mut self,
+        unit: &str,
+        canonical_source: &str,
+    ) -> Result<Vec<UnitChange>, SystemdError> {
+        remove_exact_enablement_link(&Self::owned_wants_dir(), unit, canonical_source)
+    }
+
+    fn version(&mut self) -> Result<String, SystemdError> {
         let proxy = self.manager()?;
-        let unit = unit.to_owned();
-        self.call("disable", async {
-            let changes = proxy
-                .disable_unit_files(vec![unit.clone()], false)
+        self.call("version", async {
+            proxy
+                .version()
                 .await
-                .map_err(|error| SystemdError::Refused {
-                    unit: unit.clone(),
-                    reason: format!("disable: {error}"),
-                })?;
-            Self::changes(changes, &unit)
+                .map_err(|error| SystemdError::Unavailable(format!("systemd version: {error}")))
         })
     }
 
@@ -319,15 +346,89 @@ impl SystemdManager for RealSystemd {
     }
 }
 
+/// Remove exactly one proven enablement link from a wants directory.
+///
+/// The directory is opened once with `O_NOFOLLOW`; the entry must be a
+/// symlink; its target must name the canonical source byte for byte; only
+/// then is that one name unlinked and the directory flushed. Anything
+/// else — absent link (already retired), a link pointing elsewhere, a
+/// regular file, an uninspectable directory — refuses or reports no
+/// change without touching anything. This is the mechanism behind the
+/// manager's owned-link removal, extracted so tests prove it against
+/// isolated trees instead of the host's `/etc`.
+fn remove_exact_enablement_link(
+    wants_dir: &std::path::Path,
+    unit: &str,
+    canonical_source: &str,
+) -> Result<Vec<UnitChange>, SystemdError> {
+    let unit = unit.to_owned();
+    let link = wants_dir.join(&unit);
+    let directory = match crate::fs::OwnedDirectory::open(wants_dir) {
+        Ok(directory) => directory,
+        Err(error) => {
+            // No wants directory means no enablement link: already
+            // retired, with nothing removed.
+            let missing = std::fs::symlink_metadata(wants_dir)
+                .err()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if missing {
+                return Ok(Vec::new());
+            }
+            return Err(SystemdError::Refused {
+                unit,
+                reason: format!("owned enablement is not inspectable: {error}"),
+            });
+        }
+    };
+    let target = match directory.read_link_target(&unit) {
+        Ok(target) => target,
+        Err(crate::fs::FileSystemError::Missing { .. }) => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(SystemdError::Refused {
+                unit,
+                reason: format!("owned enablement is not inspectable: {error}"),
+            });
+        }
+    };
+    if target.to_string_lossy() != canonical_source {
+        return Err(SystemdError::Ambiguous {
+            unit,
+            reason: format!(
+                "the owned enablement link points at `{}`, not the Zup source",
+                target.display()
+            ),
+        });
+    }
+    directory
+        .remove_file(&unit)
+        .map_err(|error| SystemdError::Refused {
+            unit: unit.clone(),
+            reason: format!("the owned enablement link cannot be removed: {error}"),
+        })?;
+    directory.sync().map_err(|error| SystemdError::Refused {
+        unit: unit.clone(),
+        reason: format!("the wants directory does not flush: {error}"),
+    })?;
+    let link = link.to_string_lossy().into_owned();
+    Ok(vec![UnitChange::bound("unlink", &link, "").map_err(
+        |error| SystemdError::Ambiguous {
+            unit: unit.clone(),
+            reason: error.to_string(),
+        },
+    )?])
+}
+
 /// Deterministic in-memory manager for tests and failure injection.
 ///
 /// Models persistent unit-file state per unit (`enabled`, `disabled`,
 /// `masked`, ...) plus load state and fragment path, with scriptable
 /// failures: each operation can be failed once or always, and replies can
 /// be "lost" (applied but reported as an error) to prove reconciliation.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct FakeSystemd {
     units: BTreeMap<String, FakeUnit>,
+    /// The `Manager.Version` string this fake reports.
+    pub version: String,
     /// Fail the next call to `operation` with `message`.
     pub fail_next: BTreeMap<String, String>,
     /// Fail every call to `operation` with `message`.
@@ -337,6 +438,22 @@ pub struct FakeSystemd {
     /// Unexpected extra enablement links, for ownership tests.
     pub extra_links: BTreeMap<String, Vec<String>>,
     pub reloads: usize,
+}
+
+impl Default for FakeSystemd {
+    fn default() -> Self {
+        Self {
+            units: BTreeMap::new(),
+            // Newer than the `Type=exec` baseline, so existing tests
+            // exercise the supported path unless they say otherwise.
+            version: "259".into(),
+            fail_next: BTreeMap::new(),
+            fail_always: BTreeMap::new(),
+            lose_reply: BTreeMap::new(),
+            extra_links: BTreeMap::new(),
+            reloads: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +509,29 @@ impl FakeSystemd {
         self.lose_reply.remove(operation).is_some()
     }
 
+    /// Test-only helper simulating an external administrator edit: sets
+    /// persistent state unconditionally, bypassing ownership. Production
+    /// never calls a broad disable; it removes exactly the owned link.
+    pub fn disable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError> {
+        if let Some(error) = self.fail("disable", unit) {
+            return Err(error);
+        }
+        let entry = self.entry(unit);
+        entry.state = "disabled".into();
+        let changes = vec![
+            UnitChange::bound(
+                "unlink",
+                &format!("/etc/systemd/system/multi-user.target.wants/{unit}"),
+                "",
+            )
+            .expect("static change bounds"),
+        ];
+        if self.lost("disable") {
+            return Err(SystemdError::Unavailable("disable reply lost".into()));
+        }
+        Ok(changes)
+    }
+
     fn entry(&mut self, unit: &str) -> &mut FakeUnit {
         self.units.entry(unit.to_owned()).or_insert(FakeUnit {
             state: "disabled".into(),
@@ -411,6 +551,13 @@ impl SystemdManager for FakeSystemd {
             return Err(SystemdError::Unavailable("reload reply lost".into()));
         }
         Ok(())
+    }
+
+    fn version(&mut self) -> Result<String, SystemdError> {
+        if let Some(error) = self.fail("version", "") {
+            return Err(error);
+        }
+        Ok(self.version.clone())
     }
 
     fn unit_file_state(&mut self, unit: &str) -> Result<String, SystemdError> {
@@ -463,8 +610,12 @@ impl SystemdManager for FakeSystemd {
         Ok(changes)
     }
 
-    fn disable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError> {
-        if let Some(error) = self.fail("disable", unit) {
+    fn remove_owned_enablement(
+        &mut self,
+        unit: &str,
+        _canonical_source: &str,
+    ) -> Result<Vec<UnitChange>, SystemdError> {
+        if let Some(error) = self.fail("remove_owned_enablement", unit) {
             return Err(error);
         }
         if let Some(extra) = self.extra_links.get(unit)
@@ -473,23 +624,29 @@ impl SystemdManager for FakeSystemd {
             return Err(SystemdError::Ambiguous {
                 unit: unit.to_owned(),
                 reason: format!(
-                    "refusing broad disable: unrelated enablement exists: {}",
+                    "refusing owned-link removal: unrelated enablement exists: {}",
                     extra.join(", ")
                 ),
             });
         }
         let entry = self.entry(unit);
+        let removed = entry.state == "enabled" || entry.state == "enabled-runtime";
         entry.state = "disabled".into();
-        let changes = vec![
-            UnitChange::bound(
-                "unlink",
-                &format!("/etc/systemd/system/multi-user.target.wants/{unit}"),
-                "",
-            )
-            .expect("static change bounds"),
-        ];
-        if self.lost("disable") {
-            return Err(SystemdError::Unavailable("disable reply lost".into()));
+        let changes = removed
+            .then(|| {
+                UnitChange::bound(
+                    "unlink",
+                    &format!("/etc/systemd/system/multi-user.target.wants/{unit}"),
+                    "",
+                )
+                .expect("static change bounds")
+            })
+            .into_iter()
+            .collect();
+        if self.lost("remove_owned_enablement") {
+            return Err(SystemdError::Unavailable(
+                "owned-link removal reply lost".into(),
+            ));
         }
         Ok(changes)
     }
@@ -558,6 +715,10 @@ impl SystemdManager for SharedFakeSystemd {
         self.0.borrow_mut().reload()
     }
 
+    fn version(&mut self) -> Result<String, SystemdError> {
+        self.0.borrow_mut().version()
+    }
+
     fn unit_file_state(&mut self, unit: &str) -> Result<String, SystemdError> {
         self.0.borrow_mut().unit_file_state(unit)
     }
@@ -570,8 +731,14 @@ impl SystemdManager for SharedFakeSystemd {
         self.0.borrow_mut().enable(unit)
     }
 
-    fn disable(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError> {
-        self.0.borrow_mut().disable(unit)
+    fn remove_owned_enablement(
+        &mut self,
+        unit: &str,
+        canonical_source: &str,
+    ) -> Result<Vec<UnitChange>, SystemdError> {
+        self.0
+            .borrow_mut()
+            .remove_owned_enablement(unit, canonical_source)
     }
 
     fn mask(&mut self, unit: &str) -> Result<Vec<UnitChange>, SystemdError> {
@@ -605,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_refuses_broad_disable_with_unrelated_links() {
+    fn fake_refuses_owned_link_removal_with_unrelated_links() {
         let mut fake = FakeSystemd::default();
         fake.seed(
             "zup-a.service",
@@ -616,13 +783,111 @@ mod tests {
             "zup-a.service".into(),
             vec!["/etc/systemd/system/graphical.target.wants/zup-a.service".into()],
         );
-        assert!(fake.disable("zup-a.service").is_err());
+        assert!(
+            fake.remove_owned_enablement(
+                "zup-a.service",
+                "/usr/local/lib/systemd/system/zup-a.service"
+            )
+            .is_err()
+        );
         assert_eq!(fake.unit_file_state("zup-a.service").unwrap(), "enabled");
+    }
+
+    #[test]
+    fn fake_reports_its_manager_version() {
+        let mut fake = FakeSystemd::default();
+        assert_eq!(fake.version().unwrap(), "259");
+        fake.version = "239".into();
+        assert_eq!(fake.version().unwrap(), "239");
     }
 
     #[test]
     fn changes_are_bounded() {
         assert!(UnitChange::bound("symlink", "a", &"x".repeat(2048)).is_err());
         assert!(UnitChange::bound("symlink", "a\nb", "c").is_err());
+    }
+
+    /// The exact-link removal only ever removes the proven owned name:
+    /// neighbors, foreign targets, and non-links are preserved, and every
+    /// refusal leaves the tree exactly as found.
+    #[test]
+    fn exact_link_removal_touches_only_the_proven_name() {
+        let base = tempfile::tempdir().expect("an isolated tree");
+        let wants = base.path().join("multi-user.target.wants");
+        std::fs::create_dir_all(&wants).expect("a wants directory");
+        let unit = "zup-owned.service";
+        let canonical = "/usr/local/lib/systemd/system/zup-owned.service";
+        let link = wants.join(unit);
+        std::os::unix::fs::symlink(canonical, &link).expect("the owned link");
+        let neighbor = wants.join("unrelated.service");
+        std::fs::write(&neighbor, b"[Unit]\n").expect("a neighbor");
+
+        let changes =
+            remove_exact_enablement_link(&wants, unit, canonical).expect("owned link removes");
+        assert_eq!(changes.len(), 1);
+        assert!(!link.exists() && std::fs::symlink_metadata(&link).is_err());
+        assert!(neighbor.is_file(), "neighbors survive");
+
+        // Already retired reports no change.
+        assert!(
+            remove_exact_enablement_link(&wants, unit, canonical)
+                .expect("absent link is no change")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_link_removal_refuses_a_repointed_link() {
+        let base = tempfile::tempdir().expect("an isolated tree");
+        let wants = base.path().join("multi-user.target.wants");
+        std::fs::create_dir_all(&wants).expect("a wants directory");
+        let unit = "zup-owned.service";
+        let link = wants.join(unit);
+        std::os::unix::fs::symlink("/usr/lib/systemd/system/zup-owned.service", &link)
+            .expect("a repointed link");
+        assert!(
+            remove_exact_enablement_link(
+                &wants,
+                unit,
+                "/usr/local/lib/systemd/system/zup-owned.service"
+            )
+            .is_err()
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "a repointed link is preserved, never removed"
+        );
+    }
+
+    #[test]
+    fn exact_link_removal_refuses_a_non_link() {
+        let base = tempfile::tempdir().expect("an isolated tree");
+        let wants = base.path().join("multi-user.target.wants");
+        std::fs::create_dir_all(&wants).expect("a wants directory");
+        let unit = "zup-owned.service";
+        std::fs::write(wants.join(unit), b"[Unit]\n").expect("a regular file");
+        assert!(
+            remove_exact_enablement_link(
+                &wants,
+                unit,
+                "/usr/local/lib/systemd/system/zup-owned.service"
+            )
+            .is_err()
+        );
+        assert!(wants.join(unit).is_file(), "a regular file is preserved");
+    }
+
+    #[test]
+    fn exact_link_removal_tolerates_a_missing_tree() {
+        let base = tempfile::tempdir().expect("an isolated tree");
+        assert!(
+            remove_exact_enablement_link(
+                &base.path().join("no-such-wants"),
+                "zup-owned.service",
+                "/usr/local/lib/systemd/system/zup-owned.service",
+            )
+            .expect("a missing tree is no change")
+            .is_empty()
+        );
     }
 }

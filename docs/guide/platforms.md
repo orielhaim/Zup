@@ -105,12 +105,17 @@ The service binary must be a Zup-owned executable payload under the
 machine program tree (`/opt/<App>/...`): user-writable paths and foreign
 system binaries such as `/bin/sh` are refused by the worker, so the
 service backend cannot become a generic root command runner. Arguments
-are literal argv values - no shell, no `$` or `%` expansion. The unit
+are literal argv values - no shell, no `$` or `%` expansion. Units render
+with `Type=exec`, which needs systemd 240 or newer; the worker preflights
+the manager version before writing anything, with no silent fallback, and
+`zup doctor` reports the same readiness. The unit
 identity derives from the stable service id alone, so display-name or
 version changes never create a second system service; a same-name unit
 owned by the distribution or the administrator is a conflict, never an
 overwrite, and administrator drop-ins and full `/etc` overrides are
-preserved, never deleted.
+preserved, never deleted. Retiring enablement removes exactly the one
+link Zup owns (`multi-user.target.wants/<unit>`): unrelated administrator
+links are preserved by refusing the transition instead.
 
 User-scope services, plugin-generated privileged services, socket/timer
 units, service users, environment files, and hardening or resource
