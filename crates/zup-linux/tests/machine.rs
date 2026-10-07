@@ -30,13 +30,16 @@ use zup_linux::test_support::{
     MachineTestRoots, drive_client_isolated, recv_envelope_on, run_machine_isolated,
     send_envelope_on, serve_worker_isolated,
 };
-use zup_linux::{LinuxAction, LinuxOutcome, MachineRoots};
+use zup_linux::{LinuxAction, LinuxOutcome};
 use zup_protocol::{
     ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
     privileged_operation,
 };
 
-use support::{FixtureFile, tool_script};
+use support::{
+    machine_fixture, machine_fixture_override, machine_install_dir, machine_maintenance_path,
+    machine_package_bytes, machine_v1_files, machine_v2_files,
+};
 
 const HANDSHAKE: Duration = Duration::from_secs(30);
 
@@ -48,154 +51,12 @@ fn app_id() -> AppId {
     AppId::new("com.example.tool").expect("an id")
 }
 
-fn v1_files() -> Vec<FixtureFile> {
-    vec![
-        FixtureFile {
-            name: "tool",
-            bytes: tool_script("1.0.0"),
-            executable: true,
-        },
-        FixtureFile {
-            name: "keep.dat",
-            bytes: b"keep-v1".to_vec(),
-            executable: false,
-        },
-    ]
-}
-
-fn v2_files() -> Vec<FixtureFile> {
-    vec![
-        FixtureFile {
-            name: "tool",
-            bytes: tool_script("2.0.0"),
-            executable: true,
-        },
-        FixtureFile {
-            name: "new.dat",
-            bytes: b"new-v2".to_vec(),
-            executable: false,
-        },
-    ]
-}
-
-/// A machine-scope package: files only, no integration, no services.
-fn machine_package_bytes(
-    scratch: &Path,
-    version: &str,
-    files: &[FixtureFile],
-    allow_directory_override: bool,
-) -> Vec<u8> {
-    let target = linux_target();
-    let payload_dir = scratch.join("payload");
-    std::fs::create_dir_all(&payload_dir).expect("a payload directory");
-    let resolved = files
-        .iter()
-        .map(|file| {
-            let source = payload_dir.join(file.name);
-            std::fs::write(&source, &file.bytes).expect("a payload file");
-            let (size, sha256) = hash_reader(file.bytes.as_slice()).expect("a payload hashes");
-            ResolvedFile {
-                source,
-                source_relative: RelativePath::new(file.name).expect("a relative path"),
-                destination: Template::parse(&format!("${{location.programs}}/tool/{}", file.name))
-                    .expect("a destination"),
-                size,
-                sha256,
-                component: None,
-                condition: None,
-                executable: file.executable,
-            }
-        })
-        .collect::<Vec<_>>();
-    let total_size = resolved.iter().map(|file| file.size).sum();
-    let plan = TargetBuildPlan {
-        installer: Installer {
-            preset: None,
-            app: App {
-                id: app_id(),
-                name: NonEmptyString::new("Tool").expect("a name"),
-                version: semver::Version::parse(version).expect("a version"),
-                publisher: None,
-                main: None,
-                description: None,
-            },
-            target: target.clone(),
-            frontend: Frontend::Console,
-            updates: None,
-            install: Install {
-                scope: InstallScope::Machine,
-                directory: InstallDirectory {
-                    user: None,
-                    machine: Some(
-                        Template::parse("${location.programs}/tool").expect("a directory"),
-                    ),
-                },
-                allow_directory_override,
-            },
-            prerequisites: Vec::new(),
-            components: Vec::new(),
-            component_groups: Vec::new(),
-            plugins: Vec::new(),
-            files: Vec::new(),
-            launchers: Vec::new(),
-            path: Vec::new(),
-            services: Vec::new(),
-            protocols: Vec::new(),
-            file_associations: Vec::new(),
-        },
-        prerequisites: Vec::new(),
-        plugins: Vec::new(),
-        total_size,
-        prerequisite_size: 0,
-        icons: zup_core::TargetIcons::default(),
-        files: resolved,
-        ui_assets: Vec::new(),
-    };
-    BundleWriter::encode(&plan, &[]).expect("the package encodes")
-}
-
-fn machine_fixture(
-    scratch: &Path,
-    file_name: &str,
-    version: &str,
-    files: &[FixtureFile],
-) -> PathBuf {
-    machine_fixture_override(scratch, file_name, version, files, false)
-}
-
-fn machine_fixture_override(
-    scratch: &Path,
-    file_name: &str,
-    version: &str,
-    files: &[FixtureFile],
-    allow_directory_override: bool,
-) -> PathBuf {
-    let package = machine_package_bytes(scratch, version, files, allow_directory_override);
-    let output = scratch.join(file_name);
-    support::compose_installer(Path::new(support::inert_template()), &output, &package);
-    output
-}
-
-fn install_dir(roots: &MachineRoots) -> PathBuf {
-    roots.programs.join("tool")
-}
-
 /// An isolated machine tree held alive for one test: the temporary base
 /// plus the roots inside it. Nothing touches the host's `/opt`.
 fn isolated() -> (tempfile::TempDir, MachineTestRoots) {
     let base = tempfile::tempdir().expect("an isolated base");
     let roots = MachineTestRoots::isolate_in(base.path());
     (base, roots)
-}
-
-fn maintenance_path(roots: &MachineRoots, version: &str) -> PathBuf {
-    zup_transaction::maintenance_runtime_path(
-        &roots.state,
-        &app_id(),
-        SelectedScope::Machine,
-        &semver::Version::parse(version).expect("a version"),
-        linux_target().executable_suffix(),
-    )
 }
 
 fn run_tool(tool: &Path, args: &[&str]) -> String {
@@ -208,7 +69,7 @@ fn run_tool(tool: &Path, args: &[&str]) -> String {
 }
 
 fn install_v1(roots: &MachineTestRoots, scratch: &Path) -> PathBuf {
-    let installer = machine_fixture(scratch, "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch, "v1", "1.0.0", &machine_v1_files());
     let outcome = run_machine_isolated(
         &installer,
         &roots.roots,
@@ -234,7 +95,7 @@ fn machine_full_lifecycle() {
 
     // The payload landed under the program tree, runnable by this user: the
     // worker never runs application code, and the user runs it afterwards.
-    let tool = install_dir(&roots.roots).join("tool");
+    let tool = machine_install_dir(&roots.roots).join("tool");
     assert_eq!(run_tool(&tool, &["--version"]).trim(), "tool 1.0.0");
     assert_eq!(
         std::fs::metadata(&tool).expect("stat").permissions().mode() & 0o777,
@@ -248,7 +109,7 @@ fn machine_full_lifecycle() {
     );
     // The maintenance generation is installed and executable but locked
     // against unprivileged writes by its mode.
-    let maintenance = maintenance_path(&roots.roots, "1.0.0");
+    let maintenance = machine_maintenance_path(&roots.state, "1.0.0");
     assert!(maintenance.is_file(), "a maintenance generation exists");
     let mode = std::fs::metadata(&maintenance)
         .expect("stat")
@@ -269,12 +130,12 @@ fn machine_full_lifecycle() {
     let neighbor = roots.roots.programs.join("neighbor").join("notes.txt");
     std::fs::create_dir_all(neighbor.parent().expect("a parent")).expect("a neighbor dir");
     std::fs::write(&neighbor, b"someone else").expect("a neighbor");
-    let nearby = install_dir(&roots.roots).join("user-notes.txt");
+    let nearby = machine_install_dir(&roots.roots).join("user-notes.txt");
     std::fs::write(&nearby, b"the user's").expect("a user file");
 
     // Upgrade: changed files replace, retired files leave, new files arrive,
     // neighbors survive, the ledger becomes v2, the old generation retires.
-    let upgrade = machine_fixture(scratch.path(), "v2", "2.0.0", &v2_files());
+    let upgrade = machine_fixture(scratch.path(), "v2", "2.0.0", &machine_v2_files());
     let outcome = run_machine_isolated(
         &upgrade,
         &roots.roots,
@@ -289,7 +150,7 @@ fn machine_full_lifecycle() {
     assert_eq!(run_tool(&tool, &["--version"]).trim(), "tool 2.0.0");
     assert_eq!(run_tool(&tool, &["read-payload"]).trim(), "new-v2");
     assert!(
-        !install_dir(&roots.roots).join("keep.dat").exists(),
+        !machine_install_dir(&roots.roots).join("keep.dat").exists(),
         "the retired file is gone"
     );
     assert_eq!(
@@ -303,17 +164,17 @@ fn machine_full_lifecycle() {
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "2.0.0");
     assert!(
-        !maintenance_path(&roots.roots, "1.0.0").exists(),
+        !machine_maintenance_path(&roots.state, "1.0.0").exists(),
         "the old generation retires"
     );
     assert!(
-        maintenance_path(&roots.roots, "2.0.0").is_file(),
+        machine_maintenance_path(&roots.state, "2.0.0").is_file(),
         "the new generation installs"
     );
 
     // Repair: a missing owned file comes back without force; a damaged one
     // refuses without force and restores with it.
-    std::fs::remove_file(install_dir(&roots.roots).join("new.dat")).expect("delete");
+    std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
     let outcome = run_machine_isolated(
         &upgrade,
         &roots.roots,
@@ -326,10 +187,14 @@ fn machine_full_lifecycle() {
         "missing files come back without force: {outcome:?}"
     );
     assert_eq!(
-        std::fs::read(install_dir(&roots.roots).join("new.dat")).expect("restored"),
+        std::fs::read(machine_install_dir(&roots.roots).join("new.dat")).expect("restored"),
         b"new-v2"
     );
-    std::fs::write(install_dir(&roots.roots).join("new.dat"), b"damaged").expect("damage");
+    std::fs::write(
+        machine_install_dir(&roots.roots).join("new.dat"),
+        b"damaged",
+    )
+    .expect("damage");
     let outcome = run_machine_isolated(
         &upgrade,
         &roots.roots,
@@ -353,7 +218,7 @@ fn machine_full_lifecycle() {
         "force repair restores damage: {outcome:?}"
     );
     assert_eq!(
-        std::fs::read(install_dir(&roots.roots).join("new.dat")).expect("restored"),
+        std::fs::read(machine_install_dir(&roots.roots).join("new.dat")).expect("restored"),
         b"new-v2"
     );
 
@@ -361,8 +226,8 @@ fn machine_full_lifecycle() {
     // maintenance generation instead of an arbitrary copy.
     std::fs::remove_file(&upgrade).expect("the download is gone");
     std::fs::remove_file(&installer).expect("the old download is gone");
-    std::fs::remove_file(install_dir(&roots.roots).join("new.dat")).expect("delete");
-    let maintenance = maintenance_path(&roots.roots, "2.0.0");
+    std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
+    let maintenance = machine_maintenance_path(&roots.state, "2.0.0");
     let outcome = run_machine_isolated(
         &maintenance,
         &roots.roots,
@@ -414,7 +279,8 @@ fn machine_full_lifecycle() {
 fn machine_install_dir_override_stays_in_the_program_tree() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture_override(scratch.path(), "v1", "1.0.0", &v1_files(), true);
+    let installer =
+        machine_fixture_override(scratch.path(), "v1", "1.0.0", &machine_v1_files(), true);
 
     // A program-tree override installs there.
     let elsewhere = roots.roots.programs.join("AltApp");
@@ -468,7 +334,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
     );
 
     // Without the project permitting it, any override is refused.
-    let strict = machine_fixture(scratch.path(), "strict", "1.0.0", &v1_files());
+    let strict = machine_fixture(scratch.path(), "strict", "1.0.0", &machine_v1_files());
     let outcome = run_machine_isolated(
         &strict,
         &roots.roots,
@@ -485,7 +351,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
 fn machine_lock_serializes_one_application() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
 
     // First session prepares and waits: the lock is held from preparation
@@ -565,7 +431,7 @@ fn machine_lock_serializes_one_application() {
         "a prepared-but-never-executed session mutates nothing"
     );
     assert!(
-        !install_dir(&roots.roots).exists(),
+        !machine_install_dir(&roots.roots).exists(),
         "no payload without Execute"
     );
 }
@@ -576,7 +442,7 @@ fn machine_lock_serializes_one_application() {
 fn machine_plan_substitution_is_refused() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
@@ -610,7 +476,7 @@ fn machine_plan_substitution_is_refused() {
         .expect("the worker exits")
         .expect_err("substitution refuses");
     assert!(
-        !install_dir(&roots.roots).exists(),
+        !machine_install_dir(&roots.roots).exists(),
         "a refused substitution mutates nothing"
     );
 }
@@ -621,7 +487,7 @@ fn machine_plan_substitution_is_refused() {
 fn machine_execute_replay_reaches_no_worker() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
@@ -670,7 +536,7 @@ fn machine_execute_replay_reaches_no_worker() {
 fn machine_cross_session_execute_is_refused() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
 
     let session_a = SessionId::new_v7();
@@ -751,7 +617,7 @@ fn machine_cross_session_execute_is_refused() {
         .expect("the worker exits")
         .expect_err("refused");
     assert!(
-        !install_dir(&roots.roots).exists(),
+        !machine_install_dir(&roots.roots).exists(),
         "confused sessions mutate nothing"
     );
 }
@@ -763,7 +629,7 @@ fn machine_cross_session_execute_is_refused() {
 fn machine_malformed_frames_are_refused_without_mutation() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
 
     // An oversized length buys no allocation.
@@ -796,7 +662,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let session = SessionId::new_v7();
         let (_base, roots) = isolated();
-        let installer = machine_fixture(scratch.path(), "v1b", "1.0.0", &v1_files());
+        let installer = machine_fixture(scratch.path(), "v1b", "1.0.0", &machine_v1_files());
         let roots_clone = roots.roots.clone();
         let installer_clone = installer.clone();
         let handle = std::thread::spawn(move || {
@@ -831,7 +697,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let session = SessionId::new_v7();
         let (_base, roots) = isolated();
-        let installer = machine_fixture(scratch.path(), "v1c", "1.0.0", &v1_files());
+        let installer = machine_fixture(scratch.path(), "v1c", "1.0.0", &machine_v1_files());
         let roots_clone = roots.roots.clone();
         let installer_clone = installer.clone();
         let handle = std::thread::spawn(move || {
@@ -870,7 +736,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
 fn machine_package_substitution_is_detected() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
@@ -888,7 +754,7 @@ fn machine_package_substitution_is_detected() {
     support::compose_installer(
         Path::new(support::inert_template()),
         &swap,
-        &machine_package_bytes(scratch.path(), "1.0.0", &v2_files(), false),
+        &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false),
     );
     std::fs::rename(&swap, &installer).expect("swap");
     send_envelope_on(
@@ -910,7 +776,7 @@ fn machine_package_substitution_is_detected() {
         .expect("the worker exits")
         .expect_err("substitution refuses");
     assert!(
-        !install_dir(&roots.roots).exists(),
+        !machine_install_dir(&roots.roots).exists(),
         "a substituted package installs nothing"
     );
 }
@@ -946,7 +812,7 @@ fn machine_wrong_peer_uid_is_refused() {
 fn machine_state_symlink_is_refused() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let elsewhere = tempfile::tempdir().expect("an unrelated tree");
     std::fs::write(elsewhere.path().join("owned"), b"attacker content").expect("write");
     std::os::unix::fs::symlink(elsewhere.path(), roots.state.join("transactions"))
@@ -964,7 +830,7 @@ fn machine_state_symlink_is_refused() {
         b"attacker content"
     );
     assert!(
-        !install_dir(&roots.roots).exists(),
+        !machine_install_dir(&roots.roots).exists(),
         "nothing installs past a refused hierarchy"
     );
 }
@@ -975,7 +841,7 @@ fn machine_state_symlink_is_refused() {
 fn machine_interrupted_transaction_recovers_first() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
 
     // Simulate a worker that died after beginning: a real compiled plan,
     // journaled, never executed.
@@ -1019,7 +885,11 @@ fn machine_interrupted_transaction_recovers_first() {
         "recovery then apply commits: {outcome:?}"
     );
     assert_eq!(
-        run_tool(&install_dir(&roots.roots).join("tool"), &["--version"]).trim(),
+        run_tool(
+            &machine_install_dir(&roots.roots).join("tool"),
+            &["--version"]
+        )
+        .trim(),
         "tool 1.0.0"
     );
     let ledger = zup_linux::LinuxLedgerStore::new(&roots.state)

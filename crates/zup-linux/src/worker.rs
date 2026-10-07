@@ -468,12 +468,17 @@ fn prepare_operation(
         .map_err(|error| WorkerError::Policy(format!("app version: {error}")))?;
 
     // Machine state first: untrusted state is never planned against.
+    // Structure is verified before modes are normalized - journals a
+    // previous run left behind carry whatever mode the old umask gave
+    // them - and the normalization refuses the same evil it fixes.
     let state_root = crate::machine::ensure_machine_state_root(
         &context.roots,
         rustix::process::geteuid().as_raw(),
     )
     .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
+    crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
 
     // The carrier: the root-owned maintenance generation when it declares
@@ -589,7 +594,7 @@ fn prepare_operation(
         Some(lock) => lock,
         None => return Err(WorkerError::Busy),
     };
-    crate::machine::normalize_machine_state_modes(&state_root)
+    crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
     recover_pending(&state_root, &app_id, &carrier, &carrier_path)?;
     // Re-establish the gap repair after recovery: a commit the recovery
@@ -597,6 +602,12 @@ fn prepare_operation(
     ledger_store
         .repair_committed(&target_plan.app.id, SelectedScope::Machine)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+    crate::machine::verify_ledger_trust(
+        &state_root,
+        &target_plan.app.id,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
     let ledger = ledger_store
         .load(&target_plan.app.id, SelectedScope::Machine)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
@@ -733,6 +744,16 @@ fn recover_one(
     let id = transaction
         .parse::<uuid::Uuid>()
         .map_err(|_| WorkerError::Transaction("unparsable transaction identity".into()))?;
+    // The journal earns trust the same way the ledger does: a root-owned
+    // regular file, never a link or a user-writable note.
+    crate::machine::verify_trusted_state_file(
+        &state_root
+            .join("transactions")
+            .join(id.to_string())
+            .join("transaction.json"),
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
     let store = zup_transaction::FilesystemTransactionStore::new(state_root);
     let record = zup_transaction::TransactionStore::load(
         &store,
@@ -775,6 +796,8 @@ fn recover_one(
         zup_transaction::TransactionOutcome::Committed => {
             let ledger = ledger_store_publish(state_root, &record)?;
             crate::machine::normalize_published_modes(state_root, &ledger)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            crate::machine::normalize_state_modes(state_root, rustix::process::geteuid().as_raw())
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             Ok(())
         }
@@ -870,6 +893,10 @@ fn select_trusted_carrier(
         target.executable_suffix(),
     );
     if std::fs::symlink_metadata(&maintenance).is_ok() {
+        // An existing maintenance generation that fails trust is not a
+        // fallback case: the machine state is suspect, and installing from
+        // an arbitrary executable over it would launder that suspicion into
+        // a trusted install. Refuse outright.
         crate::machine::verify_trusted_state_file(
             &maintenance,
             rustix::process::geteuid().as_raw(),
@@ -979,6 +1006,11 @@ fn execute_prepared(
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            crate::machine::normalize_state_modes(
+                &prepared.state_root,
+                rustix::process::geteuid().as_raw(),
+            )
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             if prepared.action == crate::run::LinuxAction::Upgrade {
                 crate::run::retire_old_generations_for(
                     &prepared.state_root,

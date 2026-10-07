@@ -86,10 +86,16 @@ pub(crate) struct ExpectedPlan {
 /// `roots` are the machine roots both sides enforce: production on the real
 /// path, isolated roots in tests. They are a parameter, never environment,
 /// so an unprivileged caller cannot redirect them.
+///
+/// `expected_uid` anchors trust: the state hierarchy and the ledger must be
+/// owned by it and private to it before anything is planned from them. `0`
+/// on the real path; the test account's own uid in isolated runs. A ledger
+/// the invoking user could have written is refused rather than bound.
 pub(crate) fn plan_expected(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
+    expected_uid: u32,
 ) -> Result<(PrepareOperation, ExpectedPlan), LinuxRunError> {
     let carrier = crate::carrier::Carrier::open(&request.installer)?;
     let mut targets = carrier.package().build_plan()?.targets;
@@ -165,6 +171,20 @@ pub(crate) fn plan_expected(
         SelectedScope::Machine,
     )?;
     crate::capabilities::validate_target_plan(&target_plan)?;
+    // Trust before reading: a hierarchy or ledger the invoking user could
+    // have written plans a digest nobody should authorize.
+    crate::machine::verify_machine_hierarchy(state_root, expected_uid).map_err(|error| {
+        LinuxRunError::RefusedPath {
+            path: state_root.display().to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    crate::machine::verify_ledger_trust(state_root, &target_plan.app.id, expected_uid).map_err(
+        |error| LinuxRunError::RefusedPath {
+            path: state_root.display().to_string(),
+            reason: error.to_string(),
+        },
+    )?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger = ledger_store.load(&target_plan.app.id, SelectedScope::Machine)?;
     let action =
@@ -232,7 +252,7 @@ fn run_machine_elevated(
 ) -> Result<LinuxOutcome, LinuxRunError> {
     let roots = MachineRoots::production();
     let state_root = planning_state_root(request);
-    let (intent, expected) = plan_expected(request, &state_root, &roots)?;
+    let (intent, expected) = plan_expected(request, &state_root, &roots, 0)?;
     let session = SessionId::new_v7();
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
@@ -476,7 +496,12 @@ fn run_machine_loopback_on(
     state_root: &PathBuf,
     roots: &MachineRoots,
 ) -> Result<LinuxOutcome, LinuxRunError> {
-    let (intent, expected) = plan_expected(request, state_root, roots)?;
+    let (intent, expected) = plan_expected(
+        request,
+        state_root,
+        roots,
+        rustix::process::geteuid().as_raw(),
+    )?;
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().map_err(|source| LinuxRunError::Io {
         path: "<loopback>".into(),

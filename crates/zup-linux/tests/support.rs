@@ -179,6 +179,158 @@ pub fn package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Ve
     )
 }
 
+/// Build a real machine-scope package: files only, no integration, no
+/// services. Shared by the machine-scope suites so both prove the same
+/// application shape.
+pub fn machine_package_bytes(
+    scratch: &Path,
+    version: &str,
+    files: &[FixtureFile],
+    allow_directory_override: bool,
+) -> Vec<u8> {
+    let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+    let payload_dir = scratch.join("payload");
+    std::fs::create_dir_all(&payload_dir).expect("a payload directory");
+    let resolved = files
+        .iter()
+        .map(|file| {
+            let source = payload_dir.join(file.name);
+            std::fs::write(&source, &file.bytes).expect("a payload file");
+            let (size, sha256) = hash_reader(file.bytes.as_slice()).expect("a payload hashes");
+            ResolvedFile {
+                source,
+                source_relative: RelativePath::new(file.name).expect("a relative path"),
+                destination: Template::parse(&format!("${{location.programs}}/tool/{}", file.name))
+                    .expect("a destination"),
+                size,
+                sha256,
+                component: None,
+                condition: None,
+                executable: file.executable,
+            }
+        })
+        .collect::<Vec<_>>();
+    let total_size = resolved.iter().map(|file| file.size).sum();
+    let plan = TargetBuildPlan {
+        installer: Installer {
+            preset: None,
+            app: App {
+                id: AppId::new("com.example.tool").expect("an id"),
+                name: NonEmptyString::new("Tool").expect("a name"),
+                version: semver::Version::parse(version).expect("a version"),
+                publisher: None,
+                main: None,
+                description: None,
+            },
+            target: target.clone(),
+            frontend: Frontend::Console,
+            updates: None,
+            install: Install {
+                scope: InstallScope::Machine,
+                directory: InstallDirectory {
+                    user: None,
+                    machine: Some(
+                        Template::parse("${location.programs}/tool").expect("a directory"),
+                    ),
+                },
+                allow_directory_override,
+            },
+            prerequisites: Vec::new(),
+            components: Vec::new(),
+            component_groups: Vec::new(),
+            plugins: Vec::new(),
+            files: Vec::new(),
+            launchers: Vec::new(),
+            path: Vec::new(),
+            services: Vec::new(),
+            protocols: Vec::new(),
+            file_associations: Vec::new(),
+        },
+        prerequisites: Vec::new(),
+        plugins: Vec::new(),
+        total_size,
+        prerequisite_size: 0,
+        icons: zup_core::TargetIcons::default(),
+        files: resolved,
+        ui_assets: Vec::new(),
+    };
+    BundleWriter::encode(&plan, &[]).expect("the package encodes")
+}
+
+/// Compose a machine-scope installer for one fixture version.
+pub fn machine_fixture(
+    scratch: &Path,
+    file_name: &str,
+    version: &str,
+    files: &[FixtureFile],
+) -> PathBuf {
+    machine_fixture_override(scratch, file_name, version, files, false)
+}
+
+/// Compose a machine-scope installer, optionally permitting an
+/// install-directory override.
+pub fn machine_fixture_override(
+    scratch: &Path,
+    file_name: &str,
+    version: &str,
+    files: &[FixtureFile],
+    allow_directory_override: bool,
+) -> PathBuf {
+    let package = machine_package_bytes(scratch, version, files, allow_directory_override);
+    let output = scratch.join(file_name);
+    compose_installer(Path::new(inert_template()), &output, &package);
+    output
+}
+
+/// The standard machine fixture payloads, versioned.
+pub fn machine_v1_files() -> Vec<FixtureFile> {
+    vec![
+        FixtureFile {
+            name: "tool",
+            bytes: tool_script("1.0.0"),
+            executable: true,
+        },
+        FixtureFile {
+            name: "keep.dat",
+            bytes: b"keep-v1".to_vec(),
+            executable: false,
+        },
+    ]
+}
+
+pub fn machine_v2_files() -> Vec<FixtureFile> {
+    vec![
+        FixtureFile {
+            name: "tool",
+            bytes: tool_script("2.0.0"),
+            executable: true,
+        },
+        FixtureFile {
+            name: "new.dat",
+            bytes: b"new-v2".to_vec(),
+            executable: false,
+        },
+    ]
+}
+
+/// Where the machine fixture installs to under isolated `programs`.
+pub fn machine_install_dir(roots: &zup_linux::MachineRoots) -> PathBuf {
+    roots.programs.join("tool")
+}
+
+/// The maintenance runtime path for the machine fixture.
+pub fn machine_maintenance_path(state: &Path, version: &str) -> PathBuf {
+    zup_transaction::maintenance_runtime_path(
+        state,
+        &AppId::new("com.example.tool").expect("an id"),
+        SelectedScope::Machine,
+        &semver::Version::parse(version).expect("a version"),
+        TargetTriple::parse("x86_64-unknown-linux-gnu")
+            .expect("a Linux target")
+            .executable_suffix(),
+    )
+}
+
 /// One icon file in a fixture application, as a hicolor-relative name.
 pub struct FixtureIcon {
     pub name: &'static str,

@@ -128,7 +128,8 @@ pub use machine::{
     MACHINE_PROGRAMS_ROOT, MACHINE_PUBLIC_FILE_MODE, MACHINE_SHARED_DATA_ROOT,
     MACHINE_STATE_DIR_MODE, MACHINE_STATE_ROOT, MachineDestination, MachinePathPolicyError,
     MachineRoots, MachineStateError, authorize_machine_destination,
-    authorize_machine_install_directory, ensure_machine_state_root, verify_machine_hierarchy,
+    authorize_machine_install_directory, ensure_machine_state_root, normalize_state_modes,
+    verify_ledger_trust, verify_machine_hierarchy, verify_machine_structure,
     verify_trusted_state_file,
 };
 #[cfg(target_os = "linux")]

@@ -122,8 +122,13 @@ pub fn plan_for_test(
         action,
         install_dir_override,
     };
-    let (intent, expected) = crate::elevate::plan_expected(&request, &state.to_path_buf(), roots)
-        .expect("the fixture plans");
+    let (intent, expected) = crate::elevate::plan_expected(
+        &request,
+        &state.to_path_buf(),
+        roots,
+        rustix::process::geteuid().as_raw(),
+    )
+    .expect("the fixture plans");
     (intent, expected.plan)
 }
 

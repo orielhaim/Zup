@@ -341,15 +341,19 @@ pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), M
 }
 
 /// Prove the machine state hierarchy holds no redirection or foreign
-/// ownership before the worker trusts it.
+/// ownership before anything trusts it.
 ///
-/// The state root's own entries - journals, ledgers, generations, lock
-/// markers - are all real files and directories owned by the expected uid.
-/// A symlink, a special file, or a foreign-owned entry anywhere in the top
-/// level is either planted or corrupt, and either way it is refused before
-/// anything reads or writes through it. Same-user attackers cannot replace
-/// entries inside a root-owned private hierarchy in the first place; this
-/// check makes the assumption explicit instead of load-bearing and silent.
+/// Every entry - journals, ledgers, generations, lock markers - must be a
+/// real file or directory owned by the expected uid and writable by nobody
+/// else. A symlink, a special file, or a foreign-owned entry anywhere in
+/// the tree is either planted or corrupt, and either way it is refused
+/// before anything reads or writes through it. Same-user attackers cannot
+/// replace entries inside a root-owned private hierarchy in the first
+/// place; this check makes the assumption explicit instead of load-bearing
+/// and silent.
+///
+/// An absent root is the fresh-machine case, not a redirect: there is
+/// nothing to trust yet.
 pub fn verify_machine_hierarchy(
     state_root: &Path,
     expected_uid: u32,
@@ -360,6 +364,176 @@ pub fn verify_machine_hierarchy(
             reason: format!("the machine state hierarchy must not pass through a link: {error}"),
         }
     })?;
+    match std::fs::symlink_metadata(state_root) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(MachineStateError::Io {
+                path: state_root.display().to_string(),
+                source,
+            });
+        }
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(MachineStateError::Refused {
+                    path: state_root.display().to_string(),
+                    reason: "machine state is a real directory, not a link or a special file"
+                        .to_owned(),
+                });
+            }
+            verify_owner_and_privacy(state_root, &metadata, expected_uid)?;
+        }
+    }
+    verify_tree(state_root, expected_uid, 8, true)
+}
+
+/// Prove the machine state structure before normalizing it: no links, no
+/// special files, no foreign owners - without judging modes.
+///
+/// The worker calls this before [`normalize_state_modes`]: journals a
+/// previous run left behind carry whatever mode the old umask gave them,
+/// and judging them before normalizing would refuse a machine the worker
+/// is about to repair. Privacy is enforced by the normalization that
+/// follows, which refuses the same evil this refuses.
+pub fn verify_machine_structure(
+    state_root: &Path,
+    expected_uid: u32,
+) -> Result<(), MachineStateError> {
+    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| {
+        MachineStateError::Refused {
+            path: state_root.display().to_string(),
+            reason: format!("the machine state hierarchy must not pass through a link: {error}"),
+        }
+    })?;
+    match std::fs::symlink_metadata(state_root) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(MachineStateError::Io {
+                path: state_root.display().to_string(),
+                source,
+            });
+        }
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(MachineStateError::Refused {
+                    path: state_root.display().to_string(),
+                    reason: "machine state is a real directory, not a link or a special file"
+                        .to_owned(),
+                });
+            }
+            if metadata.uid() != expected_uid {
+                return Err(MachineStateError::Refused {
+                    path: state_root.display().to_string(),
+                    reason: format!(
+                        "machine state is owned by uid {}, not {}",
+                        metadata.uid(),
+                        expected_uid
+                    ),
+                });
+            }
+        }
+    }
+    verify_tree(state_root, expected_uid, 8, false)
+}
+
+/// Prove one hierarchy level, recursing into real directories.
+fn verify_tree(
+    directory: &Path,
+    expected_uid: u32,
+    depth: u32,
+    privacy: bool,
+) -> Result<(), MachineStateError> {
+    if depth == 0 {
+        return Err(MachineStateError::Refused {
+            path: directory.display().to_string(),
+            reason: "machine state is deeper than it should ever be".to_owned(),
+        });
+    }
+    let entries = std::fs::read_dir(directory).map_err(|source| MachineStateError::Io {
+        path: directory.display().to_string(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| MachineStateError::Io {
+            path: directory.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| MachineStateError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+        if metadata.file_type().is_symlink() {
+            return Err(MachineStateError::Refused {
+                path: path.display().to_string(),
+                reason: "a machine state entry is a symbolic link".to_owned(),
+            });
+        }
+        if !metadata.is_dir() && !metadata.is_file() {
+            return Err(MachineStateError::Refused {
+                path: path.display().to_string(),
+                reason: "a machine state entry is a special file".to_owned(),
+            });
+        }
+        if privacy {
+            verify_owner_and_privacy(&path, &metadata, expected_uid)?;
+        } else if metadata.uid() != expected_uid {
+            return Err(MachineStateError::Refused {
+                path: path.display().to_string(),
+                reason: format!(
+                    "machine state is owned by uid {}, not {}",
+                    metadata.uid(),
+                    expected_uid
+                ),
+            });
+        }
+        if metadata.is_dir() {
+            verify_tree(&path, expected_uid, depth - 1, privacy)?;
+        }
+    }
+    Ok(())
+}
+
+/// Prove one application's ledger is trusted state before it is read.
+///
+/// A machine ledger replaced by an unprivileged user must not become an
+/// instruction to root - and an unprivileged planner must not bind a digest
+/// from it either. Absence is fine: a machine that never installed this
+/// application has no record of it.
+pub fn verify_ledger_trust(
+    state_root: &Path,
+    app_id: &zup_core::AppId,
+    expected_uid: u32,
+) -> Result<(), MachineStateError> {
+    let path = crate::ledger::LinuxLedgerStore::new(state_root)
+        .path_for(app_id, zup_core::SelectedScope::Machine);
+    match std::fs::symlink_metadata(&path) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(MachineStateError::Io {
+            path: path.display().to_string(),
+            source,
+        }),
+        Ok(_) => verify_trusted_state_file(&path, expected_uid),
+    }
+}
+
+/// Normalize the modes of machine state the worker owns: explicit modes,
+/// never inherited umask behavior.
+///
+/// - lock markers become [`MACHINE_LOCK_FILE_MODE`];
+/// - `transactions/` becomes private recursively (directories
+///   [`MACHINE_PRIVATE_DIR_MODE`], files [`MACHINE_PRIVATE_FILE_MODE`]);
+/// - `installations/` and `generated/` become public containers
+///   ([`MACHINE_STATE_DIR_MODE`]) holding public metadata
+///   ([`MACHINE_PUBLIC_FILE_MODE`]).
+///
+/// Anything that is not a real file or directory, or not owned by the
+/// expected uid, is refused rather than chmodded: normalizing a planted
+/// link would bless it.
+pub fn normalize_state_modes(
+    state_root: &Path,
+    expected_uid: u32,
+) -> Result<(), MachineStateError> {
     let entries = match std::fs::read_dir(state_root) {
         Ok(entries) => entries,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -381,58 +555,116 @@ pub fn verify_machine_hierarchy(
                 path: path.display().to_string(),
                 source,
             })?;
-        if metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
             return Err(MachineStateError::Refused {
                 path: path.display().to_string(),
-                reason: "a machine state entry is a symbolic link".to_owned(),
+                reason: "machine state holds only real files and directories".to_owned(),
             });
         }
-        if !metadata.is_dir() && !metadata.is_file() {
+        if metadata.uid() != expected_uid {
             return Err(MachineStateError::Refused {
                 path: path.display().to_string(),
-                reason: "a machine state entry is a special file".to_owned(),
+                reason: format!(
+                    "machine state is owned by uid {}, not {}",
+                    metadata.uid(),
+                    expected_uid
+                ),
             });
         }
-        verify_owner_and_privacy(&path, &metadata, expected_uid)?;
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "lock")
+        {
+            if !metadata.is_file() {
+                return Err(MachineStateError::Refused {
+                    path: path.display().to_string(),
+                    reason: "a lock marker is a regular file".to_owned(),
+                });
+            }
+            set_mode(&path, MACHINE_LOCK_FILE_MODE)?;
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        match (name, metadata.is_dir()) {
+            ("transactions", true) => normalize_tree(
+                &path,
+                MACHINE_PRIVATE_DIR_MODE,
+                MACHINE_PRIVATE_FILE_MODE,
+                expected_uid,
+            )?,
+            ("installations" | "generated", true) => {
+                set_mode(&path, MACHINE_STATE_DIR_MODE)?;
+                normalize_tree(
+                    &path,
+                    MACHINE_STATE_DIR_MODE,
+                    MACHINE_PUBLIC_FILE_MODE,
+                    expected_uid,
+                )?;
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
 
-/// Normalize the modes of worker-created machine state after acquiring the
-/// lock: the lock markers the portable lock leaves behind get the explicit
-/// lock mode rather than inherited umask behavior.
-pub fn normalize_machine_state_modes(state_root: &Path) -> Result<(), MachineStateError> {
-    let entries = match std::fs::read_dir(state_root) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(MachineStateError::Io {
-                path: state_root.display().to_string(),
-                source,
-            });
-        }
-    };
+/// Normalize one subtree: directories get `dir_mode`, files get `file_mode`.
+fn normalize_tree(
+    directory: &Path,
+    dir_mode: u32,
+    file_mode: u32,
+    expected_uid: u32,
+) -> Result<(), MachineStateError> {
+    let entries = std::fs::read_dir(directory).map_err(|source| MachineStateError::Io {
+        path: directory.display().to_string(),
+        source,
+    })?;
     for entry in entries {
         let entry = entry.map_err(|source| MachineStateError::Io {
-            path: state_root.display().to_string(),
+            path: directory.display().to_string(),
             source,
         })?;
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "lock")
-        {
-            std::fs::set_permissions(
-                entry.path(),
-                std::fs::Permissions::from_mode(MACHINE_LOCK_FILE_MODE),
-            )
-            .map_err(|source| MachineStateError::Io {
-                path: entry.path().display().to_string(),
+        let path = entry.path();
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| MachineStateError::Io {
+                path: path.display().to_string(),
                 source,
             })?;
+        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+            return Err(MachineStateError::Refused {
+                path: path.display().to_string(),
+                reason: "machine state holds only real files and directories".to_owned(),
+            });
+        }
+        if metadata.uid() != expected_uid {
+            return Err(MachineStateError::Refused {
+                path: path.display().to_string(),
+                reason: format!(
+                    "machine state is owned by uid {}, not {}",
+                    metadata.uid(),
+                    expected_uid
+                ),
+            });
+        }
+        if metadata.is_dir() {
+            set_mode(&path, dir_mode)?;
+            normalize_tree(&path, dir_mode, file_mode, expected_uid)?;
+        } else {
+            set_mode(&path, file_mode)?;
         }
     }
     Ok(())
+}
+
+fn set_mode(path: &Path, mode: u32) -> Result<(), MachineStateError> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
+        MachineStateError::Io {
+            path: path.display().to_string(),
+            source,
+        }
+    })
 }
 
 /// Normalize the modes of what a committed machine transaction published:
