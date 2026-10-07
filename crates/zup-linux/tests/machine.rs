@@ -27,7 +27,7 @@ use zup_core::{
     hash_reader,
 };
 use zup_linux::test_support::{
-    MachineTestRoots, drive_client_isolated, recv_envelope_on, run_machine_isolated,
+    MachineTestRoots, drive_client_isolated, recv_envelope_on, run_machine_isolated_in,
     send_envelope_on, serve_worker_isolated,
 };
 use zup_linux::{LinuxAction, LinuxOutcome};
@@ -70,7 +70,7 @@ fn run_tool(tool: &Path, args: &[&str]) -> String {
 
 fn install_v1(roots: &MachineTestRoots, scratch: &Path) -> PathBuf {
     let installer = machine_fixture(scratch, "v1", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -136,7 +136,7 @@ fn machine_full_lifecycle() {
     // Upgrade: changed files replace, retired files leave, new files arrive,
     // neighbors survive, the ledger becomes v2, the old generation retires.
     let upgrade = machine_fixture(scratch.path(), "v2", "2.0.0", &machine_v2_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &upgrade,
         &roots.roots,
         &roots.state,
@@ -175,7 +175,7 @@ fn machine_full_lifecycle() {
     // Repair: a missing owned file comes back without force; a damaged one
     // refuses without force and restores with it.
     std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &upgrade,
         &roots.roots,
         &roots.state,
@@ -195,7 +195,7 @@ fn machine_full_lifecycle() {
         b"damaged",
     )
     .expect("damage");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &upgrade,
         &roots.roots,
         &roots.state,
@@ -206,7 +206,7 @@ fn machine_full_lifecycle() {
         outcome.is_err(),
         "damage without force refuses: {outcome:?}"
     );
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &upgrade,
         &roots.roots,
         &roots.state,
@@ -228,7 +228,7 @@ fn machine_full_lifecycle() {
     std::fs::remove_file(&installer).expect("the old download is gone");
     std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
     let maintenance = machine_maintenance_path(&roots.state, "2.0.0");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &maintenance,
         &roots.roots,
         &roots.state,
@@ -242,7 +242,7 @@ fn machine_full_lifecycle() {
 
     // Uninstall removes only what Zup owns: neighbors and shared
     // infrastructure survive.
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &maintenance,
         &roots.roots,
         &roots.state,
@@ -284,7 +284,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
 
     // A program-tree override installs there.
     let elsewhere = roots.roots.programs.join("AltApp");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -315,7 +315,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
             .join("..")
             .join("evil"),
     ] {
-        let outcome = run_machine_isolated(
+        let outcome = run_machine_isolated_in(
             &installer,
             &roots.roots,
             &roots.state,
@@ -335,7 +335,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
 
     // Without the project permitting it, any override is refused.
     let strict = machine_fixture(scratch.path(), "strict", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &strict,
         &roots.roots,
         &roots.state,
@@ -931,7 +931,7 @@ fn machine_state_symlink_is_refused() {
     std::fs::write(elsewhere.path().join("owned"), b"attacker content").expect("write");
     std::os::unix::fs::symlink(elsewhere.path(), roots.state.join("transactions"))
         .expect("a planted redirect");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -988,7 +988,7 @@ fn machine_interrupted_transaction_recovers_first() {
     // intent against the recovered world. The first attempt goes stale when
     // the recovery commits under it and retries once; the terminal state is
     // what matters, not how many sessions it took.
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -1117,7 +1117,7 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     let installer = scratch.path().join("evil-installer");
     support::compose_installer(Path::new(support::inert_template()), &installer, &package);
 
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -1215,7 +1215,7 @@ fn machine_destination_symlink_is_refused() {
     std::os::unix::fs::symlink(elsewhere.path().join("target"), &destination)
         .expect("a planted link");
 
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,

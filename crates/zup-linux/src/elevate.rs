@@ -95,6 +95,7 @@ pub(crate) fn plan_expected(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
     expected_uid: u32,
 ) -> Result<(PrepareOperation, ExpectedPlan), LinuxRunError> {
     let carrier = crate::carrier::Carrier::open(&request.installer)?;
@@ -189,7 +190,29 @@ pub(crate) fn plan_expected(
     let ledger = ledger_store.load(&target_plan.app.id, SelectedScope::Machine)?;
     let action =
         crate::run::resolve_action(request.action, ledger.as_ref(), &target_plan.app.version)?;
-    let snapshot = crate::snapshot::snapshot_target(&target_plan);
+    let mut snapshot = crate::snapshot::snapshot_target(&target_plan);
+    // Services observe through the manager, exactly as the worker will:
+    // both sides must plan from the same systemd state for the digests
+    // to agree. File-only projects never touch the bus.
+    let needs_manager = !target_plan.services.is_empty()
+        || ledger.as_ref().is_some_and(|ledger| {
+            ledger
+                .resources
+                .values()
+                .any(|owned| matches!(owned, zup_exec::OwnedResource::Service { .. }))
+        });
+    let mut manager =
+        if needs_manager {
+            Some(crate::systemd::RealSystemd::connect().map_err(|error| {
+                LinuxRunError::Executor(format!("systemd is unavailable: {error}"))
+            })?)
+        } else {
+            None
+        };
+    if let Some(manager) = manager.as_mut() {
+        snapshot.services = crate::snapshot::snapshot_services(&target_plan, manager, systemd)
+            .map_err(|error| LinuxRunError::Executor(format!("service snapshot: {error}")))?;
+    }
     let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
     let execution = zup_exec::plan_lifecycle(
         action,
@@ -198,7 +221,24 @@ pub(crate) fn plan_expected(
         ledger.as_ref(),
         &owned_matches,
     )?;
-    let input = crate::input::compile_execution_plan(&execution, &target_plan)?;
+    let force_services = matches!(request.action, LinuxAction::Repair { force_files: true });
+    let input = if !needs_manager {
+        crate::input::compile_execution_plan(&execution, &target_plan)?
+    } else {
+        let manager = manager.as_mut().ok_or_else(|| {
+            LinuxRunError::Executor("a service transaction without a systemd manager".into())
+        })?;
+        crate::input::compile_machine_execution_plan(
+            &execution,
+            &target_plan,
+            crate::input::ServiceCompilation {
+                roots,
+                systemd,
+                manager,
+                force_services,
+            },
+        )?
+    };
     let plan = zup_transaction::compile_transaction(&input)?;
     ledger_store.validate_plan(
         &target_plan.app.id,
@@ -271,7 +311,8 @@ pub(crate) fn run_machine_elevated_once(
 ) -> Result<LinuxOutcome, LinuxRunError> {
     let roots = MachineRoots::production();
     let state_root = planning_state_root(request);
-    let (intent, expected) = plan_expected(request, &state_root, &roots, 0)?;
+    let systemd = crate::machine::SystemdRoots::production();
+    let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
     let session = SessionId::new_v7();
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
@@ -536,8 +577,9 @@ fn run_machine_loopback(
 pub(crate) fn run_machine_loopback_for_test(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
 ) -> Result<LinuxOutcome, LinuxRunError> {
-    run_machine_loopback(request, roots)
+    run_machine_loopback_with(request, roots, systemd)
 }
 
 /// One loopback session: plan, serve, drive, join.
@@ -549,22 +591,54 @@ fn run_machine_loopback_on(
     state_root: &PathBuf,
     roots: &MachineRoots,
 ) -> Result<LinuxOutcome, LinuxRunError> {
-    match run_machine_loopback_once(request, state_root, roots) {
-        Err(LinuxRunError::StalePlan) => run_machine_loopback_once(request, state_root, roots),
+    run_machine_loopback_with_on(
+        request,
+        state_root,
+        roots,
+        &crate::machine::SystemdRoots::production(),
+    )
+}
+
+/// One loopback session with explicit systemd roots, for isolated tests.
+#[cfg(feature = "test-support")]
+fn run_machine_loopback_with(
+    request: &LinuxRunRequest,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    let state_root = request
+        .state_root
+        .clone()
+        .unwrap_or_else(|| roots.state.clone());
+    run_machine_loopback_with_on(request, &state_root, roots, systemd)
+}
+
+fn run_machine_loopback_with_on(
+    request: &LinuxRunRequest,
+    state_root: &PathBuf,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    match run_machine_loopback_with_once(request, state_root, roots, systemd) {
+        Err(LinuxRunError::StalePlan) => {
+            run_machine_loopback_with_once(request, state_root, roots, systemd)
+        }
         outcome => outcome,
     }
 }
 
-/// One loopback attempt: plan, serve, drive, join.
-fn run_machine_loopback_once(
+/// One loopback attempt with explicit systemd roots.
+fn run_machine_loopback_with_once(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
 ) -> Result<LinuxOutcome, LinuxRunError> {
     let (intent, expected) = plan_expected(
         request,
         state_root,
         roots,
+        systemd,
         rustix::process::geteuid().as_raw(),
     )?;
     let session = SessionId::new_v7();
@@ -574,6 +648,7 @@ fn run_machine_loopback_once(
     })?;
     let context = crate::worker::WorkerContext {
         roots: roots.clone(),
+        systemd: systemd.clone(),
         invoking_uid: rustix::process::geteuid().as_raw(),
         // The loopback client is this process: the same pinning as the
         // elevated path, with no hop skipped.

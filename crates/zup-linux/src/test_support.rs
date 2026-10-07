@@ -26,6 +26,9 @@ pub struct MachineTestRoots {
     pub roots: MachineRoots,
     /// The isolated state root, for request overrides.
     pub state: PathBuf,
+    /// The isolated systemd unit-source root: no test ever writes the
+    /// host's unit tree.
+    pub systemd: crate::machine::SystemdRoots,
 }
 
 impl MachineTestRoots {
@@ -34,11 +37,22 @@ impl MachineTestRoots {
         let programs = base.join("opt");
         let state = base.join("var").join("lib").join("zup");
         let shared_data = base.join("var").join("opt");
-        for directory in [&programs, &shared_data, state.parent().expect("a parent")] {
+        let units = base.join("units");
+        for directory in [
+            &programs,
+            &shared_data,
+            &units,
+            state.parent().expect("a parent"),
+        ] {
             std::fs::create_dir_all(directory).expect("an isolated root");
         }
         let roots = MachineRoots::new(programs, state.clone(), shared_data);
-        Self { roots, state }
+        let systemd = crate::machine::SystemdRoots::new(units);
+        Self {
+            roots,
+            state,
+            systemd,
+        }
     }
 }
 
@@ -46,21 +60,54 @@ impl MachineTestRoots {
 /// roots: the same plan, path, and policy validation as the privileged
 /// path, with no `pkexec` hop and no host mutation.
 pub fn run_machine_isolated(
-    installer: &PathBuf,
-    roots: &MachineRoots,
-    state: &PathBuf,
+    installer: &Path,
+    test_roots: &MachineTestRoots,
     action: LinuxAction,
     install_dir_override: Option<PathBuf>,
 ) -> Result<LinuxOutcome, LinuxRunError> {
     crate::elevate::run_machine_loopback_for_test(
         &LinuxRunRequest {
-            installer: installer.clone(),
+            installer: installer.to_path_buf(),
             scope: zup_core::SelectedScope::Machine,
-            state_root: Some(state.clone()),
+            state_root: Some(test_roots.state.clone()),
+            action,
+            install_dir_override,
+        },
+        &test_roots.roots,
+        &test_roots.systemd,
+    )
+}
+
+/// Run one machine-scope lifecycle with separate roots and state, deriving
+/// the isolated systemd unit tree beside the state root.
+///
+/// Kept for the file-only machine suites, which predate service support:
+/// the unit tree lands at `<base>/units` next to `<base>/var/lib/zup`,
+/// still under the test's temporary base and never on the host.
+pub fn run_machine_isolated_in(
+    installer: &Path,
+    roots: &MachineRoots,
+    state: &Path,
+    action: LinuxAction,
+    install_dir_override: Option<PathBuf>,
+) -> Result<LinuxOutcome, LinuxRunError> {
+    let units = state
+        .parent()
+        .and_then(|parent| parent.parent())
+        .and_then(|parent| parent.parent())
+        .map(|base| base.join("units"))
+        .unwrap_or_else(|| state.join("units"));
+    std::fs::create_dir_all(&units).expect("an isolated unit tree");
+    crate::elevate::run_machine_loopback_for_test(
+        &LinuxRunRequest {
+            installer: installer.to_path_buf(),
+            scope: zup_core::SelectedScope::Machine,
+            state_root: Some(state.to_path_buf()),
             action,
             install_dir_override,
         },
         roots,
+        &crate::machine::SystemdRoots::new(units),
     )
 }
 
@@ -73,16 +120,39 @@ pub fn serve_worker_isolated(
     invoking_uid: u32,
     expected_client_pid: u32,
     session: SessionId,
-    worker_exe: &PathBuf,
+    worker_exe: &Path,
+) -> Result<String, crate::worker::WorkerError> {
+    serve_worker_isolated_with_systemd(
+        stream,
+        roots,
+        &crate::machine::SystemdRoots::production(),
+        invoking_uid,
+        expected_client_pid,
+        session,
+        worker_exe,
+    )
+}
+
+/// Serve one worker session with isolated systemd roots, for service tests:
+/// the unit tree under test never touches the host.
+pub fn serve_worker_isolated_with_systemd(
+    stream: &mut UnixStream,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
+    invoking_uid: u32,
+    expected_client_pid: u32,
+    session: SessionId,
+    worker_exe: &Path,
 ) -> Result<String, crate::worker::WorkerError> {
     crate::worker::serve_session(
         stream,
         crate::worker::WorkerContext {
             roots: roots.clone(),
+            systemd: systemd.clone(),
             invoking_uid,
             expected_client_pid,
             session,
-            worker_exe: worker_exe.clone(),
+            worker_exe: worker_exe.to_path_buf(),
             carrier_pin: None,
         },
     )
@@ -128,6 +198,7 @@ pub fn plan_for_test(
         &request,
         &state.to_path_buf(),
         roots,
+        &crate::machine::SystemdRoots::production(),
         rustix::process::geteuid().as_raw(),
     )
     .expect("the fixture plans");

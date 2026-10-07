@@ -107,6 +107,26 @@ pub enum LinuxFileExecutorError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("service `{unit}`: {reason}")]
+    Service { unit: String, reason: String },
+}
+
+impl From<crate::service_ops::ServiceError> for LinuxFileExecutorError {
+    fn from(error: crate::service_ops::ServiceError) -> Self {
+        match error {
+            crate::service_ops::ServiceError::Refused { unit, reason }
+            | crate::service_ops::ServiceError::Conflict { unit, reason }
+            | crate::service_ops::ServiceError::Drift { unit, reason }
+            | crate::service_ops::ServiceError::Ambiguous { unit, reason } => {
+                Self::Service { unit, reason }
+            }
+            crate::service_ops::ServiceError::Systemd(error) => Self::Service {
+                unit: String::new(),
+                reason: error.to_string(),
+            },
+        }
+    }
 }
 
 impl From<FileSystemError> for LinuxFileExecutorError {
@@ -185,6 +205,60 @@ pub struct LinuxFileExecutor {
     files: BTreeMap<String, FileWork>,
     payload: Option<Box<dyn PayloadSource>>,
     executable_mode: rustix::fs::Mode,
+    services: Option<ServiceSupport>,
+}
+
+/// Typed service support for machine-scope transactions.
+///
+/// Absent by default: user scope plans no services, and a backend node that
+/// names one without support fails closed rather than running without its
+/// policy checks. The manager is boxed so production serves the real
+/// system bus while tests inject the deterministic fake.
+pub struct ServiceSupport {
+    roots: crate::machine::MachineRoots,
+    systemd: crate::machine::SystemdRoots,
+    manager: Box<dyn crate::systemd::SystemdManager>,
+    expected_uid: u32,
+}
+
+impl ServiceSupport {
+    /// Production service support: real system bus, production roots.
+    pub fn production() -> Result<Self, String> {
+        Ok(Self {
+            roots: crate::machine::MachineRoots::production(),
+            systemd: crate::machine::SystemdRoots::production(),
+            manager: Box::new(
+                crate::systemd::RealSystemd::connect().map_err(|error| error.to_string())?,
+            ),
+            expected_uid: rustix::process::geteuid().as_raw(),
+        })
+    }
+
+    /// Explicit support: production code passes production roots with the
+    /// real bus; tests pass isolated roots with the fake.
+    pub fn isolated(
+        roots: crate::machine::MachineRoots,
+        systemd: crate::machine::SystemdRoots,
+        manager: impl crate::systemd::SystemdManager + 'static,
+        expected_uid: u32,
+    ) -> Self {
+        Self::new(roots, systemd, Box::new(manager), expected_uid)
+    }
+
+    /// Explicit support with an already-boxed manager.
+    pub fn new(
+        roots: crate::machine::MachineRoots,
+        systemd: crate::machine::SystemdRoots,
+        manager: Box<dyn crate::systemd::SystemdManager>,
+        expected_uid: u32,
+    ) -> Self {
+        Self {
+            roots,
+            systemd,
+            manager,
+            expected_uid,
+        }
+    }
 }
 
 impl Default for LinuxFileExecutor {
@@ -193,6 +267,7 @@ impl Default for LinuxFileExecutor {
             files: BTreeMap::new(),
             payload: None,
             executable_mode: EXECUTABLE_PAYLOAD_MODE,
+            services: None,
         }
     }
 }
@@ -203,6 +278,7 @@ impl std::fmt::Debug for LinuxFileExecutor {
             .debug_struct("LinuxFileExecutor")
             .field("files", &self.files)
             .field("has_payload", &self.payload.is_some())
+            .field("has_services", &self.services.is_some())
             .finish()
     }
 }
@@ -231,6 +307,16 @@ impl LinuxFileExecutor {
     /// Data files stay `0644` in both scopes.
     pub fn for_machine(mut self) -> Self {
         self.executable_mode = rustix::fs::Mode::from_bits_truncate(0o755);
+        self
+    }
+
+    /// Attach typed systemd service support, for machine scope.
+    ///
+    /// Production serves the real system bus; tests inject the fake. An
+    /// executor without support fails a service node closed rather than
+    /// applying it without its policy checks.
+    pub fn with_services(mut self, services: ServiceSupport) -> Self {
+        self.services = Some(services);
         self
     }
 
@@ -405,18 +491,28 @@ impl LinuxFileExecutor {
                 }
             }
             NodeKind::BackendOperation { .. } => {
-                // The one backend operation this executor answers: regenerating
-                // a derived freedesktop database. The tool must resolve before
-                // anything mutates, and only transactions carrying integration
-                // sources hold such an operation.
+                if is_service_node(node) {
+                    // Typed service preflight: ownership proof before
+                    // anything mutates, never a generic D-Bus call.
+                    return self.prepare_service(node);
+                }
+                // The one other backend operation this executor answers:
+                // regenerating a derived freedesktop database. The tool must
+                // resolve before anything mutates, and only transactions
+                // carrying integration sources hold such an operation.
                 let request = refresh_request(node)?;
                 crate::refresh::preflight(&request)?;
                 Ok(())
             }
-            NodeKind::BackendRemoval { .. } => Err(LinuxFileExecutorError::PlanDrift {
-                path: node.id.to_string(),
-                reason: "a backend removal is not a Linux operation".into(),
-            }),
+            NodeKind::BackendRemoval { .. } => {
+                if is_service_node(node) {
+                    return self.prepare_service(node);
+                }
+                Err(LinuxFileExecutorError::PlanDrift {
+                    path: node.id.to_string(),
+                    reason: "a backend removal is not a Linux operation".into(),
+                })
+            }
         }
     }
 
@@ -495,6 +591,9 @@ impl LinuxFileExecutor {
             },
             NodeKind::FileRemoval { .. } => self.remove(node),
             NodeKind::BackendOperation { .. } => {
+                if is_service_node(node) {
+                    return self.apply_service(node);
+                }
                 let request = refresh_request(node)?;
                 crate::refresh::run_refresh(&request)?;
                 Ok(OperationReceipt::Backend {
@@ -502,10 +601,15 @@ impl LinuxFileExecutor {
                     payload: request.encode(),
                 })
             }
-            NodeKind::BackendRemoval { .. } => Err(LinuxFileExecutorError::PlanDrift {
-                path: node.id.to_string(),
-                reason: "a backend removal is not a Linux operation".into(),
-            }),
+            NodeKind::BackendRemoval { .. } => {
+                if is_service_node(node) {
+                    return self.apply_service(node);
+                }
+                Err(LinuxFileExecutorError::PlanDrift {
+                    path: node.id.to_string(),
+                    reason: "a backend removal is not a Linux operation".into(),
+                })
+            }
         }
     }
 
@@ -514,7 +618,7 @@ impl LinuxFileExecutor {
     /// Observe-only: the transaction calls this before the commit barrier, so an
     /// operation that mutated something here would defeat the barrier.
     pub fn verify(
-        &self,
+        &mut self,
         _node: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), LinuxFileExecutorError> {
@@ -567,7 +671,10 @@ impl LinuxFileExecutor {
                 }
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { payload, .. } => {
+            OperationReceipt::Backend { key, payload } => {
+                if is_service_key(key) {
+                    return self.verify_service_receipt(key, payload);
+                }
                 // A refresh regenerates derived state deterministically, so
                 // verification confirms the tool still resolves and the
                 // database directory still exists. The authoritative files
@@ -588,7 +695,7 @@ impl LinuxFileExecutor {
     /// Undo an applied node from its receipt.
     pub fn rollback(
         &mut self,
-        _node: &TransactionNode,
+        node: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), LinuxFileExecutorError> {
         match receipt {
@@ -674,7 +781,10 @@ impl LinuxFileExecutor {
                 Ok(())
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { .. } => {
+            OperationReceipt::Backend { key, payload } => {
+                if is_service_key(key) {
+                    return self.rollback_service(node, key, payload);
+                }
                 // Nothing to undo: a refresh owns no bytes, and re-running it
                 // here would regenerate from sources the file rollbacks below
                 // are about to restore. The runner sweeps once more after
@@ -695,7 +805,7 @@ impl LinuxFileExecutor {
     /// the no-receipt applied case reports [`ReconcileResult::Applied`] rather
     /// than a reconstructed record of backups that may never have been taken.
     pub fn reconcile(
-        &self,
+        &mut self,
         node: &TransactionNode,
         receipt: Option<&OperationReceipt>,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
@@ -745,8 +855,14 @@ impl LinuxFileExecutor {
             // A refresh is idempotent regeneration with no owned bytes: after
             // a crash it is re-run rather than reconstructed. Recovery replays
             // it from the journaled payload, which names the tool and the
-            // database directory.
-            OperationReceipt::Backend { .. } => Ok(ReconcileResult::NotApplied),
+            // database directory. A service receipt carries its own
+            // before/after evidence and reconciles from it instead.
+            OperationReceipt::Backend { key, .. } => {
+                if is_service_key(key) {
+                    return self.reconcile_service(node, Some(receipt));
+                }
+                Ok(ReconcileResult::NotApplied)
+            }
         }
     }
 
@@ -760,7 +876,7 @@ impl LinuxFileExecutor {
     /// hold the bytes the receipt claims. Anything less is `Ambiguous`, which
     /// is the only honest answer when the proofs do not all agree.
     fn reconcile_interrupted(
-        &self,
+        &mut self,
         node: &TransactionNode,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
         match &node.kind {
@@ -780,10 +896,21 @@ impl LinuxFileExecutor {
             },
             NodeKind::FileRemoval { .. } => self.reconcile_interrupted_removal(node),
             // A refresh with no receipt never established anything: it is
-            // re-run on recovery. A backend removal is foreign to this
-            // backend and stays ambiguous.
-            NodeKind::BackendOperation { .. } => Ok(ReconcileResult::NotApplied),
-            NodeKind::BackendRemoval { .. } => Ok(ReconcileResult::Ambiguous),
+            // re-run on recovery. A service node reconciles from live
+            // filesystem plus manager state. A backend removal is foreign to
+            // this backend and stays ambiguous.
+            NodeKind::BackendOperation { .. } => {
+                if is_service_node(node) {
+                    return self.reconcile_service(node, None);
+                }
+                Ok(ReconcileResult::NotApplied)
+            }
+            NodeKind::BackendRemoval { .. } => {
+                if is_service_node(node) {
+                    return self.reconcile_service(node, None);
+                }
+                Ok(ReconcileResult::Ambiguous)
+            }
         }
     }
 
@@ -795,7 +922,7 @@ impl LinuxFileExecutor {
     /// directories - that record died with the crashed process - which is a
     /// known concession, not a silent one.
     fn reconcile_interrupted_create(
-        &self,
+        &mut self,
         node: &TransactionNode,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
         let file = self.file(node.id.as_str())?.clone();
@@ -822,7 +949,7 @@ impl LinuxFileExecutor {
     /// publish, so its absence means the publish never happened or never
     /// finished proving itself.
     fn reconcile_interrupted_replace(
-        &self,
+        &mut self,
         node: &TransactionNode,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
         let file = self.file(node.id.as_str())?.clone();
@@ -864,7 +991,7 @@ impl LinuxFileExecutor {
     /// the removed bytes beside it means the unlink happened, and a present
     /// destination holding the expected bytes means it did not.
     fn reconcile_interrupted_removal(
-        &self,
+        &mut self,
         node: &TransactionNode,
     ) -> Result<ReconcileResult, LinuxFileExecutorError> {
         let Some(removal) = &node.meta.removal else {
@@ -1290,4 +1417,292 @@ fn staged_name(id: &OperationId) -> String {
 fn short_digest(value: &str) -> String {
     let (_, digest) = hash_reader(value.as_bytes()).expect("a string hashes");
     digest.to_hex()[..16].to_owned()
+}
+
+/// Whether a backend node is a typed systemd service operation rather than
+/// a freedesktop refresh: the backend id names the unit.
+fn is_service_node(node: &TransactionNode) -> bool {
+    node.meta.backend.as_ref().is_some_and(|backend| {
+        backend
+            .id
+            .as_str()
+            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
+    })
+}
+
+/// Whether a backend receipt belongs to a service operation.
+fn is_service_key(key: &ResourceKey) -> bool {
+    match key {
+        ResourceKey::Backend { id } => id
+            .as_str()
+            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
+        _ => false,
+    }
+}
+
+impl LinuxFileExecutor {
+    /// One service operation's live context: isolated roots and the
+    /// injected manager in tests, production roots and the system bus
+    /// otherwise.
+    fn service_context(
+        &mut self,
+    ) -> Result<crate::service_exec::ServiceContext<'_>, LinuxFileExecutorError> {
+        let Some(support) = self.services.as_mut() else {
+            return Err(LinuxFileExecutorError::PlanDrift {
+                path: "<service>".into(),
+                reason: "a service operation without service support".into(),
+            });
+        };
+        Ok(crate::service_exec::ServiceContext {
+            roots: &support.roots,
+            systemd: &support.systemd,
+            manager: support.manager.as_mut(),
+            expected_uid: support.expected_uid,
+        })
+    }
+
+    fn prepare_service(&mut self, node: &TransactionNode) -> Result<(), LinuxFileExecutorError> {
+        use crate::service_ops::ServicePayload;
+        let payload = crate::service_exec::payload_for(node)?;
+        match payload {
+            ServicePayload::Apply { service, .. } => {
+                let context = self.service_context()?;
+                // Policy-half validation only: the binary may legitimately
+                // not be on disk yet at preflight - backend nodes run after
+                // the file mutations that install it.
+                let derived = service_unit_for(&service)?;
+                let canonical = crate::machine::authorize_systemd_unit(&derived, context.systemd)
+                    .map_err(|error| LinuxFileExecutorError::PlanDrift {
+                    path: derived.clone(),
+                    reason: error.to_string(),
+                })?;
+                crate::service_ops::refuse_source_symlink(&derived, &canonical)?;
+                crate::service_ops::check_collisions(
+                    &derived,
+                    &canonical,
+                    &crate::service_ops::load_path_dirs(),
+                )?;
+                // systemd answers before anything mutates.
+                let manager = context.manager;
+                manager.unit_file_state(&derived).map_err(|error| {
+                    LinuxFileExecutorError::PlanDrift {
+                        path: derived.clone(),
+                        reason: format!("systemd is unavailable: {error}"),
+                    }
+                })?;
+                Ok(())
+            }
+            ServicePayload::Remove { unit, .. } => {
+                let context = self.service_context()?;
+                let canonical = crate::machine::authorize_systemd_unit(&unit, context.systemd)
+                    .map_err(|error| LinuxFileExecutorError::PlanDrift {
+                        path: unit.clone(),
+                        reason: error.to_string(),
+                    })?;
+                crate::service_ops::refuse_source_symlink(&unit, &canonical)?;
+                let manager = context.manager;
+                manager.unit_file_state(&unit).map_err(|error| {
+                    LinuxFileExecutorError::PlanDrift {
+                        path: unit.clone(),
+                        reason: format!("systemd is unavailable: {error}"),
+                    }
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_service(
+        &mut self,
+        node: &TransactionNode,
+    ) -> Result<OperationReceipt, LinuxFileExecutorError> {
+        use crate::service_ops::ServicePayload;
+        let payload = crate::service_exec::payload_for(node)?;
+        match payload {
+            ServicePayload::Apply { service, .. } => {
+                let backend = node
+                    .meta
+                    .backend
+                    .clone()
+                    .expect("a service node holds a payload");
+                let mut context = self.service_context()?;
+                let receipt = crate::service_exec::apply(&service, &backend.payload, &mut context)?;
+                Ok(OperationReceipt::Backend {
+                    key: backend.key,
+                    payload: serde_json::to_vec(&receipt).map_err(|_| {
+                        LinuxFileExecutorError::PlanDrift {
+                            path: node.id.to_string(),
+                            reason: "a service receipt does not serialize".into(),
+                        }
+                    })?,
+                })
+            }
+            ServicePayload::Remove { key, unit, owned } => {
+                let backend = node
+                    .meta
+                    .backend
+                    .clone()
+                    .expect("a service node holds a payload");
+                let mut context = self.service_context()?;
+                let receipt = crate::service_exec::apply_remove(&key, &unit, &owned, &mut context)?;
+                Ok(OperationReceipt::Backend {
+                    key: backend.key,
+                    payload: serde_json::to_vec(&receipt).map_err(|_| {
+                        LinuxFileExecutorError::PlanDrift {
+                            path: node.id.to_string(),
+                            reason: "a service receipt does not serialize".into(),
+                        }
+                    })?,
+                })
+            }
+        }
+    }
+
+    fn verify_service_receipt(
+        &mut self,
+        key: &ResourceKey,
+        payload: &[u8],
+    ) -> Result<(), LinuxFileExecutorError> {
+        let receipt: crate::service_ops::ServiceReceipt =
+            serde_json::from_slice(payload).map_err(|_| LinuxFileExecutorError::Verification {
+                path: format!("{key:?}"),
+                reason: "a service receipt does not parse".into(),
+            })?;
+        let mut context = self.service_context()?;
+        if receipt.installed_source_sha256.is_none() {
+            crate::service_exec::verify_remove_receipt(&receipt, &mut context)?;
+        } else {
+            crate::service_exec::verify_receipt(&receipt, &mut context)?;
+        }
+        Ok(())
+    }
+
+    fn rollback_service(
+        &mut self,
+        node: &TransactionNode,
+        key: &ResourceKey,
+        payload: &[u8],
+    ) -> Result<(), LinuxFileExecutorError> {
+        use crate::service_ops::ServicePayload;
+        let receipt: crate::service_ops::ServiceReceipt =
+            serde_json::from_slice(payload).map_err(|_| LinuxFileExecutorError::RollbackDrift {
+                path: format!("{key:?}"),
+                reason: "a service receipt does not parse".into(),
+            })?;
+        let operation = crate::service_exec::payload_for(node)?;
+        let mut context = self.service_context()?;
+        match &operation {
+            ServicePayload::Apply { .. } => {
+                crate::service_exec::rollback_apply(&operation, &receipt, &mut context)?;
+                Ok(())
+            }
+            ServicePayload::Remove { key, unit, owned } => {
+                crate::service_exec::rollback_remove(key, unit, owned, &receipt, &mut context)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn reconcile_service(
+        &mut self,
+        node: &TransactionNode,
+        receipt: Option<&OperationReceipt>,
+    ) -> Result<ReconcileResult, LinuxFileExecutorError> {
+        use crate::service_ops::ServicePayload;
+        let operation = crate::service_exec::payload_for(node)?;
+        let decoded = receipt
+            .map(|receipt| match receipt {
+                OperationReceipt::Backend { payload, .. } => serde_json::from_slice::<
+                    crate::service_ops::ServiceReceipt,
+                >(payload)
+                .map_err(|_| LinuxFileExecutorError::RollbackDrift {
+                    path: node.id.to_string(),
+                    reason: "a service receipt does not parse".into(),
+                }),
+                _ => Err(LinuxFileExecutorError::RollbackDrift {
+                    path: node.id.to_string(),
+                    reason: "a service node without a service receipt".into(),
+                }),
+            })
+            .transpose()?;
+        // How the journaled receipt round-trips back into the transaction:
+        // an applied service carries its evidence, anything else replays.
+        let round_trip = |receipt: crate::service_ops::ServiceReceipt| {
+            serde_json::to_vec(&receipt)
+                .map(|payload| OperationReceipt::Backend {
+                    key: node
+                        .meta
+                        .backend
+                        .clone()
+                        .expect("a service node holds a payload")
+                        .key,
+                    payload,
+                })
+                .map_err(|_| LinuxFileExecutorError::RollbackDrift {
+                    path: node.id.to_string(),
+                    reason: "a service receipt does not serialize".into(),
+                })
+        };
+        let mut context = self.service_context()?;
+        match &operation {
+            ServicePayload::Apply {
+                service,
+                previous_policy,
+                ..
+            } => {
+                let (outcome, receipt) = crate::service_exec::reconcile_apply(
+                    service,
+                    previous_policy,
+                    decoded.as_ref(),
+                    &mut context,
+                )?;
+                Ok(match outcome {
+                    crate::service_exec::ServiceReconcile::Applied => {
+                        ReconcileResult::AppliedWithReceipt(round_trip(
+                            receipt.expect("an applied reconciliation holds a receipt"),
+                        )?)
+                    }
+                    crate::service_exec::ServiceReconcile::NotApplied => {
+                        ReconcileResult::NotApplied
+                    }
+                    crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
+                })
+            }
+            ServicePayload::Remove { unit, owned, .. } => {
+                let (outcome, receipt) = crate::service_exec::reconcile_remove(
+                    unit,
+                    owned,
+                    decoded.as_ref(),
+                    &mut context,
+                )?;
+                Ok(match outcome {
+                    crate::service_exec::ServiceReconcile::Applied => {
+                        ReconcileResult::AppliedWithReceipt(round_trip(
+                            receipt.expect("an applied reconciliation holds a receipt"),
+                        )?)
+                    }
+                    crate::service_exec::ServiceReconcile::NotApplied => {
+                        ReconcileResult::NotApplied
+                    }
+                    crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
+                })
+            }
+        }
+    }
+}
+
+/// The unit name one service operation addresses, without rendering.
+fn service_unit_for(
+    service: &zup_exec::ServiceOperation,
+) -> Result<String, LinuxFileExecutorError> {
+    let id = zup_core::ServiceId::new(&service.id).map_err(|error| {
+        LinuxFileExecutorError::PlanDrift {
+            path: service.name.clone(),
+            reason: format!("service id: {error}"),
+        }
+    })?;
+    crate::services::unit_name(&id).map_err(|error| LinuxFileExecutorError::PlanDrift {
+        path: service.name.clone(),
+        reason: error.to_string(),
+    })
 }

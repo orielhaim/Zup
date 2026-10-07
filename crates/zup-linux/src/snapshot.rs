@@ -37,6 +37,21 @@ pub fn snapshot_target(target: &TargetPlan) -> HostSnapshot {
     snapshot
 }
 
+/// Observe every service a target plan names, through the systemd manager.
+///
+/// Companion to [`snapshot_target`]: files observe through the filesystem,
+/// services through unit source plus persistent start policy. Running
+/// process state is never read - Zup owns unit source and persistent
+/// policy, never running/stopped state. The portable delta planner compares
+/// the result against desired state exactly as it does for files.
+pub fn snapshot_services(
+    target: &TargetPlan,
+    manager: &mut dyn crate::systemd::SystemdManager,
+    systemd: &crate::machine::SystemdRoots,
+) -> Result<Vec<zup_exec::ObservedService>, crate::service_ops::ServiceError> {
+    crate::service_ops::snapshot_services(target, manager, systemd)
+}
+
 /// What occupies one desired file's destination.
 fn observe_file(file: &zup_platform::TargetFile) -> ObservedFileState {
     let host = match to_host_path(&file.destination) {

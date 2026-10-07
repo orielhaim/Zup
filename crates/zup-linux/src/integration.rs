@@ -454,7 +454,9 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), IntegrationError> {
             },
         )));
     }
-    if !plan.services.is_empty() {
+    // Services lower through systemd in machine scope, not through
+    // integration files; user scope (systemd user units) stays refused.
+    if plan.scope != SelectedScope::Machine && !plan.services.is_empty() {
         return Err(IntegrationError::Unsupported(format!(
             "{} service resource{} {} not supported on Linux in this phase",
             plan.services.len(),

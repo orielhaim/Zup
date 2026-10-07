@@ -103,6 +103,10 @@ pub struct WorkerContext {
     /// The roots the worker enforces. Always production in a real worker;
     /// isolated roots exist only for tests driving [`serve_session`].
     pub roots: MachineRoots,
+    /// The systemd unit-source root the worker enforces. Always production
+    /// in a real worker; isolated in tests so no test writes the host's
+    /// unit tree.
+    pub systemd: crate::machine::SystemdRoots,
     /// The uid `pkexec` reports as the authorizing user. The peer must be it.
     pub invoking_uid: u32,
     /// The client process the worker serves: the peer pid must equal this,
@@ -194,6 +198,7 @@ pub fn run_worker_mode(
         .map_err(|error| WorkerError::Protocol(error.to_string()))?;
     let context = WorkerContext {
         roots: MachineRoots::production(),
+        systemd: crate::machine::SystemdRoots::production(),
         invoking_uid: invoking,
         expected_client_pid,
         session,
@@ -344,15 +349,11 @@ fn serve_inner(
 
     // Exactly one Prepare per session.
     let mut session_state = PrivilegedSession::new(context.session);
-    let prepared = loop {
-        let envelope = channel.recv(HANDSHAKE_TIMEOUT)?;
-        match envelope.message {
-            Message::Prepare(intent) => {
-                break prepare_operation(context, &pin, intent)?;
-            }
-            Message::Cancel => return Err(WorkerError::Cancelled),
-            _ => return Err(WorkerError::Protocol("expected Prepare".into())),
-        }
+    let envelope = channel.recv(HANDSHAKE_TIMEOUT)?;
+    let prepared = match envelope.message {
+        Message::Prepare(intent) => prepare_operation(context, &pin, intent)?,
+        Message::Cancel => return Err(WorkerError::Cancelled),
+        _ => return Err(WorkerError::Protocol("expected Prepare".into())),
     };
     session_state
         .prepared(context.session, &prepared.plan_digest)
@@ -369,15 +370,11 @@ fn serve_inner(
 
     // No mutation has happened yet: a client that disappears here leaves
     // nothing behind, and expiry cleans the session and exits.
-    let execute = loop {
-        match channel.recv(EXECUTE_TIMEOUT) {
-            Ok(envelope) => match envelope.message {
-                Message::Execute(execute) => break execute,
-                Message::Cancel => return Err(WorkerError::Cancelled),
-                _ => return Err(WorkerError::Protocol("expected Execute".into())),
-            },
-            Err(error) => return Err(error),
-        }
+    let envelope = channel.recv(EXECUTE_TIMEOUT)?;
+    let execute = match envelope.message {
+        Message::Execute(execute) => execute,
+        Message::Cancel => return Err(WorkerError::Cancelled),
+        _ => return Err(WorkerError::Protocol("expected Execute".into())),
     };
     session_state
         .execute(context.session, &execute.plan_digest)
@@ -442,6 +439,8 @@ struct PreparedPlan {
     target_plan: zup_platform::TargetPlan,
     action: crate::run::LinuxAction,
     state_root: PathBuf,
+    roots: MachineRoots,
+    systemd: crate::machine::SystemdRoots,
     payload: PreparedPayload,
     /// The machine lock, held from preparation through execution.
     ///
@@ -629,7 +628,14 @@ fn prepare_operation(
         .load(&app_id, SelectedScope::Machine)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?
         .map(|ledger| ledger.committed_transaction.clone());
-    recover_pending(&state_root, &app_id, &carrier, &carrier_path)?;
+    recover_pending(
+        &state_root,
+        &app_id,
+        &carrier,
+        &carrier_path,
+        &context.roots,
+        &context.systemd,
+    )?;
     // Re-establish the gap repair after recovery: a commit the recovery
     // published must be visible before the new plan reads the ledger.
     ledger_store
@@ -647,7 +653,23 @@ fn prepare_operation(
     let action = crate::run::resolve_action(requested, ledger.as_ref(), &target_plan.app.version)
         .map_err(|error| WorkerError::Policy(error.to_string()))?;
 
-    let snapshot = crate::snapshot::snapshot_target(&target_plan);
+    let mut snapshot = crate::snapshot::snapshot_target(&target_plan);
+    // Services observe through the manager: unit source plus persistent
+    // start policy. File-only installers never touch the bus, so systemd
+    // stays optional unless services are present.
+    let mut manager = if target_plan.services.is_empty() {
+        None
+    } else {
+        Some(
+            crate::systemd::RealSystemd::connect()
+                .map_err(|error| WorkerError::Policy(format!("systemd is unavailable: {error}")))?,
+        )
+    };
+    if let Some(manager) = manager.as_mut() {
+        snapshot.services =
+            crate::snapshot::snapshot_services(&target_plan, manager, &context.systemd)
+                .map_err(|error| WorkerError::Policy(format!("service snapshot: {error}")))?;
+    }
     let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
     let execution = zup_exec::plan_lifecycle(
         action,
@@ -657,22 +679,48 @@ fn prepare_operation(
         &owned_matches,
     )
     .map_err(|error| WorkerError::Policy(format!("lifecycle: {error}")))?;
-    let input = crate::input::compile_execution_plan(&execution, &target_plan)
-        .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?;
+    let force_services = matches!(
+        requested,
+        crate::run::LinuxAction::Repair { force_files: true }
+    );
+    let input = if target_plan.services.is_empty()
+        && execution.services.is_empty()
+        && !execution
+            .removals
+            .iter()
+            .any(|removal| matches!(removal.owned, zup_exec::OwnedResource::Service { .. }))
+    {
+        crate::input::compile_execution_plan(&execution, &target_plan)
+            .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?
+    } else {
+        let manager = manager.as_mut().ok_or_else(|| {
+            WorkerError::Policy("a service transaction without a systemd manager".into())
+        })?;
+        crate::input::compile_machine_execution_plan(
+            &execution,
+            &target_plan,
+            crate::input::ServiceCompilation {
+                roots: &context.roots,
+                systemd: &context.systemd,
+                manager,
+                force_services,
+            },
+        )
+        .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?
+    };
     let plan = zup_transaction::compile_transaction(&input)
         .map_err(|error| WorkerError::Policy(format!("transaction plan: {error}")))?;
-    // No backend operations in machine scope: derived-cache refreshes are a
-    // user-scope integration concern, and anything else backend-shaped is
-    // foreign to this worker.
+    // Only typed service operations and derived-cache refreshes travel as
+    // backend nodes: anything else backend-shaped is foreign to this worker.
     if plan.nodes.iter().any(|node| {
         matches!(
-            node.kind,
+            &node.kind,
             zup_transaction::NodeKind::BackendOperation { .. }
                 | zup_transaction::NodeKind::BackendRemoval { .. }
-        )
+        ) && !is_expected_backend(node)
     }) {
         return Err(WorkerError::Policy(
-            "a machine transaction holds no backend operations".into(),
+            "a machine transaction holds no foreign backend operations".into(),
         ));
     }
     ledger_store
@@ -741,6 +789,8 @@ fn prepare_operation(
             }
         },
         state_root,
+        roots: context.roots.clone(),
+        systemd: context.systemd.clone(),
         payload: PreparedPayload {
             maintenance,
             maintenance_sha256,
@@ -763,13 +813,23 @@ fn recover_pending(
     app_id: &AppId,
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
 ) -> Result<(), WorkerError> {
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     loop {
         match ledger_store.repair_committed(app_id, SelectedScope::Machine) {
             Ok(()) => return Ok(()),
             Err(crate::ledger::LinuxLedgerError::RecoveryRequired(transaction)) => {
-                recover_one(state_root, app_id, carrier, carrier_path, &transaction)?;
+                recover_one(
+                    state_root,
+                    app_id,
+                    carrier,
+                    carrier_path,
+                    &transaction,
+                    roots,
+                    systemd,
+                )?;
             }
             Err(error) => return Err(WorkerError::Transaction(error.to_string())),
         }
@@ -783,6 +843,8 @@ fn recover_one(
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
     transaction: &str,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
 ) -> Result<(), WorkerError> {
     let id = transaction
         .parse::<uuid::Uuid>()
@@ -830,6 +892,23 @@ fn recover_one(
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)
         .for_machine();
+    if record.plan.nodes.iter().any(|node| {
+        node.meta.backend.as_ref().is_some_and(|backend| {
+            backend
+                .id
+                .as_str()
+                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
+        })
+    }) {
+        let manager = crate::systemd::RealSystemd::connect()
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+        executor = executor.with_services(crate::executor::ServiceSupport::isolated(
+            roots.clone(),
+            systemd.clone(),
+            manager,
+            rustix::process::geteuid().as_raw(),
+        ));
+    }
     executor
         .register_plan(&record.plan)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
@@ -859,6 +938,21 @@ fn ledger_store_publish(
     crate::ledger::LinuxLedgerStore::new(state_root)
         .publish_committed(record, SelectedScope::Machine)
         .map_err(|error| WorkerError::Transaction(error.to_string()))
+}
+
+/// Whether a backend node is one the machine worker emitted: a typed
+/// systemd service operation or a derived-cache refresh. Anything else
+/// backend-shaped is foreign to this worker.
+fn is_expected_backend(node: &zup_transaction::TransactionNode) -> bool {
+    let Some(backend) = node.meta.backend.as_ref() else {
+        return false;
+    };
+    backend
+        .id
+        .as_str()
+        .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
+        || backend.id.as_str() == crate::refresh::REFRESH_MIME_ID
+        || backend.id.as_str() == crate::refresh::REFRESH_DESKTOP_ID
 }
 
 /// Enforce the privileged destination policy over the lowered desired state.
@@ -906,6 +1000,31 @@ fn enforce_machine_policy(
                     file.key
                 )));
             }
+        }
+    }
+    // Service binaries are trusted machine content: the executable must
+    // resolve under the program tree and correspond to a Zup-owned
+    // executable payload. The live ownership bits are revalidated at apply
+    // time; this is the up-front policy half, before any journal exists.
+    if target.scope == SelectedScope::Machine && !target.services.is_empty() {
+        let mut target_files = std::collections::BTreeMap::new();
+        for file in &target.files {
+            target_files.insert(file.destination.to_string(), file.executable);
+        }
+        for service in &target.services {
+            let unit = crate::services::unit_name(&service.id)
+                .map_err(|error| WorkerError::Policy(format!("service identity: {error}")))?;
+            // The unit name is derived here so an unrepresentable identity
+            // refuses before the transaction exists.
+            let _ = unit;
+            crate::service_ops::validate_executable(
+                &service.command,
+                &target_files,
+                roots,
+                rustix::process::geteuid().as_raw(),
+                false,
+            )
+            .map_err(|error| WorkerError::Policy(format!("service binary: {error}")))?;
         }
     }
     Ok(())
@@ -1022,6 +1141,26 @@ fn execute_prepared(
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)
         .for_machine();
+    // Typed service operations ride the same journal: the executor serves
+    // the real system bus here, exactly as planning preflighted it. Plans
+    // without service nodes run without touching the bus at all.
+    if prepared.plan.nodes.iter().any(|node| {
+        node.meta.backend.as_ref().is_some_and(|backend| {
+            backend
+                .id
+                .as_str()
+                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
+        })
+    }) {
+        let manager = crate::systemd::RealSystemd::connect()
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+        executor = executor.with_services(crate::executor::ServiceSupport::isolated(
+            prepared.roots.clone(),
+            prepared.systemd.clone(),
+            manager,
+            rustix::process::geteuid().as_raw(),
+        ));
+    }
     executor
         .register_plan(&prepared.plan)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;

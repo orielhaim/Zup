@@ -43,9 +43,10 @@ impl LinuxCapabilityError {
 /// passes may still fail at apply time - a disk can fill - but it will not fail
 /// because the plan asked for something this backend has no mechanism for.
 ///
-/// Machine scope plans carry files only: machine desktop integration is
-/// deferred, so a machine plan that still names launchers, PATH entries,
-/// services, protocols, or associations was not produced by this backend's
+/// Machine scope plans carry files and system services: services resolve to
+/// systemd units there and are validated again (identity, binary ownership,
+/// collisions) before anything mutates. User scope plans carry files only -
+/// a user plan that still names services was not produced by this backend's
 /// resolution and is refused here.
 pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityError> {
     let mut refused: Vec<String> = Vec::new();
@@ -65,7 +66,9 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), LinuxCapabilityErro
             ));
         }
     };
-    unsupported("service", plan.services.len());
+    if plan.scope != zup_core::SelectedScope::Machine {
+        unsupported("service", plan.services.len());
+    }
     unsupported("package-manager prerequisite", plan.prerequisites.len());
     // Resolution lowers user-scope launchers, PATH entries, protocols, and
     // associations into generated files, and defers every machine-scope one;
@@ -137,28 +140,13 @@ mod tests {
     /// The diagnostic names *every* unsupported active resource, not just the
     /// first one found. A caller that fixed one refusal only to discover the
     /// next would be iterating against the validator instead of the manifest.
+    /// Machine services are supported (systemd), so the machine-scope arm
+    /// names launchers while user-scope services still refuse.
     #[test]
     fn one_diagnostic_names_every_unsupported_resource() {
         let mut plan = empty_plan();
         plan.scope = SelectedScope::Machine;
-        plan.services.push(zup_platform::TargetService {
-            key: zup_core::ResourceKey::Service {
-                id: zup_core::ServiceId::new("tool").expect("an id"),
-            },
-            id: zup_core::ServiceId::new("tool").expect("an id"),
-            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
-            display_name: None,
-            command: zup_platform::CommandSpec::new(
-                zup_platform::TargetPath::new(
-                    plan.target.clone(),
-                    "/home/u/.local/lib/zup/apps/tool/tool",
-                )
-                .expect("a path"),
-                Vec::new(),
-            ),
-            start: zup_core::ServiceStart::Automatic,
-            privilege: zup_core::Privilege::System,
-        });
+        plan.services.push(machine_service(&plan.target));
         plan.launchers.push(zup_platform::TargetLauncher {
             key: zup_core::ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
@@ -181,13 +169,40 @@ mod tests {
             privilege: zup_core::Privilege::User,
         });
 
-        let error = validate_target_plan(&plan).expect_err("machine scope with services refuses");
+        let error = validate_target_plan(&plan).expect_err("machine scope with launchers refuses");
         let reasons = error.reasons();
-        assert!(reasons.contains("service"), "services are named: {reasons}");
         assert!(
             reasons.contains("launcher"),
             "launchers are named: {reasons}"
         );
+        // Machine services are supported: the same plan without the
+        // launcher passes, and a user-scope service still refuses.
+        plan.launchers.clear();
+        assert!(validate_target_plan(&plan).is_ok());
+        plan.scope = SelectedScope::User;
+        let error = validate_target_plan(&plan).expect_err("user scope with services refuses");
+        assert!(
+            error.reasons().contains("service"),
+            "services are named: {}",
+            error.reasons()
+        );
+    }
+
+    fn machine_service(target: &zup_core::TargetTriple) -> zup_platform::TargetService {
+        zup_platform::TargetService {
+            key: zup_core::ResourceKey::Service {
+                id: zup_core::ServiceId::new("tool").expect("an id"),
+            },
+            id: zup_core::ServiceId::new("tool").expect("an id"),
+            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            display_name: None,
+            command: zup_platform::CommandSpec::new(
+                zup_platform::TargetPath::new(target.clone(), "/opt/tool/tool").expect("a path"),
+                Vec::new(),
+            ),
+            start: zup_core::ServiceStart::Automatic,
+            privilege: zup_core::Privilege::System,
+        }
     }
 
     #[test]

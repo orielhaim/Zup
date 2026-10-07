@@ -202,16 +202,15 @@ pub fn worker_socket_path(invoking_uid: u32, session: SessionId) -> Result<PathB
 /// untrusted user environment, and a runtime directory owned by someone else
 /// or passing through a link is not a private area.
 fn runtime_base(invoking_uid: u32) -> Result<PathBuf, SocketError> {
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        if dir.is_absolute()
-            && let Ok(metadata) = std::fs::symlink_metadata(&dir)
-            && metadata.is_dir()
-            && !metadata.file_type().is_symlink()
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            if metadata.uid() == invoking_uid && metadata.permissions().mode() & 0o022 == 0 {
-                return Ok(dir);
-            }
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+        && dir.is_absolute()
+        && let Ok(metadata) = std::fs::symlink_metadata(&dir)
+        && metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() == invoking_uid && metadata.permissions().mode() & 0o022 == 0 {
+            return Ok(dir);
         }
     }
     fallback_base()

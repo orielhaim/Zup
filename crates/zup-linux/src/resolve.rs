@@ -174,6 +174,73 @@ pub fn resolve_target_with(
         });
     }
 
+    // Machine-scope system services: static manifest services lower into
+    // target services here; user-scope services were already refused above
+    // (systemd user units are deferred past this phase), and the privileged
+    // worker additionally refuses any project that needs plugin execution,
+    // so a plugin-generated privileged service never reaches this point
+    // with machine authority.
+    let mut services = Vec::with_capacity(plan.services.len());
+    if scope == SelectedScope::Machine {
+        let mut service_ids: BTreeMap<String, String> = BTreeMap::new();
+        for service in &plan.services {
+            let binary = resolve(&service.binary, "service binary")?;
+            let identity = service.id.as_str().to_owned();
+            if let Some(first) = service_ids.get(&identity) {
+                return Err(LinuxResolveError::Collision {
+                    kind: "service id",
+                    first: first.clone(),
+                    second: identity,
+                });
+            }
+            service_ids.insert(identity, service.name.to_string());
+            // The unit name must be derivable now: an identity with no
+            // honest unit spelling refuses at resolution, not at install.
+            let unit = crate::services::unit_name(&service.id).map_err(|error| {
+                LinuxResolveError::InvalidPath {
+                    kind: "service id",
+                    path: service.id.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            // The renderer must accept the command now for the same reason.
+            let synthetic = zup_platform::TargetService {
+                key: ResourceKey::Service {
+                    id: service.id.clone(),
+                },
+                id: service.id.clone(),
+                name: service.name.clone(),
+                display_name: service.display_name.clone(),
+                command: zup_platform::CommandSpec::new(binary.clone(), service.arguments.clone()),
+                start: service.start,
+                privilege: service.privilege,
+            };
+            let display = service
+                .display_name
+                .as_ref()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| service.name.to_string());
+            crate::services::render_unit(&synthetic, &display).map_err(|error| {
+                LinuxResolveError::InvalidPath {
+                    kind: "service command",
+                    path: unit.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            services.push(zup_platform::TargetService {
+                key: ResourceKey::Service {
+                    id: service.id.clone(),
+                },
+                id: service.id.clone(),
+                name: service.name.clone(),
+                display_name: service.display_name.clone(),
+                command: zup_platform::CommandSpec::new(binary, service.arguments.clone()),
+                start: service.start,
+                privilege: service.privilege,
+            });
+        }
+    }
+
     // Portable integration intent lowers into generated native files here, so
     // the snapshot, delta, transaction, and ledger below all treat a desktop
     // entry or MIME package as what it is: a file Zup owns.
@@ -224,6 +291,7 @@ pub fn resolve_target_with(
     }
 
     let file_count = files.len();
+    let resource_count = services.len();
     Ok(TargetPlan {
         app: plan.app.clone(),
         target: plan.target.clone(),
@@ -234,13 +302,13 @@ pub fn resolve_target_with(
         files,
         launchers: Vec::new(),
         path_entries: Vec::new(),
-        services: Vec::new(),
+        services,
         protocols: Vec::new(),
         file_associations: Vec::new(),
         summary: TargetPlanSummary {
             file_count,
             install_bytes,
-            resource_count: 0,
+            resource_count,
             requires_authorization: plan.summary.requires_authorization,
             selected_component_count: plan.selected_components.len(),
             prerequisite_count: plan.prerequisites.len(),
@@ -294,7 +362,9 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Linu
 /// shapes with no honest mapping (a literal desktop icon, a directory PATH
 /// mutation) are refused by that lowering with their reasons. Machine scope
 /// has no integration lowering at all - a machine desktop entry is deferred -
-/// so every one of those resources is refused here instead.
+/// so every one of those resources is refused here instead. Services are the
+/// mirror image: machine scope owns them through systemd, while user scope
+/// (systemd user units) is deferred, so only user-scope services refuse here.
 fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
     let mut refused: Vec<String> = Vec::new();
     let mut unsupported = |kind: &str, count: usize| {
@@ -306,7 +376,9 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
             ));
         }
     };
-    unsupported("service", plan.services.len());
+    if plan.scope != SelectedScope::Machine {
+        unsupported("service", plan.services.len());
+    }
     unsupported("package-manager prerequisite", plan.prerequisites.len());
     if plan.scope == SelectedScope::Machine {
         unsupported("launcher", plan.launchers.len());
@@ -454,6 +526,7 @@ mod tests {
 
     #[test]
     fn services_are_refused_with_everything_named() {
+        // User scope (systemd user units are deferred): services refuse.
         let mut input = plan();
         input.services.push(zup_plan::PlannedService {
             key: ResourceKey::Service {
@@ -537,6 +610,69 @@ mod tests {
                 .starts_with("/opt/"),
             "payload lands under the program tree: {}",
             resolved.files[0].destination
+        );
+    }
+
+    fn machine_service(start: zup_core::ServiceStart) -> zup_plan::PlannedService {
+        zup_plan::PlannedService {
+            key: ResourceKey::Service {
+                id: zup_core::ServiceId::new("tool").expect("an id"),
+            },
+            id: zup_core::ServiceId::new("tool").expect("an id"),
+            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            display_name: None,
+            binary: zup_core::Template::parse("${location.programs}/tool/tool")
+                .expect("a template"),
+            arguments: vec!["--serve".to_owned()],
+            start,
+            privilege: zup_core::Privilege::System,
+        }
+    }
+
+    /// Machine scope resolves static manifest services into target
+    /// services; the unit name derives from the stable identity alone.
+    #[test]
+    fn machine_services_resolve_into_target_services() {
+        let mut input = plan();
+        input.scope = SelectedScope::Machine;
+        input
+            .services
+            .push(machine_service(zup_core::ServiceStart::Automatic));
+        let resolved = resolve_target(&input).expect("a machine service plan resolves");
+        assert_eq!(resolved.services.len(), 1);
+        assert_eq!(
+            resolved.services[0].start,
+            zup_core::ServiceStart::Automatic
+        );
+        assert_eq!(
+            resolved.services[0].command.arguments,
+            vec!["--serve".to_owned()]
+        );
+        assert_eq!(resolved.summary.resource_count, 1);
+        let unit = crate::services::unit_name(&resolved.services[0].id).expect("a unit name");
+        let again = crate::services::unit_name(&zup_core::ServiceId::new("tool").expect("an id"))
+            .expect("a unit name");
+        assert_eq!(unit, again, "identity is stable across resolutions");
+    }
+
+    /// Two services claiming one identity collide at resolution, before
+    /// any transaction exists.
+    #[test]
+    fn duplicate_service_identities_collide() {
+        let mut input = plan();
+        input.scope = SelectedScope::Machine;
+        input
+            .services
+            .push(machine_service(zup_core::ServiceStart::Automatic));
+        input
+            .services
+            .push(machine_service(zup_core::ServiceStart::Manual));
+        assert!(
+            matches!(
+                resolve_target(&input),
+                Err(LinuxResolveError::Collision { .. })
+            ),
+            "one identity is one service"
         );
     }
 }

@@ -19,7 +19,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::test_support::{MachineTestRoots, run_machine_isolated};
+use zup_linux::test_support::{MachineTestRoots, run_machine_isolated_in};
 use zup_linux::{LinuxAction, LinuxOutcome};
 
 use support::{machine_fixture, machine_maintenance_path, machine_v1_files};
@@ -95,7 +95,7 @@ fn root_machine_state_ownership_and_modes() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -163,7 +163,7 @@ fn root_refuses_user_writable_maintenance() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -181,7 +181,7 @@ fn root_refuses_user_writable_maintenance() {
     let mut permissions = std::fs::metadata(&maintenance).expect("stat").permissions();
     permissions.set_mode(0o666);
     std::fs::set_permissions(&maintenance, permissions).expect("chmod");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &maintenance,
         &roots.roots,
         &roots.state,
@@ -198,7 +198,7 @@ fn root_refuses_user_writable_maintenance() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&maintenance, permissions).expect("chmod");
     std::fs::remove_file(roots.roots.programs.join("tool").join("keep.dat")).expect("delete");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &maintenance,
         &roots.roots,
         &roots.state,
@@ -221,7 +221,7 @@ fn root_refuses_user_writable_ledger() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,
@@ -238,7 +238,7 @@ fn root_refuses_user_writable_ledger() {
     let mut permissions = std::fs::metadata(&ledger).expect("stat").permissions();
     permissions.set_mode(0o666);
     std::fs::set_permissions(&ledger, permissions).expect("chmod");
-    let outcome = run_machine_isolated(
+    let outcome = run_machine_isolated_in(
         &installer,
         &roots.roots,
         &roots.state,

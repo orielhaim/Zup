@@ -18,10 +18,12 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
-use zup_exec::{INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource};
+use zup_exec::{
+    INSTALL_LEDGER_SCHEMA, InstallLedger, ObservedServiceState, OwnedResource, ServiceState,
+};
 use zup_transaction::{
-    FileDelta, FilePrecondition, NodeKind, OperationReceipt, TransactionPhase, TransactionPlan,
-    TransactionRecord, TransactionStore,
+    FileDelta, FilePrecondition, NodeKind, OperationReceipt, TransactionNode, TransactionPhase,
+    TransactionPlan, TransactionRecord, TransactionStore,
 };
 
 use crate::fs::OwnedDirectory;
@@ -136,18 +138,22 @@ impl LinuxLedgerStore {
             return Err(LinuxLedgerError::Ownership("target identity".into()));
         }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
+        // Backend removals retire ledger keys under a backend identity
+        // (one backend node per service); map them before comparing
+        // against the ledger, which owns the portable service key.
+        let retired_ledger = retired_ledger_keys(plan)?;
         if retired.len() != plan.retired_keys.len()
-            || retired.iter().any(|key| {
+            || retired_ledger.iter().any(|key| {
                 ledger
                     .as_ref()
-                    .is_none_or(|ledger| !ledger.resources.contains_key(*key))
+                    .is_none_or(|ledger| !ledger.resources.contains_key(key))
             })
             || (plan.uninstall
                 && ledger.as_ref().is_some_and(|ledger| {
-                    retired.len() != ledger.resources.len()
-                        || retired
+                    retired_ledger.len() != ledger.resources.len()
+                        || retired_ledger
                             .iter()
-                            .any(|key| !ledger.resources.contains_key(*key))
+                            .any(|key| !ledger.resources.contains_key(key))
                 }))
         {
             return Err(LinuxLedgerError::Ownership("retired resources".into()));
@@ -223,7 +229,9 @@ impl LinuxLedgerStore {
                 // authoritative files above. It owns no bytes, so the ledger
                 // records nothing for it; validation only proves the node is
                 // one this backend emitted, with a bounded, well-formed
-                // request. Anything else backend-shaped is foreign.
+                // request. A service apply owns the portable service key it
+                // names, validated below. Anything else backend-shaped is
+                // foreign.
                 NodeKind::BackendOperation { key, .. } => {
                     let Some(backend) = &node.meta.backend else {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
@@ -231,13 +239,24 @@ impl LinuxLedgerStore {
                     if backend.key != *key {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                     }
+                    if is_service_backend(&backend.key) {
+                        validate_service_apply(node, backend, ledger.as_ref())?;
+                        continue;
+                    }
                     let request = crate::refresh::RefreshRequest::decode(&backend.payload)
                         .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
                     if request.key() != *key {
                         return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                     }
                 }
-                NodeKind::BackendRemoval { .. } => {
+                NodeKind::BackendRemoval { key } => {
+                    let Some(backend) = &node.meta.backend else {
+                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                    };
+                    if is_service_backend(&backend.key) && backend.key == *key {
+                        validate_service_removal(node, backend, ledger.as_ref(), &retired)?;
+                        continue;
+                    }
                     return Err(LinuxLedgerError::Ownership(node.id.to_string()));
                 }
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}
@@ -356,6 +375,17 @@ impl LinuxLedgerStore {
         // make a later repair restore the wrong ones.
         ledger.release = None;
         for node in &record.plan.nodes {
+            // Service applies own the portable service key their payload
+            // names; the ledger keeps understanding `ResourceKey::Service`
+            // as the owned semantic resource, with the unit evidence in
+            // the receipt.
+            if matches!(
+                &node.kind,
+                NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. }
+            ) {
+                publish_service_node(&mut ledger, record, node)?;
+                continue;
+            }
             let NodeKind::FileMutation { key, .. } = &node.kind else {
                 continue;
             };
@@ -587,13 +617,169 @@ fn valid_file_key(
 fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, LinuxLedgerError> {
     let mut keys = BTreeSet::new();
     for key in &plan.retired_keys {
-        if !keys.insert(key.clone()) {
+        // A service removal retires under its backend identity; the
+        // ledger owns the portable service key the payload names.
+        let ledger_key = plan
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.kind,
+                    NodeKind::BackendRemoval { key: node_key }
+                        if node_key == key
+                )
+            })
+            .and_then(service_ledger_key)
+            .unwrap_or_else(|| key.clone());
+        if !keys.insert(ledger_key) {
             return Err(LinuxLedgerError::Ownership(
                 "duplicate retired resources".into(),
             ));
         }
     }
     Ok(keys)
+}
+
+/// Whether a backend key is a typed service identity rather than a
+/// freedesktop refresh.
+fn is_service_backend(key: &ResourceKey) -> bool {
+    match key {
+        ResourceKey::Backend { id } => id
+            .as_str()
+            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
+        _ => false,
+    }
+}
+
+/// The portable service key one backend node owns, if it is a service node.
+fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
+    let backend = node.meta.backend.as_ref()?;
+    if !is_service_backend(&backend.key) {
+        return None;
+    }
+    let payload = crate::service_ops::decode_payload(&backend.payload).ok()?;
+    Some(crate::service_ops::ledger_key_for_payload(&payload))
+}
+
+/// Validate one service apply against committed ownership: the family must
+/// be absent or already a service, never a foreign resource wearing the
+/// same key.
+fn validate_service_apply(
+    node: &TransactionNode,
+    backend: &zup_transaction::BackendOperation,
+    ledger: Option<&InstallLedger>,
+) -> Result<(), LinuxLedgerError> {
+    let payload = crate::service_ops::decode_payload(&backend.payload)
+        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
+    let crate::service_ops::ServicePayload::Apply {
+        service,
+        unit,
+        binary_owned,
+        ..
+    } = payload
+    else {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    };
+    if crate::service_ops::backend_key_for_unit(&unit) != backend.key {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    }
+    if !binary_owned {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    }
+    match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
+        None | Some(OwnedResource::Service { .. }) => Ok(()),
+        _ => Err(LinuxLedgerError::Ownership(node.id.to_string())),
+    }
+}
+
+/// Validate one service removal: the payload names the owned service the
+/// ledger holds, and the backend identity is retired.
+fn validate_service_removal(
+    node: &TransactionNode,
+    backend: &zup_transaction::BackendOperation,
+    ledger: Option<&InstallLedger>,
+    retired: &BTreeSet<&ResourceKey>,
+) -> Result<(), LinuxLedgerError> {
+    let payload = crate::service_ops::decode_payload(&backend.payload)
+        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
+    let crate::service_ops::ServicePayload::Remove { key, owned, .. } = payload else {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    };
+    if !retired.contains(&backend.key) {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    }
+    if ledger.and_then(|ledger| ledger.resources.get(&key)) != Some(&owned) {
+        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+    }
+    Ok(())
+}
+
+/// Publish one service node into the ledger: applies become owned
+/// services with the receipt's before/after evidence; removals retire
+/// through [`retired_ledger_keys`].
+fn publish_service_node(
+    ledger: &mut InstallLedger,
+    record: &TransactionRecord,
+    node: &TransactionNode,
+) -> Result<(), LinuxLedgerError> {
+    let NodeKind::BackendOperation { .. } = &node.kind else {
+        return Ok(());
+    };
+    let Some(backend) = &node.meta.backend else {
+        return Err(LinuxLedgerError::Invalid);
+    };
+    if !is_service_backend(&backend.key) {
+        return Ok(());
+    }
+    let payload = crate::service_ops::decode_payload(&backend.payload)
+        .map_err(|_| LinuxLedgerError::Invalid)?;
+    let crate::service_ops::ServicePayload::Apply { service, .. } = payload else {
+        return Err(LinuxLedgerError::Invalid);
+    };
+    let Some(receipt) = record.receipt(&node.id) else {
+        return Ok(());
+    };
+    let OperationReceipt::Backend { payload, .. } = receipt else {
+        return Err(LinuxLedgerError::Invalid);
+    };
+    let service_receipt: crate::service_ops::ServiceReceipt =
+        serde_json::from_slice(payload).map_err(|_| LinuxLedgerError::Invalid)?;
+    let key = service.key.clone();
+    let previous = match &service.previous {
+        ObservedServiceState::Absent => ServiceState::Absent,
+        ObservedServiceState::Service {
+            display_name,
+            command,
+            start,
+            ..
+        } => ServiceState::Registration {
+            display_name: display_name.clone(),
+            command: command.clone(),
+            start: *start,
+        },
+    };
+    let installed = ServiceState::Registration {
+        display_name: service.display_name.clone(),
+        command: service.command.clone(),
+        start: service.start,
+    };
+    // The receipt proves the mutation; the payload proves the intent. A
+    // receipt for another unit or another policy cannot publish here.
+    let _ = service_receipt;
+    let old_previous = match ledger.resources.get(&key) {
+        Some(OwnedResource::Service { previous, .. }) => Some(previous.clone()),
+        _ => None,
+    };
+    ledger.resources.insert(
+        key,
+        OwnedResource::Service {
+            name: service.name.clone(),
+            privilege: service.privilege,
+            previous: old_previous.unwrap_or(previous),
+            installed,
+        },
+    );
+    Ok(())
 }
 
 /// Write a ledger durably: temporary sibling, flush, rename, flush directory.
