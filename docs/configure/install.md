@@ -24,9 +24,15 @@ user = "${location.user_data}/acme"
 the value `zup publish stage --thin` refuses, because a thin installer's
 embedded trust context has to name one scope.
 
-Linux targets install user-scope only in this phase: `machine` and `either`
-are refused for them during `check`/`build` capability validation, because
-machine scope needs a privilege mechanism the Linux backend does not have yet.
+Linux targets install user-scope without elevation. Machine scope installs
+through the privileged worker: `zup build` needs no authority, and running
+the installer requests administrator authorization through `pkexec` at
+execution time. An `either` installer requires an explicit `--scope user`
+or `--scope machine` choice at install time. Machine scope serves files
+under `/opt` (payload), `/var/opt` (shared data), and `/var/lib/zup` (Zup
+state); desktop integration, services, and package-manager prerequisites
+stay unsupported there and are refused during `check`/`build` capability
+validation.
 
 `--scope` overrides this on `zup plan`. A per-machine profile inherits the
 top-level `[install]` unless it declares its own.

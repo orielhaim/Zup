@@ -875,10 +875,11 @@ impl TargetChecks<'_> {
     ///
     /// This never authenticates: it proves a system `pkexec` is structurally
     /// usable (present, root-owned, not writable below root), which is what a
-    /// build host can say without prompting. Whether the installing machine
-    /// authorizes is a target-runtime concern, and a build host without
-    /// `pkexec` - a Windows cross-build host, for example - skips rather
-    /// than failing a project that builds correctly.
+    /// build host can say without prompting. A build host without `pkexec` -
+    /// a container, or a Windows cross-build host - skips rather than failing
+    /// a project that builds correctly: whether the installing machine
+    /// authorizes is a target-runtime concern. `zup build` never needs this
+    /// check to pass.
     fn elevation(&mut self) {
         let target = &self.config.target;
         if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
@@ -925,9 +926,9 @@ impl TargetChecks<'_> {
                         ),
                         Some(&path),
                     ),
-                    None => self.fail(
+                    None => self.skip(
                         CheckKind::Elevation,
-                        "machine installation needs a system `pkexec`, and none is usable on this machine",
+                        "no system `pkexec` on this machine: machine installation will need one on the installing machine",
                         None,
                     ),
                 }

@@ -15,7 +15,7 @@ The profile name (`windows-x64`) is project-local. The triple is the machine ide
 <div class="platform-state">
   <div>Windows</div><div>Installation backend ships today.</div>
   <div>macOS</div><div>Architecture and public model support a backend; no installation backend ships today.</div>
-  <div>Linux</div><div>User-scope installation backend ships for `x86_64-unknown-linux-gnu` (console and headless).</div>
+  <div>Linux</div><div>User- and machine-scope installation backend ships for `x86_64-unknown-linux-gnu` (console and headless).</div>
 </div>
 
 Zup may parse a target no backend answers for, but `doctor` and `build` refuse it because there is no backend for that target yet.
@@ -35,14 +35,43 @@ A Linux build produces one self-contained, extensionless installer per target (f
 |---|---|
 | Target | `x86_64-unknown-linux-gnu` only |
 | Frontends | console, headless |
-| Scope | user |
+| Scope | user, machine, either (either requires an explicit `--scope` choice) |
 | Artifact | one self-contained installer per target |
 | Signing | no platform-native signature; artifact digest and release identity carry authenticity (`zup sign verify --allow-unsigned` finalizes the measured bytes) |
 | GUI installer | not supported |
-| Machine scope | not supported |
-| Services, launchers, PATH entries, protocols, file associations, package-manager prerequisites | not supported |
+| Machine scope elevation | `pkexec` at install time; `zup build` needs no authority |
+| Machine payload | `/opt/<App>` for `${location.programs}`, `/var/opt` for shared data, `/var/lib/zup` for Zup state |
+| Machine desktop integration, services, PATH entries, protocols, file associations, package-manager prerequisites | not supported |
+| User desktop integration (`.desktop`, icons, MIME) | user scope only |
+| systemd, D-Bus, package managers | not supported |
 | Universal/dispatcher and thin artifacts | not supported; Windows-only |
-| Desktop integration (`.desktop`, icons, MIME), systemd, D-Bus, PATH integration, package managers | not supported |
+
+## Linux machine scope
+
+A machine-scope installer (`scope = "machine"`, or `either` with
+`--scope machine`) performs its transaction through a short-lived
+privileged worker:
+
+```text
+unprivileged installer plans and shows the operation
+→ administrator authorization through `pkexec`
+→ privileged worker re-verifies the package, reconstructs the plan,
+  enforces the privileged path policy, and executes
+→ ledger, journals, and maintenance generation under `/var/lib/zup`
+```
+
+User-scope installs never elevate. Machine installs request elevation
+only when executed, never during `zup build` - including when
+cross-built from Windows. `zup doctor` reports the `pkexec` elevation
+capability for machine projects without ever prompting. Zup never
+handles an administrator password; authentication belongs to polkit.
+
+The worker performs typed installation operations only: static files,
+executable intent, ledger, maintenance, locking, install, upgrade,
+repair, uninstall, and recovery. It never launches the installed
+application, never executes plugins or prerequisite installers, and
+never writes outside `/opt`, `/var/opt`, and `/var/lib/zup`. An
+`--install-dir` override stays inside the machine program tree.
 
 A project can declare Windows and Linux target profiles side by side and builds them into separate native artifacts. Unsupported Linux configurations fail during `check`/`build` capability validation with a diagnostic naming the configuration.
 

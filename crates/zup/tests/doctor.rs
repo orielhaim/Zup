@@ -567,10 +567,10 @@ destination = "${{install}}"
     );
     if cfg!(target_os = "linux") {
         // Never a prompt, and never a claim: present means usable, missing
-        // means named.
+        // means named and skipped - `zup build` needs no elevation.
         let status = statuses(&rows, "elevation");
         assert!(
-            status == only("pass") || status == only("fail"),
+            status == only("pass") || status == only("skip"),
             "{status:?}"
         );
         assert!(

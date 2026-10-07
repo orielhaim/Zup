@@ -180,6 +180,45 @@ jobs:
           Invoke-Zup build --manifest $manifest --target linux
           Invoke-Zup artifact inspect (Join-Path $fixture 'Tool-Setup')
           python -c "import json,sys; data = open(r'$fixture\Tool-Setup','rb').read(4); assert data == b'\x7fELF', data; release = json.load(open(r'$fixture\zup-release.json')); assert release['variants'][0]['target'] == 'x86_64-unknown-linux-gnu', release; assert release['artifacts'][0]['path'] == 'Tool-Setup', release; text = json.dumps(release); assert '.exe' not in text and 'Authenticode' not in text, text; print('linux artifact verified')"
+          # Phase 5: a Windows host cross-builds the exact Linux
+          # machine-scope installer bytes. Authorization is a target runtime
+          # concern, so no pkexec exists here and none is needed: check,
+          # doctor (elevation skips off Linux), and build all succeed.
+          $machine = Join-Path $env:RUNNER_TEMP 'zup-linux-machine-fixture'
+          Remove-Item -Recurse -Force $machine -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $machine, (Join-Path $machine 'dist') | Out-Null
+          @'
+          schema = 1
+
+          [app]
+          id = "com.example.tool"
+          name = "Tool"
+          version = "1.0.0"
+
+          [build]
+
+          [build.targets.linux]
+          target = "x86_64-unknown-linux-gnu"
+          frontend = "console"
+          source = { directory = "dist" }
+
+          [install]
+          scope = "machine"
+
+          [install.directory]
+          machine = "${location.programs}/tool"
+
+          [[files]]
+          source = "tool"
+          destination = "${install}"
+          executable = true
+          '@ | Set-Content (Join-Path $machine 'zup.toml') -NoNewline -Encoding utf8
+          [IO.File]::WriteAllBytes((Join-Path $machine 'dist/tool'), [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n"))
+          $machineManifest = Join-Path $machine 'zup.toml'
+          Invoke-Zup check --manifest $machineManifest --target linux
+          Invoke-Zup doctor --manifest $machineManifest --target linux
+          Invoke-Zup build --manifest $machineManifest --target linux
+          python -c "data = open(r'$machine\Tool-Setup','rb').read(4); assert data == b'\x7fELF', data; print('linux machine artifact verified')"
 
   clean-room:
     name: clean room
@@ -296,9 +335,25 @@ jobs:
       # XDG resolution - that a build check cannot establish. This is the full
       # product path: fresh install, upgrade, repair, uninstall, recovery, and
       # carrier security against real ELF installers, executed as child
-      # processes with hermetic environments.
+      # processes with hermetic environments. `--all-features` enables the
+      # machine-scope `test-support` surface: the privileged worker's
+      # lifecycle, locking, recovery, and attack cases run with isolated
+      # roots, never the host's `/opt` or `/var/lib/zup`.
       - name: Linux backend tests
         run: cargo nextest run --all-features $LINUX
+
+      # The root proofs need uid 0: ownership, modes, write resistance by
+      # attempt, and tamper refusal. Still isolated roots - `sudo` is test
+      # infrastructure that stages a root-owned environment, never the
+      # production elevation mechanism, which stays `pkexec`. A scratch
+      # target directory keeps root-owned artifacts out of the workspace.
+      # The non-root proofs skip gracefully outside uid 0; under `sudo` the
+      # whole root binary runs.
+      - name: Privileged machine tests
+        run: |
+          sudo --preserve-env=PATH,HOME,CARGO_HOME,RUSTUP_HOME \
+            env CARGO_TARGET_DIR=/tmp/zup-sudo-target \
+            cargo nextest run -p zup-linux --features test-support --test machine_root
 
       # The public surface, not only the backend crates: the real `zup`
       # binary checks, builds, and produces a runnable Linux installer from
@@ -397,6 +452,45 @@ jobs:
           test ! -e "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
           test ! -e "$XDG_DATA_HOME/mime/packages/com.example.tool.xml"
           test ! -e "$XDG_DATA_HOME/icons/hicolor/48x48/apps/com.example.tool.png"
+          # Phase 5 machine scope from the public build path: check, doctor
+          # (elevation capability, no prompt), and a byte-correct machine
+          # installer. Installing it needs interactive administrator
+          # authorization, so CI proves the artifact structurally and the
+          # harnessed suites prove the privileged runtime.
+          rm -rf /tmp/zup-public-machine && mkdir -p /tmp/zup-public-machine/dist
+          cat > /tmp/zup-public-machine/zup.toml <<'EOF'
+          schema = 1
+
+          [app]
+          id = "com.example.tool"
+          name = "Tool"
+          version = "1.0.0"
+
+          [build]
+
+          [build.targets.linux]
+          target = "x86_64-unknown-linux-gnu"
+          frontend = "console"
+          source = { directory = "dist" }
+
+          [install]
+          scope = "machine"
+
+          [install.directory]
+          machine = "${location.programs}/tool"
+
+          [[files]]
+          source = "tool"
+          destination = "${install}"
+          executable = true
+          EOF
+          printf '#!/bin/sh\necho "tool 1.0.0"\n' > /tmp/zup-public-machine/dist/tool
+          cargo run -p zup -- check --manifest /tmp/zup-public-machine/zup.toml --target linux
+          cargo run -p zup -- doctor --manifest /tmp/zup-public-machine/zup.toml --target linux
+          cargo run -p zup -- build --manifest /tmp/zup-public-machine/zup.toml --target linux
+          file /tmp/zup-public-machine/Tool-Setup | grep ELF
+          test -x /tmp/zup-public-machine/Tool-Setup
+          grep -q x86_64-unknown-linux-gnu /tmp/zup-public-machine/zup-release.json
 
       - name: Tests
         run: cargo nextest run --all-features $PORTABLE
