@@ -17,14 +17,16 @@
 //! target:    x86_64-unknown-linux-gnu
 //! frontends: console, headless
 //! artifact:  self-contained native installer (one per target)
-//! scope:     user
-//! desktop:   menu launchers, URI protocols, file associations
+//! scope:     user, machine, either
+//! desktop:   menu launchers, URI protocols, file associations (user scope)
 //! ```
 //!
-//! Everything else - GUI, machine scope, dispatcher/universal artifacts,
+//! Machine scope installs through the privileged worker: `zup build` needs
+//! no authority, and elevation through `pkexec` happens only when the
+//! installer runs. Everything else - GUI, dispatcher/universal artifacts,
 //! services, literal desktop icons, PATH entries, package-manager
-//! prerequisites - is refused here with a diagnostic that names the
-//! configuration, not an internal crate.
+//! prerequisites, machine desktop integration - is refused here with a
+//! diagnostic that names the configuration, not an internal crate.
 
 use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, TargetBuildPlan, TargetTriple};
 
@@ -93,9 +95,12 @@ fn linux_frontend_errors(target: &TargetTriple, frontend: Frontend) -> Vec<Strin
 /// Every reason `config` cannot become a Linux installer, in manifest terms.
 ///
 /// Empty means the public path may compose it: the target is the supported
-/// one, the frontend exists as a Linux runtime template, the scope needs no
-/// privilege mechanism, and the plan carries no resource the Linux backend has
-/// no mechanism for. Each entry is one sentence a project author can act on.
+/// one, the frontend exists as a Linux runtime template, and the plan
+/// carries no resource the Linux backend has no mechanism for. Machine
+/// scope is composed without authority - elevation through `pkexec` happens
+/// when the installer runs, never at build time - and either-scope
+/// installers choose at runtime. Each entry is one sentence a project
+/// author can act on.
 pub fn linux_capability_errors(
     config: &ResolvedTargetConfig,
     plan: &TargetBuildPlan,
@@ -107,19 +112,17 @@ pub fn linux_capability_errors(
     // iterating one refusal at a time. The fail-fast pre-materialization check
     // in the build path is separate and stays narrow.
     errors.extend(linux_selection_errors(target, config.frontend));
-    match config.install.scope {
-        InstallScope::User => {}
-        InstallScope::Machine => errors.push(
-            "machine-scope installation is not supported by the Linux backend yet: it needs a \
-             privilege mechanism this phase does not have"
-                .to_owned(),
-        ),
-        InstallScope::Either => errors.push(
-            "install scope `either` is not supported by the Linux backend yet: machine scope \
-             needs a privilege mechanism this phase does not have"
-                .to_owned(),
-        ),
-    }
+    // Machine scope installs through the privileged worker, which serves
+    // files only: machine desktop integration is deferred, so a machine
+    // installation that requests launchers, protocols, or associations is
+    // refused here rather than at the worker. An either-scope project may
+    // carry user-scope integration - the machine choice refuses it at
+    // capability validation before anything mutates - but machine-only
+    // resources are still refused for every scope.
+    let machine_leg = matches!(
+        config.install.scope,
+        InstallScope::Machine | InstallScope::Either
+    );
     let installer = &plan.installer;
     {
         let mut unsupported = |kind: &str, count: usize| {
@@ -138,10 +141,28 @@ pub fn linux_capability_errors(
         );
     }
     // Menu launchers, URI protocols, and file associations lower into
-    // freedesktop desktop entries and Shared MIME-info packages. A literal
-    // desktop icon has no desktop-neutral implementation, and a
-    // directory-level PATH mutation is not command exposure without editing
-    // shell configuration, so those stay refused with their reasons.
+    // freedesktop desktop entries and Shared MIME-info packages in user
+    // scope only. A machine installation has no desktop integration to
+    // lower them into, so a machine leg that requests them is refused here
+    // rather than at the worker. A literal desktop icon has no
+    // desktop-neutral implementation, and a directory-level PATH mutation is
+    // not command exposure without editing shell configuration, so those
+    // stay refused with their reasons in every scope.
+    if machine_leg {
+        let mut machine_unsupported = |kind: &str, count: usize| {
+            if count > 0 {
+                errors.push(format!(
+                    "{count} {kind} resource{} {} not supported for a machine installation: \
+                     machine desktop integration is deferred past this phase",
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "is" } else { "are" },
+                ));
+            }
+        };
+        machine_unsupported("menu launcher", installer.launchers.len());
+        machine_unsupported("URI protocol", installer.protocols.len());
+        machine_unsupported("file association", installer.file_associations.len());
+    }
     let desktop_launchers = installer
         .launchers
         .iter()
@@ -452,7 +473,7 @@ mod tests {
     }
     #[test]
     fn every_unsupported_dimension_is_named() {
-        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::Machine);
+        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
             id: zup_core::ServiceId::new("tool").unwrap(),
@@ -467,12 +488,56 @@ mod tests {
         let errors = linux_capability_errors(&config, &plan);
         let text = errors.join("\n");
         assert!(text.contains("GUI"), "{text}");
-        assert!(text.contains("machine"), "{text}");
         assert!(text.contains("service"), "{text}");
         assert!(
             !text.contains("zup-linux"),
             "diagnostics name the configuration, never an internal crate: {text}"
         );
+    }
+
+    #[test]
+    fn a_plain_machine_file_plan_is_accepted() {
+        let errors = linux_capability_errors(
+            &config(
+                SUPPORTED_LINUX_TARGET,
+                Frontend::Console,
+                InstallScope::Machine,
+            ),
+            &plan(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = linux_capability_errors(
+            &config(
+                SUPPORTED_LINUX_TARGET,
+                Frontend::Headless,
+                InstallScope::Either,
+            ),
+            &plan(),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn machine_scope_refuses_desktop_integration() {
+        for scope in [InstallScope::Machine, InstallScope::Either] {
+            let config = config(SUPPORTED_LINUX_TARGET, Frontend::Console, scope);
+            let mut plan = plan();
+            plan.installer.launchers.push(zup_core::Launcher {
+                location: zup_core::LauncherLocation::Menu,
+                name: zup_core::NonEmptyString::new("Tool").unwrap(),
+                target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
+                arguments: Vec::new(),
+                working_directory: None,
+                component: None,
+                when: None,
+            });
+            let errors = linux_capability_errors(&config, &plan);
+            let text = errors.join("\n");
+            assert!(
+                text.contains("machine"),
+                "{scope:?} with a launcher is refused: {text}"
+            );
+        }
     }
 
     #[test]

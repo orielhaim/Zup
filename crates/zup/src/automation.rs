@@ -280,6 +280,7 @@ fn check_kind(kind: CheckKind) -> &'static str {
         CheckKind::BuildBackend => "build_backend",
         CheckKind::TargetLowering => "target_lowering",
         CheckKind::OutputParent => "output_parent",
+        CheckKind::Elevation => "elevation",
     }
 }
 

@@ -116,10 +116,14 @@ pub enum CheckKind {
     RuntimeTemplate,
     /// Backend support for the target on this build host.
     BuildBackend,
-    /// Windows target lowering for every install scope.
+    /// Target lowering for every install scope.
     TargetLowering,
     /// Whether the output parent directory can be written.
     OutputParent,
+    /// Whether a machine installation could elevate on the installing
+    /// machine. Linux-only: other targets skip, and user-scope-only
+    /// projects skip because user scope installs without elevation.
+    Elevation,
 }
 
 impl CheckKind {
@@ -135,6 +139,7 @@ impl CheckKind {
             Self::BuildBackend => "backend",
             Self::TargetLowering => "lowering",
             Self::OutputParent => "output",
+            Self::Elevation => "elevation",
         }
     }
 }
@@ -434,6 +439,7 @@ impl Inspection<'_> {
         if let PlanOutcome::Ready(build) = &plan {
             report.lowering(build);
         }
+        report.elevation();
         report.input_problems(build_inputs::InputSubject::Output);
         report.output();
         report.finish()
@@ -860,6 +866,75 @@ impl TargetChecks<'_> {
         }
     }
 
+    /// Whether a machine installation could elevate on the installing machine.
+    ///
+    /// Linux-only, and only for projects with a machine leg: user-scope-only
+    /// projects install without elevation, and other targets have no `pkexec`
+    /// to check. When lowering already failed, machine scope is unsupported
+    /// for that reason and elevation is not evaluated twice.
+    ///
+    /// This never authenticates: it proves a system `pkexec` is structurally
+    /// usable (present, root-owned, not writable below root), which is what a
+    /// build host can say without prompting. Whether the installing machine
+    /// authorizes is a target-runtime concern, and a build host without
+    /// `pkexec` - a Windows cross-build host, for example - skips rather
+    /// than failing a project that builds correctly.
+    fn elevation(&mut self) {
+        let target = &self.config.target;
+        if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+            self.skip(
+                CheckKind::Elevation,
+                "elevation is a Linux target concern",
+                None,
+            );
+            return;
+        }
+        if self.checks.iter().any(|check| {
+            check.kind == CheckKind::TargetLowering && check.status == CheckStatus::Fail
+        }) {
+            self.skip(
+                CheckKind::Elevation,
+                "not evaluated: target lowering failed",
+                None,
+            );
+            return;
+        }
+        match self.config.install.scope {
+            zup_core::InstallScope::User => {
+                self.skip(
+                    CheckKind::Elevation,
+                    "user scope installs without elevation",
+                    None,
+                );
+            }
+            zup_core::InstallScope::Machine | zup_core::InstallScope::Either => {
+                if !cfg!(target_os = "linux") {
+                    self.skip(
+                        CheckKind::Elevation,
+                        "machine installation authorizes through `pkexec` on the Linux installing machine",
+                        None,
+                    );
+                    return;
+                }
+                match system_pkexec() {
+                    Some(path) => self.pass(
+                        CheckKind::Elevation,
+                        format!(
+                            "machine installation elevates through `{}`",
+                            path.display()
+                        ),
+                        Some(&path),
+                    ),
+                    None => self.fail(
+                        CheckKind::Elevation,
+                        "machine installation needs a system `pkexec`, and none is usable on this machine",
+                        None,
+                    ),
+                }
+            }
+        }
+    }
+
     fn output(&mut self) {
         let slot = &self.inputs.outputs[self.index];
         let output = slot.path.clone();
@@ -979,6 +1054,35 @@ fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// A structurally usable system `pkexec`, if this Linux machine has one.
+///
+/// Presence, ownership, and writability - never execution, which would
+/// authenticate. `doctor` reports capability; prompting is the installer's
+/// job at install time.
+#[cfg(target_os = "linux")]
+fn system_pkexec() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    ["/usr/bin/pkexec", "/bin/pkexec"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| {
+            std::fs::metadata(path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.uid() == 0
+                    && metadata.mode() & 0o022 == 0
+                    && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+}
+
+/// No `pkexec` off Linux: elevation is a target-runtime concern the build
+/// host reports by skipping, never by failing the project.
+#[cfg(not(target_os = "linux"))]
+fn system_pkexec() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Whether a directory can be written, read from its permission bits.

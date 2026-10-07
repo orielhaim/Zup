@@ -33,7 +33,7 @@ const OTHER_TARGET: &str = "aarch64-pc-windows-msvc";
 const ON_WINDOWS: bool = cfg!(windows);
 
 /// Every check kind a report must contain for each selected target.
-const CHECK_KINDS: [&str; 10] = [
+const CHECK_KINDS: [&str; 11] = [
     "canonical_target",
     "manifest_compile",
     "source_payload",
@@ -44,6 +44,7 @@ const CHECK_KINDS: [&str; 10] = [
     "runtime_template",
     "build_backend",
     "output_parent",
+    "elevation",
 ];
 
 fn zup() -> Command {
@@ -276,6 +277,12 @@ fn healthy_single_target_passes_every_required_check() {
     assert_eq!(statuses(&rows, "plugin_engine"), only("skip"));
     assert_eq!(statuses(&rows, "update_root"), only("skip"));
     assert_eq!(statuses(&rows, "output_parent"), only("pass"));
+    assert_eq!(statuses(&rows, "elevation"), only("skip"));
+    assert!(
+        message(find(&rows, "elevation")).contains("without elevation"),
+        "{}",
+        message(find(&rows, "elevation"))
+    );
     assert_eq!(
         find(&rows, "frontend")["message"],
         format!("resolved frontend is `{}`", selected_frontend())
@@ -509,6 +516,75 @@ destination = "${{install}}"
         assert!(message.contains(OTHER_TARGET), "{message}");
         assert!(message.contains("was wanted"), "{message}");
         assert!(!output.status.success());
+    }
+}
+
+/// A machine-scope project reports its elevation capability: user-scope
+/// projects skip, and machine projects name `pkexec` without prompting.
+#[test]
+fn machine_scope_reports_elevation_capability() {
+    let target = "x86_64-unknown-linux-gnu";
+    let project = TempDir::new().unwrap();
+    write_project(
+        project.path(),
+        &format!(
+            r#"schema = 1
+frontend = "{frontend}"
+
+[app]
+id = "com.example.doctor"
+name = "Doctor App"
+version = "1.0.0"
+{main}
+[build]
+
+[build.targets.default]
+target = "{target}"
+source = {{ directory = "dist" }}
+
+[install]
+scope = "machine"
+
+[install.directory]
+machine = "${{location.programs}}/DoctorApp"
+
+[[files]]
+source = "**/*"
+destination = "${{install}}"
+"#,
+            frontend = selected_frontend(),
+            main = fixture_main(),
+        ),
+    );
+    let _runtime = setup_runtime(project.path(), target);
+    let output = run_doctor(&project.path().join("zup.toml"), &[]);
+    let rows = checks(&output, "default");
+    assert_eq!(
+        rows.iter()
+            .map(|check| check["kind"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>(),
+        only_kinds()
+    );
+    if cfg!(target_os = "linux") {
+        // Never a prompt, and never a claim: present means usable, missing
+        // means named.
+        let status = statuses(&rows, "elevation");
+        assert!(
+            status == only("pass") || status == only("fail"),
+            "{status:?}"
+        );
+        assert!(
+            message(find(&rows, "elevation")).contains("pkexec"),
+            "{}",
+            message(find(&rows, "elevation"))
+        );
+    } else {
+        assert_eq!(statuses(&rows, "elevation"), only("skip"));
+        assert!(
+            message(find(&rows, "elevation")).contains("installing machine"),
+            "{}",
+            message(find(&rows, "elevation"))
+        );
     }
 }
 

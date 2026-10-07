@@ -70,6 +70,11 @@ pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunEr
 pub(crate) struct ExpectedPlan {
     pub digest: String,
     pub target: zup_core::TargetTriple,
+    /// The compiled plan itself, for tests that journal an interrupted
+    /// transaction. Present only under `test` or `test-support`: production
+    /// planning binds the digest, never the plan object.
+    #[cfg(feature = "test-support")]
+    pub plan: zup_transaction::TransactionPlan,
 }
 
 /// Plan the machine transaction locally, read-only, to bind it.
@@ -205,6 +210,8 @@ pub(crate) fn plan_expected(
         ExpectedPlan {
             digest,
             target: target.clone(),
+            #[cfg(feature = "test-support")]
+            plan,
         },
     ))
 }
@@ -256,7 +263,13 @@ fn run_machine_elevated(
     }
     let _pin = pin_peer(peer.pid, peer.uid).map_err(into_run_error)?;
 
-    let outcome = drive_client(&mut stream, session, &intent, &expected);
+    let outcome = drive_client(
+        &mut stream,
+        session,
+        &intent,
+        &expected.digest,
+        &expected.target,
+    );
     // The protocol decides, and the launcher result corroborates: a clean
     // protocol ending with a failed launch is still a failure, and a clean
     // launch with a broken protocol is not a success.
@@ -272,11 +285,16 @@ fn run_machine_elevated(
 }
 
 /// The client half of the handshake over a connected stream.
-fn drive_client(
+///
+/// `pub(crate)` so the `test-support` surface can drive the real client
+/// against an isolated worker without `pkexec`: the handshake is identical,
+/// only the transport is a test socket pair.
+pub(crate) fn drive_client(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &PrepareOperation,
-    expected: &ExpectedPlan,
+    expected_digest: &str,
+    expected_target: &zup_core::TargetTriple,
 ) -> Result<LinuxOutcome, LinuxRunError> {
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
@@ -286,7 +304,7 @@ fn drive_client(
     let hello = recv_msg(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?;
     let worker_pid = match hello.message {
         Message::WorkerHello(hello) => {
-            if hello.session_id != session || hello.target != expected.target {
+            if hello.session_id != session || hello.target != *expected_target {
                 return Err(LinuxRunError::Worker("worker hello mismatch".into()));
             }
             check_capabilities(&hello.capabilities)?;
@@ -321,7 +339,7 @@ fn drive_client(
     // The binding: the worker's reconstructed digest must equal what this
     // process planned and showed. Authorizing any other digest would let
     // the UI confirm one plan while root executes another.
-    if prepared.plan_digest.to_lowercase() != expected.digest.to_lowercase() {
+    if prepared.plan_digest.to_lowercase() != expected_digest.to_lowercase() {
         return Err(LinuxRunError::Worker(
             "the worker's plan differs from the confirmed one".into(),
         ));
@@ -444,7 +462,7 @@ fn run_machine_loopback(
 /// `pub(crate)` and reachable only through the `test-support` module:
 /// production always resolves the state root the same way the real worker
 /// does, and no IPC message selects it.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) fn run_machine_loopback_for_test(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
@@ -473,7 +491,13 @@ fn run_machine_loopback_on(
     };
     let worker_thread =
         std::thread::spawn(move || crate::worker::serve_session(&mut worker, context));
-    let outcome = drive_client_loopback(&mut client, session, &intent, &expected);
+    let outcome = drive_client_loopback(
+        &mut client,
+        session,
+        &intent,
+        &expected.digest,
+        &expected.target,
+    );
     match worker_thread.join() {
         Ok(Ok(_)) => outcome,
         Ok(Err(error)) => Err(LinuxRunError::Worker(error.to_string())),
@@ -490,13 +514,14 @@ fn drive_client_loopback(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &PrepareOperation,
-    expected: &ExpectedPlan,
+    expected_digest: &str,
+    expected_target: &zup_core::TargetTriple,
 ) -> Result<LinuxOutcome, LinuxRunError> {
     let peer = peer_identity(stream).map_err(into_run_error)?;
     if peer.uid != rustix::process::geteuid().as_raw() {
         return Err(LinuxRunError::Worker("loopback peer mismatch".into()));
     }
-    drive_client(stream, session, intent, expected)
+    drive_client(stream, session, intent, expected_digest, expected_target)
 }
 
 fn into_run_error(error: crate::socket::SocketError) -> LinuxRunError {

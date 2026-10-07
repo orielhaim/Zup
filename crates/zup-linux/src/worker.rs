@@ -33,7 +33,7 @@ use zup_core::{AppId, ResourceKey, SelectedScope};
 use zup_protocol::{
     Capabilities, Message, PROTOCOL_VERSION, PrepareOperation, PreparedOperation,
     PrivilegedSession, ProgressKind, ProgressReport, SequenceTracker, SessionId, WireEnvelope,
-    WorkerHello,
+    WorkerHello, failure,
 };
 
 use crate::machine::{
@@ -68,8 +68,25 @@ pub enum WorkerError {
     #[error("worker transaction failed: {0}")]
     Transaction(String),
 
+    #[error("cancelled")]
+    Cancelled,
+
     #[error("another operation holds this installation's lock")]
     Busy,
+}
+
+impl WorkerError {
+    /// The closed failure kind the parent acts on.
+    fn kind(&self) -> &'static str {
+        match self {
+            WorkerError::AuthFailed(_) => failure::AUTHENTICATION,
+            WorkerError::Protocol(_) => failure::PROTOCOL,
+            WorkerError::Policy(_) => failure::POLICY,
+            WorkerError::Transaction(_) => failure::TRANSACTION,
+            WorkerError::Cancelled => failure::CANCELLED,
+            WorkerError::Busy => failure::INSTALLATION_BUSY,
+        }
+    }
 }
 
 /// The worker's trusted context: everything it enforces but never accepts
@@ -202,13 +219,80 @@ fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<(), WorkerErr
 /// Shared by the real worker, the already-root loopback, and the tests: the
 /// transport differs, the verification does not. Returns the terminal
 /// outcome name (`committed`, `rolled_back`, `recovery_required`).
+///
+/// Every refusal and failure is reported as a typed `Failed` message before
+/// the worker exits, so the client learns the kind rather than a closed
+/// socket: busy, authentication, policy, protocol, transaction, or
+/// cancelled. Best effort at the very end - a dead client cannot be told.
 pub fn serve_session(
     stream: &mut UnixStream,
     context: WorkerContext,
 ) -> Result<String, WorkerError> {
+    let mut channel = SessionChannel {
+        stream,
+        session: context.session,
+        incoming: SequenceTracker::new(),
+        outgoing: 0,
+    };
+    match serve_inner(&mut channel, &context) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            let _ = channel.send(Message::Failed(zup_protocol::Failed {
+                kind: error.kind().to_owned(),
+                message: error.to_string(),
+            }));
+            Err(error)
+        }
+    }
+}
+
+/// One session's framing: bounded envelopes in, bounded envelopes out, both
+/// bound to the session and the sequence.
+struct SessionChannel<'a> {
+    stream: &'a mut UnixStream,
+    session: SessionId,
+    incoming: SequenceTracker,
+    outgoing: u64,
+}
+
+impl SessionChannel<'_> {
+    fn send(&mut self, message: Message) -> Result<(), WorkerError> {
+        let envelope = WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: self.session,
+            sequence: self.outgoing,
+            message,
+        };
+        send_envelope(self.stream, &envelope)
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        self.outgoing = self.outgoing.saturating_add(1);
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<WireEnvelope, WorkerError> {
+        let envelope = recv_envelope(self.stream, timeout)
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        self.incoming
+            .accept(envelope.sequence)
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        if envelope.session_id != self.session {
+            return Err(WorkerError::AuthFailed("session mismatch".into()));
+        }
+        if envelope.version != PROTOCOL_VERSION {
+            return Err(WorkerError::Protocol("protocol version mismatch".into()));
+        }
+        Ok(envelope)
+    }
+}
+
+fn serve_inner(
+    channel: &mut SessionChannel<'_>,
+    context: &WorkerContext,
+) -> Result<String, WorkerError> {
     // The peer is whoever holds the other end right now - not whoever the
     // first message claims to be.
-    let peer = peer_identity(stream).map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let peer = peer_identity(channel.stream)
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
     if peer.uid != context.invoking_uid {
         return Err(WorkerError::AuthFailed(format!(
             "client uid {} is not the authorizing user",
@@ -218,85 +302,49 @@ pub fn serve_session(
     let pin =
         pin_peer(peer.pid, peer.uid).map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
 
-    let mut incoming = SequenceTracker::new();
-    let mut outgoing: u64 = 0;
-    let mut send = |stream: &mut UnixStream, message: Message| -> Result<(), WorkerError> {
-        let envelope = WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: context.session,
-            sequence: outgoing,
-            message,
-        };
-        send_envelope(stream, &envelope)
-            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-        outgoing = outgoing.saturating_add(1);
-        Ok(())
-    };
-    let mut recv =
-        |stream: &mut UnixStream, timeout: Duration| -> Result<WireEnvelope, WorkerError> {
-            let envelope = recv_envelope(stream, timeout)
-                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-            incoming
-                .accept(envelope.sequence)
-                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-            if envelope.session_id != context.session {
-                return Err(WorkerError::AuthFailed("session mismatch".into()));
-            }
-            if envelope.version != PROTOCOL_VERSION {
-                return Err(WorkerError::Protocol("protocol version mismatch".into()));
-            }
-            Ok(envelope)
-        };
-
     // WorkerHello first: the client must know it reached the privileged
     // worker for this session before it proposes anything.
-    let target = worker_target(&context)?;
-    send(
-        stream,
-        Message::WorkerHello(WorkerHello {
-            protocol_version: PROTOCOL_VERSION,
-            session_id: context.session,
-            target,
-            worker_pid: std::process::id(),
-            capabilities: worker_capabilities(),
-        }),
-    )?;
+    let target = worker_target(context)?;
+    channel.send(Message::WorkerHello(WorkerHello {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: context.session,
+        target,
+        worker_pid: std::process::id(),
+        capabilities: worker_capabilities(),
+    }))?;
 
     // Exactly one Prepare per session.
     let mut session_state = PrivilegedSession::new(context.session);
     let prepared = loop {
-        let envelope = recv(stream, HANDSHAKE_TIMEOUT)?;
+        let envelope = channel.recv(HANDSHAKE_TIMEOUT)?;
         match envelope.message {
             Message::Prepare(intent) => {
-                break prepare_operation(stream, &context, &pin, intent)?;
+                break prepare_operation(context, &pin, intent)?;
             }
-            Message::Cancel => return Err(WorkerError::Protocol("cancelled".into())),
+            Message::Cancel => return Err(WorkerError::Cancelled),
             _ => return Err(WorkerError::Protocol("expected Prepare".into())),
         }
     };
     session_state
         .prepared(context.session, &prepared.plan_digest)
         .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-    send(
-        stream,
-        Message::Prepared(PreparedOperation {
-            plan_digest: prepared.plan_digest.clone(),
-            operation: prepared.operation.clone(),
-            app_id: prepared.app_id.clone(),
-            app_version: prepared.app_version.clone(),
-            scope: prepared.scope.clone(),
-            target: prepared.target.clone(),
-            file_count: prepared.file_count,
-        }),
-    )?;
+    channel.send(Message::Prepared(PreparedOperation {
+        plan_digest: prepared.plan_digest.clone(),
+        operation: prepared.operation.clone(),
+        app_id: prepared.app_id.clone(),
+        app_version: prepared.app_version.clone(),
+        scope: prepared.scope.clone(),
+        target: prepared.target.clone(),
+        file_count: prepared.file_count,
+    }))?;
 
     // No mutation has happened yet: a client that disappears here leaves
     // nothing behind, and expiry cleans the session and exits.
     let execute = loop {
-        match recv(stream, EXECUTE_TIMEOUT) {
+        match channel.recv(EXECUTE_TIMEOUT) {
             Ok(envelope) => match envelope.message {
                 Message::Execute(execute) => break execute,
-                Message::Cancel => return Err(WorkerError::Protocol("cancelled".into())),
+                Message::Cancel => return Err(WorkerError::Cancelled),
                 _ => return Err(WorkerError::Protocol("expected Execute".into())),
             },
             Err(error) => return Err(error),
@@ -322,16 +370,13 @@ pub fn serve_session(
         pin.verify(&prepared.carrier_path)?;
     }
 
-    let outcome = execute_prepared(stream, &prepared, &mut send)?;
-    send(
-        stream,
-        Message::Completed(zup_protocol::Completed {
-            transaction_id: prepared.transaction_id,
-            outcome: outcome.clone(),
-            prerequisite_id: None,
-            exit_code: None,
-        }),
-    )?;
+    let outcome = execute_prepared(channel, &prepared)?;
+    channel.send(Message::Completed(zup_protocol::Completed {
+        transaction_id: prepared.transaction_id,
+        outcome: outcome.clone(),
+        prerequisite_id: None,
+        exit_code: None,
+    }))?;
     Ok(outcome)
 }
 
@@ -395,7 +440,6 @@ struct PreparedPayload {
 /// the machine policy. A mismatch anywhere refuses the session before the
 /// lock is taken and before any journal exists.
 fn prepare_operation(
-    _stream: &mut UnixStream,
     context: &WorkerContext,
     _pin: &PeerPin,
     intent: PrepareOperation,
@@ -883,9 +927,8 @@ fn verify_carrier_declares(
 /// Execute exactly the prepared plan: lock, journal, publish. No
 /// replanning, no new inputs, no second Execute.
 fn execute_prepared(
-    stream: &mut UnixStream,
+    channel: &mut SessionChannel<'_>,
     prepared: &PreparedPlan,
-    send: &mut impl FnMut(&mut UnixStream, Message) -> Result<(), WorkerError>,
 ) -> Result<String, WorkerError> {
     // The machine lock is already held from preparation: the same guard that
     // refused a second worker then serializes execution now.
@@ -922,15 +965,12 @@ fn execute_prepared(
     let (record, outcome) = coordinator
         .execute(record, &mut executor)
         .map_err(|error| WorkerError::Transaction(error.to_string()))?;
-    send(
-        stream,
-        Message::Progress(ProgressReport {
-            kind: ProgressKind::OperationProgress,
-            detail: "finishing".into(),
-            completed: None,
-            total: None,
-        }),
-    )?;
+    channel.send(Message::Progress(ProgressReport {
+        kind: ProgressKind::OperationProgress,
+        detail: "finishing".into(),
+        completed: None,
+        total: None,
+    }))?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
     match outcome {
         zup_transaction::TransactionOutcome::Committed => {

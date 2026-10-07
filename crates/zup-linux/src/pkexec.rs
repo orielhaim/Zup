@@ -158,11 +158,11 @@ impl WorkerChild for SystemWorkerChild {
     }
 }
 
-/// A fake launcher for tests: canned pid and outcome, no process.
+/// A fake launcher for unit tests: canned pid and outcome, no process.
 ///
 /// Test-only dependency injection for result mapping: production resolution
 /// stays strict and never consults the environment.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct FakePkexec {
     /// The pid the fake child reports.
@@ -171,7 +171,7 @@ pub struct FakePkexec {
     pub outcome: LaunchOutcome,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl PkexecLauncher for FakePkexec {
     type Child = FakeWorkerChild;
 
@@ -183,14 +183,14 @@ impl PkexecLauncher for FakePkexec {
     }
 }
 
-/// A fake worker child for tests.
-#[cfg(any(test, feature = "test-support"))]
+/// A fake worker child for unit tests.
+#[cfg(test)]
 pub struct FakeWorkerChild {
     pid: u32,
     outcome: LaunchOutcome,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl WorkerChild for FakeWorkerChild {
     fn pid(&self) -> u32 {
         self.pid
@@ -327,6 +327,43 @@ mod tests {
         assert!(matches!(
             map_launch(&outcome),
             Err(PkexecError::WorkerFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_fake_launcher_reports_its_pid_and_outcome() {
+        // The injection seam itself: a test launcher names its child and its
+        // ending without a process, so result mapping is proven without
+        // polkit. Production resolution never consults this path.
+        let launcher = FakePkexec {
+            pid: 4242,
+            outcome: LaunchOutcome {
+                code: Some(0),
+                stderr: String::new(),
+            },
+        };
+        let child = launcher
+            .spawn(Path::new("/bin/true"), &[])
+            .expect("a fake spawn");
+        assert_eq!(child.pid(), 4242);
+        let outcome = child.wait().expect("a fake wait");
+        assert!(map_launch(&outcome).is_ok());
+
+        let denied = FakePkexec {
+            pid: 4243,
+            outcome: LaunchOutcome {
+                code: Some(126),
+                stderr: "Not authorized".into(),
+            },
+        };
+        let outcome = denied
+            .spawn(Path::new("/bin/true"), &[])
+            .expect("a fake spawn")
+            .wait()
+            .expect("a fake wait");
+        assert!(matches!(
+            map_launch(&outcome),
+            Err(PkexecError::AuthorizationFailed(_))
         ));
     }
 

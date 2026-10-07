@@ -8,7 +8,7 @@
 //! verification does not.
 
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use zup_protocol::{SessionId, WireEnvelope};
@@ -16,13 +16,12 @@ use zup_protocol::{SessionId, WireEnvelope};
 use crate::machine::MachineRoots;
 use crate::run::{LinuxAction, LinuxOutcome, LinuxRunError, LinuxRunRequest};
 
-/// Isolated machine roots under a temporary base, for machine-scope tests.
+/// Isolated machine roots under a caller-held base, for machine-scope tests.
 ///
 /// Nothing here touches the host's `/opt` or `/var/lib/zup`: every root
-/// lives under the returned temporary directory, which vanishes on drop.
+/// lives under `base`, which the test owns (usually a temporary directory
+/// that vanishes on drop).
 pub struct MachineTestRoots {
-    /// Holds the base alive. Dropping removes the whole tree.
-    pub _base: tempfile::TempDir,
     /// The isolated roots to pass explicitly.
     pub roots: MachineRoots,
     /// The isolated state root, for request overrides.
@@ -30,21 +29,16 @@ pub struct MachineTestRoots {
 }
 
 impl MachineTestRoots {
-    /// Create the isolated tree.
-    pub fn isolate() -> Self {
-        let base = tempfile::tempdir().expect("an isolated machine base");
-        let programs = base.path().join("opt");
-        let state = base.path().join("var").join("lib").join("zup");
-        let shared_data = base.path().join("var").join("opt");
+    /// Create the isolated tree under `base`.
+    pub fn isolate_in(base: &Path) -> Self {
+        let programs = base.join("opt");
+        let state = base.join("var").join("lib").join("zup");
+        let shared_data = base.join("var").join("opt");
         for directory in [&programs, &shared_data, state.parent().expect("a parent")] {
             std::fs::create_dir_all(directory).expect("an isolated root");
         }
         let roots = MachineRoots::new(programs, state.clone(), shared_data);
-        Self {
-            _base: base,
-            roots,
-            state,
-        }
+        Self { roots, state }
     }
 }
 
@@ -90,6 +84,47 @@ pub fn serve_worker_isolated(
             carrier_pin: None,
         },
     )
+}
+
+/// Drive the real client handshake on `stream` with an expected plan, for
+/// client-side verification tests: hello, capability, session, and digest
+/// binding against an isolated worker.
+pub fn drive_client_isolated(
+    stream: &mut UnixStream,
+    session: SessionId,
+    intent: &zup_protocol::PrepareOperation,
+    expected_digest: &str,
+    expected_target: &zup_core::TargetTriple,
+) -> Result<crate::run::LinuxOutcome, crate::run::LinuxRunError> {
+    crate::elevate::drive_client(stream, session, intent, expected_digest, expected_target)
+}
+
+/// Plan one machine operation and return the intent plus the compiled
+/// plan, for tests that journal an interrupted transaction.
+///
+/// The intent is what the client sends; the plan is what the worker must
+/// independently reconstruct. Recovery tests journal the plan, then prove
+/// the worker replays it before accepting new work.
+pub fn plan_for_test(
+    installer: &Path,
+    roots: &MachineRoots,
+    state: &Path,
+    action: LinuxAction,
+    install_dir_override: Option<PathBuf>,
+) -> (
+    zup_protocol::PrepareOperation,
+    zup_transaction::TransactionPlan,
+) {
+    let request = crate::run::LinuxRunRequest {
+        installer: installer.to_path_buf(),
+        scope: zup_core::SelectedScope::Machine,
+        state_root: Some(state.to_path_buf()),
+        action,
+        install_dir_override,
+    };
+    let (intent, expected) = crate::elevate::plan_expected(&request, &state.to_path_buf(), roots)
+        .expect("the fixture plans");
+    (intent, expected.plan)
 }
 
 /// Send one envelope on a test stream.
