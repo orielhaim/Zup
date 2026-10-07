@@ -580,17 +580,24 @@ fn check_linux_lowering(
     if !errors.is_empty() {
         return Err(miette::miette!("{}", errors.join("\n")));
     }
+    let scopes = match config.install.scope {
+        zup_core::InstallScope::User => vec![SelectedScope::User],
+        zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
+        zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
+    };
     #[cfg(target_os = "linux")]
     {
-        let request = zup_plan::PlanRequest::new(config.target.clone(), SelectedScope::User);
-        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
-            miette::miette!("semantic plan for target `{}`: {error}", config.target)
-        })?;
-        zup_linux::resolve_target(&install).map_err(|error| {
-            miette::miette!("Linux lowering for target `{}`: {error}", config.target)
-        })?;
+        for scope in &scopes {
+            let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
+            let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
+                miette::miette!("semantic plan for target `{}`: {error}", config.target)
+            })?;
+            zup_linux::resolve_target(&install).map_err(|error| {
+                miette::miette!("Linux lowering for target `{}`: {error}", config.target)
+            })?;
+        }
     }
-    Ok(vec![SelectedScope::User])
+    Ok(scopes)
 }
 
 /// Whether Windows target lowering resolves for every install scope of a target.
