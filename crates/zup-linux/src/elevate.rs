@@ -71,8 +71,8 @@ pub(crate) struct ExpectedPlan {
     pub digest: String,
     pub target: zup_core::TargetTriple,
     /// The compiled plan itself, for tests that journal an interrupted
-    /// transaction. Present only under `test` or `test-support`: production
-    /// planning binds the digest, never the plan object.
+    /// transaction. Present only with `test-support`: production planning
+    /// binds the digest, never the plan object.
     #[cfg(feature = "test-support")]
     pub plan: zup_transaction::TransactionPlan,
 }

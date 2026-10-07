@@ -459,14 +459,12 @@ fn prepare_operation(
             "the privileged worker serves machine scope only".into(),
         ));
     }
-    let target: zup_core::TargetTriple = intent
-        .target
-        .operating_system()
-        .eq(&zup_core::TargetOperatingSystem::Linux)
-        .then(|| intent.target.clone())
-        .ok_or_else(|| {
-            WorkerError::Policy("the privileged worker serves Linux targets only".into())
-        })?;
+    if intent.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+        return Err(WorkerError::Policy(
+            "the privileged worker serves Linux targets only".into(),
+        ));
+    }
+    let target = intent.target.clone();
     let app_id = AppId::new(&intent.app_id)
         .map_err(|error| WorkerError::Policy(format!("app id: {error}")))?;
     let app_version: semver::Version = intent
@@ -527,7 +525,7 @@ fn prepare_operation(
             "machine scope runs no prerequisite installers as root".into(),
         ));
     }
-    if build.installer.install.scope.allows_machine() == false {
+    if !build.installer.install.scope.allows_machine() {
         return Err(WorkerError::Policy(
             "the package does not declare machine scope".into(),
         ));
