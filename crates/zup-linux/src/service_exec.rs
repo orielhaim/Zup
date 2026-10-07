@@ -485,7 +485,10 @@ fn write_source(
 ///
 /// Mask transitions unmask first where required; a broad disable that would
 /// delete unrelated administrator enablement refuses (fail closed) rather
-/// than silently removing state Zup does not own.
+/// than silently removing state Zup does not own. The owned link is the
+/// single `multi-user.target.wants` symlink this renderer's `[Install]`
+/// section creates; anything else wanting the unit is preserved by
+/// refusing.
 fn apply_policy(
     unit: &str,
     start: ServiceStart,
@@ -506,11 +509,15 @@ fn apply_policy(
                 changes.extend(manager.unmask(unit).map_err(ServiceError::from)?);
             }
             if state == "enabled" || state == "enabled-runtime" {
+                refuse_unrelated_enablement(unit)?;
                 changes.extend(manager.disable(unit).map_err(ServiceError::from)?);
             }
         }
         ServiceStart::Disabled => {
             let state = manager.unit_file_state(unit).map_err(ServiceError::from)?;
+            if state == "enabled" || state == "enabled-runtime" {
+                refuse_unrelated_enablement(unit)?;
+            }
             if state == "enabled" || state == "enabled-runtime" {
                 changes.extend(manager.disable(unit).map_err(ServiceError::from)?);
             }
@@ -518,6 +525,55 @@ fn apply_policy(
         }
     }
     Ok(())
+}
+
+/// Refuse when administrator-added enablement exists beyond the single
+/// link Zup owns: a broad disable would delete it, so the transition
+/// fails closed instead.
+fn refuse_unrelated_enablement(unit: &str) -> Result<(), ServiceError> {
+    let extras = extra_enablement_links(unit);
+    if extras.is_empty() {
+        return Ok(());
+    }
+    Err(ServiceError::Ambiguous {
+        unit: unit.to_owned(),
+        reason: format!(
+            "refusing broad disable: unrelated enablement exists: {}",
+            extras
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Administrator-owned enablement links for one unit: every
+/// `/etc/systemd/system/*.wants/<unit>` symlink except the single
+/// `multi-user.target.wants` link this backend owns.
+fn extra_enablement_links(unit: &str) -> Vec<std::path::PathBuf> {
+    let mut extras = Vec::new();
+    let Ok(layer) = std::fs::read_dir("/etc/systemd/system") else {
+        return extras;
+    };
+    for entry in layer.flatten() {
+        let path = entry.path();
+        // Only `.wants` directories hold enablement links.
+        if path.extension().and_then(|extension| extension.to_str()) != Some("wants") {
+            continue;
+        }
+        // The one this backend owns is never extra.
+        if path.file_name().and_then(|name| name.to_str()) == Some("multi-user.target.wants") {
+            continue;
+        }
+        let candidate = path.join(unit);
+        if std::fs::symlink_metadata(&candidate)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            extras.push(candidate);
+        }
+    }
+    extras
 }
 
 /// Verify systemd resolves the unit as Zup installed it: the fragment is
@@ -798,6 +854,7 @@ pub fn apply_remove(
         changes.extend(context.manager.unmask(unit).map_err(ServiceError::from)?);
     }
     if state == "enabled" || state == "enabled-runtime" {
+        refuse_unrelated_enablement(unit)?;
         changes.extend(context.manager.disable(unit).map_err(ServiceError::from)?);
     }
     remove_file_no_follow(unit, &canonical)?;
