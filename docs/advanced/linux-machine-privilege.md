@@ -24,7 +24,8 @@ privileged Zup worker (this binary, `__privileged-worker`)
         ├─ reconstruct and verify plan identity
         ├─ enforce the privileged path policy
         ├─ acquire the machine lock
-        └─ execute the normal Zup transaction → /opt, /var/lib/zup
+        └─ execute the normal Zup transaction → /opt, /var/lib/zup, typed
+     systemd unit sources
 ```
 
 Everything originating from the unprivileged process is untrusted:
@@ -51,7 +52,7 @@ its own verified inputs.
 | Cross-session message confusion | Every frame binds the session identity; strangers refuse. |
 | Plan substitution after authorization | Prepare carries the client's expected digest; Prepared echoes the worker's reconstruction; Execute names it exactly; mismatch refuses. |
 | Package substitution after authorization | The carrier inode is pinned at verification and rechecked before Execute; per-file digests and post-publish verification add depth. |
-| Symlink and path substitution | Descriptor-relative operations, symlink-ancestor refusal, no-follow opens, and the privileged destination allowlist (`/opt`, `/var/opt`, `/var/lib/zup`). |
+| Symlink and path substitution | Descriptor-relative operations, symlink-ancestor refusal, no-follow opens, and the privileged destination allowlist (`/opt`, `/var/opt`, `/var/lib/zup`, plus typed `<unit>.service` sources under `/usr/local/lib/systemd/system`). |
 | Filesystem races | No check-then-act on names: kernel-enforced exclusive publication, durable backups before replace, atomic renames. |
 | Hard links | Nothing publishes in place: creates are exclusive, replaces rename over the name, removals unlink the name. A hard-linked victim keeps its bytes because the inode is never truncated or written through. |
 | Arbitrary absolute paths | The destination policy refuses everything outside the allowed trees; install-directory overrides stay inside the program tree; `..` is refused, never resolved. |
@@ -60,6 +61,12 @@ its own verified inputs.
 | Stale journals | Recovery-before-mutation on every machine operation; committed-but-unpublished gaps are published first. |
 | Untrusted environment variables and `PATH` | Machine roots are policy constants, never environment; `pkexec` is resolved from absolute system paths and validated, never from `PATH`. |
 | Malicious plugins | Machine scope refuses projects that need plugin execution; planning itself rejects active plugins before any plugin code could run. |
+| Service unit substitution | The unit name is re-derived from the stable service identity and the bytes re-rendered from the operation inside the worker; the plan digest binds both, and Execute names the exact digest. |
+| Foreign service binaries | The executable must resolve under the Zup-owned program tree to a declared executable payload, and is revalidated (regular, root-owned, private, runnable, no-follow) before systemd integration commits. |
+| Unit identity collision | Same-name units in `/etc`, `/run`, `/usr/local/lib` (foreign), or `/usr/lib` refuse the transaction; distro and administrator units are never overwritten. |
+| Administrator override removal | Full `/etc` overrides and drop-ins are never deleted; an override shadowing the source is a conflict requiring administrator action. |
+| Unrelated enablement deletion | Broad disable operations that would delete administrator-added links refuse instead; only Zup-owned enablement is retired. |
+| Service as command runner | No shell, no `StartUnit`/`StopUnit`/`RestartUnit` on the manager surface, no D-Bus force flags: installing registers boot policy and never executes application code. |
 | Cancelled authentication | Typed outcomes distinguish cancellation, denial, missing mechanism, worker failure, and protocol failure. |
 
 ## Explicit non-goals
@@ -76,9 +83,10 @@ its own verified inputs.
   authorization serves one bounded worker lifetime. Test harnesses may
   use `sudo` to stage isolated root-owned environments in CI; production
   never does.
-- **No services, systemd, D-Bus, desktop integration, PATH mutation, or
-  package-manager prerequisites in the privileged worker.** Those are
-  later phases with their own trust models.
+- **No user services, socket/timer units, service users, environment
+  files, hardening or resource directives, desktop integration, PATH
+  mutation, or package-manager prerequisites in the privileged worker.**
+  Those are later phases with their own trust models.
 
 ## Trust anchors
 
