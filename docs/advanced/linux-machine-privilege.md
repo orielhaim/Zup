@@ -46,7 +46,7 @@ its own verified inputs.
 | Another process running as the same user | Peer uid must equal the authorizing uid; the rendezvous is private; state only trusts root-owned private entries. |
 | Concurrent installer sessions | The root lock is acquired at preparation and held through execution; a second session refuses as busy. |
 | PID reuse | The peer is pinned with a pidfd held for the session (or pid plus start time plus uid where pidfd is unavailable); liveness is rechecked before Execute. |
-| IPC endpoint replacement | The rendezvous directory is validated (owner, type, privacy) before connecting; peer credentials decide identity, never the pathname. |
+| IPC endpoint replacement | The rendezvous directory is validated (owner, type, privacy) before connecting; peer credentials decide identity, never the pathname. The worker additionally requires the exact client pid it was launched for, and the client skips impostor connections until its real worker arrives. |
 | Replay of old worker messages | Versioned bounded framing, per-sender sequences, one Prepare and one Execute per session, enforced by the portable session tracker. |
 | Cross-session message confusion | Every frame binds the session identity; strangers refuse. |
 | Plan substitution after authorization | Prepare carries the client's expected digest; Prepared echoes the worker's reconstruction; Execute names it exactly; mismatch refuses. |

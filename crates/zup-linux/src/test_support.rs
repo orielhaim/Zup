@@ -71,6 +71,7 @@ pub fn serve_worker_isolated(
     stream: &mut UnixStream,
     roots: &MachineRoots,
     invoking_uid: u32,
+    expected_client_pid: u32,
     session: SessionId,
     worker_exe: &PathBuf,
 ) -> Result<String, crate::worker::WorkerError> {
@@ -79,6 +80,7 @@ pub fn serve_worker_isolated(
         crate::worker::WorkerContext {
             roots: roots.clone(),
             invoking_uid,
+            expected_client_pid,
             session,
             worker_exe: worker_exe.clone(),
             carrier_pin: None,

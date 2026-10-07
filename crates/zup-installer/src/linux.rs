@@ -85,6 +85,10 @@ struct WorkerArgs {
     /// The session this worker serves.
     #[arg(long)]
     session: String,
+    /// The client process this worker serves, verified against kernel peer
+    /// credentials rather than trusted as a claim.
+    #[arg(long)]
+    client_pid: u32,
 }
 
 /// Run the runtime as the frontend its binary was built for.
@@ -98,8 +102,8 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     }
     // The worker mode is argv-dispatched before anything else reads the
     // package: it authenticates and serves one session, never a lifecycle.
-    if let Some(session) = worker_session_arg() {
-        return run_worker(session);
+    if let Some((session, client_pid)) = worker_session_args() {
+        return run_worker(session, client_pid);
     }
     let cli = Cli::parse();
     let action = match cli.verb {
@@ -110,7 +114,9 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             force_files: args.force,
         },
         Some(Verb::Uninstall) => zup_linux::LinuxAction::Uninstall,
-        Some(Verb::__PrivilegedWorker(args)) => return run_worker(args.session),
+        Some(Verb::__PrivilegedWorker(args)) => {
+            return run_worker(args.session, args.client_pid);
+        }
     };
     let executable =
         std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
@@ -138,29 +144,34 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
 }
 
 /// The worker session when this process started as one, without parsing the
-/// full CLI: worker argv is `__privileged-worker --session <uuid>` in any
-/// position clap would otherwise reject before the worker authenticates.
-fn worker_session_arg() -> Option<String> {
+/// full CLI: worker argv is `__privileged-worker --session <uuid>
+/// --client-pid <pid>` in any position clap would otherwise reject before
+/// the worker authenticates.
+fn worker_session_args() -> Option<(String, u32)> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "__privileged-worker" {
+            let mut session = None;
+            let mut client_pid = None;
             while let Some(flag) = args.next() {
                 if flag == "--session" {
-                    return args.next();
+                    session = args.next();
+                } else if flag == "--client-pid" {
+                    client_pid = args.next().and_then(|pid| pid.parse::<u32>().ok());
                 }
             }
-            return None;
+            return session.map(|session| (session, client_pid.unwrap_or(0)));
         }
     }
     None
 }
 
 /// Serve one privileged session and exit with its outcome.
-fn run_worker(session: String) -> miette::Result<()> {
+fn run_worker(session: String, client_pid: u32) -> miette::Result<()> {
     let session: zup_protocol::SessionId = session
         .parse()
         .map_err(|_| miette::miette!("the worker serves one session, named by uuid"))?;
-    match zup_linux::run_worker_mode(session) {
+    match zup_linux::run_worker_mode(session, client_pid) {
         Ok(outcome) => {
             println!("worker: {outcome}");
             Ok(())

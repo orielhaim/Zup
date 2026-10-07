@@ -361,7 +361,14 @@ fn machine_lock_serializes_one_application() {
     let roots_a = roots.roots.clone();
     let installer_a = installer.clone();
     let worker = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker_a, &roots_a, uid, session_a, &installer_a)
+        serve_worker_isolated(
+            &mut worker_a,
+            &roots_a,
+            uid,
+            std::process::id(),
+            session_a,
+            &installer_a,
+        )
     });
     let hello = next_hello(&mut client_a);
     assert_eq!(hello.session_id, session_a);
@@ -390,7 +397,14 @@ fn machine_lock_serializes_one_application() {
     let roots_b = roots.roots.clone();
     let installer_b = installer.clone();
     let worker_b_handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker_b, &roots_b, uid, session_b, &installer_b)
+        serve_worker_isolated(
+            &mut worker_b,
+            &roots_b,
+            uid,
+            std::process::id(),
+            session_b,
+            &installer_b,
+        )
     });
     let _ = next_hello(&mut client_b);
     send_prepare(
@@ -449,7 +463,14 @@ fn machine_plan_substitution_is_refused() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
     });
     let _ = next_hello(&mut client);
     send_prepare(&mut client, session, 1, install_intent(None));
@@ -494,7 +515,14 @@ fn machine_execute_replay_reaches_no_worker() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
     });
     let outcome = drive_client_isolated(
         &mut client,
@@ -544,7 +572,14 @@ fn machine_cross_session_execute_is_refused() {
     let roots_a = roots.roots.clone();
     let installer_a = installer.clone();
     let worker_a = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker_a, &roots_a, uid, session_a, &installer_a)
+        serve_worker_isolated(
+            &mut worker_a,
+            &roots_a,
+            uid,
+            std::process::id(),
+            session_a,
+            &installer_a,
+        )
     });
     let _ = next_hello(&mut client_a);
     send_prepare(&mut client_a, session_a, 1, install_intent(None));
@@ -555,7 +590,14 @@ fn machine_cross_session_execute_is_refused() {
     let roots_b = roots.roots.clone();
     let installer_b = installer.clone();
     let worker_b = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker_b, &roots_b, uid, session_b, &installer_b)
+        serve_worker_isolated(
+            &mut worker_b,
+            &roots_b,
+            uid,
+            std::process::id(),
+            session_b,
+            &installer_b,
+        )
     });
     let _ = next_hello(&mut client_b);
     // Session B prepares a *different* operation so its digest differs.
@@ -639,7 +681,14 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         let roots_clone = roots.roots.clone();
         let installer_clone = installer.clone();
         let handle = std::thread::spawn(move || {
-            serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+            serve_worker_isolated(
+                &mut worker,
+                &roots_clone,
+                uid,
+                std::process::id(),
+                session,
+                &installer_clone,
+            )
         });
         let _ = next_hello(&mut client);
         use std::io::Write as _;
@@ -666,7 +715,14 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         let roots_clone = roots.roots.clone();
         let installer_clone = installer.clone();
         let handle = std::thread::spawn(move || {
-            serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+            serve_worker_isolated(
+                &mut worker,
+                &roots_clone,
+                uid,
+                std::process::id(),
+                session,
+                &installer_clone,
+            )
         });
         let _ = next_hello(&mut client);
         send_envelope_on(
@@ -701,7 +757,14 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         let roots_clone = roots.roots.clone();
         let installer_clone = installer.clone();
         let handle = std::thread::spawn(move || {
-            serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+            serve_worker_isolated(
+                &mut worker,
+                &roots_clone,
+                uid,
+                std::process::id(),
+                session,
+                &installer_clone,
+            )
         });
         let _ = next_hello(&mut client);
         let mut intent = install_intent(None);
@@ -743,7 +806,14 @@ fn machine_package_substitution_is_detected() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
     });
     let _ = next_hello(&mut client);
     send_prepare(&mut client, session, 1, install_intent(None));
@@ -793,12 +863,56 @@ fn machine_wrong_peer_uid_is_refused() {
     assert_ne!(stranger, rustix::process::getuid().as_raw());
     let roots_clone = roots.roots.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, stranger, session, &installer)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            stranger,
+            std::process::id(),
+            session,
+            &installer,
+        )
     });
     // No hello arrives: the peer check fails first.
     assert!(
         recv_envelope_on(&mut client, HANDSHAKE).is_err(),
         "a foreign uid gets no session"
+    );
+    handle
+        .join()
+        .expect("the worker exits")
+        .expect_err("refused");
+}
+
+/// A wrong client process is refused even with the right user: pid binding
+/// uses kernel credentials, and a neighboring same-user process cannot
+/// drive the session.
+#[test]
+fn machine_wrong_peer_pid_is_refused() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let uid = rustix::process::getuid().as_raw();
+    let session = SessionId::new_v7();
+    let (mut client, mut worker) = UnixStream::pair().expect("a pair");
+    let roots_clone = roots.roots.clone();
+    let installer_clone = installer.clone();
+    // Nobody holds this pid here: the check names the launched installer,
+    // not whoever connected first.
+    let stranger_pid = u32::MAX - 11;
+    assert_ne!(stranger_pid, std::process::id());
+    let handle = std::thread::spawn(move || {
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            stranger_pid,
+            session,
+            &installer_clone,
+        )
+    });
+    assert!(
+        recv_envelope_on(&mut client, HANDSHAKE).is_err(),
+        "a foreign process gets no session"
     );
     handle
         .join()
@@ -1135,7 +1249,14 @@ fn machine_cancel_before_execute_mutates_nothing() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
     });
     let _ = next_hello(&mut client);
     send_prepare(&mut client, session, 1, install_intent(None));
@@ -1192,7 +1313,14 @@ fn machine_override_swap_is_refused() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     let handle = std::thread::spawn(move || {
-        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+        serve_worker_isolated(
+            &mut worker,
+            &roots_clone,
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
     });
     let _ = next_hello(&mut client);
     let mut intent_b = install_intent(Some(digest_a));

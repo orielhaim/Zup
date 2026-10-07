@@ -105,6 +105,12 @@ pub struct WorkerContext {
     pub roots: MachineRoots,
     /// The uid `pkexec` reports as the authorizing user. The peer must be it.
     pub invoking_uid: u32,
+    /// The client process the worker serves: the peer pid must equal this,
+    /// pinned for the session. The value arrives over an untrusted channel
+    /// and is verified against kernel credentials, never trusted as a
+    /// claim - but without it, any same-user process that reached the
+    /// rendezvous first could drive the session.
+    pub expected_client_pid: u32,
     /// This elevation's session. Frames outside it are cross-session
     /// confusion and are refused.
     pub session: SessionId,
@@ -155,12 +161,20 @@ impl FilePin {
 ///
 /// Refuses unless this process is uid 0 with a `PKEXEC_UID` authorizing
 /// user: the worker mode is an internal detail, not a command anyone runs
-/// by hand to gain authority they do not have.
-pub fn run_worker_mode(session: SessionId) -> Result<String, WorkerError> {
+/// by hand to gain authority they do not have. The expected client pid
+/// arrives over the untrusted command line and is verified against kernel
+/// peer credentials before anything is served.
+pub fn run_worker_mode(
+    session: SessionId,
+    expected_client_pid: u32,
+) -> Result<String, WorkerError> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(WorkerError::AuthFailed(
             "the privileged worker runs as root after authorization".into(),
         ));
+    }
+    if expected_client_pid == 0 {
+        return Err(WorkerError::AuthFailed("no client process".into()));
     }
     let invoking = std::env::var("PKEXEC_UID")
         .map_err(|_| WorkerError::AuthFailed("no authorizing user".into()))?
@@ -181,6 +195,7 @@ pub fn run_worker_mode(session: SessionId) -> Result<String, WorkerError> {
     let context = WorkerContext {
         roots: MachineRoots::production(),
         invoking_uid: invoking,
+        expected_client_pid,
         session,
         worker_exe,
         carrier_pin: None,
@@ -297,7 +312,9 @@ fn serve_inner(
     context: &WorkerContext,
 ) -> Result<String, WorkerError> {
     // The peer is whoever holds the other end right now - not whoever the
-    // first message claims to be.
+    // first message claims to be. Both halves are kernel evidence: the uid
+    // must be the authorizing user, and the pid must be the exact client
+    // process this session was launched for.
     let peer = peer_identity(channel.stream)
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
     if peer.uid != context.invoking_uid {
@@ -305,6 +322,11 @@ fn serve_inner(
             "client uid {} is not the authorizing user",
             peer.uid
         )));
+    }
+    if peer.pid != context.expected_client_pid {
+        return Err(WorkerError::AuthFailed(
+            "client process is not the launched installer".into(),
+        ));
     }
     let pin =
         pin_peer(peer.pid, peer.uid).map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
@@ -1074,7 +1096,7 @@ mod tests {
             return;
         }
         assert!(matches!(
-            run_worker_mode(SessionId::new_v7()),
+            run_worker_mode(SessionId::new_v7(), std::process::id()),
             Err(WorkerError::AuthFailed(_))
         ));
     }

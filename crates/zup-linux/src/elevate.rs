@@ -284,6 +284,8 @@ pub(crate) fn run_machine_elevated_once(
         "__privileged-worker".to_owned(),
         "--session".to_owned(),
         session.0.to_string(),
+        "--client-pid".to_owned(),
+        std::process::id().to_string(),
     ];
     let mut spawned = launcher
         .spawn(&worker_exe, &args)
@@ -291,44 +293,41 @@ pub(crate) fn run_machine_elevated_once(
     // Wait for the worker's connection in slices, watching the child:
     // an authorization that fails fast must surface at once, not after
     // the connection timeout. The deadline still bounds the wait;
-    // authentication timing itself belongs to pkexec/polkit.
+    // authentication timing itself belongs to pkexec/polkit. A connection
+    // from anyone but the launched worker is an impostor: it is skipped,
+    // never served, and the wait continues for the real one.
     let mut stream = {
         let start = std::time::Instant::now();
         loop {
             match rendezvous.accept(Duration::from_secs(1)) {
-                Ok(stream) => break stream,
-                Err(crate::socket::SocketError::Timeout) => {
-                    match spawned.try_wait().map_err(LinuxRunError::Elevation)? {
-                        Some(launch) => {
-                            map_launch(&launch).map_err(LinuxRunError::Elevation)?;
-                            return Err(LinuxRunError::Worker(
-                                "the worker exited before connecting".into(),
-                            ));
-                        }
-                        None => {
-                            if start.elapsed() >= ACCEPT_TIMEOUT {
-                                return Err(LinuxRunError::Worker(
-                                    "the worker did not connect".into(),
-                                ));
-                            }
-                        }
+                Ok(stream) => {
+                    let peer = peer_identity(&stream).map_err(into_run_error)?;
+                    if peer.uid == 0 && peer.pid == spawned.pid() {
+                        break stream;
+                    }
+                    drop(stream);
+                }
+                Err(crate::socket::SocketError::Timeout) => {}
+                Err(error) => return Err(into_run_error(error)),
+            }
+            match spawned.try_wait().map_err(LinuxRunError::Elevation)? {
+                Some(launch) => {
+                    map_launch(&launch).map_err(LinuxRunError::Elevation)?;
+                    return Err(LinuxRunError::Worker(
+                        "the worker exited before connecting".into(),
+                    ));
+                }
+                None => {
+                    if start.elapsed() >= ACCEPT_TIMEOUT {
+                        return Err(LinuxRunError::Worker("the worker did not connect".into()));
                     }
                 }
-                Err(error) => return Err(into_run_error(error)),
             }
         }
     };
     // The worker is the process just launched, now root: peer uid 0 and
     // the exact launched pid, pinned against reuse.
     let peer = peer_identity(&stream).map_err(into_run_error)?;
-    if peer.uid != 0 {
-        return Err(LinuxRunError::Worker("the worker is not privileged".into()));
-    }
-    if peer.pid != spawned.pid() {
-        return Err(LinuxRunError::Worker(
-            "the connected worker is not the launched process".into(),
-        ));
-    }
     let _pin = pin_peer(peer.pid, peer.uid).map_err(into_run_error)?;
 
     let outcome = drive_client(
@@ -576,6 +575,9 @@ fn run_machine_loopback_once(
     let context = crate::worker::WorkerContext {
         roots: roots.clone(),
         invoking_uid: rustix::process::geteuid().as_raw(),
+        // The loopback client is this process: the same pinning as the
+        // elevated path, with no hop skipped.
+        expected_client_pid: std::process::id(),
         session,
         worker_exe: request.installer.clone(),
         carrier_pin: None,
