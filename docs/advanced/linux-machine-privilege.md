@@ -53,6 +53,7 @@ its own verified inputs.
 | Package substitution after authorization | The carrier inode is pinned at verification and rechecked before Execute; per-file digests and post-publish verification add depth. |
 | Symlink and path substitution | Descriptor-relative operations, symlink-ancestor refusal, no-follow opens, and the privileged destination allowlist (`/opt`, `/var/opt`, `/var/lib/zup`). |
 | Filesystem races | No check-then-act on names: kernel-enforced exclusive publication, durable backups before replace, atomic renames. |
+| Hard links | Nothing publishes in place: creates are exclusive, replaces rename over the name, removals unlink the name. A hard-linked victim keeps its bytes because the inode is never truncated or written through. |
 | Arbitrary absolute paths | The destination policy refuses everything outside the allowed trees; install-directory overrides stay inside the program tree; `..` is refused, never resolved. |
 | Malicious special files | Unexpected-kind refusals everywhere a regular file or directory is expected, in state, payload, and maintenance alike. |
 | Worker or client death during execution | The transaction is durable: the next invocation recovers the root-owned journal before accepting new work. |
@@ -81,6 +82,11 @@ its own verified inputs.
 
 ## Trust anchors
 
+- The session identity travels in `pkexec` argv because `pkexec` passes
+  arguments, not secrets. That exposure is safe by construction: the
+  session id is identity, not capability. Possession of it authorizes
+  nothing - the live socket connection, the kernel peer credentials, the
+  pidfd pin, and the per-session handshake do. It is never logged.
 - State root creation verifies the trusted parent and every existing
   entry, sets explicit modes, and never inherits umask behavior (the
   worker additionally runs under a restrictive umask).

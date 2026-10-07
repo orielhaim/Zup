@@ -132,6 +132,15 @@ pub fn plan_for_test(
     (intent, expected.plan)
 }
 
+/// Validate a rendezvous path the way the worker does: derived, then
+/// proven. For socket-replacement attack tests.
+pub fn validate_rendezvous_for_test(
+    socket: &std::path::Path,
+    invoking_uid: u32,
+) -> Result<(), crate::worker::WorkerError> {
+    crate::worker::validate_rendezvous(socket, invoking_uid)
+}
+
 /// Send one envelope on a test stream.
 pub fn send_envelope_on(
     stream: &mut UnixStream,

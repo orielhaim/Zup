@@ -195,7 +195,7 @@ pub fn run_worker_mode(session: SessionId) -> Result<String, WorkerError> {
 /// owned by the authorizing user, private to them, holding the session's
 /// socket. A replaced pathname or a raced endpoint fails here, before any
 /// peer is trusted.
-fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<(), WorkerError> {
+pub(crate) fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<(), WorkerError> {
     let directory = socket
         .parent()
         .ok_or_else(|| WorkerError::AuthFailed("the rendezvous has no directory".into()))?;

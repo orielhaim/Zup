@@ -497,4 +497,46 @@ mod tests {
             Err(LinuxResolveError::UnsupportedTarget { .. })
         ));
     }
+
+    /// Machine scope lowers no integration: a launcher that would become a
+    /// generated desktop entry in user scope is refused in machine scope,
+    /// because a machine desktop entry is deferred past this phase.
+    #[test]
+    fn machine_launchers_are_refused_not_lowered() {
+        let mut input = plan();
+        input.scope = SelectedScope::Machine;
+        input.launchers.push(zup_plan::PlannedLauncher {
+            key: ResourceKey::Launcher {
+                location: zup_core::LauncherLocation::Menu,
+                name: "tool".to_owned(),
+            },
+            location: zup_core::LauncherLocation::Menu,
+            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            target: zup_core::Template::parse("${location.programs}/tool/tool")
+                .expect("a template"),
+            arguments: Vec::new(),
+            working_directory: None,
+            privilege: zup_core::Privilege::System,
+        });
+        let error = resolve_target(&input).expect_err("machine launchers refuse");
+        assert!(error.to_string().contains("launcher"), "{error}");
+    }
+
+    /// A files-only machine plan resolves under the program tree: payload
+    /// destinations land where the privileged policy expects them.
+    #[test]
+    fn machine_files_resolve_under_opt() {
+        let mut input = plan();
+        input.scope = SelectedScope::Machine;
+        input.files.push(file("tool"));
+        let resolved = resolve_target(&input).expect("a machine file plan resolves");
+        assert!(
+            resolved.files[0]
+                .destination
+                .to_string()
+                .starts_with("/opt/"),
+            "payload lands under the program tree: {}",
+            resolved.files[0].destination
+        );
+    }
 }

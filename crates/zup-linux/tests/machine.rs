@@ -1086,3 +1086,158 @@ fn send_prepare(
     )
     .expect("prepare sends");
 }
+
+/// A symlink planted at an install destination is refused before anything
+/// is mutated: installation never writes through a link.
+#[test]
+fn machine_destination_symlink_is_refused() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let elsewhere = tempfile::tempdir().expect("an unrelated tree");
+    std::fs::write(elsewhere.path().join("target"), b"elsewhere").expect("write");
+    let destination = machine_install_dir(&roots.roots).join("tool");
+    std::fs::create_dir_all(destination.parent().expect("a parent")).expect("a parent");
+    std::os::unix::fs::symlink(elsewhere.path().join("target"), &destination)
+        .expect("a planted link");
+
+    let outcome = run_machine_isolated(
+        &installer,
+        &roots.roots,
+        &roots.state,
+        LinuxAction::Install,
+        None,
+    );
+    assert!(outcome.is_err(), "a planted link refuses: {outcome:?}");
+    assert_eq!(
+        std::fs::read(elsewhere.path().join("target")).expect("untouched"),
+        b"elsewhere"
+    );
+    assert!(
+        zup_linux::LinuxLedgerStore::new(&roots.state)
+            .load(&app_id(), SelectedScope::Machine)
+            .expect("the ledger reads")
+            .is_none(),
+        "nothing is owned after a refused destination"
+    );
+}
+
+/// Cancelling before Execute leaves no machine changes: no client means no
+/// final authorization, even after a successful preparation.
+#[test]
+fn machine_cancel_before_execute_mutates_nothing() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let uid = rustix::process::getuid().as_raw();
+    let session = SessionId::new_v7();
+    let (mut client, mut worker) = UnixStream::pair().expect("a pair");
+    let roots_clone = roots.roots.clone();
+    let installer_clone = installer.clone();
+    let handle = std::thread::spawn(move || {
+        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+    });
+    let _ = next_hello(&mut client);
+    send_prepare(&mut client, session, 1, install_intent(None));
+    let _ = next_prepared(&mut client);
+    send_envelope_on(
+        &mut client,
+        &WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: session,
+            sequence: 2,
+            message: Message::Cancel,
+        },
+    )
+    .expect("send");
+    let failed = next_failed(&mut client);
+    assert_eq!(failed.kind, zup_protocol::failure::CANCELLED);
+    handle
+        .join()
+        .expect("the worker exits")
+        .expect_err("cancelled");
+    assert!(
+        !machine_install_dir(&roots.roots).exists(),
+        "a cancelled session mutates nothing"
+    );
+}
+
+/// Swapping the install directory under an authorized digest is refused:
+/// the worker replans from the intent it received, and a digest bound to
+/// another directory does not match.
+#[test]
+fn machine_override_swap_is_refused() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer =
+        machine_fixture_override(scratch.path(), "v1", "1.0.0", &machine_v1_files(), true);
+    let uid = rustix::process::getuid().as_raw();
+
+    // The digest the client bound for directory A.
+    let dir_a = roots.roots.programs.join("AppA");
+    let (intent_a, plan_a) = zup_linux::test_support::plan_for_test(
+        &installer,
+        &roots.roots,
+        &roots.state,
+        LinuxAction::Install,
+        Some(dir_a.clone()),
+    );
+    let _ = plan_a;
+    let digest_a = intent_a.expected_plan_digest.clone().expect("bound");
+
+    // A session whose intent names directory B but authorizes A's digest.
+    let dir_b = roots.roots.programs.join("AppB");
+    let session = SessionId::new_v7();
+    let (mut client, mut worker) = UnixStream::pair().expect("a pair");
+    let roots_clone = roots.roots.clone();
+    let installer_clone = installer.clone();
+    let handle = std::thread::spawn(move || {
+        serve_worker_isolated(&mut worker, &roots_clone, uid, session, &installer_clone)
+    });
+    let _ = next_hello(&mut client);
+    let mut intent_b = install_intent(Some(digest_a));
+    intent_b.install_dir_override = Some(dir_b.display().to_string());
+    send_prepare(&mut client, session, 1, intent_b);
+    let failed = next_failed(&mut client);
+    assert_eq!(failed.kind, zup_protocol::failure::AUTHENTICATION);
+    handle
+        .join()
+        .expect("the worker exits")
+        .expect_err("refused");
+    assert!(
+        !dir_a.exists() && !dir_b.exists(),
+        "a swapped override installs nowhere"
+    );
+}
+
+/// A replaced rendezvous is refused before any peer is trusted: the
+/// session directory must be real, owned, and private.
+#[test]
+fn machine_replaced_rendezvous_is_refused() {
+    use zup_linux::test_support::validate_rendezvous_for_test;
+
+    let uid = rustix::process::getuid().as_raw();
+    let base = tempfile::tempdir().expect("a base");
+    let session_dir = base.path().join("session");
+    std::fs::create_dir_all(&session_dir).expect("a directory");
+    // A private directory owned by this user validates.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    validate_rendezvous_for_test(&session_dir.join("worker.sock"), uid).expect("honest validates");
+    // A symlink where the session directory belongs does not.
+    let link_base = tempfile::tempdir().expect("a base");
+    let target = link_base.path().join("target");
+    std::fs::create_dir_all(&target).expect("a target");
+    let link = link_base.path().join("session");
+    std::os::unix::fs::symlink(&target, &link).expect("a planted link");
+    assert!(
+        validate_rendezvous_for_test(&link.join("worker.sock"), uid).is_err(),
+        "a replaced rendezvous refuses"
+    );
+    // A world-writable directory does not either.
+    std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    assert!(
+        validate_rendezvous_for_test(&session_dir.join("worker.sock"), uid).is_err(),
+        "an unprivate rendezvous refuses"
+    );
+}

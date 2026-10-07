@@ -251,6 +251,35 @@ fn root_refuses_user_writable_ledger() {
     );
 }
 
+/// Already root takes no weaker shortcut: the public run dispatches machine
+/// scope through the same worker path, with the same validation.
+#[test]
+fn root_public_run_dispatches_machine_scope() {
+    if !root_only() {
+        return;
+    }
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let outcome = zup_linux::run(&zup_linux::LinuxRunRequest {
+        installer,
+        scope: SelectedScope::Machine,
+        state_root: Some(roots.state.clone()),
+        action: LinuxAction::Install,
+        install_dir_override: None,
+    });
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "the public machine run commits without pkexec: {outcome:?}"
+    );
+    let tool = roots.roots.programs.join("tool").join("tool");
+    assert!(
+        tool.is_file(),
+        "the payload installed through the public path"
+    );
+    assert_eq!(uid_of(&tool), 0);
+}
+
 /// Real `pkexec` is proven by hand, not by CI: this test documents the
 /// boundary instead of faking it.
 ///
