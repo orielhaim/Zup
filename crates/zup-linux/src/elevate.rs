@@ -227,19 +227,6 @@ fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
         .unwrap_or_else(|| MachineRoots::production().state)
 }
 
-fn worker_executable() -> Result<PathBuf, ExecError> {
-    #[cfg(feature = "test-support")]
-    if let Some(path) = std::env::var_os("ZUP_TEST_WORKER_EXE") {
-        return Ok(PathBuf::from(path));
-    }
-    std::env::current_exe()
-        .map_err(|source| PathError::Io {
-            path: "<executable>".into(),
-            source,
-        })
-        .map_err(ExecError::from)
-}
-
 pub(crate) fn run_machine_elevated(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
@@ -262,7 +249,10 @@ pub(crate) fn run_machine_elevated_once(
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
 
-    let worker_exe = worker_executable()?;
+    let worker_exe = std::env::current_exe().map_err(|source| PathError::Io {
+        path: "<executable>".into(),
+        source,
+    })?;
 
     let args = vec![
         "__privileged-worker".to_owned(),

@@ -41,21 +41,16 @@ pub struct WorkerContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePin {
-    pub device: u64,
-    pub inode: u64,
-    pub size: u64,
+    digest: zup_core::Sha256Digest,
 }
 
 impl FilePin {
     pub fn pin(path: &Path) -> Result<Self, IpcError> {
-        let metadata = std::fs::metadata(path).map_err(|error| {
+        let bytes = std::fs::read(path).map_err(|error| {
             IpcError::WorkerAuth(format!("carrier at `{}`: {error}", path.display()))
         })?;
-        use std::os::unix::fs::MetadataExt as _;
         Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            size: metadata.len(),
+            digest: zup_core::hash_bytes(&bytes),
         })
     }
 
@@ -1020,6 +1015,13 @@ mod tests {
         std::fs::remove_file(&path).expect("remove");
         std::fs::write(&path, b"v2").expect("replace");
         assert!(pin.verify(&path).is_err(), "a swapped file fails the pin");
+        std::fs::write(&path, b"v1").expect("write");
+        let pin = FilePin::pin(&path).expect("pin");
+        std::fs::write(&path, b"v2").expect("overwrite in place");
+        assert!(
+            pin.verify(&path).is_err(),
+            "an in-place overwrite fails the pin despite the same inode and size"
+        );
     }
 
     #[test]
