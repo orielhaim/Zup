@@ -95,9 +95,8 @@ fn accept_one(
             Err(zup_linux::SocketError::Timeout) => {}
             Err(error) => panic!("the rendezvous accepts: {error}"),
         }
-        match child.try_wait().expect("a child polls") {
-            Some(status) => panic!("the connector exited before connecting: {status}"),
-            None => {}
+        if let Some(status) = child.try_wait().expect("a child polls") {
+            panic!("the connector exited before connecting: {status}");
         }
         assert!(
             std::time::Instant::now() < deadline,
