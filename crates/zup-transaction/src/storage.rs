@@ -65,7 +65,6 @@ impl FilesystemTransactionStore {
             path: directory.clone(),
             source,
         })?;
-        restrict_container(&self.root)?;
         let path = directory.join("transaction.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -81,23 +80,6 @@ impl FilesystemTransactionStore {
             .map_err(|source| StoreError::Io { path, source })?;
         Ok(file)
     }
-}
-
-#[cfg(unix)]
-fn restrict_container(root: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let container = root.join("transactions");
-    std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o700)).map_err(|source| {
-        StoreError::Io {
-            path: container,
-            source,
-        }
-    })
-}
-
-#[cfg(not(unix))]
-fn restrict_container(_root: &Path) -> Result<(), StoreError> {
-    Ok(())
 }
 
 fn write_record(path: &Path, record: &TransactionRecord) -> Result<(), StoreError> {

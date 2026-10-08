@@ -114,4 +114,8 @@ its own verified inputs.
   intent, and the worker authorizes it with the standard hierarchy and
   trust checks before deriving ledger, lock, journal, and maintenance
   paths from it. Program, shared-data, and systemd roots always
-  describe the production machine.
+  describe the production machine. The privileged end-to-end test
+  additionally enters a private mount namespace with disposable tmpfs
+  mounts over the production machine paths, so the real installation,
+  commit, and uninstall exercise production paths without ever
+  touching the host.

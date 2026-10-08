@@ -358,11 +358,23 @@ fn prepare_operation(
             "machine state travels as an absolute path".into(),
         ));
     }
+    if state_root.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err(IpcError::Policy(
+            "machine state names plain components".into(),
+        ));
+    }
     crate::machine::ensure_machine_state_dir(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::ensure_transactions_dir(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;

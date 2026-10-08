@@ -778,6 +778,81 @@ fn machine_package_substitution_is_detected() {
 }
 
 #[test]
+fn machine_unauthorized_state_roots_refuse() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let uid = rustix::process::getuid().as_raw();
+
+    let linked = roots.state.join("linked");
+    std::fs::create_dir_all(&roots.state).expect("a state directory");
+    std::os::unix::fs::symlink(roots.state.join("real"), &linked).expect("a planted link");
+    let writable = roots.state.join("writable");
+    std::fs::create_dir_all(&writable).expect("a directory");
+    let mut permissions = std::fs::metadata(&writable).expect("stat").permissions();
+    permissions.set_mode(0o777);
+    std::fs::set_permissions(&writable, permissions).expect("chmod");
+    let missing = roots.state.join("missing-parent").join("state");
+
+    let cases = [
+        (
+            "relative",
+            PathBuf::from("var/lib/zup"),
+            zup_protocol::failure::POLICY,
+        ),
+        (
+            "traversal",
+            roots.state.join("../escape"),
+            zup_protocol::failure::POLICY,
+        ),
+        ("symlink", linked, zup_protocol::failure::AUTHENTICATION),
+        (
+            "group-writable",
+            writable,
+            zup_protocol::failure::AUTHENTICATION,
+        ),
+        (
+            "missing-parent",
+            missing,
+            zup_protocol::failure::AUTHENTICATION,
+        ),
+    ];
+    for (name, root, kind) in cases {
+        let session = SessionId::new_v7();
+        let (mut client, mut worker) = UnixStream::pair().expect("a pair");
+        let roots_clone = roots.roots.clone();
+        let installer_clone = installer.clone();
+        let handle = std::thread::spawn(move || {
+            serve_worker_isolated(
+                &mut worker,
+                &roots_clone,
+                uid,
+                std::process::id(),
+                session,
+                &installer_clone,
+            )
+        });
+        let _ = next_hello(&mut client);
+        let mut intent = install_intent(&roots.state, None);
+        intent.state_root = root.display().to_string();
+        send_prepare(&mut client, session, 1, intent);
+        let failed = next_failed(&mut client);
+        assert_eq!(
+            failed.kind, kind,
+            "an unauthorized state root refuses: {name}"
+        );
+        handle
+            .join()
+            .expect("the worker exits")
+            .expect_err("refused");
+    }
+    assert!(
+        !machine_install_dir(&roots.roots).exists(),
+        "a refused state root installs nothing"
+    );
+}
+
+#[test]
 fn machine_wrong_peer_uid_is_refused() {
     let (_base, roots) = isolated();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");

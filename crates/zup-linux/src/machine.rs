@@ -175,6 +175,12 @@ pub fn ensure_machine_state_dir(state_root: &Path, expected_uid: u32) -> Result<
     Ok(())
 }
 
+pub fn ensure_transactions_dir(state_root: &Path, expected_uid: u32) -> Result<PathBuf, PathError> {
+    let directory = state_root.join("transactions");
+    create_or_verify_dir(&directory, MACHINE_PRIVATE_DIR_MODE, expected_uid)?;
+    Ok(directory)
+}
+
 fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), PathError> {
     let metadata = std::fs::symlink_metadata(parent).map_err(|source| PathError::Io {
         path: parent.display().to_string(),
