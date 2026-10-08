@@ -148,7 +148,11 @@ fn machine_full_lifecycle() {
         "a machine upgrade commits: {outcome:?}"
     );
     assert_eq!(run_tool(&tool, &["--version"]).trim(), "tool 2.0.0");
-    assert_eq!(run_tool(&tool, &["read-payload"]).trim(), "new-v2");
+    assert_eq!(
+        std::fs::read(machine_install_dir(&roots.roots).join("new.dat")).expect("the new file"),
+        b"new-v2",
+        "the upgrade lands the added file"
+    );
     assert!(
         !machine_install_dir(&roots.roots).join("keep.dat").exists(),
         "the retired file is gone"
@@ -562,19 +566,42 @@ fn machine_execute_replay_reaches_no_worker() {
 /// never authorizes.
 #[test]
 fn machine_cross_session_execute_is_refused() {
-    let (_base, roots) = isolated();
+    // Each session serves its own isolated machine: the worker holds the
+    // installation lock from preparation through execution, so two sessions
+    // preparing the *same* installation would (correctly) refuse the second
+    // with `installation_busy` before any digest confusion is even possible.
+    // What this test proves is the digest binding: an Execute naming another
+    // session's plan is refused, and nothing mutates either way.
+    let (_base_a, roots_a) = isolated();
+    let (_base_b, roots_b) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let installer_v1 = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let installer_v2 = machine_fixture(scratch.path(), "v2", "2.0.0", &machine_v2_files());
     let uid = rustix::process::getuid().as_raw();
+
+    // Session B's world already holds v1, so its upgrade to v2 plans the
+    // replace-transition while session A's fresh install of v1 plans
+    // creation: different versions, different plans, different digests.
+    let outcome = run_machine_isolated_in(
+        &installer_v1,
+        &roots_b.roots,
+        &roots_b.state,
+        LinuxAction::Apply,
+        None,
+    );
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "session B's world installs v1 first: {outcome:?}"
+    );
 
     let session_a = SessionId::new_v7();
     let (mut client_a, mut worker_a) = UnixStream::pair().expect("a pair");
-    let roots_a = roots.roots.clone();
-    let installer_a = installer.clone();
+    let roots_a_clone = roots_a.roots.clone();
+    let installer_a = installer_v1.clone();
     let worker_a = std::thread::spawn(move || {
         serve_worker_isolated(
             &mut worker_a,
-            &roots_a,
+            &roots_a_clone,
             uid,
             std::process::id(),
             session_a,
@@ -587,16 +614,15 @@ fn machine_cross_session_execute_is_refused() {
 
     let session_b = SessionId::new_v7();
     let (mut client_b, mut worker_b) = UnixStream::pair().expect("a pair");
-    let roots_b = roots.roots.clone();
-    let installer_b = installer.clone();
+    let roots_b_clone = roots_b.roots.clone();
     let worker_b = std::thread::spawn(move || {
         serve_worker_isolated(
             &mut worker_b,
-            &roots_b,
+            &roots_b_clone,
             uid,
             std::process::id(),
             session_b,
-            &installer_b,
+            &installer_v2,
         )
     });
     let _ = next_hello(&mut client_b);
@@ -607,6 +633,7 @@ fn machine_cross_session_execute_is_refused() {
         1,
         PrepareOperation {
             operation: privileged_operation::UPGRADE.to_owned(),
+            app_version: "2.0.0".to_owned(),
             ..install_intent(None)
         },
     );
@@ -659,8 +686,17 @@ fn machine_cross_session_execute_is_refused() {
         .expect("the worker exits")
         .expect_err("refused");
     assert!(
-        !machine_install_dir(&roots.roots).exists(),
-        "confused sessions mutate nothing"
+        !machine_install_dir(&roots_a.roots).exists(),
+        "the confused install mutates nothing"
+    );
+    assert_eq!(
+        run_tool(
+            &machine_install_dir(&roots_b.roots).join("tool"),
+            &["--version"]
+        )
+        .trim(),
+        "tool 1.0.0",
+        "the confused upgrade leaves v1 running"
     );
 }
 
@@ -696,9 +732,11 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             .write_all(&(zup_protocol::MAX_FRAME_BYTES as u32 + 1).to_be_bytes())
             .expect("send");
         client.flush().expect("flush");
-        assert!(
-            recv_envelope_on(&mut client, HANDSHAKE).is_err(),
-            "the worker does not serve an oversized frame"
+        // A framing refusal is still a typed refusal: the worker reports
+        // `protocol` before exiting rather than dropping the peer in silence.
+        assert_eq!(
+            next_failed(&mut client).kind,
+            zup_protocol::failure::PROTOCOL
         );
         handle
             .join()
@@ -780,12 +818,18 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             },
         )
         .expect("send");
-        assert!(
-            recv_envelope_on(&mut client, HANDSHAKE).is_err()
-                || next_failed(&mut client).kind == zup_protocol::failure::AUTHENTICATION
-                || next_failed(&mut client).kind == zup_protocol::failure::PROTOCOL,
-            "a foreign frame is refused"
-        );
+        // Exactly one answer: the worker reports the refusal as a typed
+        // `Failed` (authentication or protocol) before exiting rather than
+        // dropping the peer in silence.
+        match recv_envelope_on(&mut client, HANDSHAKE) {
+            Err(_) => {}
+            Ok(envelope) => match envelope.message {
+                Message::Failed(failed)
+                    if failed.kind == zup_protocol::failure::AUTHENTICATION
+                        || failed.kind == zup_protocol::failure::PROTOCOL => {}
+                other => panic!("a foreign frame is refused, got {other:?}"),
+            },
+        }
         handle
             .join()
             .expect("the worker exits")
@@ -872,11 +916,15 @@ fn machine_wrong_peer_uid_is_refused() {
             &installer,
         )
     });
-    // No hello arrives: the peer check fails first.
-    assert!(
-        recv_envelope_on(&mut client, HANDSHAKE).is_err(),
-        "a foreign uid gets no session"
-    );
+    // No session is served: the peer check fails first, reported as a
+    // typed refusal before the worker exits.
+    match recv_envelope_on(&mut client, HANDSHAKE) {
+        Err(_) => {}
+        Ok(envelope) => match envelope.message {
+            Message::Failed(failed) if failed.kind == zup_protocol::failure::AUTHENTICATION => {}
+            other => panic!("a foreign uid gets no session, got {other:?}"),
+        },
+    }
     handle
         .join()
         .expect("the worker exits")
@@ -897,7 +945,8 @@ fn machine_wrong_peer_pid_is_refused() {
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
     // Nobody holds this pid here: the check names the launched installer,
-    // not whoever connected first.
+    // not whoever connected first. The refusal is typed, like every other
+    // worker refusal.
     let stranger_pid = u32::MAX - 11;
     assert_ne!(stranger_pid, std::process::id());
     let handle = std::thread::spawn(move || {
@@ -910,10 +959,13 @@ fn machine_wrong_peer_pid_is_refused() {
             &installer_clone,
         )
     });
-    assert!(
-        recv_envelope_on(&mut client, HANDSHAKE).is_err(),
-        "a foreign process gets no session"
-    );
+    match recv_envelope_on(&mut client, HANDSHAKE) {
+        Err(_) => {}
+        Ok(envelope) => match envelope.message {
+            Message::Failed(failed) if failed.kind == zup_protocol::failure::AUTHENTICATION => {}
+            other => panic!("a foreign process gets no session, got {other:?}"),
+        },
+    }
     handle
         .join()
         .expect("the worker exits")
@@ -929,6 +981,7 @@ fn machine_state_symlink_is_refused() {
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let elsewhere = tempfile::tempdir().expect("an unrelated tree");
     std::fs::write(elsewhere.path().join("owned"), b"attacker content").expect("write");
+    std::fs::create_dir_all(&roots.state).expect("a state root to redirect");
     std::os::unix::fs::symlink(elsewhere.path(), roots.state.join("transactions"))
         .expect("a planted redirect");
     let outcome = run_machine_isolated_in(

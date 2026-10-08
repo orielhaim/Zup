@@ -27,6 +27,23 @@ use zup_transaction::{
 use crate::integration::GENERATED_PREFIX;
 use crate::refresh::RefreshRequest;
 
+pub fn requires_service_manager(
+    target: &TargetPlan,
+    ledger: Option<&zup_exec::InstallLedger>,
+) -> bool {
+    !target.services.is_empty() || ledger_has_services(ledger)
+}
+
+/// Whether the previous installation owns service resources.
+pub fn ledger_has_services(ledger: Option<&zup_exec::InstallLedger>) -> bool {
+    ledger.is_some_and(|ledger| {
+        ledger
+            .resources
+            .values()
+            .any(|owned| matches!(owned, OwnedResource::Service { .. }))
+    })
+}
+
 /// Why an execution plan cannot become a Linux transaction input.
 #[derive(Debug, thiserror::Error)]
 pub enum LinuxInputError {
@@ -988,6 +1005,103 @@ mod tests {
             observed[0].state,
             ObservedServiceState::Absent,
             "an uninstalled service observes absent"
+        );
+    }
+
+    fn ledger_with_services(service: bool) -> Option<zup_exec::InstallLedger> {
+        use zup_core::{AppId, SelectedScope};
+        let mut ledger = zup_exec::InstallLedger::new(
+            AppId::new("com.example.tool").expect("an id"),
+            target(),
+            SelectedScope::Machine,
+        );
+        if service {
+            ledger.resources.insert(
+                ResourceKey::Service {
+                    id: ServiceId::new("tool").expect("an id"),
+                },
+                zup_exec::OwnedResource::Service {
+                    name: "Tool".to_owned(),
+                    privilege: Privilege::System,
+                    previous: zup_exec::ServiceState::Absent,
+                    installed: zup_exec::ServiceState::Absent,
+                },
+            );
+        }
+        Some(ledger)
+    }
+
+    /// The shared manager decision: desired services or previously owned
+    /// services need the manager - including the transition from one service
+    /// to none, and a full uninstall with owned services.
+    #[test]
+    fn the_manager_decision_covers_desired_owned_and_removals() {
+        let (base, _, _) = isolated();
+        let with = service_plan(&base, ServiceStart::Automatic, vec!["--serve".into()]);
+        let mut without = with.clone();
+        without.services.clear();
+
+        assert!(
+            !requires_service_manager(&without, None),
+            "no desired services and no ledger needs no manager"
+        );
+        assert!(
+            !requires_service_manager(&without, ledger_with_services(false).as_ref()),
+            "a file-only ledger needs no manager"
+        );
+        assert!(
+            requires_service_manager(&with, None),
+            "desired services need the manager"
+        );
+        assert!(
+            requires_service_manager(&without, ledger_with_services(true).as_ref()),
+            "previously owned services need the manager even when the desired state has none"
+        );
+        assert!(
+            requires_service_manager(&with, ledger_with_services(true).as_ref()),
+            "desired plus owned services need the manager"
+        );
+    }
+
+    /// Removing the final service compiles through the machine path: the
+    /// desired plan holds no services, but the owned-service removal becomes
+    /// one typed backend removal.
+    #[test]
+    fn removing_the_final_service_compiles_to_a_typed_removal() {
+        let (base, roots, systemd) = isolated();
+        let with = service_plan(&base, ServiceStart::Automatic, vec!["--serve".into()]);
+        let mut desired = with.clone();
+        desired.services.clear();
+        assert!(
+            requires_service_manager(&desired, ledger_with_services(true).as_ref()),
+            "the one-to-none transition needs the manager"
+        );
+
+        let mut execution = execution(vec![]);
+        execution.removals.push(zup_exec::RemovalOperation {
+            key: ResourceKey::Service {
+                id: ServiceId::new("tool").expect("an id"),
+            },
+            kind: zup_exec::RemovalKind::RemoveOwned,
+            scope: zup_core::SelectedScope::Machine,
+            privilege: Privilege::System,
+            owned: zup_exec::OwnedResource::Service {
+                name: "Tool".to_owned(),
+                privilege: Privilege::System,
+                previous: zup_exec::ServiceState::Absent,
+                installed: zup_exec::ServiceState::Absent,
+            },
+        });
+        let mut manager = crate::systemd::FakeSystemd::default();
+        let input = compile(&desired, &execution, &roots, &systemd, &mut manager, false)
+            .expect("a service removal compiles");
+        assert_eq!(input.backend_operations.len(), 1);
+        assert!(
+            input.backend_operations[0]
+                .id
+                .as_str()
+                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
+            "a typed service removal, never a generic call"
         );
     }
 }

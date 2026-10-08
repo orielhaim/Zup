@@ -124,6 +124,7 @@ pub use host::{
 #[cfg(target_os = "linux")]
 pub use input::{
     LinuxInputError, ServiceCompilation, compile_execution_plan, compile_machine_execution_plan,
+    ledger_has_services, requires_service_manager,
 };
 #[cfg(target_os = "linux")]
 pub use ledger::{LinuxLedgerError, LinuxLedgerStore};
@@ -173,8 +174,8 @@ pub use services::{
 pub use snapshot::{snapshot_services, snapshot_target};
 #[cfg(target_os = "linux")]
 pub use socket::{
-    FRAME_TIMEOUT, HANDSHAKE_TIMEOUT, PeerIdentity, PeerPin, Rendezvous, SocketError,
-    peer_identity, pin_peer, worker_socket_path,
+    FRAME_TIMEOUT, HANDSHAKE_TIMEOUT, PeerIdentity, PeerPin, Rendezvous, SocketError, peer_alive,
+    peer_identity, pin_peer,
 };
 #[cfg(target_os = "linux")]
 pub use source_policy::{LinuxSourceFilePolicy, SourceEntryKind};

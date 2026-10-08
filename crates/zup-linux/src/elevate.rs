@@ -192,15 +192,9 @@ pub(crate) fn plan_expected(
         crate::run::resolve_action(request.action, ledger.as_ref(), &target_plan.app.version)?;
     let mut snapshot = crate::snapshot::snapshot_target(&target_plan);
     // Services observe through the manager, exactly as the worker will:
-    // both sides must plan from the same systemd state for the digests
-    // to agree. File-only projects never touch the bus.
-    let needs_manager = !target_plan.services.is_empty()
-        || ledger.as_ref().is_some_and(|ledger| {
-            ledger
-                .resources
-                .values()
-                .any(|owned| matches!(owned, zup_exec::OwnedResource::Service { .. }))
-        });
+    // both sides share `requires_service_manager`, so the digests agree.
+    // File-only projects never touch the bus.
+    let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
     let mut manager =
         if needs_manager {
             Some(crate::systemd::RealSystemd::connect().map_err(|error| {
@@ -321,12 +315,18 @@ pub(crate) fn run_machine_elevated_once(
         path: "<executable>".into(),
         source,
     })?;
+    // The socket pathname travels explicitly: `pkexec` sanitizes the
+    // environment, so the worker cannot re-derive it from `XDG_RUNTIME_DIR`
+    // or from an independently generated fallback directory. The worker
+    // validates the pathname before connecting.
     let args = vec![
         "__privileged-worker".to_owned(),
         "--session".to_owned(),
         session.0.to_string(),
         "--client-pid".to_owned(),
         std::process::id().to_string(),
+        "--socket-path".to_owned(),
+        rendezvous.socket().display().to_string(),
     ];
     let mut spawned = launcher
         .spawn(&worker_exe, &args)

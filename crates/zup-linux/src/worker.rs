@@ -41,7 +41,6 @@ use crate::machine::{
 };
 use crate::socket::{
     HANDSHAKE_TIMEOUT, PeerPin, peer_alive, peer_identity, pin_peer, recv_envelope, send_envelope,
-    worker_socket_path,
 };
 
 /// How long the worker waits for the final Execute after preparing.
@@ -160,17 +159,25 @@ impl FilePin {
     }
 }
 
-/// Entry for the `__privileged-worker` mode: derive everything, serve one
-/// session, exit.
+/// Entry for the `__privileged-worker` mode: serve one session, exit.
 ///
 /// Refuses unless this process is uid 0 with a `PKEXEC_UID` authorizing
 /// user: the worker mode is an internal detail, not a command anyone runs
 /// by hand to gain authority they do not have. The expected client pid
 /// arrives over the untrusted command line and is verified against kernel
 /// peer credentials before anything is served.
+///
+/// The socket pathname also arrives over the command line - `pkexec`
+/// sanitizes the environment, so the worker cannot re-derive the client's
+/// rendezvous from `XDG_RUNTIME_DIR` or from an independently generated
+/// fallback directory. The pathname is untrusted and fully validated by
+/// [`validate_rendezvous`]: the containing directory must be real, owned by
+/// the authorizing user, and private to them, and the peer on the other end
+/// must still prove uid, pid, session, and liveness.
 pub fn run_worker_mode(
     session: SessionId,
     expected_client_pid: u32,
+    socket_path: &Path,
 ) -> Result<String, WorkerError> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(WorkerError::AuthFailed(
@@ -191,10 +198,8 @@ pub fn run_worker_mode(
     let _ = previous_umask;
     let worker_exe = std::env::current_exe()
         .map_err(|error| WorkerError::AuthFailed(format!("own executable: {error}")))?;
-    let socket = worker_socket_path(invoking, session)
-        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    validate_rendezvous(&socket, invoking)?;
-    let mut stream = crate::socket::connect(&socket, ACCEPT_TIMEOUT)
+    validate_rendezvous(socket_path, invoking)?;
+    let mut stream = crate::socket::connect(socket_path, ACCEPT_TIMEOUT)
         .map_err(|error| WorkerError::Protocol(error.to_string()))?;
     let context = WorkerContext {
         roots: MachineRoots::production(),
@@ -210,15 +215,33 @@ pub fn run_worker_mode(
 
 /// Prove the rendezvous the worker is about to use belongs to the session.
 ///
-/// The socket path is derived, not accepted - but the directory it lands in
-/// is user-writable, so the worker checks what it found: a real directory
-/// owned by the authorizing user, private to them, holding the session's
-/// socket. A replaced pathname or a raced endpoint fails here, before any
-/// peer is trusted.
+/// The socket pathname arrives over the untrusted command line - the only
+/// rendezvous establishment that survives a sanitized `pkexec` environment -
+/// so every property is checked: the pathname is absolute and names the
+/// session's socket inside its directory, the directory is real, owned by
+/// the authorizing user, and private to them, and it holds no symlink on the
+/// way down. A replaced pathname or a raced endpoint fails here, before any
+/// peer is trusted. Peer uid/pid, session, and liveness are verified
+/// separately once connected.
 pub(crate) fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<(), WorkerError> {
+    if !socket.is_absolute() {
+        return Err(WorkerError::AuthFailed(
+            "the rendezvous is an absolute pathname".into(),
+        ));
+    }
+    if socket.file_name().is_none_or(|name| name != "worker.sock") {
+        return Err(WorkerError::AuthFailed(
+            "the rendezvous names the session socket".into(),
+        ));
+    }
     let directory = socket
         .parent()
         .ok_or_else(|| WorkerError::AuthFailed("the rendezvous has no directory".into()))?;
+    crate::fs::refuse_symlink_ancestors(directory).map_err(|error| {
+        WorkerError::AuthFailed(format!(
+            "the rendezvous must not pass through a link: {error}"
+        ))
+    })?;
     let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
         WorkerError::AuthFailed(format!("rendezvous at `{}`: {error}", directory.display()))
     })?;
@@ -655,15 +678,19 @@ fn prepare_operation(
 
     let mut snapshot = crate::snapshot::snapshot_target(&target_plan);
     // Services observe through the manager: unit source plus persistent
-    // start policy. File-only installers never touch the bus, so systemd
-    // stays optional unless services are present.
-    let mut manager = if target_plan.services.is_empty() {
-        None
-    } else {
+    // start policy. The decision is `requires_service_manager` - the same
+    // predicate the unprivileged planner uses - so an upgrade that removes
+    // the final service (or a full uninstall) still snapshots and compiles
+    // through the manager on both sides. File-only installers never touch
+    // the bus.
+    let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
+    let mut manager = if needs_manager {
         Some(
             crate::systemd::RealSystemd::connect()
                 .map_err(|error| WorkerError::Policy(format!("systemd is unavailable: {error}")))?,
         )
+    } else {
+        None
     };
     if let Some(manager) = manager.as_mut() {
         snapshot.services =
@@ -683,16 +710,7 @@ fn prepare_operation(
         requested,
         crate::run::LinuxAction::Repair { force_files: true }
     );
-    let input = if target_plan.services.is_empty()
-        && execution.services.is_empty()
-        && !execution
-            .removals
-            .iter()
-            .any(|removal| matches!(removal.owned, zup_exec::OwnedResource::Service { .. }))
-    {
-        crate::input::compile_execution_plan(&execution, &target_plan)
-            .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?
-    } else {
+    let input = if needs_manager {
         let manager = manager.as_mut().ok_or_else(|| {
             WorkerError::Policy("a service transaction without a systemd manager".into())
         })?;
@@ -707,6 +725,9 @@ fn prepare_operation(
             },
         )
         .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?
+    } else {
+        crate::input::compile_execution_plan(&execution, &target_plan)
+            .map_err(|error| WorkerError::Policy(format!("transaction input: {error}")))?
     };
     let plan = zup_transaction::compile_transaction(&input)
         .map_err(|error| WorkerError::Policy(format!("transaction plan: {error}")))?;
@@ -917,8 +938,11 @@ fn recover_one(
     match outcome {
         zup_transaction::TransactionOutcome::Committed => {
             let ledger = ledger_store_publish(state_root, &record)?;
-            crate::machine::normalize_published_modes(state_root, &ledger)
-                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            // A recovered uninstall publishes no ledger either.
+            if !record.plan.uninstall {
+                crate::machine::normalize_published_modes(state_root, &ledger)
+                    .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            }
             crate::machine::normalize_state_modes(state_root, rustix::process::geteuid().as_raw())
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             Ok(())
@@ -1184,8 +1208,13 @@ fn execute_prepared(
             let ledger = ledger_store
                 .publish_committed(&record, SelectedScope::Machine)
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?;
-            crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
-                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            // An uninstall publishes no ledger - the record is removed, not
+            // written - so there are no published modes to normalize. The
+            // hierarchy normalization below still runs.
+            if prepared.action != crate::run::LinuxAction::Uninstall {
+                crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
+                    .map_err(|error| WorkerError::Transaction(error.to_string()))?;
+            }
             crate::machine::normalize_state_modes(
                 &prepared.state_root,
                 rustix::process::geteuid().as_raw(),
@@ -1235,7 +1264,11 @@ mod tests {
             return;
         }
         assert!(matches!(
-            run_worker_mode(SessionId::new_v7(), std::process::id()),
+            run_worker_mode(
+                SessionId::new_v7(),
+                std::process::id(),
+                std::path::Path::new("/run/zup/worker.sock")
+            ),
             Err(WorkerError::AuthFailed(_))
         ));
     }

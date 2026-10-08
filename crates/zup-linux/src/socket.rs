@@ -72,16 +72,27 @@ impl Rendezvous {
     /// runtime area.
     ///
     /// Prefers `$XDG_RUNTIME_DIR/zup/privileged/<session>/` after validating
-    /// the runtime directory itself; otherwise a freshly created
-    /// unpredictable directory under the system temporary area. Never a
-    /// caller-supplied pathname, and never a predictable shared socket.
+    /// the runtime directory itself; otherwise the freshly created
+    /// unpredictable fallback directory itself is the session directory.
+    /// The fallback name already carries the session's randomness, so no
+    /// further nesting is added - nesting would push the socket pathname
+    /// past the `SUN_LEN` bound. Never a caller-supplied pathname, and never
+    /// a predictable shared socket.
     pub fn create(invoking_uid: u32, session: SessionId) -> Result<Self, SocketError> {
-        let base = runtime_base(invoking_uid)?;
-        let directory = base
-            .join("zup")
-            .join("privileged")
-            .join(session.0.to_string());
-        create_private_dir_all(&directory)?;
+        let directory = match validated_xdg(invoking_uid) {
+            Some(dir) => {
+                let directory = dir
+                    .join("zup")
+                    .join("privileged")
+                    .join(session.0.to_string());
+                create_private_dir_all(&directory)?;
+                directory
+            }
+            // The fallback base is freshly created, unpredictable, and
+            // private: it already is a per-session directory, so the socket
+            // lives directly in it.
+            None => fallback_base()?,
+        };
         let socket = directory.join("worker.sock");
         // A stale socket from a crashed run must not be served: it names a
         // session that is over.
@@ -182,38 +193,33 @@ pub fn connect(socket: &Path, timeout: Duration) -> Result<UnixStream, SocketErr
     }
 }
 
-/// Derive the worker's own view of a rendezvous socket path.
-///
-/// Constructed from the authorizing uid and the session identity, never
-/// taken from an untrusted argument: the worker trusts `pkexec` for who
-/// authorized it and the session for which rendezvous, and nothing else.
-pub fn worker_socket_path(invoking_uid: u32, session: SessionId) -> Result<PathBuf, SocketError> {
-    Ok(runtime_base(invoking_uid)?
-        .join("zup")
-        .join("privileged")
-        .join(session.0.to_string())
-        .join("worker.sock"))
-}
-
-/// The per-user runtime base: a validated `$XDG_RUNTIME_DIR`, or a secure
-/// explicitly-created fallback.
+/// The validated `$XDG_RUNTIME_DIR`, if one is usable.
 ///
 /// Validation is ownership and type, not just spelling: the variable is
 /// untrusted user environment, and a runtime directory owned by someone else
 /// or passing through a link is not a private area.
-fn runtime_base(invoking_uid: u32) -> Result<PathBuf, SocketError> {
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
-        && dir.is_absolute()
-        && let Ok(metadata) = std::fs::symlink_metadata(&dir)
-        && metadata.is_dir()
-        && !metadata.file_type().is_symlink()
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.uid() == invoking_uid && metadata.permissions().mode() & 0o022 == 0 {
-            return Ok(dir);
-        }
+///
+/// The result is only ever used by the client to *create* its own rendezvous;
+/// the worker never derives this path. The client passes the created socket
+/// pathname to the worker explicitly (as a command-line argument), so a
+/// sanitized `pkexec` environment - or an independently generated fallback
+/// directory - cannot desynchronize the two ends.
+fn validated_xdg(invoking_uid: u32) -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    if !dir.is_absolute() {
+        return None;
     }
-    fallback_base()
+    let Ok(metadata) = std::fs::symlink_metadata(&dir) else {
+        return None;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    use std::os::unix::fs::MetadataExt as _;
+    if metadata.uid() != invoking_uid || metadata.permissions().mode() & 0o022 != 0 {
+        return None;
+    }
+    Some(dir)
 }
 
 /// A fresh unpredictable directory under the system temporary area.

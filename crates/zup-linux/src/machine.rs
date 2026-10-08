@@ -115,10 +115,15 @@ pub enum MachinePathPolicyError {
 
 /// Classify one absolute host path against the privileged destination policy.
 ///
-/// Path semantics, not string prefixes: `/optish/app` is not under `/opt`,
-/// and `/opt/app/../../etc` never reaches classification because `..` is
-/// refused rather than resolved - resolving a hostile path into an allowed
-/// one would bless exactly the traversal it attempted.
+/// Path semantics, not string prefixes: `/optish/app` is not under `/opt`.
+///
+/// Canonical-path policy, shared with [`TargetPath`]: `.` names the same
+/// directory, so it is absorbed rather than refused, while `..` is refused
+/// rather than resolved - resolving a hostile path into an allowed one would
+/// bless exactly the traversal it attempted. [`TargetPath`] and
+/// [`lowering`](crate::lowering) already canonicalize `.` away, so a
+/// canonical host path never carries one; this layer refuses `..` and
+/// classifies whatever remains, which keeps both layers on one contract.
 pub fn authorize_machine_destination(
     host: &Path,
     roots: &MachineRoots,
@@ -132,13 +137,15 @@ pub fn authorize_machine_destination(
     }
     // No normalization: a `..` that survives to this layer is either a bug
     // or an attack, and either way it is refused rather than resolved.
-    // `TargetPath` already guarantees canonical spellings; this is the
-    // worker's independent check that the guarantee held.
+    // `.` needs no check: `Path::components` already absorbs interior `.`
+    // (it names the same directory), and `TargetPath` guarantees canonical
+    // spellings, so refusing it would reject the same location this policy
+    // otherwise allows.
     if host
         .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err(refused("a privileged destination names no `.` or `..`"));
+        return Err(refused("a privileged destination names no `..`"));
     }
     if host == roots.programs || host == roots.state || host == roots.shared_data {
         return Err(refused("a privileged destination is never a root itself"));
@@ -886,9 +893,13 @@ mod tests {
         assert!(
             authorize_machine_destination(&roots.programs.join("../etc/passwd"), &roots).is_err()
         );
-        assert!(
-            authorize_machine_destination(&roots.programs.join("./app"), &roots).is_err(),
-            "no normalization: `.` is refused, not resolved"
+        // Canonical-path policy, shared with `TargetPath`: `.` names the
+        // same directory, so it classifies rather than refuses. `..` above
+        // is the traversal; `.` here is the same location spelled redundantly.
+        assert_eq!(
+            authorize_machine_destination(&roots.programs.join("./app"), &roots)
+                .expect("`.` is absorbed, not refused"),
+            MachineDestination::Programs
         );
         assert!(
             authorize_machine_destination(Path::new("opt/Acme"), &roots).is_err(),

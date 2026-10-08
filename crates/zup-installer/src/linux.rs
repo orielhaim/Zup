@@ -89,6 +89,10 @@ struct WorkerArgs {
     /// credentials rather than trusted as a claim.
     #[arg(long)]
     client_pid: u32,
+    /// The rendezvous socket this worker connects to, passed explicitly
+    /// because `pkexec` sanitizes the environment. Validated before use.
+    #[arg(long)]
+    socket_path: PathBuf,
 }
 
 /// Run the runtime as the frontend its binary was built for.
@@ -102,8 +106,8 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     }
     // The worker mode is argv-dispatched before anything else reads the
     // package: it authenticates and serves one session, never a lifecycle.
-    if let Some((session, client_pid)) = worker_session_args() {
-        return run_worker(session, client_pid);
+    if let Some((session, client_pid, socket_path)) = worker_session_args() {
+        return run_worker(session, client_pid, socket_path);
     }
     let cli = Cli::parse();
     let action = match cli.verb {
@@ -115,7 +119,7 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
         },
         Some(Verb::Uninstall) => zup_linux::LinuxAction::Uninstall,
         Some(Verb::__PrivilegedWorker(args)) => {
-            return run_worker(args.session, args.client_pid);
+            return run_worker(args.session, args.client_pid, args.socket_path);
         }
     };
     let executable =
@@ -145,33 +149,42 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
 
 /// The worker session when this process started as one, without parsing the
 /// full CLI: worker argv is `__privileged-worker --session <uuid>
-/// --client-pid <pid>` in any position clap would otherwise reject before
-/// the worker authenticates.
-fn worker_session_args() -> Option<(String, u32)> {
+/// --client-pid <pid> --socket-path <path>` in any position clap would
+/// otherwise reject before the worker authenticates.
+fn worker_session_args() -> Option<(String, u32, PathBuf)> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "__privileged-worker" {
             let mut session = None;
             let mut client_pid = None;
+            let mut socket_path = None;
             while let Some(flag) = args.next() {
                 if flag == "--session" {
                     session = args.next();
                 } else if flag == "--client-pid" {
                     client_pid = args.next().and_then(|pid| pid.parse::<u32>().ok());
+                } else if flag == "--socket-path" {
+                    socket_path = args.next().map(PathBuf::from);
                 }
             }
-            return session.map(|session| (session, client_pid.unwrap_or(0)));
+            return session.map(|session| {
+                (
+                    session,
+                    client_pid.unwrap_or(0),
+                    socket_path.unwrap_or_default(),
+                )
+            });
         }
     }
     None
 }
 
 /// Serve one privileged session and exit with its outcome.
-fn run_worker(session: String, client_pid: u32) -> miette::Result<()> {
+fn run_worker(session: String, client_pid: u32, socket_path: PathBuf) -> miette::Result<()> {
     let session: zup_protocol::SessionId = session
         .parse()
         .map_err(|_| miette::miette!("the worker serves one session, named by uuid"))?;
-    match zup_linux::run_worker_mode(session, client_pid) {
+    match zup_linux::run_worker_mode(session, client_pid, &socket_path) {
         Ok(outcome) => {
             println!("worker: {outcome}");
             Ok(())

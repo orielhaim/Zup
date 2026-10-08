@@ -200,7 +200,7 @@ pub fn machine_package_bytes(
             ResolvedFile {
                 source,
                 source_relative: RelativePath::new(file.name).expect("a relative path"),
-                destination: Template::parse(&format!("${{location.programs}}/tool/{}", file.name))
+                destination: Template::parse(&format!("${{install}}/{}", file.name))
                     .expect("a destination"),
                 size,
                 sha256,
