@@ -1,12 +1,8 @@
-//! Versioned IPC wire types for zup parent ↔ elevated worker.
-//!
-//! Pure data: no Tokio, Kameo, Windows, or GPUI.
-
 #![forbid(unsafe_code)]
 
 mod messages;
-mod session;
 
+pub use messages::PrivilegedSession;
 pub use messages::{
     BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteOperation,
     ExecuteTransaction, FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
@@ -16,43 +12,10 @@ pub use messages::{
     TransactionStateChanged, WireEnvelope, WorkerHello, decode_payload, encode_payload, failure,
     privileged_operation,
 };
-pub use session::PrivilegedSession;
+pub use zup_core::SessionId;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
-/// Runtime identity of one parent/worker IPC relationship.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(pub Uuid);
-
-impl SessionId {
-    pub fn new_v7() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Parse a session identity, refusing anything that is not a uuid.
-    pub fn parse(text: &str) -> Result<Self, uuid::Error> {
-        text.parse::<Uuid>().map(Self)
-    }
-}
-
-impl std::str::FromStr for SessionId {
-    type Err = uuid::Error;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::parse(text)
-    }
-}
-
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Protocol / framing errors.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("frame exceeds maximum size {max}")]

@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::condition::Condition;
 use crate::digest::Sha256Digest;
+use crate::ids::ValueError;
 use crate::ids::{ComponentId, NonEmptyString};
 use crate::model::Privilege;
 use crate::path::RelativePath;
 use crate::template::Template;
-use crate::value::ValueError;
 
 pub const MAX_PREREQUISITE_ID_BYTES: usize = 128;
 pub const MAX_PREREQUISITE_ARGUMENTS: usize = 128;
@@ -106,12 +106,6 @@ impl PrerequisiteArchitecture {
     }
 }
 
-/// Opaque identifier of a runtime a platform provider knows how to observe.
-///
-/// The identifier is a namespaced, lowercase dotted path such as
-/// `provider.toolchain.v14`. Portable crates validate its shape but never
-/// interpret it; the platform backend owns the meaning of each id it
-/// publishes, and only the backend may attach a meaning to a segment.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transparent))]
@@ -166,7 +160,6 @@ impl TryFrom<&str> for RuntimeRequirementId {
     }
 }
 
-/// A runtime that must be present, optionally within a version range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -177,10 +170,6 @@ pub struct Runtime {
     pub version: Option<VersionReq>,
 }
 
-/// Opaque identifier of an installed package, such as a product code.
-///
-/// Portable crates validate the shape only; the platform backend decides which
-/// identifiers it can answer and what they mean.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transparent))]
@@ -232,7 +221,6 @@ impl TryFrom<&str> for InstalledPackageId {
     }
 }
 
-/// An installed package that must be present, optionally within a version range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -243,7 +231,6 @@ pub struct InstalledPackage {
     pub version: Option<VersionReq>,
 }
 
-/// A file that must exist, optionally with a matching file version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -254,11 +241,6 @@ pub struct FileVersion {
     pub version: Option<VersionReq>,
 }
 
-/// The portable semantic condition a prerequisite must satisfy.
-///
-/// Every variant names a fact the target system can be asked about. Detection
-/// mechanics, package formats, and registry layout belong to the platform
-/// provider, not to this model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -321,10 +303,6 @@ impl PrerequisitePackage {
     }
 }
 
-/// How a prerequisite package is run once its requirement is unsatisfied.
-///
-/// The provider owns the command line it builds; the manifest only supplies
-/// extra arguments, the accepted exit codes, and the privilege it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]

@@ -35,15 +35,11 @@ pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, Integra
     match decode::<ApplyPayload>(&operation.payload)
         .map_err(|error| IntegrationError::Drift(error.to_string()))?
     {
-        ApplyPayload::Launcher(op) => native_apply(
-            key,
-            crate::shortcuts::apply(&op).map_err(IntegrationError::Drift)?,
-        ),
+        ApplyPayload::Launcher(op) => {
+            native_apply(key, crate::shortcuts::apply(&op).map_err(drift)?)
+        }
         ApplyPayload::Path(op) => apply_path(&key, &op),
-        ApplyPayload::Service(op) => native_apply(
-            key,
-            crate::services::apply(&op).map_err(IntegrationError::Drift)?,
-        ),
+        ApplyPayload::Service(op) => native_apply(key, crate::services::apply(&op).map_err(drift)?),
         ApplyPayload::Protocol(op) => apply_protocol(&key, &op),
         ApplyPayload::FileAssociation(op) => apply_progid(&key, &op),
         ApplyPayload::Extension(op) => apply_extension(&key, &op),
@@ -60,11 +56,15 @@ fn native_apply(
     Ok(OperationReceipt::Backend { key, payload })
 }
 
+fn drift(error: impl std::fmt::Display) -> IntegrationError {
+    IntegrationError::Drift(error.to_string())
+}
+
 fn native_reconcile(
     key: ResourceKey,
-    result: Result<NativeReconcileResult, String>,
+    result: Result<NativeReconcileResult, impl std::fmt::Display>,
 ) -> Result<ReconcileResult, IntegrationError> {
-    match result.map_err(IntegrationError::Drift)? {
+    match result.map_err(drift)? {
         NativeReconcileResult::AppliedWithReceipt(receipt) => Ok(
             ReconcileResult::AppliedWithReceipt(native_apply(key, *receipt)?),
         ),
@@ -367,13 +367,6 @@ pub fn rollback_managed(receipt: &OperationReceipt) -> Result<(), IntegrationErr
     rollback_native(&receipt)
 }
 
-/// Confirm that a backend apply or removal left the host in the state its
-/// receipt says it installed.
-///
-/// The journal stores backend receipts as opaque bytes, so this is the only
-/// place that can read one back: `zup-transaction` never sees a payload. A
-/// removal's receipt records the *removed* state as its installed state, which
-/// is what makes one comparison cover both directions.
 pub(crate) fn verify_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
     let OperationReceipt::Backend { payload, .. } = receipt else {
         return Err(IntegrationError::Unsupported);
@@ -390,10 +383,7 @@ fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             installed,
             ..
         } => {
-            use crate::shortcuts::ShortcutReader;
-            let observed = crate::shortcuts::WindowsShortcutReader
-                .read_shortcut(launcher_path)
-                .map_err(IntegrationError::Drift)?;
+            let observed = crate::shortcuts::read_shortcut(launcher_path).map_err(drift)?;
             expect(
                 "launcher",
                 &launcher_path.to_string(),
@@ -441,8 +431,7 @@ fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             else {
                 return Err(IntegrationError::Drift("service target is missing".into()));
             };
-            let observed =
-                crate::scm::query_service(name, target).map_err(IntegrationError::Drift)?;
+            let observed = crate::scm::query_service(name, target).map_err(drift)?;
             expect("service", name, &observed_service(observed)?, installed)
         }
         BackendReceipt::Protocol {
@@ -567,14 +556,13 @@ fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             previous,
             installed,
             ..
-        } => crate::shortcuts::rollback(launcher_path, previous, installed)
-            .map_err(IntegrationError::Drift),
+        } => crate::shortcuts::rollback(launcher_path, previous, installed).map_err(drift),
         BackendReceipt::Service {
             name,
             previous,
             installed,
             ..
-        } => crate::services::rollback(name, previous, installed).map_err(IntegrationError::Drift),
+        } => crate::services::rollback(name, previous, installed).map_err(drift),
         BackendReceipt::Path {
             scope,
             entry,
@@ -655,28 +643,25 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
             previous,
             installed,
             ..
-        } => {
-            use crate::shortcuts::ShortcutReader;
-            match crate::shortcuts::WindowsShortcutReader.read_shortcut(launcher_path) {
-                Ok(zup_exec::ObservedLauncherState::Absent) => {
-                    Ok(compare_removal(&LauncherState::Absent, previous, installed))
-                }
-                Ok(zup_exec::ObservedLauncherState::Launcher {
+        } => match crate::shortcuts::read_shortcut(launcher_path) {
+            Ok(zup_exec::ObservedLauncherState::Absent) => {
+                Ok(compare_removal(&LauncherState::Absent, previous, installed))
+            }
+            Ok(zup_exec::ObservedLauncherState::Launcher {
+                target,
+                arguments,
+                working_directory,
+            }) => Ok(compare_removal(
+                &LauncherState::Launcher {
                     target,
                     arguments,
                     working_directory,
-                }) => Ok(compare_removal(
-                    &LauncherState::Launcher {
-                        target,
-                        arguments,
-                        working_directory,
-                    },
-                    previous,
-                    installed,
-                )),
-                _ => Ok(ReconcileResult::Ambiguous),
-            }
-        }
+                },
+                previous,
+                installed,
+            )),
+            _ => Ok(ReconcileResult::Ambiguous),
+        },
         BackendReceipt::Path {
             scope,
             entry,
@@ -837,7 +822,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
             if search_path_entry_count(&raw, &entry) == 1 {
                 native_reconcile(
                     key,
-                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
                         BackendReceipt::Path {
                             scope: op.scope,
                             entry,
@@ -866,7 +851,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
             if current == installed {
                 native_reconcile(
                     key,
-                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
                         BackendReceipt::Protocol {
                             scope: op.scope,
                             scheme: op.scheme.to_string(),
@@ -893,7 +878,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
             if current == installed {
                 native_reconcile(
                     key,
-                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
                         BackendReceipt::FileAssociation {
                             scope: op.scope,
                             id: op.id.clone(),
@@ -919,7 +904,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
             if current == installed {
                 native_reconcile(
                     key,
-                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
                         BackendReceipt::Extension {
                             scope: op.scope,
                             extension: op.extension.clone(),
@@ -941,7 +926,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
             if current == Some(operation.installed.clone()) {
                 native_reconcile(
                     key,
-                    Ok(NativeReconcileResult::AppliedWithReceipt(Box::new(
+                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
                         BackendReceipt::AppsFeatures {
                             scope: operation.scope,
                             key_path: operation.key_path,
@@ -991,8 +976,6 @@ fn apply_path(
     )
 }
 
-/// Append one segment, preserving the host's trailing-separator shape so an
-/// unrelated value round-trips byte-for-byte apart from the addition.
 fn append_search_path_entry(raw: &str, entry: &str) -> String {
     if raw.is_empty() {
         entry.to_owned()
@@ -1003,7 +986,6 @@ fn append_search_path_entry(raw: &str, entry: &str) -> String {
     }
 }
 
-/// True when a stored value still names `entry` exactly once.
 fn search_path_entry_count(raw: &str, entry: &str) -> usize {
     crate::search_path::split(raw)
         .into_iter()
@@ -1805,8 +1787,6 @@ mod tests {
         let receipt = apply_managed(&node).expect("apply");
         verify_managed(&receipt).expect("the live registration is the installed state");
 
-        // Drift the registration after the apply: the receipt no longer
-        // describes the host.
         windows_registry::CURRENT_USER
             .create(&operation.key_path)
             .expect("open for write")
@@ -1825,8 +1805,6 @@ mod tests {
         let apply = backend_apply_node(&app_id, operation.clone());
         let applied = apply_managed(&apply).expect("apply");
 
-        // A removal receipt records the removed state as its installed state,
-        // so one comparison covers a removal in the other direction.
         let remove = backend_remove_node(&app_id, &operation);
         let removed = apply_owned_removal(&remove).expect("remove");
         verify_managed(&removed).expect("the removed state is the installed state");

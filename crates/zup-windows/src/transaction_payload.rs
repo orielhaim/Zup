@@ -27,10 +27,6 @@ pub enum AppsFeaturesValue {
     Dword(u32),
 }
 
-/// One Apps & Features registration write.
-///
-/// `scope` selects the host store; `privilege` states the authority the write
-/// needs. Neither is derived from the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppsFeaturesOperation {
     pub scope: SelectedScope,
@@ -58,9 +54,7 @@ pub(crate) enum RemovePayload {
     Owned {
         scope: SelectedScope,
         key: ResourceKey,
-        /// Boxed behind an owned handle: `OwnedResource` is an order of
-        /// magnitude wider than the Apps & Features arm, and a removal payload
-        /// is decoded once, inspected, and dropped.
+
         owned: Box<OwnedResource>,
     },
     AppsFeatures {
@@ -70,11 +64,6 @@ pub(crate) enum RemovePayload {
     },
 }
 
-/// Durable proof of one applied host operation.
-///
-/// `privilege` is recorded here so ownership can be written back to the ledger
-/// with the exact authority the operation needed, instead of re-deriving one
-/// from the scope the application happens to live in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub(crate) enum BackendReceipt {
@@ -135,9 +124,7 @@ pub(crate) enum BackendReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NativeReconcileResult {
     NotApplied,
-    /// Boxed behind an owned handle: a receipt carries whole before/after
-    /// states, so inlining it would make every `NotApplied` and `Ambiguous`
-    /// result as wide as a completed reconciliation.
+
     AppliedWithReceipt(Box<BackendReceipt>),
     Ambiguous,
 }
@@ -455,8 +442,7 @@ fn validate_semantic_owned(
 
 pub(crate) struct AppsPlanningInput {
     pub(crate) app_id: AppId,
-    /// Authority the registration is written with. The host store lives in
-    /// `scope`; the authority is stated separately.
+
     pub(crate) privilege: Privilege,
     pub(crate) current: Option<AppsFeaturesState>,
     pub(crate) owned: Option<AppsFeaturesState>,
@@ -490,9 +476,7 @@ pub(crate) fn compile_execution_plan(
         .map(|target| target.install_directory.clone())
         .or_else(|| execution.install_directory.clone());
     input.uninstall = execution.uninstall;
-    // The preset runtime is a statement about this transaction, not about the
-    // machine: an uninstall and a target with no window both leave none, and a
-    // repair carries the one it is preserving forward.
+
     input.preset = if execution.uninstall {
         None
     } else {

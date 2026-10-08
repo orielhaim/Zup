@@ -14,7 +14,7 @@ use zup_transaction::{TransactionPlan, compile_transaction};
 use crate::inspect::{InspectError, inspect_target};
 use crate::ledger::{InstallLedgerStore, LedgerError};
 use crate::lowering::host_path;
-use crate::shortcuts::{ShortcutReader, WindowsShortcutReader};
+
 use crate::transaction_payload::{
     AppsFeaturesState, AppsFeaturesValue, AppsPlanningInput, apps_backend_id, apps_key,
     compile_execution_plan, decode_apps_owned_payload,
@@ -103,8 +103,7 @@ pub fn plan_target_lifecycle_with_frontend(
             .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
             .map(|_| apps_state(target, scope, state_root, frontend))
     });
-    // The Apps & Features registration needs the same authority as the
-    // maintenance executable it points at, so reuse that operation privilege.
+
     let maintenance_privilege = target
         .and_then(|target| {
             target
@@ -242,9 +241,8 @@ fn inspect_owned_matches(
                 launcher_path,
                 installed,
                 ..
-            } => match WindowsShortcutReader
-                .read_shortcut(launcher_path)
-                .map_err(WindowsPlanError::OwnedInspection)?
+            } => match crate::shortcuts::read_shortcut(launcher_path)
+                .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
             {
                 ObservedLauncherState::Absent => *installed == LauncherState::Absent,
                 ObservedLauncherState::Launcher {
@@ -264,9 +262,6 @@ fn inspect_owned_matches(
             OwnedResource::PathEntry {
                 value, value_type, ..
             } => {
-                // Ownership is checked against the search path that owns the
-                // entry, using Windows segment identity rather than an exact
-                // string compare.
                 let entry = value.clone();
                 let (kind, raw) = crate::integration::read_path(ledger.scope)
                     .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?;
@@ -277,7 +272,7 @@ fn inspect_owned_matches(
                 name, installed, ..
             } => {
                 match crate::scm::query_service(name, &ledger.target)
-                    .map_err(WindowsPlanError::OwnedInspection)?
+                    .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
                 {
                     ObservedServiceState::Absent => *installed == ServiceState::Absent,
                     ObservedServiceState::Service {

@@ -258,8 +258,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
             size: 11,
             sha256: digest(b"maintenance"),
             privilege: Privilege::User,
-            // The maintenance executable is the one file in a Windows
-            // installation that is genuinely runnable.
+
             executable: true,
         }],
         launchers: Vec::new(),

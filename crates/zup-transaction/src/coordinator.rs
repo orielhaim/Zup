@@ -1,5 +1,3 @@
-//! Transaction coordinator: durable prepare / apply / verify / commit.
-
 use miette::Diagnostic;
 use semver::Version;
 use thiserror::Error;
@@ -10,9 +8,8 @@ use crate::executor::{OperationExecutor, OperationReceipt, ReconcileResult};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::{NodeKind, Phase, TransactionNode, TransactionPlan};
 use crate::record::{NodeState, StoreError, TransactionPhase, TransactionRecord};
-use crate::store::TransactionStore;
+use crate::storage::TransactionStore;
 
-/// Final stable outcome of a transaction attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionOutcome {
     Committed,
@@ -20,7 +17,6 @@ pub enum TransactionOutcome {
     RecoveryRequired,
 }
 
-/// Coordinator / executor failures.
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionError {
     #[error("store error: {0}")]
@@ -36,9 +32,6 @@ pub enum TransactionError {
     InvalidState(String),
 }
 
-/// Synchronous transaction coordinator.
-///
-/// Contains no platform-specific mutation logic.
 pub struct TransactionCoordinator<S: TransactionStore> {
     store: S,
 }
@@ -48,7 +41,6 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
         Self { store }
     }
 
-    /// Create the durable record and return it ready for execution.
     pub fn begin(
         &self,
         app_id: AppId,
@@ -63,10 +55,6 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
         Ok(record)
     }
 
-    /// Execute the prepared transaction to a stable outcome.
-    ///
-    /// Preparation and staging run under `Prepared`; the commit-intent barrier
-    /// is where the record becomes `Applying`.
     pub fn execute<E: OperationExecutor>(
         &self,
         mut record: TransactionRecord,
@@ -83,8 +71,6 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
             }
             Err(error) => {
                 if matches!(error, TransactionError::Store(_)) {
-                    // The journal is the authority and it could not be
-                    // written, so this attempt is over. Rolling back from a
                     // record the store never accepted would only compound it.
                     return Err(error);
                 }
@@ -96,11 +82,6 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
     }
 }
 
-/// Recover a transaction from durable state after a crash.
-///
-/// Reconciles every `Running` node before doing anything else, then resumes
-/// the phase the record was in: preparation is undone, applied work rolls
-/// forward, an interrupted rollback continues rolling back.
 pub fn recover<E: OperationExecutor, S: TransactionStore>(
     mut record: TransactionRecord,
     store: &S,
@@ -130,7 +111,6 @@ where
     }
 
     match record.phase {
-        // Commit intent was crossed: finish the plan, verification included.
         TransactionPhase::Applying => match drive(store, &mut record, executor) {
             Ok(()) => {
                 commit_phase(&mut record, store, TransactionPhase::Committed)?;
@@ -146,8 +126,6 @@ where
                 Ok((record, outcome))
             }
         },
-        // A crash before commit intent left only preparation and staging, so
-        // that work is undone rather than adopted. A crash during rollback
         // must never be turned into a commit.
         TransactionPhase::Prepared | TransactionPhase::RollingBack => {
             let outcome = rollback_after_failure(store, &mut record, executor)?;
@@ -168,7 +146,6 @@ fn settled(phase: TransactionPhase) -> TransactionOutcome {
     }
 }
 
-/// Turn a failed drive into a stable outcome.
 fn fail<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -183,8 +160,6 @@ where
     rollback_after_failure(store, record, executor)
 }
 
-/// Walk the plan in execution order, crossing every barrier and verifying
-/// every applied mutation before the commit barrier.
 fn drive<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -217,14 +192,10 @@ where
     Ok(())
 }
 
-/// Barriers that guard the plan: each one is prepared before it is crossed.
 fn barrier_prepares(phase: Phase) -> bool {
     matches!(phase, Phase::Begin | Phase::Preflight)
 }
 
-/// Prepare a barrier, then journal that it was crossed.
-///
-/// The barrier's own state is the durable record of the crossing, so a crash
 /// can never replay a completed barrier as an untracked side effect.
 fn cross_barrier<S: TransactionStore, E: OperationExecutor>(
     store: &S,
@@ -247,8 +218,6 @@ where
     let receipt = match executor.apply(node) {
         Ok(receipt) => receipt,
         Err(error) => {
-            // A barrier carries no side effect of its own, so an unfinished
-            // barrier is simply pending again.
             commit_node(record, store, &node.id, NodeState::Pending)?;
             return Err(TransactionError::Executor {
                 operation: node.id.to_string(),
@@ -269,7 +238,6 @@ where
     Ok(())
 }
 
-/// Cross commit intent when this barrier carries it.
 fn cross_commit_intent<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,
@@ -283,7 +251,6 @@ fn cross_commit_intent<S: TransactionStore>(
     Ok(())
 }
 
-/// Apply one mutating node, or settle it into a durable state after failure.
 fn run_mutation<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -293,7 +260,6 @@ fn run_mutation<S: TransactionStore, E: OperationExecutor>(
 where
     E::Error: std::fmt::Display,
 {
-    // Durable intent BEFORE side effect.
     commit_node(record, store, &node.id, NodeState::Running)?;
     info!(operation = %node.id, "node intent");
 
@@ -319,8 +285,6 @@ where
     Ok(())
 }
 
-/// Decide what a failed apply actually did, using the executor's own
-/// reconciliation, and journal that decision.
 fn settle_failed_mutation<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -362,7 +326,6 @@ where
     Ok(())
 }
 
-/// Verify every applied mutation against its receipt, journaling each result
 /// so recovery never re-runs a completed verification.
 fn verify_applied<S: TransactionStore, E: OperationExecutor>(
     store: &S,
@@ -394,7 +357,6 @@ where
     Ok(())
 }
 
-/// Reconcile every node the journal caught mid-flight.
 fn reconcile_running<S: TransactionStore, E: OperationExecutor>(
     record: &mut TransactionRecord,
     store: &S,
@@ -414,7 +376,6 @@ where
     for op_id in &running {
         let node = find_node(&record.plan, op_id)?.clone();
         if let NodeKind::Barrier = node.kind {
-            // A barrier is pure control, so an interrupted one did not happen.
             commit_node(record, store, op_id, NodeState::Pending)?;
             continue;
         }
@@ -461,7 +422,6 @@ where
     Ok(())
 }
 
-/// Undo every applied node in reverse dependency order.
 fn rollback_after_failure<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -475,8 +435,6 @@ where
         .values()
         .any(|state| *state == NodeState::RollingBack)
     {
-        // A node was mid-rollback when the process died: its receipt is no
-        // longer in the journal, so nothing can name how to undo it.
         warn!(transaction_id = %record.transaction_id, "rollback was interrupted");
         commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
         return Ok(TransactionOutcome::RecoveryRequired);
@@ -495,8 +453,6 @@ where
             .cloned()
             .unwrap_or(NodeState::Pending);
         if node.kind.is_barrier() {
-            // A crossed barrier has no work to undo; the transaction just no
-            // longer stands on it.
             if matches!(state, NodeState::Applied { .. }) {
                 commit_node(record, store, op_id, NodeState::RolledBack)?;
             }
@@ -530,13 +486,6 @@ where
     Ok(TransactionOutcome::RolledBack)
 }
 
-/// Journal one durable change and adopt exactly what was committed.
-///
-/// Every write the coordinator makes is a read-modify-write cycle against a
-/// record other actors also write, so each one goes through the store's update
-/// path: the change is applied to the freshest state and retried if the record
-/// moved underneath it. The committed record then replaces the local copy, so
-/// no later decision is made against a revision that no longer exists.
 fn commit<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,
@@ -555,11 +504,6 @@ fn commit<S: TransactionStore>(
     Ok(())
 }
 
-/// Move one node to `state` durably.
-///
-/// A node that is already in `state` is left alone, so an actor that got there
-/// first is not undone. Any other move has to be a legal one: a refusal is how
-/// this stays from erasing a receipt that names work which really landed.
 fn commit_node<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,
@@ -582,8 +526,6 @@ fn commit_node<S: TransactionStore>(
     })
 }
 
-/// Cross into `next` durably, leaving the phase alone where the record cannot
-/// legally reach it - another actor may already have moved past it.
 fn commit_phase<S: TransactionStore>(
     record: &mut TransactionRecord,
     store: &S,

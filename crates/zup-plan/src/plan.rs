@@ -169,8 +169,6 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
     };
 
     let install_directory = resolve_install_directory(&raw_directory, &installer.app)?;
-    // Authoring default only: resources inherit their scope's authorization
-    // unless something later gives them a narrower requirement.
     let default_privilege = scope.authorization();
 
     let prerequisites = installer

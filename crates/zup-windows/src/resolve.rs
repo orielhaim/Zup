@@ -140,7 +140,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         validate_shortcut_filename(launcher.name.as_str()).map_err(|reason| {
             TargetResolveError::InvalidLauncherName {
                 name: launcher.name.to_string(),
-                reason,
+                reason: reason.to_string(),
             }
         })?;
 
@@ -190,7 +190,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
                 value: value.to_string(),
             },
             value,
-            // The owning search path comes from the plan, not from privilege.
+
             scope: entry.scope,
             privilege: entry.privilege,
         });
@@ -223,7 +223,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             },
             scheme: protocol.scheme.clone(),
             command: CommandSpec::new(executable, protocol.args.clone()),
-            // The host store comes from the plan, not from privilege.
+
             scope: protocol.scope,
             privilege: protocol.privilege,
         });
@@ -244,7 +244,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             id: file_association.id.clone(),
             description: file_association.description.clone(),
             command: CommandSpec::new(executable, Vec::new()),
-            // The host store comes from the plan, not from privilege.
+
             scope: file_association.scope,
             privilege: file_association.privilege,
         });
@@ -283,9 +283,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         target: plan.target.clone(),
         scope: plan.scope,
         install_directory,
-        // A build plan says which preset; it does not say which bytes. The
-        // executable is content, and content is resolved by whoever supplies the
-        // payload - the caller that attaches this installation's runtime copy.
+
         preset: None,
         selected_components: plan.selected_components.clone(),
         prerequisites,
@@ -441,12 +439,6 @@ fn insert_identity(
     Ok(())
 }
 
-/// Whether an installation cannot own both paths.
-///
-/// A directory and a path inside it cannot both be owned, because one is the
-/// container of the other. Two files at unrelated locations can, and so can two
-/// directories, because the installer owns directories as a set of parents
-/// rather than as a single entry.
 fn hierarchy_conflict(path: &TargetPath, kind: OwnedPathKind, existing: &OwnedPath) -> bool {
     match (
         matches!(kind, OwnedPathKind::Directory),

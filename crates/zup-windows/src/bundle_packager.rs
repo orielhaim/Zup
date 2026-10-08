@@ -1,10 +1,9 @@
-//! Windows executable packaging and inspection.
-
 use std::{
     fs::File,
     io::{Seek, SeekFrom},
     path::{Path, PathBuf},
 };
+use zup_transaction::MAINTENANCE_PACKAGE_NAME;
 
 use thiserror::Error;
 use zup_binary::{BinaryFormat, Executable, ProgramKind};
@@ -22,7 +21,6 @@ use zup_pe::{
     ResourceDocument,
 };
 
-/// Errors produced by the Windows package adapter.
 #[derive(Debug, Error)]
 pub enum BundleError {
     #[error(transparent)]
@@ -77,9 +75,6 @@ impl From<PeError> for BundleError {
     }
 }
 
-/// Read one embedded resource, mapping a missing resource to the adapter's own
-/// answer so a program without a package and a program with a broken one are
-/// told apart.
 fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
     crate::pe_resources::read_resource(executable, id).map_err(|error| match error {
         crate::pe_resources::ResourceError::Absent(_) => BundleError::MissingResource,
@@ -88,12 +83,11 @@ fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
     })
 }
 
-/// A package embedded in a Windows executable.
 #[derive(Debug, Clone)]
 pub struct EmbeddedBundle {
     executable: PathBuf,
     package: Package,
-    /// The installer's preset, when this executable was composed with one.
+
     preset: Option<Vec<u8>>,
 }
 
@@ -146,9 +140,7 @@ impl EmbeddedBundle {
             bytes.extend_from_slice(&blob);
         }
         let package = Package::from_bytes(bytes)?;
-        // A self-contained GUI installer is composed with a preset; a console
-        // one is not. The resource is read only when it is there, because a
-        // missing one is a fact about the frontend rather than a damaged file.
+
         let preset = read_resource(&executable, RESOURCE_ID_PRESET).ok();
         Ok(Self {
             executable,
@@ -157,7 +149,6 @@ impl EmbeddedBundle {
         })
     }
 
-    /// The preset this installer was composed with.
     pub fn preset(&self) -> Option<&[u8]> {
         self.preset.as_deref()
     }
@@ -182,8 +173,6 @@ impl EmbeddedBundle {
         Ok(self.package.build_plan()?)
     }
 
-    /// The bytes of one application-provided preset asset, proved against the digest
-    /// the plan recorded.
     pub fn ui_asset(&self, name: &str) -> Result<(zup_core::PresetAsset, Vec<u8>), BundleError> {
         self.package
             .ui_asset(name)
@@ -282,12 +271,6 @@ impl EmbeddedPayloadSource {
         Ok(Box::new(file))
     }
 
-    /// The preset executable this image was composed with.
-    ///
-    /// Present only for an installer that presents a window, and read from the
-    /// image's own resource rather than from a file beside it, because the file
-    /// beside it is a convenience a first run leaves behind and nothing else may
-    /// rely on.
     fn open_preset(
         &self,
         path: &RelativePath,
@@ -365,14 +348,6 @@ impl PayloadSource for EmbeddedPayloadSource {
     }
 }
 
-/// Selects directory, standalone-package, or embedded-executable payload data.
-///
-/// A native runtime's content may live in its own resources, in a standalone
-/// package file, or in a **sidecar store** beside the executable. The sidecar is
-/// what a selected universal variant installs as, and what an installed
-/// maintenance copy reads from after the original artifact is gone. Which one is
-/// in play is decided here and is invisible above: the lifecycle planner only
-/// ever asks for a portable path, a digest, and a length.
 pub enum AutoPayloadSource {
     Portable(PortableAutoPayloadSource),
     Embedded(EmbeddedPayloadSource),
@@ -393,21 +368,17 @@ impl AutoPayloadSource {
             Err(_package_error) if is_executable_image(&path) => {
                 match EmbeddedBundle::open(&path) {
                     Ok(bundle) => Ok(Self::Embedded(bundle.payload_source())),
-                    // An image that carries a universal artifact is not a payload
-                    // root; it is something to run.
+
                     Err(error) if error.is_missing_resource() => {
                         if is_universal_artifact(&path) {
                             return Err(BundleError::UniversalArtifact {
                                 path: path.display().to_string(),
                             });
                         }
-                        // An image with no package of its own is a bare native
-                        // runtime, whose content is the sidecar store the
-                        // installation persisted beside it.
+
                         Self::from_sidecar(&path)
                     }
-                    // An image that does carry something zup wrote but cannot read is
-                    // a defect, not a sidecar case.
+
                     Err(error) => Err(error),
                 }
             }
@@ -415,10 +386,6 @@ impl AutoPayloadSource {
         }
     }
 
-    /// Read the sidecar store beside `executable`, if there is one.
-    ///
-    /// A missing sidecar beside a bare runtime is a real refusal: the runtime has
-    /// no content and no way to get any.
     fn from_sidecar(executable: &Path) -> Result<Self, BundleError> {
         let sidecar = sidecar_package_path(executable);
         if !sidecar.is_file() {
@@ -444,19 +411,13 @@ impl AutoPayloadSource {
     }
 }
 
-/// The sidecar package path beside an executable.
 pub fn sidecar_package_path(executable: &Path) -> PathBuf {
     executable
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(crate::MAINTENANCE_PACKAGE_NAME)
+        .join(MAINTENANCE_PACKAGE_NAME)
 }
 
-/// Whether an image is a universal artifact rather than a payload root.
-///
-/// The two are told apart by their first resource, which is a package index in
-/// one case and an artifact index in the other. A single-target artifact stays a
-/// payload root, so this is a narrow question with a narrow answer.
 fn is_universal_artifact(executable: &Path) -> bool {
     match crate::pe_resources::read_resource(executable, RESOURCE_ID_INDEX) {
         Ok(bytes) => zup_artifact::ArtifactIndex::parse(&bytes).is_ok(),
@@ -541,7 +502,6 @@ fn is_plugin_path(path: &RelativePath) -> bool {
         .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)
 }
 
-/// Build an installer executable containing a package index and its blobs.
 pub fn build_self_contained_executable(
     executable: &Path,
     output: &Path,
@@ -559,18 +519,6 @@ pub fn build_self_contained_executable(
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
 
-/// Build a **thin** native runtime: the plan, and none of the content.
-///
-/// This is the executable a thin installer fetches and hands control to. It
-/// knows exactly what it would install - application identity, components, file
-/// destinations, prerequisites, plugin bindings - so it can plan and execute a
-/// lifecycle with no manifest, and it holds none of the bytes, because the bytes
-/// come from a verified content-addressed cache the release graph
-/// authenticated.
-///
-/// The alternative - embedding the payload - is what an offline artifact does,
-/// and it makes the runtime the entire application. Which is the reason a thin
-/// installer built that way would not be thin.
 pub fn build_plan_only_executable(
     executable: &Path,
     output: &Path,
@@ -582,12 +530,6 @@ pub fn build_plan_only_executable(
     Ok((bytes.len() as u64, package_size))
 }
 
-/// The plan-only runtime image, as bytes.
-///
-/// The bytes are the useful shape for a publisher: the image is content a
-/// release graph names, so it has to exist as bytes before anything writes a
-/// file, and a caller that wrote a temporary file first would have two
-/// processes racing over one name.
 pub fn plan_only_runtime_bytes(
     executable: &Path,
     plan: &TargetBuildPlan,
@@ -606,7 +548,6 @@ pub fn plan_only_runtime_bytes(
     Ok((std::fs::read(&out)?, package_size))
 }
 
-/// Embed a prebuilt portable package in an executable.
 pub fn embed_bundle_file(
     executable: &Path,
     output: &Path,
@@ -617,12 +558,6 @@ pub fn embed_bundle_file(
     embed_bundle_resource(executable, output, package, preset)
 }
 
-/// Confirm a runtime template is the executable its plan says it is.
-///
-/// The descriptor a toolchain ships beside a component is a claim; the image's
-/// own header is an independent statement. Reading the file and refusing any
-/// contradiction is what makes the claim worth anything on a host that cannot
-/// run the file.
 fn validate_runtime_executable(
     executable: &Path,
     installer: &zup_core::Installer,
@@ -636,11 +571,6 @@ fn validate_runtime_executable(
     Ok(())
 }
 
-/// Whether `path` is an executable image at all.
-///
-/// The question is asked about files zup did not write and about a universal
-/// artifact measured in gigabytes, so it is a bounded read rather than a parse:
-/// the architecture and the subsystem are not needed to answer it.
 pub fn is_executable_image(path: &Path) -> bool {
     Executable::read(path).is_ok_and(|executable| executable.format() == BinaryFormat::Pe)
 }
@@ -658,11 +588,6 @@ pub fn validate_embedded_bundle_target(
     Ok(())
 }
 
-/// The frontend a runtime template presents, judged by its own header.
-///
-/// A template whose format records no subsystem answers `None`: ELF and Mach-O
-/// have no such field, and reporting one of the two would be a guess about a
-/// file that did not make it.
 pub fn read_frontend(path: &Path) -> Result<Option<Frontend>, BundleError> {
     let program = Executable::read(path)?.program();
     Ok(match program {
@@ -672,11 +597,6 @@ pub fn read_frontend(path: &Path) -> Result<Option<Frontend>, BundleError> {
     })
 }
 
-/// Whether a runtime template satisfies a declared frontend.
-///
-/// One rule for every caller: a console program serves a headless frontend,
-/// because a headless frontend is a console program that also promises to speak
-/// a protocol rather than draw anything.
 pub fn validate_frontend(path: &Path, expected: Frontend) -> Result<(), BundleError> {
     Executable::read(path)?.refuse_frontend(expected)?;
     Ok(())
@@ -689,8 +609,6 @@ fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
     Ok(())
 }
 
-/// The resource documents a portable package occupies: the index, then one
-/// resource per compressed blob.
 fn package_documents(package: &Package) -> Result<Vec<ResourceDocument>, BundleError> {
     let index = package.index_bytes()?;
     if index.len() as u64 > MAX_RESOURCE_SIZE {

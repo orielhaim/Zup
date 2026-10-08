@@ -48,11 +48,6 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
     input
 }
 
-/// The one worker invocation these tests share.
-///
-/// A struct rather than eight positional arguments, because a test helper whose
-/// arguments are four paths and two options is a test helper whose call sites
-/// cannot be read.
 struct Worker {
     plan: TransactionPlan,
     version: String,

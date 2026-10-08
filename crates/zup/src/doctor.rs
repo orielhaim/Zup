@@ -1,14 +1,4 @@
-//! Read-only build readiness for `zup doctor`.
-//!
-//! `zup doctor` answers one question: would `zup build` succeed right now? It
-//! reuses the same manifest, target, plugin, lowering, and build-input paths as
-//! `zup build`, then reports every check it cannot pass.
-//!
 //! The command is read-only. It never writes an installer artifact, downloads a
-//! tool, or changes machine state: plugin sources are hashed and AOT-compiled
-//! in memory, and output directories are probed for write access without
-//! creating anything. Every failure across every selected target is collected
-//! and reported, and the process exits nonzero when a check fails.
 
 use std::fmt::Write as _;
 use std::io;
@@ -21,55 +11,34 @@ use zup_plugin_contract::{PluginEngine, WASMTIME_VERSION};
 
 use crate::build_inputs::{self, BackendSupport, BuildInputs};
 use crate::cli::OutputArg;
-use crate::report::Reporter;
+use crate::failure::Reporter;
 #[cfg(target_os = "linux")]
 use zup_linux::SystemdManager as _;
 
-/// The remedy `doctor` names when a toolchain component is unusable.
-///
-/// Not a Cargo command. A developer who installed `zup` does not have a
-/// workspace, and telling them to run `cargo build` in one would be advice that
-/// only works inside this repository.
-/// The remedy named when a toolchain component is unusable.
-///
-/// Not a Cargo command. A developer who installed `zup` does not have a
-/// workspace, and telling them to run `cargo build` in one would be advice that
-/// only works inside this repository. Shared with the build, which refuses for the
-/// same reason and would otherwise repeat the sentence.
 pub const TOOLCHAIN_HINT: &str = "Build the zup toolchain for this version and stage it beside \
                              `zup`, or point zup at one with `zup --toolchain <dir>`";
 
-/// Build readiness without writing anything.
 #[derive(Debug, Args)]
 pub struct DoctorCommand {
     #[arg(long, default_value = crate::DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
     pub manifest: PathBuf,
-    /// Runtime template for each selected target; discovered from the toolchain
-    /// when absent.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub runtime: Vec<PathBuf>,
-    /// Installer output for each selected target; derived when omitted.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub output: Vec<PathBuf>,
-    /// Build source directory for each selected target, relative to the project.
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Vec<PathBuf>,
-    /// Default install directory to resolve for each selected target.
     #[arg(long, alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub install_directory: Vec<PathBuf>,
-    /// Frontend to resolve for each selected target.
     #[arg(long, value_enum)]
     pub frontend: Option<crate::FrontendArg>,
-    /// Target profile name or canonical target triple. Repeatable; empty selects all.
     #[arg(long, value_name = "PROFILE_OR_TARGET")]
     pub target: Vec<String>,
-    /// Readable text, or the versioned machine result.
     #[arg(long, value_enum, default_value = "human")]
     pub format: OutputArg,
 }
 
 impl Default for DoctorCommand {
-    /// A human-readable readiness report for the default manifest.
     fn default() -> Self {
         Self {
             manifest: PathBuf::from(crate::DEFAULT_MANIFEST),
@@ -84,53 +53,26 @@ impl Default for DoctorCommand {
     }
 }
 
-/// Result of one readiness check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
-    /// The check passed.
     Pass,
-    /// The check failed; `zup build` would fail or refuse this target.
     Fail,
-    /// The check does not apply, or an earlier failure made it meaningless.
     Skip,
 }
 
-/// What one readiness check examined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckKind {
-    /// The canonical target triple the profile resolves to.
     CanonicalTarget,
-    /// Compilation of the profile into installer IR.
     ManifestCompile,
-    /// The source root and the payload it materializes.
     SourcePayload,
-    /// Plugin engine construction and AOT compilation.
     PluginEngine,
-    /// The embedded trusted update root.
     UpdateRoot,
-    /// The frontend this profile resolves to.
     Frontend,
-    /// The manifest, and the toolchain to resolve templates from, agree on one
-    /// check: the descriptor beside the component, and the component's own header.
-    /// They are one check because a build refuses a component that fails either,
-    /// and a report that split them would show a green row for a file the build
-    /// would not use.
     RuntimeTemplate,
-    /// Backend support for the target on this build host.
     BuildBackend,
-    /// Target lowering for every install scope.
     TargetLowering,
-    /// Whether the output parent directory can be written.
     OutputParent,
-    /// Whether a machine installation could elevate on the installing
-    /// machine. Linux-only: other targets skip, and user-scope-only
-    /// projects skip because user scope installs without elevation.
     Elevation,
-    /// Whether the systemd system manager answers on the installing
-    /// machine. Linux-only, and only for projects that declare machine
-    /// services: anything else skips, and a build host that cannot confirm
-    /// (a Windows cross-build host, a container without a bus) skips rather
-    /// than failing a project that builds correctly.
     ServiceRuntime,
 }
 
@@ -153,7 +95,6 @@ impl CheckKind {
     }
 }
 
-/// One readiness check for one target profile.
 #[derive(Debug, Clone)]
 pub struct Check {
     pub profile: String,
@@ -161,11 +102,9 @@ pub struct Check {
     pub kind: CheckKind,
     pub status: CheckStatus,
     pub message: String,
-    /// The path the check examined, when it examined one.
     pub path: Option<String>,
 }
 
-/// Readiness of one selected target profile.
 #[derive(Debug, Clone)]
 pub struct TargetReport {
     pub profile: String,
@@ -180,22 +119,15 @@ impl TargetReport {
     }
 }
 
-/// A complete readiness report for the selected targets.
-///
-/// The command's own model and the one the human view renders. `crate::automation`
-/// projects it onto the protocol's `DoctorDetails`, which is the only serialized
-/// shape: a second one here would be a document with two owners.
 #[derive(Debug, Clone)]
 pub struct DoctorReport {
     pub manifest: String,
-    /// The canonical target triple of the build host.
     pub host: String,
     pub status: CheckStatus,
     pub targets: Vec<TargetReport>,
 }
 
 impl DoctorReport {
-    /// The number of checks that failed.
     pub fn failures(&self) -> usize {
         self.targets
             .iter()
@@ -204,12 +136,10 @@ impl DoctorReport {
             .count()
     }
 
-    /// Whether every selected target is ready to build.
     pub fn is_ready(&self) -> bool {
         self.targets.iter().all(TargetReport::is_ready)
     }
 
-    /// Render the report for a terminal.
     pub fn human(&self) -> String {
         let mut text = String::new();
         let _ = writeln!(text, "manifest  {}", self.manifest);
@@ -262,17 +192,10 @@ const fn status_glyph(status: CheckStatus) -> &'static str {
     }
 }
 
-/// Render a build-machine path for a report, without the Windows verbatim prefix.
 fn display(path: &Path) -> String {
     crate::plain_path(path)
 }
 
-/// Report whether this project is ready to build.
-///
-/// Returns the machine result and *also* fails, because readiness is a verdict and the
-/// process's exit code is how a shell learns it. The result is the report: a caller
-/// that asked for `--format json` gets the findings and the exit code, not one or the
-/// other.
 pub fn run(
     args: DoctorCommand,
     toolchain_root: Option<PathBuf>,
@@ -308,10 +231,6 @@ pub fn run(
     Ok(result)
 }
 
-/// Checks that need a materialized build plan for this target.
-///
-/// The update root and the frontend are resolved from the manifest and the
-/// target profile alone, so they are evaluated even without a plan.
 const PLAN_KINDS: [CheckKind; 4] = [
     CheckKind::ManifestCompile,
     CheckKind::SourcePayload,
@@ -319,7 +238,6 @@ const PLAN_KINDS: [CheckKind; 4] = [
     CheckKind::TargetLowering,
 ];
 
-/// The check that owns a plan failure, so it is reported once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanOwner {
     Compile,
@@ -339,7 +257,6 @@ impl PlanOwner {
     }
 }
 
-/// The plan a target produced, or the check that owns the failure.
 enum PlanOutcome {
     Ready(Box<zup_build::BuildPlan>),
     Failed(PlanOwner, String),
@@ -457,7 +374,6 @@ impl Inspection<'_> {
         report.finish()
     }
 
-    /// Compile and materialize one target, keeping the failure typed.
     fn plan(
         &self,
         config: &ResolvedTargetConfig,
@@ -483,7 +399,6 @@ impl Inspection<'_> {
         ) {
             Ok(build) => PlanOutcome::Ready(Box::new(build)),
             Err(error) => {
-                // Report the cause once, under the check that owns it.
                 let owner = if source_root.is_err() {
                     PlanOwner::Payload
                 } else if update_root.is_err() {
@@ -499,7 +414,6 @@ impl Inspection<'_> {
     }
 }
 
-/// Whether a materialization failure is about a declared plugin source.
 fn is_plugin_error(error: &zup_build::BuildError) -> bool {
     let error = match error {
         zup_build::BuildError::Target { source, .. } => source.as_ref(),
@@ -518,7 +432,6 @@ fn is_plugin_error(error: &zup_build::BuildError) -> bool {
     )
 }
 
-/// Ordered check rows for one target profile.
 struct TargetChecks<'a> {
     inputs: &'a BuildInputs,
     manifest: &'a zup_manifest::Manifest,
@@ -560,11 +473,6 @@ impl TargetChecks<'_> {
         self.record(kind, CheckStatus::Skip, message, path);
     }
 
-    /// Fold a remedy into the check's message.
-    ///
-    /// A check that says what is wrong and not what to do about it makes the
-    /// reader go and look up a Cargo command, and the whole point of `doctor` is
-    /// that the reader does not have to.
     fn hint(&mut self, kind: CheckKind, remedy: &str) {
         if let Some(check) = self
             .checks
@@ -594,7 +502,6 @@ impl TargetChecks<'_> {
         });
     }
 
-    /// One row per shared input problem, reported against the input it names.
     fn input_problems(&mut self, subject: build_inputs::InputSubject) {
         for problem in self
             .inputs
@@ -673,7 +580,6 @@ impl TargetChecks<'_> {
                 return;
             }
         };
-        // AOT compilation happens in memory; nothing is written or installed.
         match zup_plugin_build::compile_plugins(plan) {
             Ok(artifacts) => self.pass(
                 CheckKind::PluginEngine,
@@ -692,7 +598,6 @@ impl TargetChecks<'_> {
         }
     }
 
-    /// Mark every plan-dependent check; only the owning check failed.
     fn plan_unavailable(&mut self, plan: &PlanOutcome) {
         let PlanOutcome::Failed(owner, message) = plan else {
             return;
@@ -764,15 +669,6 @@ impl TargetChecks<'_> {
         );
     }
 
-    /// The runtime's toolchain descriptor, and the header that has to agree with it.
-    ///
-    /// A file name is not a compatibility check, and this is where that is
-    /// enforced. The descriptor names the zup release, the target, and the
-    /// frontend the bytes were produced for; the bytes have to hash to the digest
-    /// it recorded; and the machine and subsystem in the file's own header have to
-    /// say the same thing. A template left over from another zup release, built
-    /// for another machine, or built for another presentation fails here rather
-    /// than producing an installer that cannot read its own plan.
     fn runtime_template(&mut self, runtime: &Path) {
         let component = crate::toolchain::runtime_for(&self.config.target, self.config.frontend);
         match zup_toolchain::read(runtime, &component, crate::ZUP_VERSION) {
@@ -799,10 +695,6 @@ impl TargetChecks<'_> {
         }
     }
 
-    /// The runtime check, or nothing when resolution already reported the refusal.
-    ///
-    /// Two rows for one problem would make a report a reader has to reconcile, and
-    /// the second would be a green row for a file the build would not use.
     fn runtime(&mut self) {
         if self
             .inputs
@@ -878,20 +770,8 @@ impl TargetChecks<'_> {
         }
     }
 
-    /// Whether a machine installation could elevate on the installing machine.
-    ///
-    /// Linux-only, and only for projects with a machine leg: user-scope-only
-    /// projects install without elevation, and other targets have no `pkexec`
-    /// to check. When lowering already failed, machine scope is unsupported
-    /// for that reason and elevation is not evaluated twice.
-    ///
     /// This never authenticates: it proves a system `pkexec` is structurally
-    /// usable (present, root-owned, not writable below root), which is what a
-    /// build host can say without prompting. A build host without `pkexec` -
-    /// a container, or a Windows cross-build host - skips rather than failing
-    /// a project that builds correctly: whether the installing machine
     /// authorizes is a target-runtime concern. `zup build` never needs this
-    /// check to pass.
     fn elevation(&mut self) {
         let target = &self.config.target;
         if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
@@ -948,16 +828,8 @@ impl TargetChecks<'_> {
         }
     }
 
-    /// Whether the systemd system manager answers on this machine, for a
-    /// project that declares machine services.
-    ///
     /// Read-only and never mutating: a probe that names the manager and
     /// reads one property, never an operation that changes unit state. A
-    /// project with no services skips; a non-Linux target skips; a build
-    /// host that cannot confirm (Windows cross-build, bus unavailable)
-    /// skips with the reason rather than failing the build - systemd is an
-    /// install-time requirement, and `zup build` must stay host-independent.
-    /// `zup check` already proved the services are machine-scope statics.
     fn service_runtime(&mut self, build: &zup_build::BuildPlan) {
         let target = &self.config.target;
         if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
@@ -1081,10 +953,7 @@ impl TargetChecks<'_> {
     }
 }
 
-/// The backend name a readiness report uses for `target`.
-///
 /// The target's own platform, never the build host's: a Windows host building
-/// a Linux target reports on the Linux backend.
 fn backend_name(target: &zup_core::TargetTriple) -> &'static str {
     match target.operating_system() {
         zup_core::TargetOperatingSystem::Windows => "Windows",
@@ -1093,7 +962,6 @@ fn backend_name(target: &zup_core::TargetTriple) -> &'static str {
     }
 }
 
-/// The lowering name a readiness report uses for `target`.
 fn lowering_name(target: &zup_core::TargetTriple) -> &'static str {
     match target.operating_system() {
         zup_core::TargetOperatingSystem::Windows => "Windows",
@@ -1102,9 +970,6 @@ fn lowering_name(target: &zup_core::TargetTriple) -> &'static str {
     }
 }
 
-/// A stable digest over the ordered payload inventory of one target.
-///
-/// This summarizes what the payload contains without rehashing the sources.
 fn payload_digest(plan: &zup_build::TargetBuildPlan) -> io::Result<Sha256Digest> {
     let mut summary = String::with_capacity(plan.files.len() * 96);
     for file in &plan.files {
@@ -1119,10 +984,6 @@ fn payload_digest(plan: &zup_build::TargetBuildPlan) -> io::Result<Sha256Digest>
     hash_reader(summary.as_bytes()).map(|(_, digest)| digest)
 }
 
-/// Whether a directory can be written, without writing anything.
-///
-/// On Windows the ACL is probed by opening the directory for write access with
-/// backup semantics, which needs no privilege and creates nothing.
 #[cfg(windows)]
 fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -1139,11 +1000,7 @@ fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     }
 }
 
-/// A structurally usable system `pkexec`, if this Linux machine has one.
-///
 /// Presence, ownership, and writability - never execution, which would
-/// authenticate. `doctor` reports capability; prompting is the installer's
-/// job at install time.
 #[cfg(target_os = "linux")]
 fn system_pkexec() -> Option<std::path::PathBuf> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1161,15 +1018,12 @@ fn system_pkexec() -> Option<std::path::PathBuf> {
         })
 }
 
-/// No `pkexec` off Linux: elevation is a target-runtime concern the build
 /// host reports by skipping, never by failing the project.
 #[cfg(not(target_os = "linux"))]
 fn system_pkexec() -> Option<std::path::PathBuf> {
     None
 }
 
-/// What this Linux machine's systemd system manager reports, without
-/// mutating anything: connect, name the manager, read its version.
 #[cfg(target_os = "linux")]
 fn system_systemd() -> SystemdReadiness {
     let mut manager = match zup_linux::RealSystemd::connect() {
@@ -1179,9 +1033,7 @@ fn system_systemd() -> SystemdReadiness {
     SystemdReadiness::of_version(manager.version().ok().as_deref())
 }
 
-/// Names the `Type=exec` minimum for a too-old manager. Reachable only on
 /// Linux: a non-Linux host never constructs `TooOld`, so its copy just
-/// states the requirement without the constant.
 #[cfg(target_os = "linux")]
 fn systemd_too_old_message(version: u32) -> String {
     format!(
@@ -1190,18 +1042,11 @@ fn systemd_too_old_message(version: u32) -> String {
     )
 }
 
-/// Names the `Type=exec` minimum for a too-old manager. Reachable only on
 /// Linux: a non-Linux host never constructs `TooOld`, so its copy just
-/// states the requirement without the constant.
 #[cfg(not(target_os = "linux"))]
 fn systemd_too_old_message(version: u32) -> String {
     format!("systemd {version} is too old for `Type=exec` service units")
 }
-/// The systemd readiness of one machine: new enough, too old, or unknown.
-///
-/// Plain data, portable across hosts: only the constructors that probe a
-/// live manager are platform-gated. `Ready`/`TooOld` are constructed on
-/// Linux only; the shared match still names them everywhere.
 #[allow(dead_code)]
 enum SystemdReadiness {
     Ready(u32),
@@ -1210,10 +1055,6 @@ enum SystemdReadiness {
 }
 
 impl SystemdReadiness {
-    /// Pure verdict from an optional probed version string: new enough to
-    /// run `Type=exec` units, too old (fail, with the minimum named), or
-    /// unparsable/absent (unknown — the caller skips rather than failing
-    /// a build on a question it could not ask).
     #[cfg(target_os = "linux")]
     fn of_version(version: Option<&str>) -> Self {
         match version.and_then(zup_linux::parse_manager_version) {
@@ -1257,14 +1098,12 @@ mod readiness_tests {
     }
 }
 
-/// No systemd off Linux: service runtime is a target-runtime concern the
 /// build host reports by skipping, never by failing the project.
 #[cfg(not(target_os = "linux"))]
 fn system_systemd() -> SystemdReadiness {
     SystemdReadiness::Unknown
 }
 
-/// Whether a directory can be written, read from its permission bits.
 #[cfg(unix)]
 fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     use std::os::unix::fs::PermissionsExt;
@@ -1272,7 +1111,6 @@ fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     Ok(std::fs::metadata(directory)?.permissions().mode() & 0o222 != 0)
 }
 
-/// Whether a directory can be written, read from its read-only flag.
 #[cfg(not(any(windows, unix)))]
 fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     Ok(!std::fs::metadata(directory)?.permissions().readonly())

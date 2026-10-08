@@ -1,11 +1,3 @@
-//! The artifact composer.
-//!
-//! Composition is a separate phase from variant building, because an artifact
-//! may consume the outputs of several target builds that need not happen on the
-//! same machine or at the same time. The composer takes finished variants and
-//! produces one graph, and the graph is where deduplication happens: every unique
-//! payload byte is compressed once, no matter how many variants reference it.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -15,23 +7,21 @@ use sha2::{Digest, Sha256};
 use zup_core::Sha256Digest;
 
 use crate::compat::check_compatibility;
-use crate::descriptor::Descriptor;
-use crate::error::ArtifactError;
+use crate::format::ArtifactError;
+use crate::format::Descriptor;
+use crate::format::{MAX_VARIANTS, MediaType};
 use crate::index::{
     ARTIFACT_SCHEMA, ArtifactDescriptor, ArtifactIndex, ArtifactKind, ArtifactMode, ArtifactPin,
     ArtifactSavings, ArtifactTables, FEATURE_CHANNEL_PIN, FEATURE_SHARED_CAS,
     FEATURE_VARIANT_MANIFESTS, LauncherStrategy, VariantContentSet, savings,
 };
-use crate::media_type::{MAX_VARIANTS, MediaType};
 use crate::table::{BlobEntry, BlobTable};
 use crate::variant::{
     DistributionVariant, VariantDescriptor, VariantDescriptorContent, VariantManifest,
 };
 
-/// Zstandard level used for every content blob.
 const CONTENT_LEVEL: i32 = 9;
 
-/// What composition was asked to produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRequest {
     pub id: String,
@@ -40,12 +30,10 @@ pub struct ArtifactRequest {
     pub pin: ArtifactPin,
     pub launcher: LauncherStrategy,
     pub output: String,
-    /// Where the release graph lives, for a thin artifact.
     pub trust: Option<zup_acquire::OnlineTrust>,
 }
 
 impl ArtifactRequest {
-    /// A universal offline artifact covering every given variant.
     pub fn universal_offline(
         id: impl Into<String>,
         application: &zup_core::App,
@@ -64,12 +52,6 @@ impl ArtifactRequest {
         }
     }
 
-    /// A thin artifact that authenticates `trust` and fetches the rest.
-    ///
-    /// The two thin artifacts differ only in `trust.pin`, and that is the whole
-    /// difference a user sees: a version-labelled installer always resolves the
-    /// graph it was built for, and a channel installer resolves whatever the
-    /// channel currently says.
     pub fn thin_online(
         id: impl Into<String>,
         application: &zup_core::App,
@@ -97,7 +79,6 @@ impl ArtifactRequest {
     }
 }
 
-/// A variant's canonical manifest, with the bytes it was serialized from.
 #[derive(Debug, Clone)]
 pub struct ComposedManifest {
     pub id: String,
@@ -105,12 +86,6 @@ pub struct ComposedManifest {
     pub bytes: Vec<u8>,
 }
 
-/// A native image a variant declares, with the bytes it was composed from.
-///
-/// A runtime and a window's preset are the same kind of thing here: an
-/// executable a machine has to fetch for this target and verify before it runs.
-/// They carry different media types, and nothing else about them differs, so
-/// they are one type with two names at the point where they are addressed.
 #[derive(Debug, Clone)]
 pub struct ComposedImage {
     pub id: String,
@@ -118,7 +93,6 @@ pub struct ComposedImage {
     pub bytes: Vec<u8>,
 }
 
-/// One composed artifact: the index plus everything it references.
 #[derive(Debug)]
 pub struct ArtifactGraph {
     index: ArtifactIndex,
@@ -128,11 +102,8 @@ pub struct ArtifactGraph {
     presets: Vec<ComposedImage>,
     segments_root: Option<PathBuf>,
     segment_sizes: Vec<u64>,
-    /// Keeps the composition spool alive for as long as the graph.
     _spool: Option<tempfile::TempDir>,
     savings: ArtifactSavings,
-    /// Per-variant content sets, kept so a selection can materialize one
-    /// variant without reading the others.
     content: BTreeMap<String, VariantContentSet>,
 }
 
@@ -153,33 +124,26 @@ impl ArtifactGraph {
         &self.runtimes
     }
 
-    /// The window images this artifact carries, in index order.
     pub fn presets(&self) -> &[ComposedImage] {
         &self.presets
     }
 
-    /// The directory the compressed segments were spooled into, when the graph
-    /// was composed on disk.
     pub fn segments_root(&self) -> Option<&Path> {
         self.segments_root.as_deref()
     }
 
-    /// The compressed size of each segment, in segment order.
     pub fn segment_sizes(&self) -> &[u64] {
         &self.segment_sizes
     }
 
-    /// What composing these variants saved.
     pub fn savings(&self) -> ArtifactSavings {
         self.savings
     }
 
-    /// The digests one variant requires.
     pub fn content_of(&self, id: &str) -> Option<&VariantContentSet> {
         self.content.get(id)
     }
 
-    /// A segment source reading this graph's compressed segments from disk.
     pub fn segments(&self) -> Result<crate::store::FileSegments, ArtifactError> {
         let root = self
             .segments_root
@@ -191,17 +155,14 @@ impl ArtifactGraph {
         Ok(crate::store::FileSegments::new(root.clone()))
     }
 
-    /// The index bytes a container must embed.
     pub fn index_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
         self.index.encode()
     }
 
-    /// The table bytes a container must embed.
     pub fn table_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
         self.table.encode()
     }
 
-    /// The manifest bytes a container must embed, in index order.
     pub fn manifest_bytes(&self) -> Result<Vec<(String, Vec<u8>)>, ArtifactError> {
         Ok(self
             .manifests
@@ -210,7 +171,6 @@ impl ArtifactGraph {
             .collect())
     }
 
-    /// The runtime bytes a container must embed, in index order.
     pub fn runtime_bytes(&self) -> Result<Vec<(String, Vec<u8>)>, ArtifactError> {
         Ok(self
             .runtimes
@@ -219,7 +179,6 @@ impl ArtifactGraph {
             .collect())
     }
 
-    /// The window image bytes a container must carry, in index order.
     pub fn preset_bytes(&self) -> Vec<(String, Vec<u8>)> {
         self.presets
             .iter()
@@ -227,24 +186,18 @@ impl ArtifactGraph {
             .collect()
     }
 
-    /// Whether this artifact carries its content bytes.
     pub fn carries_content(&self) -> bool {
         self.index.artifact.mode.carries_content()
     }
 }
 
-/// How a composition stores its compressed segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompositionStorage {
-    /// Compress into a temporary directory. The right choice for anything
-    /// larger than memory.
     #[default]
     Spooled,
-    /// Compress into memory. Useful for tests and very small graphs.
     Memory,
 }
 
-/// Composes one artifact from one or more finished variants.
 #[derive(Debug)]
 pub struct ArtifactComposer {
     request: ArtifactRequest,
@@ -253,9 +206,6 @@ pub struct ArtifactComposer {
 }
 
 impl ArtifactComposer {
-    /// Prepare to compose `request` from `variants`.
-    ///
-    /// Compatibility is decided here, before any content is read, so an
     /// incompatible set never costs a hash or a compression pass.
     pub fn new(
         request: ArtifactRequest,
@@ -306,20 +256,16 @@ impl ArtifactComposer {
         })
     }
 
-    /// Choose where compressed segments are stored.
     pub fn with_storage(mut self, storage: CompositionStorage) -> Self {
         self.storage = storage;
         self
     }
 
-    /// Choose the Zstandard level. The default is what a released artifact uses,
-    /// so a build is reproducible without asking for it.
     pub fn with_level(mut self, level: i32) -> Self {
         self.level = level;
         self
     }
 
-    /// Compose the graph.
     pub fn compose(
         self,
         variants: &[&DistributionVariant],
@@ -342,8 +288,6 @@ impl ArtifactComposer {
         };
         let mut spooled = BlobSpool::new(segments_root.clone());
 
-        // One pass over the union of every variant's content, so a shared blob
-        // is read, hashed, and compressed exactly once.
         let mut unique: BTreeSet<Sha256Digest> = BTreeSet::new();
         for variant in &ordered {
             for digest in variant.content_digests() {
@@ -389,12 +333,6 @@ impl ArtifactComposer {
                 logical_size: variant.logical_size(),
             };
             content.insert(variant.id().to_owned(), set);
-            // A thin artifact names each variant's runtime but does not carry it.
-            // The bytes come from the release graph, which is the whole reason a
-            // thin installer is thin: it would be absurd to embed the installer
-            // inside the thing whose job is to fetch the installer. The offline
-            // case is the opposite, and the reason an offline artifact must be
-            // able to execute what it holds.
             let runtime = match (self.request.mode, variant.runtime()) {
                 (ArtifactMode::Thin, Some(runtime)) => Some(*runtime),
                 (ArtifactMode::Offline, Some(runtime)) => {
@@ -417,12 +355,6 @@ impl ArtifactComposer {
                 }
                 (ArtifactMode::Thin, None) => None,
             };
-            // The window image is the second native image, and it follows the
-            // same rule for the same reason: an offline artifact must be able to
-            // present the window it carries, and a thin one fetches it from the
-            // release rather than embedding the thing it is fetching. A variant
-            // with no window has none, and saying so is a fact about the variant
-            // rather than a gap in the artifact.
             if self.request.mode == ArtifactMode::Offline
                 && let Some(preset) = variant.preset()
             {
@@ -509,13 +441,6 @@ impl ArtifactComposer {
         self.native_image_bytes(variant, runtime)
     }
 
-    /// One native image's bytes, read from the variant's own sources and
-    /// checked against the descriptor that named it.
-    ///
-    /// The same read for a runtime and for a window's preset: both are
-    /// executables a machine has to have for this target, both are named by
-    /// content, and both are refused on a size that disagrees with the digest
-    /// they were published under.
     fn native_image_bytes(
         &self,
         variant: &DistributionVariant,
@@ -543,8 +468,6 @@ impl ArtifactComposer {
         Ok(bytes)
     }
 
-    /// Compress one unique digest once, reading it from the first variant that
-    /// has it and verifying the content on the way through.
     fn compress_once(
         &self,
         variants: &[&DistributionVariant],
@@ -611,7 +534,6 @@ impl ArtifactComposer {
 }
 
 /// Streams bytes into a Zstandard frame, so a large blob is never buffered
-/// whole before compression.
 struct CompressingSink {
     encoder: zstd::stream::write::Encoder<'static, Vec<u8>>,
 }
@@ -632,7 +554,6 @@ impl CompressingSink {
     }
 }
 
-/// Compressed bytes, held in memory or written to one file per segment.
 enum BlobSpool {
     Memory {
         segments: BTreeMap<u16, Vec<u8>>,
@@ -680,7 +601,6 @@ impl BlobSpool {
         sizes.get(digest).copied().unwrap_or(0)
     }
 
-    /// Lay the pending blobs out into segments exactly as the table says.
     fn seal(&mut self, table: &BlobTable) -> Result<(), ArtifactError> {
         let root = match self {
             Self::Disk { root, .. } => root.clone(),

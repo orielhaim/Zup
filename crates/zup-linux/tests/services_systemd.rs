@@ -1,17 +1,3 @@
-//! Real systemd coverage: the manager answers, units validate, and (as
-//! root, opt-in) a disposable service round-trips its full lifecycle
-//! through the real executor, journal, and ledger.
-//!
-//! Read-only tests run wherever the system bus answers and skip honestly
-//! where it does not (containers without systemd, cross hosts). The
-//! privileged lifecycle additionally needs uid 0 and an explicit opt-in
-//! (`ZUP_TEST_REAL_SYSTEMD=1`): it installs a uniquely-named unit into the
-//! real unit directory, drives install, transitions, and uninstall through
-//! the same transaction machinery production serves, never starts
-//! anything, and always retires everything in a cleanup guard.
-//! `systemd-analyze verify` serves as an additional oracle where
-//! available; the renderer and runtime verification stay authoritative.
-
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
@@ -29,22 +15,16 @@ use zup_transaction::{
     FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, compile_transaction,
 };
 
-/// Whether the systemd system manager answers on this machine.
 fn bus_available() -> bool {
     probe_systemd().is_ok()
 }
 
-/// Whether the privileged lifecycle may run here: root, bus, and explicit
-/// opt-in. Production architecture stays the pkexec worker; `sudo -n` in
-/// CI only stages this isolated test environment (the suite itself must
-/// already run as root — nothing here elevates).
 fn privileged_available() -> bool {
     rustix::process::geteuid().as_raw() == 0
         && bus_available()
         && std::env::var("ZUP_TEST_REAL_SYSTEMD").is_ok()
 }
 
-/// `systemd-analyze verify` as a test oracle, when the host ships it.
 fn analyze_available() -> bool {
     std::process::Command::new("systemd-analyze")
         .arg("--version")
@@ -58,27 +38,23 @@ fn the_system_manager_answers_where_it_runs() {
         eprintln!("skipped: no systemd system bus on this machine");
         return;
     }
-    // Read-only: an unknown unit reports a state (or a clean refusal),
-    // proving the manager answers without mutating anything.
+
     let mut manager = RealSystemd::connect().expect("the manager connects");
     let state = manager.unit_file_state("zup-definitely-not-installed.service");
     eprintln!("unknown unit state: {state:?}");
-    // The manager also reports a parseable version for the baseline gate.
+
     let raw = manager.version().expect("the version reads");
     let major = zup_linux::parse_manager_version(&raw).expect("the version parses");
     eprintln!("systemd major version: {major}");
 }
 
-/// Every rendered start policy verifies under `systemd-analyze` where the
-/// host ships it: the renderer output is structurally valid systemd.
 #[test]
 fn rendered_units_verify() {
     if !analyze_available() {
         eprintln!("skipped: no systemd-analyze on this machine");
         return;
     }
-    // `systemd-analyze verify` executes nothing but insists the service
-    // binary exists and is runnable: a host-owned true binary serves.
+
     let binary = ["/bin/true", "/usr/bin/true"]
         .into_iter()
         .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
@@ -121,14 +97,6 @@ fn rendered_units_verify() {
     }
 }
 
-/// A disposable privileged lifecycle against the real manager: install
-/// `Automatic` (enabled), transition to `Manual` (disabled + unmasked),
-/// to `Disabled` (masked, source intact), back to `Automatic`
-/// (unmasked + enabled), then uninstall (everything owned retired) —
-/// through snapshot, planning, typed input, journaled execution, and
-/// ledger publish, exactly as the worker serves them. Nothing is ever
-/// started or stopped: the narrow manager surface has no such call, and
-/// the test asserts the service stays inactive throughout.
 #[test]
 fn real_systemd_service_lifecycle() {
     if !privileged_available() {
@@ -157,9 +125,6 @@ fn real_systemd_service_lifecycle() {
     );
     world.assert_inactive("while masked");
 
-    // Foreign integration blocks the way back: a `.requires/` link, a
-    // direct alias, and a runtime `/run` link each refuse the transition
-    // with everything preserved, then the retry converges once removed.
     world.plant_foreign_links();
     let refused = world.try_upgrade(ServiceStart::Automatic, "4.0.0");
     assert!(
@@ -185,9 +150,6 @@ fn real_systemd_service_lifecycle() {
     assert!(world.load_ledger().is_none(), "the ledger retires");
 }
 
-/// One disposable real system: unique program tree, payload, state, and
-/// unit, with a cleanup guard that best-effort retires everything even
-/// when an assertion panics mid-flight.
 struct RealWorld {
     tag: String,
     program: PathBuf,
@@ -202,9 +164,6 @@ struct RealWorld {
 
 impl RealWorld {
     fn stage(tag: &str) -> Self {
-        // The program tree exists; the binary itself is installed by the
-        // file operation in each transaction, proving file-before-service
-        // ordering through the real coordinator.
         let program = PathBuf::from(format!("/opt/zup-test-{tag}"));
         std::fs::create_dir_all(&program).expect("a program tree");
         let scratch = tempfile::tempdir().expect("a scratch tree");
@@ -377,9 +336,6 @@ impl RealWorld {
         matches
     }
 
-    /// Drive one lifecycle through snapshot, planning, typed input,
-    /// journaled execution, and publish — the worker's path with a live
-    /// manager instead of the pkexec hop.
     fn drive(
         &mut self,
         plan: &TargetPlan,
@@ -563,8 +519,6 @@ impl RealWorld {
         );
     }
 
-    /// Plant foreign integration the backend must refuse around: a
-    /// `.requires/` link, a direct alias, and a runtime `/run` link.
     fn plant_foreign_links(&mut self) {
         let canonical = self.source.to_string_lossy().into_owned();
         let requires = PathBuf::from("/etc/systemd/system/zup-test-alias.target.requires");
@@ -604,9 +558,6 @@ impl RealWorld {
         }
     }
 
-    /// Best-effort, idempotent retirement of everything this test owns:
-    /// foreign links, mask, owned link, source, program tree, reload.
-    /// Never panics: cleanup must survive the failure it follows.
     fn cleanup_once(&mut self) {
         if !self.unit.is_empty() {
             if let Ok(mut manager) = RealSystemd::connect() {

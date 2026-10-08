@@ -1,21 +1,3 @@
-//! The unprivileged side of a machine operation.
-//!
-//! The model is propose, verify, then authorize - never validate-then-trust:
-//!
-//! ```text
-//! plan locally from the same inputs (expected digest)
-//! create a private per-session rendezvous
-//! launch the privileged worker through pkexec (or loop back when root)
-//! verify the worker (uid 0, the launched pid)
-//! send intent + expected digest (Prepare)
-//! compare the worker's reconstructed digest with the expected one
-//! authorize exactly that digest (Execute)
-//! ```
-//!
-//! No mutation follows from anything before Execute, and Execute names the
-//! exact digest both sides computed. A substitution anywhere in between
-//! refuses the session instead of installing something nobody confirmed.
-
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,124 +8,99 @@ use zup_protocol::{
     SessionId, WireEnvelope,
 };
 
+use crate::error::{ExecError, PathError};
 use crate::machine::MachineRoots;
 use crate::pkexec::{PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
-use crate::run::{LinuxAction, LinuxOutcome, LinuxRunError, LinuxRunRequest};
+use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest};
 use crate::socket::{
     HANDSHAKE_TIMEOUT, Rendezvous, peer_identity, pin_peer, recv_envelope, send_envelope,
 };
 
-/// How long to wait for the worker to connect after launch.
-///
-/// Deliberately generous: authorization timing belongs to `pkexec`/polkit,
-/// and racing the administrator entering a password would turn every slow
-/// authentication into a protocol failure.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(600);
-/// How long to wait for the final Execute's answer once sent. The install
-/// itself may take arbitrarily long; the *answer* framing must not hang
-/// forever, so the framing timeout applies per frame while progress flows.
+
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// Run one machine-scope lifecycle.
-///
-/// When this process is already uid 0, the same worker path serves the
-/// session over a loopback socket pair with no `pkexec` hop - and with the
-/// exact same plan, path, and policy validation. "Already root" never takes
-/// a weaker shortcut.
-pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, LinuxRunError> {
+pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
     if request.scope != SelectedScope::Machine {
-        return Err(LinuxRunError::RefusedPath {
+        return Err(PathError::Refused {
             path: "<scope>".into(),
             reason: "the machine runner serves machine scope only".into(),
-        });
+        }
+        .into());
     }
     if rustix::process::geteuid().as_raw() == 0 {
         return run_machine_loopback(request, &MachineRoots::production());
     }
-    let launcher = SystemPkexec::resolve().map_err(LinuxRunError::Elevation)?;
+    let launcher = SystemPkexec::resolve().map_err(ExecError::Elevation)?;
     run_machine_elevated(request, &launcher)
 }
 
-/// The expected plan: the digest the unprivileged process computed itself,
-/// plus the target it must match.
 #[derive(Debug, Clone)]
 pub(crate) struct ExpectedPlan {
     pub digest: String,
     pub target: zup_core::TargetTriple,
-    /// The compiled plan itself, for tests that journal an interrupted
-    /// transaction. Present only with `test-support`: production planning
-    /// binds the digest, never the plan object.
+
     #[cfg(feature = "test-support")]
     pub plan: zup_transaction::TransactionPlan,
 }
 
-/// Plan the machine transaction locally, read-only, to bind it.
-///
-/// Nothing here mutates: no journal begins, no lock is taken, no file is
-/// staged. The worker repeats the same planning from the same inputs after
-/// authorization, and the two digests must be equal before Execute.
-///
-/// `roots` are the machine roots both sides enforce: production on the real
-/// path, isolated roots in tests. They are a parameter, never environment,
-/// so an unprivileged caller cannot redirect them.
-///
-/// `expected_uid` anchors trust: the state hierarchy and the ledger must be
-/// owned by it and private to it before anything is planned from them. `0`
-/// on the real path; the test account's own uid in isolated runs. A ledger
-/// the invoking user could have written is refused rather than bound.
 pub(crate) fn plan_expected(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
     expected_uid: u32,
-) -> Result<(PrepareOperation, ExpectedPlan), LinuxRunError> {
+) -> Result<(PrepareOperation, ExpectedPlan), ExecError> {
     let carrier = crate::carrier::Carrier::open(&request.installer)?;
     let mut targets = carrier.package().build_plan()?.targets;
     if targets.len() != 1 {
-        return Err(LinuxRunError::MultipleTargets {
+        return Err(ExecError::MultipleTargets {
             count: targets.len(),
         });
     }
     let build = targets.remove(0);
     if !build.installer.install.scope.allows_machine() {
-        return Err(LinuxRunError::RefusedPath {
+        return Err(PathError::Refused {
             path: build.installer.app.id.to_string(),
             reason: "the package does not declare machine scope".into(),
-        });
+        }
+        .into());
     }
     if !build.installer.plugins.is_empty() {
-        return Err(LinuxRunError::RefusedPath {
+        return Err(PathError::Refused {
             path: build.installer.app.id.to_string(),
             reason: "machine scope refuses projects that need plugin execution".into(),
-        });
+        }
+        .into());
     }
     if !build.installer.prerequisites.is_empty() {
-        return Err(LinuxRunError::RefusedPath {
+        return Err(PathError::Refused {
             path: build.installer.app.id.to_string(),
             reason: "machine scope runs no prerequisite installers".into(),
-        });
+        }
+        .into());
     }
     let target = build.installer.target.clone();
     if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
-        return Err(LinuxRunError::RefusedPath {
+        return Err(PathError::Refused {
             path: target.to_string(),
             reason: "not a Linux target".into(),
-        });
+        }
+        .into());
     }
 
     let mut plan_request = zup_plan::PlanRequest::new(target.clone(), SelectedScope::Machine);
     let mut override_text: Option<String> = None;
     if let Some(directory) = &request.install_dir_override {
         crate::machine::authorize_machine_install_directory(directory, roots).map_err(|error| {
-            LinuxRunError::RefusedPath {
+            PathError::Refused {
                 path: directory.display().to_string(),
                 reason: error.to_string(),
             }
         })?;
         plan_request.install_directory = Some(
             crate::machine::host_to_install_template(directory, roots, &target).map_err(
-                |error| LinuxRunError::RefusedPath {
+                |error| PathError::Refused {
                     path: directory.display().to_string(),
                     reason: error.to_string(),
                 },
@@ -151,17 +108,14 @@ pub(crate) fn plan_expected(
         );
         override_text = Some(directory.display().to_string());
     }
-    // The installer's own directory choices, if the project permits them,
-    // are validated against the machine program tree before planning.
-    // (The installer CLI resolves `--install-dir` into the request; the
-    // worker revalidates the same host path independently.)
+
     let install = zup_plan::plan(
         &zup_plan::BuildPlan {
             targets: vec![build],
         },
         &plan_request,
     )?;
-    let mut target_plan = crate::resolve::resolve_target_with(
+    let mut target_plan = crate::resolve::resolve_target(
         &install,
         &crate::locations::LinuxInstallLocationResolver::with_machine_roots(roots.clone()),
     )?;
@@ -171,17 +125,15 @@ pub(crate) fn plan_expected(
         state_root,
         SelectedScope::Machine,
     )?;
-    crate::capabilities::validate_target_plan(&target_plan)?;
-    // Trust before reading: a hierarchy or ledger the invoking user could
-    // have written plans a digest nobody should authorize.
+
     crate::machine::verify_machine_hierarchy(state_root, expected_uid).map_err(|error| {
-        LinuxRunError::RefusedPath {
+        PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),
         }
     })?;
     crate::machine::verify_ledger_trust(state_root, &target_plan.app.id, expected_uid).map_err(
-        |error| LinuxRunError::RefusedPath {
+        |error| PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),
         },
@@ -190,22 +142,20 @@ pub(crate) fn plan_expected(
     let ledger = ledger_store.load(&target_plan.app.id, SelectedScope::Machine)?;
     let action =
         crate::run::resolve_action(request.action, ledger.as_ref(), &target_plan.app.version)?;
-    let mut snapshot = crate::snapshot::snapshot_target(&target_plan);
-    // Services observe through the manager, exactly as the worker will:
-    // both sides share `requires_service_manager`, so the digests agree.
-    // File-only projects never touch the bus.
+    let mut snapshot = crate::executor::snapshot_target(&target_plan);
+
     let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
-    let mut manager =
-        if needs_manager {
-            Some(crate::systemd::RealSystemd::connect().map_err(|error| {
-                LinuxRunError::Executor(format!("systemd is unavailable: {error}"))
-            })?)
-        } else {
-            None
-        };
+    let mut manager = if needs_manager {
+        Some(
+            crate::systemd::RealSystemd::connect()
+                .map_err(|error| ExecError::Executor(format!("systemd is unavailable: {error}")))?,
+        )
+    } else {
+        None
+    };
     if let Some(manager) = manager.as_mut() {
-        snapshot.services = crate::snapshot::snapshot_services(&target_plan, manager, systemd)
-            .map_err(|error| LinuxRunError::Executor(format!("service snapshot: {error}")))?;
+        snapshot.services = crate::input::snapshot_services(&target_plan, manager, systemd)
+            .map_err(|error| ExecError::Executor(format!("service snapshot: {error}")))?;
     }
     let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
     let execution = zup_exec::plan_lifecycle(
@@ -220,7 +170,7 @@ pub(crate) fn plan_expected(
         crate::input::compile_execution_plan(&execution, &target_plan)?
     } else {
         let manager = manager.as_mut().ok_or_else(|| {
-            LinuxRunError::Executor("a service transaction without a systemd manager".into())
+            ExecError::Executor("a service transaction without a systemd manager".into())
         })?;
         crate::input::compile_machine_execution_plan(
             &execution,
@@ -270,8 +220,6 @@ pub(crate) fn plan_expected(
     ))
 }
 
-/// Effective machine state root for planning: the explicit test root, or
-/// the production root without creating it.
 fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
     request
         .state_root
@@ -279,30 +227,20 @@ fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
         .unwrap_or_else(|| MachineRoots::production().state)
 }
 
-/// Drive one elevated machine operation through `pkexec` and the worker.
-///
-/// A plan that went stale while the worker repaired state retries once
-/// against the repaired world, with a fresh plan and a fresh session.
-/// Anything else fails as it fails: retries never reuse an authorization.
-///
-/// `pub(crate)` for the `test-support` surface, which proves launcher
-/// handling (cancelled, denied, missing, exited-before-handshake) with a
-/// fake launcher and no polkit.
 pub(crate) fn run_machine_elevated(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     match run_machine_elevated_once(request, launcher) {
-        Err(LinuxRunError::StalePlan) => run_machine_elevated_once(request, launcher),
+        Err(ExecError::StalePlan) => run_machine_elevated_once(request, launcher),
         outcome => outcome,
     }
 }
 
-/// One elevated attempt: plan, launch, handshake, execute.
 pub(crate) fn run_machine_elevated_once(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let roots = MachineRoots::production();
     let state_root = planning_state_root(request);
     let systemd = crate::machine::SystemdRoots::production();
@@ -311,14 +249,11 @@ pub(crate) fn run_machine_elevated_once(
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
 
-    let worker_exe = std::env::current_exe().map_err(|source| LinuxRunError::Io {
+    let worker_exe = std::env::current_exe().map_err(|source| PathError::Io {
         path: "<executable>".into(),
         source,
     })?;
-    // The socket pathname travels explicitly: `pkexec` sanitizes the
-    // environment, so the worker cannot re-derive it from `XDG_RUNTIME_DIR`
-    // or from an independently generated fallback directory. The worker
-    // validates the pathname before connecting.
+
     let args = vec![
         "__privileged-worker".to_owned(),
         "--session".to_owned(),
@@ -330,13 +265,8 @@ pub(crate) fn run_machine_elevated_once(
     ];
     let mut spawned = launcher
         .spawn(&worker_exe, &args)
-        .map_err(LinuxRunError::Elevation)?;
-    // Wait for the worker's connection in slices, watching the child:
-    // an authorization that fails fast must surface at once, not after
-    // the connection timeout. The deadline still bounds the wait;
-    // authentication timing itself belongs to pkexec/polkit. A connection
-    // from anyone but the launched worker is an impostor: it is skipped,
-    // never served, and the wait continues for the real one.
+        .map_err(ExecError::Elevation)?;
+
     let mut stream = {
         let start = std::time::Instant::now();
         loop {
@@ -348,26 +278,25 @@ pub(crate) fn run_machine_elevated_once(
                     }
                     drop(stream);
                 }
-                Err(crate::socket::SocketError::Timeout) => {}
+                Err(crate::error::IpcError::Timeout) => {}
                 Err(error) => return Err(into_run_error(error)),
             }
-            match spawned.try_wait().map_err(LinuxRunError::Elevation)? {
+            match spawned.try_wait().map_err(ExecError::Elevation)? {
                 Some(launch) => {
-                    map_launch(&launch).map_err(LinuxRunError::Elevation)?;
-                    return Err(LinuxRunError::Worker(
+                    map_launch(&launch).map_err(ExecError::Elevation)?;
+                    return Err(ExecError::Worker(
                         "the worker exited before connecting".into(),
                     ));
                 }
                 None => {
                     if start.elapsed() >= ACCEPT_TIMEOUT {
-                        return Err(LinuxRunError::Worker("the worker did not connect".into()));
+                        return Err(ExecError::Worker("the worker did not connect".into()));
                     }
                 }
             }
         }
     };
-    // The worker is the process just launched, now root: peer uid 0 and
-    // the exact launched pid, pinned against reuse.
+
     let peer = peer_identity(&stream).map_err(into_run_error)?;
     let _pin = pin_peer(peer.pid, peer.uid).map_err(into_run_error)?;
 
@@ -378,13 +307,11 @@ pub(crate) fn run_machine_elevated_once(
         &expected.digest,
         &expected.target,
     );
-    // The protocol decides, and the launcher result corroborates: a clean
-    // protocol ending with a failed launch is still a failure, and a clean
-    // launch with a broken protocol is not a success.
+
     let launch_result = spawned
         .wait()
-        .map_err(LinuxRunError::Elevation)
-        .and_then(|launch| map_launch(&launch).map_err(LinuxRunError::Elevation));
+        .map_err(ExecError::Elevation)
+        .and_then(|launch| map_launch(&launch).map_err(ExecError::Elevation));
     match (outcome, launch_result) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(error)) => Err(error),
@@ -392,33 +319,26 @@ pub(crate) fn run_machine_elevated_once(
     }
 }
 
-/// The client half of the handshake over a connected stream.
-///
-/// `pub(crate)` so the `test-support` surface can drive the real client
-/// against an isolated worker without `pkexec`: the handshake is identical,
-/// only the transport is a test socket pair.
 pub(crate) fn drive_client(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &PrepareOperation,
     expected_digest: &str,
     expected_target: &zup_core::TargetTriple,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
 
-    // The worker speaks first: it must be the privileged worker for this
-    // session before anything is proposed.
     let hello = recv_msg(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?;
     let worker_pid = match hello.message {
         Message::WorkerHello(hello) => {
             if hello.session_id != session || hello.target != *expected_target {
-                return Err(LinuxRunError::Worker("worker hello mismatch".into()));
+                return Err(ExecError::Worker("worker hello mismatch".into()));
             }
             check_capabilities(&hello.capabilities)?;
             hello.worker_pid
         }
-        _ => return Err(LinuxRunError::Worker("expected worker hello".into())),
+        _ => return Err(ExecError::Worker("expected worker hello".into())),
     };
     let _ = worker_pid;
 
@@ -436,22 +356,20 @@ pub(crate) fn drive_client(
                 continue;
             }
             Message::Failed(failed) if failed.kind == zup_protocol::failure::STALE_PLAN => {
-                return Err(LinuxRunError::StalePlan);
+                return Err(ExecError::StalePlan);
             }
             Message::Failed(failed) => {
-                return Err(LinuxRunError::Worker(format!(
+                return Err(ExecError::Worker(format!(
                     "{}: {}",
                     failed.kind, failed.message
                 )));
             }
-            _ => return Err(LinuxRunError::Worker("expected prepared".into())),
+            _ => return Err(ExecError::Worker("expected prepared".into())),
         }
     };
-    // The binding: the worker's reconstructed digest must equal what this
-    // process planned and showed. Authorizing any other digest would let
-    // the UI confirm one plan while root executes another.
+
     if prepared.plan_digest.to_lowercase() != expected_digest.to_lowercase() {
-        return Err(LinuxRunError::Worker(
+        return Err(ExecError::Worker(
             "the worker's plan differs from the confirmed one".into(),
         ));
     }
@@ -475,7 +393,7 @@ pub(crate) fn drive_client(
     let version: semver::Version = prepared
         .app_version
         .parse()
-        .map_err(|_| LinuxRunError::Worker("the worker prepared an unparsable version".into()))?;
+        .map_err(|_| ExecError::Worker("the worker prepared an unparsable version".into()))?;
     loop {
         match recv_msg(stream, session, &mut incoming, EXECUTE_TIMEOUT)?.message {
             Message::Completed(completed) => {
@@ -485,14 +403,14 @@ pub(crate) fn drive_client(
                     "recovery_required" => Ok(LinuxOutcome::RecoveryRequired {
                         transaction: completed.transaction_id.to_string(),
                     }),
-                    _ => Err(LinuxRunError::Worker(format!(
+                    _ => Err(ExecError::Worker(format!(
                         "unknown outcome {}",
                         completed.outcome
                     ))),
                 };
             }
             Message::Failed(failed) => {
-                return Err(LinuxRunError::Worker(format!(
+                return Err(ExecError::Worker(format!(
                     "{}: {}",
                     failed.kind, failed.message
                 )));
@@ -506,13 +424,12 @@ pub(crate) fn drive_client(
     }
 }
 
-/// Send one client envelope, advancing the outgoing sequence.
 fn send_msg(
     stream: &mut UnixStream,
     session: SessionId,
     outgoing: &mut u64,
     message: Message,
-) -> Result<(), LinuxRunError> {
+) -> Result<(), ExecError> {
     let envelope = WireEnvelope {
         version: PROTOCOL_VERSION,
         session_id: session,
@@ -524,43 +441,38 @@ fn send_msg(
     Ok(())
 }
 
-/// Receive one client envelope: session, version, and sequence bound.
 fn recv_msg(
     stream: &mut UnixStream,
     session: SessionId,
     incoming: &mut SequenceTracker,
     timeout: Duration,
-) -> Result<WireEnvelope, LinuxRunError> {
+) -> Result<WireEnvelope, ExecError> {
     let envelope = recv_envelope(stream, timeout).map_err(into_run_error)?;
     incoming
         .accept(envelope.sequence)
-        .map_err(|error| LinuxRunError::Worker(format!("sequence: {error}")))?;
+        .map_err(|error| ExecError::Worker(format!("sequence: {error}")))?;
     if envelope.session_id != session {
-        return Err(LinuxRunError::Worker("session mismatch".into()));
+        return Err(ExecError::Worker("session mismatch".into()));
     }
     if envelope.version != PROTOCOL_VERSION {
-        return Err(LinuxRunError::Worker("protocol version mismatch".into()));
+        return Err(ExecError::Worker("protocol version mismatch".into()));
     }
     Ok(envelope)
 }
 
-/// The worker must speak the lifecycle the client plans through.
-fn check_capabilities(capabilities: &Capabilities) -> Result<(), LinuxRunError> {
+fn check_capabilities(capabilities: &Capabilities) -> Result<(), ExecError> {
     if !capabilities.file_transactions_v1 || !capabilities.lifecycle_v1 {
-        return Err(LinuxRunError::Worker(
+        return Err(ExecError::Worker(
             "the worker lacks the file-transaction capability".into(),
         ));
     }
     Ok(())
 }
 
-/// Already-root loopback: the same worker path serves the session over an
-/// in-process socket pair, with the exact same plan, path, and policy
-/// validation - and no `pkexec` hop.
 fn run_machine_loopback(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let state_root = request
         .state_root
         .clone()
@@ -568,29 +480,20 @@ fn run_machine_loopback(
     run_machine_loopback_on(request, &state_root, roots)
 }
 
-/// Loopback with an explicit state root, for isolated tests.
-///
-/// `pub(crate)` and reachable only through the `test-support` module:
-/// production always resolves the state root the same way the real worker
-/// does, and no IPC message selects it.
 #[cfg(feature = "test-support")]
 pub(crate) fn run_machine_loopback_for_test(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     run_machine_loopback_with(request, roots, systemd)
 }
 
-/// One loopback session: plan, serve, drive, join.
-///
-/// Like the elevated path, a stale plan retries once against the repaired
-/// world with a fresh session.
 fn run_machine_loopback_on(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     run_machine_loopback_with_on(
         request,
         state_root,
@@ -599,13 +502,12 @@ fn run_machine_loopback_on(
     )
 }
 
-/// One loopback session with explicit systemd roots, for isolated tests.
 #[cfg(feature = "test-support")]
 fn run_machine_loopback_with(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let state_root = request
         .state_root
         .clone()
@@ -618,22 +520,21 @@ fn run_machine_loopback_with_on(
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     match run_machine_loopback_with_once(request, state_root, roots, systemd) {
-        Err(LinuxRunError::StalePlan) => {
+        Err(ExecError::StalePlan) => {
             run_machine_loopback_with_once(request, state_root, roots, systemd)
         }
         outcome => outcome,
     }
 }
 
-/// One loopback attempt with explicit systemd roots.
 fn run_machine_loopback_with_once(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let (intent, expected) = plan_expected(
         request,
         state_root,
@@ -642,7 +543,7 @@ fn run_machine_loopback_with_once(
         rustix::process::geteuid().as_raw(),
     )?;
     let session = SessionId::new_v7();
-    let (mut client, mut worker) = UnixStream::pair().map_err(|source| LinuxRunError::Io {
+    let (mut client, mut worker) = UnixStream::pair().map_err(|source| PathError::Io {
         path: "<loopback>".into(),
         source,
     })?;
@@ -650,8 +551,7 @@ fn run_machine_loopback_with_once(
         roots: roots.clone(),
         systemd: systemd.clone(),
         invoking_uid: rustix::process::geteuid().as_raw(),
-        // The loopback client is this process: the same pinning as the
-        // elevated path, with no hop skipped.
+
         expected_client_pid: std::process::id(),
         session,
         worker_exe: request.installer.clone(),
@@ -668,32 +568,27 @@ fn run_machine_loopback_with_once(
     );
     match worker_thread.join() {
         Ok(Ok(_)) => outcome,
-        Ok(Err(error)) => Err(LinuxRunError::Worker(error.to_string())),
-        Err(_) => Err(LinuxRunError::Worker("the worker thread failed".into())),
+        Ok(Err(error)) => Err(ExecError::Worker(error.to_string())),
+        Err(_) => Err(ExecError::Worker("the worker thread failed".into())),
     }
 }
 
-/// The client half without pkexec: peer checks against the loopback worker.
-///
-/// The loopback worker is this process, already root: uid 0 and a live
-/// pinned peer are still verified, because "already root" skips the hop,
-/// never the checks.
 fn drive_client_loopback(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &PrepareOperation,
     expected_digest: &str,
     expected_target: &zup_core::TargetTriple,
-) -> Result<LinuxOutcome, LinuxRunError> {
+) -> Result<LinuxOutcome, ExecError> {
     let peer = peer_identity(stream).map_err(into_run_error)?;
     if peer.uid != rustix::process::geteuid().as_raw() {
-        return Err(LinuxRunError::Worker("loopback peer mismatch".into()));
+        return Err(ExecError::Worker("loopback peer mismatch".into()));
     }
     drive_client(stream, session, intent, expected_digest, expected_target)
 }
 
-fn into_run_error(error: crate::socket::SocketError) -> LinuxRunError {
-    LinuxRunError::Worker(error.to_string())
+fn into_run_error(error: crate::error::IpcError) -> ExecError {
+    ExecError::Worker(error.to_string())
 }
 
 #[cfg(test)]

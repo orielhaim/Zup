@@ -1,5 +1,3 @@
-//! End-to-end: parse → compile → materialize → plan for the Acme fixture.
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -62,26 +60,20 @@ fn user_default_plan() {
         .iter()
         .map(|id| id.as_str().to_owned())
         .collect();
-    // core required + cli default; service default=false
     assert_eq!(selected, ["core", "cli"]);
 
-    // Service component not selected → no service resource.
     assert!(result.services.is_empty());
 
-    // User install directory with app.name resolved.
     assert_eq!(
         result.install_directory.to_string(),
         "${location.user_data}/Programs/Acme"
     );
 
-    // No ${install} / ${app.*} remain.
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("${install}"));
     assert!(!json.contains("${app."));
     assert!(json.contains("${location."));
 
-    // core files: payload under component core + launcher/path/cli files.
-    // Fixture: files **/* component=core; path component=cli; launcher core.
     assert!(!result.files.is_empty());
     assert!(!result.launchers.is_empty());
     assert_eq!(result.path_entries.len(), 1);
@@ -89,7 +81,6 @@ fn user_default_plan() {
     assert!(!result.summary.requires_authorization);
     assert_eq!(result.summary.selected_component_count, 2);
 
-    // Correct byte count = sum of active file sizes only.
     let expected_bytes: u64 = result.files.iter().map(|f| f.size).sum();
     assert_eq!(result.summary.install_bytes, expected_bytes);
     assert!(expected_bytes > 0);
@@ -138,7 +129,6 @@ fn install_directory_variables_resolved_into_destinations() {
     let (_dir, build) = acme_project();
     let result = plan(&build, &PlanRequest::new(target(), SelectedScope::Machine)).unwrap();
 
-    // file destination `${install}` + relative path expands install directory.
     for file in &result.files {
         let dest = file.destination.to_string();
         assert!(

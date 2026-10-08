@@ -1,19 +1,6 @@
-//! Linux machine-scope privilege boundary, end to end through the worker.
-//!
-//! Every test here drives the real worker code with isolated roots: nothing
-//! touches the host's `/opt` or `/var/lib/zup`. The loopback tests prove the
-//! full lifecycle (install, upgrade, repair, uninstall, recovery, locking)
-//! through the same plan, path, and policy validation the privileged path
-//! enforces. The protocol tests speak raw frames to the real session driver
-//! and prove substitution, replay, and confusion are refused without
-//! mutation. Requires the `test-support` feature, which production binaries
-//! never enable.
 #![cfg(target_os = "linux")]
 #![cfg(feature = "test-support")]
 #![allow(dead_code)]
-
-#[path = "support.rs"]
-mod support;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
@@ -27,18 +14,16 @@ use zup_core::{
     hash_reader,
 };
 use zup_linux::test_support::{
-    MachineTestRoots, drive_client_isolated, recv_envelope_on, run_machine_isolated_in,
-    send_envelope_on, serve_worker_isolated,
+    MachineTestRoots, compose_installer, drive_client_isolated, inert_template, machine_fixture,
+    machine_fixture_override, machine_install_dir, machine_maintenance_path, machine_package_bytes,
+    machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on,
+    run_machine_elevated_for_test, run_machine_isolated, run_tool, send_envelope_on,
+    serve_worker_isolated, validate_rendezvous_for_test,
 };
 use zup_linux::{LinuxAction, LinuxOutcome};
 use zup_protocol::{
     ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
     privileged_operation,
-};
-
-use support::{
-    machine_fixture, machine_fixture_override, machine_install_dir, machine_maintenance_path,
-    machine_package_bytes, machine_v1_files, machine_v2_files,
 };
 
 const HANDSHAKE: Duration = Duration::from_secs(30);
@@ -51,50 +36,43 @@ fn app_id() -> AppId {
     AppId::new("com.example.tool").expect("an id")
 }
 
-/// An isolated machine tree held alive for one test: the temporary base
-/// plus the roots inside it. Nothing touches the host's `/opt`.
 fn isolated() -> (tempfile::TempDir, MachineTestRoots) {
     let base = tempfile::tempdir().expect("an isolated base");
     let roots = MachineTestRoots::isolate_in(base.path());
     (base, roots)
 }
-
-fn run_tool(tool: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new(tool)
-        .args(args)
-        .output()
-        .expect("the installed tool runs");
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).expect("utf8")
+fn commit(
+    roots: &MachineTestRoots,
+    installer: &Path,
+    action: LinuxAction,
+    install_dir_override: Option<PathBuf>,
+    what: &str,
+) {
+    let outcome = run_machine_isolated(installer, roots, action, install_dir_override);
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "{what}: {outcome:?}"
+    );
 }
 
 fn install_v1(roots: &MachineTestRoots, scratch: &Path) -> PathBuf {
     let installer = machine_fixture(scratch, "v1", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated_in(
+    commit(
+        roots,
         &installer,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Apply,
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "a fresh machine install commits: {outcome:?}"
+        "a fresh machine install commits: {outcome:?}",
     );
     installer
 }
 
-/// The full machine lifecycle through the worker: install, upgrade, repair,
-/// maintenance-only repair, uninstall. Neighbors survive throughout, and the
-/// application runs as the ordinary user after the worker completes.
 #[test]
 fn machine_full_lifecycle() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = install_v1(&roots, scratch.path());
 
-    // The payload landed under the program tree, runnable by this user: the
-    // worker never runs application code, and the user runs it afterwards.
     let tool = machine_install_dir(&roots.roots).join("tool");
     assert_eq!(run_tool(&tool, &["--version"]).trim(), "tool 1.0.0");
     assert_eq!(
@@ -107,8 +85,7 @@ fn machine_full_lifecycle() {
         "keep-v1",
         "payload data installs beside the tool"
     );
-    // The maintenance generation is installed and executable but locked
-    // against unprivileged writes by its mode.
+
     let maintenance = machine_maintenance_path(&roots.state, "1.0.0");
     assert!(maintenance.is_file(), "a maintenance generation exists");
     let mode = std::fs::metadata(&maintenance)
@@ -118,34 +95,26 @@ fn machine_full_lifecycle() {
         & 0o777;
     assert_eq!(mode & 0o022, 0, "never group- or world-writable: {mode:o}");
     assert_ne!(mode & 0o111, 0, "still runnable: {mode:o}");
-    // The ledger is public metadata: the unprivileged planner reads it to
-    // bind the expected digest.
+
     let ledger = zup_linux::LinuxLedgerStore::new(&roots.state)
         .load(&app_id(), SelectedScope::Machine)
         .expect("the ledger reads")
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.0.0");
 
-    // An unrelated neighbor inside and outside the program tree.
     let neighbor = roots.roots.programs.join("neighbor").join("notes.txt");
     std::fs::create_dir_all(neighbor.parent().expect("a parent")).expect("a neighbor dir");
     std::fs::write(&neighbor, b"someone else").expect("a neighbor");
     let nearby = machine_install_dir(&roots.roots).join("user-notes.txt");
     std::fs::write(&nearby, b"the user's").expect("a user file");
 
-    // Upgrade: changed files replace, retired files leave, new files arrive,
-    // neighbors survive, the ledger becomes v2, the old generation retires.
     let upgrade = machine_fixture(scratch.path(), "v2", "2.0.0", &machine_v2_files());
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &upgrade,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Apply,
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "a machine upgrade commits: {outcome:?}"
+        "a machine upgrade commits: {outcome:?}",
     );
     assert_eq!(run_tool(&tool, &["--version"]).trim(), "tool 2.0.0");
     assert_eq!(
@@ -176,19 +145,13 @@ fn machine_full_lifecycle() {
         "the new generation installs"
     );
 
-    // Repair: a missing owned file comes back without force; a damaged one
-    // refuses without force and restores with it.
     std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &upgrade,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Repair { force_files: false },
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "missing files come back without force: {outcome:?}"
+        "missing files come back without force: {outcome:?}",
     );
     assert_eq!(
         std::fs::read(machine_install_dir(&roots.roots).join("new.dat")).expect("restored"),
@@ -199,10 +162,9 @@ fn machine_full_lifecycle() {
         b"damaged",
     )
     .expect("damage");
-    let outcome = run_machine_isolated_in(
+    let outcome = run_machine_isolated(
         &upgrade,
-        &roots.roots,
-        &roots.state,
+        &roots,
         LinuxAction::Repair { force_files: false },
         None,
     );
@@ -210,52 +172,36 @@ fn machine_full_lifecycle() {
         outcome.is_err(),
         "damage without force refuses: {outcome:?}"
     );
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &upgrade,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Repair { force_files: true },
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "force repair restores damage: {outcome:?}"
+        "force repair restores damage: {outcome:?}",
     );
     assert_eq!(
         std::fs::read(machine_install_dir(&roots.roots).join("new.dat")).expect("restored"),
         b"new-v2"
     );
 
-    // The original download is gone: repair runs from the root-owned
-    // maintenance generation instead of an arbitrary copy.
     std::fs::remove_file(&upgrade).expect("the download is gone");
     std::fs::remove_file(&installer).expect("the old download is gone");
     std::fs::remove_file(machine_install_dir(&roots.roots).join("new.dat")).expect("delete");
     let maintenance = machine_maintenance_path(&roots.state, "2.0.0");
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &maintenance,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Repair { force_files: false },
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "repair works from trusted maintenance: {outcome:?}"
+        "repair works from trusted maintenance: {outcome:?}",
     );
 
-    // Uninstall removes only what Zup owns: neighbors and shared
-    // infrastructure survive.
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &maintenance,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Uninstall,
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "uninstall commits: {outcome:?}"
+        "uninstall commits: {outcome:?}",
     );
     assert!(!tool.exists(), "the payload is gone");
     assert!(!maintenance.exists(), "its generation is gone");
@@ -277,8 +223,6 @@ fn machine_full_lifecycle() {
     );
 }
 
-/// An install-directory override stays inside the machine program tree, and
-/// escapes are refused without mutation.
 #[test]
 fn machine_install_dir_override_stays_in_the_program_tree() {
     let (_base, roots) = isolated();
@@ -286,12 +230,10 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
     let installer =
         machine_fixture_override(scratch.path(), "v1", "1.0.0", &machine_v1_files(), true);
 
-    // A program-tree override installs there.
     let elsewhere = roots.roots.programs.join("AltApp");
-    let outcome = run_machine_isolated_in(
+    let outcome = run_machine_isolated(
         &installer,
-        &roots.roots,
-        &roots.state,
+        &roots,
         LinuxAction::Install,
         Some(elsewhere.clone()),
     );
@@ -304,8 +246,6 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
         "tool 1.0.0"
     );
 
-    // Escapes are refused: absolute elsewhere, the program root itself, and
-    // traversal tricks. None mutates.
     for hostile in [
         PathBuf::from("/etc"),
         PathBuf::from("/etc/zup-phase5-sentinel"),
@@ -319,10 +259,9 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
             .join("..")
             .join("evil"),
     ] {
-        let outcome = run_machine_isolated_in(
+        let outcome = run_machine_isolated(
             &installer,
-            &roots.roots,
-            &roots.state,
+            &roots,
             LinuxAction::Install,
             Some(hostile.clone()),
         );
@@ -337,20 +276,16 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
         "a refused override writes nothing"
     );
 
-    // Without the project permitting it, any override is refused.
     let strict = machine_fixture(scratch.path(), "strict", "1.0.0", &machine_v1_files());
-    let outcome = run_machine_isolated_in(
+    let outcome = run_machine_isolated(
         &strict,
-        &roots.roots,
-        &roots.state,
+        &roots,
         LinuxAction::Install,
         Some(roots.roots.programs.join("Other")),
     );
     assert!(outcome.is_err(), "an unpermitted override refuses");
 }
 
-/// A second machine operation on the same application refuses while the
-/// first session holds the root lock; an unrelated application proceeds.
 #[test]
 fn machine_lock_serializes_one_application() {
     let (_base, roots) = isolated();
@@ -358,8 +293,6 @@ fn machine_lock_serializes_one_application() {
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
 
-    // First session prepares and waits: the lock is held from preparation
-    // through execution, so a second prepare already refuses.
     let session_a = SessionId::new_v7();
     let (mut client_a, mut worker_a) = UnixStream::pair().expect("a pair");
     let roots_a = roots.roots.clone();
@@ -395,7 +328,6 @@ fn machine_lock_serializes_one_application() {
     let prepared = next_prepared(&mut client_a);
     assert_eq!(prepared.app_id, app_id().to_string());
 
-    // Same application, second session: busy, typed, without mutation.
     let session_b = SessionId::new_v7();
     let (mut client_b, mut worker_b) = UnixStream::pair().expect("a pair");
     let roots_b = roots.roots.clone();
@@ -434,8 +366,6 @@ fn machine_lock_serializes_one_application() {
         .expect("the worker exits")
         .expect_err("busy refuses");
 
-    // Release the first session without executing: nothing mutated, and the
-    // lock goes with it.
     drop(client_a);
     worker
         .join()
@@ -454,8 +384,6 @@ fn machine_lock_serializes_one_application() {
     );
 }
 
-/// A substitution between Prepare and Execute is refused: authorizing one
-/// plan never executes another.
 #[test]
 fn machine_plan_substitution_is_refused() {
     let (_base, roots) = isolated();
@@ -479,7 +407,7 @@ fn machine_plan_substitution_is_refused() {
     let _ = next_hello(&mut client);
     send_prepare(&mut client, session, 1, install_intent(None));
     let prepared = next_prepared(&mut client);
-    // Execute names a different digest than the prepared one.
+
     let other = "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9";
     assert_ne!(other, prepared.plan_digest.as_str());
     send_envelope_on(
@@ -506,8 +434,6 @@ fn machine_plan_substitution_is_refused() {
     );
 }
 
-/// A completed session cannot be replayed: the stream is over, and a second
-/// Execute against it reaches no worker.
 #[test]
 fn machine_execute_replay_reaches_no_worker() {
     let (_base, roots) = isolated();
@@ -540,7 +466,7 @@ fn machine_execute_replay_reaches_no_worker() {
         "the first execute commits: {outcome:?}"
     );
     handle.join().expect("the worker exits").expect("committed");
-    // The session is over: replaying the Execute finds no worker.
+
     let replay = send_envelope_on(
         &mut client,
         &WireEnvelope {
@@ -555,23 +481,15 @@ fn machine_execute_replay_reaches_no_worker() {
     );
     let closed = replay.is_err() || recv_envelope_on(&mut client, Duration::from_secs(5)).is_err();
     assert!(closed, "a replay reaches no worker");
-    // Exactly one transaction ran for the one installation.
+
     let transactions = std::fs::read_dir(roots.state.join("transactions"))
         .expect("transactions")
         .count();
     assert_eq!(transactions, 1, "one session ran one transaction");
 }
 
-/// Swapping the sessions' digests refuses both: cross-session confusion
-/// never authorizes.
 #[test]
 fn machine_cross_session_execute_is_refused() {
-    // Each session serves its own isolated machine: the worker holds the
-    // installation lock from preparation through execution, so two sessions
-    // preparing the *same* installation would (correctly) refuse the second
-    // with `installation_busy` before any digest confusion is even possible.
-    // What this test proves is the digest binding: an Execute naming another
-    // session's plan is refused, and nothing mutates either way.
     let (_base_a, roots_a) = isolated();
     let (_base_b, roots_b) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
@@ -579,19 +497,12 @@ fn machine_cross_session_execute_is_refused() {
     let installer_v2 = machine_fixture(scratch.path(), "v2", "2.0.0", &machine_v2_files());
     let uid = rustix::process::getuid().as_raw();
 
-    // Session B's world already holds v1, so its upgrade to v2 plans the
-    // replace-transition while session A's fresh install of v1 plans
-    // creation: different versions, different plans, different digests.
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots_b,
         &installer_v1,
-        &roots_b.roots,
-        &roots_b.state,
         LinuxAction::Apply,
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "session B's world installs v1 first: {outcome:?}"
+        "session B's world installs v1 first: {outcome:?}",
     );
 
     let session_a = SessionId::new_v7();
@@ -626,7 +537,7 @@ fn machine_cross_session_execute_is_refused() {
         )
     });
     let _ = next_hello(&mut client_b);
-    // Session B prepares a *different* operation so its digest differs.
+
     send_prepare(
         &mut client_b,
         session_b,
@@ -643,8 +554,6 @@ fn machine_cross_session_execute_is_refused() {
         "the two sessions prepared different plans"
     );
 
-    // Each Execute carries the other session's digest - and its own session
-    // identity, which is exactly what an attacker swapping frames achieves.
     send_envelope_on(
         &mut client_a,
         &WireEnvelope {
@@ -700,9 +609,6 @@ fn machine_cross_session_execute_is_refused() {
     );
 }
 
-/// Malformed frames never panic, never allocate unboundedly, and never
-/// mutate: unknown versions, unknown types, oversized lengths, truncation,
-/// out-of-order messages, wrong sessions, and wrong digests.
 #[test]
 fn machine_malformed_frames_are_refused_without_mutation() {
     let (_base, roots) = isolated();
@@ -710,7 +616,6 @@ fn machine_malformed_frames_are_refused_without_mutation() {
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let uid = rustix::process::getuid().as_raw();
 
-    // An oversized length buys no allocation.
     {
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let session = SessionId::new_v7();
@@ -732,8 +637,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             .write_all(&(zup_protocol::MAX_FRAME_BYTES as u32 + 1).to_be_bytes())
             .expect("send");
         client.flush().expect("flush");
-        // A framing refusal is still a typed refusal: the worker reports
-        // `protocol` before exiting rather than dropping the peer in silence.
+
         assert_eq!(
             next_failed(&mut client).kind,
             zup_protocol::failure::PROTOCOL
@@ -744,7 +648,6 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             .expect_err("refused");
     }
 
-    // Execute before Prepare authorizes nothing.
     {
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let session = SessionId::new_v7();
@@ -786,7 +689,6 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             .expect_err("refused");
     }
 
-    // A frame for another session is cross-session confusion, refused.
     {
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let session = SessionId::new_v7();
@@ -818,9 +720,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             },
         )
         .expect("send");
-        // Exactly one answer: the worker reports the refusal as a typed
-        // `Failed` (authentication or protocol) before exiting rather than
-        // dropping the peer in silence.
+
         match recv_envelope_on(&mut client, HANDSHAKE) {
             Err(_) => {}
             Ok(envelope) => match envelope.message {
@@ -837,8 +737,6 @@ fn machine_malformed_frames_are_refused_without_mutation() {
     }
 }
 
-/// Replacing the installer between Prepare and Execute is detected: the
-/// worker installs the pinned bytes or nothing.
 #[test]
 fn machine_package_substitution_is_detected() {
     let (_base, roots) = isolated();
@@ -862,11 +760,10 @@ fn machine_package_substitution_is_detected() {
     let _ = next_hello(&mut client);
     send_prepare(&mut client, session, 1, install_intent(None));
     let prepared = next_prepared(&mut client);
-    // Swap the user-writable installer for a different package before
-    // Execute: same declared version, different bytes and inode.
+
     let swap = scratch.path().join("swap");
-    support::compose_installer(
-        Path::new(support::inert_template()),
+    compose_installer(
+        Path::new(inert_template()),
         &swap,
         &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false),
     );
@@ -895,8 +792,6 @@ fn machine_package_substitution_is_detected() {
     );
 }
 
-/// A wrong authorizing user is refused before anything is read: peer
-/// verification uses kernel credentials, not message claims.
 #[test]
 fn machine_wrong_peer_uid_is_refused() {
     let (_base, roots) = isolated();
@@ -916,8 +811,7 @@ fn machine_wrong_peer_uid_is_refused() {
             &installer,
         )
     });
-    // No session is served: the peer check fails first, reported as a
-    // typed refusal before the worker exits.
+
     match recv_envelope_on(&mut client, HANDSHAKE) {
         Err(_) => {}
         Ok(envelope) => match envelope.message {
@@ -931,9 +825,6 @@ fn machine_wrong_peer_uid_is_refused() {
         .expect_err("refused");
 }
 
-/// A wrong client process is refused even with the right user: pid binding
-/// uses kernel credentials, and a neighboring same-user process cannot
-/// drive the session.
 #[test]
 fn machine_wrong_peer_pid_is_refused() {
     let (_base, roots) = isolated();
@@ -944,9 +835,7 @@ fn machine_wrong_peer_pid_is_refused() {
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
     let roots_clone = roots.roots.clone();
     let installer_clone = installer.clone();
-    // Nobody holds this pid here: the check names the launched installer,
-    // not whoever connected first. The refusal is typed, like every other
-    // worker refusal.
+
     let stranger_pid = u32::MAX - 11;
     assert_ne!(stranger_pid, std::process::id());
     let handle = std::thread::spawn(move || {
@@ -972,8 +861,6 @@ fn machine_wrong_peer_pid_is_refused() {
         .expect_err("refused");
 }
 
-/// A symlink planted in machine state is refused: trusted state is never
-/// reached through a link.
 #[test]
 fn machine_state_symlink_is_refused() {
     let (_base, roots) = isolated();
@@ -984,13 +871,7 @@ fn machine_state_symlink_is_refused() {
     std::fs::create_dir_all(&roots.state).expect("a state root to redirect");
     std::os::unix::fs::symlink(elsewhere.path(), roots.state.join("transactions"))
         .expect("a planted redirect");
-    let outcome = run_machine_isolated_in(
-        &installer,
-        &roots.roots,
-        &roots.state,
-        LinuxAction::Install,
-        None,
-    );
+    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
     assert!(outcome.is_err(), "a redirected state refuses: {outcome:?}");
     assert_eq!(
         std::fs::read(elsewhere.path().join("owned")).expect("untouched"),
@@ -1002,23 +883,13 @@ fn machine_state_symlink_is_refused() {
     );
 }
 
-/// An interrupted machine transaction recovers before new work: the next
-/// operation replays the journal to a terminal state, then proceeds.
 #[test]
 fn machine_interrupted_transaction_recovers_first() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
 
-    // Simulate a worker that died after beginning: a real compiled plan,
-    // journaled, never executed.
-    let (intent, plan) = zup_linux::test_support::plan_for_test(
-        &installer,
-        &roots.roots,
-        &roots.state,
-        LinuxAction::Install,
-        None,
-    );
+    let (intent, plan) = plan_for_test(&installer, &roots, LinuxAction::Install, None);
     let _ = intent;
     let coordinator = zup_transaction::TransactionCoordinator::new(
         zup_transaction::FilesystemTransactionStore::new(&roots.state),
@@ -1037,20 +908,12 @@ fn machine_interrupted_transaction_recovers_first() {
         "nothing published yet"
     );
 
-    // The next operation recovers the journal forward, then applies its own
-    // intent against the recovered world. The first attempt goes stale when
-    // the recovery commits under it and retries once; the terminal state is
-    // what matters, not how many sessions it took.
-    let outcome = run_machine_isolated_in(
+    commit(
+        &roots,
         &installer,
-        &roots.roots,
-        &roots.state,
         LinuxAction::Apply,
         None,
-    );
-    assert!(
-        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
-        "recovery then apply commits: {outcome:?}"
+        "recovery then apply commits: {outcome:?}",
     );
     assert_eq!(
         run_tool(
@@ -1065,8 +928,7 @@ fn machine_interrupted_transaction_recovers_first() {
         .expect("the ledger reads")
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.0.0");
-    // No journal is left unfinished: the interrupted transaction reached a
-    // terminal phase through recovery, and the apply committed after it.
+
     let store = zup_transaction::FilesystemTransactionStore::new(&roots.state);
     let mut terminal = 0;
     for entry in std::fs::read_dir(roots.state.join("transactions")).expect("transactions") {
@@ -1096,8 +958,6 @@ fn machine_interrupted_transaction_recovers_first() {
     assert!(terminal >= 2, "the recovery and the apply both journaled");
 }
 
-/// A payload that names a forbidden destination is refused by policy, not
-/// merely by the parser: the sentinel outside the allowed roots survives.
 #[test]
 fn machine_forbidden_destination_is_refused_by_policy() {
     let (_base, roots) = isolated();
@@ -1105,9 +965,6 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     let sentinel = scratch.path().join("sentinel");
     std::fs::write(&sentinel, b"untouchable").expect("a sentinel");
 
-    // A package whose payload claims an absolute destination outside every
-    // allowed root. Lowering accepts the spelling; the worker's policy does
-    // not.
     let target = linux_target();
     let payload_dir = scratch.path().join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
@@ -1168,15 +1025,9 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     };
     let package = BundleWriter::encode(&plan, &[]).expect("the package encodes");
     let installer = scratch.path().join("evil-installer");
-    support::compose_installer(Path::new(support::inert_template()), &installer, &package);
+    compose_installer(Path::new(inert_template()), &installer, &package);
 
-    let outcome = run_machine_isolated_in(
-        &installer,
-        &roots.roots,
-        &roots.state,
-        LinuxAction::Install,
-        None,
-    );
+    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
     assert!(
         outcome.is_err(),
         "a forbidden destination refuses: {outcome:?}"
@@ -1187,9 +1038,6 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     );
 }
 
-// --- Handshake drivers -----------------------------------------------------
-
-/// A Prepare intent for the standard fixture install.
 fn install_intent(expected: Option<String>) -> PrepareOperation {
     PrepareOperation {
         operation: privileged_operation::INSTALL.to_owned(),
@@ -1204,10 +1052,8 @@ fn install_intent(expected: Option<String>) -> PrepareOperation {
     }
 }
 
-/// The digest the unprivileged planner binds for a fixture operation.
 fn expected_digest(installer: &Path, roots: &MachineTestRoots, action: LinuxAction) -> String {
-    let (intent, _) =
-        zup_linux::test_support::plan_for_test(installer, &roots.roots, &roots.state, action, None);
+    let (intent, _) = plan_for_test(installer, roots, action, None);
     intent.expected_plan_digest.expect("the planner binds")
 }
 
@@ -1254,8 +1100,6 @@ fn send_prepare(
     .expect("prepare sends");
 }
 
-/// A symlink planted at an install destination is refused before anything
-/// is mutated: installation never writes through a link.
 #[test]
 fn machine_destination_symlink_is_refused() {
     let (_base, roots) = isolated();
@@ -1268,13 +1112,7 @@ fn machine_destination_symlink_is_refused() {
     std::os::unix::fs::symlink(elsewhere.path().join("target"), &destination)
         .expect("a planted link");
 
-    let outcome = run_machine_isolated_in(
-        &installer,
-        &roots.roots,
-        &roots.state,
-        LinuxAction::Install,
-        None,
-    );
+    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
     assert!(outcome.is_err(), "a planted link refuses: {outcome:?}");
     assert_eq!(
         std::fs::read(elsewhere.path().join("target")).expect("untouched"),
@@ -1289,8 +1127,6 @@ fn machine_destination_symlink_is_refused() {
     );
 }
 
-/// Cancelling before Execute leaves no machine changes: no client means no
-/// final authorization, even after a successful preparation.
 #[test]
 fn machine_cancel_before_execute_mutates_nothing() {
     let (_base, roots) = isolated();
@@ -1336,9 +1172,6 @@ fn machine_cancel_before_execute_mutates_nothing() {
     );
 }
 
-/// Swapping the install directory under an authorized digest is refused:
-/// the worker replans from the intent it received, and a digest bound to
-/// another directory does not match.
 #[test]
 fn machine_override_swap_is_refused() {
     let (_base, roots) = isolated();
@@ -1347,19 +1180,16 @@ fn machine_override_swap_is_refused() {
         machine_fixture_override(scratch.path(), "v1", "1.0.0", &machine_v1_files(), true);
     let uid = rustix::process::getuid().as_raw();
 
-    // The digest the client bound for directory A.
     let dir_a = roots.roots.programs.join("AppA");
-    let (intent_a, plan_a) = zup_linux::test_support::plan_for_test(
+    let (intent_a, plan_a) = plan_for_test(
         &installer,
-        &roots.roots,
-        &roots.state,
+        &roots,
         LinuxAction::Install,
         Some(dir_a.clone()),
     );
     let _ = plan_a;
     let digest_a = intent_a.expected_plan_digest.clone().expect("bound");
 
-    // A session whose intent names directory B but authorizes A's digest.
     let dir_b = roots.roots.programs.join("AppB");
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
@@ -1391,21 +1221,17 @@ fn machine_override_swap_is_refused() {
     );
 }
 
-/// A replaced rendezvous is refused before any peer is trusted: the
-/// session directory must be real, owned, and private.
 #[test]
 fn machine_replaced_rendezvous_is_refused() {
-    use zup_linux::test_support::validate_rendezvous_for_test;
-
     let uid = rustix::process::getuid().as_raw();
     let base = tempfile::tempdir().expect("a base");
     let session_dir = base.path().join("session");
     std::fs::create_dir_all(&session_dir).expect("a directory");
-    // A private directory owned by this user validates.
+
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     validate_rendezvous_for_test(&session_dir.join("worker.sock"), uid).expect("honest validates");
-    // A symlink where the session directory belongs does not.
+
     let link_base = tempfile::tempdir().expect("a base");
     let target = link_base.path().join("target");
     std::fs::create_dir_all(&target).expect("a target");
@@ -1415,7 +1241,7 @@ fn machine_replaced_rendezvous_is_refused() {
         validate_rendezvous_for_test(&link.join("worker.sock"), uid).is_err(),
         "a replaced rendezvous refuses"
     );
-    // A world-writable directory does not either.
+
     std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o777)).expect("chmod");
     assert!(
         validate_rendezvous_for_test(&session_dir.join("worker.sock"), uid).is_err(),
@@ -1423,12 +1249,9 @@ fn machine_replaced_rendezvous_is_refused() {
     );
 }
 
-/// Launcher failures surface at once: a cancelled prompt, a denial, a
-/// missing mechanism, or a worker that exits before connecting never waits
-/// out the connection timeout.
 #[test]
 fn machine_launcher_failures_surface_at_once() {
-    use zup_linux::{LaunchOutcome, PkexecError, PkexecLauncher, WorkerChild};
+    use zup_linux::{IpcError, LaunchOutcome, PkexecLauncher, WorkerChild};
 
     #[derive(Debug, Clone)]
     struct FakeLauncher {
@@ -1448,7 +1271,7 @@ fn machine_launcher_failures_surface_at_once() {
             &self,
             _executable: &std::path::Path,
             _args: &[String],
-        ) -> Result<FakeChild, PkexecError> {
+        ) -> Result<FakeChild, IpcError> {
             Ok(FakeChild {
                 pid: self.pid,
                 exit: self.exit.clone(),
@@ -1461,14 +1284,14 @@ fn machine_launcher_failures_surface_at_once() {
             self.pid
         }
 
-        fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+        fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, IpcError> {
             Ok(self.exit.clone())
         }
 
-        fn wait(self) -> Result<LaunchOutcome, PkexecError> {
+        fn wait(self) -> Result<LaunchOutcome, IpcError> {
             self.exit
                 .clone()
-                .ok_or_else(|| PkexecError::WorkerFailed("the fake worker never exited".into()))
+                .ok_or_else(|| IpcError::PkexecWorkerFailed("the fake worker never exited".into()))
         }
     }
 
@@ -1500,7 +1323,7 @@ fn machine_launcher_failures_surface_at_once() {
             }),
         };
         let start = std::time::Instant::now();
-        let outcome = zup_linux::test_support::run_machine_elevated_for_test(
+        let outcome = run_machine_elevated_for_test(
             &installer,
             &roots.state,
             LinuxAction::Install,

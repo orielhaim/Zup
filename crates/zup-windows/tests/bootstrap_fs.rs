@@ -1,13 +1,8 @@
 #![cfg(windows)]
 
-//! The Windows bootstrap filesystem adapter: publication through the Windows
-//! durable primitives, and reparse-point refusal for quarantine and bootstrap
-//! state.
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use semver::Version;
@@ -18,6 +13,11 @@ use zup_bootstrap::{
 };
 use zup_core::{AppId, PrerequisiteId, SelectedScope, Sha256Digest, TargetTriple, hash_reader};
 use zup_windows::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
+
+#[path = "fixture/junction.rs"]
+mod junction;
+
+use junction::Junction;
 
 const PAYLOAD: &[u8] = b"runtime";
 
@@ -44,36 +44,6 @@ fn runtime_id() -> PrerequisiteId {
     PrerequisiteId::new("runtime").unwrap()
 }
 
-/// A directory junction: a reparse point that, unlike a symlink, needs no
-/// elevated privilege to create, so the adapter's reparse check is exercised on
-/// a stock host. Dropping it deletes the reparse point, never its target.
-struct Junction {
-    path: PathBuf,
-}
-
-impl Junction {
-    fn new(link: &Path, target: &Path) -> Self {
-        fs::create_dir_all(target).unwrap();
-        let status = Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "mklink /J failed for {}", link.display());
-        Self {
-            path: link.to_path_buf(),
-        }
-    }
-}
-
-impl Drop for Junction {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
 #[derive(Default)]
 struct Observed {
     publishes: Mutex<Vec<(PathBuf, PathBuf)>>,
@@ -90,8 +60,6 @@ impl Observed {
     }
 }
 
-/// Wraps the Windows adapter so a test can see that the injected adapter, not
-/// `std::fs`, is what quarantine and the state store call.
 struct ObservedWindowsFileSystem {
     observed: Arc<Observed>,
 }

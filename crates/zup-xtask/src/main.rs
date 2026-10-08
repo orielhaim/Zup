@@ -1,5 +1,3 @@
-//! Command line for the zup repository tasks.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -90,7 +88,6 @@ exit codes:
     2  usage or unreadable workspace
 ";
 
-/// Every option this tool understands.
 const OPTIONS: &[&str] = &[
     "--root",
     "--matrix",
@@ -177,11 +174,6 @@ fn emit(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String
     Ok(ExitCode::SUCCESS)
 }
 
-/// Print the package list one build host verifies.
-///
-/// Derived from the matrices rather than from a workflow's own list, so a job
-/// cannot claim to cover a package the model does not classify for its host - and
-/// so a new backend gets a CI job's package list without anyone editing YAML.
 fn emit_host(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let options = parse(arguments, "emit-host-packages", &["--host", "--format"])?;
     let Some(name) = options.host else {
@@ -190,12 +182,7 @@ fn emit_host(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, S
     let host = match name.as_str() {
         "windows" => matrix::Host::Windows,
         "linux" => matrix::Host::Linux,
-        // The host with no native backend: everything the model classifies as
-        // portable, which is what a Linux CI job needs alongside the Linux
-        // backend's own packages.
         "any" | "portable" => matrix::Host::Any,
-        // A matrix name resolves to the host that verifies it, so a caller can
-        // ask for a package set and the host that owns it in the same breath.
         other => matrix::matrix(other)
             .map(|entry| entry.host)
             .ok_or_else(|| {
@@ -266,9 +253,6 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
         _ => pins::check(&root, options.online),
     };
 
-    // Problems go to stderr, because that is where a failing build's diagnostics
-    // are read, and because a caller piping stdout to a file should not have a
-    // list of failures silently written into it.
     if report.is_clean() {
         print!("{}", pins::render_report(&report));
         println!("github-action-pins: {}", report.detail);
@@ -279,8 +263,6 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
     Ok(ExitCode::from(1))
 }
 
-/// Build the local toolchain a contributor's `zup build` composes from, or
-/// assemble it into a directory a developer can unzip and use.
 fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("toolchain needs `build` or `package`\n\n".to_owned() + USAGE);
@@ -336,7 +318,6 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
     Ok(ExitCode::SUCCESS)
 }
 
-/// Refuse a dependency graph that grew by accident.
 fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let options = parse(arguments, "verify-dependency-graph", &["--root"])?;
     let root = match options.root {
@@ -348,8 +329,6 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
         println!("verify-dependency-graph: clean");
         return Ok(ExitCode::SUCCESS);
     }
-    // Every finding is printed, not a count. A count tells a reviewer that
-    // something is wrong; the offending edge is what they can act on.
     for duplicate in &findings.duplicates {
         eprintln!("xtask: {duplicate}");
     }
@@ -372,7 +351,6 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
     Ok(ExitCode::from(1))
 }
 
-/// Generate the automation contract's derived files, or report that they have drifted.
 fn automation(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("automation needs `generate` or `check`\n\n".to_owned() + USAGE);
@@ -414,7 +392,6 @@ fn automation(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, 
     Ok(ExitCode::from(1))
 }
 
-/// Prove a packaged release works from outside this repository.
 fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("release needs `clean-room`\n\n".to_owned() + USAGE);
@@ -431,9 +408,6 @@ fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, Str
     let material = options
         .material
         .unwrap_or_else(|| root.join("target").join("release-material").join(&version));
-    // A fresh directory every run: the assertion that matters is that the
-    // project starts with nothing in it, and reusing one would test whatever the
-    // last run left behind.
     let work = options
         .work
         .unwrap_or_else(|| std::env::temp_dir().join(format!("zup-clean-room-{version}")));
@@ -471,11 +445,6 @@ fn select(names: &[String]) -> Result<Vec<&'static Matrix>, String> {
         .collect()
 }
 
-/// The options that are flags rather than value-taking.
-///
-/// A flag must not consume the next argument: `--check --online` and
-/// `--check --root .` differ only in where the flag sits, and a parser that
-/// cannot tell them apart will eventually read a directory as a boolean.
 const FLAGS: &[&str] = &["--online"];
 
 fn parse(
@@ -539,8 +508,6 @@ fn parse(
     Ok(options)
 }
 
-/// The workspace containing this xtask, found by walking up to the manifest
-/// that declares `[workspace]`.
 fn repository_root() -> PathBuf {
     let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {

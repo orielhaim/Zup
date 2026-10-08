@@ -1,19 +1,3 @@
-//! Where one installation's ownership record lives, and what committing means.
-//!
-//! The journal format and the file names are identical to the Windows
-//! backend's: `installations/<sha256(app_id)>-<scope>.json` holds the ledger,
-//! and the ledger is the same `InstallLedger` document. Two backends
-//! disagreeing about either would mean one of them could not read the other's
-//! installations, so there is exactly one spelling and it lives in the
-//! portable types both backends build on.
-//!
-//! What is Linux-specific is everything around that document: durable writes
-//! through this backend's filesystem primitives, host-path conversions through
-//! Linux lowering, and scope. Only file mutations are published - a plan with
-//! backend operations in it cannot reach a Linux transaction, and a ledger
-//! store that accepted one would be recording ownership of work no Linux
-//! executor performed.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -26,36 +10,10 @@ use zup_transaction::{
     TransactionPlan, TransactionRecord, TransactionStore,
 };
 
+use crate::error::{ExecError, PathError};
 use crate::fs::OwnedDirectory;
 use crate::lowering::{target_path_from_host, to_host_path};
 
-/// Why the ownership record could not be read or published.
-#[derive(Debug, thiserror::Error)]
-pub enum LinuxLedgerError {
-    #[error("ledger I/O at `{path}`: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("ledger JSON: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("ledger identity or schema mismatch")]
-    Invalid,
-
-    #[error("ledger publish requires a committed transaction")]
-    Uncommitted,
-
-    #[error("transaction plan does not match committed ownership: {0}")]
-    Ownership(String),
-
-    #[error("unfinished transaction {0} requires recovery")]
-    RecoveryRequired(String),
-}
-
-/// One scope's installation ownership records, rooted at a state root.
 pub struct LinuxLedgerStore {
     root: PathBuf,
 }
@@ -65,12 +23,6 @@ impl LinuxLedgerStore {
         Self { root: root.into() }
     }
 
-    /// Where one application's ownership record is kept.
-    ///
-    /// The name is a digest of the application id plus the scope, so two
-    /// applications never share a file and neither does a scope. Identical to
-    /// the Windows backend's naming, because the ledger is one document with
-    /// one spelling no matter which backend wrote it.
     pub fn path_for(&self, app_id: &AppId, scope: SelectedScope) -> PathBuf {
         let digest = zup_core::hash_bytes(app_id.as_str().as_bytes());
         let name: String = digest
@@ -87,60 +39,45 @@ impl LinuxLedgerStore {
             .join(format!("{name}-{scope}.json"))
     }
 
-    /// Read one application's ownership record, or `None` when absent.
-    ///
-    /// Absence is a normal answer - a machine that never installed this
-    /// application has no record of it - and anything unreadable is an error
-    /// rather than an invitation to install over unknown state.
     pub fn load(
         &self,
         app_id: &AppId,
         scope: SelectedScope,
-    ) -> Result<Option<InstallLedger>, LinuxLedgerError> {
+    ) -> Result<Option<InstallLedger>, ExecError> {
         let path = self.path_for(app_id, scope);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(LinuxLedgerError::Io { path, source }),
+            Err(source) => return Err(PathError::io(&(path), source).into()),
         };
         let ledger: InstallLedger = serde_json::from_slice(&bytes)?;
         if ledger.schema != INSTALL_LEDGER_SCHEMA
             || ledger.app_id != *app_id
             || ledger.scope != scope
         {
-            return Err(LinuxLedgerError::Invalid);
+            return Err(ExecError::LedgerInvalid);
         }
         Ok(Some(ledger))
     }
 
-    /// Check a compiled plan against committed ownership before it runs.
-    ///
-    /// A transaction that would create what is already owned, replace what is
-    /// owned differently, or retire what was never owned is refused here, while
-    /// nothing is held and nothing is staged. The checks mirror the journal's
-    /// own validation, because a plan that passes one and fails the other
-    /// would be executable but unpublishable - work performed for a ledger
-    /// that can never record it.
     pub fn validate_plan(
         &self,
         app_id: &AppId,
         scope: SelectedScope,
         app_version: &semver::Version,
         plan: &TransactionPlan,
-    ) -> Result<(), LinuxLedgerError> {
+    ) -> Result<(), ExecError> {
         plan.validate()
-            .map_err(|error| LinuxLedgerError::Ownership(error.to_string()))?;
+            .map_err(|error| ExecError::Ownership(error.to_string()))?;
         let ledger = self.load(app_id, scope)?;
         if ledger
             .as_ref()
             .is_some_and(|ledger| ledger.target != plan.target)
         {
-            return Err(LinuxLedgerError::Ownership("target identity".into()));
+            return Err(ExecError::Ownership("target identity".into()));
         }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
-        // Backend removals retire ledger keys under a backend identity
-        // (one backend node per service); map them before comparing
-        // against the ledger, which owns the portable service key.
+
         let retired_ledger = retired_ledger_keys(plan)?;
         if retired.len() != plan.retired_keys.len()
             || retired_ledger.iter().any(|key| {
@@ -156,7 +93,7 @@ impl LinuxLedgerStore {
                             .any(|key| !ledger.resources.contains_key(key))
                 }))
         {
-            return Err(LinuxLedgerError::Ownership("retired resources".into()));
+            return Err(ExecError::Ownership("retired resources".into()));
         }
         for node in &plan.nodes {
             match &node.kind {
@@ -200,12 +137,12 @@ impl LinuxLedgerStore {
                         || !valid_file_key(key, app_id, app_version, &plan.target)
                         || node.meta.source_relative.is_none()
                     {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     }
                 }
                 NodeKind::FileRemoval { key } => {
                     let Some(removal) = &node.meta.removal else {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     };
                     let Some(OwnedResource::File {
                         destination,
@@ -214,7 +151,7 @@ impl LinuxLedgerStore {
                         ..
                     }) = ledger.as_ref().and_then(|ledger| ledger.resources.get(key))
                     else {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     };
                     if !retired.contains(key)
                         || removal.key != *key
@@ -222,84 +159,71 @@ impl LinuxLedgerStore {
                         || removal.sha256 != *sha256
                         || removal.size != *size
                     {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     }
                 }
-                // A refresh regenerates derived freedesktop databases from the
-                // authoritative files above. It owns no bytes, so the ledger
-                // records nothing for it; validation only proves the node is
-                // one this backend emitted, with a bounded, well-formed
-                // request. A service apply owns the portable service key it
-                // names, validated below. Anything else backend-shaped is
-                // foreign.
+
                 NodeKind::BackendOperation { key, .. } => {
                     let Some(backend) = &node.meta.backend else {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     };
                     if backend.key != *key {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     }
                     if is_service_backend(&backend.key) {
                         validate_service_apply(node, backend, ledger.as_ref())?;
                         continue;
                     }
                     let request = crate::refresh::RefreshRequest::decode(&backend.payload)
-                        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
+                        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
                     if request.key() != *key {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     }
                 }
                 NodeKind::BackendRemoval { key } => {
                     let Some(backend) = &node.meta.backend else {
-                        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                        return Err(ExecError::Ownership(node.id.to_string()));
                     };
                     if is_service_backend(&backend.key) && backend.key == *key {
                         validate_service_removal(node, backend, ledger.as_ref(), &retired)?;
                         continue;
                     }
-                    return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+                    return Err(ExecError::Ownership(node.id.to_string()));
                 }
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}
             }
         }
         if plan.preset.is_some() {
-            return Err(LinuxLedgerError::Ownership(
+            return Err(ExecError::Ownership(
                 "a Linux console or headless transaction presents no window".into(),
             ));
         }
         Ok(())
     }
 
-    /// Publish a committed transaction as the installation's ownership state.
-    ///
-    /// File mutations become owned files with the receipt's identity;
-    /// retired keys leave; an uninstall removes the ledger itself and then the
-    /// transaction state the lifecycle rules say goes with it. Every write is
-    /// durable before it is visible, because a ledger that names files the
-    /// disk never received is worse than no ledger at all.
     pub fn publish_committed(
         &self,
         record: &TransactionRecord,
         scope: SelectedScope,
-    ) -> Result<InstallLedger, LinuxLedgerError> {
+    ) -> Result<InstallLedger, ExecError> {
         if record.phase != TransactionPhase::Committed {
-            return Err(LinuxLedgerError::Uncommitted);
+            return Err(ExecError::LedgerUncommitted);
         }
         if record.scope != scope {
-            return Err(LinuxLedgerError::Invalid);
+            return Err(ExecError::LedgerInvalid);
         }
-        record.validate().map_err(|_| LinuxLedgerError::Invalid)?;
+        record.validate().map_err(|_| ExecError::LedgerInvalid)?;
         if record.plan.nodes.iter().any(|node| {
             !matches!(node.kind, NodeKind::Barrier) && record.receipt(&node.id).is_none()
         }) {
-            return Err(LinuxLedgerError::Uncommitted);
+            return Err(ExecError::LedgerUncommitted);
         }
         let previous = self.load(&record.app_id, scope)?;
         if previous
             .as_ref()
             .is_some_and(|ledger| ledger.target != record.target)
         {
-            return Err(LinuxLedgerError::Ownership("target identity".into()));
+            return Err(ExecError::Ownership("target identity".into()));
         }
         if previous
             .as_ref()
@@ -316,20 +240,18 @@ impl LinuxLedgerStore {
                         .iter()
                         .any(|key| !ledger.resources.contains_key(key)))
             {
-                return Err(LinuxLedgerError::Invalid);
+                return Err(ExecError::LedgerInvalid);
             }
             let path = self.path_for(&record.app_id, scope);
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(LinuxLedgerError::Io { path, source }),
+                Err(source) => return Err(PathError::io(&(path), source).into()),
             }
             cleanup_committed_files(record)?;
             cleanup_removed_directories(record)?;
             cleanup_application_state(&self.root, record)?;
-            // The maintenance generations are all retired with the files they
-            // held: whatever version directories are now empty go, and one
-            // holding anything else stays, because zup cannot prove it owns it.
+
             let maintenance = zup_transaction::maintenance_root(&self.root, &record.app_id, scope);
             if let Ok(entries) = std::fs::read_dir(&maintenance) {
                 for entry in entries.flatten() {
@@ -347,7 +269,7 @@ impl LinuxLedgerStore {
                                         | std::io::ErrorKind::DirectoryNotEmpty
                                 ) => {}
                             Err(source) => {
-                                return Err(LinuxLedgerError::Io { path, source });
+                                return Err(PathError::io(&(path), source).into());
                             }
                         }
                     }
@@ -364,21 +286,15 @@ impl LinuxLedgerStore {
             InstallLedger::new(record.app_id.clone(), record.target.clone(), scope)
         });
         if ledger.target != record.target {
-            return Err(LinuxLedgerError::Ownership("target identity".into()));
+            return Err(ExecError::Ownership("target identity".into()));
         }
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
         ledger.preset = None;
-        // A self-contained installer carries no release graph: the bytes are
-        // the authority, and claiming a graph they did not come from would
-        // make a later repair restore the wrong ones.
+
         ledger.release = None;
         for node in &record.plan.nodes {
-            // Service applies own the portable service key their payload
-            // names; the ledger keeps understanding `ResourceKey::Service`
-            // as the owned semantic resource, with the unit evidence in
-            // the receipt.
             if matches!(
                 &node.kind,
                 NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. }
@@ -393,7 +309,7 @@ impl LinuxLedgerStore {
                 continue;
             };
             let Some(source_relative) = node.meta.source_relative.clone() else {
-                return Err(LinuxLedgerError::Invalid);
+                return Err(ExecError::LedgerInvalid);
             };
             let (destination, digest, size, created_directories) = match receipt {
                 OperationReceipt::CreateFile {
@@ -407,7 +323,7 @@ impl LinuxLedgerStore {
                         .iter()
                         .map(|path| {
                             target_path_from_host(Path::new(path), &record.target)
-                                .map_err(|_| LinuxLedgerError::Invalid)
+                                .map_err(|_| ExecError::LedgerInvalid)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     if let Some(OwnedResource::File {
@@ -438,30 +354,30 @@ impl LinuxLedgerStore {
                     };
                     (destination, new_sha256, *new_size, directories)
                 }
-                _ => return Err(LinuxLedgerError::Invalid),
+                _ => return Err(ExecError::LedgerInvalid),
             };
             let expected_path = match key {
                 ResourceKey::File { destination }
                 | ResourceKey::Maintenance { destination, .. } => destination,
-                _ => return Err(LinuxLedgerError::Invalid),
+                _ => return Err(ExecError::LedgerInvalid),
             };
-            let sha256: Sha256Digest = digest.parse().map_err(|_| LinuxLedgerError::Invalid)?;
+            let sha256: Sha256Digest = digest.parse().map_err(|_| ExecError::LedgerInvalid)?;
             if *destination != *expected_path
                 || node.meta.expected_sha256 != Some(sha256)
                 || node.meta.expected_size != Some(size)
             {
-                return Err(LinuxLedgerError::Invalid);
+                return Err(ExecError::LedgerInvalid);
             }
             ledger.resources.insert(
                 key.clone(),
                 OwnedResource::File {
                     destination: target_path_from_host(Path::new(destination), &record.target)
-                        .map_err(|_| LinuxLedgerError::Invalid)?,
+                        .map_err(|_| ExecError::LedgerInvalid)?,
                     source_relative,
                     sha256,
                     size,
                     created_directories,
-                    privilege: node.meta.privilege.ok_or(LinuxLedgerError::Invalid)?,
+                    privilege: node.meta.privilege.ok_or(ExecError::LedgerInvalid)?,
                 },
             );
         }
@@ -504,43 +420,24 @@ impl LinuxLedgerStore {
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         write_ledger(&path, &bytes)?;
         cleanup_committed_files(record)?;
-        // Whatever this transaction retired, the directories it emptied go
-        // too. A state root that accumulates one directory per version is a
-        // state root nobody can read.
+
         cleanup_removed_directories(record)?;
         Ok(ledger)
     }
 
-    /// Replay committed journals newer than the ledger, or refuse when an
-    /// unfinished transaction needs recovery first.
-    ///
-    /// A machine that crashed between commit and publish has a journal that
-    /// says more than its ledger does. Publishing every committed record newer
-    /// than the ledger's own transaction closes that gap, and refusing on any
-    /// other phase keeps a half-written future from becoming ownership.
-    pub fn repair_committed(
-        &self,
-        app_id: &AppId,
-        scope: SelectedScope,
-    ) -> Result<(), LinuxLedgerError> {
+    pub fn repair_committed(&self, app_id: &AppId, scope: SelectedScope) -> Result<(), ExecError> {
         let directory = self.root.join("transactions");
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(source) => {
-                return Err(LinuxLedgerError::Io {
-                    path: directory,
-                    source,
-                });
+                return Err(PathError::io(&(directory), source).into());
             }
         };
         let journals = zup_transaction::FilesystemTransactionStore::new(&self.root);
         let mut committed = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|source| LinuxLedgerError::Io {
-                path: directory.clone(),
-                source,
-            })?;
+            let entry = entry.map_err(|source| PathError::io(&(directory.clone()), source))?;
             let Some(id) = entry
                 .file_name()
                 .to_str()
@@ -550,7 +447,7 @@ impl LinuxLedgerStore {
             };
             let record = journals
                 .load(&zup_transaction::TransactionId::from_uuid(id))
-                .map_err(|_| LinuxLedgerError::Invalid)?;
+                .map_err(|_| ExecError::LedgerInvalid)?;
             if record.app_id != *app_id || record.scope != scope {
                 continue;
             }
@@ -559,13 +456,13 @@ impl LinuxLedgerStore {
                 .as_ref()
                 .is_some_and(|ledger| ledger.target != record.target)
             {
-                return Err(LinuxLedgerError::Ownership("target identity".into()));
+                return Err(ExecError::Ownership("target identity".into()));
             }
             match record.phase {
                 TransactionPhase::Committed => committed.push(record),
                 TransactionPhase::RolledBack => {}
                 _ => {
-                    return Err(LinuxLedgerError::RecoveryRequired(
+                    return Err(ExecError::RecoveryRequired(
                         record.transaction_id.to_string(),
                     ));
                 }
@@ -588,11 +485,6 @@ impl LinuxLedgerStore {
     }
 }
 
-/// Whether a file key belongs to this application and version.
-///
-/// Maintenance keys name their owner and version explicitly, so a maintenance
-/// file for another application - or another version - is refused rather than
-/// recorded as this installation's own.
 fn valid_file_key(
     key: &ResourceKey,
     app_id: &AppId,
@@ -614,11 +506,9 @@ fn valid_file_key(
     }
 }
 
-fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, LinuxLedgerError> {
+fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, ExecError> {
     let mut keys = BTreeSet::new();
     for key in &plan.retired_keys {
-        // A service removal retires under its backend identity; the
-        // ledger owns the portable service key the payload names.
         let ledger_key = plan
             .nodes
             .iter()
@@ -632,16 +522,12 @@ fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, 
             .and_then(service_ledger_key)
             .unwrap_or_else(|| key.clone());
         if !keys.insert(ledger_key) {
-            return Err(LinuxLedgerError::Ownership(
-                "duplicate retired resources".into(),
-            ));
+            return Err(ExecError::Ownership("duplicate retired resources".into()));
         }
     }
     Ok(keys)
 }
 
-/// Whether a backend key is a typed service identity rather than a
-/// freedesktop refresh.
 fn is_service_backend(key: &ResourceKey) -> bool {
     match key {
         ResourceKey::Backend { id } => id
@@ -651,7 +537,6 @@ fn is_service_backend(key: &ResourceKey) -> bool {
     }
 }
 
-/// The portable service key one backend node owns, if it is a service node.
 fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
     let backend = node.meta.backend.as_ref()?;
     if !is_service_backend(&backend.key) {
@@ -661,16 +546,13 @@ fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
     Some(crate::service_ops::ledger_key_for_payload(&payload))
 }
 
-/// Validate one service apply against committed ownership: the family must
-/// be absent or already a service, never a foreign resource wearing the
-/// same key.
 fn validate_service_apply(
     node: &TransactionNode,
     backend: &zup_transaction::BackendOperation,
     ledger: Option<&InstallLedger>,
-) -> Result<(), LinuxLedgerError> {
+) -> Result<(), ExecError> {
     let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
+        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
     let crate::service_ops::ServicePayload::Apply {
         service,
         unit,
@@ -678,72 +560,67 @@ fn validate_service_apply(
         ..
     } = payload
     else {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     };
     if crate::service_ops::backend_key_for_unit(&unit) != backend.key {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     }
     if !binary_owned {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     }
     match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
         None | Some(OwnedResource::Service { .. }) => Ok(()),
-        _ => Err(LinuxLedgerError::Ownership(node.id.to_string())),
+        _ => Err(ExecError::Ownership(node.id.to_string())),
     }
 }
 
-/// Validate one service removal: the payload names the owned service the
-/// ledger holds, and the backend identity is retired.
 fn validate_service_removal(
     node: &TransactionNode,
     backend: &zup_transaction::BackendOperation,
     ledger: Option<&InstallLedger>,
     retired: &BTreeSet<&ResourceKey>,
-) -> Result<(), LinuxLedgerError> {
+) -> Result<(), ExecError> {
     let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| LinuxLedgerError::Ownership(node.id.to_string()))?;
+        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
     let crate::service_ops::ServicePayload::Remove { key, owned, .. } = payload else {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     };
     if !retired.contains(&backend.key) {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     }
     if ledger.and_then(|ledger| ledger.resources.get(&key)) != Some(&owned) {
-        return Err(LinuxLedgerError::Ownership(node.id.to_string()));
+        return Err(ExecError::Ownership(node.id.to_string()));
     }
     Ok(())
 }
 
-/// Publish one service node into the ledger: applies become owned
-/// services with the receipt's before/after evidence; removals retire
-/// through [`retired_ledger_keys`].
 fn publish_service_node(
     ledger: &mut InstallLedger,
     record: &TransactionRecord,
     node: &TransactionNode,
-) -> Result<(), LinuxLedgerError> {
+) -> Result<(), ExecError> {
     let NodeKind::BackendOperation { .. } = &node.kind else {
         return Ok(());
     };
     let Some(backend) = &node.meta.backend else {
-        return Err(LinuxLedgerError::Invalid);
+        return Err(ExecError::LedgerInvalid);
     };
     if !is_service_backend(&backend.key) {
         return Ok(());
     }
     let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| LinuxLedgerError::Invalid)?;
+        .map_err(|_| ExecError::LedgerInvalid)?;
     let crate::service_ops::ServicePayload::Apply { service, .. } = payload else {
-        return Err(LinuxLedgerError::Invalid);
+        return Err(ExecError::LedgerInvalid);
     };
     let Some(receipt) = record.receipt(&node.id) else {
         return Ok(());
     };
     let OperationReceipt::Backend { payload, .. } = receipt else {
-        return Err(LinuxLedgerError::Invalid);
+        return Err(ExecError::LedgerInvalid);
     };
     let service_receipt: crate::service_ops::ServiceReceipt =
-        serde_json::from_slice(payload).map_err(|_| LinuxLedgerError::Invalid)?;
+        serde_json::from_slice(payload).map_err(|_| ExecError::LedgerInvalid)?;
     let key = service.key.clone();
     let previous = match &service.previous {
         ObservedServiceState::Absent => ServiceState::Absent,
@@ -763,8 +640,7 @@ fn publish_service_node(
         command: service.command.clone(),
         start: service.start,
     };
-    // The receipt proves the mutation; the payload proves the intent. A
-    // receipt for another unit or another policy cannot publish here.
+
     let _ = service_receipt;
     let old_previous = match ledger.resources.get(&key) {
         Some(OwnedResource::Service { previous, .. }) => Some(previous.clone()),
@@ -782,51 +658,33 @@ fn publish_service_node(
     Ok(())
 }
 
-/// Write a ledger durably: temporary sibling, flush, rename, flush directory.
-///
-/// The ledger is the machine's memory of what it owns. A torn write is not a
-/// corrupt file - it is an installation the machine has forgotten, and
-/// forgetting means the next run plans over files it believes are nobody's.
-fn write_ledger(path: &Path, bytes: &[u8]) -> Result<(), LinuxLedgerError> {
+fn write_ledger(path: &Path, bytes: &[u8]) -> Result<(), ExecError> {
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     else {
-        return Err(LinuxLedgerError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other("a ledger path has a parent directory"),
-        });
+        return Err(PathError::io(
+            path,
+            std::io::Error::other("a ledger path has a parent directory"),
+        )
+        .into());
     };
-    let directory =
-        OwnedDirectory::create(parent, crate::fs::STATE_DIRECTORY_MODE).map_err(|error| {
-            LinuxLedgerError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::other(error.to_string()),
-            }
-        })?;
+    let directory = OwnedDirectory::create(parent, crate::fs::STATE_DIRECTORY_MODE)
+        .map_err(|error| PathError::io(path, std::io::Error::other(error.to_string())))?;
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| LinuxLedgerError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other("a ledger path has a file name"),
+        .ok_or_else(|| {
+            PathError::io(path, std::io::Error::other("a ledger path has a file name"))
         })?;
     directory
         .write_durable(&name, bytes, crate::fs::STATE_FILE_MODE)
-        .map_err(|error| LinuxLedgerError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other(error.to_string()),
-        })
+        .map_err(|error| PathError::io(path, std::io::Error::other(error.to_string())))?;
+    Ok(())
 }
 
-/// Remove the verified backups of committed removals.
-///
-/// A backup that survived its transaction's commit is garbage with a purpose
-/// already served: the removal it could have undone is now ownership, and
-/// ownership is restored by planning, not by keeping every replaced byte
-/// forever.
-fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), LinuxLedgerError> {
+fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> {
     for node in &record.plan.nodes {
         let Some(receipt) = record.receipt(&node.id) else {
             continue;
@@ -840,44 +698,31 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), LinuxLedger
         else {
             continue;
         };
-        let backup = to_host_path(backup_path).map_err(|_| LinuxLedgerError::Invalid)?;
+        let backup = to_host_path(backup_path).map_err(|_| ExecError::LedgerInvalid)?;
         match std::fs::symlink_metadata(&backup) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
-                return Err(LinuxLedgerError::Io {
-                    path: backup.clone(),
-                    source,
-                });
+                return Err(PathError::io(&(backup.clone()), source).into());
             }
             Ok(metadata) if metadata.file_type().is_file() => {
-                let file = std::fs::File::open(&backup).map_err(|source| LinuxLedgerError::Io {
-                    path: backup.clone(),
-                    source,
-                })?;
-                if zup_core::hash_reader(file).map_err(|source| LinuxLedgerError::Io {
-                    path: backup.clone(),
-                    source,
-                })? != (*size, *sha256)
+                let file = std::fs::File::open(&backup)
+                    .map_err(|source| PathError::io(&(backup.clone()), source))?;
+                if zup_core::hash_reader(file)
+                    .map_err(|source| PathError::io(&(backup.clone()), source))?
+                    != (*size, *sha256)
                 {
-                    return Err(LinuxLedgerError::Invalid);
+                    return Err(ExecError::LedgerInvalid);
                 }
-                std::fs::remove_file(&backup).map_err(|source| LinuxLedgerError::Io {
-                    path: backup.clone(),
-                    source,
-                })?;
+                std::fs::remove_file(&backup)
+                    .map_err(|source| PathError::io(&(backup.clone()), source))?;
             }
-            Ok(_) => return Err(LinuxLedgerError::Invalid),
+            Ok(_) => return Err(ExecError::LedgerInvalid),
         }
     }
     Ok(())
 }
 
-/// Remove the directories a transaction emptied, deepest first.
-///
-/// Only directories the transaction's own removals named, and only while
-/// empty: a directory that has acquired content of its own since is left
-/// alone, because zup cannot prove it owns it.
-fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), LinuxLedgerError> {
+fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), ExecError> {
     let mut directories = BTreeSet::new();
     for node in &record.plan.nodes {
         if !matches!(node.kind, NodeKind::FileRemoval { .. }) {
@@ -893,7 +738,7 @@ fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), LinuxLe
     let mut directories: Vec<_> = directories.into_iter().collect();
     directories.sort_by_key(|path| std::cmp::Reverse(path.to_string().len()));
     for directory in directories {
-        let path = to_host_path(&directory).map_err(|_| LinuxLedgerError::Invalid)?;
+        let path = to_host_path(&directory).map_err(|_| ExecError::LedgerInvalid)?;
         match std::fs::remove_dir(&path) {
             Ok(()) => {}
             Err(error)
@@ -902,39 +747,25 @@ fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), LinuxLe
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
                 ) => {}
             Err(source) => {
-                return Err(LinuxLedgerError::Io { path, source });
+                return Err(PathError::io(&(path), source).into());
             }
         }
     }
     Ok(())
 }
 
-/// Remove all of one application's transaction state after an uninstall.
-///
-/// Every journal for this application must already be committed or rolled
-/// back: anything else means a transaction is still in flight, and deleting
-/// its record would be destroying the evidence of what it did.
-fn cleanup_application_state(
-    root: &Path,
-    uninstall: &TransactionRecord,
-) -> Result<(), LinuxLedgerError> {
+fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Result<(), ExecError> {
     let transactions = root.join("transactions");
     let entries = match std::fs::read_dir(&transactions) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(LinuxLedgerError::Io {
-                path: transactions,
-                source,
-            });
+            return Err(PathError::io(&(transactions), source).into());
         }
     };
     let store = zup_transaction::FilesystemTransactionStore::new(root);
     for entry in entries {
-        let entry = entry.map_err(|source| LinuxLedgerError::Io {
-            path: transactions.clone(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| PathError::io(&(transactions.clone()), source))?;
         let Some(id) = entry
             .file_name()
             .to_str()
@@ -944,7 +775,7 @@ fn cleanup_application_state(
         };
         let record = store
             .load(&zup_transaction::TransactionId::from_uuid(id))
-            .map_err(|_| LinuxLedgerError::Invalid)?;
+            .map_err(|_| ExecError::LedgerInvalid)?;
         if record.app_id != uninstall.app_id || record.scope != uninstall.scope {
             continue;
         }
@@ -952,18 +783,16 @@ fn cleanup_application_state(
             record.phase,
             TransactionPhase::Committed | TransactionPhase::RolledBack
         ) {
-            return Err(LinuxLedgerError::RecoveryRequired(
+            return Err(ExecError::RecoveryRequired(
                 record.transaction_id.to_string(),
             ));
         }
         let directory = entry.path();
         if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
-            std::fs::remove_dir_all(&directory).map_err(|source| LinuxLedgerError::Io {
-                path: directory.clone(),
-                source,
-            })?;
+            std::fs::remove_dir_all(&directory)
+                .map_err(|source| PathError::io(&(directory.clone()), source))?;
         } else {
-            return Err(LinuxLedgerError::Invalid);
+            return Err(ExecError::LedgerInvalid);
         }
     }
     for directory in [root.join("transactions"), root.join("installations")] {
@@ -975,10 +804,7 @@ fn cleanup_application_state(
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
                 ) => {}
             Err(source) => {
-                return Err(LinuxLedgerError::Io {
-                    path: directory,
-                    source,
-                });
+                return Err(PathError::io(&(directory), source).into());
             }
         }
     }

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod fake;
 
 use zup_core::{
     BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest,

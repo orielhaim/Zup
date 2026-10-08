@@ -1,13 +1,5 @@
 #![cfg(target_os = "linux")]
 
-//! The real coordinator driving the Linux executor, end to end.
-//!
-//! The unit tests in `executor.rs` drive the executor by hand; these prove the
-//! portable [`TransactionCoordinator`] accepts it as an [`OperationExecutor`]
-//! and runs the full prepare / stage / apply / verify / commit protocol against
-//! a real filesystem journal. A hand-driven executor that the coordinator
-//! cannot drive would be a demonstration, not a backend.
-
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
@@ -60,7 +52,6 @@ fn work(
     }
 }
 
-/// Run one transaction to a stable outcome through the real coordinator.
 fn run(
     input: &TransactionInput,
     payload_root: &Path,
@@ -86,8 +77,6 @@ fn run(
     (outcome, executor)
 }
 
-/// A two-file install commits through the coordinator, and the executable bit
-/// lands where the intent said.
 #[test]
 fn the_coordinator_commits_a_linux_install() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -140,14 +129,6 @@ fn the_coordinator_commits_a_linux_install() {
     );
 }
 
-/// A contested destination fails the whole transaction, and the engine is
-/// honest about what it cannot prove: a create refused by the kernel leaves
-/// nothing behind, but the coordinator settles a failed apply through the same
-/// reconciliation a crash would get, and foreign bytes at the destination are
-/// ambiguous there. The outcome is recovery-required rather than rolled-back,
-/// which is the same answer the Windows backend gives for the same collision.
-/// What matters is what the machine holds: the file that was already there is
-/// untouched, and the uncontested file is never published.
 #[test]
 fn a_contested_destination_fails_the_transaction_without_publishing_anything() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -189,8 +170,6 @@ fn a_contested_destination_fails_the_transaction_without_publishing_anything() {
     );
 }
 
-/// An upgrade is a replace with an exact precondition: the old bytes must be
-/// what the plan says they are, and the backup holds them afterwards.
 #[test]
 fn the_coordinator_applies_an_upgrade_as_a_replace() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -241,9 +220,6 @@ fn the_coordinator_applies_an_upgrade_as_a_replace() {
     );
 }
 
-/// Recovery replays from the journal alone: a record left mid-apply by a dead
-/// process reconciles the published file as applied and reaches commit without
-/// the original executor, payload handles, or registrations.
 #[test]
 fn recovery_replays_a_journal_without_the_original_executor() {
     use zup_transaction::{NodeState, TransactionPhase, TransactionStore as _};
@@ -265,9 +241,6 @@ fn recovery_replays_a_journal_without_the_original_executor() {
     ));
     let plan = compile_transaction(&input).expect("a plan compiles");
 
-    // Drive the plan by hand up to and including the publish, journaling each
-    // receipt the way the coordinator would - then stop cold. This is the crash:
-    // staging nodes applied, mutation nodes caught running, phase Applying.
     let store = FilesystemTransactionStore::new(&state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
@@ -297,7 +270,6 @@ fn recovery_replays_a_journal_without_the_original_executor() {
             .iter()
             .filter(|node| matches!(node.kind, zup_transaction::NodeKind::FileMutation { .. }))
         {
-            // The mutation publishes - then the process dies before journaling it.
             let _ = executor.apply(node).expect("a mutation applies");
         }
         let store = FilesystemTransactionStore::new(&state);
@@ -320,11 +292,8 @@ fn recovery_replays_a_journal_without_the_original_executor() {
                 Ok(())
             })
             .expect("the interrupted phase persists");
-        // The executor drops here. So does the process, in the real story.
     }
 
-    // A new process, a new executor, no registrations carried over: only the
-    // journal on disk.
     let store = FilesystemTransactionStore::new(&state);
     let record = store.load(&transaction_id).expect("the journal survives");
     let mut executor = LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));

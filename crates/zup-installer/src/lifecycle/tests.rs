@@ -1,9 +1,4 @@
-//! The embedded-package lifecycle, tested against a real plan.
-//!
-//! The plan is written out literally rather than compiled from a manifest,
 //! because the runtime never sees a manifest: it is handed a plan, and a fixture
-//! that reached for the compiler to produce one would put a build-plane
-//! dev-dependency into the package whose whole purpose is to have none.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,10 +21,8 @@ use super::{
     prepare_embedded_request,
 };
 
-/// The plugin the fixture declares, which no test here ever plans.
 const PLUGIN: &str = "helper";
 
-/// A plan for an application that declares one plugin and one payload file.
 fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
     let payload = root.join("app.exe");
     std::fs::write(&payload, b"app").expect("payload file");
@@ -111,13 +104,8 @@ fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
     }
 }
 
-/// The machine the host runs, which is the machine a runtime template is for.
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
-/// An executor that records whether it was ever asked to plan anything.
-///
-/// The count is in an `Arc` rather than in the executor so a caller can read it
-/// after the executor has been moved into the preparation.
 struct RecordingExecutor {
     target: zup_core::TargetTriple,
     planned: Arc<AtomicUsize>,
@@ -167,9 +155,6 @@ fn an_uninstall_removes_by_ownership_and_never_loads_the_plugin_executor() {
     let root = TempDir::new().expect("temp dir");
     let build = plan_with_plugin(root.path());
     let (executor, planned) = RecordingExecutor::new(build.installer.target.clone());
-    // The target cannot be lowered on a host without the Windows backend, so this
-    // fixture is expected to fail - and it must fail without ever asking the
-    // plugin executor anything, which is the property under test.
     let result = prepare_embedded_request(
         EmbeddedPreparation {
             request: Request::Named(LifecycleAction::Uninstall),
@@ -260,7 +245,6 @@ fn a_repair_refuses_a_selection_it_does_not_use() {
     };
     assert!(error.contains("committed component selection"), "{error}");
 }
-/// A target plan with nothing in it, for the window-attach tests to fill.
 fn empty_target(scope: SelectedScope, id: &str) -> zup_platform::TargetPlan {
     let target = TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target");
     zup_platform::TargetPlan {
@@ -297,7 +281,6 @@ fn empty_target(scope: SelectedScope, id: &str) -> zup_platform::TargetPlan {
     }
 }
 
-/// A window with settings and one application-provided asset.
 fn preset() -> PresetRuntime {
     PresetRuntime {
         name: NonEmptyString::new("aurora").expect("a name"),
@@ -316,12 +299,6 @@ fn preset() -> PresetRuntime {
 const LOGO: &[u8] = b"<svg/>";
 const PRESET_EXECUTABLE: &[u8] = b"the preset executable";
 
-/// The window an installation will present, resolved into installed content.
-///
-/// Attached rather than declared, because the preset executable is content: a
-/// build knows which preset, and only whoever supplied the bytes can name them.
-/// Each scope's content is that scope's, in that scope's directory, carried by
-/// that scope's authority.
 #[test]
 fn a_window_is_attached_as_scope_aware_installed_content() {
     let root = TempDir::new().expect("a scratch directory");
@@ -341,7 +318,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
             SelectedScope::User => "user",
             SelectedScope::Machine => "machine",
         });
-        let directory = zup_windows::maintenance_directory(&state_root, &app, scope, &version);
+        let directory = zup_transaction::maintenance_directory(&state_root, &app, scope, &version);
         let mut target = empty_target(scope, "com.example.window");
         attach_ui_runtime(&mut target, &directory, scope, &preset(), &source)
             .expect("the window is attached");
@@ -361,8 +338,6 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
         let executable = zup_bundle::preset_path(
             &directory,
             &runtime.executable,
-            // The name the installation persisted its window under, which follows
-            // the target's own naming rule rather than this host's.
             zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
                 .expect("a target")
                 .executable_suffix(),
@@ -410,9 +385,6 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
     assert_ne!(seen[0], seen[1], "two scopes are two storages");
 }
 
-/// A payload that cannot supply the preset's bytes is refused rather than planned
-/// around. An installation that committed a window it cannot open is the one
-/// state this whole mechanism exists to prevent.
 #[test]
 fn a_window_whose_executable_cannot_be_read_is_refused() {
     let root = TempDir::new().expect("a scratch directory");
@@ -436,9 +408,6 @@ fn a_window_whose_executable_cannot_be_read_is_refused() {
     assert!(target.files.is_empty(), "and no half-installed content");
 }
 
-/// An asset whose bytes are not the content the settings named is refused, for
-/// the same reason: the digest is the contract between the application and the
-/// preset that will read the file.
 #[test]
 fn an_asset_that_is_not_the_configured_content_is_refused() {
     let root = TempDir::new().expect("a scratch directory");
@@ -465,19 +434,12 @@ fn an_asset_that_is_not_the_configured_content_is_refused() {
     assert!(target.preset.is_none(), "and records no window");
 }
 
-/// A transition's window comes out of verified acquired content, by digest.
-///
-/// The whole claim of making a preset first-class release content: an update
-/// reads its new window out of the same verified cache every other byte came
-/// from, plans it as ordinary installed files under the same state root, and
-/// records the digest the release authenticated - with nothing hashed to
-/// discover it and no `.zupui` anywhere in sight.
 #[test]
 fn a_windows_bytes_come_from_verified_acquired_content() {
     let root = TempDir::new().expect("a scratch directory");
     let (manifest, payload) = acquired_release(root.path(), zup_core::hash_bytes(LOGO));
     let mut target = empty_target(SelectedScope::User, "com.example.acquired");
-    let directory = zup_windows::maintenance_directory(
+    let directory = zup_transaction::maintenance_directory(
         &root.path().join("state"),
         &zup_core::AppId::new("com.example.acquired").expect("a valid id"),
         SelectedScope::User,
@@ -540,9 +502,6 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
     assert_eq!(
         sources,
         [
-            // The reserved slot carries no executable suffix: it is a slot in a
-            // payload, not a file name, and a slot that ended in one platform's
-            // convention could not be the same slot on another.
             zup_bundle::PRESET_SOURCE,
             "__zup_preset_asset__/branding/logo.svg",
         ],
@@ -550,19 +509,11 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
     );
 }
 
-/// Content the release does not carry is refused, with what is missing named.
-///
-/// The refusal matters more than the install: an update that quietly installed a
-/// window without its executable would commit a generation that cannot open, and
-/// the failure would surface on a later launch as a missing file rather than as
-/// the release problem it is.
 #[rstest::rstest]
 #[case::an_executable_the_cache_does_not_hold(true)]
 #[case::an_asset_the_cache_does_not_hold(false)]
 fn a_window_the_release_does_not_carry_is_refused(#[case] absent_executable: bool) {
     let root = TempDir::new().expect("a scratch directory");
-    // The asset the release names is the one the cache does not hold in one case
-    // and does in the other, so the difference is content rather than a name.
     let named = if absent_executable {
         zup_core::hash_bytes(LOGO)
     } else {
@@ -602,12 +553,6 @@ fn a_window_the_release_does_not_carry_is_refused(#[case] absent_executable: boo
     assert!(target.files.is_empty(), "and no half-installed content");
 }
 
-/// A release carrying one window's bytes, and a verified cache holding them.
-///
-/// The same shape a real acquisition leaves behind: a manifest that names the
-/// content, a catalog that describes it, and a cache that has proved every blob
-/// it holds. No network and no target lowering, because the claim under test is
-/// about which bytes reach the plan.
 fn acquired_release(
     root: &Path,
     asset_digest: zup_core::Sha256Digest,

@@ -1,5 +1,3 @@
-//! Portable planned resources and stable logical identity.
-
 use serde::{Deserialize, Serialize};
 use zup_core::{
     FileAssociationId, FileExtension, LauncherLocation, NonEmptyString, Prerequisite,
@@ -37,9 +35,6 @@ impl PlannedPrerequisite {
     }
 }
 
-/// One active payload file in the desired installation.
-///
-/// Contains no build-machine paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedFile {
     pub key: ResourceKey,
@@ -48,12 +43,10 @@ pub struct PlannedFile {
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
-    /// This file is intended to be executable. Portable intent, not a mode.
     #[serde(default)]
     pub executable: bool,
 }
 
-/// One active application launcher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedLauncher {
     pub key: ResourceKey,
@@ -65,10 +58,6 @@ pub struct PlannedLauncher {
     pub privilege: Privilege,
 }
 
-/// One active search-path entry.
-///
-/// scope names the persistent search path that will own the entry, decided
-/// at authoring time. It is not derived from privilege.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedPathEntry {
     pub key: ResourceKey,
@@ -77,7 +66,6 @@ pub struct PlannedPathEntry {
     pub privilege: Privilege,
 }
 
-/// One active service intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedService {
     pub key: ResourceKey,
@@ -87,24 +75,19 @@ pub struct PlannedService {
     pub binary: Template,
     pub arguments: Vec<String>,
     pub start: ServiceStart,
-    /// Services are host-wide by nature, so they always need system authority.
     pub privilege: Privilege,
 }
 
-/// One active URI-protocol registration intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedProtocol {
     pub key: ResourceKey,
     pub scheme: ProtocolScheme,
     pub executable: Template,
     pub args: Vec<String>,
-    /// Host store that holds the registration. Chosen at authoring time, never
-    /// derived from privilege.
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
-/// One active file-association registration intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedFileAssociation {
     pub key: ResourceKey,
@@ -112,8 +95,6 @@ pub struct PlannedFileAssociation {
     pub id: FileAssociationId,
     pub description: Option<String>,
     pub executable: Template,
-    /// Host store that holds the registration. Chosen at authoring time, never
-    /// derived from privilege.
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }

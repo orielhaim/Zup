@@ -1,7 +1,3 @@
-//! Windows file mutation executor (Create / Replace / Stage / Verify).
-//!
-//! Files only. No registry, PATH, launchers, services, protocols, or file
-//! associations. All payload access goes through `PayloadSource`.
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -18,7 +14,6 @@ use zup_transaction::{
 use crate::durable::{DurableError, move_durable};
 use crate::lowering::{host_path, target_path_from_host};
 
-/// Receipt recorded after staging a payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StageFileReceipt {
     pub staged_path: String,
@@ -26,19 +21,17 @@ pub struct StageFileReceipt {
     pub sha256: Sha256Digest,
 }
 
-/// Receipt recorded after creating a file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreateFileReceipt {
     pub destination: String,
     pub installed_sha256: Sha256Digest,
     pub installed_size: u64,
-    /// Whether the installed file is executable. See the journal receipt.
+
     pub executable: bool,
-    /// Directories created by zup for this operation (rollback candidates).
+
     pub created_directories: Vec<String>,
 }
 
-/// Receipt recorded after replacing a file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReplaceFileReceipt {
     pub destination: String,
@@ -47,11 +40,10 @@ pub struct ReplaceFileReceipt {
     pub backup_path: String,
     pub new_sha256: Sha256Digest,
     pub new_size: u64,
-    /// Whether the installed file is executable. See the journal receipt.
+
     pub executable: bool,
 }
 
-/// Typed operation receipt (journal schema).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationReceipt {
@@ -61,7 +53,6 @@ pub enum OperationReceipt {
     Control,
 }
 
-/// Synchronous progress events (no Tokio).
 #[derive(Debug, Clone)]
 pub enum FileProgress {
     PreflightStarted,
@@ -73,18 +64,15 @@ pub enum FileProgress {
     Committed,
 }
 
-/// Progress sink trait.
 pub trait ProgressSink: Send {
     fn on_event(&mut self, event: FileProgress);
 }
 
-/// No-op progress sink.
 pub struct NullProgress;
 impl ProgressSink for NullProgress {
     fn on_event(&mut self, _event: FileProgress) {}
 }
 
-/// File executor errors.
 #[derive(Debug, Error)]
 pub enum WindowsFileExecutorError {
     #[error("plan drift on `{path}`: {reason}")]
@@ -116,21 +104,15 @@ pub enum WindowsFileExecutorError {
     },
 }
 
-/// Windows file mutation executor.
 pub struct WindowsFileExecutor<P: PayloadSource> {
     payload: P,
     work_root: PathBuf,
     tx_id: String,
-    /// operation id → precondition
+
     preconditions: BTreeMap<String, FilePrecondition>,
-    /// operation id → desired digest/size
+
     desired: BTreeMap<String, (Sha256Digest, u64)>,
-    /// The suffix a runnable payload carries on the target this executor
-    /// installs for.
-    ///
-    /// Read from the target rather than the host: an executor holds a plan for
-    /// a target, and the two differ whenever zup is preparing another
-    /// machine's installation.
+
     executable_suffix: &'static str,
     progress: Box<dyn ProgressSink>,
 }
@@ -583,12 +565,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             hasher.update(&buf[..n]);
             written = written.saturating_add(n as u64);
         }
-        // Flushed, not just written. A staged payload is what a later commit
-        // barrier moves into the install location, and a power cut between the
-        // write and the rename would otherwise leave a destination holding bytes
-        // that were never on the medium - an installed file that hashes to
-        // nothing anybody can reproduce. The size and digest are checked right
-        // after, so the file is also known to be complete before it is published.
+
         out.sync_all().map_err(|source| {
             let _ = fs::remove_file(&staged);
             WindowsFileExecutorError::Io {
@@ -631,15 +608,13 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             id: op.id.to_string(),
         });
         self.verify_precondition(dest, &FilePrecondition::Absent)?;
-        // Refused here rather than after the write: an unrunnable file published
-        // and reported as installed is worse than a refused transaction.
+
         let executable = assert_runnable(
             dest,
             op.meta.executable.unwrap_or(false),
             self.executable_suffix,
         )?;
 
-        // Create missing parents deliberately (rollback candidates).
         let mut created_dirs = Vec::new();
         if let Some(parent) = dest.parent() {
             let mut missing = Vec::new();
@@ -662,7 +637,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
 
         let volume = crate::durable::volume_root(dest)?;
         let staged = self.staged_path_for_key(key, &volume);
-        // Re-check staged integrity before publish.
+
         let file = fs::File::open(&staged).map_err(|source| WindowsFileExecutorError::Io {
             path: staged.display().to_string(),
             source,
@@ -678,7 +653,6 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             ));
         }
 
-        // Create-only publish: refuse if destination appeared.
         if dest.symlink_metadata().is_ok() {
             return Err(WindowsFileExecutorError::PlanDrift {
                 path: dest.display().to_string(),
@@ -687,7 +661,6 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         }
         move_durable(&staged, dest)?;
 
-        // Verify final file.
         let file = fs::File::open(dest).map_err(|source| WindowsFileExecutorError::Io {
             path: dest.display().to_string(),
             source,
@@ -742,7 +715,6 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             });
         };
 
-        // Backup original on the same volume.
         let backup = self.backup_path_for_key(key);
         if let Some(parent) = backup.parent() {
             fs::create_dir_all(parent).map_err(|source| WindowsFileExecutorError::Io {
@@ -750,11 +722,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 source,
             })?;
         }
-        // The backup is the *only* copy of what was there: rollback restores it,
-        // and if the machine loses power after the new file is published, this is
-        // what decides whether the installation can go back. A plain `fs::copy`
-        // leaves that copy in the write cache, so it is flushed before anything
-        // is replaced.
+
         crate::durable::copy_new_durable(dest, &backup).map_err(|source| {
             WindowsFileExecutorError::Io {
                 path: backup.display().to_string(),
@@ -796,7 +764,6 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         }))
     }
 
-    /// Register file operations from a compiled plan's file nodes.
     pub fn note_file(
         &mut self,
         op_id: &OperationId,
@@ -834,7 +801,6 @@ fn file_identity(path: &Path) -> Result<Option<(u64, Sha256Digest)>, WindowsFile
         })
 }
 
-/// Apply one transaction node (file kinds only).
 pub fn apply_node<P: PayloadSource>(
     exec: &mut WindowsFileExecutor<P>,
     op: &TransactionNode,
@@ -882,20 +848,6 @@ pub fn apply_node<P: PayloadSource>(
     }
 }
 
-/// Whether a payload path is executable on Windows.
-///
-/// Windows has no execute bit: a file is runnable because of what it *is*, not
-/// because of a permission. So the intent is not applied here - there is nothing
-/// to apply - but it is not ignored either. A payload declared executable that is
-/// not a Windows image would install as a file nothing can run, which is exactly
-/// the outcome the manifest said should not happen, and the only honest response
-/// to that is to refuse before the file is written rather than publish it and
-/// report success.
-///
-/// The reverse is not a failure: Windows legitimately needs no mode change for the
-/// same intent that Linux lowers into a permission bit. The manifest's portable
-/// claim is "this file should be runnable", and a PE image at that path satisfies
-/// it with no filesystem state at all.
 fn assert_runnable(
     dest: &Path,
     executable: bool,
@@ -918,7 +870,6 @@ fn assert_runnable(
     Ok(true)
 }
 
-/// Lower a Windows file receipt to the transaction journal's receipt shape.
 pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::OperationReceipt {
     use zup_transaction::OperationReceipt as Journal;
     match receipt {
@@ -947,12 +898,6 @@ pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::Operat
     }
 }
 
-/// Verify an applied file operation against the receipt that recorded it.
-///
-/// The receipt is the only durable record of what the apply installed, so the
-/// installed bytes, the retained backup, and the vacated path are all read
-/// back from it. A receipt kind that names no file state is not a file
-/// verification, and says so rather than passing.
 pub fn verify_installed_file(
     receipt: &zup_transaction::OperationReceipt,
 ) -> Result<(), WindowsFileExecutorError> {
@@ -1066,7 +1011,6 @@ fn expect_identity(
     }
 }
 
-/// Reconcile a `Running` file node.
 pub fn reconcile_node(
     _op: &TransactionNode,
     dest: &Path,

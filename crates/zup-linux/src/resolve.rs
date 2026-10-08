@@ -1,82 +1,22 @@
-//! Turning a portable desired state into a Linux one.
-//!
-//! `resolve_target` answers one question: where does everything in this
-//! installation go on a Linux machine. Templates become target paths through
-//! the Linux location policy, every path is validated as a Linux path, and no
-//! two owned resources may claim the same name.
-//!
-//! What it does not do is invent host paths for concepts Linux has no
-//! mechanism for. A plan with active launchers, services, PATH entries,
-//! protocols, associations, or package-manager prerequisites is refused here,
-//! naming everything at once - resolving them into a plan the capability gate
-//! would then reject would be two diagnostics for one mistake, and inventing
-//! Linux spellings for them (a `.desktop` path, a unit name) would be fake
-//! implementations wearing a resolver's clothes.
-
 use std::collections::BTreeMap;
 
-use zup_core::{ResourceKey, SelectedScope, TargetTriple};
+use zup_core::{ResourceKey, SelectedScope};
 use zup_plan::InstallPlan;
 use zup_platform::{
     TargetFile, TargetPath, TargetPlan, TargetPlanSummary, TargetPrerequisite,
-    TemplateResolveError, resolve_template_path,
+    resolve_template_path,
 };
 
+use crate::error::{PathError, PlanError};
 use crate::locations::LinuxInstallLocationResolver;
-use crate::lowering::{LinuxPathLoweringError, to_host_path};
+use crate::lowering::to_host_path;
 
-/// Why a portable plan cannot become a Linux target plan.
-#[derive(Debug, thiserror::Error)]
-pub enum LinuxResolveError {
-    #[error("cannot resolve for target `{target}`: not a Linux target")]
-    UnsupportedTarget { target: String },
-
-    #[error("cannot resolve {kind} `{path}`: {reason}")]
-    InvalidPath {
-        kind: &'static str,
-        path: String,
-        reason: String,
-    },
-
-    #[error("location or template failure for {kind}: {source}")]
-    Template {
-        kind: &'static str,
-        #[source]
-        source: TemplateResolveError,
-    },
-
-    #[error("two owned resources claim `{second}`: {kind} collides with `{first}`")]
-    Collision {
-        kind: &'static str,
-        first: String,
-        second: String,
-    },
-
-    #[error("this installation cannot proceed on Linux: {reasons}")]
-    Unsupported { reasons: String },
-}
-
-/// Resolve a portable desired state into a Linux target plan.
-///
-/// Total over well-formed plans: files, the install directory, and
-/// prerequisites lower normally, and anything else active is refused in one
-/// diagnostic rather than resolved into a plan that could never execute.
-pub fn resolve_target(plan: &InstallPlan) -> Result<TargetPlan, LinuxResolveError> {
-    resolve_target_with(plan, &LinuxInstallLocationResolver::default())
-}
-
-/// Resolve with explicit machine roots, for isolated machine-scope runs.
-///
-/// The default above is the production roots; the privileged worker resolves
-/// with its enforced roots, and the unprivileged planner with the same
-/// roots it will ask the worker to enforce, so both sides compute the same
-/// plan digest.
-pub fn resolve_target_with(
+pub fn resolve_target(
     plan: &InstallPlan,
     resolver: &LinuxInstallLocationResolver,
-) -> Result<TargetPlan, LinuxResolveError> {
+) -> Result<TargetPlan, PlanError> {
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
-        return Err(LinuxResolveError::UnsupportedTarget {
+        return Err(PlanError::UnsupportedTarget {
             target: plan.target.to_string(),
         });
     }
@@ -85,9 +25,9 @@ pub fn resolve_target_with(
     let scope = plan.scope;
     let resolve = |template: &zup_core::Template, kind: &'static str| {
         let path = resolve_template_path(template, &plan.target, resolver, scope)
-            .map_err(|source| LinuxResolveError::Template { kind, source })?;
+            .map_err(|source| PlanError::Template { kind, source })?;
         validate_linux_path(kind, &path)?;
-        Ok::<TargetPath, LinuxResolveError>(path)
+        Ok::<TargetPath, PlanError>(path)
     };
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,43 +37,37 @@ pub fn resolve_target_with(
     }
 
     let mut owned: BTreeMap<String, (OwnedKind, &'static str)> = BTreeMap::new();
-    let mut claim = |path: &TargetPath,
-                     kind: &'static str,
-                     path_kind: OwnedKind|
-     -> Result<(), LinuxResolveError> {
-        let name = path.to_string();
-        if let Some((_, first)) = owned.get(&name) {
-            return Err(LinuxResolveError::Collision {
-                kind,
-                first: (*first).to_owned(),
-                second: name,
-            });
-        }
-        // A file inside an owned directory is the normal case; anything else
-        // where one owned path contains another means one of them is not what
-        // it claims to be. Identity is exact text - Linux is case-sensitive,
-        // so `Tool` and `tool` are two names and folding them would refuse
-        // installations the filesystem accepts.
-        for (existing, (existing_kind, first)) in &owned {
-            let conflict = match (path_kind, *existing_kind) {
-                (OwnedKind::Directory, OwnedKind::Directory) => false,
-                (OwnedKind::File, OwnedKind::Directory) => is_ancestor(&name, existing),
-                (OwnedKind::Directory, OwnedKind::File) => is_ancestor(existing, &name),
-                (OwnedKind::File, OwnedKind::File) => {
-                    is_ancestor(existing, &name) || is_ancestor(&name, existing)
-                }
-            };
-            if conflict {
-                return Err(LinuxResolveError::Collision {
+    let mut claim =
+        |path: &TargetPath, kind: &'static str, path_kind: OwnedKind| -> Result<(), PathError> {
+            let name = path.to_string();
+            if let Some((_, first)) = owned.get(&name) {
+                return Err(PathError::Collision {
                     kind,
                     first: (*first).to_owned(),
                     second: name,
                 });
             }
-        }
-        owned.insert(name, (path_kind, kind));
-        Ok(())
-    };
+
+            for (existing, (existing_kind, first)) in &owned {
+                let conflict = match (path_kind, *existing_kind) {
+                    (OwnedKind::Directory, OwnedKind::Directory) => false,
+                    (OwnedKind::File, OwnedKind::Directory) => is_ancestor(&name, existing),
+                    (OwnedKind::Directory, OwnedKind::File) => is_ancestor(existing, &name),
+                    (OwnedKind::File, OwnedKind::File) => {
+                        is_ancestor(existing, &name) || is_ancestor(&name, existing)
+                    }
+                };
+                if conflict {
+                    return Err(PathError::Collision {
+                        kind,
+                        first: (*first).to_owned(),
+                        second: name,
+                    });
+                }
+            }
+            owned.insert(name, (path_kind, kind));
+            Ok(())
+        };
 
     let install_directory = resolve(&plan.install_directory, "install directory")?;
     claim(
@@ -174,12 +108,6 @@ pub fn resolve_target_with(
         });
     }
 
-    // Machine-scope system services: static manifest services lower into
-    // target services here; user-scope services were already refused above
-    // (systemd user units are deferred past this phase), and the privileged
-    // worker additionally refuses any project that needs plugin execution,
-    // so a plugin-generated privileged service never reaches this point
-    // with machine authority.
     let mut services = Vec::with_capacity(plan.services.len());
     if scope == SelectedScope::Machine {
         let mut service_ids: BTreeMap<String, String> = BTreeMap::new();
@@ -187,23 +115,22 @@ pub fn resolve_target_with(
             let binary = resolve(&service.binary, "service binary")?;
             let identity = service.id.as_str().to_owned();
             if let Some(first) = service_ids.get(&identity) {
-                return Err(LinuxResolveError::Collision {
+                return Err(PathError::Collision {
                     kind: "service id",
                     first: first.clone(),
                     second: identity,
-                });
+                }
+                .into());
             }
             service_ids.insert(identity, service.name.to_string());
-            // The unit name must be derivable now: an identity with no
-            // honest unit spelling refuses at resolution, not at install.
-            let unit = crate::services::unit_name(&service.id).map_err(|error| {
-                LinuxResolveError::InvalidPath {
+
+            let unit =
+                crate::services::unit_name(&service.id).map_err(|error| PathError::Invalid {
                     kind: "service id",
                     path: service.id.to_string(),
                     reason: error.to_string(),
-                }
-            })?;
-            // The renderer must accept the command now for the same reason.
+                })?;
+
             let synthetic = zup_platform::TargetService {
                 key: ResourceKey::Service {
                     id: service.id.clone(),
@@ -221,7 +148,7 @@ pub fn resolve_target_with(
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| service.name.to_string());
             crate::services::render_unit(&synthetic, &display).map_err(|error| {
-                LinuxResolveError::InvalidPath {
+                PathError::Invalid {
                     kind: "service command",
                     path: unit.clone(),
                     reason: error.to_string(),
@@ -241,27 +168,20 @@ pub fn resolve_target_with(
         }
     }
 
-    // Portable integration intent lowers into generated native files here, so
-    // the snapshot, delta, transaction, and ledger below all treat a desktop
-    // entry or MIME package as what it is: a file Zup owns.
     let integration = crate::integration::lower_integration(plan).map_err(|error| match error {
-        crate::integration::IntegrationError::Unsupported { .. } => {
-            LinuxResolveError::Unsupported {
-                reasons: error.to_string(),
-            }
-        }
-        crate::integration::IntegrationError::DataHome(source) => LinuxResolveError::Template {
+        PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
+        PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
+        PlanError::Path(PathError::NoHome) => PlanError::Template {
             kind: "XDG data home",
             source: zup_platform::TemplateResolveError::InstallLocation(
                 zup_platform::InstallLocationError::ResolutionFailed {
                     location: zup_core::InstallLocation::UserData,
                     scope: plan.scope,
-                    source: Box::new(source),
+                    source: Box::new(PathError::NoHome),
                 },
             ),
         },
-        other => LinuxResolveError::InvalidPath {
-            kind: "integration resource",
+        other => PlanError::InvalidTargetPath {
             path: String::new(),
             reason: other.to_string(),
         },
@@ -276,7 +196,7 @@ pub fn resolve_target_with(
         files.push(TargetFile {
             key: generated.key.clone(),
             source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
-                |_| LinuxResolveError::InvalidPath {
+                |_| PathError::Invalid {
                     kind: "integration source",
                     path: generated.source_relative.clone(),
                     reason: "generated source name is not a relative path".into(),
@@ -292,7 +212,7 @@ pub fn resolve_target_with(
 
     let file_count = files.len();
     let resource_count = services.len();
-    Ok(TargetPlan {
+    let target = TargetPlan {
         app: plan.app.clone(),
         target: plan.target.clone(),
         scope: plan.scope,
@@ -314,38 +234,33 @@ pub fn resolve_target_with(
             prerequisite_count: plan.prerequisites.len(),
             download_bytes: 0,
         },
-        // A build plan says which preset; it does not say which bytes. The
-        // executable is content, resolved by whoever supplies the payload.
+
         preset: None,
-    })
+    };
+    validate_target_plan(&target)?;
+    Ok(target)
 }
 
-/// Whether `ancestor` is a strict path ancestor of `path, component-wise.
-///
-/// Compared as text on `/` separators, because both spellings are canonical
-/// target paths for the same Linux target: no normalization is left to do, and
-/// a prefix that stops mid-component (`/opt/ac` vs `/opt/acme`) is not an
-/// ancestor.
 fn is_ancestor(ancestor: &str, path: &str) -> bool {
     path.len() > ancestor.len()
         && path.starts_with(ancestor)
         && path.as_bytes()[ancestor.len()] == b'/'
 }
 
-/// Prove a resolved path is a valid Linux path, or say which rule it breaks.
-fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), LinuxResolveError> {
+fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), PathError> {
     to_host_path(path).map_err(|error| {
         let (path_text, reason) = match &error {
-            LinuxPathLoweringError::UnsupportedTarget { .. } => {
+            PathError::UnsupportedTarget { .. } => {
                 (path.to_string(), "not a Linux target path".to_owned())
             }
-            LinuxPathLoweringError::InvalidComponent { component, reason } => (
+            PathError::InvalidComponent { component, reason } => (
                 path.to_string(),
                 format!("component `{component}`: {reason}"),
             ),
-            LinuxPathLoweringError::InvalidPath(error) => (path.to_string(), error.to_string()),
+            PathError::Path(error) => (path.to_string(), error.to_string()),
+            other => (path.to_string(), other.to_string()),
         };
-        LinuxResolveError::InvalidPath {
+        PathError::Invalid {
             kind,
             path: path_text,
             reason,
@@ -354,18 +269,7 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Linu
     Ok(())
 }
 
-/// Refuse every active resource this backend has no mechanism for, in one
-/// diagnostic.
-///
-/// Launchers, protocols, and file associations are not refused here for user
-/// scope: they lower into generated integration files above, and only the
-/// shapes with no honest mapping (a literal desktop icon, a directory PATH
-/// mutation) are refused by that lowering with their reasons. Machine scope
-/// has no integration lowering at all - a machine desktop entry is deferred -
-/// so every one of those resources is refused here instead. Services are the
-/// mirror image: machine scope owns them through systemd, while user scope
-/// (systemd user units) is deferred, so only user-scope services refuse here.
-fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
+fn refuse_unsupported(plan: &InstallPlan) -> Result<(), PlanError> {
     let mut refused: Vec<String> = Vec::new();
     let mut unsupported = |kind: &str, count: usize| {
         if count > 0 {
@@ -389,30 +293,54 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), LinuxResolveError> {
     if refused.is_empty() {
         Ok(())
     } else {
-        Err(LinuxResolveError::Unsupported {
+        Err(PlanError::Unsupported {
             reasons: refused.join("; "),
         })
     }
 }
 
-/// Resolve with an explicit target triple for the location policy.
-///
-/// `resolve_target` answers from the plan's own target; this answers from a
-/// caller-supplied one, for plans whose target the caller has already
-/// committed to (a recovery run replays a journal, not a manifest, and the
-/// journal's target is the commitment).
-pub fn resolve_target_for(
-    plan: &InstallPlan,
-    target: &TargetTriple,
-) -> Result<TargetPlan, LinuxResolveError> {
-    let mut borrowed = plan.clone();
-    borrowed.target = target.clone();
-    resolve_target(&borrowed)
+pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), PlanError> {
+    let mut refused: Vec<String> = Vec::new();
+    if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+        refused.push(format!(
+            "target `{}` is not a Linux target",
+            plan.target.as_str()
+        ));
+    }
+    let mut unsupported = |kind: &str, count: usize| {
+        if count > 0 {
+            refused.push(format!(
+                "{count} {kind} resource{} {} not supported on Linux in this phase",
+                if count == 1 { "" } else { "s" },
+                if count == 1 { "is" } else { "are" },
+            ));
+        }
+    };
+    if plan.scope != zup_core::SelectedScope::Machine {
+        unsupported("service", plan.services.len());
+    }
+    unsupported("package-manager prerequisite", plan.prerequisites.len());
+    unsupported("launcher", plan.launchers.len());
+    unsupported("PATH entry", plan.path_entries.len());
+    unsupported("URI protocol", plan.protocols.len());
+    unsupported("file association", plan.file_associations.len());
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(PlanError::Unsupported {
+            reasons: refused.join("; "),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zup_core::TargetTriple;
+
+    fn resolve(input: &InstallPlan) -> Result<TargetPlan, PlanError> {
+        resolve_target(input, &LinuxInstallLocationResolver::default())
+    }
 
     fn plan() -> InstallPlan {
         let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
@@ -468,7 +396,7 @@ mod tests {
     fn files_resolve_under_the_programs_namespace() {
         let mut input = plan();
         input.files.push(file("tool"));
-        let resolved = resolve_target(&input).expect("a file plan resolves");
+        let resolved = resolve(&input).expect("a file plan resolves");
         assert_eq!(resolved.files.len(), 1);
         assert!(
             resolved.files[0]
@@ -487,8 +415,8 @@ mod tests {
         input.files.push(file("tool"));
         assert!(
             matches!(
-                resolve_target(&input),
-                Err(LinuxResolveError::Collision { .. })
+                resolve(&input),
+                Err(PlanError::Path(PathError::Collision { .. }))
             ),
             "two files may not claim one destination"
         );
@@ -503,30 +431,26 @@ mod tests {
         input.files.push(nested);
         assert!(
             matches!(
-                resolve_target(&input),
-                Err(LinuxResolveError::Collision { .. })
+                resolve(&input),
+                Err(PlanError::Path(PathError::Collision { .. }))
             ),
             "a file cannot contain another file"
         );
     }
 
-    /// Case is significant on Linux: `Tool` and `tool` are two names, and a
-    /// resolver that folded them would refuse installations the filesystem
-    /// accepts.
     #[test]
     fn case_distinguishes_destinations() {
         let mut input = plan();
         input.files.push(file("Tool"));
         input.files.push(file("tool"));
         assert!(
-            resolve_target(&input).is_ok(),
+            resolve(&input).is_ok(),
             "case-sensitive filesystems hold both names"
         );
     }
 
     #[test]
     fn services_are_refused_with_everything_named() {
-        // User scope (systemd user units are deferred): services refuse.
         let mut input = plan();
         input.services.push(zup_plan::PlannedService {
             key: ResourceKey::Service {
@@ -541,8 +465,7 @@ mod tests {
             start: zup_core::ServiceStart::Automatic,
             privilege: zup_core::Privilege::System,
         });
-        // A menu launcher is not part of this refusal: it lowers into a
-        // generated desktop entry rather than being refused.
+
         input.launchers.push(zup_plan::PlannedLauncher {
             key: ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
@@ -556,7 +479,7 @@ mod tests {
             working_directory: None,
             privilege: zup_core::Privilege::User,
         });
-        let error = resolve_target(&input).expect_err("services refuse");
+        let error = resolve(&input).expect_err("services refuse");
         let message = error.to_string();
         assert!(message.contains("service"), "{message}");
     }
@@ -566,14 +489,11 @@ mod tests {
         let mut input = plan();
         input.target = TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target");
         assert!(matches!(
-            resolve_target(&input),
-            Err(LinuxResolveError::UnsupportedTarget { .. })
+            resolve(&input),
+            Err(PlanError::UnsupportedTarget { .. })
         ));
     }
 
-    /// Machine scope lowers no integration: a launcher that would become a
-    /// generated desktop entry in user scope is refused in machine scope,
-    /// because a machine desktop entry is deferred past this phase.
     #[test]
     fn machine_launchers_are_refused_not_lowered() {
         let mut input = plan();
@@ -591,18 +511,16 @@ mod tests {
             working_directory: None,
             privilege: zup_core::Privilege::System,
         });
-        let error = resolve_target(&input).expect_err("machine launchers refuse");
+        let error = resolve(&input).expect_err("machine launchers refuse");
         assert!(error.to_string().contains("launcher"), "{error}");
     }
 
-    /// A files-only machine plan resolves under the program tree: payload
-    /// destinations land where the privileged policy expects them.
     #[test]
     fn machine_files_resolve_under_opt() {
         let mut input = plan();
         input.scope = SelectedScope::Machine;
         input.files.push(file("tool"));
-        let resolved = resolve_target(&input).expect("a machine file plan resolves");
+        let resolved = resolve(&input).expect("a machine file plan resolves");
         assert!(
             resolved.files[0]
                 .destination
@@ -629,8 +547,6 @@ mod tests {
         }
     }
 
-    /// Machine scope resolves static manifest services into target
-    /// services; the unit name derives from the stable identity alone.
     #[test]
     fn machine_services_resolve_into_target_services() {
         let mut input = plan();
@@ -638,7 +554,7 @@ mod tests {
         input
             .services
             .push(machine_service(zup_core::ServiceStart::Automatic));
-        let resolved = resolve_target(&input).expect("a machine service plan resolves");
+        let resolved = resolve(&input).expect("a machine service plan resolves");
         assert_eq!(resolved.services.len(), 1);
         assert_eq!(
             resolved.services[0].start,
@@ -655,8 +571,6 @@ mod tests {
         assert_eq!(unit, again, "identity is stable across resolutions");
     }
 
-    /// Two services claiming one identity collide at resolution, before
-    /// any transaction exists.
     #[test]
     fn duplicate_service_identities_collide() {
         let mut input = plan();
@@ -669,10 +583,132 @@ mod tests {
             .push(machine_service(zup_core::ServiceStart::Manual));
         assert!(
             matches!(
-                resolve_target(&input),
-                Err(LinuxResolveError::Collision { .. })
+                resolve(&input),
+                Err(PlanError::Path(PathError::Collision { .. }))
             ),
             "one identity is one service"
+        );
+    }
+
+    fn empty_plan() -> TargetPlan {
+        let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+        TargetPlan {
+            app: zup_core::App {
+                id: zup_core::AppId::new("com.example.tool").expect("an id"),
+                name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+                version: semver::Version::parse("1.0.0").expect("a version"),
+                publisher: None,
+                main: None,
+                description: None,
+            },
+            target: target.clone(),
+            scope: SelectedScope::User,
+            install_directory: zup_platform::TargetPath::new(
+                target,
+                "/home/u/.local/lib/zup/apps/tool",
+            )
+            .expect("a path"),
+            selected_components: Vec::new(),
+            prerequisites: Vec::new(),
+            files: Vec::new(),
+            launchers: Vec::new(),
+            path_entries: Vec::new(),
+            services: Vec::new(),
+            protocols: Vec::new(),
+            file_associations: Vec::new(),
+            summary: zup_platform::TargetPlanSummary {
+                file_count: 0,
+                install_bytes: 0,
+                resource_count: 0,
+                requires_authorization: false,
+                selected_component_count: 0,
+                prerequisite_count: 0,
+                download_bytes: 0,
+            },
+            preset: None,
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::user(SelectedScope::User)]
+    #[case::machine(SelectedScope::Machine)]
+    fn plain_file_plans_are_accepted(#[case] scope: SelectedScope) {
+        let mut plan = empty_plan();
+        plan.scope = scope;
+        assert!(validate_target_plan(&plan).is_ok());
+    }
+
+    #[test]
+    fn one_diagnostic_names_every_unsupported_resource() {
+        let mut plan = empty_plan();
+        plan.scope = SelectedScope::Machine;
+        plan.services.push(target_service(&plan.target.clone()));
+        plan.launchers.push(zup_platform::TargetLauncher {
+            key: zup_core::ResourceKey::Launcher {
+                location: zup_core::LauncherLocation::Menu,
+                name: "tool".to_owned(),
+            },
+            location: zup_core::LauncherLocation::Menu,
+            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            launcher_path: zup_platform::TargetPath::new(
+                plan.target.clone(),
+                "/home/u/.local/share/applications/tool.desktop",
+            )
+            .expect("a path"),
+            target: zup_platform::TargetPath::new(
+                plan.target.clone(),
+                "/home/u/.local/lib/zup/apps/tool/tool",
+            )
+            .expect("a path"),
+            arguments: Vec::new(),
+            working_directory: None,
+            privilege: zup_core::Privilege::User,
+        });
+
+        let error = validate_target_plan(&plan).expect_err("machine scope with launchers refuses");
+        let reasons = error.reasons();
+        assert!(
+            reasons.contains("launcher"),
+            "launchers are named: {reasons}"
+        );
+
+        plan.launchers.clear();
+        assert!(validate_target_plan(&plan).is_ok());
+        plan.scope = SelectedScope::User;
+        let error = validate_target_plan(&plan).expect_err("user scope with services refuses");
+        assert!(
+            error.reasons().contains("service"),
+            "services are named: {}",
+            error.reasons()
+        );
+    }
+
+    fn target_service(target: &zup_core::TargetTriple) -> zup_platform::TargetService {
+        zup_platform::TargetService {
+            key: zup_core::ResourceKey::Service {
+                id: zup_core::ServiceId::new("tool").expect("an id"),
+            },
+            id: zup_core::ServiceId::new("tool").expect("an id"),
+            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            display_name: None,
+            command: zup_platform::CommandSpec::new(
+                zup_platform::TargetPath::new(target.clone(), "/opt/tool/tool").expect("a path"),
+                Vec::new(),
+            ),
+            start: zup_core::ServiceStart::Automatic,
+            privilege: zup_core::Privilege::System,
+        }
+    }
+
+    #[test]
+    fn a_non_linux_target_is_refused() {
+        let mut plan = empty_plan();
+        plan.target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target");
+        let error = validate_target_plan(&plan).expect_err("a Windows target refuses");
+        assert!(
+            error.reasons().contains("not a Linux target"),
+            "{}",
+            error.reasons()
         );
     }
 }

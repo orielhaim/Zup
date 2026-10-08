@@ -1,5 +1,3 @@
-//! Windows implementation of the runtime backend.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +7,7 @@ use zup_bootstrap::{
     BootstrapOutcome, BootstrapState, BootstrapStateStore, FilesystemBootstrapStateStore,
     Quarantine, execute_plan_with_persist,
 };
-use zup_bundle::PayloadSource;
+use zup_bundle::{AcquiredPayloadSource, PayloadSource};
 use zup_core::SelectedScope;
 use zup_runtime::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend,
@@ -17,18 +15,17 @@ use zup_runtime::{
     RuntimeState, SessionError,
 };
 use zup_transaction::{
-    CancellationProbe, FileDelta, FilePrecondition, FilesystemTransactionStore, OperationExecutor,
-    OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionError, TransactionId,
-    TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
+    CancellationProbe, FileDelta, FilePrecondition, FilesystemTransactionStore, InstallationLock,
+    OperationExecutor, OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionError,
+    TransactionId, TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
 };
 
 use crate::{
-    AutoPayloadSource, BundleError, InstallLedgerStore, InstallationLock, NullProgress,
-    PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayIdentity, WindowsFileExecutor,
-    cleanup_payload_overlay, payload_overlay_base_root, verify_payload_overlay,
+    AutoPayloadSource, BundleError, InstallLedgerStore, NullProgress, PAYLOAD_OVERLAY_DIRECTORY,
+    PayloadOverlayIdentity, WindowsFileExecutor, cleanup_payload_overlay,
+    payload_overlay_base_root, verify_payload_overlay,
 };
 
-/// What to record about the release graph a committing request came from.
 fn record_release(request: &RuntimeRequest) -> crate::ReleaseRecord<'_> {
     match &request.release {
         Some(identity) => crate::ReleaseRecord::Identity(identity),
@@ -36,18 +33,14 @@ fn record_release(request: &RuntimeRequest) -> crate::ReleaseRecord<'_> {
     }
 }
 
-/// Windows execution policy for temporary payload overlays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayPolicy {
     Cleanup,
     RetainOnBlocked,
 }
 
-/// Outcome prefix for an install a running application blocks, whether the
-/// blocker was seen before the request or at a preflight barrier.
 const BLOCKED_BY_RUNNING_APPLICATIONS: &str = "blocked by running applications";
 
-/// A request-scoped Windows backend.
 #[derive(Clone)]
 pub struct WindowsRuntimeBackend {
     payload: RuntimePayloadSource,
@@ -153,15 +146,8 @@ impl WindowsRuntimeBackend {
         Self::from_path(payload_root, overlay).map_err(|error| error.to_string())
     }
 
-    /// A backend whose payload is a verified content cache.
-    ///
-    /// This is the online and graph-update path: the content came from a release
-    /// graph rather than from an image, and the executor reads it by digest. The
-    /// executor's own precondition checks are unchanged, so a blob that does not
-    /// hash to what the plan names fails at the file operation rather than
-    /// producing a file.
     pub fn from_acquired(
-        payload: std::sync::Arc<crate::AcquiredPayloadSource>,
+        payload: std::sync::Arc<AcquiredPayloadSource>,
         payload_root: impl Into<PathBuf>,
     ) -> Result<Self, BundleError> {
         let payload_root = payload_root.into();
@@ -223,7 +209,6 @@ impl RuntimeBackend for WindowsRuntimeBackend {
     }
 }
 
-/// Run a request with a newly created Windows-backed session.
 pub async fn run_install(
     backend: &WindowsRuntimeBackend,
     request: RuntimeRequest,
@@ -231,7 +216,6 @@ pub async fn run_install(
     zup_runtime::run_install(backend, request).await
 }
 
-/// Run a request with frontend-owned cancellation and events.
 pub async fn run_install_control(
     backend: &WindowsRuntimeBackend,
     request: RuntimeRequest,
@@ -241,7 +225,6 @@ pub async fn run_install_control(
     zup_runtime::run_install_control(backend, request, cancel, events).await
 }
 
-/// Run a request with an explicit authorization policy.
 pub async fn run_install_control_with_policy(
     backend: &WindowsRuntimeBackend,
     request: RuntimeRequest,
@@ -252,7 +235,6 @@ pub async fn run_install_control_with_policy(
     zup_runtime::run_install_control_with_policy(backend, request, cancel, events, policy).await
 }
 
-/// Run a request through the Windows backend using its normal dispatch rules.
 pub async fn run_local_install(
     backend: &WindowsRuntimeBackend,
     request: RuntimeRequest,
@@ -407,8 +389,7 @@ async fn run_bootstrap_phase(
     store
         .compare_and_swap(assessed_revision, &state)
         .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
-    // Windows turns a system-authorized operation into a UAC request; the
-    // portable plan only says which operations need host-wide authority.
+
     let needs_system_authority = request
         .plan
         .plan
@@ -570,7 +551,7 @@ async fn run_elevated_bootstrap(
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
     let (mut reader, mut writer) =
         crate::frame_server(server.into_inner().expect("connected server"));
-    let hello = tokio::time::timeout(crate::HELLO_TIMEOUT, reader.recv())
+    let hello = tokio::time::timeout(crate::HANDSHAKE_TIMEOUT, reader.recv())
         .await
         .map_err(|_| SessionError::Protocol("worker hello timeout".into()))?
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
@@ -785,8 +766,6 @@ impl WindowsRuntimeBackend {
             }
         }
 
-        // Elevation is a Windows fact. Ask the transaction which operations
-        // need host-wide authority, not which scope the application uses.
         let needs_authorization = request.transaction_plan.requires_authorization();
         let already_authorized = if needs_authorization {
             Some(
@@ -910,7 +889,6 @@ async fn run_local_install_control_inner(
     Ok(outcome)
 }
 
-/// Elevated worker route (authenticated UAC + named pipe + one-shot worker).
 async fn run_elevated_worker(
     request: RuntimeRequest,
     payload_root: &Path,
@@ -931,7 +909,6 @@ async fn run_elevated_worker(
 
     let _ = events.send(RuntimeEvent::WaitingForAuthorization);
 
-    // Create the secured pipe BEFORE launching the worker.
     let pipe = crate::pipe_name(&session_id.to_string());
     let mut server =
         crate::PipeServer::create(&pipe).map_err(|e| SessionError::Protocol(e.to_string()))?;
@@ -1038,7 +1015,7 @@ async fn run_elevated_worker(
 
     let (mut reader, mut writer) =
         crate::frame_server(server.into_inner().expect("connected server"));
-    let hello = tokio::time::timeout(crate::HELLO_TIMEOUT, reader.recv())
+    let hello = tokio::time::timeout(crate::HANDSHAKE_TIMEOUT, reader.recv())
         .await
         .map_err(|_| SessionError::Protocol("worker hello timeout".into()))?
         .map_err(|e| SessionError::Protocol(e.to_string()))?;
@@ -1152,12 +1129,7 @@ async fn run_elevated_worker(
                     return Ok(outcome);
                 }
                 zup_protocol::Message::Failed(failed) => {
-                    // The kind, not the message, is what the caller acts on. A
-                    // busy installation becomes a typed state the frontends can
-                    // offer to retry, rather than a sentence somebody has to read
-                    // and classify. An unrecognized kind is a protocol failure,
-                    // never a default: a newer worker talking to an older parent
-                    // has to be refused rather than reported as a broken install.
+
                     return Err(match failed.kind.as_str() {
                         zup_protocol::failure::INSTALLATION_BUSY => {
                             SessionError::InstallationBusy
@@ -1321,7 +1293,6 @@ fn validate_request(
     Ok(())
 }
 
-/// Blocking local execution with the production `WindowsFileExecutor`.
 fn execute_local_blocking_with_events(
     request: RuntimeRequest,
     payload: RuntimePayloadSource,
@@ -1347,9 +1318,7 @@ fn execute_local_blocking_with_events_inner(
     );
     let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
         Ok(Some(lock)) => lock,
-        // A typed state, not a failure string: a caller that can see this is one
-        // more of the same operation can wait for the other to finish, and the
-        // headless exit code says so.
+
         Ok(None) => {
             return InstallOutcome::Busy {
                 operation: "another maintenance operation",
@@ -1453,7 +1422,6 @@ fn execute_local_blocking_with_events_inner(
         blocked_paths: crate::plan_mutating_paths(&record.plan, &request.target),
     };
 
-    // Register the immutable payload identity under each transaction operation.
     note_plan_files(&mut executor.inner, &record.plan);
 
     match coordinator.execute(record, &mut executor) {
@@ -1533,15 +1501,13 @@ fn operation_action(operation: &TransactionNode) -> String {
     }
 }
 
-/// Production `OperationExecutor` wrapping `WindowsFileExecutor`.
 struct ProductionExecutor<P: zup_bundle::PayloadSource, C: CancellationProbe> {
     inner: WindowsFileExecutor<P>,
     cancel: C,
     events: Option<broadcast::Sender<RuntimeEvent>>,
     completed_work: u64,
     total_work: u64,
-    /// Files this plan may mutate, for the Restart Manager preflight a
-    /// barrier repeats.
+
     blocked_paths: Vec<PathBuf>,
 }
 
@@ -1555,9 +1521,6 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
             return Err("cancelled".into());
         }
         match &operation.kind {
-            // The plan orders this barrier immediately before commit intent, so
-            // this is the last chance to see a blocker before the transaction
-            // mutates anything.
             zup_transaction::NodeKind::Barrier => {
                 let blockers = self
                     .blocked_paths
@@ -1584,8 +1547,7 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
                     detail.replace('\n', ", ")
                 ))
             }
-            // Barriers are the only nodes the coordinator preflights; a file
-            // node re-checks its own precondition in `apply`.
+
             _ => Ok(()),
         }
     }

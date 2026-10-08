@@ -1,41 +1,7 @@
-//! The parts that can only be checked against GitHub itself.
-//!
-//! Everything else in this crate runs against a mock, which is the right default:
-//! a mock is deterministic, fast, and can be made to do the thing a real host
-//! does. But a mock cannot tell you whether GitHub still serves
-//! `releases/download/<tag>/<asset>` the way this crate assumes, whether the
-//! documented `sha256:` digest field is still there, whether the upload endpoint
-//! still wants the API-version media type, or whether a release asset answers a
-//! `Range` request. Those are facts about a server that changes, and the only way
-//! to know is to ask.
-//!
-//! # Running it
-//!
-//! Off by default, and off in a way that is a skip rather than a failure, so the
-//! ordinary suite never touches the network:
-//!
-//! ```bash
-//! ZUP_GITHUB_LIVE=1 \
-//! ZUP_GITHUB_LIVE_REPO=owner/name \
-//! GH_TOKEN=… \
-//! cargo nextest run -p zup-publish-github --test live
-//! ```
-//!
-//! `ZUP_GITHUB_LIVE_REPO` defaults to `GITHUB_REPOSITORY`, so a workflow that
-//! already sets that needs only `ZUP_GITHUB_LIVE=1`.
-//!
-//! # What it will never do
-//!
-//! Nothing here creates, uploads, publishes, or deletes anything. The tests read
-//! and they assert. A harness that could mutate a repository would eventually
-//! mutate the wrong one, and the value of a live check does not justify a
-//! maintainer having to wonder.
-
 use zup_publish_github::{
     GithubClient, GithubRepository, ProcessEnvironment, RepositorySpec, discover, resolve,
 };
 
-/// The repository to ask about, or `None` to skip.
 fn live_repository() -> Option<GithubRepository> {
     std::env::var_os("ZUP_GITHUB_LIVE")?;
     let spec = std::env::var("ZUP_GITHUB_LIVE_REPO")
@@ -51,7 +17,6 @@ fn live_repository() -> Option<GithubRepository> {
     Some(resolved.repository)
 }
 
-/// A credential, or `None` to skip.
 fn live_token() -> Option<zup_publish_github::Token> {
     discover(&ProcessEnvironment).ok()
 }
@@ -74,8 +39,6 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
     let token = or_skip!(live_token(), "no GitHub credential");
     let client = GithubClient::new(&repository, &token).expect("a client");
 
-    // The two calls a read-only check makes. If either shape changed, this fails
-    // here rather than in a maintainer's release.
     let info = client
         .repository_info()
         .await
@@ -89,9 +52,6 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
         !info.default_branch.is_empty(),
         "and reported a default branch, which is what a tag would be created from"
     );
-    // `immutable_releases` is `None` on a server too old to have the field, and
-    // "not reported" is not "not enabled" - so only the value, never the absence,
-    // is asserted.
     if let Some(immutable) = info.immutable_releases {
         eprintln!(
             "{}/{} reports immutable releases: {immutable}",
@@ -99,8 +59,6 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
         );
     }
 
-    // `release_by_tag` on a tag that does not exist is a `404`, which is the
-    // ordinary answer for a first release and the one the publisher branches on.
     let missing = client
         .release_by_tag("v0.0.0-zup-live-probe-does-not-exist")
         .await;
@@ -116,8 +74,6 @@ async fn a_real_repository_answers_the_calls_this_client_makes() {
 
 #[tokio::test]
 async fn a_real_release_asset_answers_a_range_request_or_says_it_does_not() {
-    // The one fact this design cannot assume, and the reason the content source
-    // probes rather than depends on it.
     let repository = or_skip!(live_repository(), "no ZUP_GITHUB_LIVE repository");
     let Some(url) = std::env::var("ZUP_GITHUB_LIVE_ASSET").ok().map(|value| {
         if value.starts_with("http") {

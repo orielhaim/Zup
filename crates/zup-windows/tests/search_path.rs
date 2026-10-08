@@ -1,11 +1,3 @@
-//! Windows search-path semantics are decided by the adapter, not by the
-//! portable delta planner.
-//!
-//! The planner only ever sees a `SearchPath` of target-normalized entries and
-//! asks whether one is a member. Everything host-specific - the `;` separator,
-//! quoting, case identity, `%VAR%` references, `REG_SZ` vs `REG_EXPAND_SZ` -
-//! belongs here.
-
 use std::collections::BTreeMap;
 
 use zup_core::{Privilege, ResourceKey, SelectedScope, TargetTriple};
@@ -24,9 +16,6 @@ fn tpath(value: &str) -> TargetPath {
     TargetPath::new(windows(), value).unwrap()
 }
 
-// `split_search_path`, `search_path_contains` and `write_value_type` are unit
-// tested in `src/search_path.rs`, where they are private. What is left here is
-// the decision the delta planner makes from their answers.
 fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_platform::TargetPlan {
     zup_platform::TargetPlan {
         app: zup_core::App {
@@ -98,7 +87,7 @@ fn ledger_owning(target: &zup_platform::TargetPlan, privilege: Privilege) -> Ins
 fn ownership_ignores_unrelated_segments() {
     let target = target_with_path_entry(SelectedScope::User, Privilege::User);
     let ledger = ledger_owning(&target, Privilege::User);
-    // Unrelated values, a differently-cased duplicate, and the entry itself.
+
     let stored = [r"C:\Windows", r"c:/pf/acme/bin/", r"D:\tools"];
     let plan = plan_execution(&target, &snapshot_for(&target, &stored), Some(&ledger)).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
@@ -161,8 +150,7 @@ fn uninstall_removes_a_search_path_entry_with_its_recorded_authority() {
     .unwrap();
     assert!(plan.uninstall);
     let removal = &plan.removals[0];
-    // A per-user install that owned a host-wide entry removes it as such; the
-    // scope would have said User and been wrong.
+
     assert_eq!(removal.scope, SelectedScope::User);
     assert_eq!(removal.privilege, Privilege::System);
     assert!(plan.summary.requires_authorization);

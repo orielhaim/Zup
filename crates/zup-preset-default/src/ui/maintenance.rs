@@ -1,17 +1,12 @@
-//! Looking after an installation that exists.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariants};
-use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::button::{Button, ButtonVariants};
+use zup_sdk::preset::gpui_kit::component::spinner::Spinner;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce,
     SharedString, Styled, Window, div, relative,
 };
@@ -21,7 +16,6 @@ use crate::theme::{Layout, size, space, text};
 use crate::ui::parts::tone_color;
 use crate::ui::{Callout, Handler, Tone, caption};
 
-/// An icon in a soft square, the way an action or a fact is marked.
 fn tile(icon: IconName, color: Hsla, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
@@ -35,18 +29,13 @@ fn tile(icon: IconName, color: Hsla, cx: &App) -> impl IntoElement {
         .child(Icon::new(icon).size(size::ICON).text_color(color))
 }
 
-/// How loudly an action asks to be pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emphasis {
     Normal,
-    /// The screen's main action.
     Primary,
-    /// Something that cannot be taken back.
     Destructive,
 }
 
-/// One thing that can be done to the installation: what it is, why, and the
-/// button that does it.
 #[derive(IntoElement)]
 pub struct ActionRow {
     id: SharedString,
@@ -85,7 +74,6 @@ impl ActionRow {
         self
     }
 
-    /// The button's label, and how loudly it asks to be pressed.
     pub fn button(
         mut self,
         label: impl Into<SharedString>,
@@ -175,7 +163,6 @@ impl RenderOnce for ActionRow {
     }
 }
 
-/// The update situation, drawn as an action row.
 #[derive(IntoElement)]
 pub struct UpdateRow {
     row: model::UpdateRow,
@@ -218,7 +205,6 @@ impl RenderOnce for UpdateRow {
     }
 }
 
-/// Files that no longer match, and the repair that restores them.
 #[derive(IntoElement)]
 pub struct HealthNotice {
     resources: Vec<String>,
@@ -276,8 +262,6 @@ impl RenderOnce for HealthNotice {
     }
 }
 
-/// The one destructive thing a maintenance screen offers, set apart from the
-/// rest.
 #[derive(IntoElement)]
 pub struct DestructiveSection {
     title: SharedString,

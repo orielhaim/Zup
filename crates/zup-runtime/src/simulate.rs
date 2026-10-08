@@ -1,20 +1,11 @@
-//! A lifecycle that takes time and changes nothing.
-//!
-//! The same stages a real operation walks - prepare, download, verify, files,
-//! system, finish - each lasting a different amount of time, reporting through
-//! the same [`RuntimeEvent`]s. Cancellation stops at the next safe point rather
-//! than at the end of the current stage. Nothing here writes a file, a
-//! registry value, or a shortcut: the clock is the work.
-
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
-use crate::events::RuntimeEvent;
+use crate::RuntimeEvent;
 use crate::session::{CancellationHandle, InstallOutcome, emit_terminal};
 
-/// Which lifecycle is being simulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimulatedLifecycle {
     Install,
@@ -24,22 +15,14 @@ pub enum SimulatedLifecycle {
     Uninstall,
 }
 
-/// What the simulated lifecycle has to get through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimulatedJob {
     pub lifecycle: SimulatedLifecycle,
-    /// Bytes that have to be fetched before the files can be written.
     pub download_bytes: u64,
-    /// Bytes the operation writes or removes.
     pub file_bytes: u64,
-    /// Shortcuts, services, PATH, protocols, or associations.
     pub system_changes: bool,
 }
 
-/// Run `job` to completion, or until `cancel` is signalled.
-///
-/// Events are the ones a real operation emits, including the terminal event.
-/// A dropped receiver ends the run as cancelled: nobody is left to watch it.
 pub fn run_simulated(
     job: SimulatedJob,
     cancel: CancellationHandle,
@@ -88,10 +71,9 @@ enum Step {
 
 impl Simulation {
     fn new(job: SimulatedJob, now: Instant) -> Self {
-        let mut rng = Rng::from_time();
-        let stages = stages(&job, &mut rng);
+        let stages = stages(&job);
         let total_weight = stages.iter().map(|stage| stage.weight).sum();
-        let safe_wait = Duration::from_millis(rng.gen_range(350, 800));
+        let safe_wait = Duration::from_millis(575);
         Self {
             stages,
             index: 0,
@@ -148,81 +130,50 @@ impl Simulation {
     }
 }
 
-fn stages(job: &SimulatedJob, rng: &mut Rng) -> Vec<Stage> {
-    let mut stages = vec![stage(rng, "Preparing…", 4, 450, 1200)];
+fn stages(job: &SimulatedJob) -> Vec<Stage> {
+    let mut stages = vec![stage("Preparing…", 4, 450, 1200)];
     match job.lifecycle {
         SimulatedLifecycle::Uninstall => {
             let files = file_span(job.file_bytes);
-            stages.push(stage(rng, "Removing files…", 48, files.0, files.1));
+            stages.push(stage("Removing files…", 48, files.0, files.1));
             if job.system_changes {
-                stages.push(stage(rng, "Removing system changes…", 14, 500, 1500));
+                stages.push(stage("Removing system changes…", 14, 500, 1500));
             }
         }
         SimulatedLifecycle::Repair => {
-            stages.push(stage(rng, "Verifying installed files…", 12, 500, 1400));
+            stages.push(stage("Verifying installed files…", 12, 500, 1400));
             let files = file_span(job.file_bytes);
-            stages.push(stage(rng, "Installing files…", 40, files.0, files.1));
+            stages.push(stage("Installing files…", 40, files.0, files.1));
             if job.system_changes {
-                stages.push(stage(rng, "Registering system changes…", 12, 450, 1300));
+                stages.push(stage("Registering system changes…", 12, 450, 1300));
             }
         }
         SimulatedLifecycle::Install | SimulatedLifecycle::Upgrade | SimulatedLifecycle::Modify => {
             if job.download_bytes > 0 {
-                stages.push(stage(
-                    rng,
-                    "Downloading required components…",
-                    22,
-                    1100,
-                    3200,
-                ));
+                stages.push(stage("Downloading required components…", 22, 1100, 3200));
             }
-            stages.push(stage(rng, "Verifying the package…", 8, 350, 1100));
+            stages.push(stage("Verifying the package…", 8, 350, 1100));
             let files = file_span(job.file_bytes);
-            stages.push(stage(rng, "Installing files…", 46, files.0, files.1));
+            stages.push(stage("Installing files…", 46, files.0, files.1));
             if job.system_changes {
-                stages.push(stage(rng, "Registering system changes…", 14, 500, 1600));
+                stages.push(stage("Registering system changes…", 14, 500, 1600));
             }
         }
     }
-    stages.push(stage(rng, "Finishing…", 5, 300, 800));
+    stages.push(stage("Finishing…", 5, 300, 800));
     stages
 }
 
-/// How long the file stage lasts, growing with the amount of data and still random.
 fn file_span(bytes: u64) -> (u64, u64) {
     let scale = (bytes / (24 * 1024 * 1024)).clamp(1, 3);
     (700 * scale, 1600 * scale)
 }
 
-fn stage(rng: &mut Rng, label: &'static str, weight: u64, min_ms: u64, max_ms: u64) -> Stage {
+fn stage(label: &'static str, weight: u64, min_ms: u64, max_ms: u64) -> Stage {
     Stage {
         label,
         weight,
-        duration: Duration::from_millis(rng.gen_range(min_ms, max_ms)),
-    }
-}
-
-struct Rng(u64);
-
-impl Rng {
-    fn from_time() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15);
-        Self(nanos | 1)
-    }
-
-    fn gen_range(&mut self, min: u64, max: u64) -> u64 {
-        if max <= min {
-            return min;
-        }
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        min + x % (max - min + 1)
+        duration: Duration::from_millis((min_ms + max_ms) / 2),
     }
 }
 

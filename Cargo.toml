@@ -79,18 +79,16 @@ zup-preset-host = { path = "crates/zup-preset-host" }
 zup-preset-compose = { path = "crates/zup-preset-compose" }
 zup-preview = { path = "crates/zup-preview" }
 zup-preset-dev = { path = "crates/zup-preset-dev" }
-zup-preset-sdk = { path = "crates/zup-preset-sdk", version = "0.1.0" }
+zup-sdk-macros = { path = "crates/zup-sdk-macros", version = "0.1.0" }
+zup-sdk = { path = "crates/zup-sdk", version = "0.1.0" }
 zup-preset-ipc = { path = "crates/zup-preset-ipc", version = "0.1.0" }
 zup-windows = { path = "crates/zup-windows" }
 zup-linux = { path = "crates/zup-linux" }
 zup-update = { path = "crates/zup-update" }
 zup-plugin-abi = { path = "crates/zup-plugin-abi", version = "0.1.0" }
-zup-plugin-sdk = { path = "crates/zup-plugin-sdk", version = "0.1.0" }
 zup-plugin-contract = { path = "crates/zup-plugin-contract" }
 zup-plugin-build = { path = "crates/zup-plugin-build" }
 zup-plugin-runtime = { path = "crates/zup-plugin-runtime" }
-zup-preset-sdk-macros = { path = "crates/zup-preset-sdk-macros", version = "0.1.0" }
-zup-sdk = { path = "crates/zup-sdk", version = "0.1.0" }
 zup-xtask = { path = "crates/zup-xtask" }
 
 # Graph

@@ -1,106 +1,58 @@
-//! Reading a built artifact.
-//!
-//! One parser, three consumers: this command, the dispatcher, and the runtime.
-//! A format rule implemented here and again elsewhere is a rule that will drift,
-//! so inspection reads the artifact exactly the way the machine that has to
-//! install it does.
-
 use serde::{Deserialize, Serialize};
 use zup_artifact::ArtifactError;
 use zup_automation::{Application, AutomationResult, Details, LogLevel, Target};
 #[cfg(windows)]
 use zup_windows::UniversalArtifact;
 
-use crate::report::Reporter;
+use crate::failure::Reporter;
 
-/// Everything worth knowing about one artifact.
-///
-/// The command's own report, and the human view's model of it. The machine result
-/// carries a projection - the same facts, shaped for a consumer that wants the content
-/// accounting and the trust questions without a prose rendering around them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inspection {
-    /// The artifact this report describes.
     pub artifact: String,
     pub application: String,
     pub application_version: String,
     pub kind: String,
     pub mode: String,
-    /// Whether the artifact always installs one version or follows a channel.
     pub pin: String,
-    /// The launcher experience this artifact presents.
     pub subsystem: String,
     pub variants: Vec<InspectedVariant>,
     pub content: InspectedContent,
     pub trust: InspectedTrust,
 }
 
-/// One variant inside an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectedVariant {
     pub id: String,
     pub target: String,
     pub frontend: String,
-    /// The size this variant's content is worth, counting shared bytes.
     pub logical_size: u64,
     pub file_count: u64,
     pub prerequisite_count: u64,
     pub plugin_count: u64,
-    /// Whether the variant refuses to run under a compatibility layer.
     pub native_execution: bool,
-    /// Whether the runtime image this variant carries is built for the target the
-    /// index names.
-    ///
-    /// The index's `target` is a claim; the runtime's own header is an independent
     /// statement. A report that printed one and never compared them would be
-    /// describing what the artifact says about itself rather than what it is.
-    /// `"carries no runtime"` for a thin artifact, which fetches its runtime and so
-    /// has no bytes here to read.
     pub target_matches_binary: String,
 }
 
-/// What the artifact costs, and what composing it saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectedContent {
-    /// Every variant's content, counted once per variant.
     pub logical_size: u64,
-    /// The distinct content the artifact actually stores.
     pub stored_size: u64,
-    /// The distinct content before compression.
     pub content_size: u64,
-    /// Bytes more than one variant needs.
     pub shared_size: u64,
-    /// Bytes only one variant needs.
     pub exclusive_size: u64,
     pub unique_blob_count: u64,
-    /// Bytes the file on disk occupies.
     pub file_size: u64,
 }
 
-/// What can be proven about an artifact's trust.
-///
-/// Each field is one *question*, and the words in it are the answer to that
-/// question and no other. "The Authenticode digest matches" and "Windows trusts
-/// this publisher" are different facts about different authorities, and a report
-/// that collapsed them into one word would be claiming the second from evidence
-/// for the first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectedTrust {
-    /// Whether the image carries an Authenticode structure, and whether its
-    /// embedded digest covers these bytes.
-    ///
-    /// Structural: read from the certificate table and the image digest, on any
-    /// platform.
     pub authenticode: String,
-    /// Whether the index parses and agrees with the content beside it.
     pub index: String,
-    /// Whether every advertised content digest verifies.
     pub content_digests: String,
-    /// Whether every variant the index names is complete.
     pub variants: String,
 }
 
-/// Failures produced while inspecting.
 #[derive(Debug, thiserror::Error)]
 pub enum InspectError {
     #[error(transparent)]
@@ -118,11 +70,7 @@ pub enum InspectError {
     Io(#[from] std::io::Error),
 }
 
-/// Read an artifact and report what it contains.
-///
 /// Every content digest is verified, so a report never describes content the
-/// artifact cannot actually produce.
-/// Describe a built artifact, in the format the caller asked for.
 pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let report = inspect(&args.artifact).map_err(|error| {
@@ -159,20 +107,11 @@ pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<Automatio
     )
 }
 
-/// Read one artifact and describe it.
-///
-/// A dispatcher artifact is read the way the machine that has to install it
-/// reads it. A Linux self-contained installer is a carrier, not a dispatcher
-/// artifact, and is read the way its own runtime opens it: footer, package
-/// digest, package, and image/target pairing.
 pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
     #[cfg(windows)]
     {
         Ok(match UniversalArtifact::open(path) {
             Ok(artifact) => inspect_composed(path, &artifact)?,
-            // Not a dispatcher artifact: it may still be a Linux carrier, which
-            // is read below. The dispatcher error is kept for the report when it
-            // is neither.
             Err(first) => match inspect_carrier(path) {
                 Ok(inspection) => inspection,
                 Err(_) => return Err(InspectError::Universal(first)),
@@ -185,11 +124,7 @@ pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
     }
 }
 
-/// Read one Linux self-contained installer and describe it.
-///
-/// Opening the carrier verifies it completely - footer, package digest,
 /// package parse, and image/target pairing - so a report never describes an
-/// installer its own runtime would refuse.
 fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
     let carrier = zup_linux::Carrier::open(path)?;
     let plan = carrier
@@ -251,10 +186,7 @@ fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
     })
 }
 
-/// Read one dispatcher artifact and describe it.
-///
 /// Every content digest is verified, so a report never describes content the
-/// artifact cannot actually produce.
 #[cfg(windows)]
 fn inspect_composed(
     path: &std::path::Path,
@@ -282,11 +214,6 @@ fn inspect_composed(
             exclusive_size = exclusive_size.saturating_add(size);
         }
     }
-    // Every content digest an artifact *carries* is verified, so a report never
-    // describes content the artifact cannot produce. A thin artifact carries
-    // none: its table names every digest the release will serve, and those are
-    // authenticated by the release rather than by this file, so the report says
-    // `named` rather than pretending to have checked bytes it does not have.
     let carries_content = index.artifact.mode.carries_content();
     if carries_content {
         store.verify_all()?;
@@ -352,25 +279,13 @@ fn inspect_composed(
     })
 }
 
-/// What the image's Authenticode structure says, in words.
-///
-/// This is a *structural* answer, and the wording is chosen so a reader cannot
-/// take it for a trust answer. The certificate table's presence and the image
-/// digest are properties of the bytes; whether Windows trusts the chain is
-/// `zup sign verify`'s question, which asks the platform. So this reports
 /// "digest matches" and never "signed" - a word that would be read as a claim
 /// about a trust store this command never consulted.
-///
-/// Windows-only: only dispatcher artifacts carry a certificate table, and only
-/// a Windows host composes one.
 #[cfg(windows)]
 fn authenticode(path: &std::path::Path) -> String {
     let signature = match zup_pe::embedded_signature(path) {
         Ok(Some(signature)) => signature,
         Ok(None) => return "no certificate table".to_owned(),
-        // A table that declares a signature and does not contain one is a
-        // malformed file, and saying "unsigned" here would be the one answer
-        // nobody should be able to hear about it.
         Err(_) => return "certificate table is malformed".to_owned(),
     };
     match zup_pe::image_digest(path) {
@@ -387,7 +302,6 @@ fn authenticode(path: &std::path::Path) -> String {
 }
 
 impl Inspection {
-    /// The readable view.
     pub fn human(&self) -> String {
         use zup_presentation::format_bytes;
         let mut out = String::new();
@@ -395,9 +309,6 @@ impl Inspection {
             "{} {}\n",
             self.application, self.application_version
         ));
-        // The artifact's own platform, read from its variants rather than
-        // assumed: a single offline installer is a Windows PE on one target
-        // and a Linux ELF on another, and the summary names which.
         let linux = self.variants.iter().any(|variant| {
             variant
                 .target
@@ -419,10 +330,6 @@ impl Inspection {
         out.push_str(&format!("\n  pinned to    {}\n", self.pin));
         out.push_str("\nVariants\n");
         for variant in &self.variants {
-            // The mismatch is spelled out where a reader is already looking at
-            // the target, rather than only in the machine-readable report: a
-            // variant that installs on the wrong machine is the one fact here a
-            // human has to notice.
             let binary = match variant.target_matches_binary.as_str() {
                 "matches" | "carries no runtime" => String::new(),
                 other => format!("  <- {other}"),

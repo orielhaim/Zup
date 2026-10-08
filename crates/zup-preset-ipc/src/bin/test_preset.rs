@@ -1,10 +1,3 @@
-//! A minimal preset, spawned by this crate's own tests.
-//!
-//! It is not a mock: it collects the endpoint a host created, reads the host's
-//! hello, and answers with the host hello a real host sends. That is the whole
-//! of the handshake, and a transport whose test peer does exactly the handshake
-//! has exercised the same path a shipped preset takes.
-
 use zup_preset_ipc::Bootstrap;
 use zup_preset_protocol::{
     Action, Capabilities, Capability, Envelope, HostHello, Message, PRESET_PROTOCOL_VERSION,

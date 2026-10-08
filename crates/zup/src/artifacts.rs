@@ -1,19 +1,3 @@
-//! Distribution artifacts on the build side.
-//!
-//! A target profile becomes a **variant**: one resolved native target with its
-//! content, its runtime template, and its requirements. Variants are built
-//! locally, in parallel, and are the unit that is cached.
-//!
-//! An **artifact** is a file a user downloads. It may contain one variant or
-//! several, and it is composed after every variant it needs exists, because an
-//! artifact may consume outputs from target builds that happened on different
-//! machines. That is the local/global split: variants are local, artifacts are
-//! global.
-//!
-//! Nothing here knows about a container format. `zup-windows` turns a composed
-//! graph into a PE, and a future backend would turn the same graph into a package
-//! bundle or a fat binary.
-
 use std::path::{Path, PathBuf};
 
 use zup_artifact::{
@@ -36,25 +20,16 @@ fn mode_of(mode: zup_manifest::ArtifactMode) -> ArtifactMode {
     }
 }
 
-/// One artifact a project declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactProfile {
     pub kind: ArtifactKind,
     pub mode: ArtifactMode,
-    /// The target profiles this artifact includes, in declaration order.
     pub targets: Vec<TargetProfileId>,
-    /// The release channel this artifact follows, when it follows one.
-    ///
-    /// An artifact without a channel is labelled with an exact version and always
-    /// installs it. An artifact with one resolves the channel's current release,
-    /// which is a different promise and a different file name.
     pub channel: Option<String>,
-    /// The output file name, when the project names one.
     pub output: Option<String>,
 }
 
 impl ArtifactProfile {
-    /// A profile a project declared in its manifest.
     pub fn from_declared(profile: &zup_manifest::ArtifactProfile) -> Self {
         Self {
             kind: kind_of(profile.kind),
@@ -65,8 +40,6 @@ impl ArtifactProfile {
         }
     }
 
-    /// The profile `zup build --universal` names, which is one universal offline
-    /// artifact over every selected target.
     pub fn universal() -> Self {
         Self {
             kind: ArtifactKind::Universal,
@@ -77,7 +50,6 @@ impl ArtifactProfile {
         }
     }
 
-    /// The launcher subsystem this artifact's variants must agree on.
     pub fn subsystem(&self, variants: &[&DistributionVariant]) -> zup_artifact::LauncherSubsystem {
         variants
             .first()
@@ -86,14 +58,7 @@ impl ArtifactProfile {
             })
     }
 
-    /// The filename this artifact's build writes.
-    ///
-    /// Universal names the Windows dispatcher experience: universal artifacts
-    /// are composed into a dispatcher launcher, which only exists on Windows
-    /// in this phase, so a universal file name is a Windows file name. A
     /// Linux target never reaches this - it ships one self-contained installer
-    /// per target and composition is refused before naming - which is what
-    /// keeps a portable artifact kind from implying a Linux dispatcher.
     pub fn file_name(&self, app_name: &str, version: &semver::Version) -> String {
         if let Some(output) = &self.output {
             return output.clone();
@@ -110,7 +75,6 @@ impl ArtifactProfile {
         format!("{app_name}-{kind}{label}-Setup.exe")
     }
 
-    /// The composer request for this artifact.
     pub fn request(
         &self,
         id: &str,
@@ -136,31 +100,17 @@ impl ArtifactProfile {
         }
     }
 
-    /// Whether this artifact's launcher has to reach the network before it can
-    /// start a runtime.
-    ///
-    /// A thin artifact carries no content; its launcher resolves a release graph
-    /// and acquires the runtime from it. An offline artifact already contains the
-    /// runtime, so its launcher only has to pick one. Composing a thin artifact
-    /// from a launcher that cannot fetch would produce an installer that refuses
-    /// to install itself, on a user's machine, with no build-time symptom.
     pub fn needs_online(&self) -> bool {
         self.mode == ArtifactMode::Thin
     }
 }
 
-/// A profile selection that composition refuses, with the reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionRefusal {
     pub dimension: zup_artifact::CompatibilityDimension,
     pub message: String,
 }
 
-/// Check whether the selected variants can form one artifact, and say what
-/// composing them would save.
-///
-/// This is the read-only half of composition, so `zup check` and `zup doctor`
-/// can show the value of a universal artifact before anyone builds one.
 pub fn composition_report(
     variants: &[&DistributionVariant],
 ) -> Result<CompositionSavings, CompositionRefusal> {
@@ -202,7 +152,6 @@ pub fn composition_report(
     })
 }
 
-/// What composing a selection of variants would save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompositionSavings {
     pub standalone_size: u64,
@@ -232,7 +181,6 @@ fn entry_size(variants: &[&DistributionVariant], digest: zup_core::Sha256Digest)
     (0, 0)
 }
 
-/// Compose one artifact from the variants it names.
 pub fn compose(
     request: ArtifactRequest,
     variants: &[&DistributionVariant],
@@ -240,12 +188,10 @@ pub fn compose(
     ArtifactComposer::new(request, variants)?.compose(variants)
 }
 
-/// The launcher subsystem a frontend's installer experience needs.
 pub fn subsystem_of(frontend: zup_core::Frontend) -> zup_artifact::LauncherSubsystem {
     zup_artifact::frontend_subsystem(frontend)
 }
 
-/// The artifact output paths a caller asked for, or the derived ones.
 pub fn resolve_outputs(
     supplied: &[PathBuf],
     jobs: &[(String, String)],
@@ -287,7 +233,6 @@ fn names(jobs: &[(String, String)]) -> String {
         .join(", ")
 }
 
-/// Start a release description for a project.
 pub fn release_manifest(application: &zup_core::App) -> ReleaseManifest {
     ReleaseManifest::new(application)
 }

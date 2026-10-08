@@ -1,14 +1,5 @@
 #![cfg(target_os = "linux")]
-
-//! The privileged rendezvous across real process boundaries.
-//!
-//! The client creates the rendezvous and passes the exact socket pathname to
-//! the worker explicitly, because `pkexec` sanitizes the environment and two
-//! independently generated fallback directories can never match. These tests
-//! prove the handoff with a real child process spawned with a sanitized
-//! environment - no `XDG_*` inheritance - for both the `XDG_RUNTIME_DIR` and
-//! the fallback locations, while the worker-side validation (ownership,
-//! symlink, peer identity, liveness) still holds.
+#![cfg(feature = "test-support")]
 
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt as _;
@@ -51,13 +42,7 @@ where
     result
 }
 
-/// Spawn a real child process with a sanitized environment that connects to
-/// `socket` and sends one byte, then exits. The child learns the pathname
-/// from its arguments only - never from the environment.
 fn spawn_connector(socket: &std::path::Path) -> std::process::Child {
-    // The child stays alive after connecting so the parent can prove
-    // process-lifetime pinning against a live peer; the test kills it
-    // afterwards and proves the pin dies with it.
     let script = format!(
         "import socket as s, time; c=s.socket(s.AF_UNIX, s.SOCK_STREAM); c.connect({:?}); c.sendall(b'!'); time.sleep(30)",
         socket.to_string_lossy().into_owned(),
@@ -82,8 +67,6 @@ fn accept_one(
     loop {
         match rendezvous.accept(Duration::from_secs(1)) {
             Ok(mut stream) => {
-                // The child sent one byte; drain it so the assertion below
-                // proves the bytes crossed the boundary.
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("a timeout sets");
@@ -92,7 +75,7 @@ fn accept_one(
                 assert_eq!(byte, [b'!']);
                 return stream;
             }
-            Err(zup_linux::SocketError::Timeout) => {}
+            Err(zup_linux::IpcError::Timeout) => {}
             Err(error) => panic!("the rendezvous accepts: {error}"),
         }
         if let Some(status) = child.try_wait().expect("a child polls") {
@@ -123,8 +106,6 @@ fn prove_peer(
     pin
 }
 
-/// The XDG rendezvous crosses a sanitized process boundary on the exact
-/// endpoint, with ownership, peer identity, and liveness verified.
 #[test]
 fn xdg_rendezvous_crosses_a_sanitized_boundary_on_the_exact_endpoint() {
     let _env = env_lock();
@@ -142,7 +123,7 @@ fn xdg_rendezvous_crosses_a_sanitized_boundary_on_the_exact_endpoint() {
         let mut child = spawn_connector(rendezvous.socket());
         let stream = accept_one(&rendezvous, &mut child);
         let pin = prove_peer(&stream, &child, rendezvous.socket());
-        // The pin dies with the process: liveness is process lifetime, not a number.
+
         child.kill().expect("the child is killed");
         let status = child.wait().expect("the child is reaped");
         assert!(!status.success(), "the killed connector exits uncleanly");
@@ -156,9 +137,6 @@ fn xdg_rendezvous_crosses_a_sanitized_boundary_on_the_exact_endpoint() {
     });
 }
 
-/// The fallback rendezvous crosses a sanitized process boundary too: the
-/// child never sees the fallback directory through the environment, only
-/// through the explicit pathname.
 #[test]
 fn fallback_rendezvous_crosses_a_sanitized_boundary_on_the_exact_endpoint() {
     let _env = env_lock();
@@ -184,19 +162,16 @@ fn fallback_rendezvous_crosses_a_sanitized_boundary_on_the_exact_endpoint() {
     });
 }
 
-/// A sanitized worker-side view needs no environment at all: the pathname is
-/// explicit, and validation still refuses a replaced or unprivate directory.
 #[test]
 fn explicit_path_validation_needs_no_environment() {
     let _env = env_lock();
     with_xdg_runtime(None, || {
         let session = SessionId::new_v7();
         let rendezvous = Rendezvous::create(current_uid(), session).expect("a rendezvous");
-        // No environment, yet the explicit path validates: establishment never
-        // relied on inherited state.
+
         validate_rendezvous_for_test(rendezvous.socket(), current_uid())
             .expect("an explicit pathname validates without environment");
-        // And the same validation still refuses impostors.
+
         assert!(
             validate_rendezvous_for_test(
                 &rendezvous.socket().with_file_name("other.sock"),

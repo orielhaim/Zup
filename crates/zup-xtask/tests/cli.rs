@@ -1,10 +1,3 @@
-//! The exit codes and messages the command line promises.
-//!
-//! The two checks that gate a repository - the boundary check and the pin check -
-//! are covered here end to end, because a gate that cannot fail is a gate nobody
-//! reads. The usage errors are pinned because a silently-ignored argument is how a
-//! typo in a `--matrix` name builds the wrong thing.
-
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -29,8 +22,6 @@ fn code(output: &Output) -> i32 {
     output.status.code().expect("xtask exits normally")
 }
 
-/// A workspace holding exactly the packages the matrices name, so the
-/// matrix-membership rule is satisfied and one package can be dirtied.
 fn complete_workspace() -> TempDir {
     let root = TempDir::new().expect("temp workspace");
     for package in matrix::all() {
@@ -50,8 +41,6 @@ fn complete_workspace() -> TempDir {
     root
 }
 
-/// An argument the parser does not recognise is a usage error, never a silent
-/// no-op: a typo in a `--matrix` name must not quietly build the wrong thing.
 #[rstest]
 #[case::an_unknown_command(&["verify-everything"], "verify-everything")]
 #[case::an_unknown_matrix(&["emit-portable-matrix", "--matrix", "nope"], "nope")]
@@ -70,9 +59,6 @@ fn a_rejected_argument_is_a_usage_error(#[case] args: &[&str], #[case] named: &s
 
 #[test]
 fn the_pin_check_reports_a_broken_lock_rather_than_passing() {
-    // A `check` that cannot fail is a `check` nobody reads. The fixture has a
-    // workflow whose `uses:` does not match the lock, which is the failure this
-    // command exists to catch.
     let fixture = tempfile::tempdir().expect("a temporary workspace");
     let workflows = fixture.path().join(".github").join("workflows");
     std::fs::create_dir_all(&workflows).expect("a directory");
@@ -93,9 +79,6 @@ fn the_pin_check_reports_a_broken_lock_rather_than_passing() {
     assert!(stderr.contains("does not match the lock"), "{stderr}");
 }
 
-/// The negative control for the pin check: a repository that has not generated a
-/// workflow yet is not a failure. Without it, a `check` that reported nothing at
-/// all would be indistinguishable from a `check` that passed.
 #[test]
 fn the_pin_check_passes_on_a_workspace_with_no_workflows() {
     let fixture = tempfile::tempdir().expect("a temporary workspace");
@@ -153,10 +136,6 @@ fn a_clean_workspace_boundary_check_is_silent() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
-/// A CI job runs the check with no arguments, so the default root has to be the
-/// repository rather than whatever the working directory happens to be. Both
-/// invocations must reach the same tree, which is what an identical exit code and
-/// an identical report show.
 #[test]
 fn the_repository_root_is_the_default_workspace() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

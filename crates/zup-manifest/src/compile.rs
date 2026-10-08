@@ -1,5 +1,3 @@
-//! Compile the authoring model into normalized Installer IR.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -63,11 +61,6 @@ fn targeted_values<T: Clone>(
         .collect()
 }
 
-/// Compile a parsed manifest and one selected target into Installer IR.
-///
-/// The resolved config and caller overrides must still match the declared
-/// profile. Other validation covers uniqueness, cross-references, component
-/// graphs, and install-directory coverage. No filesystem access.
 pub fn compile(
     manifest: &Manifest,
     target: &ResolvedTargetConfig,
@@ -114,8 +107,6 @@ pub fn compile(
         app: view.app,
         target: target.target.clone(),
         frontend: target.frontend,
-        // The preset a GUI target presents is chosen from a `.zupui` the build
-        // verifies, so it is not something this crate can resolve.
         preset: None,
         updates: None,
         install: view.install,
@@ -132,14 +123,10 @@ pub fn compile(
     })
 }
 
-/// Parse and compile one selected target without caller overrides.
-///
-/// Source text is attached to diagnostics.
 pub fn parse_and_compile(source: &str, selector: &str) -> Result<Installer, ManifestError> {
     parse_and_compile_named(source, "zup.toml", selector)
 }
 
-/// Parse and compile one target without overrides using a diagnostic source name.
 pub fn parse_and_compile_named(
     source: &str,
     name: &str,
@@ -153,13 +140,6 @@ pub fn parse_and_compile_named(
     compile(&manifest, target, &overrides).map_err(|err| err.with_source_named(source, name))
 }
 
-/// Reject a resolved config that no manifest declaration and no declared
-/// override can produce.
-///
-/// The expected value is recomputed through the single resolution function, so
-/// a caller can only smuggle a source or install-directory override by also
-/// declaring it. Every field is compared, and every diagnostic names the field
-/// that drifted.
 fn validate_resolved_target(
     manifest: &Manifest,
     resolved: &ResolvedTargetConfig,
@@ -224,7 +204,6 @@ fn validate_resolved_target(
     Ok(())
 }
 
-/// A readable summary of an install directory, for a resolution diagnostic.
 fn render_install_directory(install: &Install) -> String {
     let user = install
         .directory
@@ -241,13 +220,6 @@ fn render_install_directory(install: &Install) -> String {
     format!("user={user} machine={machine}")
 }
 
-/// What can be checked about `[ui]` without the preset in hand.
-///
-/// Whether the settings fit the preset's own schema needs the packaged schema,
-/// so that is the build's check. What is checkable here is that the values
-/// themselves are a shape a schema could describe: a bounded, well-named
-/// document. A `.zupui` path is already refused of `..` and absolute paths by
-/// the type that holds it.
 fn validate_ui(ui: &Ui) -> Result<(), ManifestError> {
     let encoded = serde_json::to_vec(&ui.settings).map_err(|error| ManifestError::Invalid {
         message: format!("[ui.settings] is not a value: {error}"),
@@ -640,7 +612,6 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
         }
     }
 
-    // Unconditional identity collisions (no `when`) are authoring errors.
     let mut protocols = BTreeSet::new();
     for protocol in &manifest.protocols {
         if protocol.when.is_none() && !protocols.insert(protocol.scheme.clone()) {

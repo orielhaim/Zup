@@ -1,32 +1,14 @@
 #![cfg(target_os = "linux")]
-
-//! The Linux lifecycle, end to end through the real engine.
-//!
-//! Each test composes a genuine installer - a real ELF template with a real
-//! package appended - and runs it through [`run`]: install, upgrade, repair,
-//! uninstall. Nothing here calls the executor directly; the primary path is
-//! the same one a downloaded installer takes, from carrier open to ledger
-//! publish.
-//!
-//! The environment is isolated: every path the installer can resolve lands
-//! under temporary directories, and the real user profile is never touched.
-//! (Process execution of the produced installer is `process.rs`, with a
-//! genuine runtime template.)
-
-#[path = "support.rs"]
-mod support;
+#![cfg(feature = "test-support")]
 
 use zup_core::{AppId, SelectedScope};
 use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
 
-use support::{
+use zup_linux::test_support::{
     IsolatedUser, compose_fixture, mode_of, run_installer, run_tool, tool_script, v1_files,
     v2_files,
 };
 
-/// A fresh install through the real engine: the installer exits committed, the
-/// payload exists with the modes the intents asked for, the ledger exists, a
-/// maintenance generation exists, and the installed executable actually runs.
 #[test]
 fn fresh_install_runs_the_application() {
     let user = IsolatedUser::isolate();
@@ -56,7 +38,6 @@ fn fresh_install_runs_the_application() {
         "keep-v1"
     );
 
-    // The ledger exists and names this installation.
     let ledger = LinuxLedgerStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
@@ -67,7 +48,6 @@ fn fresh_install_runs_the_application() {
     assert_eq!(ledger.version.to_string(), "1.0.0");
     assert!(!ledger.resources.is_empty(), "ownership is recorded");
 
-    // A maintenance generation exists, is executable, and is the installer.
     let maintenance = zup_transaction::maintenance_runtime_path(
         &user.state,
         &AppId::new("com.example.tool").expect("an id"),
@@ -86,10 +66,6 @@ fn fresh_install_runs_the_application() {
     );
 }
 
-/// An upgrade runs the v2 installer over v1 through lifecycle deltas: the app
-/// reports v2, shared content is untouched, the retired file is gone, the new
-/// file is present, the ledger records v2, and the old maintenance generation
-/// is retired.
 #[test]
 fn upgrade_moves_the_installation_to_v2() {
     let user = IsolatedUser::isolate();
@@ -98,7 +74,6 @@ fn upgrade_moves_the_installation_to_v2() {
     let outcome = run_installer(&v1, &user.state, LinuxAction::Apply);
     assert!(matches!(outcome, LinuxOutcome::Committed { .. }));
 
-    // The user's own file beside the payload: upgrade must not touch it.
     let install = user.programs().join("tool");
     std::fs::write(install.join("user-notes.txt"), b"the user's").expect("a user file");
 
@@ -141,7 +116,6 @@ fn upgrade_moves_the_installation_to_v2() {
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.1.0", "the ledger records v2");
 
-    // The new maintenance generation is current; the old one is retired.
     let generation = |version: &str| {
         zup_transaction::maintenance_directory(
             &user.state,
@@ -160,10 +134,6 @@ fn upgrade_moves_the_installation_to_v2() {
     );
 }
 
-/// Repair restores owned files: deleted ones always come back, damaged ones
-/// with force, and an unrelated file nearby is not treated as owned merely
-/// because of where it sits. Repair without force on a damaged file fails
-/// rather than overwriting what may be a user edit.
 #[test]
 fn repair_restores_owned_files_and_ignores_the_rest() {
     let user = IsolatedUser::isolate();
@@ -175,7 +145,6 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
     ));
     let install = user.programs().join("tool");
 
-    // A deleted file comes back on a plain repair.
     std::fs::remove_file(install.join("keep.dat")).expect("delete");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
     let outcome = run_installer(&v1, &user.state, LinuxAction::Repair { force_files: false });
@@ -189,8 +158,6 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         "the deleted file is restored"
     );
 
-    // A damaged file is refused without force: it may be damage or a user
-    // edit, and the installer does not decide which silently.
     std::fs::write(install.join("tool"), b"damaged").expect("damage");
     let outcome = run(&LinuxRunRequest {
         installer: v1.clone(),
@@ -209,7 +176,6 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         "the refusal leaves the bytes alone"
     );
 
-    // With force, exact original bytes are restored and the executable runs.
     let outcome = run_installer(&v1, &user.state, LinuxAction::Repair { force_files: true });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
@@ -232,9 +198,6 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
     );
 }
 
-/// Uninstall retires only owned resources: the payload, ledger, maintenance,
-/// and transaction state go; an unrelated file survives; Zup-created
-/// directories leave only while empty; no lock marker is left behind.
 #[test]
 fn uninstall_removes_what_zup_owns_and_nothing_else() {
     let user = IsolatedUser::isolate();
@@ -286,9 +249,6 @@ fn uninstall_removes_what_zup_owns_and_nothing_else() {
     );
 }
 
-/// A tampered installer is refused before the machine is mutated: flipping
-/// bytes in the embedded package breaks the footer digest, and the carrier
-/// never gets as far as planning.
 #[test]
 fn a_tampered_package_is_refused_before_mutation() {
     let user = IsolatedUser::isolate();
@@ -296,10 +256,7 @@ fn a_tampered_package_is_refused_before_mutation() {
     let installer = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
 
     let mut bytes = std::fs::read(&installer).expect("the installer reads");
-    // Inside the package, not the template: the template occupies the file's
-    // head, so the midpoint of the whole image may still be template bytes,
-    // which the carrier deliberately does not cover. The package starts where
-    // the template ends.
+
     let template_len = std::fs::metadata("/bin/true").expect("a template").len() as usize;
     let tamper_at = template_len + 100;
     assert!(
@@ -328,8 +285,6 @@ fn a_tampered_package_is_refused_before_mutation() {
     );
 }
 
-/// Truncation is a refusal, not a panic: cutting the footer off the image
-/// leaves a file the carrier will not parse, let alone install from.
 #[test]
 fn a_truncated_installer_is_refused_without_panicking() {
     let user = IsolatedUser::isolate();
@@ -357,12 +312,6 @@ fn a_truncated_installer_is_refused_without_panicking() {
     );
 }
 
-/// Repair from the persisted maintenance copy, not from the download.
-///
-/// This is the requirement that makes the maintenance generation load-bearing:
-/// the original installer is deleted first, and the repair runs out of the
-/// copy the installation owns. A repair that needed the download would make
-/// the maintenance copy decorative.
 #[test]
 fn repair_runs_from_the_maintenance_copy_without_the_download() {
     let user = IsolatedUser::isolate();
@@ -372,13 +321,9 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
         run_installer(&installer, &user.state, LinuxAction::Apply),
         LinuxOutcome::Committed { .. }
     ));
-    // The download is gone. What remains is what the installation owns.
+
     std::fs::remove_file(&installer).expect("the download is deleted");
 
-    // The maintenance copy is a genuine installer, not a marker: it opens its
-    // own embedded package and repairs from it. It is already runnable - the
-    // transaction installed it with executable intent, so no manual chmod is
-    // needed, exactly as for every installer this build produces.
     let maintenance = zup_transaction::maintenance_runtime_path(
         &user.state,
         &AppId::new("com.example.tool").expect("an id"),

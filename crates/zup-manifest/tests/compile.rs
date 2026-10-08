@@ -1,5 +1,4 @@
-//! Compilation and semantic validation tests.
-
+use rstest::rstest;
 use std::fs;
 
 use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId, TargetTriple};
@@ -141,11 +140,9 @@ source = "plugins/helper.wasm"
     ));
 }
 
-#[test]
-fn duplicate_ids_are_rejected() {
-    let scenarios = [
-        (
-            r#"
+#[rstest]
+#[case::component(
+    r#"
 [[components]]
 id = "core"
 name = "Core"
@@ -154,10 +151,10 @@ name = "Core"
 id = "core"
 name = "Also core"
 "#,
-            "core",
-        ),
-        (
-            r#"
+    "core"
+)]
+#[case::service(
+    r#"
 [[services]]
 id = "svc"
 name = "svc"
@@ -170,10 +167,10 @@ name = "svc2"
 binary = "${install}/svc2.exe"
 start = "manual"
 "#,
-            "svc",
-        ),
-        (
-            r#"
+    "svc"
+)]
+#[case::plugin(
+    r#"
 [[plugins]]
 id = "helper"
 source = "plugins/one.wasm"
@@ -182,11 +179,10 @@ source = "plugins/one.wasm"
 id = "helper"
 source = "plugins/two.wasm"
 "#,
-            "helper",
-        ),
-        // Plugin identities fold case, so only the differing case is a collision.
-        (
-            r#"
+    "helper"
+)]
+#[case::plugin_case_insensitive(
+    r#"
 [[plugins]]
 id = "Helper"
 source = "plugins/one.wasm"
@@ -195,20 +191,17 @@ source = "plugins/one.wasm"
 id = "helper"
 source = "plugins/two.wasm"
 "#,
-            "helper",
-        ),
-    ];
-
-    for (body, id) in scenarios {
-        let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
-        let collision = match &err {
-            ManifestError::DuplicateComponent { id, .. } => Some(id.as_str()),
-            ManifestError::DuplicateService { id, .. } => Some(id.as_str()),
-            ManifestError::DuplicatePlugin { id, .. } => Some(id.as_str()),
-            other => panic!("expected a duplicate-id diagnostic, got {other:?}"),
-        };
-        assert_eq!(collision, Some(id), "{err:?}");
-    }
+    "helper"
+)]
+fn duplicate_ids_are_rejected(#[case] body: &str, #[case] id: &str) {
+    let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
+    let collision = match &err {
+        ManifestError::DuplicateComponent { id, .. } => Some(id.as_str()),
+        ManifestError::DuplicateService { id, .. } => Some(id.as_str()),
+        ManifestError::DuplicatePlugin { id, .. } => Some(id.as_str()),
+        other => panic!("expected a duplicate-id diagnostic, got {other:?}"),
+    };
+    assert_eq!(collision, Some(id), "{err:?}");
 }
 
 #[test]

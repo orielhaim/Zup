@@ -1,78 +1,37 @@
-//! Machine-scope roots and the privileged destination policy.
-//!
-//! A root worker must not become "write anywhere the manifest asks". This
-//! module answers the only two location questions a privileged worker may
-//! ever answer affirmatively:
-//!
-//! ```text
-//! /opt/...         application payload
-//! /var/lib/zup/... Zup state, ledger, journals, maintenance
-//! /var/opt/...     application variable data (SharedData)
-//! ```
-//!
-//! Everything else - `/etc`, `/usr`, `/home`, `/root`, `/tmp`, and every
-//! other tree a later typed resource might one day name - is refused here,
-//! before any executor sees it. Administrator authentication authorizes Zup
-//! to perform its typed installation operations; it is not permission for
-//! arbitrary filesystem mutation.
-//!
-//! # Test isolation without environment overrides
-//!
-//! [`MachineRoots::new`] takes explicit roots so tests can prove the policy
-//! against isolated directories. Production paths always use
-//! [`MachineRoots::production`]; no environment variable and no IPC message
-//! selects the roots a privileged worker enforces, so an unprivileged caller
-//! cannot redirect them.
-
+use crate::error::PathError;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
-/// Application payload root for machine scope: `/opt`.
 pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
-/// Zup machine state root: `/var/lib/zup`.
+
 pub const MACHINE_STATE_ROOT: &str = "/var/lib/zup";
-/// Application variable-data root for machine scope: `/var/opt`.
+
 pub const MACHINE_SHARED_DATA_ROOT: &str = "/var/opt";
-/// Canonical Zup service-unit source directory: a systemd unit search path
-/// for locally installed units. The only `/usr` tree the privileged worker
-/// may write, and only for typed `<validated-unit>.service` sources - never
-/// arbitrary files, never `/usr/lib`, never `/run`, never `/etc`.
+
 pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
-/// Expected mode of an installed unit source: readable by all, writable by
-/// root only.
+
 pub const SYSTEMD_UNIT_FILE_MODE: u32 = 0o644;
 
-/// The mode of the machine state root and its public subdirectories.
-///
-/// Readable and traversable by every account, writable by none but root. The
-/// unprivileged installer plans against this state to compute the expected
-/// plan digest it binds before Execute, and status inspection reads the same
-/// public view - so the ledger and other public metadata live here, while
-/// journals and other private transaction state live under a private
-/// subdirectory instead of this mode being loosened file by file.
 pub const MACHINE_STATE_DIR_MODE: u32 = 0o755;
-/// The mode of private machine transaction state (journals, work areas).
+
 pub const MACHINE_PRIVATE_DIR_MODE: u32 = 0o700;
-/// The mode of private machine transaction files.
+
 pub const MACHINE_PRIVATE_FILE_MODE: u32 = 0o600;
-/// The mode of public machine metadata (ledger documents).
+
 pub const MACHINE_PUBLIC_FILE_MODE: u32 = 0o644;
-/// The mode of the machine lock markers.
+
 pub const MACHINE_LOCK_FILE_MODE: u32 = 0o644;
 
-/// The three machine trees a privileged worker may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineRoots {
-    /// Where application payload goes.
     pub programs: PathBuf,
-    /// Where Zup machine state goes.
+
     pub state: PathBuf,
-    /// Where machine application variable data goes.
+
     pub shared_data: PathBuf,
 }
 
 impl MachineRoots {
-    /// The production roots. The only roots a privileged worker enforces.
     pub fn production() -> Self {
         Self {
             programs: PathBuf::from(MACHINE_PROGRAMS_ROOT),
@@ -81,11 +40,6 @@ impl MachineRoots {
         }
     }
 
-    /// Explicit roots, for isolated tests.
-    ///
-    /// A constructor, not a configuration hook: production worker paths call
-    /// [`MachineRoots::production`], and nothing an unprivileged process
-    /// controls - no environment variable, no IPC field - reaches this.
     pub fn new(programs: PathBuf, state: PathBuf, shared_data: PathBuf) -> Self {
         Self {
             programs,
@@ -95,52 +49,27 @@ impl MachineRoots {
     }
 }
 
-/// Which allowed tree a privileged destination belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineDestination {
-    /// Application payload, under the programs root.
     Programs,
-    /// Application variable data, under the shared-data root.
+
     SharedData,
-    /// Zup machine state, under the state root.
+
     MachineState,
 }
 
-/// Why a privileged destination was refused.
-#[derive(Debug, thiserror::Error)]
-pub enum MachinePathPolicyError {
-    #[error("refused privileged path `{path}`: {reason}")]
-    Refused { path: String, reason: String },
-}
-
-/// Classify one absolute host path against the privileged destination policy.
-///
-/// Path semantics, not string prefixes: `/optish/app` is not under `/opt`.
-///
-/// Canonical-path policy, shared with [`TargetPath`]: `.` names the same
-/// directory, so it is absorbed rather than refused, while `..` is refused
-/// rather than resolved - resolving a hostile path into an allowed one would
-/// bless exactly the traversal it attempted. [`TargetPath`] and
-/// [`lowering`](crate::lowering) already canonicalize `.` away, so a
-/// canonical host path never carries one; this layer refuses `..` and
-/// classifies whatever remains, which keeps both layers on one contract.
 pub fn authorize_machine_destination(
     host: &Path,
     roots: &MachineRoots,
-) -> Result<MachineDestination, MachinePathPolicyError> {
-    let refused = |reason: &str| MachinePathPolicyError::Refused {
+) -> Result<MachineDestination, PathError> {
+    let refused = |reason: &str| PathError::PolicyRefused {
         path: host.display().to_string(),
         reason: reason.to_owned(),
     };
     if !host.is_absolute() {
         return Err(refused("a privileged destination is absolute"));
     }
-    // No normalization: a `..` that survives to this layer is either a bug
-    // or an attack, and either way it is refused rather than resolved.
-    // `.` needs no check: `Path::components` already absorbs interior `.`
-    // (it names the same directory), and `TargetPath` guarantees canonical
-    // spellings, so refusing it would reject the same location this policy
-    // otherwise allows.
+
     if host
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -164,19 +93,14 @@ pub fn authorize_machine_destination(
     ))
 }
 
-/// Authorize an install-directory override for machine scope.
-///
-/// Overrides stay inside the machine program tree: `--install-dir /etc`
-/// must not turn the installer into an arbitrary privileged writer, and
-/// neither must its spelling tricks.
 pub fn authorize_machine_install_directory(
     host: &Path,
     roots: &MachineRoots,
-) -> Result<(), MachinePathPolicyError> {
+) -> Result<(), PathError> {
     match authorize_machine_destination(host, roots)? {
         MachineDestination::Programs => Ok(()),
         MachineDestination::SharedData | MachineDestination::MachineState => {
-            Err(MachinePathPolicyError::Refused {
+            Err(PathError::PolicyRefused {
                 path: host.display().to_string(),
                 reason: "a machine install directory lives under the program tree".to_owned(),
             })
@@ -184,42 +108,25 @@ pub fn authorize_machine_install_directory(
     }
 }
 
-/// The systemd unit-source root the privileged worker enforces.
-///
-/// Production is [`SYSTEMD_UNIT_DIR`]; tests pass an isolated directory so
-/// no test ever writes the host's unit tree. Like [`MachineRoots`], the
-/// value is a constructor parameter, never environment or IPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemdRoots {
-    /// Canonical unit source directory.
     pub unit_dir: PathBuf,
 }
 
 impl SystemdRoots {
-    /// The production unit directory.
     pub fn production() -> Self {
         Self {
             unit_dir: PathBuf::from(SYSTEMD_UNIT_DIR),
         }
     }
 
-    /// Explicit unit directory, for isolated tests.
     pub fn new(unit_dir: PathBuf) -> Self {
         Self { unit_dir }
     }
 }
 
-/// Authorize one canonical unit source path: exactly
-/// `<unit_dir>/<validated-unit>.service`, never a root, never a traversal,
-/// never any other `/usr` or `/etc` spelling.
-///
-/// The worker rejects any other `/usr` mutation; this function is the only
-/// `/usr` path it permits, and only for typed Zup service-unit sources.
-pub fn authorize_systemd_unit(
-    unit: &str,
-    roots: &SystemdRoots,
-) -> Result<PathBuf, MachinePathPolicyError> {
-    let refused = |reason: &str| MachinePathPolicyError::Refused {
+pub fn authorize_systemd_unit(unit: &str, roots: &SystemdRoots) -> Result<PathBuf, PathError> {
+    let refused = |reason: &str| PathError::PolicyRefused {
         path: format!("{}/{}", roots.unit_dir.display(), unit),
         reason: reason.to_owned(),
     };
@@ -245,65 +152,34 @@ pub fn authorize_systemd_unit(
     Ok(path)
 }
 
-/// Why machine state could not be established or trusted.
-#[derive(Debug, thiserror::Error)]
-pub enum MachineStateError {
-    #[error("machine state at `{path}`: {reason}")]
-    Refused { path: String, reason: String },
-
-    #[error("machine state I/O at `{path}`: {source}")]
-    Io {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Create the machine state root from its trusted parent, or verify the
-/// existing one.
-///
-/// Creating `/var/lib/zup` is privileged state mutation, so it is never a
-/// `mkdir -p` through an arbitrary walk: the parent must already exist as a
-/// real directory, every existing entry on the way down must be the expected
-/// type, and symlink or special-file substitutions are refused. New
-/// directories get explicit modes rather than inherited umask behavior.
-///
-/// `expected_uid` is the uid that must own trusted state: `0` in production,
-/// the test account's own uid in isolated tests.
 pub fn ensure_machine_state_root(
     roots: &MachineRoots,
     expected_uid: u32,
-) -> Result<PathBuf, MachineStateError> {
+) -> Result<PathBuf, PathError> {
     let parent = roots
         .state
         .parent()
-        .ok_or_else(|| MachineStateError::Refused {
+        .ok_or_else(|| PathError::StateRefused {
             path: roots.state.display().to_string(),
             reason: "a machine state root has a parent".to_owned(),
         })?;
     verify_trusted_parent(parent, expected_uid)?;
     create_or_verify_dir(&roots.state, MACHINE_STATE_DIR_MODE, expected_uid)?;
-    // The parent gains an entry; flush it so the name survives a crash.
-    crate::fs::sync_directory(parent).map_err(|error| MachineStateError::Refused {
+
+    crate::fs::sync_directory(parent).map_err(|error| PathError::StateRefused {
         path: parent.display().to_string(),
         reason: format!("the state parent does not flush: {error}"),
     })?;
     Ok(roots.state.clone())
 }
 
-/// Prove the state parent is a real directory the expected owner holds.
-///
-/// The parent (`/var/lib` in production) is trusted infrastructure, not
-/// something this function creates: an absent or substituted parent is a
-/// machine this worker does not understand, and understanding it is not
-/// this worker's job.
-fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), MachineStateError> {
-    let metadata = std::fs::symlink_metadata(parent).map_err(|source| MachineStateError::Io {
+fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), PathError> {
+    let metadata = std::fs::symlink_metadata(parent).map_err(|source| PathError::Io {
         path: parent.display().to_string(),
         source,
     })?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(MachineStateError::Refused {
+        return Err(PathError::StateRefused {
             path: parent.display().to_string(),
             reason: "the state parent is a real directory, not a link or a special file".to_owned(),
         });
@@ -311,23 +187,13 @@ fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), Machine
     verify_owner_and_privacy(parent, &metadata, expected_uid)
 }
 
-/// Create `path` with `mode`, or verify the existing entry.
-///
-/// An existing entry must be a real directory owned by the expected uid and
-/// writable by nobody but the owner. A machine ledger replaced by an
-/// unprivileged user must not become an instruction to root, and the same
-/// holds for the directory that holds it.
-fn create_or_verify_dir(
-    path: &Path,
-    mode: u32,
-    expected_uid: u32,
-) -> Result<(), MachineStateError> {
+fn create_or_verify_dir(path: &Path, mode: u32, expected_uid: u32) -> Result<(), PathError> {
     use std::os::unix::fs::DirBuilderExt as _;
 
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(MachineStateError::Refused {
+                return Err(PathError::StateRefused {
                     path: path.display().to_string(),
                     reason: "machine state is a real directory, not a link or a special file"
                         .to_owned(),
@@ -340,45 +206,37 @@ fn create_or_verify_dir(
                 .recursive(false)
                 .mode(mode)
                 .create(path)
-                .map_err(|source| MachineStateError::Io {
+                .map_err(|source| PathError::Io {
                     path: path.display().to_string(),
                     source,
                 })?;
-            // The mode argument is masked by the process umask; applying it
-            // again is what makes the privacy unconditional.
+
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(
-                |source| MachineStateError::Io {
+                |source| PathError::Io {
                     path: path.display().to_string(),
                     source,
                 },
             )?;
-            let metadata =
-                std::fs::symlink_metadata(path).map_err(|source| MachineStateError::Io {
-                    path: path.display().to_string(),
-                    source,
-                })?;
+            let metadata = std::fs::symlink_metadata(path).map_err(|source| PathError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
             verify_owner_and_privacy(path, &metadata, expected_uid)
         }
-        Err(source) => Err(MachineStateError::Io {
+        Err(source) => Err(PathError::Io {
             path: path.display().to_string(),
             source,
         }),
     }
 }
 
-/// Prove existing state is owned by the expected uid and writable by nobody
-/// else.
-///
-/// Ownership without privacy is half the check: a root-owned directory that
-/// the invoking user can write to is a directory whose entries root must not
-/// trust, from the ledger down to the lock markers.
 fn verify_owner_and_privacy(
     path: &Path,
     metadata: &std::fs::Metadata,
     expected_uid: u32,
-) -> Result<(), MachineStateError> {
+) -> Result<(), PathError> {
     if metadata.uid() != expected_uid {
-        return Err(MachineStateError::Refused {
+        return Err(PathError::StateRefused {
             path: path.display().to_string(),
             reason: format!(
                 "machine state is owned by uid {}, not {}",
@@ -388,7 +246,7 @@ fn verify_owner_and_privacy(
         });
     }
     if metadata.mode() & 0o022 != 0 {
-        return Err(MachineStateError::Refused {
+        return Err(PathError::StateRefused {
             path: path.display().to_string(),
             reason: "machine state is never writable by group or other".to_owned(),
         });
@@ -396,18 +254,13 @@ fn verify_owner_and_privacy(
     Ok(())
 }
 
-/// Prove a trusted state file is a regular file owned by the expected uid
-/// and writable by nobody else.
-///
-/// The ledger, the lock markers, and the maintenance generation earn trust
-/// through this check, not through living under a trusted pathname.
-pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), MachineStateError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|source| MachineStateError::Io {
+pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), PathError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| PathError::Io {
         path: path.display().to_string(),
         source,
     })?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(MachineStateError::Refused {
+        return Err(PathError::StateRefused {
             path: path.display().to_string(),
             reason: "trusted machine state is a regular file, not a link or a special file"
                 .to_owned(),
@@ -416,41 +269,22 @@ pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), M
     verify_owner_and_privacy(path, &metadata, expected_uid)
 }
 
-/// Prove the machine state hierarchy holds no redirection or foreign
-/// ownership before anything trusts it.
-///
-/// Every entry - journals, ledgers, generations, lock markers - must be a
-/// real file or directory owned by the expected uid and writable by nobody
-/// else. A symlink, a special file, or a foreign-owned entry anywhere in
-/// the tree is either planted or corrupt, and either way it is refused
-/// before anything reads or writes through it. Same-user attackers cannot
-/// replace entries inside a root-owned private hierarchy in the first
-/// place; this check makes the assumption explicit instead of load-bearing
-/// and silent.
-///
-/// An absent root is the fresh-machine case, not a redirect: there is
-/// nothing to trust yet.
-pub fn verify_machine_hierarchy(
-    state_root: &Path,
-    expected_uid: u32,
-) -> Result<(), MachineStateError> {
-    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| {
-        MachineStateError::Refused {
-            path: state_root.display().to_string(),
-            reason: format!("the machine state hierarchy must not pass through a link: {error}"),
-        }
+pub fn verify_machine_hierarchy(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| PathError::StateRefused {
+        path: state_root.display().to_string(),
+        reason: format!("the machine state hierarchy must not pass through a link: {error}"),
     })?;
     match std::fs::symlink_metadata(state_root) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(MachineStateError::Io {
+            return Err(PathError::Io {
                 path: state_root.display().to_string(),
                 source,
             });
         }
         Ok(metadata) => {
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(MachineStateError::Refused {
+                return Err(PathError::StateRefused {
                     path: state_root.display().to_string(),
                     reason: "machine state is a real directory, not a link or a special file"
                         .to_owned(),
@@ -462,42 +296,29 @@ pub fn verify_machine_hierarchy(
     verify_tree(state_root, expected_uid, 8, true)
 }
 
-/// Prove the machine state structure before normalizing it: no links, no
-/// special files, no foreign owners - without judging modes.
-///
-/// The worker calls this before [`normalize_state_modes`]: journals a
-/// previous run left behind carry whatever mode the old umask gave them,
-/// and judging them before normalizing would refuse a machine the worker
-/// is about to repair. Privacy is enforced by the normalization that
-/// follows, which refuses the same evil this refuses.
-pub fn verify_machine_structure(
-    state_root: &Path,
-    expected_uid: u32,
-) -> Result<(), MachineStateError> {
-    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| {
-        MachineStateError::Refused {
-            path: state_root.display().to_string(),
-            reason: format!("the machine state hierarchy must not pass through a link: {error}"),
-        }
+pub fn verify_machine_structure(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| PathError::StateRefused {
+        path: state_root.display().to_string(),
+        reason: format!("the machine state hierarchy must not pass through a link: {error}"),
     })?;
     match std::fs::symlink_metadata(state_root) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(MachineStateError::Io {
+            return Err(PathError::Io {
                 path: state_root.display().to_string(),
                 source,
             });
         }
         Ok(metadata) => {
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(MachineStateError::Refused {
+                return Err(PathError::StateRefused {
                     path: state_root.display().to_string(),
                     reason: "machine state is a real directory, not a link or a special file"
                         .to_owned(),
                 });
             }
             if metadata.uid() != expected_uid {
-                return Err(MachineStateError::Refused {
+                return Err(PathError::StateRefused {
                     path: state_root.display().to_string(),
                     reason: format!(
                         "machine state is owned by uid {}, not {}",
@@ -511,42 +332,40 @@ pub fn verify_machine_structure(
     verify_tree(state_root, expected_uid, 8, false)
 }
 
-/// Prove one hierarchy level, recursing into real directories.
 fn verify_tree(
     directory: &Path,
     expected_uid: u32,
     depth: u32,
     privacy: bool,
-) -> Result<(), MachineStateError> {
+) -> Result<(), PathError> {
     if depth == 0 {
-        return Err(MachineStateError::Refused {
+        return Err(PathError::StateRefused {
             path: directory.display().to_string(),
             reason: "machine state is deeper than it should ever be".to_owned(),
         });
     }
-    let entries = std::fs::read_dir(directory).map_err(|source| MachineStateError::Io {
+    let entries = std::fs::read_dir(directory).map_err(|source| PathError::Io {
         path: directory.display().to_string(),
         source,
     })?;
     for entry in entries {
-        let entry = entry.map_err(|source| MachineStateError::Io {
+        let entry = entry.map_err(|source| PathError::Io {
             path: directory.display().to_string(),
             source,
         })?;
         let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| MachineStateError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| PathError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
         if metadata.file_type().is_symlink() {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "a machine state entry is a symbolic link".to_owned(),
             });
         }
         if !metadata.is_dir() && !metadata.is_file() {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "a machine state entry is a special file".to_owned(),
             });
@@ -554,7 +373,7 @@ fn verify_tree(
         if privacy {
             verify_owner_and_privacy(&path, &metadata, expected_uid)?;
         } else if metadata.uid() != expected_uid {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: format!(
                     "machine state is owned by uid {}, not {}",
@@ -570,22 +389,16 @@ fn verify_tree(
     Ok(())
 }
 
-/// Prove one application's ledger is trusted state before it is read.
-///
-/// A machine ledger replaced by an unprivileged user must not become an
-/// instruction to root - and an unprivileged planner must not bind a digest
-/// from it either. Absence is fine: a machine that never installed this
-/// application has no record of it.
 pub fn verify_ledger_trust(
     state_root: &Path,
     app_id: &zup_core::AppId,
     expected_uid: u32,
-) -> Result<(), MachineStateError> {
+) -> Result<(), PathError> {
     let path = crate::ledger::LinuxLedgerStore::new(state_root)
         .path_for(app_id, zup_core::SelectedScope::Machine);
     match std::fs::symlink_metadata(&path) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(MachineStateError::Io {
+        Err(source) => Err(PathError::Io {
             path: path.display().to_string(),
             source,
         }),
@@ -593,52 +406,35 @@ pub fn verify_ledger_trust(
     }
 }
 
-/// Normalize the modes of machine state the worker owns: explicit modes,
-/// never inherited umask behavior.
-///
-/// - lock markers become [`MACHINE_LOCK_FILE_MODE`];
-/// - `transactions/` becomes private recursively (directories
-///   [`MACHINE_PRIVATE_DIR_MODE`], files [`MACHINE_PRIVATE_FILE_MODE`]);
-/// - `installations/` and `generated/` become public containers
-///   ([`MACHINE_STATE_DIR_MODE`]) holding public metadata
-///   ([`MACHINE_PUBLIC_FILE_MODE`]).
-///
-/// Anything that is not a real file or directory, or not owned by the
-/// expected uid, is refused rather than chmodded: normalizing a planted
-/// link would bless it.
-pub fn normalize_state_modes(
-    state_root: &Path,
-    expected_uid: u32,
-) -> Result<(), MachineStateError> {
+pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
     let entries = match std::fs::read_dir(state_root) {
         Ok(entries) => entries,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(MachineStateError::Io {
+            return Err(PathError::Io {
                 path: state_root.display().to_string(),
                 source,
             });
         }
     };
     for entry in entries {
-        let entry = entry.map_err(|source| MachineStateError::Io {
+        let entry = entry.map_err(|source| PathError::Io {
             path: state_root.display().to_string(),
             source,
         })?;
         let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| MachineStateError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| PathError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
         if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "machine state holds only real files and directories".to_owned(),
             });
         }
         if metadata.uid() != expected_uid {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: format!(
                     "machine state is owned by uid {}, not {}",
@@ -652,7 +448,7 @@ pub fn normalize_state_modes(
             .is_some_and(|extension| extension == "lock")
         {
             if !metadata.is_file() {
-                return Err(MachineStateError::Refused {
+                return Err(PathError::StateRefused {
                     path: path.display().to_string(),
                     reason: "a lock marker is a regular file".to_owned(),
                 });
@@ -686,36 +482,34 @@ pub fn normalize_state_modes(
     Ok(())
 }
 
-/// Normalize one subtree: directories get `dir_mode`, files get `file_mode`.
 fn normalize_tree(
     directory: &Path,
     dir_mode: u32,
     file_mode: u32,
     expected_uid: u32,
-) -> Result<(), MachineStateError> {
-    let entries = std::fs::read_dir(directory).map_err(|source| MachineStateError::Io {
+) -> Result<(), PathError> {
+    let entries = std::fs::read_dir(directory).map_err(|source| PathError::Io {
         path: directory.display().to_string(),
         source,
     })?;
     for entry in entries {
-        let entry = entry.map_err(|source| MachineStateError::Io {
+        let entry = entry.map_err(|source| PathError::Io {
             path: directory.display().to_string(),
             source,
         })?;
         let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| MachineStateError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| PathError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
         if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "machine state holds only real files and directories".to_owned(),
             });
         }
         if metadata.uid() != expected_uid {
-            return Err(MachineStateError::Refused {
+            return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: format!(
                     "machine state is owned by uid {}, not {}",
@@ -734,29 +528,26 @@ fn normalize_tree(
     Ok(())
 }
 
-fn set_mode(path: &Path, mode: u32) -> Result<(), MachineStateError> {
+fn set_mode(path: &Path, mode: u32) -> Result<(), PathError> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
-        MachineStateError::Io {
+        PathError::Io {
             path: path.display().to_string(),
             source,
         }
     })
 }
 
-/// Normalize the modes of what a committed machine transaction published:
-/// the ledger document is public metadata, and the maintenance generation
-/// is executable but never writable by anyone but root.
 pub fn normalize_published_modes(
     state_root: &Path,
     ledger: &zup_exec::InstallLedger,
-) -> Result<(), MachineStateError> {
+) -> Result<(), PathError> {
     let store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger_path = store.path_for(&ledger.app_id, ledger.scope);
     std::fs::set_permissions(
         &ledger_path,
         std::fs::Permissions::from_mode(MACHINE_PUBLIC_FILE_MODE),
     )
-    .map_err(|source| MachineStateError::Io {
+    .map_err(|source| PathError::Io {
         path: ledger_path.display().to_string(),
         source,
     })?;
@@ -767,12 +558,10 @@ pub fn normalize_published_modes(
         let Ok(host) = crate::lowering::to_host_path(destination) else {
             continue;
         };
-        // Only maintenance destinations are normalized: payload modes are
-        // the executor's explicit decision, and nothing here re-decides
-        // what the transaction published.
+
         if host.starts_with(state_root) {
             std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).map_err(
-                |source| MachineStateError::Io {
+                |source| PathError::Io {
                     path: host.display().to_string(),
                     source,
                 },
@@ -782,30 +571,23 @@ pub fn normalize_published_modes(
     Ok(())
 }
 
-/// Turn an authorized absolute host install directory back into the template
-/// the planner resolves.
-///
-/// The worker plans from templates like every other path; the override is a
-/// host path because the policy speaks host paths. Only directories under
-/// the enforced program root convert - anything else never reaches here,
-/// because the caller authorizes first.
 pub fn host_to_install_template(
     host: &Path,
     roots: &MachineRoots,
     target: &zup_core::TargetTriple,
-) -> Result<zup_core::Template, MachinePathPolicyError> {
+) -> Result<zup_core::Template, PathError> {
     if host == roots.programs || !host.starts_with(&roots.programs) {
-        return Err(MachinePathPolicyError::Refused {
+        return Err(PathError::PolicyRefused {
             path: host.display().to_string(),
             reason: "an install directory override lives under the program tree".to_owned(),
         });
     }
-    let relative =
-        host.strip_prefix(&roots.programs)
-            .map_err(|_| MachinePathPolicyError::Refused {
-                path: host.display().to_string(),
-                reason: "an install directory override lives under the program tree".to_owned(),
-            })?;
+    let relative = host
+        .strip_prefix(&roots.programs)
+        .map_err(|_| PathError::PolicyRefused {
+            path: host.display().to_string(),
+            reason: "an install directory override lives under the program tree".to_owned(),
+        })?;
     let mut text = "${location.programs}".to_owned();
     for component in relative.components() {
         match component {
@@ -814,17 +596,16 @@ pub fn host_to_install_template(
                 text.push_str(&name.to_string_lossy());
             }
             _ => {
-                return Err(MachinePathPolicyError::Refused {
+                return Err(PathError::PolicyRefused {
                     path: host.display().to_string(),
                     reason: "an install directory override names plain components".to_owned(),
                 });
             }
         }
     }
-    // The parse validates; the target is accepted to keep one spelling of
-    // the round trip at the call sites.
+
     let _ = target;
-    zup_core::Template::parse(&text).map_err(|error| MachinePathPolicyError::Refused {
+    zup_core::Template::parse(&text).map_err(|error| PathError::PolicyRefused {
         path: host.display().to_string(),
         reason: error.to_string(),
     })
@@ -893,9 +674,7 @@ mod tests {
         assert!(
             authorize_machine_destination(&roots.programs.join("../etc/passwd"), &roots).is_err()
         );
-        // Canonical-path policy, shared with `TargetPath`: `.` names the
-        // same directory, so it classifies rather than refuses. `..` above
-        // is the traversal; `.` here is the same location spelled redundantly.
+
         assert_eq!(
             authorize_machine_destination(&roots.programs.join("./app"), &roots)
                 .expect("`.` is absorbed, not refused"),
@@ -939,9 +718,9 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, MACHINE_STATE_DIR_MODE);
-        // Twice is fine: the existing root verifies.
+
         ensure_machine_state_root(&roots, uid).expect("verification");
-        // Another account's directory is not trusted state.
+
         assert!(ensure_machine_state_root(&roots, uid.wrapping_add(1)).is_err());
         let _ = base;
     }

@@ -9,9 +9,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use target_lexicon::{Architecture, OperatingSystem, ParseError, Triple};
 use thiserror::Error;
 
+use crate::ids::ValueError;
 use crate::model::{Frontend, Install, Source};
 use crate::template::Template;
-use crate::value::ValueError;
 
 pub use target_lexicon::{
     Architecture as TargetArchitecture, OperatingSystem as TargetOperatingSystem,
@@ -29,14 +29,12 @@ pub enum TargetParseError {
     UnknownIdentity { target: String },
 }
 
-/// Stable, human-readable identity for a target profile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct TargetProfileId(String);
 
 impl TargetProfileId {
-    /// Create a target profile id, trimming surrounding whitespace.
     pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
@@ -47,7 +45,6 @@ impl TargetProfileId {
         Ok(Self(value.to_owned()))
     }
 
-    /// Borrow the target profile id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -100,7 +97,6 @@ impl<'de> Deserialize<'de> for TargetProfileId {
     }
 }
 
-/// Build payload declared for one target profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -113,25 +109,14 @@ pub struct TargetProfile {
     pub install: Option<Install>,
 }
 
-/// Non-serialized caller overrides applied while resolving one target profile.
-///
-/// A field is `Some` only when the caller supplied one. Each field resolves
-/// independently, in the order caller override, then the profile's own
-/// declaration, then the common manifest. Resolution belongs to exactly one
 /// place in `zup-manifest`, so a caller can never mix precedence rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetOverrides {
-    /// Replaces the profile's build source directory.
     pub source: Option<Source>,
-    /// Replaces the install directory template of every scope this target
-    /// installs to. The target's scope and directory-override policy are
-    /// unaffected.
     pub install_directory: Option<Template>,
-    /// Replaces the profile's frontend.
     pub frontend: Option<Frontend>,
 }
 
-/// One selected target profile with authoring overrides resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -194,29 +179,12 @@ impl TargetTriple {
         self.as_lexicon().operating_system
     }
 
-    /// The suffix a native executable of this target is named with.
-    ///
-    /// A property of the target's operating system rather than of the machine
-    /// running the build, which is the distinction that matters: a release
-    /// description written on one host describes artifacts for several targets,
     /// and the name it records for a Linux runtime must not carry the suffix of
-    /// the host that happened to write it.
-    ///
-    /// Empty for every operating system that has no such convention, which is
-    /// every Unix one: a Linux or macOS executable is named without a suffix, and
-    /// an empty string here produces exactly that rather than a special case at
-    /// each call site.
     pub fn executable_suffix(&self) -> &'static str {
         executable_suffix(self.operating_system())
     }
 }
 
-/// The suffix a native executable is named with on `os`.
-///
-/// A free function rather than an inherent method because
-/// [`TargetOperatingSystem`] is `target_lexicon`'s own type: zup reads it, and
-/// adding to it would be a claim zup cannot keep. The rule therefore lives here,
-/// beside the triple it is read through.
 pub const fn executable_suffix(os: OperatingSystem) -> &'static str {
     match os {
         OperatingSystem::Windows => ".exe",
@@ -224,17 +192,10 @@ pub const fn executable_suffix(os: OperatingSystem) -> &'static str {
     }
 }
 
-/// The architecture this process runs as, in canonical triple spelling.
-///
-/// This is the *process* architecture, not the machine's. A 32-bit program on a
-/// 64-bit Windows machine reports `x86`, which is correct for choosing what to
-/// run: it must pick a variant it can execute directly rather than one it would
-/// need a 64-bit host to start.
 pub fn host_architecture() -> String {
     target_lexicon::Architecture::host().to_string()
 }
 
-/// The operating system this process runs on, in canonical triple spelling.
 pub fn host_operating_system() -> String {
     target_lexicon::OperatingSystem::host().to_string()
 }

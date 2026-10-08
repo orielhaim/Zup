@@ -1,9 +1,3 @@
-//! The console frontend: a person, a terminal, and a few questions.
-//!
-//! The console build is the only one that talks. It asks for a scope the
-//! application allows but does not fix, for the components the application offers
-//! but does not require, for a directory the application permits, and finally
-//! whether to go ahead. Every one of those has a non-interactive answer, and a
 //! caller who supplied one never sees a question.
 
 use std::path::{Path, PathBuf};
@@ -14,14 +8,12 @@ use zup_runtime::{ExecutionPolicy, InstallOutcome};
 use zup_windows::EmbeddedBundle;
 
 use crate::cli::{LifecycleArgs, ScopeArg};
-use crate::context::RuntimeContext;
 use crate::execute;
 use crate::lifecycle::{self, PreparedRuntime, Request};
+use crate::maintenance as state;
 use crate::package;
-use crate::state;
+use crate::run::RuntimeContext;
 
-/// The console theme, so a zup-driven install reads as one product rather than
-/// as a library's defaults inside somebody else's window.
 struct SetupTheme;
 
 impl cliclack::Theme for SetupTheme {
@@ -43,12 +35,10 @@ impl cliclack::Theme for SetupTheme {
     }
 }
 
-/// Ask the questions, then apply the package.
 pub fn run_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     ask(context, Request::Apply, args)
 }
 
-/// Ask the questions, then run one named lifecycle.
 pub fn run(
     context: RuntimeContext,
     verb: lifecycle::Verb,
@@ -57,11 +47,6 @@ pub fn run(
     ask(context, Request::Named(verb.action()), args)
 }
 
-/// The interactive console, launched with no operation named.
-///
-/// A double-click in a terminal means "do the obvious thing", and the obvious
-/// thing is the same decision `install` makes: read the machine's record, and do
-/// whatever makes it match this package.
 pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
     cliclack::set_theme(SetupTheme);
     let build = package::target_plan(bundle)?;
@@ -119,7 +104,6 @@ pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Resu
     )
 }
 
-/// Turn a set of answers into a run.
 fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> miette::Result<()> {
     cliclack::set_theme(SetupTheme);
     let executable = package::current_executable()?;
@@ -187,8 +171,6 @@ fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> mi
         args.disable.clear();
     }
     args.install_directory = install_directory;
-    // The answers above *were* the interaction. Telling the engine the same thing
-    // twice would show a second, redundant confirmation.
     args.non_interactive = true;
     args.yes = true;
     let _ = context;
@@ -207,11 +189,6 @@ fn confirm(question: &str) -> miette::Result<bool> {
         .map_err(|error| miette::miette!("prompt: {error}"))
 }
 
-/// Confirm an uninstall, which is the one question with a safe default.
-///
-/// Uninstalling is the only operation here that cannot be undone by running it
-/// again, so the default answer is no and a stray Enter does not remove an
-/// application.
 pub fn confirm_uninstall() -> miette::Result<bool> {
     cliclack::set_theme(SetupTheme);
     cliclack::confirm("Uninstall this application?")
@@ -220,7 +197,6 @@ pub fn confirm_uninstall() -> miette::Result<bool> {
         .map_err(|error| miette::miette!("prompt: {error}"))
 }
 
-/// Confirm an update before it is installed.
 pub fn confirm_update() -> miette::Result<bool> {
     cliclack::set_theme(SetupTheme);
     cliclack::confirm("Install this update?")
@@ -229,7 +205,6 @@ pub fn confirm_update() -> miette::Result<bool> {
         .map_err(|error| miette::miette!("prompt: {error}"))
 }
 
-/// The failure a cancelled question produces.
 pub fn cancelled() -> miette::Report {
     let _ = cliclack::outro_cancel("Cancelled");
     miette::miette!("cancelled")
@@ -242,7 +217,6 @@ fn scope_arg(scope: SelectedScope) -> ScopeArg {
     }
 }
 
-/// The one installation this application has, in whichever scope allows it.
 fn find_installation(
     installer: &Installer,
     state_root: Option<&Path>,
@@ -276,11 +250,6 @@ fn find_installation(
     Ok(found.pop())
 }
 
-/// The scope to install into.
-///
-/// An application that fixes its scope gets no question. An application that
-/// allows either, on a machine that already has one, keeps it: moving an
-/// installation between scopes is a different decision from reinstalling it.
 fn choose_scope(
     installer: &Installer,
     requested: ScopeArg,
@@ -306,8 +275,6 @@ fn choose_scope(
         .map_err(|error| miette::miette!("prompt: {error}"))
 }
 
-/// The components to install, defaulting to what the application and the machine
-/// already agree on.
 fn choose_components(
     installer: &Installer,
     requested_enable: &[String],
@@ -336,7 +303,6 @@ fn choose_components(
             selected.retain(|component| component != &id);
         }
     }
-    // Every component required means there is nothing to decide.
     if installer
         .components
         .iter()
@@ -372,7 +338,6 @@ fn choose_components(
     Ok(chosen)
 }
 
-/// The directory to install into, where the application allows a choice.
 fn choose_install_directory(
     installer: &Installer,
     requested: Option<&Path>,
@@ -395,12 +360,6 @@ fn choose_install_directory(
     Ok((!value.trim().is_empty()).then(|| PathBuf::from(value)))
 }
 
-/// Run a prepared lifecycle with a progress bar, retrying a blocked install.
-///
-/// A blocked installation is the common case for a desktop application: the user
-/// has it open. Throwing away a staged payload and starting over would be the
-/// slowest possible response to the easiest question, so the overlay is retained
-/// and only the transaction is retried.
 pub fn execute(prepared: PreparedRuntime, action: LifecycleAction) -> miette::Result<()> {
     let mut pending = Some(prepared);
     while let Some(prepared) = pending.take() {
@@ -442,7 +401,6 @@ pub fn execute(prepared: PreparedRuntime, action: LifecycleAction) -> miette::Re
     Err(miette::miette!("cancelled"))
 }
 
-/// The engine's message for a payload held open by a running application.
 const BLOCKED: &str = "blocked by running applications";
 
 fn execute_once(

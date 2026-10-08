@@ -1,53 +1,15 @@
-//! Typed derived-cache refresh operations.
-//!
-//! The shared freedesktop databases (`mime.cache` under `$XDG_DATA_HOME/mime`,
-//! `mimeinfo.cache` under `$XDG_DATA_HOME/applications`) are derived state:
-//! they aggregate every application's sources, so Zup never owns their bytes
-//! and never stores them in the ledger. What Zup owns is the refresh that
-//! regenerates them from its authoritative sources.
-//!
-//! A refresh is a typed transaction operation, not a post-install script and
-//! not a generic "run any command" hook:
-//!
-//! - it runs after the authoritative files, ordered by the transaction graph;
-//! - the tool is preflighted before anything mutates, and only when MIME or
-//!   desktop sources are actually part of the transaction;
-//! - it is journaled, so recovery re-runs a refresh a crash interrupted;
-//! - rollback re-runs it, and the runner sweeps once more after rollback so
-//!   the final on-disk state is coherent regardless of node order.
-//!
-//! Tools are invoked directly, never through a shell.
-
 use std::path::PathBuf;
 
 use zup_core::{BackendResourceId, ResourceKey};
 
-/// Backend identity of the MIME database refresh.
 pub const REFRESH_MIME_ID: &str = "linux:refresh-mime-database";
-/// Backend identity of the desktop database refresh.
+
 pub const REFRESH_DESKTOP_ID: &str = "linux:refresh-desktop-database";
 
-/// The freedesktop tool a refresh needs.
 pub const MIME_REFRESH_TOOL: &str = "update-mime-database";
-/// The freedesktop tool a desktop refresh needs.
+
 pub const DESKTOP_REFRESH_TOOL: &str = "update-desktop-database";
 
-/// Why a refresh could not run.
-#[derive(Debug, thiserror::Error)]
-pub enum RefreshError {
-    #[error("cannot refresh derived integration state: `{tool}` is not available: {reason}")]
-    Unavailable { tool: String, reason: String },
-    #[error("`{tool}` failed for `{directory}`: {reason}")]
-    Failed {
-        tool: String,
-        directory: String,
-        reason: String,
-    },
-    #[error("refusing to refresh: {0}")]
-    Refused(String),
-}
-
-/// One refresh operation: a tool plus the database directory it regenerates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RefreshRequest {
     pub tool: String,
@@ -88,22 +50,23 @@ impl RefreshRequest {
         serde_json::to_vec(self).expect("a refresh request serializes")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, RefreshError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, ExecError> {
         if bytes.len() > zup_transaction::MAX_BACKEND_PAYLOAD_BYTES {
-            return Err(RefreshError::Refused(
+            return Err(ExecError::RefreshRefused(
                 "refresh payload exceeds the transaction limit".into(),
             ));
         }
-        let request: RefreshRequest = serde_json::from_slice(bytes)
-            .map_err(|error| RefreshError::Refused(format!("invalid refresh payload: {error}")))?;
+        let request: RefreshRequest = serde_json::from_slice(bytes).map_err(|error| {
+            ExecError::RefreshRefused(format!("invalid refresh payload: {error}"))
+        })?;
         if request.tool != MIME_REFRESH_TOOL && request.tool != DESKTOP_REFRESH_TOOL {
-            return Err(RefreshError::Refused(format!(
+            return Err(ExecError::RefreshRefused(format!(
                 "unknown refresh tool `{}`",
                 request.tool
             )));
         }
         if request.directory.is_empty() || !request.directory.starts_with('/') {
-            return Err(RefreshError::Refused(
+            return Err(ExecError::RefreshRefused(
                 "refresh directory is not absolute".into(),
             ));
         }
@@ -111,12 +74,6 @@ impl RefreshRequest {
     }
 }
 
-/// Resolve a tool name without a shell: the first executable file of that
-/// name on `PATH`.
-///
-/// Execution follows the final link: resolving `update-mime-database`
-/// through a distribution-managed symlink is normal. The no-follow rules
-/// apply to files Zup writes, never to tools it runs.
 pub fn discover_tool(name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') || name.contains('\0') {
         return None;
@@ -127,9 +84,7 @@ pub fn discover_tool(name: &str) -> Option<PathBuf> {
             continue;
         }
         let candidate = directory.join(name);
-        // Execution follows the final link: resolving `update-mime-database`
-        // through a distribution-managed symlink is normal. The no-follow
-        // rules apply to files Zup writes, never to tools it runs.
+
         let Ok(metadata) = std::fs::metadata(&candidate) else {
             continue;
         };
@@ -143,11 +98,11 @@ pub fn discover_tool(name: &str) -> Option<PathBuf> {
     None
 }
 
+use crate::error::ExecError;
 use std::os::unix::fs::PermissionsExt as _;
 
-/// Preflight one refresh: the tool must resolve before anything mutates.
-pub fn preflight(request: &RefreshRequest) -> Result<PathBuf, RefreshError> {
-    discover_tool(&request.tool).ok_or_else(|| RefreshError::Unavailable {
+pub fn preflight(request: &RefreshRequest) -> Result<PathBuf, ExecError> {
+    discover_tool(&request.tool).ok_or_else(|| ExecError::RefreshUnavailable {
         tool: request.tool.clone(),
         reason: format!(
             "installing MIME/desktop integration needs `{}` to regenerate the shared database",
@@ -156,14 +111,12 @@ pub fn preflight(request: &RefreshRequest) -> Result<PathBuf, RefreshError> {
     })
 }
 
-/// Run one refresh to a successful exit. No shell, no argument interpolation:
-/// the tool path and one directory argument.
-pub fn run_refresh(request: &RefreshRequest) -> Result<(), RefreshError> {
+pub fn run_refresh(request: &RefreshRequest) -> Result<(), ExecError> {
     let tool = preflight(request)?;
     let output = std::process::Command::new(&tool)
         .arg(&request.directory)
         .output()
-        .map_err(|error| RefreshError::Failed {
+        .map_err(|error| ExecError::RefreshFailed {
             tool: request.tool.clone(),
             directory: request.directory.clone(),
             reason: format!("could not start: {error}"),
@@ -173,37 +126,20 @@ pub fn run_refresh(request: &RefreshRequest) -> Result<(), RefreshError> {
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr: String = stderr.chars().take(512).collect();
-    Err(RefreshError::Failed {
+    Err(ExecError::RefreshFailed {
         tool: request.tool.clone(),
         directory: request.directory.clone(),
         reason: format!("exit {}: {}", output.status, stderr.trim()),
     })
 }
 
-/// Whether the derived database a refresh regenerates has a location to be
-/// regenerated into.
-///
-/// This is about the database directory itself (`mime/`, `applications/`),
-/// not about whether any source remains. A rollback that removed the final
-/// source still changed the authoritative world - to the empty one - and the
-/// derived cache must be regenerated from that world rather than left holding
-/// the removed sources' entries. Treating "no sources" as "nothing to
-/// refresh" confuses the removal with nothing having changed, and leaves the
-/// stale cache behind.
 pub fn database_present(request: &RefreshRequest) -> bool {
     std::fs::symlink_metadata(&request.directory)
         .map(|metadata| metadata.is_dir())
         .unwrap_or(false)
 }
 
-/// Make a present database refreshable before the sweep regenerates it.
-///
-/// A MIME database regenerates from its `packages/` subdirectory, which a
-/// rollback may have removed along with the final source it held. Recreating
-/// the empty subdirectory lets the tool regenerate the empty world instead of
-/// failing on the absent one. A desktop database regenerates from its own
-/// directory, so there is nothing to prepare.
-pub fn ensure_refreshable(request: &RefreshRequest) -> Result<(), RefreshError> {
+pub fn ensure_refreshable(request: &RefreshRequest) -> Result<(), ExecError> {
     if request.tool != MIME_REFRESH_TOOL {
         return Ok(());
     }
@@ -214,7 +150,7 @@ pub fn ensure_refreshable(request: &RefreshRequest) -> Result<(), RefreshError> 
     {
         return Ok(());
     }
-    std::fs::create_dir_all(&packages).map_err(|error| RefreshError::Failed {
+    std::fs::create_dir_all(&packages).map_err(|error| ExecError::RefreshFailed {
         tool: request.tool.clone(),
         directory: request.directory.clone(),
         reason: format!(
@@ -261,8 +197,7 @@ mod tests {
     fn discovery_never_uses_a_shell() {
         assert!(discover_tool("").is_none());
         assert!(discover_tool("a/b").is_none());
-        // `sh` resolves on any Unix test machine; the mechanism is PATH
-        // search, not shell execution.
+
         assert!(discover_tool("sh").is_some());
         assert!(discover_tool("definitely-not-a-zup-tool").is_none());
     }

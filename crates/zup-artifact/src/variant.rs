@@ -1,15 +1,3 @@
-//! Distribution variants: one fully resolved native target.
-//!
-//! A variant is what a [`TargetProfile`](zup_core::TargetProfile) becomes once
-//! its payload, plugins, prerequisites, and runtime template are resolved. It
-//! is not an installer and it is not a file: it is the resolved content graph
-//! for one machine, which an artifact may reference, ignore, or select.
-//!
-//! The split is deliberate. `DistributionVariant` holds the portable content
-//! graph plus the build-machine inputs it was produced from, exactly as
-//! `zup_core::ResolvedFile` holds a source path beside its portable identity.
-//! Nothing build-machine-specific is ever serialized.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -21,26 +9,18 @@ use zup_core::{
 };
 
 use crate::compat::frontend_subsystem;
-use crate::descriptor::Descriptor;
-use crate::error::ArtifactError;
-use crate::media_type::MediaType;
+use crate::format::ArtifactError;
+use crate::format::Descriptor;
+use crate::format::MediaType;
 use crate::platform::Platform;
 
-/// Minimum host version one variant needs, when the target names one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MinimumHost {
-    /// Operating system the requirement applies to.
     pub os: PlatformOs,
-    /// Inclusive minimum version, as a dotted numeric tuple.
     pub version: HostVersion,
 }
 
-/// The operating system a minimum-host requirement applies to.
-///
-/// This is a wire value matched against the canonical operating system name in
-/// a [`Platform`](crate::platform::Platform), so it names the systems the model
-/// reasons about and stays open for the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformOs {
@@ -54,7 +34,6 @@ pub enum PlatformOs {
 }
 
 impl PlatformOs {
-    /// The canonical triple spelling of this operating system.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Windows => "windows",
@@ -67,7 +46,6 @@ impl PlatformOs {
         }
     }
 
-    /// The operating system this name denotes in a canonical triple.
     pub fn from_name(name: &str) -> Self {
         match name {
             "windows" => Self::Windows,
@@ -81,7 +59,6 @@ impl PlatformOs {
     }
 }
 
-/// A dotted numeric version with a bounded component count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostVersion {
@@ -99,7 +76,6 @@ impl HostVersion {
         }
     }
 
-    /// Whether this version is at least `other`.
     pub const fn at_least(self, other: &Self) -> bool {
         self.major > other.major
             || (self.major == other.major && self.minor > other.minor)
@@ -113,14 +89,9 @@ impl std::fmt::Display for HostVersion {
     }
 }
 
-/// One host-level capability a variant's installation may depend on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformCapability {
-    /// Machine-wide components whose behavior cannot be emulated, such as
-    /// drivers, native service binaries, or native integration points. A
-    /// variant declaring this capability will not be selected through an
-    /// emulation layer.
     MachineComponents,
 }
 
@@ -132,35 +103,23 @@ impl PlatformCapability {
     }
 }
 
-/// What a variant needs from the host that runs it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantRequirements {
-    /// The variant must execute natively. A host that would need a
-    /// compatibility or emulation layer refuses it.
     #[serde(default)]
     pub native_execution: bool,
-    /// Host capabilities the installation depends on. Each one forbids an
-    /// emulated fallback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<PlatformCapability>,
-    /// Minimum host version, when the target names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_host: Option<MinimumHost>,
 }
 
 impl VariantRequirements {
-    /// Whether an emulated execution of this variant would be sound.
     pub fn permits_emulation(&self) -> bool {
         !self.native_execution && self.capabilities.is_empty()
     }
 }
 
-/// Build-machine inputs for one variant, keyed by content digest.
-///
-/// The composer reads each unique digest exactly once through this map, so
-/// identical payload content shared by several variants is hashed, read, and
-/// compressed once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VariantSources {
     files: BTreeMap<Sha256Digest, PathBuf>,
@@ -172,29 +131,24 @@ impl VariantSources {
         Self::default()
     }
 
-    /// Record a file on the build machine that holds content with `digest`.
     pub fn with_file(mut self, digest: Sha256Digest, path: PathBuf) -> Self {
         self.files.insert(digest, path);
         self
     }
 
-    /// Record in-memory content with `digest`, such as a compiled plugin.
     pub fn with_bytes(mut self, digest: Sha256Digest, bytes: Vec<u8>) -> Self {
         self.memory.insert(digest, bytes);
         self
     }
 
-    /// Borrow a build-machine file for `digest`.
     pub fn file(&self, digest: &Sha256Digest) -> Option<&PathBuf> {
         self.files.get(digest)
     }
 
-    /// Borrow in-memory content for `digest`.
     pub fn bytes(&self, digest: &Sha256Digest) -> Option<&[u8]> {
         self.memory.get(digest).map(Vec::as_slice)
     }
 
-    /// Every digest this variant's content consists of, in ascending order.
     pub fn digests(&self) -> Vec<Sha256Digest> {
         let mut digests: Vec<Sha256Digest> = self
             .files
@@ -208,7 +162,6 @@ impl VariantSources {
     }
 }
 
-/// One resolved native target, ready to compose into artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DistributionVariant {
     id: String,
@@ -227,16 +180,6 @@ pub struct DistributionVariant {
 }
 
 impl DistributionVariant {
-    /// Resolve one target profile into a variant from a materialized build plan
-    /// and its compiled plugins.
-    ///
-    /// `natives` are the binaries a composed installer carries that no build plan
-    /// can describe: the maintenance runtime it starts, and the preset whose
-    /// window it opens. They are named here rather than left implicit because
-    /// both are things a variant may legitimately not have - a thin artifact
-    /// carries no runtime, and a console frontend carries no preset - and a
-    /// required one would produce an installer that fails on a user's machine
-    /// with no build-time symptom.
     pub fn resolve(
         config: &zup_core::ResolvedTargetConfig,
         plan: &zup_core::TargetBuildPlan,
@@ -253,12 +196,6 @@ impl DistributionVariant {
         for prerequisite in &plan.prerequisites {
             sources = sources.with_file(prerequisite.sha256, prerequisite.source.clone());
         }
-        // The window's assets are content the composed store has to hold and a
-        // client has to fetch, so their bytes are sourced exactly as payload
-        // bytes are. A plan read back out of a package carries no source, and
-        // that plan is not something to compose from: composition is the build
-        // plane, and a window whose content it cannot read is a build that would
-        // fail on the machine rather than here.
         for asset in &plan.ui_assets {
             let Some(source) = asset.source.clone() else {
                 return Err(ArtifactError::Invalid);
@@ -282,8 +219,6 @@ impl DistributionVariant {
                 executable: file.executable,
             });
         }
-        // A variant manifest is canonical, so its payload entries are ordered the
-        // way every package reader requires: by destination, then by path.
         entries.sort_by(|left, right| {
             left.destination
                 .to_string()
@@ -327,9 +262,6 @@ impl DistributionVariant {
         let mut preset = None;
         for (media_type, bytes) in natives {
             let descriptor = Descriptor::of(*media_type, bytes);
-            // A native image is content the composer must be able to read again,
-            // so it is registered beside the payload like every other blob, keyed
-            // by its own digest.
             sources = sources.with_bytes(descriptor.digest, bytes.clone());
             match media_type {
                 MediaType::Runtime => runtime = Some(descriptor),
@@ -358,29 +290,22 @@ impl DistributionVariant {
         })
     }
 
-    /// Replace the derived requirements with explicit ones.
     pub fn with_requirements(mut self, requirements: VariantRequirements) -> Self {
         self.requirements = requirements;
         self
     }
 
-    /// Override the portable variant id, which is the profile name by default.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = id.into();
         self
     }
 
-    /// Override the resolved install configuration.
-    ///
-    /// Composition compares this across variants, so a fixture that needs two
-    /// variants to disagree can say so without building two manifests.
     pub fn with_install(mut self, install: Install) -> Self {
         self.plan.installer.install = install.clone();
         self.install = install;
         self
     }
 
-    /// Override the application version the variant claims to install.
     pub fn with_version(mut self, version: &str) -> Self {
         let version = semver::Version::parse(version).expect("a fixture version parses");
         self.application.version = version.clone();
@@ -388,7 +313,6 @@ impl DistributionVariant {
         self
     }
 
-    /// A stable name for this variant inside an artifact.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -409,7 +333,6 @@ impl DistributionVariant {
         self.frontend
     }
 
-    /// The launcher subsystem class this variant's installer experience needs.
     pub fn subsystem(&self) -> crate::compat::LauncherSubsystem {
         frontend_subsystem(self.frontend)
     }
@@ -434,16 +357,10 @@ impl DistributionVariant {
         &self.requirements
     }
 
-    /// The native maintenance runtime image this variant executes as.
     pub fn runtime(&self) -> Option<&Descriptor> {
         self.runtime.as_ref()
     }
 
-    /// The native preset image, when this variant carries one.
-    ///
-    /// A GUI variant has one: it is the window the installer opens. A console or
-    /// headless variant has none, and saying so is a fact about the variant
-    /// rather than a failure.
     pub fn preset(&self) -> Option<&Descriptor> {
         self.preset.as_ref()
     }
@@ -452,13 +369,10 @@ impl DistributionVariant {
         &self.sources
     }
 
-    /// Sum of the variant's content sizes, counting shared content once per
-    /// variant. This is what a standalone artifact of this variant would cost.
     pub fn logical_size(&self) -> u64 {
         self.logical_size
     }
 
-    /// Every content digest this variant requires, in ascending order.
     pub fn content_digests(&self) -> Vec<Sha256Digest> {
         let mut digests: Vec<Sha256Digest> = self
             .plan
@@ -479,8 +393,6 @@ impl DistributionVariant {
         digests
     }
 
-    /// Plugin identifiers this variant binds, used to prove a selected
-    /// variant loads only its own ahead-of-time plugins.
     pub fn plugin_ids(&self) -> Vec<PluginId> {
         self.plan
             .plugins
@@ -489,7 +401,6 @@ impl DistributionVariant {
             .collect()
     }
 
-    /// Prerequisite identifiers this variant embeds.
     pub fn prerequisite_ids(&self) -> Vec<PrerequisiteId> {
         self.plan
             .prerequisite_artifacts
@@ -526,8 +437,6 @@ fn logical_size(
         .fold(content, |sum, native| sum.saturating_add(native.size))
 }
 
-/// Content accounting a selector and a report can rely on without reading the
-/// manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantDescriptorContent {
@@ -539,7 +448,6 @@ pub struct VariantDescriptorContent {
     pub plugin_count: u64,
 }
 
-/// The portable descriptor a variant contributes to an artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantDescriptor {
@@ -555,7 +463,6 @@ pub struct VariantDescriptor {
     pub logical_size: u64,
 }
 
-/// The serialized content graph of one variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantManifest {
@@ -571,11 +478,9 @@ pub struct VariantManifest {
     pub logical_size: u64,
 }
 
-/// Current variant manifest schema.
 pub const VARIANT_MANIFEST_SCHEMA: u32 = 1;
 
 impl VariantManifest {
-    /// Serialize a variant's content graph canonically.
     pub fn encode(variant: &DistributionVariant) -> Result<Vec<u8>, ArtifactError> {
         let manifest = Self {
             schema: VARIANT_MANIFEST_SCHEMA,
@@ -589,21 +494,19 @@ impl VariantManifest {
             plan: variant.plan.clone(),
             logical_size: variant.logical_size,
         };
-        crate::descriptor::to_canonical_json(&manifest)
+        crate::format::to_canonical_json(&manifest)
     }
 
-    /// Parse and structurally validate a variant manifest.
     pub fn parse(bytes: &[u8]) -> Result<Self, ArtifactError> {
-        let manifest: Self = crate::descriptor::from_bounded_json(
+        let manifest: Self = crate::format::from_bounded_json(
             bytes,
-            crate::media_type::MAX_VARIANT_MANIFEST_BYTES,
+            crate::format::MAX_VARIANT_MANIFEST_BYTES,
             "variant manifest",
         )?;
         manifest.validate()?;
         Ok(manifest)
     }
 
-    /// Reject a manifest whose identity fields disagree with each other.
     pub fn validate(&self) -> Result<(), ArtifactError> {
         crate::index::check_features(self.required_features, "variant manifest")?;
         if self.schema != VARIANT_MANIFEST_SCHEMA
@@ -633,7 +536,6 @@ impl VariantManifest {
         Ok(())
     }
 
-    /// Every content digest this variant requires, in ascending order.
     pub fn content_digests(&self) -> Vec<Sha256Digest> {
         let mut digests: Vec<Sha256Digest> = self
             .plan

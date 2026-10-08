@@ -1,5 +1,3 @@
-//! Project source-root resolution and file materialization.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
@@ -21,11 +19,6 @@ use zup_assets::IconCache;
 use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
 
-/// Materialize selected target sources with [`PortableSourceFilePolicy`].
-///
-/// A build that must refuse host-specific indirections - a Windows build, where
-/// a reparse point can redirect a prerequisite read without presenting as a
-/// symlink - calls [`materialize_with_policy`] with a policy that can see them.
 pub fn materialize<S>(
     manifest_path: &Path,
     manifest: &Manifest,
@@ -44,11 +37,6 @@ where
     )
 }
 
-/// Materialize selected target sources into one deterministic aggregate plan.
-///
-/// `manifest_path` must point at the project's `zup.toml`. Each selected pair
-/// is validated before any source is accessed, then materialized from its own
-/// target source root. Every prerequisite source is inspected through `policy`.
 pub fn materialize_with_policy<S>(
     manifest_path: &Path,
     manifest: &Manifest,
@@ -63,27 +51,12 @@ where
     materialize_with_assets(manifest_path, manifest, selected, &assets, policy, writes)
 }
 
-/// What a materialization may leave behind in the project.
-///
-/// Materializing an icon publishes it under `.zup` so the next build reuses the
-/// bytes instead of rasterizing again. That is a build's business. A command
-/// that only reports asks for [`Writes::None`] and gets the same answer without
-/// the files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writes {
-    /// Publish what was derived, for a later build to reuse.
     Publish,
-    /// Create and remove nothing.
     None,
 }
 
-/// Materialize selected target sources, carrying the preset assets a preset named.
-///
-/// The assets arrive already resolved: reading a project's files is this crate's
-/// job and a caller that resolved them elsewhere would have had to reimplement
-/// the same containment and link rules. They are keyed by target profile because
-/// the same asset can resolve to different bytes per target source root, and
-/// attaching one profile's answer to another's would be a silent substitution.
 pub fn materialize_with_assets<S>(
     manifest_path: &Path,
     manifest: &Manifest,
@@ -218,9 +191,6 @@ fn materialize_target(
         &installer,
         policy,
     )?;
-    // Linux hicolor artifacts ship as payload files under the user's data
-    // home; every other target consumes its icons differently (Windows embeds
-    // its ICO in the executable, macOS in its bundle), so only Linux packs.
     resolved.extend(crate::icons::pack_linux_icons(&icons, &installer)?);
     resolved.sort_by(|a, b| {
         TargetBuildPlan::sort_key(a)
@@ -250,13 +220,6 @@ fn materialize_target(
     })
 }
 
-/// Resolve one project-relative source to a verified file, size, and digest.
-///
-/// The rules here are the same ones a prerequisite and a payload file obey, and
-/// they live here because this is the crate that owns what a project may read:
-/// the path is relative with no `..`, it resolves inside the project, no
-/// directory on the way is a link, and the bytes are bounded before they are
-/// read rather than after.
 pub fn resolve_project_source(
     project_root: &Path,
     relative: &RelativePath,
@@ -329,22 +292,15 @@ fn embed_update_root(
     Ok(())
 }
 
-/// The trusted TUF root a build embeds, with the identity it was read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedUpdateRoot {
-    /// Where the root was read from, resolved against the project root.
     pub path: PathBuf,
     pub bytes: Vec<u8>,
     pub sha256: Sha256Digest,
 }
 
-/// The build-time limit for an embedded trusted update root.
 pub const MAX_UPDATE_ROOT_BYTES: usize = 1024 * 1024;
 
-/// Read `[updates].root` from the project, or `None` when updates are unconfigured.
-///
-/// Shared with readiness checks so `zup build` and preflight reports agree on
-/// what counts as a usable trusted root.
 pub fn resolve_update_root(
     project_root: &Path,
     manifest: &Manifest,
@@ -447,7 +403,6 @@ fn resolve_prerequisites(
     Ok((resolved, total))
 }
 
-/// The project directory that owns a manifest path.
 pub fn project_root(manifest_path: &Path) -> PathBuf {
     manifest_path
         .parent()
@@ -456,7 +411,6 @@ pub fn project_root(manifest_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Resolve a target's declared source directory inside the project.
 pub fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<PathBuf, BuildError> {
     if directory.is_absolute() {
         return Err(BuildError::SourceEscapesProject {
@@ -496,11 +450,6 @@ pub fn resolve_source_root(project_root: &Path, directory: &Path) -> Result<Path
     Ok(normalized)
 }
 
-/// Refuse a prerequisite source, or any directory above it, that `policy`
-/// reports as a link.
-///
-/// An ancestor that cannot be inspected is an `Io` error rather than a pass: a
-/// link behind an unreadable directory is still a link.
 fn reject_linked_source(
     policy: &dyn SourceFilePolicy,
     path: &Path,
@@ -628,7 +577,6 @@ fn discover(
         let source_relative = match RelativePath::from_path(relative_os) {
             Ok(path) => path,
             Err(err) => {
-                // Root entry itself has empty relative path - skip.
                 if relative_os.as_os_str().is_empty() {
                     continue;
                 }
@@ -649,7 +597,6 @@ fn discover(
         }
 
         if file_type.is_dir() {
-            // Directories are not payload entries; their children are walked.
             continue;
         }
 
@@ -739,8 +686,6 @@ fn detect_collisions(files: &[ResolvedFile]) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// Build a destination template from a base template and a suffix path.
-/// Exposed for tests and future planners.
 pub fn materialize_destination(base: &Template, suffix: &RelativePath) -> Template {
     base.join_relative(suffix)
 }

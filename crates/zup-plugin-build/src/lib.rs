@@ -1,10 +1,3 @@
-//! Building a Zup plugin: turning a core module into a component, and a
-//! component into the ahead-of-time artifact an installer carries.
-//!
-//! Both are Zup's steps rather than a plugin author's. The first because a
-//! componentiser has to match the runtime that will load the result; the second
-//! because only the build machine knows which engine will execute it.
-
 #![forbid(unsafe_code)]
 
 mod component;

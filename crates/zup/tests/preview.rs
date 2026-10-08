@@ -11,7 +11,7 @@
 //! then checks that the preview says it too.
 //!
 //! The window is `zup-preset-test`: a real preset, built against the public
-//! `zup-preset-sdk` and nothing else, staged by the same run as every other real
+//! `zup-sdk` and nothing else, staged by the same run as every other real
 //! binary. It is the right thing to preview with because it behaves like a
 //! third-party preset rather than like a test: it reads the settings the
 //! application configured, reports what it received to a path those settings

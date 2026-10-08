@@ -1,117 +1,40 @@
-//! Launching the privileged worker through `pkexec`.
-//!
-//! The production architecture uses `pkexec` directly: no sudo wrapper crate,
-//! no setuid binary, no file capabilities, no long-running root daemon. An
-//! unprivileged caller that needs a machine mutation runs `pkexec` on the
-//! installer binary itself in a hidden worker mode; polkit authenticates the
-//! administrator, and Zup never requests, reads, proxies, or stores any
-//! password.
-//!
-//! # Resolution
-//!
-//! The system `pkexec` is resolved deliberately from absolute candidate
-//! paths, never from an attacker-controlled `PATH`. The resolved executable
-//! must be a regular system-owned file that the invoking user cannot write.
-//!
-//! # Testability
-//!
-//! Launching is behind [`PkexecLauncher`]: production uses
-//! [`SystemPkexec`], tests inject a fake. The resolution itself is never
-//! injectable through environment variables - an untrusted runtime request
-//! must not be able to redirect elevation.
-
+use crate::error::IpcError;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-/// Absolute locations a system `pkexec` lives in, in preference order.
 const PKEXEC_CANDIDATES: &[&str] = &["/usr/bin/pkexec", "/bin/pkexec"];
 
-/// Why elevation could not run the worker.
-#[derive(Debug, thiserror::Error)]
-pub enum PkexecError {
-    /// No usable system `pkexec` exists.
-    #[error("pkexec is unavailable: {0}")]
-    Unavailable(String),
-
-    /// The administrator authentication did not happen: the user cancelled.
-    #[error("administrator authentication was cancelled")]
-    Cancelled,
-
-    /// The administrator authentication happened and refused.
-    #[error("administrator authorization failed: {0}")]
-    AuthorizationFailed(String),
-
-    /// The worker ran but reported failure after authorization.
-    #[error("privileged worker failed: {0}")]
-    WorkerFailed(String),
-
-    /// The worker channel broke after authorization.
-    #[error("privileged worker protocol failed: {0}")]
-    Protocol(String),
-
-    /// `pkexec` itself could not be started.
-    #[error("could not start pkexec at `{path}`: {source}")]
-    Spawn {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// How to start the worker process. Production resolves the system `pkexec`;
-/// tests inject a fake. The resolution itself is never injectable through
-/// environment variables - an untrusted runtime request must not be able
-/// to redirect elevation.
 pub trait PkexecLauncher {
-    /// The running worker child.
     type Child: WorkerChild;
 
-    /// Start `executable` with `args` through the elevation mechanism.
-    ///
-    /// The child keeps its pipes: the client's handshake runs while the
-    /// worker lives, and [`WorkerChild::wait`] collects the ending after
-    /// the protocol completes.
-    fn spawn(&self, executable: &Path, args: &[String]) -> Result<Self::Child, PkexecError>;
+    fn spawn(&self, executable: &Path, args: &[String]) -> Result<Self::Child, IpcError>;
 }
 
-/// A running worker child: a pid to verify, and an ending to collect.
 pub trait WorkerChild {
-    /// The child's process id, for peer verification.
     fn pid(&self) -> u32;
 
-    /// Whether the child already exited, and its outcome if so.
-    ///
-    /// The client watches this while waiting for the worker to connect: an
-    /// authorization that fails fast (a cancelled prompt, a missing
-    /// mechanism) must surface at once, not after the connection timeout.
-    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError>;
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, IpcError>;
 
-    /// Wait for the ending and collect the outcome.
-    fn wait(self) -> Result<LaunchOutcome, PkexecError>;
+    fn wait(self) -> Result<LaunchOutcome, IpcError>;
 }
 
-/// What an elevation attempt produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchOutcome {
-    /// The worker process exit status code, if it ran.
     pub code: Option<i32>,
-    /// Anything the mechanism wrote to stderr, truncated.
+
     pub stderr: String,
 }
 
-/// The production launcher: the resolved system `pkexec`.
 #[derive(Debug, Clone)]
 pub struct SystemPkexec {
     path: PathBuf,
 }
 
 impl SystemPkexec {
-    /// Resolve the system `pkexec`, strictly.
-    pub fn resolve() -> Result<Self, PkexecError> {
+    pub fn resolve() -> Result<Self, IpcError> {
         resolve_pkexec().map(|path| Self { path })
     }
 
-    /// The resolved executable, for diagnostics.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -120,12 +43,7 @@ impl SystemPkexec {
 impl PkexecLauncher for SystemPkexec {
     type Child = SystemWorkerChild;
 
-    fn spawn(&self, executable: &Path, args: &[String]) -> Result<SystemWorkerChild, PkexecError> {
-        // Piped, not inherited: the protocol carries progress and results,
-        // and stderr is captured for the typed result mapping. Polkit
-        // authenticates through its own agent (graphical, or the internal
-        // text agent on this terminal) - never through these pipes - so Zup
-        // still never sees a password.
+    fn spawn(&self, executable: &Path, args: &[String]) -> Result<SystemWorkerChild, IpcError> {
         std::process::Command::new(&self.path)
             .arg(executable)
             .args(args)
@@ -137,17 +55,16 @@ impl PkexecLauncher for SystemPkexec {
                 child,
                 collected: None,
             })
-            .map_err(|source| PkexecError::Spawn {
+            .map_err(|source| IpcError::Spawn {
                 path: self.path.display().to_string(),
                 source,
             })
     }
 }
 
-/// The production worker child.
 pub struct SystemWorkerChild {
     child: std::process::Child,
-    /// An ending already collected by [`WorkerChild::try_wait`].
+
     collected: Option<LaunchOutcome>,
 }
 
@@ -156,18 +73,15 @@ impl WorkerChild for SystemWorkerChild {
         self.child.id()
     }
 
-    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, IpcError> {
         if let Some(outcome) = &self.collected {
             return Ok(Some(outcome.clone()));
         }
         match self.child.try_wait().map_err(|source| {
-            PkexecError::WorkerFailed(format!("waiting for the worker: {source}"))
+            IpcError::PkexecWorkerFailed(format!("waiting for the worker: {source}"))
         })? {
             None => Ok(None),
             Some(status) => {
-                // Exited already: collect the pipes without blocking. The
-                // worker speaks the protocol over the socket, never bulk
-                // output, so bounded reads cannot deadlock it.
                 use std::io::Read as _;
                 let mut stderr = Vec::new();
                 if let Some(pipe) = self.child.stderr.as_mut() {
@@ -183,12 +97,12 @@ impl WorkerChild for SystemWorkerChild {
         }
     }
 
-    fn wait(mut self) -> Result<LaunchOutcome, PkexecError> {
+    fn wait(mut self) -> Result<LaunchOutcome, IpcError> {
         if let Some(outcome) = self.collected.take() {
             return Ok(outcome);
         }
         let output = self.child.wait_with_output().map_err(|source| {
-            PkexecError::WorkerFailed(format!("waiting for the worker: {source}"))
+            IpcError::PkexecWorkerFailed(format!("waiting for the worker: {source}"))
         })?;
         Ok(LaunchOutcome {
             code: output.status.code(),
@@ -200,16 +114,11 @@ impl WorkerChild for SystemWorkerChild {
     }
 }
 
-/// A fake launcher for unit tests: canned pid and outcome, no process.
-///
-/// Test-only dependency injection for result mapping: production resolution
-/// stays strict and never consults the environment.
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct FakePkexec {
-    /// The pid the fake child reports.
     pub pid: u32,
-    /// The outcome the fake child ends with.
+
     pub outcome: LaunchOutcome,
 }
 
@@ -217,7 +126,7 @@ pub struct FakePkexec {
 impl PkexecLauncher for FakePkexec {
     type Child = FakeWorkerChild;
 
-    fn spawn(&self, _executable: &Path, _args: &[String]) -> Result<FakeWorkerChild, PkexecError> {
+    fn spawn(&self, _executable: &Path, _args: &[String]) -> Result<FakeWorkerChild, IpcError> {
         Ok(FakeWorkerChild {
             pid: self.pid,
             outcome: self.outcome.clone(),
@@ -225,7 +134,6 @@ impl PkexecLauncher for FakePkexec {
     }
 }
 
-/// A fake worker child for unit tests.
 #[cfg(test)]
 pub struct FakeWorkerChild {
     pid: u32,
@@ -238,50 +146,37 @@ impl WorkerChild for FakeWorkerChild {
         self.pid
     }
 
-    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, PkexecError> {
+    fn try_wait(&mut self) -> Result<Option<LaunchOutcome>, IpcError> {
         Ok(None)
     }
 
-    fn wait(self) -> Result<LaunchOutcome, PkexecError> {
+    fn wait(self) -> Result<LaunchOutcome, IpcError> {
         Ok(self.outcome)
     }
 }
 
-/// Map a launch outcome onto the typed elevation result.
-///
-/// `pkexec` exit codes: `0` means the worker ran (its own report decides);
-/// `126` means authorization was not granted - a dismissal when polkit says
-/// so, a denial otherwise; `127` means something on the way there is missing
-/// or broken. Anything else is the worker failing after authorization.
-pub fn map_launch(outcome: &LaunchOutcome) -> Result<(), PkexecError> {
+pub fn map_launch(outcome: &LaunchOutcome) -> Result<(), IpcError> {
     match outcome.code {
         Some(0) => Ok(()),
         Some(126) => {
             if outcome.stderr.to_lowercase().contains("dismissed") {
-                Err(PkexecError::Cancelled)
+                Err(IpcError::PkexecCancelled)
             } else {
-                Err(PkexecError::AuthorizationFailed(outcome.stderr.clone()))
+                Err(IpcError::AuthorizationFailed(outcome.stderr.clone()))
             }
         }
-        Some(127) => Err(PkexecError::Unavailable(outcome.stderr.clone())),
-        Some(code) => Err(PkexecError::WorkerFailed(format!(
+        Some(127) => Err(IpcError::PkexecUnavailable(outcome.stderr.clone())),
+        Some(code) => Err(IpcError::PkexecWorkerFailed(format!(
             "exit {code}: {}",
             outcome.stderr.trim()
         ))),
-        None => Err(PkexecError::WorkerFailed(
+        None => Err(IpcError::PkexecWorkerFailed(
             "terminated by a signal".to_owned(),
         )),
     }
 }
 
-/// Resolve a usable system `pkexec` from the absolute candidates.
-///
-/// Each candidate is validated: it must exist as a regular executable file
-/// owned by root and writable by nobody but root. A candidate that fails
-/// validation does not poison the rest - `/bin` is commonly a symlink to
-/// `/usr/bin` - but when nothing validates, elevation is unavailable rather
-/// than attempted through a binary nobody checked.
-fn resolve_pkexec() -> Result<PathBuf, PkexecError> {
+fn resolve_pkexec() -> Result<PathBuf, IpcError> {
     for candidate in PKEXEC_CANDIDATES {
         let path = Path::new(candidate);
         let metadata = match std::fs::metadata(path) {
@@ -302,7 +197,7 @@ fn resolve_pkexec() -> Result<PathBuf, PkexecError> {
         }
         return Ok(path.to_path_buf());
     }
-    Err(PkexecError::Unavailable(
+    Err(IpcError::PkexecUnavailable(
         "no system-owned pkexec executable found".to_owned(),
     ))
 }
@@ -327,7 +222,10 @@ mod tests {
             stderr: "Error executing command as another user: User dismissed authentication dialog"
                 .into(),
         };
-        assert!(matches!(map_launch(&outcome), Err(PkexecError::Cancelled)));
+        assert!(matches!(
+            map_launch(&outcome),
+            Err(IpcError::PkexecCancelled)
+        ));
     }
 
     #[test]
@@ -338,7 +236,7 @@ mod tests {
         };
         assert!(matches!(
             map_launch(&outcome),
-            Err(PkexecError::AuthorizationFailed(_))
+            Err(IpcError::AuthorizationFailed(_))
         ));
     }
 
@@ -350,7 +248,7 @@ mod tests {
         };
         assert!(matches!(
             map_launch(&outcome),
-            Err(PkexecError::Unavailable(_))
+            Err(IpcError::PkexecUnavailable(_))
         ));
     }
 
@@ -372,15 +270,12 @@ mod tests {
         };
         assert!(matches!(
             map_launch(&outcome),
-            Err(PkexecError::WorkerFailed(_))
+            Err(IpcError::PkexecWorkerFailed(_))
         ));
     }
 
     #[test]
     fn a_fake_launcher_reports_its_pid_and_outcome() {
-        // The injection seam itself: a test launcher names its child and its
-        // ending without a process, so result mapping is proven without
-        // polkit. Production resolution never consults this path.
         let launcher = FakePkexec {
             pid: 4242,
             outcome: LaunchOutcome {
@@ -409,14 +304,12 @@ mod tests {
             .expect("a fake wait");
         assert!(matches!(
             map_launch(&outcome),
-            Err(PkexecError::AuthorizationFailed(_))
+            Err(IpcError::AuthorizationFailed(_))
         ));
     }
 
     #[test]
     fn resolution_names_an_absolute_candidate_or_is_unavailable() {
-        // The candidates are absolute system paths; when none validates, the
-        // answer is unavailable, never a PATH search.
         match resolve_pkexec() {
             Ok(path) => {
                 assert!(path.is_absolute(), "{}", path.display());

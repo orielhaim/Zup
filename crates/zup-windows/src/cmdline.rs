@@ -1,11 +1,8 @@
-//! Windows command-line quoting, parsing, and semantic comparison.
-
 use std::path::Path;
 
 use zup_core::TargetTriple;
 use zup_platform::{CommandSpec, TargetPath};
 
-/// Format `executable + arguments` as a Windows process command line.
 pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
     let mut line = String::new();
     line.push_str(&quote_arg(&executable.to_string_lossy()));
@@ -16,17 +13,6 @@ pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
     line
 }
 
-/// Quote a single argument according to Windows command-line conventions.
-///
-/// The set of characters that force quoting is *every* character
-/// `split_command_line` would treat as a separator, which is `char::is_whitespace`
-/// plus the quote itself. Quoting more than the platform strictly requires is
-/// always safe - `CommandLineToArgvW` accepts quotes anywhere - while quoting
-/// less is not, and a hardcoded list of "the whitespace characters" is a list
-/// somebody enumerated rather than one the reader agreed to. A carriage return, a
-/// form feed, or a non-breaking space is whitespace to `split_command_line` and
-/// was not to an earlier version of this function, so an argument containing one
-/// formatted unquoted and parsed back as two.
 pub fn quote_arg(arg: &str) -> String {
     if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"') {
         return arg.to_owned();
@@ -55,7 +41,6 @@ pub fn quote_arg(arg: &str) -> String {
     out
 }
 
-/// Parse a Windows command line into executable and arguments.
 pub fn parse_command_line(command_line: &str) -> (Option<String>, Vec<String>) {
     let mut args = split_command_line(command_line);
     if args.is_empty() {
@@ -65,7 +50,6 @@ pub fn parse_command_line(command_line: &str) -> (Option<String>, Vec<String>) {
     (Some(exe), args)
 }
 
-/// Split a Windows command line into argv-style tokens.
 pub fn split_command_line(command_line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut chars = command_line.chars().peekable();
@@ -117,12 +101,10 @@ pub fn split_command_line(command_line: &str) -> Vec<String> {
     tokens
 }
 
-/// Semantic command equality: path-insensitive executable + exact arguments.
 pub fn commands_match(a: &CommandSpec, b: &CommandSpec) -> bool {
     a.executable.equivalent(&b.executable) && a.arguments == b.arguments
 }
 
-/// Build a `CommandSpec` from a raw command line the host already stores.
 pub fn command_spec_from_command_line(
     command_line: &str,
     target: &TargetTriple,
@@ -139,7 +121,6 @@ pub fn command_spec_from_command_line(
     })
 }
 
-/// Build a `CommandSpec` from desired pieces.
 pub fn command_spec(executable: &TargetPath, arguments: &[String]) -> CommandSpec {
     CommandSpec {
         executable: executable.clone(),
@@ -151,9 +132,6 @@ pub fn command_spec(executable: &TargetPath, arguments: &[String]) -> CommandSpe
 mod tests {
     use super::*;
 
-    // `quote_arg` and `split_command_line` are exercised over a generated
-    // character corpus in `tests/cmdline_property.rs`. What is left here is the
-    // one rule that corpus cannot state: how two command specs are compared.
     #[test]
     fn command_identity_uses_target_path_identity() {
         let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();

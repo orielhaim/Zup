@@ -1,10 +1,3 @@
-//! `zup init`: a project a person can read.
-//!
-//! The generated manifest is the first thing a new user reads about this tool, so
-//! it is short, commented by example rather than by prose, and it names one
-//! profile. Everything a real project needs beyond that is a decision the author
-//! should make rather than accept.
-
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
@@ -77,7 +70,6 @@ pub fn run(args: InitCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// The answers `zup init` works from, whether it asked or was told.
 struct Answers {
     name: String,
     app_id: String,
@@ -88,16 +80,6 @@ struct Answers {
     frontend: zup_core::Frontend,
 }
 
-/// Ask for whatever was not supplied, then require the rest.
-///
-/// A non-interactive run is a script, and a script that did not say what the
-/// application is called cannot be answered for it. Guessing `app` would produce
-/// a project whose identity nobody chose.
-///
-/// The defaults that depend on the machine are the build host's, so a project
-/// created on Linux builds on Linux: the default target comes from the same
-/// function the build reads, the default main executable carries no Windows
-/// suffix there, and the default frontend is one the host's backend ships.
 fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Result<Answers> {
     let directory_name = manifest_path
         .parent()
@@ -177,15 +159,10 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
     })
 }
 
-/// The default main executable on this build host: a native executable name,
-/// which carries a suffix on Windows and none elsewhere.
 fn default_main() -> &'static str {
     if cfg!(windows) { "app.exe" } else { "app" }
 }
 
-/// The default installer frontend on this build host: the Linux backend ships
-/// no GUI runtime, so a project created there starts with the console
-/// installer its backend can build.
 fn default_frontend() -> zup_core::Frontend {
     if cfg!(target_os = "linux") {
         zup_core::Frontend::Console

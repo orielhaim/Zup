@@ -1,33 +1,3 @@
-//! The native runtime's side of a handoff.
-//!
-//! A thin bootstrapper resolves a release, verifies a native runtime, and starts
-//! it. Everything it says is a *claim*, and this module is where the claim is
-//! checked. The runtime is about to write files, registry entries, and services,
-//! so it re-derives what it is installing from authenticated descriptors rather
-//! than from anything the previous process said.
-//!
-//! # The one check that binds everything
-//!
-//! ```text
-//! handoff.runtime == sha256(this executable)
-//! ```
-//!
-//! That single equality is what makes the rest of the handoff meaningful. A
-//! release authenticates the runtime digest for each of its variants, and the
-//! release's own fingerprint was verified before a byte was downloaded. So a
-//! bootstrapper that substitutes a release must produce a release that names
-//! *this* image's digest - which requires a SHA-256 preimage. One that
-//! substitutes a payload must produce blobs that hash to the digests in the
-//! authenticated catalog. One that substitutes a target or a variant is caught
-//! by comparing the release against the target and frontend compiled into this
-//! image's own plan.
-//!
-//! What the bootstrapper *does* supply is a location: where the verified cache
-//! is. A hostile location is a cache full of objects that do not hash to the
-//! authenticated digests, which is a failure and not a compromise. The location
-//! is therefore the one untrusted input, and it is treated as a location and
-//! nothing more.
-
 use std::path::{Path, PathBuf};
 
 use zup_acquire::{
@@ -40,25 +10,22 @@ use zup_core::{Frontend, Sha256Digest};
 use crate::bundle_packager::EmbeddedBundle;
 use crate::durable::write_durable;
 
-/// A verified view of one authenticated release, from inside a native runtime.
 pub struct AcquiredRelease {
-    /// The authenticated release graph.
     pub release: ReleaseDescriptor,
-    /// The variant this machine installs.
+
     pub variant: String,
-    /// The variant descriptor, exactly as the release named it.
+
     pub manifest: Vec<u8>,
-    /// The content catalog.
+
     pub catalog: ContentCatalog,
-    /// The verified cache the content lives in.
+
     pub cache: ContentCache,
-    /// Where the handoff document was read from.
+
     pub handoff_path: PathBuf,
-    /// The handoff's own fingerprint, which the caller recorded.
+
     pub handoff_digest: Sha256Digest,
 }
 
-/// Why a handoff could not be accepted.
 #[derive(Debug, thiserror::Error)]
 pub enum HandoffRejection {
     #[error("the handoff document could not be read: {0}")]
@@ -110,27 +77,16 @@ pub enum HandoffRejection {
 }
 
 impl HandoffRejection {
-    /// Whether this refusal happened before any machine change.
-    ///
-    /// Always yes. Every one of these is a check performed before the
-    /// transaction engine is even asked for a plan.
     pub const fn left_machine_unchanged(&self) -> bool {
         true
     }
 }
 
-/// This executable's own digest, as a release would name it.
 pub fn own_digest(executable: &Path) -> Result<Sha256Digest, std::io::Error> {
     let (_, digest) = zup_core::hash_reader(std::fs::File::open(executable)?)?;
     Ok(digest)
 }
 
-/// Read a handoff and check that this process is the one it names.
-///
-/// `expected` is the digest the caller was told to expect, which the caller
-/// learned from the bootstrapper - so it is a *consistency* check between two
-/// processes, not the authority. The authority is `handoff.runtime` matched
-/// against the authenticated release, which this function then does.
 pub fn accept_handoff(
     handoff_path: &Path,
     expected: Option<Sha256Digest>,
@@ -148,7 +104,6 @@ pub fn accept_handoff(
     Ok(handoff)
 }
 
-/// Everything a thin runtime has to prove before it touches the machine.
 pub struct VerifiedHandoff {
     pub handoff: RuntimeHandoff,
     pub release: ReleaseDescriptor,
@@ -157,11 +112,6 @@ pub struct VerifiedHandoff {
 }
 
 impl std::fmt::Debug for VerifiedHandoff {
-    /// The manifest is summarised by its digest rather than printed.
-    ///
-    /// A derived `Debug` would dump every byte of every installed file's plan,
-    /// which is megabytes of hex on a panic - and the bytes are already proved by
-    /// the digest, so printing them adds nothing a reader could use.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VerifiedHandoff")
@@ -173,21 +123,11 @@ impl std::fmt::Debug for VerifiedHandoff {
     }
 }
 
-/// Verify a handoff end to end against this executable and the cache.
-///
-/// The order is the point. Identity first, then the graph, then the claims the
-/// graph makes about the variant, then the claims this executable makes about
-/// itself. Nothing here can be satisfied by naming a different location.
 pub fn verify(
     executable: &Path,
     cache: &ContentCache,
     handoff: &RuntimeHandoff,
 ) -> Result<VerifiedHandoff, HandoffRejection> {
-    // The document is addressed by the digest of its own bytes, and its
-    // fingerprint is recomputed from the body. Those are different numbers - a
-    // release document names its own fingerprint as a field, so it cannot also
-    // be the hash of its own encoding - and checking both is what makes the
-    // cache key a location rather than an authority.
     let release = read_document(cache, handoff.document, "release descriptor")?;
     let descriptor = ReleaseDescriptor::parse(&release)
         .map_err(|error| HandoffRejection::Unreadable(error.to_string()))?;
@@ -228,8 +168,6 @@ pub fn verify(
         });
     }
 
-    // The last and strongest check: the release names this image, and this is
-    // this image.
     let found = own_digest(executable)?;
     if found != runtime.digest {
         return Err(HandoffRejection::NotTheNamedRuntime {
@@ -238,11 +176,6 @@ pub fn verify(
         });
     }
 
-    // The claims the graph makes about this variant have to be the claims the
-    // handoff repeats. A bootstrapper that substituted an arm64 target into an
-    // x64 handoff would otherwise get a verified document and a plan for the
-    // wrong machine, and the digest checks above would not notice because the
-    // runtime image really is the one the release names.
     if descriptor.app_id != handoff.app_id {
         return Err(HandoffRejection::ApplicationMismatch {
             handoff: handoff.app_id.to_string(),
@@ -261,9 +194,7 @@ pub fn verify(
             executable: variant.frontend.clone(),
         });
     }
-    // And the machine's own opinion, which no handoff can overrule: this image is
-    // built for the triple it is built for, and a claim otherwise is a lie about
-    // the only party that cannot be lied to.
+
     let built_for = zup_binary::Executable::read(executable)
         .map_err(|error| HandoffRejection::Unreadable(format!("this executable: {error}")))?;
     built_for
@@ -291,9 +222,6 @@ fn read_document(
     digest: Sha256Digest,
     what: &str,
 ) -> Result<Vec<u8>, HandoffRejection> {
-    // A document is stored under its own digest like anything else, and it is
-    // re-hashed in full on the way out, because a document is what every other
-    // decision is made from.
     let mut path = cache.root().to_path_buf();
     for segment in zup_acquire::blob_path(&digest).to_string().split('/') {
         path.push(segment);
@@ -315,19 +243,15 @@ fn read_document(
         .map_err(|error| HandoffRejection::Unreadable(error.to_string()))
 }
 
-/// The plan this executable installs, checked against the handoff.
 pub struct AcquiredBundle {
-    /// The plan-only package embedded in this image.
     pub package: Package,
-    /// The plan the release's variant descriptor names.
+
     pub release: ReleaseDescriptor,
     pub variant: String,
     pub catalog: ContentCatalog,
 }
 
 impl std::fmt::Debug for AcquiredBundle {
-    /// The package is summarised by its size rather than printed, for the same
-    /// reason [`VerifiedHandoff`]'s manifest is: the proof is the digest.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AcquiredBundle")
@@ -340,12 +264,6 @@ impl std::fmt::Debug for AcquiredBundle {
 }
 
 impl AcquiredBundle {
-    /// Open this executable's package and check it against a verified handoff.
-    ///
-    /// The package is the plan compiled into the runtime; the release is the
-    /// plan the graph authenticated. They have to be the same plan, which is
-    /// what proves the bootstrapper did not point this image at a different
-    /// release's content.
     pub fn open(
         executable: &Path,
         _cache: &ContentCache,
@@ -367,9 +285,7 @@ impl AcquiredBundle {
                 release: verified.release.version.clone(),
                 variant: verified.handoff.variant.clone(),
             })?;
-        // The plan compiled into this image and the plan the graph authenticated
-        // have to be the same plan. A bootstrapper that pointed this image at a
-        // different release's content is caught here, not at install time.
+
         if manifest.plan.installer.app.id != verified.release.app_id {
             return Err(HandoffRejection::ApplicationMismatch {
                 handoff: verified.release.app_id.to_string(),
@@ -402,17 +318,14 @@ impl AcquiredBundle {
         })
     }
 
-    /// The target this image installs for.
     pub fn target(&self) -> &zup_core::TargetTriple {
         &self.package.plan().installer.target
     }
 
-    /// The frontend this image presents.
     pub fn frontend(&self) -> zup_core::Frontend {
         self.package.plan().installer.frontend
     }
 
-    /// A content source over the verified cache.
     pub fn payload_source(
         &self,
         cache: ContentCache,
@@ -424,7 +337,6 @@ impl AcquiredBundle {
         ))
     }
 
-    /// Read one prerequisite package out of the verified cache.
     pub fn prerequisite_bytes(
         &self,
         source: &AcquiredPayloadSource,
@@ -433,7 +345,6 @@ impl AcquiredBundle {
         source.read_blob(digest)
     }
 
-    /// Read one plugin's ahead-of-time image out of the verified cache.
     pub fn plugin_aot(
         &self,
         source: &AcquiredPayloadSource,
@@ -443,16 +354,10 @@ impl AcquiredBundle {
     }
 }
 
-/// Open the verified cache a handoff names.
 pub fn open_cache(root: &Path, policy: CachePolicy) -> Result<ContentCache, HandoffRejection> {
     Ok(ContentCache::open(root, policy)?)
 }
 
-/// Write a handoff where the runtime can find it.
-///
-/// The document is written through the durable path, so a process that starts
-/// immediately after the write cannot observe a partial one. It is a claim
-/// rather than an authority, but a torn claim is still a confusing failure.
 pub fn write_handoff(
     path: &Path,
     handoff: &RuntimeHandoff,
@@ -467,8 +372,6 @@ pub fn write_handoff(
     Ok(handoff.digest())
 }
 
-/// The frontend this image presents, which the bootstrapper matches against the
-/// variant it selected.
 pub fn frontend(executable: &Path) -> Result<Option<Frontend>, HandoffRejection> {
     Executable::read(executable)
         .map(|executable| executable.program())

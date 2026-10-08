@@ -1,26 +1,3 @@
-//! Which window an application presents, and what that window is given.
-//!
-//! `zup-artifact` owns the `.zupui` *format*. This crate owns the decision an
-//! application makes with one: which package it presents, whether this machine
-//! can present it, what settings it is given, and which files of the project
-//! those settings name.
-//!
-//! It is a build-plane crate, and the whole of it exists because that answer is
-//! needed in two places that must not disagree. A build composes an installer
-//! around the window and has to be right about which bytes run. A developer
-//! previewing their application has to see what they will actually ship, and a
-//! preview that resolved the preset its own way would be a preview of something
-//! nobody is going to install. So both ask this one function, and neither has a
-//! second implementation to drift.
-//!
-//! It is deliberately not part of the developer CLI. A CLI is a place commands
-//! are written down; a rule that a second command needs is not a rule the CLI
-//! should own, because the second command cannot reach it without copying it.
-//!
-//! Nothing here runs a compiler, a preset, or Cargo. The package is proved from
-//! its own bytes, which is the entire reason an application consumes a package
-//! rather than a project.
-
 #![deny(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -33,23 +10,14 @@ use zup_core::{
 };
 use zup_preset_protocol::{Capabilities, HostOffers};
 
-/// The largest one application-provided asset may be.
-///
-/// A logo, an icon, or a font. This is a statement about what a preset is given
-/// to draw with, not about what an application may ship: payload files have no
-/// such bound, and inventing one here would only move the question.
 pub const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 
-/// A preset package is not self-contained if its schema reaches outside itself.
 const SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
-/// How a schema marks a value as a file Zup manages.
 const ASSET_MARKER: &str = "x-zup-asset";
 
-/// The root a setting is reported under.
 const SETTINGS_ROOT: &str = "ui.settings";
 
-/// Why an application cannot present the window it configured.
 #[derive(Debug, thiserror::Error)]
 pub enum PresetProblem {
     #[error("`{path}` is not a readable preset package: {reason}")]
@@ -66,60 +34,25 @@ pub enum PresetProblem {
         setting: String,
         reason: String,
     },
-    /// No package could be obtained at all, so nothing could be presented.
-    ///
-    /// One variant rather than one per source, because the sources are the
-    /// caller's business: where the preset zup ships lives on this machine, and
-    /// this says what a caller has to arrange.
     #[error("{reason}")]
     Unavailable { reason: String },
 }
 
-/// One thing wrong with the application's `[ui.settings]`, named the way the
-/// author wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingProblem {
-    /// Where in `zup.toml` the value is, so a diagnostic points at something the
-    /// author can find rather than at a JSON pointer into somebody else's schema.
     pub path: String,
     pub message: String,
 }
 
-/// One `.zupui` chosen for one target, and everything derived from it.
-///
-/// The settings schema travels with the answer because a caller that shows the
-/// window has to be able to re-check a document against it. Reading the schema
-/// back out of the package would be a second read of the same verified bytes for
-/// an answer this value already holds.
 #[derive(Debug, Clone)]
 pub struct Resolved {
-    /// The package the answer came from, project-relative paths already resolved.
     pub package: PathBuf,
-    /// The runtime model the installer carries.
     pub runtime: PresetRuntime,
-    /// The resolved assets, ready to be materialized wherever a caller keeps them.
     pub assets: Vec<ResolvedAsset>,
-    /// The target's native preset executable, as it will be launched.
     pub executable: Vec<u8>,
-    /// The schema the settings were accepted against.
     pub settings_schema: serde_json::Value,
 }
 
-/// Which `.zupui` a target presents, and what that package implies.
-///
-/// The single question, and the single flow: open, verify, select the target,
-/// check the protocol and capabilities, validate the settings against the
-/// schema the package carries, resolve the assets the settings named - in that
-/// order, so a corrupt package is refused before anything is read out of it.
-/// This is the flow `zup preset inspect` already walks, because a consumer that
-/// parsed the format differently from a publisher's inspector would be two
-/// implementations of one format.
-///
-/// `shipped` is asked only when the application named no package, because
-/// finding the preset zup ships costs a directory walk and an application that
-/// chose its own window should not pay for the one it did not choose. An
-/// application that names none is not misconfigured: it gets the preset Zup
-/// ships, and that is the whole of its preset selection semantics.
 pub fn resolve(
     ui: &Ui,
     project_root: &Path,
@@ -145,14 +78,6 @@ pub fn resolve(
     })
 }
 
-/// The package a target presents, and where it came from.
-///
-/// A configured path is resolved against the project, because `zup.toml` is read
-/// from the project and a path in it means the same thing from any working
-/// directory. An application that named none gets the preset Zup ships, which
-/// arrives through the toolchain like every other binary a build composes from.
-/// After that choice the two are the same thing: a verified package, one target
-/// binary selected from it, one composition path, one host.
 pub fn package_for(
     ui: &Ui,
     project_root: &Path,
@@ -178,39 +103,25 @@ pub fn package_for(
     Ok(path)
 }
 
-/// One `.zupui` package chosen for one target, and everything a build needs from
-/// it.
 #[derive(Debug)]
 pub struct Selected {
     pub name: String,
     pub version: semver::Version,
     pub protocol: u32,
     pub required_capabilities: Capabilities,
-    /// The application's settings, already accepted by the package's own schema.
     pub settings: serde_json::Value,
-    /// The schema they were accepted against.
     pub settings_schema: serde_json::Value,
-    /// The settings names the package's schema marks as Zup-managed assets.
     pub asset_settings: Vec<String>,
-    /// The target's native preset executable, as it will be launched.
     pub executable: Vec<u8>,
 }
 
-/// What one `.zupui` selection produced for a target plan.
 #[derive(Debug)]
 pub struct Prepared {
-    /// The runtime model the installer carries.
     pub runtime: PresetRuntime,
-    /// The resolved assets, to hand to materialization.
     pub assets: Vec<ResolvedAsset>,
-    /// The preset executable's bytes.
     pub executable: Vec<u8>,
 }
 
-/// Read and verify a package, and select one target's binary from it.
-///
-/// The same reader `zup preset inspect` uses, and the same full verification: a
-/// package is proven before a single byte of it is used for anything.
 pub fn open(path: &Path) -> Result<(PresetPackageView, String), PresetProblem> {
     let bytes = std::fs::read(path).map_err(|error| PresetProblem::Unreadable {
         path: path.display().to_string(),
@@ -228,13 +139,6 @@ pub fn open(path: &Path) -> Result<(PresetPackageView, String), PresetProblem> {
     Ok((view, name))
 }
 
-/// Choose a preset for one target and prove this host can present it.
-///
-/// `installer` is the compiled IR for this target, used for one thing: what
-/// capabilities this application could ever provide. Whether *this* launch is a
-/// fresh install or a maintenance session is not known at build time, so the
-/// build asks the broader question and the host asks the exact one before it
-/// launches anything.
 pub fn select(
     package: &Path,
     installer: &Installer,
@@ -295,8 +199,6 @@ pub fn select(
     })
 }
 
-/// Resolve the assets a selected preset's settings named, and the runtime model
-/// that describes the selection to the installer.
 pub fn prepare(
     project_root: &Path,
     selected: &Selected,
@@ -337,9 +239,6 @@ pub fn prepare(
             setting: setting.clone(),
             reason: error.to_string(),
         })?;
-        // Two names for identical bytes are one stored blob. The names stay
-        // separate because a preset asks for them by name, but the content is
-        // addressed once, which is what makes deduplication free.
         if !assets
             .iter()
             .any(|asset: &ResolvedAsset| asset.sha256 == sha256)
@@ -389,22 +288,10 @@ fn asset_name(setting: &str) -> Result<NonEmptyString, PresetProblem> {
     })
 }
 
-/// What this application can offer a preset, across every surface it has.
-///
-/// The build's question. A host asks the narrower one for the launch it is
-/// actually doing, because `maintenance` is a fact about the session rather than
-/// about the application; the build cannot know it and must not pretend to.
 pub fn host_capabilities(installer: &Installer) -> Capabilities {
     zup_artifact::preset::offers(installer)
 }
 
-/// The settings names this schema marks as Zup-managed assets.
-///
-/// Read from the package's own schema, because the marker is how a preset says
-/// "this value is a file I want" without zup knowing anything about the preset.
-/// A property counts when it carries the marker directly, or refers to a
-/// definition that does - which is how `Option<AssetRef>` arrives, as an
-/// `anyOf` of a `$ref` and a null.
 pub fn asset_settings(schema: &serde_json::Value) -> Vec<String> {
     let Some(properties) = schema
         .get("properties")
@@ -421,7 +308,6 @@ pub fn asset_settings(schema: &serde_json::Value) -> Vec<String> {
     found
 }
 
-/// Whether one subschema is an asset reference, following local `$ref`s.
 fn marks_asset(root: &serde_json::Value, schema: &serde_json::Value, depth: u8) -> bool {
     if depth > MAX_REF_DEPTH {
         return false;
@@ -449,26 +335,13 @@ fn marks_asset(root: &serde_json::Value, schema: &serde_json::Value, depth: u8) 
     }
 }
 
-/// The definition a local `#/$defs/<name>` reference names.
 fn local_definition(root: &serde_json::Value, reference: &str) -> Option<serde_json::Value> {
     let name = reference.strip_prefix("#/$defs/")?;
     root.get("$defs")?.get(name).cloned()
 }
 
-/// How deep a `$ref` chain may be walked before it is treated as not-an-asset.
-///
-/// A cycle in a schema is a schema no validator can compile either, and this is
-/// not the place that reports it. Bounding the walk keeps a hostile or simply
-/// broken schema from making this function recurse without end.
 const MAX_REF_DEPTH: u8 = 16;
 
-/// Check the application's settings against the schema the package carries.
-///
-/// The schema is self-contained by construction - a preset generates it from its
-/// own types - and this refuses any that is not, rather than resolving a
-/// reference the application could have pointed anywhere. A `[ui.settings]`
-/// value must not be able to make a build read a file off the machine or make
-/// a request over a network.
 pub fn validate_settings(
     schema: &serde_json::Value,
     settings: &serde_json::Value,
@@ -495,12 +368,6 @@ pub fn validate_settings(
         .collect()
 }
 
-/// One validator error, as the problems a person can act on.
-///
-/// A schema that refuses unknown properties reports them as a set against the
-/// object, not one error per name, so a misspelled setting would otherwise be
-/// reported against `[ui.settings]` with the name only in the prose. Splitting
-/// them is what makes a diagnostic point at the line to edit.
 fn problems_of(error: jsonschema::ValidationError<'_>) -> Vec<SettingProblem> {
     match error.kind() {
         ValidationErrorKind::AdditionalProperties { unexpected } => unexpected
@@ -517,7 +384,6 @@ fn problems_of(error: jsonschema::ValidationError<'_>) -> Vec<SettingProblem> {
     }
 }
 
-/// A schema that reaches outside itself, named as the problem it is.
 fn external_reference(schema: &serde_json::Value) -> Option<SettingProblem> {
     let mut found = None;
     visit_references(schema, &mut |reference| {
@@ -555,7 +421,6 @@ fn visit_references(schema: &serde_json::Value, visit: &mut impl FnMut(&str)) {
     }
 }
 
-/// A JSON pointer to a path the author wrote in `zup.toml`.
 fn settings_path(pointer: String) -> String {
     if pointer.is_empty() || pointer == "/" {
         return SETTINGS_ROOT.to_owned();

@@ -1,19 +1,3 @@
-//! Shared build-input resolution for `zup build` and `zup doctor`.
-//!
-//! Both commands map every selected target profile to exactly one runtime
-//! template and one output path. That mapping lives here once, so the readiness
-//! report describes the inputs `zup build` will actually use instead of
-//! re-deriving names and re-implementing the checks.
-//!
-//! The runtime template is resolved here, through the toolchain resolver, because
-//! "which template goes with this target" and "is that template usable" are one
-//! question. A readiness report that asked for a different answer from the build
-//! it is reporting on would be a report about something else.
-//!
-//! [`InputMode::Enforce`] fails on the first problem so `zup build` writes
-//! nothing. [`InputMode::Preflight`] records every problem against its target
-//! so `zup doctor` can report all of them in one pass.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -21,40 +5,31 @@ use zup_core::{App, ResolvedTargetConfig, SelectedScope, TargetOperatingSystem, 
 
 use crate::toolchain::{ToolchainResolver, ToolchainSource};
 
-/// How strictly shared input resolution reports a problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
-    /// `zup build`: the first problem aborts before an artifact is written.
     Enforce,
-    /// `zup doctor`: every problem is reported and checking continues.
     Preflight,
 }
 
-/// Whether an existing output directory may be replaced.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Overwrite {
-    /// Refuse to write over an output that already exists.
     #[default]
     Refuse,
-    /// Replace an output that already exists.
     Force,
 }
 
 impl From<bool> for Overwrite {
-    /// `--force` selects [`Self::Force`]; its absence selects [`Self::Refuse`].
     fn from(force: bool) -> Self {
         if force { Self::Force } else { Self::Refuse }
     }
 }
 
-/// Which resolved input a problem belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputSubject {
     Runtime,
     Output,
 }
 
-/// A problem found while mapping inputs onto targets.
 #[derive(Debug, Clone)]
 pub struct InputProblem {
     pub subject: InputSubject,
@@ -72,26 +47,20 @@ impl InputProblem {
     }
 }
 
-/// One target's runtime template, as far as it could be resolved.
 #[derive(Debug, Clone)]
 pub struct RuntimeSlot {
-    /// `None` when no runtime could be assigned to this target.
     pub path: Option<PathBuf>,
-    /// Where the resolved component came from, when one was resolved.
     pub source: Option<ToolchainSource>,
     pub problems: Vec<InputProblem>,
 }
 
-/// One target's installer output, as far as it could be resolved.
 #[derive(Debug, Clone)]
 pub struct OutputSlot {
     pub path: PathBuf,
-    /// True when no `--output` was supplied and the name was derived.
     pub derived: bool,
     pub problems: Vec<InputProblem>,
 }
 
-/// Resolved inputs for every selected target, in selection order.
 #[derive(Debug, Clone)]
 pub struct BuildInputs {
     pub runtimes: Vec<RuntimeSlot>,
@@ -99,7 +68,6 @@ pub struct BuildInputs {
 }
 
 impl BuildInputs {
-    /// Problems recorded for one target.
     pub fn problems_for(&self, index: usize) -> impl Iterator<Item = &InputProblem> {
         self.runtimes
             .get(index)
@@ -114,16 +82,6 @@ impl BuildInputs {
     }
 }
 
-/// Resolve the runtime template for every selected target.
-///
-/// `Enforce` returns the first problem as an error, so `zup build` writes
-/// nothing. `Preflight` returns every slot with its problems attached, so
-/// `zup doctor` can report all of them in one pass.
-///
-/// Outputs are resolved separately because a caller that composes artifacts has
-/// one output per *artifact* rather than one per target, and a per-target
-/// alignment rule would be the wrong rule for one. The runtime slots are the same
-/// either way, and are the part that decides whether a build can happen at all.
 pub fn resolve_runtimes(
     mode: InputMode,
     resolver: &ToolchainResolver,
@@ -137,11 +95,6 @@ pub fn resolve_runtimes(
     Ok(slots)
 }
 
-/// Resolve one output per selected target, with every problem attached to its own
-/// slot.///
-/// `runtimes` is the already-resolved runtime list, because an output that is
-/// also a selected template is a mistake a build would otherwise discover by
-/// writing over its own input.
 pub fn resolve_outputs(
     mode: InputMode,
     overwrite: Overwrite,
@@ -158,12 +111,6 @@ pub fn resolve_outputs(
     Ok(slots)
 }
 
-/// The first problem, runtimes before outputs.
-///
-/// Presets have no slot here. A GUI target's preset is selected and proved while
-/// the project is materialized, because a preset's settings name project files
-/// that have to be resolved and hashed in the same pass as the rest of the
-/// payload; a slot that only held a toolchain path could not have done that.
 fn first_problem<'a>(
     runtimes: &'a [RuntimeSlot],
     outputs: &'a [OutputSlot],
@@ -175,7 +122,6 @@ fn first_problem<'a>(
         .next()
 }
 
-/// One output per selected target, with every problem attached to its own slot.
 fn inspect_output_slots(
     overwrite: Overwrite,
     outputs: &[PathBuf],
@@ -217,12 +163,6 @@ fn inspect_output_slots(
     outputs
 }
 
-/// The diagnostic for a repeatable per-target flag that does not line up with
-/// the selected targets. One value per target, or none at all.
-///
-/// The order matters and is not obvious: it is the manifest's own target order,
-/// so the message names the profiles rather than leaving the user to guess which
-/// template goes with which target.
 pub fn cardinality_problem(
     targets: &[ResolvedTargetConfig],
     received: usize,
@@ -240,12 +180,6 @@ pub fn cardinality_problem(
     )
 }
 
-/// Align one repeatable per-target flag against the selected target count.
-///
-/// An empty flag means the manifest decides. Otherwise exactly one value per
-/// target is required, so a single value against several targets is an error
-/// rather than a silent broadcast. Every repeatable per-target flag reports a
-/// mismatch through this one message.
 pub fn align_per_target<'a, T>(
     noun: &str,
     flag: &str,
@@ -264,13 +198,6 @@ pub fn align_per_target<'a, T>(
     Ok(Some(supplied))
 }
 
-/// One runtime template per selected target, from an explicit path or the
-/// toolchain resolver.
-///
-/// An explicit path is a per-target override, and it is checked exactly like a
-/// resolved one: a component that was not produced by this zup release, or is
-/// for another machine or frontend, is refused here rather than composed into an
-/// installer.
 fn resolve_runtime_slots(
     resolver: &ToolchainResolver,
     supplied: &[PathBuf],
@@ -373,11 +300,6 @@ fn resolve_output_slots(
     slots
 }
 
-/// The file name a derived output is given.
-///
-/// The suffix is the *target's*, not the build host's. A derived name that carried
-/// the host's suffix would name a file no composition for that target writes, and
-/// the error would surface much later - when something tried to run it.
 fn derived_output_path(
     app_name: &str,
     manifest_path: &Path,
@@ -398,8 +320,6 @@ fn derived_output_path(
     let mut file_name = format!("{stem}{suffix}");
     let mut candidate = parent.join(&file_name);
     if targets.len() > 1 {
-        // A disambiguating number belongs before the suffix, or the second
-        // candidate is a different file from the first rather than the same one.
         let mut number = 2;
         while used.contains_key(&normalized_path(&candidate)) {
             file_name = format!("{stem}-{number}{suffix}");
@@ -411,11 +331,6 @@ fn derived_output_path(
     candidate
 }
 
-/// The default target triple for a new manifest on this build host.
-///
-/// The host's own platform, not a fixed triple: a generated project should
-/// build where it was created. A Linux host gets the one Linux target this
-/// Zup version builds; any other host keeps the Windows default it always had.
 pub fn default_build_target() -> String {
     if cfg!(target_os = "linux") {
         return crate::linux_support::SUPPORTED_LINUX_TARGET.to_owned();
@@ -430,33 +345,14 @@ pub fn default_build_target() -> String {
     }
 }
 
-/// Backend support for one target on this build host.
-///
-/// The three answers are the portable selection model's own: a host that can
-/// lower this target natively, a host that has the target's backend but is not
-/// the platform it belongs to, and a target no implemented backend answers for.
-///
-/// Nothing here names Windows. A vocabulary whose only members are `Windows...`
-/// is a vocabulary that will be wrong the moment the second backend lands, and the
-/// failure it produces - "WindowsBackendUnavailable" on a Linux host - reads as
-/// though Windows were the universal backend rather than the one that happens to
-/// be implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSupport {
-    /// The host's backend can lower this target here.
     Ready,
-    /// The target's backend is implemented, but not on this build host.
-    ///
-    /// A Windows target on a Linux build host, or the reverse. The backend exists;
-    /// the *host* cannot run it, so the answer is about this machine rather than
-    /// about the target.
     HostBackendUnavailable,
-    /// A target no implemented backend answers for.
     NotImplemented,
 }
 
 impl BackendSupport {
-    /// Why this host cannot build the target, or `None` when it can.
     pub fn reason(self, target: &TargetTriple) -> Option<String> {
         match self {
             Self::Ready => None,
@@ -472,19 +368,12 @@ impl BackendSupport {
         }
     }
 
-    /// The same boundary as a hard `zup build` error.
     pub fn build_error(self, target: &TargetTriple) -> Option<String> {
         self.reason(target)
             .map(|reason| format!("unsupported backend for target `{target}`: {reason}"))
     }
 }
 
-/// Classify one target against the backends this host implements.
-///
-/// Two questions, in this order, because they have different answers and the
-/// second is the one that used to be conflated with "no backend exists": does an
-/// implemented backend own this target's platform at all, and can this build host
-/// run it.
 pub fn backend_support(target: &TargetTriple) -> BackendSupport {
     let implemented = matches!(
         target.operating_system(),
@@ -500,29 +389,12 @@ pub fn backend_support(target: &TargetTriple) -> BackendSupport {
     }
 }
 
-/// Whether this build host can lower a target for `os`.
-///
-/// Composing an installer is bytes, not execution: any host composes a Linux
-/// installer out of a runtime template and a package without running either,
-/// so Linux lowers everywhere its templates resolve. Windows composition runs
-/// Windows-only machinery, so a Windows target still needs a Windows host.
-/// Host-specific behavior stays here; everything target-specific lives in the
-/// capability checks behind [`check_target_lowering`].
 const fn host_can_lower(os: TargetOperatingSystem) -> bool {
     matches!(os, TargetOperatingSystem::Linux)
         || (matches!(os, TargetOperatingSystem::Windows) && cfg!(windows))
 }
 
-/// The portable name of a target platform, for a diagnostic that has to say which.
-///
-/// `target_lexicon`'s `Display` is the triple spelling - `windows`, `linux` - which
-/// is already the name a person reading the diagnostic would use, so the mapping
-/// is only needed to normalise the ones whose `Debug` is not lower case.
 fn platform_name(os: TargetOperatingSystem) -> String {
-    // `target_lexicon` spells an operating system through its own `Display`, which
-    // is already the lower-case triple spelling a diagnostic would use, and the two
-    // names this backend distinguishes are spelled out because a diagnostic should
-    // not depend on a foreign type's `Display` staying as it is.
     match os {
         TargetOperatingSystem::Windows => "windows".to_owned(),
         TargetOperatingSystem::Linux => "linux".to_owned(),
@@ -530,11 +402,7 @@ fn platform_name(os: TargetOperatingSystem) -> String {
     }
 }
 
-/// Reject a target this build host has no backend for.
-///
-/// This reads nothing from disk, so a build path can call it before it walks
 /// the source tree: an unsupported target must not cost a source-tree walk or a
-/// prerequisite resolution first.
 pub fn check_backend_support(config: &ResolvedTargetConfig) -> miette::Result<()> {
     match backend_support(&config.target).build_error(&config.target) {
         Some(error) => Err(miette::miette!("{error}")),
@@ -542,14 +410,7 @@ pub fn check_backend_support(config: &ResolvedTargetConfig) -> miette::Result<()
     }
 }
 
-/// Whether target lowering resolves for every install scope of a target.
-///
 /// The dispatch is on the *target's* operating system, never on the build
-/// host's: a Windows host building a Linux target takes the Linux arm, and a
-/// Linux host asked about a Windows target takes the Windows arm. Host
-/// behavior (which template bytes, which syscalls) stays behind the
-/// composition each arm calls; the decision of which arm answers is purely
-/// about what is being built.
 pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
@@ -561,14 +422,6 @@ pub fn check_target_lowering(
     }
 }
 
-/// Prove a Linux target lowers, on any build host.
-///
-/// The capability check reads the portable installer IR and the materialized
-/// plan, so a Windows host answers the same question a Linux host answers. On
-/// a Linux host the portable answer is then confirmed by the real thing: the
-/// semantic plan lowers through the Linux backend exactly as an install would.
-/// A cross host cannot run that confirmation, and does not need to: nothing it
-/// confirms is about the bytes being composed.
 fn check_linux_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
@@ -600,7 +453,6 @@ fn check_linux_lowering(
     Ok(scopes)
 }
 
-/// Whether Windows target lowering resolves for every install scope of a target.
 fn check_windows_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
@@ -636,7 +488,6 @@ fn check_windows_lowering(
     }
 }
 
-/// A filesystem-safe file stem derived from an application or profile name.
 pub fn sanitized_file_stem(value: &str, fallback: &str) -> String {
     let name = value
         .chars()
@@ -656,7 +507,6 @@ pub fn sanitized_file_stem(value: &str, fallback: &str) -> String {
     }
 }
 
-/// The absolute form of a possibly relative path.
 pub fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -667,7 +517,6 @@ pub fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
-/// A comparison key for one path, case-folded where the filesystem is.
 pub fn normalized_path(path: &Path) -> PathBuf {
     let absolute = absolute_path(path);
     let absolute = absolute.canonicalize().unwrap_or(absolute);
@@ -725,9 +574,6 @@ mod tests {
             );
         }
 
-        // Linux is a platform an implemented backend owns on every build host:
-        // composing a Linux installer is bytes, not execution, so any host that
-        // resolves a runtime template lowers the target.
         let linux_support = backend_support(&linux);
         assert_eq!(linux_support, BackendSupport::Ready);
         assert!(
@@ -736,8 +582,6 @@ mod tests {
         );
     }
 
-    /// A resolver that finds nothing, so a test is about the shape of a problem
-    /// rather than about whichever toolchain the machine happens to have staged.
     fn empty_resolver() -> ToolchainResolver {
         ToolchainResolver::new(
             "0.0.0-test".to_owned(),
@@ -750,10 +594,6 @@ mod tests {
     fn a_target_with_no_resolvable_component_reports_the_refusal_and_enforces_it() {
         let targets = vec![target_config("alpha"), target_config("beta")];
         let resolver = empty_resolver();
-        // Neither slot got a component, so neither silently takes the other's, and
-        // each says why: the component a build would have asked for is not on this
-        // machine. An absent `--runtime` is the resolver's question, not a count,
-        // so there is nothing else to report.
         let slots = resolve_runtimes(InputMode::Preflight, &resolver, &[], &targets)
             .expect("preflight reports rather than raises");
         assert_eq!(slots.len(), 2);
@@ -829,8 +669,6 @@ mod tests {
         assert_eq!(names.len(), outputs.len(), "derived names must not collide");
         assert!(outputs.iter().all(|slot| slot.derived));
 
-        // One target is one output, and the name is the whole of what a build
-        // composes; nothing picks a directory for it.
         let single =
             inspect_output_slots(Overwrite::Refuse, &[], manifest, &app(), &targets[..1], &[]);
         assert_eq!(single.len(), 1);

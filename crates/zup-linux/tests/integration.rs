@@ -1,31 +1,15 @@
 #![cfg(target_os = "linux")]
-
-//! Linux user-space desktop integration, end to end through the real engine.
-//!
-//! Each test composes a genuine installer carrying launchers, a protocol, a
-//! file association, and icon files, then runs it through [`run`] with an
-//! isolated home: install, upgrade, repair, uninstall, rollback, and symlink
-//! attacks. Nothing here calls the executor directly; the path is the same one
-//! a downloaded installer takes, from carrier open to ledger publish.
-//!
-//! Refresh tooling: `update-mime-database` is the real system tool. A fake
-//! `update-desktop-database` stands in where the test machine has none, and
-//! failing fakes prove the rollback invariant. `desktop-file-validate`
-//! additionally validates generated entries wherever it is installed.
-
-#[path = "support.rs"]
-mod support;
+#![cfg(feature = "test-support")]
 
 use std::path::{Path, PathBuf};
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, run};
-
-use support::{
+use zup_linux::test_support::{
     FakeTools, IsolatedUser, compose_integration_fixture, data_home, fixture_association,
     fixture_protocol, menu_launcher, run_installer, run_tool, v1_files, v1_icons, v1_integration,
     v2_files, v2_icons,
 };
+use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, run};
 
 fn applications() -> PathBuf {
     data_home().join("applications")
@@ -63,9 +47,6 @@ fn install_v1(user: &IsolatedUser, scratch: &Path) -> PathBuf {
     installer
 }
 
-/// A fresh install writes deterministic integration resources: a visible
-/// launcher, hidden URI and file handler entries, a MIME package, and hicolor
-/// icons, and the shared databases regenerate from those sources.
 #[test]
 fn install_creates_desktop_integration() {
     let user = IsolatedUser::isolate();
@@ -118,20 +99,18 @@ fn install_creates_desktop_integration() {
         b"<svg>icon-v1</svg>"
     );
 
-    // The real MIME database regenerated from the package source.
     let globs = read(&data_home().join("mime/globs2"));
     assert!(
         globs.contains("application/x-com.example.tool-foo"),
         "{globs}"
     );
-    // The desktop database refresh ran against the applications directory.
+
     let logged = read(&desktop_log);
     assert!(
         logged.contains(&applications().display().to_string()),
         "{logged}"
     );
 
-    // An available validator additionally accepts every generated entry.
     if which("desktop-file-validate").is_some() {
         for entry in [
             "com.example.tool.desktop",
@@ -160,8 +139,6 @@ fn install_creates_desktop_integration() {
     assert!(ledger.resources.len() >= 8, "integration is owned");
 }
 
-/// The generated command semantics execute: the installed tool opens the URI
-/// and the file exactly as the lowered `Exec=` lines promise.
 #[test]
 fn handler_invocation_uses_lowered_arguments() {
     let user = IsolatedUser::isolate();
@@ -186,9 +163,6 @@ fn handler_invocation_uses_lowered_arguments() {
     );
 }
 
-/// An upgrade keeps stable identities while changing content: the renamed
-/// launcher updates in place, the retired file type's MIME definition goes,
-/// the new type arrives, and the icon set turns over.
 #[test]
 fn upgrade_updates_and_retires_integration() {
     let user = IsolatedUser::isolate();
@@ -263,8 +237,6 @@ fn upgrade_updates_and_retires_integration() {
     assert!(read(&desktop_log).contains(&applications().display().to_string()));
 }
 
-/// Repair restores missing owned integration automatically and damaged owned
-/// integration with force, and regenerates the derived databases afterward.
 #[test]
 fn repair_restores_owned_integration() {
     let user = IsolatedUser::isolate();
@@ -298,8 +270,6 @@ fn repair_restores_owned_integration() {
     assert_eq!(read(&desktop), before);
     assert!(read(&package).contains("*.foo"));
 
-    // A damaged-but-present icon is not silently overwritten: repair without
-    // force refuses rather than deciding the user's bytes are wrong.
     std::fs::write(&icon, b"damaged").expect("damage the icon");
     let outcome = run(&zup_linux::LinuxRunRequest {
         installer: installer.clone(),
@@ -314,8 +284,6 @@ fn repair_restores_owned_integration() {
     );
     assert_eq!(std::fs::read(&icon).expect("icon"), b"damaged");
 
-    // The damaged-but-present icon needs force: repair does not silently
-    // decide the user's bytes are wrong.
     let outcome = run(&zup_linux::LinuxRunRequest {
         installer: installer.clone(),
         scope: SelectedScope::User,
@@ -332,8 +300,6 @@ fn repair_restores_owned_integration() {
     assert!(read(&data_home().join("mime/globs2")).contains("application/x-com.example.tool-foo"));
 }
 
-/// Uninstall removes only Zup-owned integration: every unrelated neighbor
-/// survives byte-for-byte and the shared databases reflect the removal.
 #[test]
 fn uninstall_removes_only_owned_integration() {
     let user = IsolatedUser::isolate();
@@ -415,9 +381,6 @@ fn uninstall_removes_only_owned_integration() {
     );
 }
 
-/// A refresh failure after the files applied rolls everything back: the
-/// authoritative sources are restored, the databases regenerate from the
-/// restored state, and a later run with a working tool commits.
 #[test]
 fn failed_refresh_rolls_back_and_recovers() {
     let user = IsolatedUser::isolate();
@@ -481,20 +444,12 @@ fn failed_refresh_rolls_back_and_recovers() {
     assert!(read(&desktop_log).contains(&applications().display().to_string()));
 }
 
-/// A rollback after one refresh succeeded regenerates the derived databases
-/// from the resulting world, including the world with no source left.
-///
-/// The MIME refresh applies, then the desktop refresh fails, so the
-/// transaction rolls back and removes the final MIME source with it. The
-/// post-rollback sweep must regenerate the MIME cache from the empty world:
-/// the cache must not keep entries for a source that no longer exists.
 #[test]
 fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let tools = FakeTools::install();
-    // The MIME tool stays the real system one; only the desktop refresh is
-    // forced to fail, after the MIME refresh has already applied.
+
     tools.tool("update-desktop-database", "#!/bin/sh\nexit 1\n");
 
     let (launchers, protocols, associations) = v1_integration();
@@ -524,9 +479,7 @@ fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
         !mime_packages().join("com.example.tool.xml").exists(),
         "the rolled-back source is gone"
     );
-    // The authoritative world is now empty of Zup MIME sources, so the
-    // derived cache must have been regenerated from that world rather than
-    // left holding the removed source's entries.
+
     let globs = data_home().join("mime/globs2");
     assert!(
         globs.is_file(),
@@ -538,9 +491,6 @@ fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
     );
 }
 
-/// A missing refresh tool fails before anything mutates: the sealed `PATH`
-/// resolves neither database tool, so preflight refuses with the capability
-/// named and the machine keeps no trace of the attempt.
 #[test]
 fn missing_tools_fail_before_mutation() {
     let user = IsolatedUser::isolate();
@@ -582,8 +532,6 @@ fn missing_tools_fail_before_mutation() {
     );
 }
 
-/// Planted symlinks at integration destinations are refused before anything
-/// is mutated: installation never writes through an attacker-controlled link.
 #[test]
 fn planted_symlinks_are_refused() {
     let user = IsolatedUser::isolate();

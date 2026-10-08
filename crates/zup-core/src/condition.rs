@@ -1,5 +1,3 @@
-//! Constrained boolean conditions over selected components.
-
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -12,52 +10,32 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::ids::ComponentId;
-use crate::value::ValueError;
+use crate::ids::ValueError;
 
-/// Errors produced while parsing a condition expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConditionError {
-    /// The expression ended unexpectedly.
     #[error("invalid condition: unexpected end of expression")]
     UnexpectedEnd,
 
-    /// A token was not valid in this position.
     #[error("invalid condition: unexpected token `{token}`")]
     UnexpectedToken { token: String },
 
-    /// `component(...)` was missing its string argument.
     #[error("invalid condition: expected component id string")]
     ExpectedComponentId,
 
-    /// The component id argument was not valid.
     #[error("invalid condition: {0}")]
     InvalidComponentId(#[from] ValueError),
 }
 
-/// Boolean expression over component selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
-    /// The named component is selected.
     Component(ComponentId),
-    /// Logical negation.
     Not(Box<Condition>),
-    /// Logical conjunction.
     And(Box<Condition>, Box<Condition>),
-    /// Logical disjunction.
     Or(Box<Condition>, Box<Condition>),
 }
 
 impl Condition {
-    /// Parse a condition expression.
-    ///
-    /// Grammar:
-    /// ```text
-    /// expr    := or
-    /// or      := and ("||" and)*
-    /// and     := unary ("&&" unary)*
-    /// unary   := "!" unary | primary
-    /// primary := "component" "(" string ")" | "(" expr ")"
-    /// ```
     pub fn parse(source: &str) -> Result<Self, ConditionError> {
         let tokens = tokenize(source)?;
         let mut parser = Parser { tokens, index: 0 };
@@ -69,7 +47,6 @@ impl Condition {
         Ok(condition)
     }
 
-    /// Evaluate against a selected-component set.
     pub fn evaluate(&self, selected: &BTreeSet<ComponentId>) -> bool {
         match self {
             Self::Component(id) => selected.contains(id),
@@ -79,7 +56,6 @@ impl Condition {
         }
     }
 
-    /// Collect every component id referenced by this condition.
     pub fn referenced_components(&self) -> BTreeSet<ComponentId> {
         let mut out = BTreeSet::new();
         self.collect_components(&mut out);

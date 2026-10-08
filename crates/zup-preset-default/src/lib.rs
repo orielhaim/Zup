@@ -1,19 +1,3 @@
-//! The default zup installer interface.
-//!
-//! This preset is written against `zup-preset-sdk` and nothing else, exactly as an
-//! application author's preset would be. Every fact this window shows arrived
-//! in a `Snapshot`, and everything it asks for is a `Action` the host may
-//! refuse.
-//!
-//! The window holds no copy of the selection, the scope, or the progress. The
-//! state it keeps is presentation only: which disclosures are open, whether the
-//! plan sheet is showing, and which overlay belongs to which state.
-//!
-//! Installing is a decision followed by an operation, so there are no pages to
-//! step through. [`model`] reads a snapshot as the one screen it belongs to,
-//! [`ui`] holds the installer-domain components those screens are built from,
-//! and [`window`] arranges them.
-
 pub mod model;
 pub mod present;
 pub mod theme;
@@ -23,31 +7,18 @@ pub mod window;
 #[cfg(test)]
 mod tests;
 
-use zup_preset_sdk::gpui_kit::AssetSource;
-use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::{AssetRef, PresetContext};
+use zup_sdk::preset::gpui_kit::AssetSource;
+use zup_sdk::preset::prelude::*;
+use zup_sdk::preset::{AssetRef, PresetContext};
 
-/// What an application can change about how this preset looks.
-///
-/// Semantic on purpose: an application chooses its logo and its colour, and
-/// the preset decides what spacing, sizes and corners those deserve. An
-/// application that needs more than this wants a preset of its own.
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct Settings {
-    /// The application's logo, shown beside its name and in the title bar.
-    /// SVG or PNG, square, at least 128 pixels for raster images.
     pub logo: Option<AssetRef>,
-    /// The colour of the main button, selections and progress.
     pub accent: Option<Accent>,
-    /// Light or dark, or whatever the person's system uses (the default).
     #[serde(default)]
     pub appearance: Appearance,
 }
 
-/// A brand colour, as `#rrggbb`.
-///
-/// Adjusted where needed so text on it and beside it stays readable in both
-/// palettes: a brand colour is a wish, and contrast is not negotiable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Accent(String);
@@ -57,7 +28,6 @@ impl Accent {
         Self(hex.into())
     }
 
-    /// The colour, when it is one.
     pub fn rgb(&self) -> Option<[u8; 3]> {
         let hex = self.0.strip_prefix('#')?;
         if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -83,18 +53,15 @@ impl schemars::JsonSchema for Accent {
     }
 }
 
-/// Which palette the window draws with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Appearance {
-    /// Follow the system, and change with it.
     #[default]
     System,
     Light,
     Dark,
 }
 
-/// The default preset.
 pub struct DefaultPreset;
 
 impl Preset for DefaultPreset {
@@ -112,7 +79,7 @@ impl Preset for DefaultPreset {
     }
 }
 
-zup_preset_sdk::gpui_kit::assets::icon_assets!(
+zup_sdk::preset::gpui_kit::assets::icon_assets!(
     pub Icons,
     [
         AppWindow,

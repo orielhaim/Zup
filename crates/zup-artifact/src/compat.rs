@@ -1,10 +1,3 @@
-//! Can these variants form one artifact?
-//!
-//! Composition answers this before doing any work, so an incompatible pair is
-//! a typed refusal with a dimension and a reason rather than an artifact that
-//! behaves surprisingly on one machine. Architecture is deliberately *not* a
-//! dimension: a universal artifact exists to differ in architecture.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -17,13 +10,10 @@ use crate::variant::{
     DistributionVariant, HostVersion, MinimumHost, PlatformCapability, PlatformOs,
 };
 
-/// The launcher subsystem class a frontend's installer experience needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LauncherSubsystem {
-    /// A windowed experience.
     Gui,
-    /// A terminal experience.
     Console,
 }
 
@@ -42,12 +32,6 @@ impl fmt::Display for LauncherSubsystem {
     }
 }
 
-/// The subsystem class a frontend needs.
-///
-/// A headless installer and a console installer are the same kind of program to
-/// the host: a process with a terminal and no window. Composing them is
-/// therefore sound; composing a windowed experience with a terminal one is not,
-/// because one artifact is one launcher experience.
 pub const fn frontend_subsystem(frontend: Frontend) -> LauncherSubsystem {
     match frontend {
         Frontend::Gui => LauncherSubsystem::Gui,
@@ -55,21 +39,14 @@ pub const fn frontend_subsystem(frontend: Frontend) -> LauncherSubsystem {
     }
 }
 
-/// One dimension on which two variants must agree to share an artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityDimension {
-    /// Operating system backend.
     Platform,
-    /// Artifact backend that will host the variants.
     ArtifactBackend,
-    /// Launcher subsystem class of the installer experience.
     LauncherSubsystem,
-    /// Application identity and version.
     ApplicationIdentity,
-    /// Update repository, channel, and trusted root.
     UpdateTrust,
-    /// Install scope, destination templates, and component set.
     InstallerSemantics,
 }
 
@@ -85,7 +62,6 @@ impl CompatibilityDimension {
         }
     }
 
-    /// What a mismatch means, in one sentence, for the refusal message.
     pub const fn requirement(self) -> &'static str {
         match self {
             Self::Platform => "one artifact serves one operating system",
@@ -100,7 +76,6 @@ impl CompatibilityDimension {
     }
 }
 
-/// Why two variants cannot share an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "dimension", rename_all = "snake_case")]
 pub enum Incompatibility {
@@ -142,8 +117,6 @@ impl Incompatibility {
         }
     }
 
-    /// The mismatch in one clause, which is what a diagnostic adds to the
-    /// dimension name.
     pub fn detail(&self) -> String {
         match self {
             Self::Platform { left, right } => {
@@ -164,11 +137,6 @@ impl Incompatibility {
     }
 }
 
-/// A refusal to compose two variants, naming both sides and the dimension.
-///
-/// `reason` is boxed because it carries two full `Platform` values, which would
-/// otherwise make this error - and therefore every function that can return one -
-/// several times larger than the failures around it.
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[error("`{left}` and `{right}` cannot form one artifact ({}): {}", .reason.dimension().as_str(), .reason.detail())]
@@ -178,7 +146,6 @@ pub struct Incompatible {
     pub reason: Box<Incompatibility>,
 }
 
-/// Everything about a variant that composition compares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantShape {
     pub id: String,
@@ -219,9 +186,6 @@ impl VariantShape {
     }
 }
 
-/// Compare every pair of variants, reporting the first incompatibility in a
-/// deterministic order: pairs are visited in declaration order and dimensions
-/// in a fixed sequence, so two runs over one input name the same conflict.
 pub fn check_compatibility(variants: &[&DistributionVariant]) -> Result<(), Incompatible> {
     let shapes = variants
         .iter()
@@ -323,9 +287,6 @@ fn compare_install(
     None
 }
 
-/// Whether a host satisfies a variant's minimum host requirement.
-///
-/// An unknown host version cannot prove a minimum, so it fails closed.
 pub fn satisfies_minimum_host(
     minimum: Option<&MinimumHost>,
     host_os: Option<PlatformOs>,
@@ -345,7 +306,6 @@ pub fn satisfies_minimum_host(
     }
 }
 
-/// Whether a variant declares a capability that forbids emulated execution.
 pub fn requires_native(capabilities: &[PlatformCapability]) -> bool {
     capabilities.contains(&PlatformCapability::MachineComponents)
 }

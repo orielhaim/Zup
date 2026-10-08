@@ -1,7 +1,3 @@
-//! Structural templates with a fixed variable vocabulary.
-//!
-//! Templates are parsed into parts. Variables are not resolved here.
-
 use std::borrow::Cow;
 use std::fmt;
 
@@ -10,23 +6,18 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-/// Errors produced while parsing a template string.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TemplateError {
-    /// A `${...` sequence was not closed with `}`.
     #[error("unterminated template variable")]
     UnterminatedVariable,
 
-    /// A `${}` sequence had an empty name.
     #[error("empty template variable")]
     EmptyVariable,
 
-    /// The variable name is not in the supported vocabulary.
     #[error("unknown template variable `{name}`")]
     UnknownVariable { name: String },
 }
 
-/// Supported template variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Variable {
@@ -38,7 +29,6 @@ pub enum Variable {
 }
 
 impl Variable {
-    /// Parse a variable name such as `install` or `location.user_data`.
     pub fn parse(name: &str) -> Result<Self, TemplateError> {
         if let Some(location) = name.strip_prefix("location.")
             && let Some(location) = crate::InstallLocation::parse(location)
@@ -56,10 +46,6 @@ impl Variable {
         }
     }
 
-    /// The canonical variable name used inside `${...}`.
-    ///
-    /// A location variable names its [`crate::InstallLocation`], so the name is
-    /// composed from the location rather than tabulated a second time.
     pub fn as_str(self) -> Cow<'static, str> {
         match self {
             Self::AppId => Cow::Borrowed("app.id"),
@@ -77,33 +63,25 @@ impl fmt::Display for Variable {
     }
 }
 
-/// One piece of a parsed template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplatePart {
-    /// Verbatim text.
     Literal(String),
-    /// A variable placeholder.
     Variable(Variable),
 }
 
-/// How a variable resolves during [`Template::substitute`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableValue {
-    /// Replace with verbatim text.
     Literal(String),
-    /// Replace with another template's parts.
     Template(Template),
 }
 
-/// A string containing zero or more `${...}` variables.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Template {
     parts: Vec<TemplatePart>,
 }
 
 impl Template {
-    /// Parse a template string into literal and variable parts.
     pub fn parse(source: &str) -> Result<Self, TemplateError> {
         let mut parts = Vec::new();
         let mut literal = String::new();
@@ -149,17 +127,12 @@ impl Template {
         Ok(Self { parts })
     }
 
-    /// True when the template references `variable`.
     pub fn contains_variable(&self, variable: Variable) -> bool {
         self.parts
             .iter()
             .any(|part| matches!(part, TemplatePart::Variable(v) if *v == variable))
     }
 
-    /// Substitute known variables structurally.
-    ///
-    /// Returning `None` leaves the variable unresolved. Adjacent literals are
-    /// merged so the result stays normalized.
     pub fn substitute<F>(&self, mut resolve: F) -> Template
     where
         F: FnMut(Variable) -> Option<VariableValue>,
@@ -186,17 +159,14 @@ impl Template {
             }
         }
 
-        // Drop empty literals produced by substitution.
         parts.retain(|part| !matches!(part, TemplatePart::Literal(lit) if lit.is_empty()));
         Template { parts }
     }
 
-    /// Parsed template parts in source order.
     pub fn parts(&self) -> &[TemplatePart] {
         &self.parts
     }
 
-    /// True when the template contains no characters or variables.
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty()
             || self
@@ -205,7 +175,6 @@ impl Template {
                 .all(|part| matches!(part, TemplatePart::Literal(lit) if lit.is_empty()))
     }
 
-    /// The literal text when the template has no variables.
     pub fn as_literal(&self) -> Option<&str> {
         match self.parts.as_slice() {
             [] => Some(""),
@@ -214,7 +183,6 @@ impl Template {
         }
     }
 
-    /// Append a portable relative path as a literal `/`-separated suffix.
     pub fn join_relative(&self, relative: &crate::path::RelativePath) -> Self {
         let mut parts = self.parts.clone();
         let suffix = relative.as_str();

@@ -114,15 +114,11 @@ fn sdk_chain(role: Generated) -> Vec<(&'static str, &'static str)> {
     let mut chain = vec![("zup-sdk", "zup-sdk")];
     chain.extend(match role {
         Generated::Preset => vec![
-            ("zup-preset-sdk", "zup-preset-sdk"),
-            ("zup-preset-sdk-macros", "zup-preset-sdk-macros"),
+            ("zup-sdk-macros", "zup-sdk-macros"),
             ("zup-preset-protocol", "zup-preset-protocol"),
             ("zup-preset-ipc", "zup-preset-ipc"),
         ],
-        Generated::Plugin => vec![
-            ("zup-plugin-sdk", "zup-plugin-sdk"),
-            ("zup-plugin-abi", "zup-plugin-abi"),
-        ],
+        Generated::Plugin => vec![("zup-plugin-abi", "zup-plugin-abi")],
     });
     chain
 }
@@ -179,10 +175,10 @@ fn a_generated_project_resolves_against_the_published_sdk() {
         .iter()
         .map(|dependency| dependency["name"].as_str().expect("a name"))
         .collect();
-    // The whole claim: a preset project declares the SDK and nothing else. Not
-    // `gpui-kit`, whose version a preset author would have to keep in step with
-    // Zup's; not `serde` or `schemars`, whose versions would decide which schema
-    // an application's settings are validated against.
+    // The whole claim: a preset project declares the SDK and nothing else.
+    // Not `gpui-kit`, whose version a preset author would have to keep in step
+    // with Zup's; not `serde` or `schemars`, whose versions would decide which
+    // schema an application's settings are validated against.
     assert_eq!(declared, ["zup-sdk"]);
 
     let features = metadata["packages"]
@@ -213,7 +209,7 @@ fn a_generated_project_resolves_against_the_published_sdk() {
         .iter()
         .map(|package| package["name"].as_str().expect("a name"))
         .collect();
-    for expected in ["zup-sdk", "zup-preset-sdk", "zup-preset-protocol"] {
+    for expected in ["zup-sdk", "zup-sdk-macros", "zup-preset-protocol"] {
         assert!(
             resolved.contains(&expected),
             "and Cargo resolved `{expected}` to a real package, from outside this workspace"

@@ -1,19 +1,3 @@
-//! The OCI adapter.
-//!
-//! The internal graph was designed to map onto an OCI image index: a small root
-//! that references immutable content by digest, one manifest per platform
-//! variant, and a content store addressed by the same digests. This module is
-//! the proof, and it is deliberately an *adapter*:
-//!
-//! - OCI types appear only here. Nothing else in the crate names an OCI
-//!   concept, and `zup-core` never will.
-//! - The digests are the same digests. A registry stores exactly the bytes the
-//!   installer verifies, so publishing to a registry and installing from a local
-//!   executable are the same verification.
-//! - Frontends, requirements, and lifecycle concepts stay typed, in a zup
-//!   config blob the manifest points at. OCI has no field for them, and hiding
-//!   them in opaque annotations would make them unverifiable.
-
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zup_core::Sha256Digest;
 
-/// The OCI SHA-256 digest of `bytes`, which is zup's digest over the same
-/// content.
 fn sha256_of(bytes: &[u8]) -> oci_spec::image::Sha256Digest {
     Sha256Digest::from_bytes(Sha256::digest(bytes).into())
         .to_hex()
@@ -36,40 +18,26 @@ fn sha256_of(bytes: &[u8]) -> oci_spec::image::Sha256Digest {
 }
 
 use crate::compose::ArtifactGraph;
-use crate::descriptor::Descriptor;
-use crate::error::ArtifactError;
-use crate::media_type::MediaType;
+use crate::format::ArtifactError;
+use crate::format::Descriptor;
+use crate::format::MediaType;
 use crate::platform::Platform;
 use crate::variant::{VariantDescriptor, VariantRequirements};
 
-/// OCI media type for the artifact index.
 pub const OCI_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 
-/// OCI media type for a translated variant manifest.
 pub const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
-/// Media type of the per-variant config blob, which carries the content a
-/// container image has no field for.
 pub const OCI_CONFIG_MEDIA_TYPE: &str = "application/vnd.zup.artifact.variant-config.v1+json";
 
-/// Annotation naming the variant an index entry or manifest refers to.
 pub const OCI_VARIANT_TITLE: &str = "org.opencontainers.image.title";
 
-/// Annotation naming the artifact an index belongs to.
 pub const OCI_ARTIFACT: &str = "io.zup.artifact.id";
 
-/// OCI image index schema version.
 pub const OCI_SCHEMA_VERSION: u32 = 2;
 
-/// Current variant config schema.
 pub const VARIANT_CONFIG_SCHEMA: u32 = 1;
 
-/// The zup document stored as a variant's OCI config blob.
-///
-/// This is where the content model lives. A client that receives only OCI
-/// metadata still learns the variant's target, frontend, requirements, and the
-/// exact digests it must fetch, which is what makes the descriptor graph
-/// verifiable without zup's own index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantConfig {
@@ -79,15 +47,11 @@ pub struct VariantConfig {
     pub platform: Platform,
     pub frontend: zup_core::Frontend,
     pub requirements: VariantRequirements,
-    /// The zup variant manifest, which carries the installer's content plan.
     pub manifest: Descriptor,
-    /// Content digests the variant requires, in ascending order.
     pub content: Vec<Sha256Digest>,
     pub logical_size: u64,
 }
 
-/// The digest string OCI uses, which is the algorithm-prefixed form of the
-/// digest zup carries.
 pub fn oci_digest(digest: &Sha256Digest) -> Digest {
     Digest::from(
         digest
@@ -97,8 +61,6 @@ pub fn oci_digest(digest: &Sha256Digest) -> Digest {
     )
 }
 
-/// The zup digest an OCI digest names, or `None` when the algorithm is not one
-/// zup verifies.
 pub fn zup_digest(digest: &Digest) -> Option<Sha256Digest> {
     match digest.algorithm() {
         oci_spec::image::DigestAlgorithm::Sha256 => digest.digest().parse().ok(),
@@ -106,7 +68,6 @@ pub fn zup_digest(digest: &Digest) -> Option<Sha256Digest> {
     }
 }
 
-/// An OCI descriptor for a zup descriptor.
 pub fn oci_descriptor(descriptor: &Descriptor, media_type: &str) -> OciDescriptor {
     OciDescriptor::new(
         OciMediaType::Other(media_type.to_owned()),
@@ -115,7 +76,6 @@ pub fn oci_descriptor(descriptor: &Descriptor, media_type: &str) -> OciDescripto
     )
 }
 
-/// One variant, expressed as an OCI manifest plus the config blob it needs.
 #[derive(Debug, Clone)]
 pub struct OciVariant {
     pub id: String,
@@ -124,18 +84,12 @@ pub struct OciVariant {
     pub config_descriptor: OciDescriptor,
 }
 
-/// The artifact graph, expressed as an OCI image index.
 #[derive(Debug, Clone)]
 pub struct OciLayout {
     pub index: ImageIndex,
     pub variants: Vec<OciVariant>,
 }
 
-/// Convert a composed graph into an OCI index and one manifest per variant.
-///
-/// The shared store becomes the variants' layers, so a registry deduplicates the
-/// store exactly as the local artifact does: one blob, referenced by both
-/// manifests.
 pub fn to_oci(graph: &ArtifactGraph) -> Result<OciLayout, ArtifactError> {
     let index = graph.index();
     let mut variants = Vec::with_capacity(index.variants.len());
@@ -223,9 +177,6 @@ pub fn to_oci(graph: &ArtifactGraph) -> Result<OciLayout, ArtifactError> {
 }
 
 fn oci_platform(platform: &Platform) -> Result<OciPlatform, ArtifactError> {
-    // OCI names the same machines with its own spellings, so this is a
-    // translation table rather than a formatting trick. An architecture the
-    // table does not know passes through unchanged rather than being guessed at.
     let architecture = match platform.architecture.as_str() {
         "x86" => Arch::i386,
         "x86_64" => Arch::Amd64,
@@ -253,11 +204,6 @@ fn oci_platform(platform: &Platform) -> Result<OciPlatform, ArtifactError> {
     builder.build().map_err(|_| ArtifactError::Invalid)
 }
 
-/// Write a composed graph as a local OCI image layout.
-///
-/// This is the cheapest proof that the model maps: a real `oci-layout`
-/// directory an OCI tool can read, built from the same graph the Windows backend
-/// writes into an executable.
 pub fn export_oci_layout(graph: &ArtifactGraph, destination: &Path) -> Result<(), ArtifactError> {
     let layout = to_oci(graph)?;
     let blobs = destination.join("blobs").join("sha256");
@@ -301,13 +247,10 @@ pub fn export_oci_layout(graph: &ArtifactGraph, destination: &Path) -> Result<()
     Ok(())
 }
 
-/// The blob path OCI uses inside a layout, which is also the canonical
-/// immutable content path of a remote store.
 pub fn oci_blob_path(digest: &Sha256Digest) -> PathBuf {
     PathBuf::from("blobs").join("sha256").join(digest.to_hex())
 }
 
-/// Read a variant's content plan back out of an OCI config blob.
 pub fn variant_config(bytes: &[u8]) -> Result<VariantConfig, ArtifactError> {
     let config: VariantConfig = serde_json::from_slice(bytes)?;
     if config.schema != VARIANT_CONFIG_SCHEMA {
@@ -316,7 +259,6 @@ pub fn variant_config(bytes: &[u8]) -> Result<VariantConfig, ArtifactError> {
     Ok(config)
 }
 
-/// The variant an OCI index entry refers to, by the digest of its manifest.
 pub fn variant_by_manifest(index: &ImageIndex, digest: &Digest) -> Option<String> {
     index
         .manifests()
@@ -331,12 +273,6 @@ pub fn variant_by_manifest(index: &ImageIndex, digest: &Digest) -> Option<String
         })
 }
 
-/// Every content digest an OCI variant needs, from its config blob and layers.
-///
-/// The layers are the store as a registry sees it; the config is the set the
-/// variant actually requires. They are equal for a composed graph, and the
-/// function reports the union so a partial store is visible rather than assumed
-/// complete.
 pub fn required_digests(
     manifest: &ImageManifest,
     config_bytes: &[u8],
@@ -353,7 +289,6 @@ pub fn required_digests(
     Ok(digests)
 }
 
-/// The OCI platform a zup variant declares, for a registry that selects on it.
 pub fn oci_platform_of(variant: &VariantDescriptor) -> Result<OciPlatform, ArtifactError> {
     oci_platform(&variant.platform)
 }

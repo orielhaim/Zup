@@ -1,5 +1,3 @@
-//! Shell Link (`.lnk`) inspection and managed mutation.
-
 use std::fs;
 
 use crate::transaction_payload::{BackendReceipt, NativeReconcileResult};
@@ -9,51 +7,57 @@ use zup_platform::TargetPath;
 use crate::durable::move_durable;
 use crate::lowering::host_path;
 
-/// Read-only shortcut inspection surface.
-pub trait ShortcutReader {
-    fn read_shortcut(&self, launcher_path: &TargetPath) -> Result<ObservedLauncherState, String>;
+#[derive(Debug, thiserror::Error)]
+pub enum ShortcutError {
+    #[error("shortcut `{path}` could not be read: {reason}")]
+    Unreadable { path: String, reason: String },
+    #[error("shortcut `{path}` could not be written: {reason}")]
+    Unwritable { path: String, reason: String },
+    #[error("shortcut operation is not executable")]
+    NotExecutable,
+    #[error("invalid shortcut precondition")]
+    InvalidPrecondition,
+    #[error("shortcut `{0}` changed since planning")]
+    ChangedSincePlanning(String),
+    #[error("shortcut `{0}` changed after installation")]
+    ChangedAfterInstall(String),
+    #[error("shortcut has no parent")]
+    MissingParent,
 }
 
-/// Production COM Shell Link reader.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WindowsShortcutReader;
+fn unreadable(path: &TargetPath, reason: impl std::fmt::Display) -> ShortcutError {
+    ShortcutError::Unreadable {
+        path: path.to_string(),
+        reason: reason.to_string(),
+    }
+}
 
-impl ShortcutReader for WindowsShortcutReader {
-    fn read_shortcut(&self, launcher_path: &TargetPath) -> Result<ObservedLauncherState, String> {
-        let path = host_path(launcher_path);
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ObservedLauncherState::Absent);
-            }
-            Err(err) => return Err(err.to_string()),
-        };
-        let ft = meta.file_type();
-        if ft.is_symlink() || !ft.is_file() {
-            return Ok(ObservedLauncherState::NonFile);
+fn unwritable(path: &TargetPath, reason: impl std::fmt::Display) -> ShortcutError {
+    ShortcutError::Unwritable {
+        path: path.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+pub fn read_shortcut(launcher_path: &TargetPath) -> Result<ObservedLauncherState, ShortcutError> {
+    let path = host_path(launcher_path);
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ObservedLauncherState::Absent);
         }
-        crate::shell_link::load_shortcut(&path, launcher_path.target())
+        Err(err) => return Err(unreadable(launcher_path, err)),
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_file() {
+        return Ok(ObservedLauncherState::NonFile);
     }
+    crate::shell_link::load_shortcut(&path, launcher_path.target())
+        .map_err(|error| unreadable(launcher_path, error))
 }
 
-/// In-memory shortcut table for tests.
-#[derive(Debug, Default, Clone)]
-pub struct FakeShortcutReader {
-    pub shortcuts: std::collections::BTreeMap<String, ObservedLauncherState>,
-}
-
-impl ShortcutReader for FakeShortcutReader {
-    fn read_shortcut(&self, launcher_path: &TargetPath) -> Result<ObservedLauncherState, String> {
-        Ok(self
-            .shortcuts
-            .get(&launcher_path.to_string())
-            .cloned()
-            .unwrap_or(ObservedLauncherState::Absent))
-    }
-}
-
-fn state(path: &TargetPath) -> Result<Option<LauncherState>, String> {
-    match WindowsShortcutReader.read_shortcut(path)? {
+fn state(path: &TargetPath) -> Result<Option<LauncherState>, ShortcutError> {
+    match read_shortcut(path)? {
         ObservedLauncherState::Absent => Ok(Some(LauncherState::Absent)),
         ObservedLauncherState::Launcher {
             target,
@@ -93,37 +97,40 @@ fn installed(op: &LauncherOperation) -> LauncherState {
 }
 
 fn write(
-    path: &TargetPath,
+    launcher_path: &TargetPath,
     value: &LauncherState,
     icon: Option<&zup_platform::TargetPath>,
-) -> Result<(), String> {
-    let path = host_path(path);
+) -> Result<(), ShortcutError> {
+    let host = host_path(launcher_path);
     match value {
-        LauncherState::Absent => std::fs::remove_file(&path).map_err(|e| e.to_string()),
+        LauncherState::Absent => {
+            std::fs::remove_file(&host).map_err(|error| unwritable(launcher_path, error))
+        }
         LauncherState::Launcher {
             target,
             arguments,
             working_directory,
         } => {
-            let parent = path.parent().ok_or("shortcut has no parent")?;
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            let temporary = path.with_extension(format!("zup-{}.lnk", uuid::Uuid::now_v7()));
+            let parent = host.parent().ok_or(ShortcutError::MissingParent)?;
+            std::fs::create_dir_all(parent).map_err(|error| unwritable(launcher_path, error))?;
+            let temporary = host.with_extension(format!("zup-{}.lnk", uuid::Uuid::now_v7()));
             let result = (|| {
                 crate::shell_link::save_shortcut(
-                    &path,
+                    &host,
                     &temporary,
                     target,
                     arguments,
                     working_directory.as_ref(),
                     icon,
-                )?;
+                )
+                .map_err(|error| unwritable(launcher_path, error))?;
                 std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(&temporary)
                     .and_then(|file| file.sync_all())
-                    .map_err(|e| e.to_string())?;
-                move_durable(&temporary, &path).map_err(|e| e.to_string())
+                    .map_err(|error| unwritable(launcher_path, error))?;
+                move_durable(&temporary, &host).map_err(|error| unwritable(launcher_path, error))
             })();
             if result.is_err() {
                 let _ = std::fs::remove_file(&temporary);
@@ -133,18 +140,20 @@ fn write(
     }
 }
 
-pub fn apply(op: &LauncherOperation) -> Result<BackendReceipt, String> {
+pub fn apply(op: &LauncherOperation) -> Result<BackendReceipt, ShortcutError> {
     if !matches!(
         op.kind,
         LauncherOperationKind::Create
             | LauncherOperationKind::UpdateOwned
             | LauncherOperationKind::RestoreOwned
     ) {
-        return Err("shortcut is not executable".into());
+        return Err(ShortcutError::NotExecutable);
     }
-    let previous = previous(op).ok_or("invalid shortcut precondition")?;
+    let previous = previous(op).ok_or(ShortcutError::InvalidPrecondition)?;
     if state(&op.launcher_path)? != Some(previous.clone()) {
-        return Err("shortcut changed since planning".into());
+        return Err(ShortcutError::ChangedSincePlanning(
+            op.launcher_path.to_string(),
+        ));
     }
     let installed = installed(op);
     write(&op.launcher_path, &installed, op.icon.as_ref())?;
@@ -160,14 +169,16 @@ pub fn rollback(
     launcher_path: &TargetPath,
     previous: &LauncherState,
     installed: &LauncherState,
-) -> Result<(), String> {
+) -> Result<(), ShortcutError> {
     if state(launcher_path)? != Some(installed.clone()) {
-        return Err("shortcut changed after installation".into());
+        return Err(ShortcutError::ChangedAfterInstall(
+            launcher_path.to_string(),
+        ));
     }
     write(launcher_path, previous, None)
 }
 
-pub fn reconcile(op: &LauncherOperation) -> Result<NativeReconcileResult, String> {
+pub fn reconcile(op: &LauncherOperation) -> Result<NativeReconcileResult, ShortcutError> {
     let current = match state(&op.launcher_path) {
         Ok(Some(current)) => current,
         _ => return Ok(NativeReconcileResult::Ambiguous),
@@ -203,12 +214,6 @@ mod tests {
     #[test]
     fn native_shortcut_create_update_and_ownership_safe_rollback() {
         let dir = TempDir::new().unwrap();
-        // The resolved directory, not the one `TEMP` named. GitHub's Windows
-        // runners hand out the 8.3 short form of the user's temp directory, and a
-        // shortcut's target comes back the way the shell resolved it - so an
-        // expectation built from the short name was comparing two spellings of one
-        // file, and failing on every runner that hands one out. Resolving once here
-        // keeps the strong claim: the shortcut holds exactly what was written.
         let root = std::path::PathBuf::from(crate::machine_state::plain_path_text(
             &std::fs::canonicalize(dir.path()).unwrap(),
         ));
@@ -251,7 +256,7 @@ mod tests {
             panic!("shortcut receipt")
         };
         op.kind = LauncherOperationKind::UpdateOwned;
-        op.previous = WindowsShortcutReader.read_shortcut(&launcher_path).unwrap();
+        op.previous = read_shortcut(&launcher_path).unwrap();
         op.arguments = vec!["new".into()];
         let upgraded = apply(&op).unwrap();
         assert_eq!(

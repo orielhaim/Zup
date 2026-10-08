@@ -1,15 +1,3 @@
-//! Windows durable file primitives and installation lock.
-//!
-//! Guarantees used here:
-//! - **atomic namespace transition**: `MoveFileExW` publishes a fully-written
-//!   temp file in one rename
-//! - **power-loss durability**: `FlushFileBuffers` on the temp file, then
-//!   `MOVEFILE_WRITE_THROUGH` on publish
-//! - **process-crash recovery**: handled by the transaction journal on top
-//!
-//! If a durability barrier cannot be satisfied the operation returns
-//! `DurableError::Unavailable` rather than lying.
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +6,7 @@ use typed_path::{
     Utf8Component, Utf8WindowsPath, Utf8WindowsPrefix, constants::windows::SEPARATOR_STR,
 };
 
-use crate::fs_bindings::{
+use crate::bindings::{
     self, CREATE_NEW, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
     GetVolumePathNameW, HANDLE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -26,7 +14,6 @@ use crate::fs_bindings::{
 
 static DURABLE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Durability errors. `Unavailable` means the platform cannot meet the contract.
 #[derive(Debug, Error)]
 pub enum DurableError {
     #[error("durable operation unavailable: {0}")]
@@ -46,9 +33,6 @@ pub enum DurableError {
     InstallationBusy,
 }
 
-/// Write `contents` to `path` with power-loss durability.
-///
-/// Order: write temp → flush temp → durable publish → success.
 pub fn write_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     let tmp = temp_sibling(path);
     write_new_file(&tmp, contents)?;
@@ -59,7 +43,6 @@ pub fn write_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     Ok(())
 }
 
-/// Create `path` only if absent, with durable publication.
 pub fn create_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     let tmp = temp_sibling(path);
     write_new_file(&tmp, contents)?;
@@ -77,14 +60,10 @@ pub fn create_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> 
     Ok(())
 }
 
-/// Durably move `from` → `to` (same volume), replacing `to` if present.
 pub fn move_durable(from: &Path, to: &Path) -> Result<(), DurableError> {
     publish_replace(from, to)
 }
 
-/// Copy a file to a new path and durably publish it without replacing an
-/// existing artifact. The temporary file is a sibling so publication stays
-/// on the destination volume.
 pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), DurableError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DurableError::Io {
@@ -162,7 +141,7 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
             0,
             std::ptr::null_mut(),
             CREATE_NEW,
-            fs_bindings::FILE_ATTRIBUTE_NORMAL,
+            bindings::FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
         )
     };
@@ -240,7 +219,6 @@ fn publish_new(from: &Path, to: &Path) -> Result<(), DurableError> {
     Ok(())
 }
 
-/// Resolve the volume root backing `path` (same-volume staging).
 pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
     let wide_in = to_wide(&path.display().to_string());
     let mut wide_out = vec![0u16; 512];
@@ -263,44 +241,25 @@ pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
     Ok(PathBuf::from(s))
 }
 
-/// The installation lock that used to live here is now
-/// `zup_transaction::InstallationLock`.
-///
-/// It was here because this module also held the Win32 durability primitives, and
-/// one of those two things is portable. What coordinates an installation is
-/// installation state, which `zup-transaction` owns, and moving it is what keeps
-/// this module to what only Windows can do.
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The extended-length spelling a Win32 file API accepts.
-///
-/// `\\?\` lifts the `MAX_PATH` limit and the path normalization the API would
-/// otherwise apply, which is what durable writes need: a name the installer
-/// owns has to reach the same file the ledger recorded. A relative path has no
-/// root to lift, so it is passed through as it stands.
 fn to_wide_path(path: &Path) -> Vec<u16> {
     let text = path.to_string_lossy();
     let lexical = Utf8WindowsPath::new(&text);
     let verbatim = match lexical.components().prefix_kind() {
-        // Already extended-length, so the API has nothing left to lift.
         Some(prefix) if prefix.is_verbatim() => text.into_owned(),
         Some(prefix) => verbatim_prefix(prefix)
             .map(|prefix| verbatim_spelling(&prefix, lexical))
             .unwrap_or_else(|_| text.into_owned()),
-        // A rooted path with no drive names a location on whichever drive is
-        // current, so it has a root to lift.
+
         None if lexical.has_root() => verbatim_spelling("\\\\?\\", lexical),
         None => text.into_owned(),
     };
     to_wide(&verbatim)
 }
 
-/// The verbatim prefix naming the same root as `prefix`.
-///
-/// Only a drive and a network share have a place in the file namespace; a
-/// device namespace is not a file, so there is nothing to re-root it under.
 fn verbatim_prefix(prefix: Utf8WindowsPrefix<'_>) -> Result<String, &'static str> {
     match prefix {
         Utf8WindowsPrefix::Disk(drive) => Ok(format!("\\\\?\\{drive}:")),
@@ -309,9 +268,6 @@ fn verbatim_prefix(prefix: Utf8WindowsPrefix<'_>) -> Result<String, &'static str
     }
 }
 
-/// `prefix`, then every name `path` holds below its own root.
-///
-/// The prefix and the root are skipped because `prefix` already names the root.
 fn verbatim_spelling(prefix: &str, path: &Utf8WindowsPath) -> String {
     let mut text = prefix.to_owned();
     for component in path.components() {

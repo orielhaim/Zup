@@ -1,22 +1,11 @@
 #![cfg(target_os = "linux")]
-
-//! From `zup.toml` to a running application, through the portable build plane.
-//!
-//! The `zup build` CLI composition root is Windows-only in this phase, but
-//! every step it composes for a Linux target is portable - manifest compile,
-//! source materialization with the Linux source policy, package encoding,
-//! carrier composition - and this test drives exactly that path: a real
-//! manifest on disk, resolved, materialized, packaged, composed onto a
-//! genuine runtime template, installed by running it, and the installed
-//! executable run. No step is hand-built; the only hand-built thing is the
-//! fixture project itself.
-
-#[path = "support.rs"]
-mod support;
+#![cfg(feature = "test-support")]
 
 use zup_core::{SelectedScope, TargetTriple};
 
-use support::{IsolatedUser, compose_installer, genuine_template, run_tool};
+use zup_linux::test_support::{
+    IsolatedUser, compose_installer, genuine_template, run_installer_process, run_tool,
+};
 
 const MANIFEST: &str = r#"
 schema = 1
@@ -58,13 +47,6 @@ component = "core"
 
 const TOOL: &str = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"tool 1.0.0\"; exit 0; fi\necho \"tool: unknown command $1\" >&2\nexit 1\n";
 
-/// The manifest on disk becomes an installed, running application.
-///
-/// Every stage reads the previous stage's output: the manifest compiles to
-/// installer IR, the IR materializes against the source tree with the Linux
-/// source policy refusing links and special files, the materialized files
-/// encode into a package, the package composes onto a genuine template, and
-/// the composed installer runs the full lifecycle as a child process.
 #[test]
 fn manifest_to_running_application() {
     let user = IsolatedUser::isolate();
@@ -112,8 +94,7 @@ fn manifest_to_running_application() {
 
     let package =
         zup_bundle::BundleWriter::encode(&build.targets[0], &[]).expect("the package encodes");
-    // Executable intent must survive the package round-trip: decode what was
-    // just encoded and prove it before composing.
+
     {
         let decoded = zup_bundle::Package::from_bytes(package.clone()).expect("a package decodes");
         let plan = decoded.build_plan().expect("a plan decodes");
@@ -127,7 +108,7 @@ fn manifest_to_running_application() {
     let output = project.path().join("Acme-Setup");
     compose_installer(&genuine_template("console"), &output, &package);
 
-    let result = support::run_installer_process(&output, &user, &[]);
+    let result = run_installer_process(&output, &user, &[]);
     assert!(
         result.status.success(),
         "install exit {}: {}",

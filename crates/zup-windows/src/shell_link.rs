@@ -1,5 +1,3 @@
-//! Semantic Shell Link inspection and creation.
-
 use std::path::Path;
 
 use zup_core::TargetTriple;
@@ -9,13 +7,28 @@ use zup_platform::TargetPath;
 use crate::cmdline::{quote_arg, split_command_line};
 use crate::lowering::{host_path, target_path_from_host};
 
+#[derive(Debug, thiserror::Error)]
+pub enum ShellLinkError {
+    #[error("shortcut `{path}` could not be read: {reason}")]
+    Unreadable { path: String, reason: String },
+    #[error("shortcut `{path}` could not be written: {reason}")]
+    Unwritable { path: String, reason: String },
+}
+
+fn unreadable(path: &Path, reason: impl std::fmt::Display) -> ShellLinkError {
+    ShellLinkError::Unreadable {
+        path: path.display().to_string(),
+        reason: reason.to_string(),
+    }
+}
+
 pub fn load_shortcut(
     path: &Path,
     target_triple: &TargetTriple,
-) -> Result<ObservedLauncherState, String> {
+) -> Result<ObservedLauncherState, ShellLinkError> {
     let link = match lnks::Shortcut::load(path) {
         Ok(link) => link,
-        Err(lnks::Error::Io(error)) => return Err(error.to_string()),
+        Err(lnks::Error::Io(error)) => return Err(unreadable(path, error)),
         Err(_) => return Ok(ObservedLauncherState::InvalidLauncher),
     };
     let Some(target) = link
@@ -48,9 +61,12 @@ pub fn save_shortcut(
     arguments: &[String],
     working_directory: Option<&TargetPath>,
     icon: Option<&TargetPath>,
-) -> Result<(), String> {
+) -> Result<(), ShellLinkError> {
     let mut link = if current_path.exists() {
-        lnks::Shortcut::load(current_path).map_err(|error| error.to_string())?
+        lnks::Shortcut::load(current_path).map_err(|error| ShellLinkError::Unwritable {
+            path: output_path.display().to_string(),
+            reason: error.to_string(),
+        })?
     } else {
         lnks::Shortcut::new(host_path(target))
     };
@@ -70,5 +86,9 @@ pub fn save_shortcut(
     if let Some(icon) = icon {
         link.icon = Some(lnks::Icon::new(host_path(icon)));
     }
-    link.save(output_path).map_err(|error| error.to_string())
+    link.save(output_path)
+        .map_err(|error| ShellLinkError::Unwritable {
+            path: output_path.display().to_string(),
+            reason: error.to_string(),
+        })
 }

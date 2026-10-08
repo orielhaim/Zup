@@ -1,29 +1,3 @@
-//! Export a composed artifact as a static web tree.
-//!
-//! This is the developer-facing half of the online story: from one build, the
-//! bytes a static host serves and the documents a TUF repository signs. Nothing
-//! here needs a server that understands components, targets, or installation -
-//! the origin is a file tree, because every object in it is named by its
-//! identity.
-//!
-//! ```text
-//! <out>/blobs/sha256/<ab>/<hex>            one compressed blob
-//! <out>/releases/<channel>.json            the release descriptor
-//! <out>/releases/<channel>/catalog.json    digest-to-size catalog
-//! <out>/releases/<channel>/variants/*.json one variant manifest
-//! <out>/tuf-input/…                        the same documents, for tuftool
-//! ```
-//!
-//! Two trees come out because two different consumers come out. The web tree is
-//! what a client fetches. The TUF input tree is what `tuftool --add-targets`
-//! consumes, because the release graph has to be *signed* before a client will
-//! believe it, and signing stays outside zup.
-//!
-//! The blob bytes are copied straight out of the composed store. Nothing is
-//! recompressed and nothing is rehashed, so a blob that was verified at
-//! composition time is the blob an origin serves, and the digest in its name is
-//! the digest of the content behind it.
-
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,25 +9,19 @@ use zup_acquire::{
 use zup_core::Sha256Digest;
 
 use crate::compose::ArtifactGraph;
-use crate::descriptor::Descriptor;
-use crate::error::ArtifactError;
+use crate::format::ArtifactError;
+use crate::format::Descriptor;
 use crate::store::SegmentReader;
 use crate::table::BlobTable;
 use crate::variant::VariantManifest;
 
-/// What an export produced, so a build can report it and a test can assert it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebTree {
-    /// Where the tree was written.
     pub root: PathBuf,
-    /// Blobs written, and the wire bytes they took.
     pub blob_count: u64,
     pub blob_bytes: u64,
-    /// Variant manifests written.
     pub variant_count: u64,
-    /// The release descriptor's own digest, which is the release's identity.
     pub release_digest: Sha256Digest,
-    /// Documents placed under the TUF input tree, for `tuftool --add-targets`.
     pub tuf_targets: Vec<String>,
 }
 
@@ -70,14 +38,12 @@ impl WebTree {
     }
 }
 
-/// Which channel the exported release answers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebExport {
     pub channel: String,
 }
 
 impl WebExport {
-    /// A named channel.
     pub fn new(channel: &str) -> Result<Self, ArtifactError> {
         check_channel(channel).map_err(|_| ArtifactError::Invalid)?;
         Ok(Self {
@@ -86,12 +52,6 @@ impl WebExport {
     }
 }
 
-/// Write the whole web tree for `graph` into `destination`.
-///
-/// The directory is created if it does not exist. An existing tree is not
-/// cleared: a blob that is already there with the right name is already the
-/// right bytes, and re-exporting an unchanged release should not rewrite a
-/// gigabyte.
 pub fn export_web_tree(
     graph: &ArtifactGraph,
     channel: &WebExport,
@@ -100,11 +60,6 @@ pub fn export_web_tree(
     export_web_tree_with(graph, channel, destination, &[])
 }
 
-/// Write the web tree, recording the finished installer files as release
-/// downloads.
-///
-/// The offline installer is a claim in the graph rather than a separate
-/// package: an enterprise or disconnected user still gets one file, and the
 /// updater never needs it.
 pub fn export_web_tree_with(
     graph: &ArtifactGraph,
@@ -144,7 +99,6 @@ pub fn export_web_tree_with(
     Ok(tree)
 }
 
-/// A finished installer a human can download.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseFile {
     pub path: String,
@@ -154,14 +108,6 @@ pub struct ReleaseFile {
     pub variant: Option<String>,
 }
 
-/// Write the blobs the graph carries, including each variant's native runtime.
-///
-/// A runtime is not payload. Composition keeps it as a descriptor and the
-/// offline artifact carries it as its own region, so it is not in the composed
-/// store - but an online machine has to fetch it, which means it has to be an
-/// addressable object too. It is written as its raw bytes: compressing
-/// executable code buys nothing, and the client verifies the digest of the image
-/// it is about to run.
 fn write_blobs(
     table: &BlobTable,
     segments: &crate::store::FileSegments,
@@ -184,10 +130,6 @@ fn write_blobs(
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(ArtifactError::from)?;
             }
-            // The bytes are copied exactly as composed. Recompressing here would
-            // produce a different wire form for the same content, which is legal
-            // and pointless: the client decompresses and hashes either way, and a
-            // stable byte layout is what lets an origin cache a blob forever.
             let bytes = segments.read_range(entry.segment, entry.offset, entry.compressed_size)?;
             write_atomic(&path, &bytes)?;
             tree.blob_count += 1;
@@ -209,10 +151,6 @@ fn write_blobs(
         write_native_image(destination, tree, &runtime, &bytes, catalog_entries)?;
     }
 
-    // A window's preset is the second native image, written exactly as the
-    // first one is. A release that names it without shipping it is not a release
-    // a machine can install from, so a GUI variant that declares one has its
-    // bytes here or the export refuses.
     for (id, bytes) in graph.preset_bytes() {
         let preset = graph
             .index()
@@ -224,10 +162,6 @@ fn write_blobs(
     Ok(())
 }
 
-/// Write one native image into the web layout and catalogue it.
-///
-/// Uncompressed, for the reason the runtime is: this is code, and a compressed
-/// frame buys nothing for bytes that are hashed whole before they run.
 fn write_native_image(
     destination: &Path,
     tree: &mut WebTree,
@@ -325,12 +259,6 @@ fn write_release(
     )?;
     tuf_targets.push(relative(&release_path));
 
-    // The same body, addressed by version. A channel document moves; a version
-    // document does not, and that is what lets a version-pinned thin installer
-    // exist at all: it authenticates this name, which no later publication can
-    // change. The bytes are identical, so the release digest is the same and a
-    // pinned and a channel client that land on one version can prove they would
-    // install the same thing.
     let versioned = WebLayout::release_version(&channel.channel, &release.version)
         .map_err(|_| ArtifactError::Invalid)?;
     write_atomic(
@@ -365,10 +293,6 @@ fn write_variant(
         manifest_bytes,
     )?;
 
-    // A native image is content like any other. Naming it in the release is what
-    // lets a thin bootstrapper verify the executable before it runs it, which is
-    // the one thing a bootstrapper is not allowed to skip. There are two of them
-    // where the variant has a window, and a client has to know about both.
     let native = |descriptor: &Option<Descriptor>| {
         descriptor
             .as_ref()
@@ -379,9 +303,6 @@ fn write_variant(
     let target = manifest.plan.installer.target.clone();
     Ok(ReleaseVariant {
         id: id.to_owned(),
-        // The platform and frontend are claims a client selects on, so they come
-        // from the manifest the plan carries rather than from a filename or an
-        // ordering convention.
         platform: target.to_string(),
         target: target.clone(),
         frontend: manifest.plan.installer.frontend.as_str().to_owned(),
@@ -403,11 +324,6 @@ fn write_variant(
     })
 }
 
-/// Mirror the authenticated documents into a TUF input tree.
-///
-/// Signing stays outside zup: this writes the files `tuftool --add-targets`
-/// reads, and nothing more. There is no key handling, no signature format, and
-/// no second application-level signing scheme.
 fn write_tuf_input(
     destination: &Path,
     release_bytes: &[u8],
@@ -440,9 +356,6 @@ fn relative(path: &zup_acquire::RelativeContentPath) -> String {
     path.to_string()
 }
 
-/// Join a `/`-separated relative path onto a root, refusing anything that leaves
-/// it. Every path here is computed by this crate, and the check is here so a
-/// future edit cannot turn a computed name into a traversal.
 fn join_relative(root: &Path, relative: &str) -> Result<PathBuf, ArtifactError> {
     let mut path = root.to_path_buf();
     for segment in relative.split('/') {
@@ -457,8 +370,6 @@ fn join_relative(root: &Path, relative: &str) -> Result<PathBuf, ArtifactError> 
     Ok(path)
 }
 
-/// Write a file through a temporary sibling, so an interrupted export never
-/// leaves a half-written document that a client would try to parse.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ArtifactError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(ArtifactError::from)?;

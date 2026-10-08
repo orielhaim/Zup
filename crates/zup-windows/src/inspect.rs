@@ -1,28 +1,22 @@
-//! Read-only inspection of target-host state.
-//!
-//! **Invariant: inspection must never mutate the machine.** No create, write,
-//! registry set, service configure, or execute calls are permitted here.
-
 use std::fs::{self, File};
 
 use thiserror::Error;
 use tracing::{info, info_span};
-use zup_core::SelectedScope;
+use windows_registry::Key;
 use zup_core::hash_reader;
+use zup_core::{SelectedScope, TargetTriple};
 use zup_exec::{
     HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
-    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedPathEntry,
-    ObservedProtocol, ObservedProtocolState, ObservedService, SearchPath,
+    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
+    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
+    ObservedServiceState, SearchPath,
 };
-use zup_platform::TargetPlan;
+use zup_platform::{TargetPath, TargetPlan};
 
 use crate::cmdline;
 use crate::lowering::host_path;
-use crate::registry::{RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader};
-use crate::services::{ServiceReader, WindowsServiceReader};
-use crate::shortcuts::{ShortcutReader, WindowsShortcutReader};
+use crate::registry::{RegistryError, RegistryValue};
 
-/// Errors produced while inspecting target resources.
 #[derive(Debug, Error)]
 pub enum InspectError {
     #[error("failed to read metadata for `{path}`")]
@@ -52,35 +46,54 @@ pub enum InspectError {
     ServiceQueryFailed { name: String, reason: String },
 }
 
-/// Inspect every active target resource and produce an immutable snapshot.
 pub fn inspect_target(target: &TargetPlan) -> Result<HostSnapshot, InspectError> {
-    let registry = WindowsRegistryReader;
-    let services = WindowsServiceReader;
-    let shortcuts = WindowsShortcutReader;
-    inspect_target_with(target, &registry, &services, &shortcuts)
+    inspect_target_with(target, &InspectReads::production())
 }
 
-/// Inspect using injected backends (tests and advanced callers).
-pub fn inspect_target_with<R, S, K>(
+#[derive(Clone, Copy)]
+pub struct InspectReads {
+    pub read_shortcut:
+        fn(&TargetPath) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
+    pub read_service:
+        fn(&str, &TargetTriple) -> Result<ObservedServiceState, crate::services::ServiceError>,
+    pub open_classes_key: fn(SelectedScope, &str) -> Result<Option<Key>, RegistryError>,
+    pub open_environment_key: fn(SelectedScope) -> Result<Option<Key>, RegistryError>,
+}
+
+impl InspectReads {
+    pub fn production() -> Self {
+        Self {
+            read_shortcut: crate::shortcuts::read_shortcut,
+            read_service: crate::services::read_service,
+            open_classes_key: crate::registry::open_classes_key,
+            open_environment_key: crate::registry::open_environment_key,
+        }
+    }
+
+    #[cfg(feature = "test-launcher")]
+    pub fn without_native_readers() -> Self {
+        Self {
+            read_shortcut: |_| Ok(ObservedLauncherState::Absent),
+            read_service: |_, _| Ok(ObservedServiceState::Absent),
+            open_classes_key: crate::registry::open_classes_key,
+            open_environment_key: crate::registry::open_environment_key,
+        }
+    }
+}
+
+pub fn inspect_target_with(
     target: &TargetPlan,
-    registry: &R,
-    services: &S,
-    shortcuts: &K,
-) -> Result<HostSnapshot, InspectError>
-where
-    R: RegistryReader,
-    S: ServiceReader,
-    K: ShortcutReader,
-{
+    reads: &InspectReads,
+) -> Result<HostSnapshot, InspectError> {
     let _span = info_span!("inspect_target").entered();
     info!("inspection started (read-only)");
 
     let files = inspect_files(target)?;
-    let shortcut_obs = inspect_launchers(target, shortcuts)?;
-    let path_entries = inspect_path_entries(target, registry)?;
-    let service_obs = inspect_services(target, services)?;
-    let protocol_obs = inspect_protocols(target, registry)?;
-    let file_associations = inspect_file_associations(target, registry)?;
+    let shortcut_obs = inspect_launchers(target, reads.read_shortcut)?;
+    let path_entries = inspect_path_entries(target)?;
+    let service_obs = inspect_services(target, reads.read_service)?;
+    let protocol_obs = inspect_protocols(target, reads)?;
+    let file_associations = inspect_file_associations(target, reads)?;
 
     info!(
         files = files.len(),
@@ -102,7 +115,6 @@ where
     })
 }
 
-/// File-only inspection (also used as a narrower advanced API).
 pub fn inspect_files(target: &TargetPlan) -> Result<Vec<ObservedFile>, InspectError> {
     let mut files = Vec::with_capacity(target.files.len());
     let mut bytes_inspected = 0u64;
@@ -175,18 +187,20 @@ fn observe_file(
     Ok(ObservedFileState::File { size, sha256 })
 }
 
-fn inspect_launchers<K: ShortcutReader>(
+fn inspect_launchers(
     target: &TargetPlan,
-    reader: &K,
+    read_shortcut: fn(
+        &TargetPath,
+    ) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
 ) -> Result<Vec<ObservedLauncher>, InspectError> {
     let mut out = Vec::with_capacity(target.launchers.len());
     for shortcut in &target.launchers {
-        let state = reader
-            .read_shortcut(&shortcut.launcher_path)
-            .map_err(|reason| InspectError::LauncherInspectionFailed {
+        let state = read_shortcut(&shortcut.launcher_path).map_err(|reason| {
+            InspectError::LauncherInspectionFailed {
                 path: shortcut.launcher_path.to_string(),
-                reason,
-            })?;
+                reason: reason.to_string(),
+            }
+        })?;
         out.push(ObservedLauncher {
             key: shortcut.key.clone(),
             launcher_path: shortcut.launcher_path.clone(),
@@ -196,18 +210,13 @@ fn inspect_launchers<K: ShortcutReader>(
     Ok(out)
 }
 
-fn inspect_path_entries<R: RegistryReader>(
-    target: &TargetPlan,
-    registry: &R,
-) -> Result<Vec<ObservedPathEntry>, InspectError> {
-    // One read per owning search path, then the portable, target-normalized
-    // view is reused for every entry that path owns.
+fn inspect_path_entries(target: &TargetPlan) -> Result<Vec<ObservedPathEntry>, InspectError> {
     let mut cache: Vec<(SelectedScope, SearchPath)> = Vec::new();
     let mut out = Vec::with_capacity(target.path_entries.len());
 
     for entry in &target.path_entries {
         if !cache.iter().any(|(scope, _)| *scope == entry.scope) {
-            let search_path = match crate::search_path::read(registry, entry.scope)
+            let search_path = match crate::search_path::read(entry.scope)
                 .map_err(InspectError::Registry)?
             {
                 Some((_value_type, value)) => crate::search_path::collect(&target.target, &value),
@@ -231,18 +240,21 @@ fn inspect_path_entries<R: RegistryReader>(
     Ok(out)
 }
 
-fn inspect_services<S: ServiceReader>(
+fn inspect_services(
     target: &TargetPlan,
-    reader: &S,
+    read_service: fn(
+        &str,
+        &TargetTriple,
+    ) -> Result<ObservedServiceState, crate::services::ServiceError>,
 ) -> Result<Vec<ObservedService>, InspectError> {
     let mut out = Vec::with_capacity(target.services.len());
     for service in &target.services {
-        let state = reader
-            .read_service(service.name.as_str(), &target.target)
-            .map_err(|reason| InspectError::ServiceQueryFailed {
+        let state = read_service(service.name.as_str(), &target.target).map_err(|reason| {
+            InspectError::ServiceQueryFailed {
                 name: service.name.to_string(),
-                reason,
-            })?;
+                reason: reason.to_string(),
+            }
+        })?;
         out.push(ObservedService {
             key: service.key.clone(),
             id: service.id.clone(),
@@ -252,18 +264,18 @@ fn inspect_services<S: ServiceReader>(
     Ok(out)
 }
 
-fn inspect_protocols<R: RegistryReader>(
+fn inspect_protocols(
     target: &TargetPlan,
-    registry: &R,
+    reads: &InspectReads,
 ) -> Result<Vec<ObservedProtocol>, InspectError> {
     let mut out = Vec::with_capacity(target.protocols.len());
     for protocol in &target.protocols {
         let scheme = protocol.scheme.as_str();
-        let state = match registry.open_classes_key(protocol.scope, scheme)? {
+        let state = match (reads.open_classes_key)(protocol.scope, scheme)? {
             None => ObservedProtocolState::Absent,
             Some(key) => {
                 let marker = key.get_value("URL Protocol").map(|_| true).unwrap_or(false);
-                match open_command(registry, &key) {
+                match open_command(&key) {
                     None if !marker && registry_key_empty(&key)? => ObservedProtocolState::Absent,
                     None => ObservedProtocolState::Malformed {
                         reason: "missing shell\\open\\command".to_owned(),
@@ -290,26 +302,26 @@ fn inspect_protocols<R: RegistryReader>(
     Ok(out)
 }
 
-fn inspect_file_associations<R: RegistryReader>(
+fn inspect_file_associations(
     target: &TargetPlan,
-    registry: &R,
+    reads: &InspectReads,
 ) -> Result<Vec<ObservedFileAssociation>, InspectError> {
     let mut out = Vec::with_capacity(target.file_associations.len());
     for file_association in &target.file_associations {
         let id = file_association.id.as_str();
-        let association_state = match registry.open_classes_key(file_association.scope, id)? {
+        let association_state = match (reads.open_classes_key)(file_association.scope, id)? {
             None => ObservedFileAssociationState::Absent,
             Some(key) => {
-                let description = match R::read_value(&key, "FriendlyTypeName") {
+                let description = match crate::registry::read_value(&key, "FriendlyTypeName") {
                     RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) if !s.is_empty() => Some(s),
-                    _ => match R::read_value(&key, "") {
+                    _ => match crate::registry::read_value(&key, "") {
                         RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) if !s.is_empty() => {
                             Some(s)
                         }
                         _ => None,
                     },
                 };
-                match open_command(registry, &key) {
+                match open_command(&key) {
                     None if description.is_none() && registry_key_empty(&key)? => {
                         ObservedFileAssociationState::Absent
                     }
@@ -330,9 +342,9 @@ fn inspect_file_associations<R: RegistryReader>(
         };
 
         let ext = file_association.extension.as_str();
-        let extension_state = match registry.open_classes_key(file_association.scope, ext)? {
+        let extension_state = match (reads.open_classes_key)(file_association.scope, ext)? {
             None => ObservedExtensionState::Absent,
-            Some(key) => match R::read_value(&key, "") {
+            Some(key) => match crate::registry::read_value(&key, "") {
                 RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) if !s.is_empty() => {
                     ObservedExtensionState::Mapped { association_id: s }
                 }
@@ -372,12 +384,11 @@ fn registry_key_empty(key: &windows_registry::Key) -> Result<bool, InspectError>
     Ok(values.take(1).next().is_none() && children.take(1).next().is_none())
 }
 
-fn open_command<R: RegistryReader>(registry: &R, key: &windows_registry::Key) -> Option<String> {
-    let _ = registry;
+fn open_command(key: &windows_registry::Key) -> Option<String> {
     let shell = key.open("shell").ok()?;
     let open = shell.open("open").ok()?;
     let cmd = open.open("command").ok()?;
-    match R::read_value(&cmd, "") {
+    match crate::registry::read_value(&cmd, "") {
         RegistryValue::Sz(s) | RegistryValue::ExpandSz(s) => Some(s),
         RegistryValue::Missing | RegistryValue::Other { .. } => None,
     }

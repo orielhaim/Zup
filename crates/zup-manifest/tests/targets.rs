@@ -93,7 +93,6 @@ fn selects_targets_by_profile_name() {
     );
     assert_eq!(selected[0].frontend, Frontend::Gui);
 
-    // An empty selector list resolves every profile, in name order.
     let selected = select_targets(&manifest, &[], &TargetOverrides::default()).unwrap();
     let names: Vec<_> = selected
         .iter()
@@ -104,7 +103,6 @@ fn selects_targets_by_profile_name() {
 
 #[test]
 fn a_selector_may_be_a_profile_name_or_a_raw_triple() {
-    // A raw triple resolves to the profile that declares it.
     let manifest = parse(MANIFEST).unwrap();
     let selected = select_targets(
         &manifest,
@@ -115,8 +113,6 @@ fn a_selector_may_be_a_profile_name_or_a_raw_triple() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].profile.as_str(), "windows-x64");
 
-    // When a profile is *named* after a triple another profile also declares,
-    // the profile name wins over the triple lookup.
     let source = MANIFEST.replace(
         "[build.targets.z-linux-arm64]",
         r#"[build.targets."x86_64-pc-windows-msvc"]
@@ -155,8 +151,6 @@ fn raw_target_aliases_are_canonicalized() {
 
 #[test]
 fn declared_frontend_resolves_and_compiles() {
-    // A `frontend` on the common manifest and a `frontend` on a target profile
-    // are the same claim: the innermost declaration reaches the installer.
     let profile = with_windows_frontend("console");
     let common = MANIFEST.replace("schema = 1\n", "schema = 1\nfrontend = \"console\"\n");
 
@@ -466,8 +460,6 @@ fn every_resource_kind_names_itself_in_the_diagnostic(#[case] kind: &str, #[case
 
 #[test]
 fn invalid_plugin_source_is_an_authoring_error_for_every_profile() {
-    // Parse checks the source of every plugin, not only the plugins the profile
-    // being compiled would select, so a bad source fails regardless of targets.
     let source = with_resources(
         r#"
 [[plugins]]
@@ -498,8 +490,6 @@ targets = ["z-linux-arm64"]
 "#,
     );
     let mut manifest = parse(&source).unwrap();
-    // A source that only parse could have caught, for a plugin the Windows
-    // profile never sees.
     manifest.plugins[0].value.source = "../helper.wasm".to_owned();
 
     let windows = compile_parsed(&manifest, "windows-x64").unwrap();
@@ -603,7 +593,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
     let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
     let installer = compile(&manifest, &selected[0], &overrides).unwrap();
 
-    // The target installs per machine, so only the machine template is replaced.
     assert_eq!(
         selected[0]
             .install
@@ -614,7 +603,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
         Some("D:/Apps/Acme".to_owned())
     );
     assert!(selected[0].install.directory.user.is_none());
-    // The override replaces a destination, not the scope or the policy.
     assert_eq!(selected[0].install.scope, InstallScope::Machine);
     assert!(selected[0].install.allow_directory_override);
     assert_eq!(installer.install, selected[0].install);
@@ -704,7 +692,6 @@ fn an_override_set_resolves_each_profile_independently() {
         "a profile without an entry keeps the manifest value"
     );
 
-    // A uniform set reaches every selected profile through the same resolution.
     let uniform = TargetOverrideSet::uniform(TargetOverrides {
         source: Some(Source::new(PathBuf::from("out/all")).unwrap()),
         ..TargetOverrides::default()
@@ -756,7 +743,6 @@ fn rejects_forged_resolved_target_config() {
         assert!(error.to_string().contains(field), "{error}");
     }
 
-    // The same source and install directory are legitimate once declared.
     let declared = TargetOverrides {
         source: Some(Source::new(PathBuf::from("dist/forged")).unwrap()),
         install_directory: Some(literal("C:/Forged")),

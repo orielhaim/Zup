@@ -1,23 +1,5 @@
-//! Machine service lifecycle through the real transaction machinery.
-//!
-//! Linux-only: every path here drives systemd state or Linux filesystem
-//! policy through the backend under test.
-
 #![cfg(target_os = "linux")]
-//!
-//! Every test drives the full path the privileged worker serves - snapshot,
-//! portable delta planning, typed transaction input, journaled execution,
-//! ledger publish - with a deterministic fake systemd manager and an
-//! isolated filesystem. Production serves the real system bus through the
-//! same narrow surface; real-manager coverage lives in
-//! `tests/services_systemd.rs`, gated on a root bus.
-//!
-//! What is proven here, and never through mocks of the planner itself:
-//! install registers boot policy without starting anything, every
-//! start-policy transition reconciles, source updates reload, repair and
-//! force repair follow owned-resource semantics, uninstall retires only
-//! what Zup owns, and every crash point reaches a consistent terminal
-//! state or an explicit `RecoveryRequired`.
+#![cfg(feature = "test-support")]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,10 +7,11 @@ use std::path::PathBuf;
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, TargetTriple};
 use zup_exec::{HostSnapshot, InstallLedger, LifecycleAction, OwnedResource};
+use zup_linux::test_support::SharedFakeSystemd;
 use zup_linux::{
     DesiredService, LinuxFileExecutor, LinuxLedgerStore, MachineRoots, ServiceCompilation,
-    ServiceSupport, SharedFakeSystemd, SystemdManager as _, SystemdRoots,
-    compile_machine_execution_plan, snapshot_services, snapshot_target,
+    ServiceSupport, SystemdManager as _, SystemdRoots, compile_machine_execution_plan,
+    snapshot_services, snapshot_target,
 };
 use zup_platform::{CommandSpec, TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
 use zup_transaction::{
@@ -156,16 +139,12 @@ impl Fixture {
         }
     }
 
-    /// The deterministic unit name for the fixture service.
     fn unit(&self, plan: &TargetPlan) -> String {
         DesiredService::derive(&plan.services[0])
             .expect("a service derives")
             .unit
     }
 
-    /// Seed the fake's fragment path so verification can prove systemd
-    /// resolves the canonical source. Never resets persistent policy:
-    /// repeated snapshots across versions observe continuous state.
     fn seed(&self, unit: &str) {
         let fragment = self
             .systemd
@@ -251,12 +230,6 @@ impl Fixture {
             .expect("a ledger reads")
     }
 
-    /// Run one lifecycle to a stable outcome through the real coordinator.
-    ///
-    /// `Err` means planning refused before any mutation (conflict, drift
-    /// without force, collision, unsafe binary, unreachable manager):
-    /// the transaction never existed. `Ok` carries the stable outcome;
-    /// only `Committed` publishes a ledger.
     fn run(
         &mut self,
         plan: &TargetPlan,
@@ -335,7 +308,6 @@ impl Fixture {
         }
     }
 
-    /// Run one lifecycle that must commit, unwrapping the ledger.
     fn commit(
         &mut self,
         plan: &TargetPlan,
@@ -349,9 +321,6 @@ impl Fixture {
         ledger
     }
 
-    /// Journal one install without executing it: the crash simulation
-    /// starting point. The world is mutated out of band afterwards, the
-    /// way a dying worker leaves it.
     fn begin(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
         let snapshot = self.snapshot(plan);
         let owned_matches = self.owned_matches(None, &snapshot);
@@ -395,7 +364,6 @@ impl Fixture {
             .expect("a journal begins")
     }
 
-    /// Journal one uninstall without executing it.
     fn begin_uninstall(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
         let ledger = self.load_ledger().expect("an installation exists");
         let snapshot = self.snapshot(plan);
@@ -440,8 +408,6 @@ impl Fixture {
             .expect("a journal begins")
     }
 
-    /// Recover one journaled record with a fresh executor, the way a new
-    /// worker replays after a crash.
     fn recover(
         &self,
         record: zup_transaction::TransactionRecord,
@@ -462,9 +428,6 @@ impl Fixture {
         zup_transaction::recover(record, &store, &mut executor).expect("recovery settles")
     }
 
-    /// Advance one journaled record to mid-apply the way a dying worker
-    /// leaves it: commit intent crossed, service nodes running, no
-    /// receipts journaled.
     fn crash_mid_apply(
         &self,
         record: zup_transaction::TransactionRecord,
@@ -494,7 +457,6 @@ impl Fixture {
             .expect("the journal advances")
     }
 
-    /// Publish one committed record through the ledger store.
     fn publish(&self, record: &zup_transaction::TransactionRecord) {
         self.ledgers()
             .publish_committed(record, SelectedScope::Machine)
@@ -513,11 +475,6 @@ impl Fixture {
     }
 }
 
-/// Installing an `Automatic` service registers persistent boot policy and
-/// nothing else: the unit source lands `0644`, the manager reports
-/// `enabled`, the payload binary is untouched, and no service process is
-/// ever started (the narrow manager surface has no start API to call -
-/// this is structural, not a runtime flag).
 #[test]
 fn install_registers_boot_policy_without_starting() {
     let mut fixture = Fixture::new();
@@ -528,8 +485,7 @@ fn install_registers_boot_policy_without_starting() {
     let ledger = fixture.commit(&plan, LifecycleAction::Install, false);
     assert_eq!(fixture.policy(&unit), "enabled");
     assert!(fixture.manager.borrow().reloads > reloads_before);
-    // The canonical source is deterministic renderer output, root-owned
-    // `0644` content.
+
     let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
     assert_eq!(
         fixture.source(&unit).expect("a source exists"),
@@ -542,7 +498,7 @@ fn install_registers_boot_policy_without_starting() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o644);
-    // The payload binary is untouched by service integration.
+
     assert_eq!(
         std::fs::read(fixture.roots.programs.join("acme").join("tool")).expect("a binary reads"),
         PAYLOAD_BYTES
@@ -569,10 +525,6 @@ fn install_registers_boot_policy_without_starting() {
     );
 }
 
-/// `v1 Automatic → v2 Manual → v3 Disabled → v4 Automatic`: every
-/// transition reconciles through real systemd state, the masked source
-/// stays intact while masked, and nothing restarts (there is no restart
-/// API on the narrow surface).
 #[test]
 fn start_policy_transitions_reconcile() {
     let mut fixture = Fixture::new();
@@ -604,8 +556,6 @@ fn start_policy_transitions_reconcile() {
     assert!(ledger.is_some());
 }
 
-/// Source updates (arguments, display name) land transactionally: the
-/// unit bytes change and the manager reloads onto the new fragment.
 #[test]
 fn source_updates_land_transactionally() {
     let mut fixture = Fixture::new();
@@ -634,8 +584,6 @@ fn source_updates_land_transactionally() {
     );
 }
 
-/// Repair restores a deleted source; a damaged source refuses without
-/// force and restores with it.
 #[test]
 fn repair_restores_the_source() {
     let mut fixture = Fixture::new();
@@ -669,9 +617,6 @@ fn repair_restores_the_source() {
     assert_eq!(fixture.source(&unit).expect("force restores"), healthy);
 }
 
-/// External persistent-policy drift refuses repair and restores with
-/// force; the running-state fiction never enters the decision (the
-/// snapshot never reads it - there is no runtime input to drift on).
 #[test]
 fn repair_restores_external_policy_drift() {
     let mut fixture = Fixture::new();
@@ -680,7 +625,6 @@ fn repair_restores_external_policy_drift() {
     fixture.seed(&unit);
     fixture.commit(&plan, LifecycleAction::Install, false);
 
-    // An administrator disables the Automatic service out of band.
     fixture
         .manager
         .borrow_mut()
@@ -696,7 +640,6 @@ fn repair_restores_external_policy_drift() {
     fixture.commit(&plan, LifecycleAction::Repair { force_files: true }, true);
     assert_eq!(fixture.policy(&unit), "enabled");
 
-    // Repair with no changes converges without touching policy.
     let reloads = fixture.manager.borrow().reloads;
     fixture.commit(&plan, LifecycleAction::Repair { force_files: false }, false);
     assert_eq!(
@@ -706,8 +649,6 @@ fn repair_restores_external_policy_drift() {
     );
 }
 
-/// Uninstall retires owned enablement, mask, and source while preserving
-/// neighboring state; it never stops anything (no stop API exists).
 #[test]
 fn uninstall_retires_only_what_zup_owns() {
     let mut fixture = Fixture::new();
@@ -715,7 +656,7 @@ fn uninstall_retires_only_what_zup_owns() {
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
     fixture.commit(&plan, LifecycleAction::Install, false);
-    // Neighboring state the uninstall must preserve.
+
     let neighbor = fixture.systemd.unit_dir.join("unrelated.service");
     std::fs::write(&neighbor, b"[Unit]\n").expect("a neighbor");
     fixture.commit(&plan, LifecycleAction::Uninstall, false);
@@ -738,8 +679,6 @@ fn uninstall_retires_only_what_zup_owns() {
     );
 }
 
-/// A planted symlink at the canonical source refuses install and leaves
-/// its target untouched.
 #[test]
 fn a_planted_source_symlink_refuses() {
     let mut fixture = Fixture::new();
@@ -764,8 +703,6 @@ fn a_planted_source_symlink_refuses() {
     assert_eq!(fixture.policy(&unit), "disabled", "no policy was applied");
 }
 
-/// An administrator-owned extra enablement link is never deleted through
-/// a broad disable: the transition refuses instead.
 #[test]
 fn unrelated_admin_enablement_is_preserved() {
     let mut fixture = Fixture::new();
@@ -773,7 +710,7 @@ fn unrelated_admin_enablement_is_preserved() {
     let unit = fixture.unit(&v1);
     fixture.seed(&unit);
     fixture.commit(&v1, LifecycleAction::Install, false);
-    // An administrator adds their own enablement for the unit.
+
     fixture.manager.borrow_mut().extra_links.insert(
         unit.clone(),
         vec!["/etc/systemd/system/graphical.target.wants/unit".to_owned()],
@@ -790,9 +727,7 @@ fn unrelated_admin_enablement_is_preserved() {
         "a broad disable never deletes unrelated state"
     );
     assert_eq!(fixture.policy(&unit), "enabled", "nothing was removed");
-    // The failed tail compensates its own source write, so the world
-    // still matches v1 ownership: a retry reaches the same refusal
-    // instead of drifting, and removing the foreign link unblocks it.
+
     let v1_bytes = DesiredService::derive(&v1.services[0]).expect("a service derives");
     assert_eq!(
         fixture.source(&unit).expect("a source remains"),
@@ -807,19 +742,13 @@ fn unrelated_admin_enablement_is_preserved() {
     assert_eq!(fixture.policy(&unit), "disabled");
 }
 
-/// A lost D-Bus reply still converges: the mutation applied, the reply
-/// did not arrive, and a fresh worker proves the installed state from
-/// the world through journal recovery rather than assuming failure means
-/// absence.
 #[test]
 fn a_lost_reply_reconciles_to_installed() {
     let mut fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    // Journal the intent while the world is clean, crash it mid-apply,
-    // then mutate the world the way the dying worker left it: source
-    // durable, policy applied, journal still open.
+
     let record = fixture.begin(&plan);
     let record = fixture.crash_mid_apply(record);
     let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
@@ -836,17 +765,13 @@ fn a_lost_reply_reconciles_to_installed() {
     assert!(fixture.load_ledger().is_some());
 }
 
-/// A reload failure leaves source durable without policy: journal
-/// recovery resumes instead of recovering, because re-application is
-/// idempotent.
 #[test]
 fn a_reload_failure_resumes() {
     let mut fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    // Journal first, crash it mid-apply, then leave the crash state:
-    // source durable, policy still pending.
+
     let record = fixture.begin(&plan);
     let record = fixture.crash_mid_apply(record);
     let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
@@ -859,8 +784,6 @@ fn a_reload_failure_resumes() {
     assert!(fixture.load_ledger().is_some());
 }
 
-/// A mask applied before a crash reconciles: the Disabled source stays
-/// intact while masked, and recovery commits the installed world.
 #[test]
 fn a_mask_before_crash_reconciles() {
     let mut fixture = Fixture::new();
@@ -886,8 +809,6 @@ fn a_mask_before_crash_reconciles() {
     );
 }
 
-/// An interrupted uninstall converges: enablement retired with the source
-/// still present re-removes; a source already gone retires idempotently.
 #[test]
 fn an_interrupted_uninstall_converges() {
     let mut fixture = Fixture::new();
@@ -895,9 +816,7 @@ fn an_interrupted_uninstall_converges() {
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
     fixture.commit(&plan, LifecycleAction::Install, false);
-    // Journal the uninstall while the world is installed, crash it
-    // mid-apply, then leave the crash state: policy already retired
-    // while the source is still present.
+
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
     fixture
@@ -909,9 +828,7 @@ fn an_interrupted_uninstall_converges() {
     assert_eq!(outcome, TransactionOutcome::Committed);
     fixture.publish(&record);
     assert!(fixture.source(&unit).is_none());
-    // And a second interruption with the source already gone still retires:
-    // reinstall, journal the uninstall, crash with the source already
-    // absent but policy pending, and recovery retires idempotently.
+
     fixture.commit(&plan, LifecycleAction::Install, false);
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
@@ -923,17 +840,13 @@ fn an_interrupted_uninstall_converges() {
     assert!(fixture.load_ledger().is_none());
 }
 
-/// A user-writable binary substitute refuses before registration: swapping
-/// the payload after planning never yields an enabled or masked unit.
 #[test]
 fn a_swapped_binary_refuses_before_registration() {
     let mut fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    // Substitute attacker-writable bytes under the installed binary path
-    // before the transaction runs: the payload digest no longer matches,
-    // so file staging fails closed before any service mutation.
+
     std::fs::write(fixture.payload.join("tool"), b"attacker-bytes").expect("a swap");
     let result = fixture.run(&plan, LifecycleAction::Install, false);
     let (outcome, ledger) = result.expect("the failure reaches a stable outcome");
@@ -946,17 +859,13 @@ fn a_swapped_binary_refuses_before_registration() {
     assert_eq!(fixture.policy(&unit), "disabled", "no policy was applied");
 }
 
-/// Tampering the journaled unit bytes refuses at apply: the worker
-/// renders its own bytes and compares, so a substituted payload cannot
-/// ride a prepared plan.
 #[test]
 fn tampered_unit_bytes_refuse_at_apply() {
     let fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    // Build a valid input, then substitute the journaled bytes the way a
-    // compromised journal would.
+
     let snapshot = fixture.snapshot(&plan);
     let owned_matches = fixture.owned_matches(None, &snapshot);
     let execution = zup_exec::plan_lifecycle(
@@ -1020,8 +929,6 @@ fn tampered_unit_bytes_refuse_at_apply() {
     assert!(fixture.source(&unit).is_none());
 }
 
-/// Neighboring admin state survives every transition: extra files in the
-/// shared unit directory are never cleaned.
 #[test]
 fn neighboring_unit_files_survive_transitions() {
     let mut fixture = Fixture::new();

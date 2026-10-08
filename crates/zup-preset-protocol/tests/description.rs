@@ -1,12 +1,3 @@
-//! What a preset says about itself, and what a publisher can do with that
-//! without running it.
-//!
-//! `zup preset pack` is the only moment a preset executable runs, and it runs in the
-//! preset author's build. Everything after that - packaging, inspecting,
-//! validating an application's settings, composing an installer - has to work
-//! from the document alone, so each rule here is tested by breaking the
-//! document rather than by describing a good one.
-
 use zup_preset_protocol::{
     Capabilities, Capability, DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES,
     PRESET_PROTOCOL_VERSION, PresetDescription,
@@ -26,7 +17,6 @@ fn description() -> PresetDescription {
     ]))
 }
 
-/// A preset that is ready to package describes itself completely.
 #[test]
 fn a_preset_describes_itself_completely() {
     let described = description();
@@ -39,8 +29,6 @@ fn a_preset_describes_itself_completely() {
     );
 }
 
-/// A preset that configures nothing is still described completely: the absence
-/// of capabilities is a statement, and it is a different one from requiring them.
 #[test]
 fn a_preset_that_needs_nothing_says_so() {
     let plain = PresetDescription::new("plain", "0.1.0", schema());
@@ -48,15 +36,11 @@ fn a_preset_that_needs_nothing_says_so() {
     assert!(plain.required_capabilities.is_empty());
 }
 
-/// The describe flag is the whole of the contract between `zup preset pack` and a
-/// preset executable, so it is a constant rather than a string repeated at both
-/// ends.
 #[test]
 fn the_describe_flag_is_one_name() {
     assert_eq!(DESCRIBE_FLAG, "--zup-describe");
 }
 
-/// A document that does not say which preset it is cannot become a package.
 #[test]
 fn a_document_without_an_identity_is_refused() {
     let mut blank = description();
@@ -68,8 +52,6 @@ fn a_document_without_an_identity_is_refused() {
     assert_eq!(unversioned.validate(), Err(DescribeError::EmptyVersion));
 }
 
-/// A settings schema a validator could not compile against is refused here
-/// rather than at the first application that uses this preset.
 #[test]
 fn a_settings_schema_that_is_not_an_object_is_refused() {
     let mut broken = description();
@@ -80,8 +62,6 @@ fn a_settings_schema_that_is_not_an_object_is_refused() {
     );
 }
 
-/// The describe document round-trips through JSON unchanged, because the whole
-/// of `zup preset pack` is a process printing it and another process reading it.
 #[test]
 fn the_describe_document_survives_json() {
     let described = description();
@@ -90,9 +70,6 @@ fn the_describe_document_survives_json() {
     assert_eq!(read, described);
 }
 
-/// An unknown field is a document this build does not understand, not something
-/// to ignore. Ignoring it is how a preset that means something different gets
-/// packaged as if it meant this.
 #[test]
 fn a_document_with_an_unknown_field_is_refused() {
     let mut document = serde_json::to_value(description()).expect("serializes");
@@ -100,8 +77,6 @@ fn a_document_with_an_unknown_field_is_refused() {
     assert!(serde_json::from_value::<PresetDescription>(document).is_err());
 }
 
-/// The same document always serializes to the same bytes, so two builds of one
-/// preset produce packages that can be compared.
 #[test]
 fn the_describe_document_is_deterministic() {
     assert_eq!(
@@ -110,10 +85,6 @@ fn the_describe_document_is_deterministic() {
     );
 }
 
-/// The bounds are statements about what a generated schema can weigh and how
-/// many targets a preset can support, not limits an application meets. A
-/// publisher that exceeds one is refused rather than truncating, so they have to
-/// be real numbers rather than a comment.
 #[test]
 fn the_bounds_are_stated_rather_than_unbounded() {
     let generous = PresetDescription::new("aurora", "1.0.0", schema());

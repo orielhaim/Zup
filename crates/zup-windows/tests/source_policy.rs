@@ -1,13 +1,8 @@
 #![cfg(windows)]
 
-//! The Windows build source-inspection policy: symlink metadata plus
-//! `FILE_ATTRIBUTE_REPARSE_POINT`, so a junction in a prerequisite's ancestry is
-//! refused the way a symlink is.
-
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -17,37 +12,12 @@ use zup_build::{
 use zup_manifest::{Manifest, TargetOverrides, compile, parse, select_targets};
 use zup_windows::WindowsSourceFilePolicy;
 
+#[path = "fixture/junction.rs"]
+mod junction;
+
+use junction::Junction;
+
 const PREREQUISITE: &[u8] = b"runtime payload";
-
-/// A directory junction: a reparse point that, unlike a symlink, needs no
-/// elevated privilege to create, so the adapter's reparse check is exercised on
-/// a stock host. Dropping it deletes the reparse point, never its target.
-struct Junction {
-    path: PathBuf,
-}
-
-impl Junction {
-    fn new(link: &Path, target: &Path) -> Self {
-        fs::create_dir_all(target).unwrap();
-        let status = Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "mklink /J failed for {}", link.display());
-        Self {
-            path: link.to_path_buf(),
-        }
-    }
-}
-
-impl Drop for Junction {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
-    }
-}
 
 fn manifest_with_prerequisite(path: &str) -> String {
     let digest = Sha256Digest::from_bytes(Sha256::digest(PREREQUISITE).into());
@@ -87,8 +57,6 @@ package = {{ type = "embedded", path = "{path}", sha256 = "{}", size = {} }}
     )
 }
 
-/// A project whose embedded prerequisite is read through a junction at
-/// `vendor`, resolving to content of exactly the declared size and digest.
 fn junction_project() -> (TempDir, Manifest, Junction) {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join("dist")).unwrap();
@@ -148,10 +116,6 @@ fn windows_adapter_reports_a_junction_a_regular_file_and_a_missing_path() {
     );
 }
 
-/// `std::fs` reports a directory junction as a symlink, so the default policy
-/// already refuses this tree. What it cannot see is a reparse point whose tag is
-/// not a name surrogate, which is why a Windows build injects the adapter - and
-/// neither policy may write through the junction on its way to the refusal.
 #[test]
 fn a_prerequisite_reached_through_a_junction_is_refused_by_every_policy() {
     for policy in [

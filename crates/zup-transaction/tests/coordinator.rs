@@ -1,10 +1,9 @@
 //! Coordinator execution, rollback, crash injection, and recovery tests.
 
 mod common;
-mod fake;
 
+use common::fake::FakeExecutor;
 use common::{chain_input, sample_app_id, sample_input, sample_plan, sample_version};
-use fake::FakeExecutor;
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_transaction::{
@@ -90,7 +89,7 @@ fn mid_verification(record: &TransactionRecord) -> (TransactionRecord, Vec<Trans
         crashed.nodes.insert(
             node.id.clone(),
             NodeState::Applied {
-                receipt: Box::new(fake::receipt_for(node)),
+                receipt: Box::new(common::fake::receipt_for(node)),
             },
         );
     }

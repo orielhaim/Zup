@@ -1,20 +1,9 @@
 #![cfg(target_os = "linux")]
-// The crate exports nothing off Linux, by design: a backend that answered on a
-// platform it has no mechanisms for would be answering with guesses. The test
-// follows the same rule rather than importing symbols a Windows build does not have.
-
-//! The Linux executor against a real filesystem.
-//!
-//! These are not unit tests with a mocked filesystem: the properties being claimed
-//! are properties of the *kernel's* behaviour - that `RENAME_NOREPLACE` refuses a
-//! destination that appeared in the meantime, that `O_NOFOLLOW` refuses a link, that
-//! a directory is unlinkable while a process is running inside it - and a mock
-//! would be asserting only that the code calls what the mock expects.
 
 use rstest::rstest;
 use zup_core::{Sha256Digest, hash_reader};
 use zup_linux::{
-    EntryKind, FileIntent, FileWork, LinuxFileExecutor, LinuxFileExecutorError, OwnedDirectory,
+    EntryKind, ExecError, FileIntent, FileWork, LinuxFileExecutor, OwnedDirectory, PathError,
     STATE_DIRECTORY_MODE,
 };
 use zup_transaction::{FilePrecondition, OperationId, OperationReceipt};
@@ -37,7 +26,6 @@ fn id(n: u32) -> OperationId {
     OperationId::new(format!("op-{n}"))
 }
 
-/// An executor with one registered file, ready to stage and apply.
 fn executor_for(
     destination: &Path,
     bytes: &[u8],
@@ -88,7 +76,6 @@ fn mode_of(path: &Path) -> u32 {
 
 use std::os::unix::fs::PermissionsExt as _;
 
-/// A fresh install writes the file, and the receipt describes what it wrote.
 #[test]
 fn a_create_publishes_the_staged_bytes_and_reports_them() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -131,9 +118,6 @@ fn a_create_publishes_the_staged_bytes_and_reports_them() {
     );
 }
 
-/// Executable intent reaches the filesystem as a permission bit, and the receipt
-/// says so. The receipt matters as much as the bit: without it, reconcile has
-/// nothing to compare against and cannot tell a runnable file from a dead one.
 #[rstest]
 #[case::declared(true, 0o744)]
 #[case::not_declared(false, 0o644)]
@@ -162,9 +146,6 @@ fn executable_intent_becomes_the_mode_the_receipt_claims(
     );
 }
 
-/// The no-clobber guarantee is enforced by the kernel, not by a check before the
-/// rename. This is the whole reason `create` exists as a primitive: a check leaves
-/// a window in which a file that appeared in the meantime is silently replaced.
 #[test]
 fn a_create_refuses_a_destination_that_is_already_there() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -187,7 +168,7 @@ fn a_create_refuses_a_destination_that_is_already_there() {
         .apply(&node(zup_transaction::FileDelta::Create))
         .expect_err("a create over an existing file is refused");
     assert!(
-        matches!(error, LinuxFileExecutorError::AlreadyExists { .. }),
+        matches!(error, ExecError::Path(PathError::AlreadyExists { .. })),
         "the refusal names the precondition, not a generic I/O failure: {error}"
     );
     assert_eq!(
@@ -197,9 +178,6 @@ fn a_create_refuses_a_destination_that_is_already_there() {
     );
 }
 
-/// A replace keeps the previous contents as a backup, flushed before the new bytes
-/// are published - so a crash between the two leaves a backup holding what the
-/// receipt claims it holds.
 #[test]
 fn a_replace_backs_up_what_it_replaced() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -239,9 +217,6 @@ fn a_replace_backs_up_what_it_replaced() {
     );
 }
 
-/// A replace that finds different bytes than the plan expected is refused. The
-/// precondition is proved at the moment of the overwrite, not when the plan was
-/// written, because that is the only moment at which it is still true.
 #[test]
 fn a_replace_refuses_to_overwrite_a_file_that_changed() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -263,10 +238,7 @@ fn a_replace_refuses_to_overwrite_a_file_that_changed() {
     let error = executor
         .apply(&node(zup_transaction::FileDelta::Replace))
         .expect_err("a replace over changed bytes is refused");
-    assert!(
-        matches!(error, LinuxFileExecutorError::PlanDrift { .. }),
-        "{error}"
-    );
+    assert!(matches!(error, ExecError::PlanDrift { .. }), "{error}");
     assert_eq!(
         std::fs::read(&destination).expect("read"),
         b"a user's edit",
@@ -274,9 +246,6 @@ fn a_replace_refuses_to_overwrite_a_file_that_changed() {
     );
 }
 
-/// A destination parent replaced by a symbolic link is refused rather than
-/// followed into whatever it now points at. Without `O_NOFOLLOW` on the directory
-/// open, the installer's payload would land in an attacker's tree.
 #[test]
 fn a_destination_parent_replaced_by_a_symlink_is_refused() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -295,8 +264,6 @@ fn a_destination_parent_replaced_by_a_symlink_is_refused() {
     );
     executor.stage(&id(1), b"the payload").expect("stage");
 
-    // The install directory is replaced by a link between staging and publishing -
-    // exactly the window a concurrent attacker has.
     std::fs::remove_dir_all(&install).expect("remove the staged sibling");
     std::os::unix::fs::symlink(elsewhere.path(), &install).expect("symlink");
 
@@ -312,9 +279,6 @@ fn a_destination_parent_replaced_by_a_symlink_is_refused() {
     );
 }
 
-/// A destination that is a symbolic link is refused rather than followed. A link
-/// at an owned path is either drift or an attack, and reading through it would
-/// report a file's identity from a tree this installation does not own.
 #[test]
 fn a_destination_that_is_a_symlink_is_refused() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -336,7 +300,7 @@ fn a_destination_that_is_a_symlink_is_refused() {
         .apply(&node(zup_transaction::FileDelta::Create))
         .expect_err("a link at an owned path is refused");
     assert!(
-        matches!(error, LinuxFileExecutorError::AlreadyExists { .. }),
+        matches!(error, ExecError::Path(PathError::AlreadyExists { .. })),
         "a link at an owned path is refused as present, not followed: {error}"
     );
     assert_eq!(
@@ -346,9 +310,6 @@ fn a_destination_that_is_a_symlink_is_refused() {
     );
 }
 
-/// The refusal is for anything that is not a regular file, not only for links. A
-/// FIFO where a payload belongs is not a file a build may read: opening one blocks
-/// forever, and installing one turns a payload into a hang.
 #[rstest]
 #[case::fifo(EntryKind::Special)]
 #[case::directory(EntryKind::Directory)]
@@ -360,7 +321,7 @@ fn a_destination_that_is_not_a_regular_file_is_refused(#[case] planted: EntryKin
             let name = std::ffi::CString::new(destination.to_string_lossy().as_bytes())
                 .expect("a c string");
             // SAFETY: `mkfifo` is called through `rustix`, which is a safe wrapper,
-            // so this is a path and a mode and nothing else.
+
             let result = rustix::fs::mknodat(
                 rustix::fs::CWD,
                 &name,
@@ -390,8 +351,6 @@ fn a_destination_that_is_not_a_regular_file_is_refused(#[case] planted: EntryKin
     );
 }
 
-/// A removal unlinks and keeps the contents as a backup, so an uninstall is
-/// reversible from the journal alone.
 #[test]
 fn a_removal_unlinks_and_backs_up() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -433,9 +392,6 @@ fn a_removal_unlinks_and_backs_up() {
     );
 }
 
-/// Rolling a create back removes the file and then the directories the create
-/// made, deepest first - and only while they are empty. A directory that has
-/// acquired content of its own is left alone, because zup cannot prove it owns it.
 #[test]
 fn rolling_back_a_create_removes_only_what_the_create_made() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -451,7 +407,7 @@ fn rolling_back_a_create_removes_only_what_the_create_made() {
     let receipt = executor
         .apply(&node(zup_transaction::FileDelta::Create))
         .expect("create");
-    // Something else puts a file in the install directory before the rollback.
+
     std::fs::write(root.path().join("install").join("user.dat"), b"the user's").expect("write");
 
     executor
@@ -469,9 +425,6 @@ fn rolling_back_a_create_removes_only_what_the_create_made() {
     );
 }
 
-/// A rollback refuses to remove a file that changed after the transaction wrote
-/// it. Removing it would take the user's edit with it, which is the one thing a
-/// rollback must not do.
 #[test]
 fn a_rollback_refuses_to_remove_a_file_that_changed() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -501,8 +454,6 @@ fn a_rollback_refuses_to_remove_a_file_that_changed() {
     );
 }
 
-/// Rolling a replace back restores the previous contents durably, so a crash
-/// during the rollback leaves the old file rather than a half-copied one.
 #[test]
 fn rolling_back_a_replace_restores_the_previous_contents() {
     let root = tempfile::tempdir().expect("a temp directory");
@@ -535,8 +486,6 @@ fn rolling_back_a_replace_restores_the_previous_contents() {
     );
 }
 
-/// Reconcile tells a crash-recovery run what it is looking at, from the journal
-/// alone - it never has the manifest.
 #[rstest]
 #[case::as_written(true, true)]
 #[case::after_the_publish(false, false)]
@@ -573,8 +522,6 @@ fn reconcile_sees_the_published_file_as_applied(
     );
 }
 
-/// An interrupted transaction leaves a staged entry the journal can name, and the
-/// name is derived from the operation rather than trusted from the plan.
 #[test]
 fn a_staged_file_is_named_for_its_operation() {
     let root = tempfile::tempdir().expect("a temp directory");

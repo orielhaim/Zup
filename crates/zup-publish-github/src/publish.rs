@@ -1,54 +1,3 @@
-//! The publication state machine.
-//!
-//! # The shape of it
-//!
-//! ```text
-//! resolve/verify tag
-//!     ↓
-//! create or find draft          ← resumable: a draft is a place to resume to
-//!     ↓
-//! upload every required asset   ← resumable: a matching asset is skipped
-//!     ↓
-//! verify every remote asset     ← name, size, SHA-256, state
-//!     ↓
-//! verify release plan completeness
-//!     ↓
-//! publish the draft once
-//! ```
-//!
-//! Every step is idempotent, and that is the whole reason this is a sequence of small
-//! functions rather than one big one: `zup publish github` is expected to be run again
-//! after a failure, on purpose or by a CI retry, and the second run has to be
-//! indistinguishable from a first run that had nothing to do.
-//!
-//! # What is never done
-//!
-//! - A public release is never created before its files exist. `create_draft` asks for
-//!   a draft unconditionally, and the only call that clears the flag is the last one.
-//! - A failed upload does not delete the draft. A draft with eleven of twelve files is
-//!   a *resumable* draft; deleting it throws away eleven uploads so that the twelfth can
-//!   start again.
-//! - A published release is never mutated. A mismatch against a published release is a
-//!   refusal, not a repair: the tag is already public, and the bytes behind it are
-//!   already what somebody downloaded.
-//! - A conflicting asset on a draft is never silently overwritten. It is a refusal
-//!   unless the caller explicitly asked to replace it, because "different bytes under
-//!   this name" means either the plan changed or something else wrote here, and neither
-//!   is the publisher's call.
-//!
-//! # Why uploads are reconciled rather than trusted
-//!
-//! GitHub documents a specific and unpleasant failure: an upload can fail upstream
-//! *after* the asset record was created, leaving a zero-byte asset in the `starter`
-//! state under the name that was being uploaded. That asset then blocks every
-//! subsequent upload of the same name, because the name is taken.
-//!
-//! So an uncertain upload is never a bare retry. The sequence is: list the release's
-//! assets, look for a `starter` entry with this name, remove exactly that one, and
-//! only then retry - bounded, with backoff. A *valid* asset is never removed, including
-//! when the HTTP request that uploaded it failed after the server processed it, because
-//! the reconciliation is exactly what tells the two apart.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -66,42 +15,24 @@ use crate::receipt::{GithubAsset, GithubReceipt};
 use crate::repository::GithubRepository;
 use crate::token::Token;
 
-/// How many times one asset upload is attempted.
-///
-/// Small, because a retry of an upload restarts the whole transfer rather than
-/// resuming it: GitHub's asset API has no resumable upload, so attempt five of a
-/// two gigabyte installer is five gigabytes sent to learn the same thing twice.
 const MAX_UPLOAD_ATTEMPTS: u32 = 3;
 
-/// How one publication is asked for.
 #[derive(Debug, Clone)]
 pub struct PublishRequest {
     pub plan: ReleasePlan,
-    /// Where each product's bytes are on this machine.
     pub sources: BTreeMap<String, PathBuf>,
-    /// The notes policy.
     pub notes: NotesPolicy,
-    /// Text for [`NotesPolicy::Text`].
     pub notes_text: Option<String>,
-    /// A file to read for [`NotesPolicy::File`].
     pub notes_file: Option<PathBuf>,
-    /// Whether to leave the release a draft.
     pub draft: bool,
-    /// Whether to mark the release a prerelease.
     pub prerelease: bool,
-    /// Whether to plan and verify without writing anything.
     pub dry_run: bool,
-    /// Whether a differing asset on a *draft* may be removed and re-uploaded.
     pub replace_conflicts: bool,
-    /// Where to write the receipt, if anywhere.
     pub receipt: Option<PathBuf>,
-    /// Where the client sends its requests, when that is not the installation's
-    /// own bases. See [ClientEndpoints](crate::ClientEndpoints).
     pub endpoints: Option<crate::api::ClientEndpoints>,
 }
 
 impl PublishRequest {
-    /// A request for `plan`, with nothing filled in yet.
     pub fn new(plan: ReleasePlan) -> Self {
         Self {
             plan,
@@ -118,19 +49,16 @@ impl PublishRequest {
         }
     }
 
-    /// Say where a product's bytes are.
     pub fn with_source(mut self, name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
         self.sources.insert(name.into(), path.into());
         self
     }
 
-    /// The file for one product, if it was staged.
     pub fn source_of(&self, name: &str) -> Option<&Path> {
         self.sources.get(name).map(PathBuf::as_path)
     }
 }
 
-/// The `POST`/`PATCH` body for a release.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateRelease {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,7 +76,6 @@ pub struct CreateRelease {
 }
 
 impl CreateRelease {
-    /// A request to create a draft for `tag`.
     pub fn draft(tag: &str, prerelease: bool) -> Self {
         Self {
             tag_name: Some(tag.to_owned()),
@@ -158,11 +85,6 @@ impl CreateRelease {
         }
     }
 
-    /// The request that publishes a draft, carrying only what changed.
-    ///
-    /// `draft: false` is the point of the whole sequence. Everything else here is
-    /// absent unless the caller set it, because a `PATCH` with an empty `name`
-    /// clears a title somebody wrote.
     pub fn publish(prerelease: bool) -> Self {
         Self {
             draft: false,
@@ -172,7 +94,6 @@ impl CreateRelease {
     }
 }
 
-/// Run one publication.
 pub async fn publish(
     repository: &GithubRepository,
     token: &Token,
@@ -195,7 +116,6 @@ pub async fn publish(
     report.plan(products.len(), plan.bytes());
     let mut receipt = GithubReceipt::new(repository, &plan.tag.tag, 0);
 
-    // ---------------------------------------------------------- preparing
     report.phase("Preparing release");
     prepare(&client, plan, request, &products, &mut report).await?;
 
@@ -208,7 +128,6 @@ pub async fn publish(
         .clone_from(&release.target_commitish);
     let was_published = !release.draft;
 
-    // ------------------------------------------------------------ uploading
     report.phase("Uploading");
     let by_name: BTreeMap<String, Asset> = if request.dry_run {
         report.info(
@@ -235,7 +154,6 @@ pub async fn publish(
     )
     .await?;
 
-    // ----------------------------------------------------------- verifying
     report.phase("Verifying");
     if request.dry_run {
         report.skip();
@@ -243,7 +161,6 @@ pub async fn publish(
         verify(&client, &release, &products, &mut report).await?;
     }
 
-    // ---------------------------------------------------------- publishing
     report.phase("Publishing");
     let mut final_release = release.clone();
     if request.dry_run {
@@ -253,8 +170,6 @@ pub async fn publish(
         );
         receipt.state = PublicationState::Planned;
     } else if was_published {
-        // Nothing was written: either every asset was already present, or the
-        // comparison refused. Both mean the release already carries this plan.
         receipt.state = PublicationState::Unchanged;
         report.ok(format!("{} already published", release.tag_name));
     } else if request.draft {
@@ -282,7 +197,6 @@ pub async fn publish(
     }
     integrity(&final_release, &mut receipt, &mut report);
 
-    // ------------------------------------------------------------- receipt
     if let Some(path) = &request.receipt {
         let bytes = receipt
             .encode()
@@ -295,9 +209,6 @@ pub async fn publish(
                 reason: error.to_string(),
             })?;
         }
-        // The receipt is what a re-run reads to decide whether the release is
-        // already published, so a torn write is a publisher that cannot resume:
-        // written atomically and flushed, like every other durable document here.
         write_receipt(path, &bytes)?;
         report.phase("Receipt");
         report.ok(path.display().to_string());
@@ -306,13 +217,6 @@ pub async fn publish(
     Ok(report.finish())
 }
 
-/// Write the receipt where a crash cannot leave half of one.
-///
-/// A temp sibling, a flush, and a rename. Not because a receipt is precious - it
-/// is a report - but because a half-written receipt is *worse* than none: a
-/// re-run parses it to decide whether the release is already published, and a
-/// truncated one either refuses a resumable draft or, read loosely, claims the
-/// release went live when it did not.
 fn write_receipt(path: &Path, bytes: &[u8]) -> Result<(), GithubError> {
     let mut temporary = path.to_path_buf();
     let name = path
@@ -344,7 +248,6 @@ fn write_receipt(path: &Path, bytes: &[u8]) -> Result<(), GithubError> {
     Ok(())
 }
 
-/// Check the plan's own claims and the host's limits, before anything is written.
 async fn prepare(
     client: &GithubClient,
     plan: &ReleasePlan,
@@ -359,9 +262,6 @@ async fn prepare(
     if let Some((_name, size)) = plan.largest() {
         report.ok(format!("largest asset {size} bytes"));
     }
-    // A repository has to be reachable before a draft exists. A 404 here is a
-    // typo in `owner/name`; a 403 is a token that cannot write to it. Both are
-    // cheap to learn now and expensive to learn after a release exists.
     let info = client.repository_info().await.inspect_err(|error| {
         report.failed("repository", error.to_string());
     })?;
@@ -390,11 +290,6 @@ async fn prepare(
     Ok(())
 }
 
-/// Find the release this publication targets, creating a draft if there is none.
-///
-/// A dry run stops here. It has established the plan, the limits, the
-/// credential, and the repository; it does not manufacture a release so that it
-/// has something to report about.
 async fn locate(
     client: &GithubClient,
     plan: &ReleasePlan,
@@ -425,11 +320,6 @@ async fn locate(
     }
 }
 
-/// A release that does not exist yet, for a dry run.
-///
-/// Everything downstream checks `dry_run` before touching a release, so the only
-/// thing this has to be is something that compiles and reads sensibly in a
-/// report.
 fn placeholder(tag: &str) -> Release {
     Release {
         id: 0,
@@ -445,7 +335,6 @@ fn placeholder(tag: &str) -> Release {
     }
 }
 
-/// Upload what is missing, and reconcile what a failed attempt left behind.
 #[allow(clippy::too_many_arguments)]
 async fn upload(
     client: &GithubClient,
@@ -461,11 +350,6 @@ async fn upload(
         return Ok(());
     }
     if !release.draft {
-        // A published release is not a retry target, in either direction. A
-        // *different* file under a planned name is the obvious case; adding a
-        // name that was never there is the same mistake in a different hat. The
-        // tag is already public, and everything under it is already what somebody
-        // may have downloaded.
         let before = report_failures(report);
         for product in products {
             let remote = by_name.get(&product.name);
@@ -560,8 +444,6 @@ async fn upload(
     Ok(())
 }
 
-/// How many steps have failed so far, so a caller can tell whether it just
-/// added one.
 fn report_failures(report: &ReportBuilder) -> usize {
     report
         .phases()
@@ -583,13 +465,6 @@ fn staged<'a>(
         })
 }
 
-/// One asset upload, with reconciliation and a bounded retry.
-///
-/// The reconciliation is the point. An upload that fails ambiguously may have
-/// succeeded, so the next thing is never "send it again" - it is "ask what the
-/// host holds under this name". A `starter` entry is a failed remnant and is
-/// removed; anything else is left alone, because a valid asset that a retry
-/// clobbered would be worse than the original failure.
 async fn upload_one(
     client: &GithubClient,
     release: &Release,
@@ -605,14 +480,9 @@ async fn upload_one(
             .await
         {
             Ok(asset) => {
-                // A successful response is not proof. The digest is.
                 if let Some(remote) = asset.sha256()
                     && remote != product.digest
                 {
-                    // The bytes that arrived are not the bytes that were signed.
-                    // The asset is removed and the upload refused, because leaving
-                    // a mismatched file on a draft is how a broken release becomes
-                    // a published one.
                     let _ = client.delete_asset(asset.id).await;
                     report.failed(
                         format!("{} digest mismatch", product.name),
@@ -633,8 +503,6 @@ async fn upload_one(
                     });
                 }
                 if asset.name != product.name {
-                    // The host renamed it. A release manifest that points at the
-                    // planned name would be pointing at nothing.
                     let _ = client.delete_asset(asset.id).await;
                     return Err(GithubError::Renamed {
                         expected: product.name.clone(),
@@ -653,8 +521,6 @@ async fn upload_one(
                     } | GithubError::RateLimited { .. }
                         | GithubError::Transport { .. }
                 );
-                // Reconcile before every decision, including giving up, so the
-                // draft is left in a state a rerun can reason about.
                 let removed = reconcile(client, release, &product.name, report).await?;
                 if !retryable || attempt >= MAX_UPLOAD_ATTEMPTS {
                     if !removed {
@@ -674,11 +540,6 @@ async fn upload_one(
     }
 }
 
-/// Ask what the host holds under `name`, and remove only a failed remnant.
-///
-/// Returns whether a remnant was removed, so the caller can tell "the upload
-/// failed and left nothing behind" from "the upload failed and I cleaned up
-/// after it" - which are different situations for the next run.
 async fn reconcile(
     client: &GithubClient,
     release: &Release,
@@ -701,7 +562,6 @@ async fn reconcile(
     Ok(false)
 }
 
-/// Prove that every planned file is on the host, by the host's own digest.
 async fn verify(
     client: &GithubClient,
     release: &Release,
@@ -762,9 +622,6 @@ async fn verify(
                 });
             }
             None => {
-                // A host that reports no digest cannot be checked against. Saying
-                // so is the honest answer; treating it as a match is the one thing
-                // that would make this phase decorative.
                 report.warn(
                     format!("{} digest unavailable", product.name),
                     "github reports no sha256 for this asset, so its bytes were not compared",
@@ -786,13 +643,6 @@ async fn verify(
     Ok(())
 }
 
-/// Record the integrity facts GitHub reported.
-///
-/// The distinction that matters: an artifact attestation answers "which workflow
-/// built these bytes", and an immutable-release attestation answers "are these
-/// the exact assets published as this tag". Both are worth having, neither is
-/// proof that the software is safe, and a publisher that reports only one of them
-/// is implying the other.
 fn integrity(release: &Release, receipt: &mut GithubReceipt, report: &mut ReportBuilder) {
     receipt.immutable = release.immutable;
     receipt.attestation = release.has_attestation;
@@ -815,9 +665,6 @@ fn integrity(release: &Release, receipt: &mut GithubReceipt, report: &mut Report
             ));
         }
         None => {
-            // An Enterprise Server too old to report the field is not the same as
-            // a github.com repository that has it off, and saying "not enabled"
-            // for the first would be a claim zup cannot support.
             receipt.notices.push(Notice::info(
                 "github immutable release",
                 "not reported by this host",
@@ -841,7 +688,6 @@ fn record(asset: &Asset, product: &ReleaseProduct, state: ProductState) -> Githu
     }
 }
 
-/// Compose the notes body, if the policy writes one.
 pub fn compose_notes(
     request: &PublishRequest,
     generated: Option<String>,

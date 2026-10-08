@@ -17,7 +17,6 @@ fn component_for_wit(wit: &str) -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", wit).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    // `false` matches the encoder below, which leaves canonical names off.
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
@@ -58,7 +57,6 @@ fn component_for_body(body: &str) -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", VALID_WIT).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = component_wat(&wat);
-    // `false` matches the encoder below, which leaves canonical names off.
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
@@ -81,10 +79,6 @@ fn context() -> Context {
     }
 }
 
-/// Every way a guest can fail has to arrive as its own `InvocationError`. These are the
-/// ABI's error-mapping rules, and they are what a host branches on: a caller that cannot
-/// tell a fuel exhaustion from a trap cannot decide whether to retry, and one that sees
-/// a generic "the plugin failed" cannot tell a plugin's own refusal from a host fault.
 #[rstest]
 #[case::oversized_output(
     "(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)",
@@ -119,22 +113,10 @@ fn a_guest_that_misbehaves_is_mapped_to_its_own_failure(
     );
 }
 
-/// The failure an invocation is expected to produce. Named rather than constructed
-/// because `Trap` carries a message the fixture does not have to predict, and what the
-/// mapping rules promise is *which* failure, not what it says.
 #[derive(Debug, Clone, Copy)]
 enum Refusal {
     OutputLimit,
     Trap,
-    /// Stopped by one of the two bounds, whichever ran out first.
-    ///
-    /// A guest that never finishes spends its fuel and its wall-clock at the same
-    /// time, so a machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
-    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
-    /// deadline. Both are the guest being stopped, and which one fired is a fact
-    /// about the machine rather than about the engine. That each bound is mapped
-    /// from its own trap is proved directly, over the traps, in
-    /// `runtime::a_trap_is_reported_as_its_own_failure`.
     Bound,
     MemoryLimit,
     Cancelled,
@@ -154,8 +136,6 @@ impl Refusal {
     }
 }
 
-/// Whether the invocation is given a cancellation query at all. The fuel fixture spins
-/// forever, so the two cases differ only in whether anything is watching.
 #[derive(Debug, Clone, Copy)]
 enum Never {
     Ask,
@@ -190,12 +170,6 @@ fn invocation_preserves_guest_rejection() {
     assert_eq!(error.message, "failure");
 }
 
-/// A component is accepted or refused on its shape, and each shape below is one a
-/// hand-written or generated component can actually arrive in. Nothing here runs the
-/// guest: these are all decided before a plugin ever executes.
-/// A component is refused on its shape, and each shape below is one a hand-written or
-/// generated component can actually arrive in. Nothing here runs the guest: every one of
-/// these is decided before a plugin ever executes.
 #[rstest]
 #[case::missing_export("(component)", "missing_export")]
 #[case::extra_export(
@@ -210,9 +184,6 @@ fn a_component_of_the_wrong_shape_is_refused(#[case] wat: &str, #[case] refusal:
     assert_eq!(refusal_of(&error), refusal, "{error:?}");
 }
 
-/// A world that names a second planner function, and a world whose `plan` has the wrong
-/// signature: the first because the export set is closed, the second because the
-/// canonical ABI is what the host links against.
 #[rstest]
 #[case::extra_planner_function(
     VALID_WIT.replace(
@@ -244,10 +215,6 @@ fn a_world_that_does_not_match_the_contract_is_refused(#[case] wit: String, #[ca
     assert_eq!(refusal_of(&error), refusal, "{error:?}");
 }
 
-/// Which refusal the contract layer produced, and whether it named the offending symbol.
-/// Naming the variant is what lets the two tables above read as tables; the payload is
-/// checked here because a refusal that does not say which import or export was refused
-/// leaves the plugin author nothing to act on.
 fn refusal_of(error: &ContractError) -> &'static str {
     match error {
         ContractError::CoreModule => "core_module",
@@ -272,10 +239,6 @@ fn refusal_of(error: &ContractError) -> &'static str {
     }
 }
 
-/// Only a component this engine's own cranelift precompiled may be loaded. A raw module
-/// is not a component, and a component is not trusted merely for being one: the host
-/// links against the exact artifact shape its engine produces, so anything else is
-/// refused before a deserializer is handed a byte of it.
 #[rstest]
 #[case::arbitrary_bytes(&b"not aot"[..])]
 #[case::raw_core_module(&component_wat("(module)"))]
@@ -289,18 +252,6 @@ fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]
     );
 }
 
-/// The fingerprint is what stops a host from loading output a differently
-/// configured engine produced, so two calls have to agree and a change to any
-/// input has to move it.
-///
-/// The expected value is pinned rather than compared to a second call: the
-/// point is that the digest covers its inputs, and the WIT contract is one of
-/// them. A change here means the contract or the engine configuration changed,
-/// which is exactly the event an ahead-of-time artifact has to be rebuilt for.
-///
-/// The value is the same on every platform, which is what makes pinning it
-/// possible at all: the contract is hashed as it reads rather than as a checkout
-/// stored it, so a Windows working tree and a Unix one agree.
 #[test]
 fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
     let first = engine_fingerprint("x86_64-pc-windows-msvc");

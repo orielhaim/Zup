@@ -1,28 +1,4 @@
-//! The Windows universal artifact backend.
-//!
-//! One file, several native runtimes, one shared content store. The file is a
-//! small dispatcher with the composed graph in its resources:
-//!
-//! ```text
-//! Acme-Windows-Setup.exe
-//!     dispatcher                  a launcher, not an installer
-//!     resource 1                  the artifact index
-//!     resource 2                  the content store table
-//!     resources 3..               one variant manifest per variant
-//!     resources ..                one native runtime per variant
-//!     resources ..                the content store, one region per segment
-//! ```
-//!
-//! Everything lives inside Authenticode-hashed image sections, because the
-//! resources are written before the finished image is signed. There is no
-//! trailing overlay, so a signature covers the whole artifact.
-//!
-//! The dispatcher deliberately has no lifecycle authority. It selects a variant,
-//! stages that variant's native runtime and content, starts it, and exits. Every
-//! privileged operation happens inside the selected native runtime, in its own
-//! architecture, which is the reason the dispatcher can be small enough to run
-//! under an emulation layer on a machine whose native variant is something else.
-
+// Stays in zup-windows: variant selection and staging orchestrate host detection, bundle identity, and durable I/O; only the resource primitives live in zup-pe.
 use std::path::Path;
 
 use thiserror::Error;
@@ -33,10 +9,9 @@ use zup_artifact::{
 use zup_binary::{BinaryArchitecture, Executable, ProgramKind};
 use zup_core::TargetTriple;
 use zup_pe::{RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument};
+use zup_transaction::{MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME};
 
 use crate::host;
-
-/// Failures produced by the Windows universal backend.
 #[derive(Debug, Error)]
 pub enum UniversalError {
     #[error(transparent)]
@@ -59,9 +34,8 @@ pub enum UniversalError {
         "the dispatcher template is a {found} program but the artifact is a {expected} launcher experience"
     )]
     DispatcherTemplate {
-        /// The launcher experience the artifact's variants agreed on.
         expected: zup_artifact::LauncherSubsystem,
-        /// The experience the template actually presents.
+
         found: zup_artifact::LauncherSubsystem,
     },
     #[error("dispatcher template is already signed; compose before signing")]
@@ -86,8 +60,6 @@ pub enum UniversalError {
 }
 
 impl UniversalError {
-    /// Whether this failure is a host no variant can serve, which is a supported
-    /// refusal the user is told about rather than a defect.
     pub fn is_unsupported_host(&self) -> bool {
         match self {
             Self::Artifact(error) => error.is_unsupported_host(),
@@ -97,25 +69,17 @@ impl UniversalError {
     }
 }
 
-/// The resource identifiers a universal artifact uses.
-///
-/// The layout is fixed and total, so a reader knows exactly which identifier
-/// holds what without consulting the index first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UniversalLayout {
-    /// How many variants the artifact carries.
     pub variants: usize,
-    /// How many content segments the artifact carries.
+
     pub segments: usize,
-    /// One past the last identifier the metadata documents use.
+
     pub first_segment: usize,
 }
 
 impl UniversalLayout {
-    /// The layout of `variants` variants and `segments` content segments.
     pub const fn new(variants: usize, segments: usize) -> Self {
-        // The index and the table take the first two identifiers; then a
-        // manifest and a runtime per variant; then the content segments.
         let first_segment = RESOURCE_ID_BLOB_START + 1 + variants * 2;
         assert!(
             first_segment + segments <= zup_pe::RESOURCE_ID_PRESET,
@@ -129,36 +93,23 @@ impl UniversalLayout {
         }
     }
 
-    /// The identifier the blob table occupies.
     pub const fn table(&self) -> usize {
         RESOURCE_ID_INDEX + 1
     }
 
-    /// The identifier of variant `index`'s manifest.
     pub const fn manifest(&self, index: usize) -> usize {
         RESOURCE_ID_BLOB_START + 1 + index
     }
 
-    /// The identifier of variant `index`'s native runtime.
     pub const fn runtime(&self, index: usize) -> usize {
         RESOURCE_ID_BLOB_START + 1 + self.variants + index
     }
 
-    /// The identifier of content `segment`.
     pub const fn segment(&self, segment: usize) -> usize {
         self.first_segment + segment
     }
 }
 
-/// Compose a universal artifact into a copy of a dispatcher template.
-///
-/// The template must be unsigned, must match the launcher subsystem the
-/// artifact's variants agreed on, and must be no wider than the narrowest
-/// machine any included variant targets. That last rule is what makes a
-/// universal artifact universal: the dispatcher is the first thing the machine
-/// has to be able to start, so a host that can run the narrowest variant must be
-/// able to run the dispatcher too. A 32-bit x86 template satisfies that for
-/// every Windows host, which is why that is what `zup-dispatch` builds.
 pub fn compose_universal_executable(
     dispatcher: &Path,
     output: &Path,
@@ -223,14 +174,6 @@ pub fn compose_universal_executable(
     Ok(layout)
 }
 
-/// The narrowest machine any included variant targets, and that variant's target.
-///
-/// The triple comes back with the width because the refusal names it: a project's
-/// manifest carries `x86_64-pc-windows-msvc`, not "width 1", and a diagnostic that
-/// says the width is one the reader has to look up again.
-///
-/// A variant naming a machine zup cannot rank is skipped rather than treated as the
-/// widest, so one unrankable target cannot refuse every dispatcher.
 fn narrowest_variant(graph: &ArtifactGraph) -> Option<(u8, TargetTriple)> {
     graph
         .index()
@@ -243,14 +186,6 @@ fn narrowest_variant(graph: &ArtifactGraph) -> Option<(u8, TargetTriple)> {
         .min_by_key(|(width, _)| *width)
 }
 
-/// How wide a machine is, in the one order that matters: a machine runs
-/// everything narrower than itself.
-///
-/// Windows' rule rather than a property of the CPUs, which is why it lives here
-/// and not in `zup-binary`: 32-bit x86 runs on every Windows host, 64-bit only
-/// where the operating system is 64-bit, and the two are unrelated. AArch64 is
-/// ranked above x86-64 so that an artifact with both variants insists on a
-/// dispatcher the narrowest of them can start.
 const fn machine_width(machine: BinaryArchitecture) -> u8 {
     match machine {
         BinaryArchitecture::X86_32 | BinaryArchitecture::Arm32 => 0,
@@ -259,28 +194,19 @@ const fn machine_width(machine: BinaryArchitecture) -> u8 {
     }
 }
 
-/// A universal artifact opened for reading.
-///
-/// This is the dispatcher and inspector's view of one file. It reads the same
-/// index the native runtime would read, so a format rule exists once.
 pub struct UniversalArtifact {
     executable: std::path::PathBuf,
     view: ArtifactView<PeSegments>,
 }
 
 impl UniversalArtifact {
-    /// Open a universal artifact, validating its index, table, and layout.
     pub fn open(executable: impl AsRef<Path>) -> Result<Self, UniversalError> {
         let executable = executable.as_ref().to_path_buf();
         let index_bytes = crate::pe_resources::read_resource(&executable, RESOURCE_ID_INDEX)?;
         let index = zup_artifact::ArtifactIndex::parse(&index_bytes)?;
         let layout = UniversalLayout::new(index.variants.len(), 0);
         let table_bytes = crate::pe_resources::read_resource(&executable, layout.table())?;
-        // A thin artifact names each variant's runtime so a client knows what the
-        // graph will hand it, but it does not carry one - the runtime is the
-        // thing the artifact exists to fetch, and embedding it would make the
-        // installer the application. An offline artifact carries it, because it
-        // has to be able to execute what it holds.
+
         let carries_runtimes = index.artifact.mode.carries_content();
         let mut metadata = MetadataSet::new();
         for (position, variant) in index.variants.iter().enumerate() {
@@ -302,30 +228,25 @@ impl UniversalArtifact {
             PeSegments {
                 executable: executable.clone(),
                 first: layout.first_segment,
-                // A resource-addressed store is bounded by the table, not by a
-                // count this reader could know in advance.
+
                 count: u16::MAX,
             },
         )?;
         Ok(Self { executable, view })
     }
 
-    /// The path this artifact was opened from.
     pub fn executable(&self) -> &Path {
         &self.executable
     }
 
-    /// The parsed artifact.
     pub fn view(&self) -> &ArtifactView<PeSegments> {
         &self.view
     }
 
-    /// The index, for reporting and selection.
     pub fn index(&self) -> &zup_artifact::ArtifactIndex {
         self.view.index()
     }
 
-    /// Select the variant this host should run.
     pub fn select(&self) -> Result<Selection, UniversalError> {
         let host = host::host_execution();
         let selected = select_from_index(&host, self.index())?;
@@ -338,16 +259,6 @@ impl UniversalArtifact {
         })
     }
 
-    /// The native runtime bytes this artifact embeds for `variant`.
-    ///
-    /// This is the file that becomes `maintenance.exe` on a user's machine, the
-    /// elevated worker, and the uninstall runner. A release pipeline needs to read
-    /// it for one reason: to prove that the bytes it embedded are the bytes it
-    /// signed, since the outer artifact's Authenticode signature covers these as
-    /// resource data and does not travel with the extracted file.
-    ///
-    /// A thin artifact has no embedded runtime by construction, and says so
-    /// rather than returning an empty vector a caller might mistake for one.
     pub fn embedded_runtime(&self, variant: &str) -> Result<Vec<u8>, UniversalError> {
         if !self.index().artifact.mode.carries_content() {
             return Err(UniversalError::ThinRuntime);
@@ -372,21 +283,14 @@ fn read_metadata(executable: &Path, id: usize) -> Result<Vec<u8>, UniversalError
     Ok(crate::pe_resources::read_resource(executable, id)?)
 }
 
-/// The variant a host selected, with how it will be executed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub id: String,
     pub compatibility: zup_artifact::Compatibility,
-    /// Whether the selected variant will run under a compatibility or
-    /// emulation layer rather than natively.
+
     pub emulated: bool,
 }
 
-/// Content segments read out of an image's resources.
-///
-/// A reader over a container rather than a directory, which is what lets the
-/// dispatcher, the runtime, and the inspector all read the same artifact through
-/// the same table.
 pub struct PeSegments {
     executable: std::path::PathBuf,
     first: usize,
@@ -417,7 +321,6 @@ impl SegmentReader for PeSegments {
     }
 }
 
-/// Read a universal artifact's variant manifest through the shared parser.
 pub fn read_variant_manifest(
     artifact: &UniversalArtifact,
     id: &str,
@@ -425,8 +328,6 @@ pub fn read_variant_manifest(
     Ok(artifact.view().variant_manifest(id)?)
 }
 
-/// Verify one variant completely before anything is staged from it: the manifest
-/// matches its descriptor, and every blob the variant needs is present.
 pub fn verify_selected_variant(
     artifact: &UniversalArtifact,
     id: &str,
@@ -434,26 +335,14 @@ pub fn verify_selected_variant(
     Ok(artifact.view().verify_variant(id)?)
 }
 
-/// Write the selected variant's native runtime and content into `directory`.
-///
-/// This is composition, not installation: it creates two files and returns the
-/// digests it proved, so the caller can record them in whatever transaction it is
-/// running. It writes nothing else, opens nothing privileged, and reads no
-/// registry.
 pub struct StagedVariant {
-    /// The native runtime image, ready to execute.
     pub runtime: std::path::PathBuf,
-    /// The selected variant's package: its manifest and exactly the blobs it
-    /// needs, in the portable package format the native runtime already reads.
+
     pub package: std::path::PathBuf,
-    /// The artifact index, so a later run knows what it is looking at.
+
     pub index: std::path::PathBuf,
 }
 
-/// Materialize one variant into `directory`.
-///
-/// The package is written by streaming the variant's blobs out of the shared
-/// store, so a machine never persists a blob belonging to another architecture.
 pub fn stage_variant(
     artifact: &UniversalArtifact,
     id: &str,
@@ -473,19 +362,16 @@ pub fn stage_variant(
         })?;
     let runtime_bytes = artifact.view().read(&runtime_descriptor)?;
     std::fs::create_dir_all(directory)?;
-    // The staged runtime is named the way *this artifact's* target names an
-    // executable, which is why the suffix is read off the variant rather than
-    // hard-coded: the same composition writes both, and the maintenance file it
-    // leaves behind has to be the one a later run looks for.
+
     let runtime = directory.join(format!(
         "{}{}",
         zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY,
         variant.target.executable_suffix()
     ));
     write_durable(&runtime, &runtime_bytes)?;
-    let package = directory.join(crate::MAINTENANCE_PACKAGE_NAME);
+    let package = directory.join(MAINTENANCE_PACKAGE_NAME);
     write_variant_package(artifact, &manifest, &package)?;
-    let index = directory.join(crate::MAINTENANCE_INDEX_NAME);
+    let index = directory.join(MAINTENANCE_INDEX_NAME);
     write_durable(&index, &artifact.index().encode()?)?;
     Ok(StagedVariant {
         runtime,
@@ -494,12 +380,6 @@ pub fn stage_variant(
     })
 }
 
-/// Write the portable package a native runtime reads, containing exactly the
-/// selected variant's content.
-///
-/// The blobs are taken from the shared store as compressed bytes, so nothing is
-/// decompressed and recompressed, and nothing belonging to another architecture
-/// is written.
 fn write_variant_package(
     artifact: &UniversalArtifact,
     manifest: &zup_artifact::VariantManifest,
@@ -516,9 +396,7 @@ fn write_variant_package(
                 media_type: MediaType::BLOB.label(),
                 digest: digest.to_hex(),
             })?;
-        // Read through the verified store: the bytes are decompressed, hashed,
-        // and only then recompressed into the package's own framing, so a
-        // corrupt store cannot be laundered into a package that opens.
+
         let content = store.blob(entry)?;
         let encoded = zstd::stream::encode_all(std::io::Cursor::new(content.as_slice()), 9)?;
         compressed.insert(digest, encoded);
@@ -537,7 +415,6 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), UniversalError> {
     Ok(())
 }
 
-/// A descriptor for a staged file, for a caller that records what it wrote.
 pub fn staged_descriptor(media_type: MediaType, bytes: &[u8]) -> Descriptor {
     Descriptor::of(media_type, bytes)
 }

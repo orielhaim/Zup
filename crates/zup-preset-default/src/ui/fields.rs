@@ -1,35 +1,25 @@
-//! The choices an installation offers: where, for whom, and with what.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariants};
-use zup_preset_sdk::gpui_kit::component::checkbox::Checkbox;
-use zup_preset_sdk::gpui_kit::component::collapsible::Collapsible;
-use zup_preset_sdk::gpui_kit::component::radio::{Radio, RadioGroup};
-use zup_preset_sdk::gpui_kit::component::tag::Tag;
-use zup_preset_sdk::gpui_kit::component::tooltip::Tooltip;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::button::{Button, ButtonVariants};
+use zup_sdk::preset::gpui_kit::component::checkbox::Checkbox;
+use zup_sdk::preset::gpui_kit::component::collapsible::Collapsible;
+use zup_sdk::preset::gpui_kit::component::radio::{Radio, RadioGroup};
+use zup_sdk::preset::gpui_kit::component::tag::Tag;
+use zup_sdk::preset::gpui_kit::component::tooltip::Tooltip;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
-use zup_preset_sdk::prelude::InstallScope;
+use zup_sdk::preset::prelude::InstallScope;
 
 use crate::model::{ComponentKind, ComponentRow, Location, Pending, ScopeChoice as Choice};
 use crate::theme::{size, space, text};
 use crate::ui::{ChoiceHandler, Handler, caption};
 
-/// Where the installation goes, and the way to put it somewhere else.
-///
-/// A path, not a text box: the folder is chosen with the system's own folder
-/// picker. A long path keeps its beginning and its end, and shows in full on
-/// hover.
 #[derive(IntoElement)]
 pub struct PathChooser {
     label: SharedString,
@@ -142,11 +132,10 @@ impl RenderOnce for PathChooser {
     }
 }
 
-fn rems_of(value: f32) -> zup_preset_sdk::gpui_kit::Rems {
-    zup_preset_sdk::gpui_kit::Rems(value)
+fn rems_of(value: f32) -> zup_sdk::preset::gpui_kit::Rems {
+    zup_sdk::preset::gpui_kit::Rems(value)
 }
 
-/// Who the installation is for.
 #[derive(IntoElement)]
 pub struct ScopeChoice {
     choices: Vec<Choice>,
@@ -215,7 +204,6 @@ impl RenderOnce for ScopeChoice {
     }
 }
 
-/// One component, as a choice or as something always included.
 #[derive(IntoElement)]
 pub struct ComponentChoice {
     row: ComponentRow,
@@ -303,7 +291,6 @@ impl RenderOnce for ComponentChoice {
     }
 }
 
-/// A large primary group: the decision is visible, and choosing opens the whole set.
 #[derive(IntoElement)]
 pub struct GroupSummary {
     title: SharedString,
@@ -369,7 +356,6 @@ impl RenderOnce for GroupSummary {
     }
 }
 
-/// A heading that shows or hides what is under it.
 #[derive(IntoElement)]
 pub struct Disclosure {
     id: SharedString,
@@ -414,9 +400,6 @@ impl RenderOnce for Disclosure {
         let theme = cx.theme();
         let open = self.open;
         let toggle = self.on_toggle.clone();
-        // The chevron points along the line and turns when the row opens.
-        // A layout direction that mirrors the interface should mirror it too;
-        // the rotation itself is the open state, not a "next page" affordance.
         let trigger = div()
             .id(ElementId::Name(format!("{}-trigger", self.id).into()))
             .w_full()

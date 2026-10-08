@@ -1,67 +1,21 @@
-//! What the public build path may compose for a Linux target.
-//!
-//! One source of truth for Linux build capability, read by `zup check`,
-//! `zup build`, and `zup doctor` alike. A configuration refused here is refused
 //! before artifact composition on every host, so `check` never calls a project
-//! buildable that `build` then rejects for a known capability reason.
-//!
-//! The checks read the portable installer IR and the materialized plan, which
-//! is what makes them host-independent: a Windows host cross-building a Linux
-//! installer answers the same question a native Linux host answers. The
-//! Linux-native lowering in `zup-linux` remains authoritative at install time;
-//! this is the build-time mirror of its unsupported set, and the two must agree.
-//!
-//! Supported in this phase:
-//!
-//! ```text
-//! target:    x86_64-unknown-linux-gnu
-//! frontends: console, headless
-//! artifact:  self-contained native installer (one per target)
-//! scope:     user, machine, either
-//! desktop:   menu launchers, URI protocols, file associations (user scope)
-//! services:  static manifest services (machine scope, systemd system units)
-//! ```
-//!
-//! Machine scope installs through the privileged worker: `zup build` needs
-//! no authority, and elevation through `pkexec` happens only when the
-//! installer runs. Everything else - GUI, dispatcher/universal artifacts,
-//! literal desktop icons, PATH entries, package-manager prerequisites,
-//! machine desktop integration - is refused here with a diagnostic that
-//! names the configuration, not an internal crate.
 
 use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, TargetBuildPlan, TargetTriple};
 
-/// The one Linux target this Zup version builds installers for.
 pub const SUPPORTED_LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
 
-/// Whether `target` is a Linux target at all, supported or not.
-///
-/// This answers the platform question only. Whether the target is one this
-/// Zup version builds is [`is_supported_linux_target`]: the two have different
-/// diagnostics, and conflating them would report an macOS target as "not yet
-/// supported on Linux" rather than as not a Linux target.
 pub fn is_linux_target(target: &TargetTriple) -> bool {
     target.operating_system() == zup_core::TargetOperatingSystem::Linux
 }
 
-/// Every reason `target` alone rules out, before any source tree is walked.
-///
-/// The target triple and the frontend are known from selection alone, so a
-/// build refuses them before materialization - and before preset resolution,
-/// which would otherwise report a missing GUI preset where the real answer is
-/// that no Linux GUI runtime exists to present one.
 pub fn linux_selection_errors(target: &TargetTriple, frontend: Frontend) -> Vec<String> {
     let mut errors = linux_target_errors(target);
-    // The frontend question is only asked of Linux targets: anything else was
-    // already refused as not a Linux target, and a GUI diagnostic naming a
-    // Windows triple would be the wrong answer about the wrong platform.
     if is_linux_target(target) {
         errors.extend(linux_frontend_errors(target, frontend));
     }
     errors
 }
 
-/// Whether `target` is the Linux target the public build path composes.
 pub fn is_supported_linux_target(target: &TargetTriple) -> bool {
     target.as_str() == SUPPORTED_LINUX_TARGET
 }
@@ -70,8 +24,6 @@ fn linux_target_errors(target: &TargetTriple) -> Vec<String> {
     if is_supported_linux_target(target) {
         return Vec::new();
     }
-    // The backend-boundary shape: selection is refused before the source tree
-    // is walked, with the same prefix a host without a backend reports, so one
     // assertion covers every refusal that never touched the filesystem.
     vec![if is_linux_target(target) {
         format!(
@@ -93,44 +45,19 @@ fn linux_frontend_errors(target: &TargetTriple, frontend: Frontend) -> Vec<Strin
     }
 }
 
-/// Every reason `config` cannot become a Linux installer, in manifest terms.
-///
-/// Empty means the public path may compose it: the target is the supported
-/// one, the frontend exists as a Linux runtime template, and the plan
-/// carries no resource the Linux backend has no mechanism for. Machine
-/// scope is composed without authority - elevation through `pkexec` happens
 /// when the installer runs, never at build time - and either-scope
-/// installers choose at runtime. Each entry is one sentence a project
-/// author can act on.
 pub fn linux_capability_errors(
     config: &ResolvedTargetConfig,
     plan: &TargetBuildPlan,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     let target = &config.target;
-    // No early return: one diagnostic names every unsupported dimension, so
-    // an author fixes the configuration against the validator rather than
-    // iterating one refusal at a time. The fail-fast pre-materialization check
-    // in the build path is separate and stays narrow.
     errors.extend(linux_selection_errors(target, config.frontend));
-    // Machine scope installs through the privileged worker, which serves
-    // files only: machine desktop integration is deferred, so a machine
-    // installation that requests launchers, protocols, or associations is
-    // refused here rather than at the worker. An either-scope project may
-    // carry user-scope integration - the machine choice refuses it at
-    // capability validation before anything mutates - but machine-only
-    // resources are still refused for every scope.
     let machine_leg = matches!(
         config.install.scope,
         InstallScope::Machine | InstallScope::Either
     );
     let installer = &plan.installer;
-    // System services run through systemd in machine scope only: systemd
-    // user units are deferred past this phase. A machine-only project may
-    // carry static manifest services; user and either scope refuse them (an
-    // either-scope user choice could not be served). A machine leg carrying
-    // services alongside plugins refuses as well: static manifest services
-    // are supported, plugin-generated privileged services are not, and the
     // privileged worker never executes plugins as root.
     if !matches!(config.install.scope, InstallScope::Machine) && !installer.services.is_empty() {
         errors.push(format!(
@@ -173,14 +100,6 @@ pub fn linux_capability_errors(
             installer.prerequisites.len(),
         );
     }
-    // Menu launchers, URI protocols, and file associations lower into
-    // freedesktop desktop entries and Shared MIME-info packages in user
-    // scope only. A machine installation has no desktop integration to
-    // lower them into, so a machine leg that requests them is refused here
-    // rather than at the worker. A literal desktop icon has no
-    // desktop-neutral implementation, and a directory-level PATH mutation is
-    // not command exposure without editing shell configuration, so those
-    // stay refused with their reasons in every scope.
     if machine_leg {
         let mut machine_unsupported = |kind: &str, count: usize| {
             if count > 0 {
@@ -239,12 +158,6 @@ pub fn linux_capability_errors(
     errors
 }
 
-/// Whether protocol handlers lower faithfully onto Linux.
-///
-/// Linux delivers the URI through one `%u`, so every protocol must carry
-/// exactly one `%1` placeholder, and every protocol must name the same
-/// handler command: one hidden desktop entry dispatches all schemes, and
-/// distinct commands would need distinct entries this phase does not lower.
 fn protocol_errors(protocols: &[zup_core::Protocol]) -> Vec<String> {
     let mut errors = Vec::new();
     for protocol in protocols {
@@ -272,10 +185,6 @@ fn protocol_errors(protocols: &[zup_core::Protocol]) -> Vec<String> {
     errors
 }
 
-/// Whether file associations lower faithfully onto Linux.
-///
-/// One hidden desktop entry opens every associated type with `%f`, so every
-/// association must name the same executable.
 fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String> {
     if let Some(first) = associations.first()
         && associations
@@ -291,16 +200,6 @@ fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String>
     Vec::new()
 }
 
-/// Whether the declared application main resolves to an executable payload file.
-///
-/// The executable-intent model is authoritative: nothing infers executability
-/// from bytes. On Linux a declared main must name a shipped file marked
-/// `executable = true`, or the installer would ship a main program the user
-/// cannot run without a diagnostic ever saying so.
-///
-/// A project that ships nothing has nothing to be incoherent with, so the rule
-/// applies only once files exist: a fresh `zup init` project checks clean on
-/// every host, and the requirement bites when there is a payload to get wrong.
 fn main_executable_errors(config: &ResolvedTargetConfig, plan: &TargetBuildPlan) -> Vec<String> {
     if plan.files.is_empty() {
         return Vec::new();

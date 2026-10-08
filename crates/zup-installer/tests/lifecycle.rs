@@ -17,7 +17,8 @@
 use std::{collections::BTreeMap, fs};
 
 use zup_core::{AppId, SelectedScope};
-use zup_windows::{AppsFeaturesValue, InstallLedgerStore, InstallationLock};
+use zup_transaction::InstallationLock;
+use zup_windows::{AppsFeaturesValue, InstallLedgerStore};
 
 #[path = "support/project.rs"]
 mod project;

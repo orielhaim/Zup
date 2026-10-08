@@ -1,22 +1,3 @@
-//! Compiling a preset, and reading the compiler's own account of it.
-//!
-//! Cargo is the build system. This runs it, and reads what it says through
-//! `--message-format=json`, which is a machine contract rather than a rendering:
-//! every diagnostic arrives as the compiler emitted it, with a file, a line, and
-//! a span, and every artifact arrives with the exact path it will exist at.
-//!
-//! The exact path matters. A development environment runs the copy it is about
-//! to launch, and that copy has to be a file this process may delete and rewrite
-//! while an earlier one is still open somewhere else. Guessing where Cargo put
-//! something is how a watcher ends up executing a previous build's output, which
-//! is the kind of bug that reproduces once a week and is never the watcher.
-//!
-//! Cargo is launched managed, in a job object on Windows and a process group on
-//! Unix, because Cargo is not the only process in a build: it drives `rustc`,
-//! build scripts and linkers. Ending Cargo alone would leave those holding the
-//! very files the next build needs to write, which is the same class of bug as a
-//! preset that outlives its own executable.
-
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Stdio};
@@ -27,14 +8,10 @@ use process_wrap::std::{ChildWrapper, CommandWrap};
 
 use crate::project::Project;
 
-/// One thing that went wrong in a build, as a compiler said it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// What a compiler calls the thing that failed: error, and one day warnings.
     pub level: String,
-    /// The message, without the file and line a terminal would have put in front.
     pub message: String,
-    /// Where, as the compiler named it.
     pub where_: Option<String>,
 }
 
@@ -47,14 +24,10 @@ impl std::fmt::Display for Diagnostic {
     }
 }
 
-/// What one build produced.
 #[derive(Debug)]
 pub enum Build {
-    /// It compiled, and this is the executable it produced.
     Succeeded { executable: PathBuf },
-    /// It did not. The previous run is untouched.
     Failed { diagnostics: Vec<Diagnostic> },
-    /// Cargo itself could not be run, or said something that is not a build.
     Unusable(String),
 }
 
@@ -64,12 +37,6 @@ impl Build {
     }
 }
 
-/// Compiles a preset, one at a time.
-///
-/// One at a time, deliberately. Two concurrent builds of one project fight over
-/// the same target directory, and the loser is whichever one Cargo decides to
-/// stop, which is not a decision this tool should be making on a preset author's
-/// behalf while they are typing.
 #[derive(Debug)]
 pub struct Supervisor {
     project: Project,
@@ -84,18 +51,10 @@ impl Supervisor {
         }
     }
 
-    /// The binary this supervisor builds.
     pub fn binary(&self) -> &str {
         &self.project.binary
     }
 
-    /// Start a build, handing back its output pipe and the build it belongs to.
-    ///
-    /// The pipe goes to the thread that reads the result, because that thread is
-    /// the only thing that can know a build is over. The build itself comes back
-    /// with it, because the tree Cargo drives is the session's to end: a session
-    /// that stops waiting for a build must not leave a compiler writing into a
-    /// target directory the next build needs.
     pub fn start(&self, cargo: &Path) -> Result<(ChildStdout, Building), String> {
         let mut command = CommandWrap::with_new(cargo, |command| {
             command
@@ -108,11 +67,6 @@ impl Supervisor {
                     &self.project.binary,
                     "--profile",
                     &self.profile,
-                    // `json` rather than `json-render-diagnostics`: cargo emits the
-                    // rendered form beside the machine form on this channel, and the
-                    // machine form is the one that carries every message. Standard
-                    // error is inherited, so a person still sees cargo's own
-                    // rendering as well.
                     "--message-format=json",
                 ])
                 .stdin(Stdio::null())
@@ -127,11 +81,6 @@ impl Supervisor {
         Ok((out, Building { child }))
     }
 
-    /// Read a build's result from a running process's output pipe.
-    ///
-    /// Blocking, and on a thread of its own: a build is the slowest thing this
-    /// tool does, and the watcher, the running preset, and the controls a person
-    /// is using must not wait for it.
     pub fn read(reader: impl BufRead, wanted: &str) -> Build {
         let mut built: Option<PathBuf> = None;
         let mut diagnostics = Vec::new();
@@ -157,9 +106,6 @@ impl Supervisor {
                     }
                 }
                 Message::CompilerArtifact(artifact) => {
-                    // A build emits an artifact per compilation unit, and only one
-                    // of them is the preset. Cargo names it, and the name in the
-                    // artifact is the one the manifest declared.
                     if artifact
                         .target
                         .kind
@@ -175,9 +121,6 @@ impl Supervisor {
                     if finished.success {
                         return match built {
                             Some(executable) => Build::Succeeded { executable },
-                            // Cargo reported success without naming the binary.
-                            // Running a guessed path is how a watcher ends up
-                            // executing the previous build's output.
                             None => Build::Unusable(format!(
                                 "cargo reported a successful build without producing `{wanted}`"
                             )),
@@ -192,30 +135,12 @@ impl Supervisor {
     }
 }
 
-/// One build, held for as long as anything is waiting on it.
-///
-/// Cargo runs `rustc`, build scripts and linkers, so a build is a tree rather
-/// than a process, and the tree is launched managed: a job object on Windows, a
-/// process group on Unix. Ending it terminates all of them, which is what lets a
-/// session that stopped waiting for a build leave nothing behind.
-///
-/// The policy is Zup's and not `process-wrap`'s: a build somebody is still waiting
-/// for is waited on, and a build nobody is waiting for any more is ended. That is
-/// why this is a type rather than a bare child - it is what makes "nobody is
-/// waiting for this any more" a thing that can be acted on, and dropping it is
-/// that answer rather than a leak.
 #[derive(Debug)]
 pub struct Building {
     child: Box<dyn ChildWrapper>,
 }
 
 impl Building {
-    /// Wait for the build to finish, and reap it.
-    ///
-    /// Every process in the tree is reaped, not just Cargo, so the next build is
-    /// not queued behind a build script that is still holding a file. Nothing is
-    /// terminated: a build that has run to completion has nothing left to kill, and
-    /// the drop below is right to try and find nothing to do.
     pub fn wait(mut self) {
         let _ = self.child.wait();
     }
@@ -223,19 +148,11 @@ impl Building {
 
 impl Drop for Building {
     fn drop(&mut self) {
-        // Terminate, then reap, and do the second even if the first reported a
-        // problem: a build whose kill failed still has processes holding the target
-        // directory, and the next build is waiting on those files.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Put `command`'s whole process tree under this process's control.
-///
-/// The only place that knows which platform mechanism answers this: a job object
-/// on Windows, a new process group on Unix. Both give one thing to end, so
-/// everything above asks for a build rather than for a platform.
 fn manage(command: &mut CommandWrap) {
     #[cfg(windows)]
     command.wrap(process_wrap::std::JobObject);

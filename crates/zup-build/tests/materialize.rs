@@ -1,5 +1,3 @@
-//! Integration tests for source materialization.
-
 use std::fs;
 use std::path::Path;
 
@@ -140,8 +138,6 @@ destination = "${install}"
     assert_eq!(plan.prerequisite_size, bytes.len() as u64);
 }
 
-// --- Source root ---
-
 #[test]
 fn missing_source_root() {
     let dir = TempDir::new().unwrap();
@@ -150,9 +146,6 @@ fn missing_source_root() {
     assert!(matches!(err, BuildError::SourceMissing { .. }), "{err:?}");
 }
 
-/// A source root that is not there and one that is not a directory are different
-/// mistakes with different remedies, so they are reported differently rather than
-/// both collapsing into "no files".
 #[test]
 fn a_source_root_that_is_not_a_directory_is_reported_as_such() {
     let dir = project(&[("dist", b"file-not-dir")]);
@@ -176,12 +169,6 @@ fn source_lexical_escape_rejected() {
     );
 }
 
-// --- Globs and static-root mapping ---
-
-/// A pattern with a static root does not copy that root into the destination:
-/// `bin/**/*` under `${install}/tools` puts `acme.exe` in the install directory,
-/// not in a `bin` the manifest never mentioned. The third file is outside the
-/// pattern entirely, so it must not appear at all.
 #[test]
 fn a_glob_with_a_static_root_does_not_copy_the_root_into_the_destination() {
     let dir = project(&[
@@ -214,9 +201,6 @@ destination = "${install}/tools"
     );
 }
 
-/// A bare `*` matches one path segment; `**` crosses them. An installer that
-/// shipped only the top level of a tree would be missing the libraries that tree
-/// exists to carry.
 #[rstest]
 #[case::one_segment(&["a.exe"], "*.exe")]
 #[case::crossing_segments(&["a.exe", "nested/c.exe"], "**/*.exe")]
@@ -239,10 +223,6 @@ fn a_glob_matches_the_depth_it_names(#[case] expected: &[&str], #[case] pattern:
     assert_eq!(matched, expected, "{pattern}");
 }
 
-/// A pattern that matches nothing is a typo far more often than it is an
-/// intention, so it fails by default. `allow_empty` is how an author says they
-/// meant it - and that flag has to be honoured, or an optional component could
-/// never be declared for a build that does not produce it.
 #[rstest]
 #[case::by_default("bni/**/*.exe", false)]
 #[case::when_the_author_says_so("bni/**/*.exe", true)]
@@ -290,8 +270,6 @@ destination = "${install}"
     names.sort();
     assert_eq!(names, [".env".to_owned(), "visible.txt".to_owned()]);
 }
-
-// --- Determinism ---
 
 #[test]
 fn deterministic_across_insertion_orders() {
@@ -346,8 +324,6 @@ destination = "${install}"
     assert_eq!(plan_a.files.len(), plan_b.files.len());
 }
 
-// --- Hashing ---
-
 #[test]
 fn large_file_streamed_with_correct_size() {
     let big = vec![0xABu8; 3 * 1024 * 1024];
@@ -369,8 +345,6 @@ destination = "${install}/big.bin"
     let expected = Sha256Digest::from_hasher(hasher);
     assert_eq!(plan.files[0].sha256, expected);
 }
-
-// --- Collisions ---
 
 #[test]
 fn different_sources_same_destination() {
@@ -416,9 +390,6 @@ destination = "${install}"
     );
 }
 
-/// Names a Windows filesystem would reject are left for the target lowering pass,
-/// which owns the rules that differ per target. Refusing them here would make a
-/// manifest unrepresentable on a host that would have accepted it.
 #[rstest]
 #[case::case_only_destinations(
     r#"
@@ -461,8 +432,6 @@ fn windows_hostile_destinations_are_left_for_target_lowering(
     assert_eq!(plan.files.len(), expected_files);
 }
 
-// --- Path safety ---
-
 #[cfg(unix)]
 #[test]
 fn symlink_file_rejected() {
@@ -487,8 +456,6 @@ fn symlink_directory_not_followed_or_matched_as_payload() {
     let dir = project(&[("dist/keep/a.txt", b"a"), ("outside/secret.txt", b"secret")]);
     std::os::unix::fs::symlink("../outside", dir.path().join("dist/secret")).unwrap();
 
-    // `**/*` should not walk into the symlink dir; if the link itself matches,
-    // it must be rejected rather than packaged.
     let result = materialize_project(
         dir.path(),
         r#"
@@ -512,9 +479,6 @@ destination = "${install}"
     }
 }
 
-/// A pattern is a manifest author's claim about where bytes come from, so one
-/// that climbs out of the project is refused before anything is read. A malformed
-/// glob is refused the same way rather than matching nothing.
 #[rstest]
 #[case::a_climbing_pattern("../outside/*")]
 #[case::an_unterminated_bracket("a/[")]
@@ -524,8 +488,6 @@ fn an_unusable_pattern_is_refused(#[case] pattern: &str) {
         Err(BuildError::InvalidGlob { .. })
     ));
 }
-
-// --- Metadata preservation ---
 
 #[test]
 fn preserves_component_condition_and_destination() {
@@ -550,7 +512,6 @@ when = 'component("cli")'
     let file = &plan.files[0];
     assert_eq!(file.component.as_ref().unwrap().as_str(), "cli");
     assert!(file.condition.is_some());
-    // Install variables are still unresolved: materialization does not lower them.
     assert_eq!(file.destination.to_string(), "${install}/tools/tool.exe");
 }
 
@@ -605,8 +566,6 @@ source = "plugins/a.wasm"
     assert_eq!(plan.plugins[1].source_relative.as_str(), "plugins/a.wasm");
 }
 
-/// A manifest that parses may still name a plugin source outside the project, and
-/// the source is resolved after parsing, so the check has to happen there too.
 #[rstest]
 #[case::lexical_traversal("lexical")]
 #[case::absolute_path("absolute")]
@@ -1028,7 +987,6 @@ fn a_missing_icon_names_the_file() {
 
 #[test]
 fn a_small_raster_warns_and_still_builds() {
-    // 16×16 PNG. The Windows icon needs 256px, so this must warn and still compile.
     let png: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,

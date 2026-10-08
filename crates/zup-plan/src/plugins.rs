@@ -851,9 +851,6 @@ impl MergeContext<'_> {
             size,
             sha256,
             privilege,
-            // A plugin's payload is data the plugin reads. A plugin that needs a
-            // runnable helper is a capability question, not an accident of the
-            // bytes it emitted.
             executable: false,
         });
         self.generated_files.push(GeneratedFile {
@@ -1284,7 +1281,6 @@ pub(crate) fn summarize_plan(
         + plan.services.len()
         + plan.protocols.len()
         + plan.file_associations.len();
-    // Authorization is a property of each resource, never of the scope.
     let requires_authorization = plan
         .prerequisites
         .iter()

@@ -1,62 +1,3 @@
-//! The Linux self-contained installer carrier.
-//!
-//! A self-contained Linux installer is the native ELF runtime with the Zup
-//! package appended behind it:
-//!
-//! ```text
-//! ┌──────────────────────────────┐
-//! │ native zup-installer ELF     │
-//! ├──────────────────────────────┤
-//! │ Zup package                  │
-//! ├──────────────────────────────┤
-//! │ fixed-size Zup footer        │
-//! └──────────────────────────────┘
-//! ```
-//!
-//! Linux ELF loaders ignore everything after the last loadable segment, so data
-//! appended to a working executable is still a working executable. That property
-//! is what makes this the cheap carrier: composition is a copy, an append and a
-//! publish, and nothing inside the image is modified. No ELF writer, no program
-//! header patching, and no offset table inside the image that a rewritten
-//! header could invalidate.
-//!
-//! # The footer
-//!
-//! Fixed-width fields at the very end of the file, so the package is found by
-//! arithmetic rather than by scanning backwards for a byte pattern. A scan is the
-//! thing to avoid here: a runtime template that happens to contain the magic
-//! anywhere in its text would be misread as a carrier, and "search the whole
-//! file" is also how an attacker gets a second package chosen for them.
-//!
-//! ```text
-//! offset  size  field
-//!      0    17  magic
-//!     17     4  format version
-//!     21     4  flags
-//!     25     8  package offset
-//!     33     8  package length
-//!     41    32  package digest
-//!     73     8  footer length
-//! ```
-//!
-//! The digest is over the package bytes alone, so it is the package's own
-//! identity and not a claim about the whole file. Two artifacts that differ only
-//! in their ELF template therefore carry the same package digest, which is what
-//! lets a release description name one content identity for several carrier
-//! images.
-//!
-//! # What is checked, and what is not trusted
-//!
-//! Every offset is read through checked arithmetic and then checked against the
-//! file's real length, so a malformed footer produces a refusal rather than a
-//! huge allocation or a wraparound. The filename is never consulted - a
-//! `.exe`, a `.elf`, or no extension at all is equally irrelevant.
-//!
-//! The native image is verified through `zup-binary`, which reads it with
-//! `object`: the carrier must actually be the ELF the package says it is. A
-//! Windows runtime with a Linux package appended is refused before any
-//! filesystem mutation.
-
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
@@ -65,20 +6,12 @@ use std::path::{Path, PathBuf};
 use zup_bundle::{Package, PackageError};
 use zup_core::{Sha256Digest, TargetTriple};
 
-/// The bytes that end every carrier: `ZUP-LINUX-CARRIER`.
-///
-/// Long enough that a random occurrence in a text segment is vanishingly
-/// unlikely, and checked exactly rather than searched for.
 pub const CARRIER_MAGIC: &[u8; 17] = b"ZUP-LINUX-CARRIER";
 
-/// The only carrier layout this build writes or accepts.
 pub const CARRIER_VERSION: u32 = 1;
 
-/// The footer's size, which is fixed so the package offset can be computed from
-/// the file length alone.
 pub const FOOTER_LEN: u64 = 81;
 
-/// Why a carrier could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum CarrierError {
     #[error("`{path}` is {size} bytes, too short to be a zup installer")]
@@ -142,25 +75,19 @@ impl CarrierError {
     }
 }
 
-/// The footer, as read off disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CarrierFooter {
     pub version: u32,
     pub flags: u32,
-    /// Where the package starts, in bytes from the start of the file.
+
     pub package_offset: u64,
-    /// How many bytes the package occupies.
+
     pub package_length: u64,
-    /// The package's SHA-256, over the package bytes alone.
+
     pub package_digest: Sha256Digest,
 }
 
 impl CarrierFooter {
-    /// The package's byte range, when it lies inside a file of `file_size`.
-    ///
-    /// Checked rather than assumed: the offset and length come from the file and
-    /// are therefore attacker-controlled, so the addition is the place an
-    /// overflow would live.
     pub fn package_range(&self, file_size: u64) -> Result<std::ops::Range<u64>, (u64, u64)> {
         let end = self
             .package_offset
@@ -172,7 +99,6 @@ impl CarrierFooter {
         Ok(self.package_offset..end)
     }
 
-    /// The bytes this footer occupies.
     fn to_bytes(self) -> [u8; FOOTER_LEN as usize] {
         let mut bytes = [0u8; FOOTER_LEN as usize];
         bytes[..17].copy_from_slice(CARRIER_MAGIC);
@@ -186,11 +112,6 @@ impl CarrierFooter {
     }
 }
 
-/// Read the footer off the end of `file`, given its total length.
-///
-/// The footer is addressed from the end, which is why the file's length is a
-/// parameter rather than something re-derived: it is the one fact the footer
-/// cannot state about itself without being found first.
 fn read_footer(
     file: &mut std::fs::File,
     path: &Path,
@@ -248,15 +169,10 @@ fn read_footer(
             end,
             size: file_size,
         })?;
-    // The range check above is the only bound a corrupt footer needs: it refuses
-    // any length that would run past the file, which is exactly the condition
-    // that would otherwise become a large allocation before the digest is read.
-    // A second "is this plausible" test would be unreachable rather than stricter.
+
     Ok(footer)
 }
 
-/// A carrier opened for reading: the native image's path plus the package it
-/// carries.
 #[derive(Debug)]
 pub struct Carrier {
     executable: PathBuf,
@@ -264,12 +180,6 @@ pub struct Carrier {
 }
 
 impl Carrier {
-    /// Open a self-contained installer and verify it completely.
-    ///
-    /// "Completely" means, in this order: the footer is present, current and
-    /// in-bounds; the package bytes hash to what the footer declares; the package
-    /// parses; and the native image is the target the package says. Every one of
-    /// those happens here, before a caller has a path it could act on.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CarrierError> {
         let executable = path.as_ref().to_path_buf();
         let mut file = std::fs::File::open(&executable)
@@ -294,9 +204,6 @@ impl Carrier {
         file.read_exact(&mut bytes)
             .map_err(|error| CarrierError::io(path.as_ref(), error))?;
 
-        // The digest is the package's own identity, checked before the bytes are
-        // parsed: a package whose bytes were edited must be refused as *not the
-        // declared package*, not as a package that happens to be malformed.
         let found = zup_core::hash_bytes(&bytes);
         if found != footer.package_digest {
             return Err(CarrierError::PackageDigestMismatch {
@@ -308,10 +215,6 @@ impl Carrier {
 
         let package = Package::from_bytes(bytes)?;
 
-        // The native image and the package have to agree about the machine. An
-        // ELF x86_64 runtime with a Windows package appended would otherwise
-        // install Windows paths, or worse, succeed at lowering them into Linux
-        // locations nobody intended.
         let expected = package.plan().installer.target.clone();
         let image =
             zup_binary::Executable::read(&executable).map_err(|error| CarrierError::Io {
@@ -324,12 +227,7 @@ impl Carrier {
                 found: error.to_string(),
                 expected: expected.to_string(),
             })?;
-        // `refuse_target` compares what the image states, and an ELF states
-        // no operating system - so a Linux runtime with a Windows package
-        // passes it on architecture alone. This carrier is ELF by
-        // construction, so both halves are pinned here: the image must be an
-        // ELF and the package must be for Linux. Anything else is a pairing
-        // this format cannot honestly carry.
+
         if image.format() != zup_binary::BinaryFormat::Elf
             || expected.operating_system() != zup_core::TargetOperatingSystem::Linux
         {
@@ -345,39 +243,23 @@ impl Carrier {
         })
     }
 
-    /// The path this carrier was opened from.
     pub fn executable(&self) -> &Path {
         &self.executable
     }
 
-    /// The verified package.
     pub fn package(&self) -> &Package {
         &self.package
     }
 
-    /// Consume the carrier and take its package.
     pub fn into_package(self) -> Package {
         self.package
     }
 
-    /// The target this carrier installs for.
     pub fn target(&self) -> &TargetTriple {
         &self.package.plan().installer.target
     }
 }
 
-/// Compose a self-contained installer: copy the runtime, append the package,
-/// append the footer, publish.
-///
-/// The runtime image is never modified. The copy exists so a failure part-way
-/// through leaves the template intact, and so the published bytes are decided
-/// before any name points at them.
-///
-/// `package_offset` is the runtime's length, which is the template's whole file -
-/// the appended data begins exactly where the template ends. It is not a segment
-/// boundary: the loader ignores everything past the last loadable segment, and
-/// addressing the package by segment would mean parsing ELF section tables to
-/// find out where that is.
 pub fn compose(
     runtime: &Path,
     output: &Path,
@@ -399,8 +281,6 @@ pub fn compose(
         .map_err(|error| CarrierError::io(runtime, error))?
         .len();
 
-    // Composed through a temporary sibling so a reader never sees a half-written
-    // installer, and so a failed composition leaves no name behind at all.
     let temporary = output.with_extension("zup-partial");
     let composed = (|| -> Result<(), std::io::Error> {
         let mut out = std::fs::File::create(&temporary)?;
@@ -421,10 +301,6 @@ pub fn compose(
         return Err(CarrierError::io(output, error));
     }
 
-    // Published by rename, so the destination name refers to the finished image
-    // or to nothing. The durability contract - flushed file, atomic rename,
-    // flushed directory - is `zup_platform::publish`'s, and composing calls it
-    // rather than growing a second one.
     let bytes = std::fs::read(&temporary).map_err(|error| CarrierError::io(&temporary, error))?;
     zup_platform::publish(output, &bytes).map_err(|error| CarrierError::Io {
         path: output.display().to_string(),
@@ -432,16 +308,6 @@ pub fn compose(
     })?;
     let _ = std::fs::remove_file(&temporary);
 
-    // The composed image keeps the runtime's own mode. A template is an
-    // executable, and a published installer that lost the bit would need a
-    // manual `chmod` before it could run - which is a build that produces a
-    // file it cannot execute. Only permission bits travel: nothing else about
-    // the template's metadata is the installer's business.
-    //
-    // Unix-only, and deliberately so: the artifact's bytes are authoritative,
-    // and the mode at the final native destination is a separate concern. An
-    // installer composed on Windows is byte-correct; the executable bit is
-    // established when it lands on a Unix filesystem, not from NTFS state.
     #[cfg(unix)]
     {
         let template_mode = std::fs::symlink_metadata(runtime)
@@ -467,10 +333,6 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    /// A stand-in for a runtime image. The carrier addresses the package from the
-    /// footer rather than by parsing the template, so these tests only need
-    /// bytes - except where the native image has to be *read*, which the
-    /// end-to-end fixture covers with a real ELF.
     fn runtime_bytes(marker: &str) -> Vec<u8> {
         let mut bytes = b"\x7fELF\x02\x01\x01\x00".to_vec();
         bytes.extend_from_slice(marker.as_bytes());
@@ -484,10 +346,6 @@ mod tests {
         path
     }
 
-    /// The writer and the reader have to agree on every field offset. Asserting
-    /// that the composed file is *readable* - and not merely the right length -
-    /// is what catches an encoder whose offsets disagree with the decoder, which
-    /// is silent otherwise.
     #[test]
     fn a_composed_carrier_round_trips_through_its_footer() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -508,13 +366,9 @@ mod tests {
             footer.package_offset + footer.package_length + FOOTER_LEN,
             "the file is the template, the package, and the footer - nothing else"
         );
-        // The digest is over the package alone, so the same package in two
-        // carriers has one identity.
+
         assert_eq!(footer.package_digest, zup_core::hash_bytes(&package));
 
-        // Reading it back must get past the footer and the digest. This template
-        // is not a real ELF and the package is not a real package, so the failure
-        // has to be the one that comes *after* both - never a footer refusal.
         let error = Carrier::open(&output).expect_err("this fixture is not a real package");
         assert!(
             matches!(
@@ -538,8 +392,6 @@ mod tests {
         );
     }
 
-    /// A file with no footer is a plain executable, not a carrier. It has to be
-    /// refused as such rather than being searched for a package.
     #[test]
     fn a_file_with_no_footer_is_refused_rather_than_scanned() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -551,9 +403,6 @@ mod tests {
         ));
     }
 
-    /// The magic appearing inside the template must not make it a carrier. This
-    /// is the whole reason the package is addressed from the end rather than
-    /// found by scanning.
     #[test]
     fn a_magic_inside_the_template_is_not_a_carrier() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -598,10 +447,6 @@ mod tests {
         NoFooter,
     }
 
-    /// Every field the footer carries is attacker-controlled, so each one has a
-    /// refusal. The arithmetic in particular: an offset plus a length that wraps
-    /// is the case that would otherwise produce a short read somewhere very
-    /// interesting.
     #[test]
     fn every_declared_offset_is_checked_against_the_file() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -610,33 +455,24 @@ mod tests {
         compose(&runtime, &output, b"a package").expect("compose");
         let original = std::fs::read(&output).expect("read");
 
-        // Offset past the end.
         let mut tampered = original.clone();
         footer_put(&mut tampered, 25, u64::MAX - 1);
         assert_outside(tampered);
 
-        // Offset that overflows when added to the length.
         let mut tampered = original.clone();
         footer_put(&mut tampered, 25, u64::MAX);
         footer_put(&mut tampered, 33, 2);
         assert_outside(tampered);
 
-        // A length that would run past the footer.
         let mut tampered = original.clone();
         footer_put(&mut tampered, 33, u64::MAX / 2);
         assert_outside(tampered);
 
-        // A length larger than the whole file, which is the case that would
-        // otherwise become a large allocation before the digest was read.
         let mut tampered = original.clone();
         footer_put(&mut tampered, 25, 0);
         footer_put(&mut tampered, 33, 1_000_000_000_000);
         assert_outside(tampered);
 
-        // The untouched carrier still reads its own footer, which is what makes the
-        // tampering above a real test rather than a test of a broken writer.
-        // Its package is not a real package, so the refusal is the one that comes
-        // after the footer and the digest have both been accepted.
         assert!(
             matches!(
                 raw_open(&original),
@@ -646,9 +482,6 @@ mod tests {
         );
     }
 
-    /// Editing the package without updating the footer's digest is the carrier
-    /// tampering case: the bytes must be refused as *not the declared package*,
-    /// before they are parsed as one.
     #[test]
     fn edited_package_bytes_are_refused() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -666,9 +499,6 @@ mod tests {
         );
     }
 
-    /// A footer whose own length field disagrees with the fixed footer size is a
-    /// layout this build does not know, and is refused before its offsets are
-    /// believed.
     #[test]
     fn a_footer_claiming_another_layout_is_refused() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -687,9 +517,6 @@ mod tests {
         );
     }
 
-    /// A future carrier version is refused rather than parsed with this build's
-    /// field offsets, which would read a version-2 file's bytes at version-1
-    /// positions.
     #[test]
     fn a_future_carrier_version_is_refused() {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -709,8 +536,6 @@ mod tests {
         );
     }
 
-    /// Open a carrier written to a scratch file, so a tampering test can hand
-    /// back bytes it never wrote under the real name.
     fn raw_open(bytes: &[u8]) -> Result<Package, CarrierError> {
         let directory = tempfile::tempdir().expect("a temp directory");
         let path = directory.path().join("carrier");
@@ -718,9 +543,6 @@ mod tests {
         Ok(Carrier::open(&path)?.into_package())
     }
 
-    /// Overwrite one 8-byte footer field, addressed *within the footer* rather
-    /// than from the start of the file - the footer is at the end, and a test
-    /// that patched absolute offsets would be editing the runtime image.
     fn footer_put(bytes: &mut [u8], field_offset: usize, value: u64) {
         let at = bytes.len() - FOOTER_LEN as usize + field_offset;
         bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
@@ -736,9 +558,6 @@ mod tests {
         );
     }
 
-    /// The footer has no target field, and that is deliberate: the target is
-    /// proved by the image and the package agreeing, so a footer cannot claim a
-    /// target the package does not have.
     #[test]
     fn the_footer_carries_no_target_of_its_own() {
         assert_eq!(

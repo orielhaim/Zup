@@ -8,13 +8,14 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
-test-support = []
+test-support = ["dep:tempfile"]
 
 [dependencies]
 rustix.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 typed-path.workspace = true
 uuid.workspace = true

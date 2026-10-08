@@ -1,35 +1,9 @@
-//! Linux lowering of the portable service model into systemd units.
-//!
-//! Pure rendering: a stable service identity becomes a deterministic unit
-//! name, and a portable command becomes deterministic unit bytes. No D-Bus,
-//! no filesystem, no process state here - the manager integration in
-//! [`crate::systemd`] and the transactional application in the service
-//! executor own those. Keeping rendering pure is what lets `zup build` on a
-//! Windows host compose exactly the bytes a Linux worker later verifies.
-//!
-//! Semantics preserved from the portable contract (and the Windows backend):
-//! `Automatic` is persistent boot enablement, `Manual` is installed but not
-//! enabled, `Disabled` is a persistent mask. Installing never starts the
-//! service; the unit file registers boot policy only.
-//!
-//! Chosen `Type=exec`: stronger startup semantics than `simple` (systemd
-//! considers the service started only after the executable is successfully
-//! launched), without the handshake protocol `notify`/`dbus`/`forking`
-//! would require. `Type=exec` needs systemd 240 or newer, present on every
-//! supported target environment.
-
+use crate::error::PlanError;
 use zup_core::{ServiceId, ServiceStart};
 use zup_platform::{CommandSpec, TargetService};
 
-/// Minimum systemd version the rendered units assume.
 pub const MINIMUM_SYSTEMD_VERSION: u32 = 240;
 
-/// Parse a `Manager.Version` string into its major version.
-///
-/// systemd reports strings like `259` or `259.5-0ubuntu3.4`; only the
-/// leading integer run is meaningful here. Anything without leading
-/// digits is unparsable, and unparsable fails closed at preflight rather
-/// than guessing a version the manager never claimed.
 pub fn parse_manager_version(raw: &str) -> Option<u32> {
     let digits: String = raw
         .bytes()
@@ -42,52 +16,33 @@ pub fn parse_manager_version(raw: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// The `[Service]` type the renderer emits, and why it is here rather than
-/// inferred at install time.
 pub const SERVICE_TYPE: &str = "exec";
 
-/// The install target every Zup service wants. A system service, not a
-/// desktop-session one; never varied by environment.
 pub const WANTED_BY: &str = "multi-user.target";
 
-/// Unit-name prefix. Keeps Zup units in one namespace and away from
-/// distro-owned names; collisions are still refused, never overwritten.
 pub const UNIT_PREFIX: &str = "zup-";
 
-/// Maximum full unit file name length (including `.service`).
 const MAX_UNIT_LEN: usize = 200;
 
-/// Why a service has no honest systemd lowering.
-#[derive(Debug, thiserror::Error)]
-pub enum ServiceRenderError {
-    #[error("service `{id}` cannot become a systemd unit: {reason}")]
-    Refused { id: String, reason: String },
-}
-
-/// The Linux-native desired state for one portable service: everything the
-/// privileged worker needs, derived deterministically from the target plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredService {
-    /// Stable systemd unit file name, e.g. `zup-tool-1a2b3c4d5e6f.service`.
     pub unit: String,
-    /// Canonical unit source path text (host spelling).
+
     pub source_path: String,
-    /// Deterministic unit bytes.
+
     pub bytes: Vec<u8>,
-    /// Digest of `bytes`.
+
     pub sha256: zup_core::Sha256Digest,
-    /// Desired persistent start policy.
+
     pub start: ServiceStart,
-    /// Service identity as planned.
+
     pub id: ServiceId,
-    /// Display name as rendered into `Description=`.
+
     pub display_name: String,
 }
 
 impl DesiredService {
-    /// Derive the desired state for one target service. Pure and
-    /// deterministic: the same target plan always yields the same bytes.
-    pub fn derive(service: &TargetService) -> Result<Self, ServiceRenderError> {
+    pub fn derive(service: &TargetService) -> Result<Self, PlanError> {
         let unit = unit_name(&service.id)?;
         let display_name = service
             .display_name
@@ -95,12 +50,11 @@ impl DesiredService {
             .map(|name| name.to_string())
             .unwrap_or_else(|| service.name.to_string());
         let bytes = render_unit(service, &display_name)?;
-        let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).map_err(|error| {
-            ServiceRenderError::Refused {
+        let (size, sha256) =
+            zup_core::hash_reader(bytes.as_slice()).map_err(|error| PlanError::ServiceRefused {
                 id: service.id.to_string(),
                 reason: format!("rendered unit does not hash: {error}"),
-            }
-        })?;
+            })?;
         debug_assert_eq!(size, bytes.len() as u64);
         Ok(Self {
             source_path: format!("{}/{unit}", crate::machine::SYSTEMD_UNIT_DIR),
@@ -114,18 +68,10 @@ impl DesiredService {
     }
 }
 
-/// Derive the deterministic unit name for a stable service identity.
-///
-/// The name depends only on the portable [`ServiceId`]: display-name,
-/// application, version, and install-path changes never rename the unit.
-/// Escaping is injective over the id bytes (unreserved bytes pass through,
-/// everything else becomes `\xHH`), plus a 12-hex-char hash suffix so a
-/// truncation can never merge two identities. Case is preserved: Linux is
-/// case-sensitive and folding would refuse installations the manager accepts.
-pub fn unit_name(id: &ServiceId) -> Result<String, ServiceRenderError> {
+pub fn unit_name(id: &ServiceId) -> Result<String, PlanError> {
     let raw = id.as_str();
     if raw.is_empty() {
-        return Err(ServiceRenderError::Refused {
+        return Err(PlanError::ServiceRefused {
             id: raw.to_owned(),
             reason: "a service id is never empty".into(),
         });
@@ -154,7 +100,7 @@ pub fn unit_name(id: &ServiceId) -> Result<String, ServiceRenderError> {
     }
     let unit = format!("{stem}.service");
     if unit.len() > MAX_UNIT_LEN || !is_valid_unit_name(&unit) {
-        return Err(ServiceRenderError::Refused {
+        return Err(PlanError::ServiceRefused {
             id: raw.to_owned(),
             reason: "the derived unit name is not a valid systemd unit name".into(),
         });
@@ -175,13 +121,9 @@ fn is_valid_unit_name(unit: &str) -> bool {
         && !stem.contains('\0')
 }
 
-/// Render the deterministic unit source for one target service.
-pub fn render_unit(
-    service: &TargetService,
-    display_name: &str,
-) -> Result<Vec<u8>, ServiceRenderError> {
+pub fn render_unit(service: &TargetService, display_name: &str) -> Result<Vec<u8>, PlanError> {
     let id = service.id.to_string();
-    let refused = |reason: String| ServiceRenderError::Refused {
+    let refused = |reason: String| PlanError::ServiceRefused {
         id: id.clone(),
         reason,
     };
@@ -194,10 +136,6 @@ pub fn render_unit(
     Ok(text.into_bytes())
 }
 
-/// Escape a user-visible name into a `Description=` value.
-///
-/// Newlines and controls are refused (no unit-directive injection); `%` is
-/// doubled so no specifier expansion is introduced through a display name.
 fn render_description(display: &str) -> Result<String, String> {
     if display.is_empty() {
         return Err("a service description is never empty".into());
@@ -211,7 +149,6 @@ fn render_description(display: &str) -> Result<String, String> {
     Ok(display.replace('%', "%%"))
 }
 
-/// The executable as a host path: absolute, literal, never a shell word.
 fn host_executable(command: &CommandSpec) -> Result<String, String> {
     let text = crate::lowering::to_host_path(&command.executable)
         .map(|host| host.to_string_lossy().into_owned())
@@ -225,15 +162,6 @@ fn host_executable(command: &CommandSpec) -> Result<String, String> {
     Ok(text)
 }
 
-/// Render `ExecStart=` from a literal argv: direct execution, never shell.
-///
-/// Every word is double-quoted after escaping (`\\` → `\\\\`, `"` → `\\\"`),
-/// with systemd's `$` expansion neutralized (`$` → `$$`) and specifier
-/// expansion neutralized (`%` → `%%`). Quoting every word (including the
-/// executable) keeps systemd's `-`/`@`/`:`/`+`/`!` command prefixes inside
-/// the quotes, where they are literal path bytes rather than control
-/// prefixes. Empty arguments render as `""`. Control/newline values are
-/// refused rather than guessed.
 pub fn render_exec_start(executable: &str, arguments: &[String]) -> Result<String, String> {
     let mut words = Vec::with_capacity(arguments.len() + 1);
     words.push(quote_word(executable)?);
@@ -263,12 +191,6 @@ fn quote_word(word: &str) -> Result<String, String> {
     Ok(format!("\"{escaped}\""))
 }
 
-/// Parse our deterministic `ExecStart=` rendering back into argv.
-///
-/// Accepts the double-quoted subset the renderer emits (plus bare words for
-/// tolerance), reversing `\\`, `\"`, `$$` → `$`, `%%` → `%`. Anything outside
-/// the subset is refused: an administrator-edited unit is drift, not a second
-/// rendering dialect to support.
 pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -358,10 +280,6 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// Parse a rendered unit's `Description=`/`ExecStart=` back into semantics.
-///
-/// Used by the snapshot to compare observed state against desired state with
-/// the portable planner. Returns `(display_name, argv)`.
 pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
     let mut description: Option<String> = None;
@@ -424,15 +342,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manager_versions_parse_to_their_major() {
-        assert_eq!(parse_manager_version("259"), Some(259));
-        assert_eq!(parse_manager_version("259.5-0ubuntu3.4"), Some(259));
-        assert_eq!(parse_manager_version("240"), Some(MINIMUM_SYSTEMD_VERSION));
-        assert_eq!(parse_manager_version("239"), Some(239));
-        assert_eq!(parse_manager_version(""), None);
-        assert_eq!(parse_manager_version("unknown"), None);
-        assert_eq!(parse_manager_version("v259"), None);
+    #[rstest::rstest]
+    #[case::plain("259", Some(259))]
+    #[case::suffixed("259.5-0ubuntu3.4", Some(259))]
+    #[case::minimum("240", Some(MINIMUM_SYSTEMD_VERSION))]
+    #[case::old("239", Some(239))]
+    #[case::empty("", None)]
+    #[case::unknown("unknown", None)]
+    #[case::prefixed("v259", None)]
+    fn manager_versions_parse_to_their_major(#[case] raw: &str, #[case] expected: Option<u32>) {
+        assert_eq!(parse_manager_version(raw), expected);
     }
 
     #[test]

@@ -11958,6 +11958,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "zup-assets",
+ "zup-bundle",
  "zup-core",
  "zup-manifest",
  "zup-platform",
@@ -11996,6 +11997,7 @@ dependencies = [
  "sha2 0.11.0",
  "target-lexicon",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -12012,6 +12014,7 @@ dependencies = [
  "zup-artifact",
  "zup-binary",
  "zup-core",
+ "zup-transaction",
  "zup-update",
  "zup-windows",
  "zup-xtask",
@@ -12252,14 +12255,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zup-plugin-sdk"
-version = "0.1.0"
-dependencies = [
- "wit-bindgen 0.62.0",
- "zup-plugin-abi",
-]
-
-[[package]]
 name = "zup-presentation"
 version = "0.0.1"
 dependencies = [
@@ -12297,7 +12292,7 @@ dependencies = [
  "gpui-kit",
  "schemars",
  "serde",
- "zup-preset-sdk",
+ "zup-sdk",
 ]
 
 [[package]]
@@ -12358,31 +12353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zup-preset-sdk"
-version = "0.1.0"
-dependencies = [
- "futures-channel",
- "futures-util",
- "gpui-kit",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "zup-preset-ipc",
- "zup-preset-protocol",
- "zup-preset-sdk-macros",
- "zup-sdk",
-]
-
-[[package]]
-name = "zup-preset-sdk-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "zup-preset-test"
 version = "0.0.1"
 dependencies = [
@@ -12427,6 +12397,7 @@ dependencies = [
 name = "zup-publish"
 version = "0.0.1"
 dependencies = [
+ "rstest",
  "serde",
  "serde_json",
  "tempfile",
@@ -12481,8 +12452,26 @@ dependencies = [
 name = "zup-sdk"
 version = "0.1.0"
 dependencies = [
- "zup-plugin-sdk",
- "zup-preset-sdk",
+ "futures-channel",
+ "futures-util",
+ "gpui-kit",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wit-bindgen 0.62.0",
+ "zup-plugin-abi",
+ "zup-preset-ipc",
+ "zup-preset-protocol",
+ "zup-sdk-macros",
+]
+
+[[package]]
+name = "zup-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -12526,7 +12515,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "uuid",
  "zup-core",
  "zup-platform",
 ]

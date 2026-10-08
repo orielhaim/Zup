@@ -1,14 +1,10 @@
-//! `[app].icon`, either a path or a table with a source and an inset.
-
 use schemars::JsonSchema;
 use serde::Deserialize;
 use zup_core::ProjectPath;
 
-/// A normalized icon source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IconConfig {
     pub source: ProjectPath,
-    /// Thousandths of the canvas left empty on each side. `100` is `0.10`.
     pub padding_milli: u16,
 }
 
@@ -72,7 +68,6 @@ fn padding(value: f64) -> Result<u16, String> {
     Ok(milli as u16)
 }
 
-/// An application icon: a path in the project, or a table with `source` and optional `padding`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[allow(dead_code)]
 #[serde(untagged, deny_unknown_fields)]
@@ -81,13 +76,11 @@ pub enum IconSetting {
     Options(IconOptions),
 }
 
-/// `icon` written as a table.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct IconOptions {
     pub source: ProjectPath,
-    /// Fraction of the canvas left empty on each side. `0.10` insets by a tenth.
     #[serde(default)]
     pub padding: Option<f64>,
 }

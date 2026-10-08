@@ -3,9 +3,9 @@
 #
 # There is exactly one crate an author depends on:
 #
-#   zup-sdk    the facade, with a feature per authoring role
+#   zup-sdk    the authoring SDK, with a feature per authoring role
 #
-# and two roles behind it, which share a name and almost nothing else:
+# and two roles behind its features, which share a name and almost nothing else:
 #
 #   preset    a window, written in Rust against GPUI
 #   plugin    a declaration, compiled to a WebAssembly component
@@ -13,7 +13,7 @@
 # A preset project and a plugin project resolve differently, reach different
 # dependency graphs, and must not be able to reach each other's machinery. This
 # script proves that, from a directory outside this workspace, against the
-# packaged archives of the crates beneath the facade rather than the workspace's
+# packaged archives of the crates beneath the SDK rather than the workspace's
 # copies - because a crate that only resolves because of a path this repository
 # happens to provide has not been shown to be publishable.
 #
@@ -37,16 +37,14 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    # Published for use outside this repository. The facade is the only one an
+    # Published for use outside this repository. The SDK is the only one an
     # author names; the rest are published because Cargo resolves a transitive
     # dependency from crates.io, not because anyone should reach them directly.
     $published = @(
         "zup-sdk",
-        "zup-preset-sdk",
-        "zup-preset-sdk-macros",
+        "zup-sdk-macros",
         "zup-preset-protocol",
         "zup-preset-ipc",
-        "zup-plugin-sdk",
         "zup-plugin-abi"
     )
 
@@ -68,8 +66,8 @@ try {
     #
     # Every one of these is new, so none of them is on crates.io yet, and Cargo
     # resolves a dependency by version rather than by path when it packages. Left
-    # alone that means packaging the facade fails with "no matching package named
-    # `zup-preset-sdk` found" - a fact about what has been published, not about
+    # alone that means packaging the SDK fails with "no matching package named
+    # `zup-sdk-macros` found" - a fact about what has been published, not about
     # whether the crate can be packaged at all. So every sibling this repository
     # also owns is patched to its local path, which is what the registry supplies
     # once the crate beneath has been published.
@@ -107,7 +105,7 @@ try {
 
     # 3 and 4. Each role, resolved and built from outside this workspace.
     #
-    # A copy of the facade is placed beside copies of everything it needs, with
+    # A copy of the SDK is placed beside copies of everything it needs, with
     # every path rewritten to a sibling. Nothing it builds can then come from this
     # repository, so a crate that only resolves here is caught here.
     $work = Join-Path $root "target\public-crate-check"
@@ -132,7 +130,8 @@ try {
             $value = $Matches[2].Trim()
             if ($value.StartsWith("{")) {
                 $inherited[$Matches[1]] = $value.TrimStart("{").TrimEnd("}").Trim()
-            } else {
+            }
+            else {
                 $inherited[$Matches[1]] = "version = $value"
             }
         }
@@ -161,7 +160,7 @@ try {
         $text = Get-Content -LiteralPath $manifest -Raw
         foreach ($other in $published) {
             if ($other -eq $crate) { continue }
-            $text = $text -replace "$other = \{ path = `"\.\./$other`", version = `"[0-9.]+`" \}", "$other = { path = `"../$other`" }"
+            $text = $text -replace "$other = \{ path = `"\.\./$other`", version = `"[0-9.]+`"(, optional = true)? \}", "$other = { path = `"../$other`"`$1 }"
         }
         foreach ($name in $inherited.Keys) {
             $text = $text -replace "(?m)^(\s*)$name\.workspace = true\s*$", "`$1$name = { $($inherited[$name]) }"
@@ -173,7 +172,7 @@ try {
         Set-Content -LiteralPath $manifest -Value $text -NoNewline
     }
 
-    # The facade, with the preset role.
+    # The SDK, with the preset role.
     Push-Location (Join-Path $work "zup-sdk")
     try {
         cargo test --all-targets --no-default-features --features preset
@@ -185,7 +184,7 @@ try {
                 throw "the preset role reaches the internal crate $name"
             }
         }
-        foreach ($expected in @("zup-preset-sdk", "zup-preset-protocol", "zup-preset-ipc")) {
+        foreach ($expected in @("zup-sdk-macros", "zup-preset-protocol", "zup-preset-ipc")) {
             if (-not ($graph | Select-String -Pattern "(^|[^a-z-])$expected v" -Quiet)) {
                 throw "the preset role does not link $expected"
             }
@@ -201,7 +200,7 @@ try {
     }
     finally { Pop-Location }
 
-    # The facade, with the plugin role.
+    # The SDK, with the plugin role.
     Push-Location (Join-Path $work "zup-sdk")
     try {
         cargo test --all-targets --no-default-features --features plugin
@@ -213,7 +212,7 @@ try {
                 throw "the plugin role reaches the internal crate $name"
             }
         }
-        foreach ($expected in @("zup-plugin-sdk", "zup-plugin-abi")) {
+        foreach ($expected in @("zup-plugin-abi")) {
             if (-not ($graph | Select-String -Pattern "(^|[^a-z-])$expected v" -Quiet)) {
                 throw "the plugin role does not link $expected"
             }

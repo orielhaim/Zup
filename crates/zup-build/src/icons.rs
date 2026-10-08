@@ -1,8 +1,3 @@
-//! Compile the icon a target will install.
-//!
-//! Each target asks for its own outputs. A Windows plan carries an ICO, a
-//! Linux plan carries a hicolor tree, and neither carries the other's files.
-
 use std::fs;
 use std::path::Path;
 
@@ -112,8 +107,6 @@ pub(crate) fn compile_icons(
                 .executable
                 .map(|icon| icon.group)
                 .unwrap_or_default(),
-            // An in-memory compile has no file behind the icon, and naming one
-            // would point a consumer at nothing.
             source: (!artifact.path.as_os_str().is_empty()).then_some(artifact.path),
         })
         .collect::<Vec<_>>();
@@ -125,13 +118,6 @@ pub(crate) fn compile_icons(
     })
 }
 
-/// Pack compiled Linux icons as payload files for the hicolor hierarchy.
-///
-/// Only Linux targets whose installer references icons (a launcher, protocol,
-/// or file association renders `Icon=`) carry them: a headless tool with no
-/// desktop presence must not scatter icon files across the user's data home.
-/// Destinations are `${location.user_data}/icons/…`, resolved on the target
-/// machine like every other payload path.
 pub(crate) fn pack_linux_icons(
     icons: &TargetIcons,
     installer: &Installer,
@@ -160,10 +146,6 @@ pub(crate) fn pack_linux_icons(
         if !linux {
             continue;
         }
-        // An in-memory compile has no file behind the icon. That is the
-        // `zup check` shape: validation without an installer, where icon
-        // metadata is checked but no bytes ship. A real build compiles
-        // through the on-disk cache, so its artifacts always have sources.
         let Some(source) = artifact.source.clone() else {
             continue;
         };

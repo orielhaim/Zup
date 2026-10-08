@@ -1,19 +1,5 @@
 #![allow(dead_code)]
 
-//! A GitHub that misbehaves in every documented way.
-//!
-//! The real API's failure modes are the whole reason the publisher's state
-//! machine exists, and none of them can be tested against the real API: a
-//! `502` that leaves a zero-byte asset behind, a `422` for a duplicate filename,
-//! a digest that disagrees with the bytes, a rate limit that arrives as a `403`
-//! rather than a `429`. A publisher that has only ever seen a well-behaved host
-//! has not been tested at all.
-//!
-//! So this is a hand-rolled `TcpListener` rather than a framework, for the same
-//! reason the acquisition tests do it: every response is exactly what the test
-//! says it is, including the ones GitHub documents but a mock framework has no
-//! vocabulary for.
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,49 +7,25 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest as _, Sha256};
 
-/// What a mock host does when a request arrives.
 #[derive(Debug, Clone, Default)]
 pub struct Behaviour {
-    /// A status to answer with instead of the normal handling.
     pub status: Option<u16>,
-    /// A `Retry-After` header, in seconds.
     pub retry_after: Option<u64>,
-    /// `x-ratelimit-remaining: 0`, which is how GitHub says "slow down" on a 403.
     pub rate_limited: bool,
-    /// Fail the next N upload attempts this way, then behave.
-    ///
-    /// A count rather than a flag, because the interesting case is "the first
-    /// attempt fails and leaves a remnant behind, the second succeeds" - which a
-    /// boolean cannot express.
     pub upload_failures: u32,
-    /// Leave an empty `starter` asset behind when an upload fails.
     pub leaves_starter: bool,
-    /// The digest to report for the next upload, when it is not the real one.
     pub report_wrong_digest: bool,
-    /// The size to report for the next upload.
     pub report_wrong_size: Option<u64>,
-    /// The name to report for the next upload.
     pub rename_to: Option<String>,
-    /// Answer `200` to an asset download that asked for a range.
-    pub ignore_range: bool,
-    /// Answer a range with a `206` whose `Content-Range` names a different range.
-    pub wrong_content_range: bool,
-    /// The repository is private.
     pub private: bool,
-    /// The repository is archived.
     pub archived: bool,
-    /// Whether the repository has immutable releases enabled.
     pub immutable_releases: Option<bool>,
-    /// Whether a release is immutable.
     pub release_immutable: Option<bool>,
-    /// Whether a release is a draft.
     pub draft: bool,
-    /// Whether a release exists at all.
     pub present: bool,
 }
 
 impl Behaviour {
-    /// A well-behaved host.
     pub fn new() -> Self {
         Self {
             present: true,
@@ -72,7 +34,6 @@ impl Behaviour {
         }
     }
 
-    /// A host with no release for the requested tag.
     pub fn absent() -> Self {
         Self {
             present: false,
@@ -80,7 +41,6 @@ impl Behaviour {
         }
     }
 
-    /// A host whose release is already published.
     pub fn published() -> Self {
         Self {
             draft: false,
@@ -89,7 +49,6 @@ impl Behaviour {
     }
 }
 
-/// One asset the mock host holds.
 #[derive(Debug, Clone)]
 struct Remote {
     id: u64,
@@ -100,7 +59,6 @@ struct Remote {
     bytes: Vec<u8>,
 }
 
-/// A mock GitHub.
 pub struct Github {
     address: SocketAddr,
     state: Arc<Mutex<State>>,
@@ -116,12 +74,10 @@ struct State {
     assets: Vec<Remote>,
     release_id: u64,
     next_asset_id: u64,
-    /// Every request line the host saw, for a test that asserts on ordering.
     log: Vec<String>,
 }
 
 impl Github {
-    /// Start a host with `behaviour`.
     pub fn start(behaviour: Behaviour) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
         let address = listener.local_addr().expect("the listener has an address");
@@ -172,37 +128,23 @@ impl Github {
         }
     }
 
-    /// The port the mock host is listening on.
-    pub fn port(&self) -> u16 {
-        self.address.port()
+    pub fn origin(&self) -> zup_acquire_http::Origin {
+        zup_acquire_http::Origin::parse(&format!("http://{}/", self.address))
+            .expect("a loopback origin parses")
     }
 
-    /// The API base, as an origin.
     pub fn api_origin(&self) -> zup_acquire_http::Origin {
-        zup_acquire_http::Origin::parse(&format!("http://{}/", self.address))
-            .expect("a loopback origin parses")
+        self.origin()
     }
 
-    /// The upload base, as an origin.
     pub fn upload_origin(&self) -> zup_acquire_http::Origin {
-        zup_acquire_http::Origin::parse(&format!("http://{}/", self.address))
-            .expect("a loopback origin parses")
+        self.origin()
     }
 
-    /// The address a client is told the repository lives at.
     pub fn repository(&self) -> zup_publish_github::GithubRepository {
         zup_publish_github::GithubRepository::dotcom("acme", "acme")
     }
 
-    /// Change the host's behaviour mid-test.
-    pub fn set(&self, behaviour: Behaviour) {
-        self.state
-            .lock()
-            .expect("the state is not poisoned")
-            .behaviour = behaviour;
-    }
-
-    /// Read the host's behaviour.
     pub fn behaviour(&self) -> Behaviour {
         self.state
             .lock()
@@ -211,17 +153,14 @@ impl Github {
             .clone()
     }
 
-    /// How many requests the host has answered.
     pub fn requests(&self) -> u64 {
         self.requests.load(Ordering::Relaxed)
     }
 
-    /// How many upload attempts the host has seen, successful or not.
     pub fn upload_attempts(&self) -> u64 {
         self.uploads.load(Ordering::Relaxed)
     }
 
-    /// The assets the host currently holds, as `(name, size, digest)`.
     pub fn assets(&self) -> Vec<(String, u64, Option<String>)> {
         self.state
             .lock()
@@ -232,12 +171,10 @@ impl Github {
             .collect()
     }
 
-    /// The asset names the host currently holds.
     pub fn asset_names(&self) -> Vec<String> {
         self.assets().into_iter().map(|(name, ..)| name).collect()
     }
 
-    /// Every request line the host saw.
     pub fn log(&self) -> Vec<String> {
         self.state
             .lock()
@@ -246,7 +183,6 @@ impl Github {
             .clone()
     }
 
-    /// Put an asset on the host as if it had been uploaded successfully.
     pub fn put(&self, name: &str, bytes: &[u8]) {
         let mut state = self.state.lock().expect("the state is not poisoned");
         let id = state.next_asset_id;
@@ -258,21 +194,6 @@ impl Github {
             state: "uploaded".to_owned(),
             digest: Some(format!("sha256:{}", hex(&Sha256::digest(bytes)))),
             bytes: bytes.to_vec(),
-        });
-    }
-
-    /// Put an empty `starter` asset on the host, as a failed upload leaves behind.
-    pub fn put_starter(&self, name: &str) {
-        let mut state = self.state.lock().expect("the state is not poisoned");
-        let id = state.next_asset_id;
-        state.next_asset_id += 1;
-        state.assets.push(Remote {
-            id,
-            name: name.to_owned(),
-            size: 0,
-            state: "starter".to_owned(),
-            digest: None,
-            bytes: Vec::new(),
         });
     }
 }
@@ -323,10 +244,6 @@ fn serve(
             } else if name.eq_ignore_ascii_case("transfer-encoding")
                 && value.eq_ignore_ascii_case("chunked")
             {
-                // An upload body is a stream, so there is no length to trust and
-                // the chunks are the only thing that says how many bytes arrived.
-                // A mock that reads a declared length would see zero and report
-                // a wrong digest for a correct upload.
                 chunked = true;
             }
         }
@@ -342,13 +259,8 @@ fn serve(
     };
     requests.fetch_add(1, Ordering::Relaxed);
     let (raw, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
-    // The route table is written in the shape GitHub's API is documented in,
-    // which is without the leading slash the request line always has.
     let path = raw.trim_start_matches('/');
     let mut writer = stream;
-    // Log and read the behaviour under the lock, then release it. The arms below
-    // take the lock themselves, and a `Mutex` is not reentrant - holding it
-    // across a dispatch that locks again is a deadlock rather than a test.
     let behaviour = {
         let mut guard = state.lock().expect("the state is not poisoned");
         guard.log.push(format!("{method} {path}"));
@@ -379,8 +291,6 @@ fn serve(
         );
     }
     if method == "GET" && path.starts_with("repos/") && path.matches('/').count() == 2 {
-        // `GET /repos/{owner}/{repo}` - and the upload host is the same
-        // listener, so the path shape is what distinguishes the two.
         return write_json(
             &mut writer,
             200,
@@ -450,7 +360,6 @@ fn serve(
     )
 }
 
-/// Read a chunked body to its terminating zero-length chunk.
 fn read_chunked(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
@@ -461,7 +370,6 @@ fn read_chunked(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>> {
         let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or("0").trim(), 16)
             .unwrap_or(0);
         if size == 0 {
-            // The trailer section, terminated by a blank line.
             let mut trailer = String::new();
             while reader.read_line(&mut trailer)? > 0 {
                 if trailer.trim().is_empty() {
@@ -480,21 +388,19 @@ fn read_chunked(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
+fn asset_json(asset: &Remote) -> serde_json::Value {
+    serde_json::json!({
+        "id": asset.id,
+        "name": asset.name,
+        "size": asset.size,
+        "state": asset.state,
+        "digest": asset.digest,
+        "browser_download_url": format!("http://example.invalid/{}", asset.name),
+    })
+}
+
 fn release_json(state: &State, behaviour: &Behaviour) -> serde_json::Value {
-    let assets: Vec<serde_json::Value> = state
-        .assets
-        .iter()
-        .map(|asset| {
-            serde_json::json!({
-                "id": asset.id,
-                "name": asset.name,
-                "size": asset.size,
-                "state": asset.state,
-                "digest": asset.digest,
-                "browser_download_url": format!("http://example.invalid/{}", asset.name),
-            })
-        })
-        .collect();
+    let assets: Vec<serde_json::Value> = state.assets.iter().map(asset_json).collect();
     serde_json::json!({
         "id": state.release_id,
         "tag_name": "v1.4.0",
@@ -512,20 +418,7 @@ fn release_json(state: &State, behaviour: &Behaviour) -> serde_json::Value {
 fn asset_list(writer: &mut TcpStream, state: &Arc<Mutex<State>>) -> std::io::Result<()> {
     let state = state.lock().expect("the state is not poisoned");
     let behaviour = state.behaviour.clone();
-    let assets: Vec<serde_json::Value> = state
-        .assets
-        .iter()
-        .map(|asset| {
-            serde_json::json!({
-                "id": asset.id,
-                "name": asset.name,
-                "size": asset.size,
-                "state": asset.state,
-                "digest": asset.digest,
-                "browser_download_url": format!("http://example.invalid/{}", asset.name),
-            })
-        })
-        .collect();
+    let assets: Vec<serde_json::Value> = state.assets.iter().map(asset_json).collect();
     write_json(writer, 200, &behaviour, &serde_json::Value::Array(assets))
 }
 
@@ -585,14 +478,7 @@ fn upload(
         bytes: body.to_vec(),
     });
     let asset = state.assets.last().expect("the asset was just pushed");
-    let payload = serde_json::json!({
-        "id": asset.id,
-        "name": asset.name,
-        "size": asset.size,
-        "state": asset.state,
-        "digest": asset.digest,
-        "browser_download_url": format!("http://example.invalid/{}", asset.name),
-    });
+    let payload = asset_json(asset);
     let behaviour = state.behaviour.clone();
     write_json(writer, 201, &behaviour, &payload)
 }
@@ -689,7 +575,6 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// Fill a buffer deterministically, for a caller that needs bytes of a size.
 pub fn fill(buffer: &mut [u8], seed: u8) {
     let mut state = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     for slot in buffer.iter_mut() {

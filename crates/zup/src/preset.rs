@@ -1,20 +1,5 @@
-//! `zup preset pack` and `zup preset inspect`: producing and looking at a `.zupui`.
-//!
-//! A preset is a Rust project, so publishing one is a Cargo build followed by
-//! packaging. Cargo is asked where its output actually is - through the
-//! `CompilerArtifact` messages a build emits - rather than by guessing a path,
-//! because a guessed path is right until someone sets a profile, a target
-//! directory, or a target triple.
-//!
-//! One machine cannot build every target, so a package is assembled from
-//! whatever binaries a caller has: a target built here, or one a CI runner built
-//! elsewhere. Both are the same input, and there is one command for them rather
-//! than a build command and an add command that disagree about the format.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-pub mod init;
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
@@ -23,18 +8,14 @@ use zup_preset_protocol::{MAX_DESCRIBE_BYTES, PresetDescription};
 
 use crate::failure;
 
-/// One preset binary, by target triple and file.
 #[derive(Debug, Args, Clone)]
 pub struct BinarySource {
-    /// The target this binary was built for, as a canonical triple.
     #[arg(long, value_name = "TRIPLE")]
     pub target: String,
-    /// The binary itself.
     #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub binary: PathBuf,
 }
 
-/// Author and look at preset packages.
 #[derive(Debug, Args)]
 pub struct PresetCommand {
     #[command(subcommand)]
@@ -43,43 +24,28 @@ pub struct PresetCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PresetVerb {
-    /// Create a preset project.
     Init(InitCommand),
-    /// Build and run the preset in this project, against a simulated installer.
     Dev(DevCommand),
-    /// Build or collect preset binaries into a `.zupui`.
     Pack(PackCommand),
-    /// Report what a `.zupui` contains, without running it.
     Inspect(InspectCommand),
 }
 
-/// Create a preset project.
 #[derive(Debug, Args)]
 pub struct InitCommand {
-    /// What to call it. The project directory takes this name.
     pub name: String,
-    /// The directory to create it in. Defaults to the current one.
     #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub directory: Option<PathBuf>,
 }
 
-/// Run the preset in this project against a simulated installer.
 #[derive(Debug, Args)]
 pub struct DevCommand {
-    /// The preset project to develop. Defaults to the current directory.
     #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub project: Option<PathBuf>,
-    /// The Cargo profile to build with.
     #[arg(long, value_name = "PROFILE", default_value = "dev")]
     pub profile: String,
 }
 
-/// Run `zup preset dev`.
 pub fn dev(args: &DevCommand) -> miette::Result<()> {
-    // What the session prints is its product, and a redirected stdout is block
-    // buffered by default, so a development tool would say nothing at all for
-    // the two minutes its first build takes. That is exactly when somebody is
-    // watching to find out whether it started.
     let _lines = std::io::LineWriter::new(std::io::stdout());
     let root = match args.project.clone() {
         Some(project) => project,
@@ -90,7 +56,6 @@ pub fn dev(args: &DevCommand) -> miette::Result<()> {
         .map_err(|error| failure::error("zup.preset.dev", error.to_string()))
 }
 
-/// Run `zup preset init`.
 pub fn generate(args: &InitCommand) -> miette::Result<()> {
     let parent = match args.directory.clone() {
         Some(directory) => directory,
@@ -102,29 +67,22 @@ pub fn generate(args: &InitCommand) -> miette::Result<()> {
 
 #[derive(Debug, Args)]
 pub struct PackCommand {
-    /// The preset project to read. Defaults to the current directory.
     #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub manifest: Option<PathBuf>,
-    /// The package to write. Defaults to `<preset-name>-<version>.zupui` here.
     #[arg(long, short, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub output: Option<PathBuf>,
-    /// A binary to include, already built.
     #[arg(long = "binary", value_name = "TRIPLE=FILE", value_parser = parse_binary, num_args = 1)]
     pub binaries: Vec<BinarySource>,
-    /// Build this target here with Cargo and include the result.
     #[arg(long = "build", value_name = "TRIPLE")]
     pub build: Vec<String>,
-    /// Build with this Cargo profile.
     #[arg(long, value_name = "PROFILE", default_value = "release")]
     pub profile: String,
-    /// Overwrite an existing package.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct InspectCommand {
-    /// The package to read.
     #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub package: PathBuf,
 }
@@ -140,7 +98,6 @@ fn parse_binary(raw: &str) -> Result<BinarySource, String> {
     })
 }
 
-/// Build or collect preset binaries into a `.zupui`.
 pub fn pack(args: &PackCommand) -> miette::Result<()> {
     let root = repository_root(args.manifest.as_deref())?;
     let cargo = crate::project::cargo_executable();
@@ -195,9 +152,6 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
         .map_err(|error| miette::miette!("{error}"))?;
     write_durably(&output, &bytes)?;
 
-    // The package on disk is read back through the same reader `zup preset inspect`
-    // uses, so a package that was written but cannot be read is not reported as
-    // a success.
     let reopened = std::fs::read(&output).map_err(|error| miette::miette!("{error}"))?;
     let view = PresetPackageView::open(reopened)
         .map_err(|error| miette::miette!("the package just written does not read back: {error}"))?;
@@ -218,7 +172,6 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// Report what a `.zupui` contains, without running it.
 pub fn inspect(args: &InspectCommand) -> miette::Result<()> {
     let bytes = std::fs::read(&args.package)
         .map_err(|error| miette::miette!("`{}`: {error}", args.package.display()))?;
@@ -260,7 +213,6 @@ pub fn inspect(args: &InspectCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// One line about what the settings accept.
 fn settings_summary(schema: &serde_json::Value) -> String {
     let properties = schema
         .get("properties")
@@ -289,12 +241,6 @@ fn human_bytes(bytes: u64) -> String {
     zup_presentation::format_bytes(bytes)
 }
 
-/// Ask the preset what it is, by running its describe mode.
-///
-/// The only time a preset executable runs, and only the one this machine built
-/// for itself: this reads a document and does not open a window. When the host
-/// target is among the binaries being packaged, that binary is asked rather than
-/// a second copy of it being built.
 fn describe(
     root: &Path,
     cargo: &Path,
@@ -333,7 +279,6 @@ fn describe(
         .map_err(|error| miette::miette!("the preset's describe document is unusable: {error}"))
 }
 
-/// What the preset's Cargo manifest says it is.
 struct PresetIdentity {
     name: String,
     version: String,
@@ -351,11 +296,6 @@ impl PresetIdentity {
         })
     }
 
-    /// Refuse a build whose executable claims a different identity.
-    ///
-    /// The manifest is the authority. A preset that hard-codes its name, or
-    /// bumps its version without bumping the manifest, would otherwise be
-    /// published under a name and version no crate answers to.
     fn cross_check(&self, described: &PresetDescription) -> miette::Result<()> {
         if described.name != self.name {
             return Err(miette::miette!(
@@ -379,10 +319,6 @@ impl PresetIdentity {
     }
 }
 
-/// Build one target and return the executable Cargo actually produced.
-///
-/// Cargo is asked. Every other answer is a guess about a directory layout that a
-/// profile, a target directory, or a cross-compile can change.
 fn build_target(
     root: &Path,
     cargo: &Path,
@@ -425,13 +361,6 @@ fn build_target(
     })
 }
 
-/// The executable one `compiler-artifact` message reports, if it is the one asked for.
-///
-/// Cargo interleaves compiler messages with build-script output and reports
-/// artifacts for every target in a dependency graph, including libraries and
-/// build scripts, so the reason, the kind, and the name all have to match before
-/// a path is taken. Anything unparseable is skipped rather than refused: a build
-/// that printed a line this does not understand still produced its artifacts.
 fn artifact_executable(line: &[u8], binary_name: &str) -> Option<String> {
     let message: serde_json::Value = serde_json::from_slice(line).ok()?;
     if message["reason"] != "compiler-artifact" {
@@ -451,11 +380,7 @@ fn host_target() -> miette::Result<String> {
     Ok(zup_plugin_contract::HOST_TARGET.to_owned())
 }
 
-/// The project to pack, as an absolute path.
-///
-/// Absolute because Cargo reports absolute manifest paths, and a relative
 /// `--manifest` would then be compared against a path that can never start with
-/// it - which is a refusal about nothing.
 fn repository_root(manifest: Option<&Path>) -> miette::Result<PathBuf> {
     let here = std::env::current_dir()
         .map_err(|error| miette::miette!("the current directory is unavailable: {error}"))?;
@@ -486,7 +411,6 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    /// One `compiler-artifact` message as Cargo emits it.
     fn artifact(name: &str, kind: &str, executable: Option<&str>) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "reason": "compiler-artifact",
@@ -496,8 +420,6 @@ mod tests {
         .expect("a message")
     }
 
-    /// A preset's executable is found in the stream Cargo prints, among every
-    /// other artifact in the build.
     #[test]
     fn cargo_artifact_discovery_finds_the_executable() {
         let message = artifact(
@@ -511,8 +433,6 @@ mod tests {
         );
     }
 
-    /// The last artifact for the name wins, because a build that recompiles
-    /// reports the fresh one last and a stale path would package a stale preset.
     #[test]
     fn cargo_artifact_discovery_takes_the_last_executable() {
         let first = artifact("aurora-preset", "bin", Some("C:/t/old.exe"));
@@ -524,8 +444,6 @@ mod tests {
         assert_eq!(found.as_deref(), Some("C:/t/new.exe"));
     }
 
-    /// Everything else in the stream is skipped rather than refused: a build that
-    /// printed a line this does not understand still produced its artifacts.
     #[rstest]
     #[case::another_binary(artifact("other-preset", "bin", Some("C:/t/other.exe")))]
     #[case::a_library(artifact("aurora-preset", "lib", Some("C:/t/libaurora.rlib")))]
@@ -537,9 +455,6 @@ mod tests {
         assert_eq!(artifact_executable(&line, "aurora-preset"), None);
     }
 
-    /// A build whose identity disagrees with its manifest is refused. A preset
-    /// that hard-codes its name, or bumps its version without bumping the
-    /// manifest, would otherwise be published under a name no crate answers to.
     #[test]
     fn a_preset_that_disagrees_with_its_manifest_is_refused() {
         let identity = PresetIdentity {
@@ -565,8 +480,6 @@ mod tests {
         assert!(refusal.to_string().contains("9.9.9"), "{refusal}");
     }
 
-    /// A prebuilt binary is named with the target it was built for, and a
-    /// malformed one is refused before any file is opened.
     #[test]
     fn a_prebuilt_binary_is_named_by_its_target() {
         let source = parse_binary("x86_64-pc-windows-msvc=C:/build/aurora.exe")
@@ -582,4 +495,309 @@ mod tests {
             "a target that is not a triple names no target"
         );
     }
+}
+
+pub mod init {
+    use std::path::{Path, PathBuf};
+
+    use super::failure;
+
+    pub struct Generator {
+        name: String,
+        root: PathBuf,
+        write_code: &'static str,
+    }
+
+    impl Generator {
+        pub fn new(raw: &str, parent: &Path, code: &'static str) -> Result<Self, String> {
+            let name = package_name(raw)?;
+            let root = parent.join(&name);
+            if root.exists() {
+                return Err(format!("`{}` already exists", root.display()));
+            }
+            Ok(Self {
+                name,
+                root,
+                write_code: code,
+            })
+        }
+
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        pub fn root(&self) -> &Path {
+            &self.root
+        }
+
+        pub fn create(self, files: &[(&str, String)]) -> miette::Result<()> {
+            for (relative, contents) in files {
+                self.write(relative, contents)?;
+            }
+            Ok(())
+        }
+
+        fn write(&self, relative: &str, contents: &str) -> miette::Result<()> {
+            let path = self.root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| self.write_failed(parent, error))?;
+            }
+            std::fs::write(&path, contents).map_err(|error| self.write_failed(&path, error))
+        }
+
+        fn write_failed(&self, path: &Path, error: std::io::Error) -> miette::Report {
+            failure::error(self.write_code, format!("{}: {error}", path.display()))
+        }
+    }
+
+    fn package_name(raw: &str) -> Result<String, String> {
+        let name: String = raw
+            .trim()
+            .to_owned()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let name = name.trim_matches('-').to_owned();
+        if name.is_empty() {
+            return Err(format!("`{raw}` names nothing a package could be called"));
+        }
+        if name.starts_with(|character: char| character.is_ascii_digit()) {
+            return Err(format!(
+                "a package cannot be called `{name}`; it starts with a digit"
+            ));
+        }
+        Ok(name)
+    }
+
+    pub fn init(name: &str, parent: &Path) -> miette::Result<()> {
+        let project = Generator::new(name, parent, "zup.preset.init")
+            .map_err(|error| failure::error("zup.preset.init_name", error))?;
+        let name = project.name().to_owned();
+        project.create(&[
+            ("Cargo.toml", manifest(&name)),
+            ("src/main.rs", MAIN.to_owned()),
+            ("zup.preset.dev.toml", DEVELOPMENT.to_owned()),
+            (".gitignore", GITIGNORE.to_owned()),
+        ])
+    }
+
+    fn manifest(name: &str) -> String {
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2024"
+description = "A zup installer preset"
+publish = false
+
+# The whole of what a preset needs. The GPUI stack this builds against, and the
+# crates its settings are built from, are the ones this SDK was built with.
+[dependencies]
+zup-sdk = {{ version = "0.1.0", features = ["preset"] }}
+
+# GPUI is a very large dependency tree, and compiling it at `opt-level = 0` is
+# both slow and, for a text and layout engine, surprisingly slow at run time.
+# These are the packages that dominate the cost; everything else stays at the
+# development default so a change to this preset's own code is compiled in
+# seconds.
+#
+# A name here that the GPUI stack has since renamed is a warning rather than an
+# error, so it costs nothing but the optimisation it was buying. Cargo prints it
+# on the first build, which is where it is worth knowing about.
+[profile.dev.package.gpui-pre]
+opt-level = 2
+[profile.dev.package.gpui-pre-platform]
+opt-level = 2
+[profile.dev.package.gpui-pre-shared-string]
+opt-level = 2
+[profile.dev.package.gpui-pre-scheduler]
+opt-level = 2
+[profile.dev.package.gpui-pre-refineable]
+opt-level = 2
+[profile.dev.package.gpui-pre-derive-refineable]
+opt-level = 2
+[profile.dev.package.gpui-pre-macros]
+opt-level = 2
+[profile.dev.package.gpui-pre-util]
+opt-level = 2
+[profile.dev.package.gpui-pre-util-macros]
+opt-level = 2
+[profile.dev.package.gpui-base]
+opt-level = 2
+[profile.dev.package.gpui-component]
+opt-level = 2
+[profile.dev.package.gpui-kit-assets]
+opt-level = 2
+[profile.dev.package.taffy]
+opt-level = 2
+[profile.dev.package.smol_str]
+opt-level = 2
+[profile.dev.package.rustybuzz]
+opt-level = 2
+[profile.dev.package.resvg]
+opt-level = 2
+[profile.dev.package.usvg]
+opt-level = 2
+[profile.dev.package.tiny-skia]
+opt-level = 2
+[profile.dev.package.image]
+opt-level = 2
+[profile.dev.package.zune-jpeg]
+opt-level = 2
+[profile.dev.package.png]
+opt-level = 2
+[profile.dev.package.smol]
+opt-level = 2
+"#
+        )
+    }
+
+    const MAIN: &str = r#"use zup_sdk::preset::prelude::*;
+
+#[zup_sdk::preset::settings]
+pub struct Settings {
+    pub hero: Option<String>,
+    pub logo: Option<AssetRef>,
+    pub accent: Option<String>,
+}
+
+struct Aurora;
+
+impl Preset for Aurora {
+    const NAME: &'static str = env!("CARGO_PKG_NAME");
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    type Settings = Settings;
+
+    fn launch(context: PresetContext<Self::Settings>, cx: &mut App) {
+        let session = context.session().clone();
+        let settings = context.settings().clone();
+        let state = session.state();
+
+        gpui::open_window(gpui::WindowOptions::default(), cx, move |_window, cx| {
+            let view = cx.new(|_| View {
+                session: session.clone(),
+                state: state.clone(),
+                settings: settings.clone(),
+                _state: Subscription::new(|| {}),
+                _settings: Subscription::new(|| {}),
+            });
+            let refreshed = view.clone();
+            view.update(cx, |view, cx| {
+                view._state = cx.observe(&state, |_, _, cx| cx.notify());
+                view._settings = settings.observe(cx, move |_, cx| {
+                    refreshed.update(cx, |_, cx| cx.notify());
+                });
+            });
+            view
+        })
+        .expect("open the installer window");
+    }
+}
+
+struct View {
+    session: Session,
+    state: Entity<SessionState>,
+    settings: PresetSettings<Settings>,
+    _state: Subscription,
+    _settings: Subscription,
+}
+
+impl Render for View {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::base::{Disableable, StyledExt};
+        use gpui::component::button::Button;
+        use gpui::component::{ActiveTheme, Theme};
+        use gpui::{FontWeight, ParentElement, Styled, div, px};
+
+        let theme: &Theme = cx.theme();
+        let body = div()
+            .v_flex()
+            .gap_4()
+            .p_6()
+            .bg(theme.colors.background)
+            .text_color(theme.colors.foreground);
+
+        let Some(snapshot) = self.state.read(cx).snapshot() else {
+            return body.child("Waiting for the installer…");
+        };
+
+        let mut column = body
+            .child(
+                div()
+                    .text_size(px(21.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(snapshot.product.name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.colors.muted_foreground)
+                    .child(self.settings.read(cx).hero.clone().unwrap_or_default()),
+            );
+
+        for component in snapshot.surface.components() {
+            let action = Action::SetComponent {
+                component: component.id.clone(),
+                selected: !component.selected,
+            };
+            let session = self.session.clone();
+            column = column.child(
+                Button::new(component.id.to_string())
+                    .label(format!(
+                        "{} {}",
+                        if component.selected { "[x]" } else { "[ ]" },
+                        component.name
+                    ))
+                    .disabled(component.required)
+                    .on_click(move |_, _, _| session.send(action.clone())),
+            );
+        }
+
+        let session = self.session.clone();
+        column.child(
+            Button::new("install")
+                .label("Install")
+                .on_click(move |_, _, _| session.send(Action::Install)),
+        )
+    }
+}
+
+fn main() {
+    if let Err(error) = zup_sdk::preset::run::<Aurora>() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+"#;
+
+    const DEVELOPMENT: &str = r##"# The application `zup preset dev` presents.
+#
+# Settings are validated against the schema your `Settings` type generates, and
+# an invalid one leaves the last valid settings in force, so a typo here cannot
+# empty a window that is working. Nothing in this file is a preset format and
+# none of it is read by a build.
+[settings]
+hero = "Install Acme"
+accent = "#695cff"
+
+# Application-provided assets, by the name the settings above refer to. Editing
+# one of these files updates the running preset; it does not recompile anything.
+[assets]
+"branding/logo.svg" = "assets/logo.svg"
+"##;
+
+    const GITIGNORE: &str = r#"/target
+# A development environment's own state: run executables and the files it
+# materialized for the simulated application. Disposable by construction.
+/.zup
+"#;
 }

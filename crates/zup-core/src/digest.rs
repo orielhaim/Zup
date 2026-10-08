@@ -1,5 +1,3 @@
-//! SHA-256 content digest and streaming helpers.
-
 use std::fmt;
 use std::io::{self, Read};
 use std::str::FromStr;
@@ -7,22 +5,18 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-/// A 32-byte SHA-256 digest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
-    /// Wrap raw digest bytes.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    /// Borrow the raw digest bytes.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// Lowercase hex representation (64 chars).
     pub fn to_hex(&self) -> String {
         let mut out = String::with_capacity(64);
         for byte in self.0 {
@@ -31,7 +25,6 @@ impl Sha256Digest {
         out
     }
 
-    /// Finish a streaming hash and produce the digest.
     pub fn from_hasher(hasher: Sha256) -> Self {
         Self(hasher.finalize().into())
     }
@@ -75,7 +68,6 @@ fn hex_val(byte: u8) -> Result<u8, DigestParseError> {
     }
 }
 
-/// Error parsing a hex digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DigestParseError;
 
@@ -106,19 +98,12 @@ impl From<[u8; 32]> for Sha256Digest {
     }
 }
 
-/// Hash a byte slice.
-///
-/// The companion to [`hash_reader`] for content that is already in memory, so a
-/// caller does not have to wrap a slice in a reader to measure it.
 pub fn hash_bytes(bytes: &[u8]) -> Sha256Digest {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Sha256Digest::from_hasher(hasher)
 }
 
-/// Stream `reader` through SHA-256 without buffering the whole input.
-///
-/// Returns `(bytes_read, digest)`.
 pub fn hash_reader(mut reader: impl Read) -> io::Result<(u64, Sha256Digest)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];

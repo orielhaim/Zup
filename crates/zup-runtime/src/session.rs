@@ -1,5 +1,3 @@
-//! Runtime session orchestration and the injected backend seam.
-
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -14,10 +12,6 @@ use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, TransactionId, TransactionPlan, TransactionStore,
 };
 
-use crate::diagnostics::SessionLog;
-use crate::events::{RuntimeEvent, RuntimeState};
-
-/// Errors reported by a runtime session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("plan validation failed: {0}")]
@@ -60,7 +54,6 @@ pub enum SessionError {
     RecoveryRequired,
 }
 
-/// A frontend-independent installation request.
 #[derive(Clone)]
 pub struct RuntimeRequest {
     pub target: TargetTriple,
@@ -72,15 +65,9 @@ pub struct RuntimeRequest {
     pub work_root: PathBuf,
     pub recovery_id: Option<TransactionId>,
     pub bootstrap: Option<BootstrapRequest>,
-    /// The exact release graph this request installs.
-    ///
-    /// Recorded on commit, so a later update, repair, or recovery acts on
-    /// digests rather than on a version number. `None` for a development run
-    /// from a manifest, which has no authenticated graph behind it.
     pub release: Option<ReleaseIdentity>,
 }
 
-/// Prerequisite work associated with a request.
 #[derive(Clone)]
 pub struct BootstrapRequest {
     pub plan: BoundBootstrapPlan,
@@ -88,7 +75,6 @@ pub struct BootstrapRequest {
     pub quarantine_root: PathBuf,
 }
 
-/// Policy supplied by the frontend for actions requiring user authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionPolicy {
     Interactive,
@@ -101,7 +87,6 @@ impl ExecutionPolicy {
     }
 }
 
-/// Final outcome of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
     Committed,
@@ -112,60 +97,33 @@ pub enum InstallOutcome {
     RolledBack,
     Cancelled,
     RecoveryRequired,
-    /// Another operation holds this installation's lock.
-    ///
-    /// A distinct state rather than a failure string, because "wait, then try
-    /// again" is the correct response and only a caller that can tell this apart
-    /// from a real failure can do that. The GUI turns it into a retry button, a
-    /// headless run into a stable exit code, and a second unattended process into
-    /// a queued job rather than a red build.
-    ///
     /// It carries what was running, never where the lock lives: the lock file is
-    /// an implementation detail of the state root, and a message about it sends
-    /// people looking in the wrong place.
     Busy {
         operation: &'static str,
     },
     Failed(String),
 }
 
-/// Handle for cooperative cancellation.
-#[derive(Clone, Debug)]
-pub struct CancellationHandle {
-    token: CancellationToken,
-}
+#[derive(Clone, Debug, Default)]
+pub struct CancellationHandle(CancellationToken);
 
 impl CancellationHandle {
     pub fn new() -> Self {
-        Self {
-            token: CancellationToken::new(),
-        }
-    }
-
-    pub fn cancel(&self) {
-        self.token.cancel();
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.token.is_cancelled()
-    }
-
-    pub async fn cancelled(&self) {
-        self.token.cancelled().await;
+        Self(CancellationToken::new())
     }
 
     pub fn probe(&self) -> TokenProbe {
-        TokenProbe(self.token.clone())
+        TokenProbe(self.0.clone())
     }
 }
 
-impl Default for CancellationHandle {
-    fn default() -> Self {
-        Self::new()
+impl std::ops::Deref for CancellationHandle {
+    type Target = CancellationToken;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-/// Adapts the runtime cancellation token to transaction execution.
 #[derive(Clone)]
 pub struct TokenProbe(CancellationToken);
 
@@ -175,7 +133,6 @@ impl CancellationProbe for TokenProbe {
     }
 }
 
-/// Recovery discovery result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryStatus {
     NoRecoveryNeeded,
@@ -184,7 +141,6 @@ pub enum RecoveryStatus {
     RecoveryRequired { transaction_id: String },
 }
 
-/// Discover unfinished transactions under `state_root` without mutating them.
 pub fn discover_recovery(state_root: &Path) -> Vec<RecoveryStatus> {
     let store = FilesystemTransactionStore::new(state_root);
     let mut out = Vec::new();
@@ -224,7 +180,6 @@ pub fn discover_recovery(state_root: &Path) -> Vec<RecoveryStatus> {
     out
 }
 
-/// A live session's frontend-facing handles.
 #[derive(Debug)]
 pub struct RuntimeSession {
     pub session_id: zup_protocol::SessionId,
@@ -247,13 +202,10 @@ impl RuntimeSession {
     }
 }
 
-/// Payload source selected by the active backend.
 pub type RuntimePayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
-/// Future returned by an object-safe backend.
 pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Control context created by the runtime and consumed by a backend.
 pub struct RuntimeControl {
     pub cancellation: CancellationHandle,
     pub events: broadcast::Sender<RuntimeEvent>,
@@ -274,7 +226,6 @@ impl RuntimeControl {
     }
 }
 
-/// The complete platform seam used by the runtime.
 pub trait RuntimeBackend: Send + Sync {
     fn payload_source(&self, request: &RuntimeRequest) -> RuntimePayloadSource;
 
@@ -285,7 +236,6 @@ pub trait RuntimeBackend: Send + Sync {
     ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>>;
 }
 
-/// Run a request with a newly created session and event channel.
 pub async fn run_install(
     backend: &dyn RuntimeBackend,
     request: RuntimeRequest,
@@ -311,7 +261,6 @@ pub async fn run_install(
     ))
 }
 
-/// Run a request using an existing cancellation and event channel.
 pub async fn run_install_control(
     backend: &dyn RuntimeBackend,
     request: RuntimeRequest,
@@ -328,7 +277,6 @@ pub async fn run_install_control(
     .await
 }
 
-/// Run a request with an explicit authorization policy.
 pub async fn run_install_control_with_policy(
     backend: &dyn RuntimeBackend,
     request: RuntimeRequest,
@@ -389,7 +337,6 @@ pub async fn run_install_control_with_policy(
     result
 }
 
-/// Run a request through the injected backend using the default session shape.
 pub async fn run_local_install(
     backend: &dyn RuntimeBackend,
     request: RuntimeRequest,
@@ -440,9 +387,6 @@ pub(crate) fn emit_terminal(
             });
         }
         Ok(InstallOutcome::Busy { operation }) => {
-            // A typed kind, not a free-text failure: an automation reading
-            // `kind` can tell "somebody else is installing" from "this
-            // installation is broken" without matching on an English sentence.
             let _ = events.send(RuntimeEvent::Failed {
                 kind: "installation_busy".into(),
                 message: format!("{operation} is already running for this installation"),
@@ -480,5 +424,171 @@ pub(crate) fn emit_terminal(
                 message: error.to_string(),
             });
         }
+    }
+}
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeState {
+    Preparing,
+    CheckingPrerequisites,
+    InstallingPrerequisites,
+    WaitingForAuthorization,
+    RebootRequired,
+    ConnectingWorker,
+    Executing,
+    RollingBack,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuntimeEvent {
+    StateChanged {
+        state: RuntimeState,
+    },
+    WaitingForAuthorization,
+    WorkerConnected,
+    PrerequisiteCheck {
+        id: String,
+        name: String,
+        satisfied: bool,
+        version: Option<String>,
+    },
+    PrerequisiteDownload {
+        id: String,
+        completed: u64,
+        total: Option<u64>,
+    },
+    PrerequisiteInstall {
+        id: String,
+        name: String,
+    },
+    RebootRequired {
+        id: String,
+        exit_code: i32,
+    },
+    PreflightStarted,
+    ResourceBlocked {
+        detail: String,
+        pids: Vec<u32>,
+    },
+    StagingStarted {
+        id: String,
+    },
+    StagingProgress {
+        id: String,
+        detail: String,
+    },
+    OperationStarted {
+        id: String,
+    },
+    Progress {
+        completed: u64,
+        total: u64,
+        action: String,
+    },
+    RollingBack,
+    Completed {
+        outcome: String,
+    },
+    Failed {
+        kind: String,
+        message: String,
+    },
+    LogPath {
+        path: String,
+    },
+}
+
+use std::io::Write;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::json;
+use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use uuid::Uuid;
+
+pub struct SessionLog {
+    path: PathBuf,
+    operation: String,
+    session_id: Uuid,
+    writer: Arc<Mutex<NonBlocking>>,
+    _guard: WorkerGuard,
+}
+
+impl SessionLog {
+    pub fn start(request: &RuntimeRequest, operation: &str) -> Option<Self> {
+        let session_id = Uuid::now_v7();
+        let directory = std::env::temp_dir().join("zup").join("sessions");
+        std::fs::create_dir_all(&directory).ok()?;
+        let appender =
+            RollingFileAppender::new(Rotation::NEVER, &directory, format!("{session_id}.log"));
+        let (writer, guard) = NonBlockingBuilder::default().lossy(true).finish(appender);
+        let log = Self {
+            path: directory.join(format!("{session_id}.log")),
+            operation: operation.to_owned(),
+            session_id,
+            writer: Arc::new(Mutex::new(writer)),
+            _guard: guard,
+        };
+        log.event(
+            "started",
+            json!({
+                "operation": operation,
+                "app_id": request.app_id.as_str(),
+                "app_version": request.app_version.to_string(),
+                "scope": request.scope,
+                "transaction_id": request.recovery_id.map(|id| id.to_string()),
+                "state_root": request.state_root.display().to_string(),
+            }),
+        );
+        Some(log)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn event(&self, name: &str, detail: serde_json::Value) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or_default();
+        let line = json!({
+            "timestamp_ms": timestamp,
+            "session_id": self.session_id,
+            "event": name,
+            "detail": detail,
+        });
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = writeln!(writer, "{line}");
+            let _ = writer.flush();
+        }
+        tracing::info!(session_id = %self.session_id, event = name, "session diagnostic");
+    }
+
+    pub fn summary(&self, request: &RuntimeRequest) -> String {
+        format!(
+            "zup session {}\noperation: {}\napp: {} {}\nscope: {}\nlog: {}",
+            self.session_id,
+            self.operation,
+            request.app_id,
+            request.app_version,
+            scope_label(request.scope),
+            self.path.display()
+        )
+    }
+}
+
+fn scope_label(scope: SelectedScope) -> &'static str {
+    match scope {
+        SelectedScope::User => "user",
+        SelectedScope::Machine => "machine",
     }
 }

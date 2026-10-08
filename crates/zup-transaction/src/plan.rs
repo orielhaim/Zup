@@ -91,17 +91,10 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    /// True for a control node that orders the plan without mutating.
     pub fn is_barrier(&self) -> bool {
         matches!(self, Self::Barrier)
     }
 
-    /// True when the node changes installed state that must be observed
-    /// against its receipt before commit.
-    ///
-    /// Staged payloads are excluded: the file mutation that publishes them
-    /// verifies the same bytes at their destination, and the staged copy is
-    /// gone by then.
     pub fn requires_verification(&self) -> bool {
         matches!(
             self,
@@ -129,12 +122,6 @@ pub struct NodeMeta {
     pub expected_sha256: Option<Sha256Digest>,
     pub expected_size: Option<u64>,
     pub privilege: Option<Privilege>,
-    /// This file is intended to be executable.
-    ///
-    /// On the node because the node is what a journal is replayed from. An
-    /// executor that recovers a transaction months later has the plan, not the
-    /// original manifest, so an intent that lived only in the manifest would be
-    /// unavailable exactly when the executor needs it.
     pub executable: Option<bool>,
     pub backend: Option<BackendOperation>,
     pub removal: Option<FileRemoval>,
@@ -167,11 +154,6 @@ pub struct TransactionPlan {
     pub audit: TransactionAudit,
     pub execution_order: Vec<OperationId>,
     pub rollback_order: Vec<OperationId>,
-    /// The preset runtime this plan makes durable, or leaves absent.
-    ///
-    /// Journalled with the rest of the plan so that a recovery run, which sees
-    /// nothing but this record, can still state which preset the installation
-    /// presents.
     pub preset: Option<InstalledPreset>,
 }
 
@@ -183,10 +165,7 @@ impl TransactionPlan {
         Sha256Digest::from_hasher(hasher)
     }
 
-    /// True when at least one node needs system authority.
-    ///
     /// Authorization is read from each node, never from a scope, so a
-    /// per-user transaction that owns a host-wide service still reports true.
     pub fn requires_authorization(&self) -> bool {
         self.nodes
             .iter()
@@ -587,11 +566,6 @@ pub fn compile_transaction(
             });
         }
     }
-    // Removals run after the mutations and backend removals they retire.
-    // Backend applies are deliberately not predecessors here: an apply that
-    // must follow removals (regenerating a derived database from the removed
-    // state) says so with an explicit dependency, and a blanket edge would
-    // forbid exactly that ordering as a cycle.
     for file in &file_removal_ids {
         for predecessor in file_ids.iter().chain(
             backend_node_ids

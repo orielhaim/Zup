@@ -394,7 +394,7 @@ pub fn verify_payload_overlay(
     verify_directory_chain(overlay_base_root, overlay_root)?;
     let metadata =
         fs::symlink_metadata(overlay_root).map_err(|error| io_error(overlay_root, error))?;
-    if is_reparse_point(overlay_root, &metadata) || !metadata.is_dir() {
+    if !crate::path_safety::is_real_dir(overlay_root, &metadata) {
         return Err(PayloadOverlayError::UnsafePath {
             path: overlay_root.display().to_string(),
             reason: "overlay root is not a regular directory".into(),
@@ -533,18 +533,6 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-fn is_reparse_point(path: &Path, metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        metadata.file_type().is_symlink() || crate::fs_bindings::is_reparse_point(path)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        metadata.file_type().is_symlink()
-    }
-}
-
 fn ensure_overlay_directories(
     overlay_base_root: &Path,
     identity: &PayloadOverlayIdentity,
@@ -569,11 +557,7 @@ fn ensure_overlay_directories(
 }
 
 fn ensure_directory_chain(path: &Path) -> Result<(), PayloadOverlayError> {
-    let ancestors = path.ancestors().collect::<Vec<_>>();
-    for ancestor in ancestors.into_iter().rev() {
-        ensure_directory(ancestor)?;
-    }
-    Ok(())
+    crate::path_safety::ensure_ancestor_chain(path, ensure_directory)
 }
 
 fn verify_existing_directory_chain(path: &Path) -> Result<(), PayloadOverlayError> {
@@ -588,24 +572,20 @@ fn verify_existing_directory_chain(path: &Path) -> Result<(), PayloadOverlayErro
 }
 
 fn verify_directory_chain(base: &Path, path: &Path) -> Result<(), PayloadOverlayError> {
-    let relative = path
-        .strip_prefix(base)
-        .map_err(|_| PayloadOverlayError::UnsafePath {
+    crate::path_safety::verify_within_base(
+        base,
+        path,
+        || PayloadOverlayError::UnsafePath {
             path: path.display().to_string(),
             reason: "directory escapes the overlay base".into(),
-        })?;
-    let mut current = base.to_path_buf();
-    verify_directory(&current)?;
-    for component in relative.components() {
-        current.push(component);
-        verify_directory(&current)?;
-    }
-    Ok(())
+        },
+        verify_directory,
+    )
 }
 
 fn verify_directory(path: &Path) -> Result<(), PayloadOverlayError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
-    if is_reparse_point(path, &metadata) || !metadata.is_dir() {
+    if !crate::path_safety::is_real_dir(path, &metadata) {
         return Err(PayloadOverlayError::UnsafePath {
             path: path.display().to_string(),
             reason: "directory is a reparse point or special file".into(),
@@ -616,7 +596,7 @@ fn verify_directory(path: &Path) -> Result<(), PayloadOverlayError> {
 
 fn ensure_directory(path: &Path) -> Result<(), PayloadOverlayError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if is_reparse_point(path, &metadata) || !metadata.is_dir() => {
+        Ok(metadata) if !crate::path_safety::is_real_dir(path, &metadata) => {
             Err(PayloadOverlayError::UnsafePath {
                 path: path.display().to_string(),
                 reason: "directory target is a reparse point or special file".into(),
@@ -707,7 +687,7 @@ fn verify_target_is_safe(
                 io_error(&current, error)
             }
         })?;
-        if is_reparse_point(&current, &metadata) || !metadata.is_dir() {
+        if !crate::path_safety::is_real_dir(&current, &metadata) {
             return Err(PayloadOverlayError::UnsafePath {
                 path: current.display().to_string(),
                 reason: "overlay parent is a reparse point or special file".into(),
@@ -715,7 +695,7 @@ fn verify_target_is_safe(
         }
     }
     match fs::symlink_metadata(target) {
-        Ok(metadata) if is_reparse_point(target, &metadata) || !metadata.is_file() => {
+        Ok(metadata) if !crate::path_safety::is_real_file(target, &metadata) => {
             Err(PayloadOverlayError::NotRegular {
                 path: source.to_string(),
             })
@@ -740,7 +720,7 @@ fn verify_regular_file(
             io_error(target, error)
         }
     })?;
-    if is_reparse_point(target, &metadata) || !metadata.is_file() {
+    if !crate::path_safety::is_real_file(target, &metadata) {
         return Err(PayloadOverlayError::NotRegular {
             path: source.to_string(),
         });
@@ -765,7 +745,7 @@ fn verify_regular_file(
 
 fn remove_directory_if_present(path: &Path) -> Result<(), PayloadOverlayError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if is_reparse_point(path, &metadata) || !metadata.is_dir() => {
+        Ok(metadata) if !crate::path_safety::is_real_dir(path, &metadata) => {
             Err(PayloadOverlayError::UnsafePath {
                 path: path.display().to_string(),
                 reason: "cleanup target is a reparse point or special file".into(),
@@ -868,9 +848,6 @@ mod tests {
         }
     }
 
-    // An overlay is reused across a crash, so its path has to be a function of
-    // what is being installed: two versions of one app may not share an overlay,
-    // or a partially written one would be picked up as valid.
     #[test]
     fn identity_path_covers_the_app_version() {
         let state_root = Path::new(r"C:\state");
@@ -898,7 +875,7 @@ mod tests {
             precondition: FilePrecondition::Absent,
             expected_sha256: install.files[0].sha256,
             expected_size: install.files[0].size,
-            // A file node carries the privilege its own plan assigned.
+
             privilege: install.files[0].privilege,
             executable: install.files[0].executable,
             delta: FileDelta::Create,
@@ -924,16 +901,12 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let plan = install_plan();
 
-        // The declared digest is the content's identity, so bytes that do not
-        // match it are not the file the plan asked for.
         let mut changed = generated_file();
         changed.bytes = b"different".to_vec();
         let error =
             materialize_payload_overlay(&root.path().join("state"), &plan, &[changed]).unwrap_err();
         assert!(matches!(error, PayloadOverlayError::DigestMismatch { .. }));
 
-        // Two files claiming one source path is ambiguous, and the second would
-        // silently win.
         let duplicate = generated_file();
         let error = materialize_payload_overlay(
             &root.path().join("state-duplicate"),
@@ -943,8 +916,6 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, PayloadOverlayError::DuplicateSource { .. }));
 
-        // A directory where a file belongs would be published as a payload and
-        // fail at install time rather than here.
         let state_root = root.path().join("state-not-a-file");
         let identity = PayloadOverlayIdentity::from_install_plan(&plan).unwrap();
         let generated = generated_file();
@@ -966,8 +937,7 @@ mod tests {
         fs::write(&state_root, b"not a directory").unwrap();
         let mut plan = install_plan();
         plan.scope = SelectedScope::Machine;
-        // A machine install is elevated, so it cannot write the user's state
-        // root; it stages under a per-identity base elsewhere.
+
         let base = payload_overlay_base_root(&state_root, SelectedScope::Machine).unwrap();
         assert!(!base.starts_with(&state_root));
 
@@ -978,8 +948,6 @@ mod tests {
         cleanup_payload_overlay(&base, overlay.as_deref()).unwrap();
     }
 
-    /// Cleanup is scoped by application identity, so an install cannot take
-    /// another application's staged plugins with it on the way out.
     #[test]
     fn app_overlay_cleanup_is_scoped_to_one_installation() {
         let root = tempfile::TempDir::new().unwrap();

@@ -7,7 +7,7 @@
 //! a child executable that collects it, the `PresetHello` and `HostHello` a shipped
 //! preset exchanges, the first snapshot, an action the child sends, and the state
 //! machine validating it. The peer is a real binary built against the public
-//! `zup-preset-sdk`, not an in-process fake, because a fake can only prove that the
+//! `zup-sdk`, not an in-process fake, because a fake can only prove that the
 //! code agrees with itself.
 //!
 //! What this cannot cover is the window itself. Between "the host launched a

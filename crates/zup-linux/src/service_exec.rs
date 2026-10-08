@@ -1,38 +1,18 @@
-//! Applying one typed service operation: filesystem truth plus manager state.
-//!
-//! Every entry point revalidates ownership immediately before mutating:
-//! the unit name is re-derived from the service identity (never trusted
-//! from the payload alone), the rendered bytes are re-derived from the
-//! operation (the journal cannot smuggle a foreign unit past a worker that
-//! renders its own), collisions and administrator overrides are refused,
-//! and the executable is revalidated against the live filesystem. D-Bus
-//! force flags stay off: a collision remains visible.
-//!
-//! Ordering inside one apply is write → reload → policy → reload; rollback
-//! restores the authoritative source first, reloads, then restores the
-//! previous policy, so systemd never observes a policy for a source that
-//! is absent.
-//!
-//! The worker never starts, stops, or restarts services: installing an
-//! `Automatic` service registers boot policy, it does not execute
-//! application code.
-
 use zup_core::{Privilege, ResourceKey, ServiceStart};
 use zup_exec::{ObservedServiceState, OwnedResource, ServiceOperation};
 use zup_platform::{CommandSpec, TargetService};
 
+use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
 use crate::machine::{MachineRoots, SystemdRoots, authorize_systemd_unit};
 use crate::service_ops::{
-    ServiceError, ServicePayload, ServiceReceipt, check_collisions, desired_policy, encode_payload,
+    ServicePayload, ServiceReceipt, check_collisions, desired_policy, encode_payload,
     load_path_dirs, policy_for_state, refuse_source_symlink, validate_changes,
     validate_executable_live,
 };
 use crate::services::{render_unit, unit_name};
 use crate::systemd::{SystemdManager, UnitChange};
 
-/// What the executor needs beyond the journal node: roots, a manager, and
-/// the uid that must own trusted executables (0 in production).
 pub struct ServiceContext<'a> {
     pub roots: &'a MachineRoots,
     pub systemd: &'a SystemdRoots,
@@ -40,7 +20,6 @@ pub struct ServiceContext<'a> {
     pub expected_uid: u32,
 }
 
-/// Rendered identity for one operation, re-derived - never trusted.
 #[derive(Debug, Clone)]
 struct Derived {
     unit: String,
@@ -49,21 +28,21 @@ struct Derived {
     start: ServiceStart,
 }
 
-fn derive_operation(op: &ServiceOperation) -> Result<Derived, ServiceError> {
-    let id = zup_core::ServiceId::new(&op.id).map_err(|error| ServiceError::Refused {
+fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
+    let id = zup_core::ServiceId::new(&op.id).map_err(|error| ExecError::Refused {
         unit: op.name.clone(),
         reason: format!("service id: {error}"),
     })?;
-    let unit = unit_name(&id).map_err(|error| ServiceError::Refused {
+    let unit = unit_name(&id).map_err(|error| ExecError::Refused {
         unit: op.name.clone(),
         reason: error.to_string(),
     })?;
-    let name = zup_core::NonEmptyString::new(&op.name).map_err(|error| ServiceError::Refused {
+    let name = zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
         unit: unit.clone(),
         reason: format!("service name: {error}"),
     })?;
     let display =
-        zup_core::NonEmptyString::new(&op.display_name).map_err(|error| ServiceError::Refused {
+        zup_core::NonEmptyString::new(&op.display_name).map_err(|error| ExecError::Refused {
             unit: unit.clone(),
             reason: format!("service display name: {error}"),
         })?;
@@ -76,13 +55,12 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ServiceError> {
         start: op.start,
         privilege: op.privilege,
     };
-    let bytes =
-        render_unit(&synthetic, &op.display_name).map_err(|error| ServiceError::Refused {
-            unit: unit.clone(),
-            reason: error.to_string(),
-        })?;
+    let bytes = render_unit(&synthetic, &op.display_name).map_err(|error| ExecError::Refused {
+        unit: unit.clone(),
+        reason: error.to_string(),
+    })?;
     if bytes.len() > crate::service_ops::MAX_UNIT_BYTES {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit,
             reason: "a unit source exceeds its bound".into(),
         });
@@ -95,7 +73,6 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ServiceError> {
     })
 }
 
-/// Render the bytes one ledger registration describes.
 fn render_registration(
     unit: &str,
     display: &str,
@@ -104,12 +81,11 @@ fn render_registration(
     key: &ResourceKey,
     id: &zup_core::ServiceId,
     name: &zup_core::NonEmptyString,
-) -> Result<Vec<u8>, ServiceError> {
-    let display =
-        zup_core::NonEmptyString::new(display).map_err(|error| ServiceError::Refused {
-            unit: unit.to_owned(),
-            reason: format!("service display name: {error}"),
-        })?;
+) -> Result<Vec<u8>, ExecError> {
+    let display = zup_core::NonEmptyString::new(display).map_err(|error| ExecError::Refused {
+        unit: unit.to_owned(),
+        reason: format!("service display name: {error}"),
+    })?;
     let synthetic = TargetService {
         key: key.clone(),
         id: id.clone(),
@@ -123,13 +99,12 @@ fn render_registration(
         &synthetic,
         synthetic.display_name.as_ref().expect("just set").as_str(),
     )
-    .map_err(|error| ServiceError::Refused {
+    .map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: error.to_string(),
     })
 }
 
-/// Live truth for one unit: source digest plus persistent policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Observed {
     source: Option<([u8; 32], u64)>,
@@ -140,7 +115,7 @@ fn observe(
     unit: &str,
     canonical: &std::path::Path,
     manager: &mut dyn SystemdManager,
-) -> Result<Observed, ServiceError> {
+) -> Result<Observed, ExecError> {
     let source = read_source(canonical)?;
     let policy = manager
         .unit_file_state(unit)
@@ -148,7 +123,7 @@ fn observe(
     Ok(Observed { source, policy })
 }
 
-fn read_source(canonical: &std::path::Path) -> Result<Option<([u8; 32], u64)>, ServiceError> {
+fn read_source(canonical: &std::path::Path) -> Result<Option<([u8; 32], u64)>, ExecError> {
     let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return Ok(None);
     };
@@ -164,12 +139,11 @@ fn read_source(canonical: &std::path::Path) -> Result<Option<([u8; 32], u64)>, S
     match directory.kind_or_absent(&name) {
         Ok(Some(EntryKind::Regular)) => match directory.read_regular(&name) {
             Ok(bytes) => {
-                let (size, digest) = zup_core::hash_reader(bytes.as_slice()).map_err(|_| {
-                    ServiceError::Ambiguous {
+                let (size, digest) =
+                    zup_core::hash_reader(bytes.as_slice()).map_err(|_| ExecError::Ambiguous {
                         unit: name.clone(),
                         reason: "a unit source does not hash".into(),
-                    }
-                })?;
+                    })?;
                 Ok(Some((*digest.as_bytes(), size)))
             }
             Err(_) => Ok(None),
@@ -187,11 +161,7 @@ fn hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The source bytes one observed state describes, if any.
-fn previous_source_bytes(
-    unit: &str,
-    op: &ServiceOperation,
-) -> Result<Option<Vec<u8>>, ServiceError> {
+fn previous_source_bytes(unit: &str, op: &ServiceOperation) -> Result<Option<Vec<u8>>, ExecError> {
     match &op.previous {
         ObservedServiceState::Absent => Ok(None),
         ObservedServiceState::Service {
@@ -201,11 +171,11 @@ fn previous_source_bytes(
             ..
         } => {
             let name =
-                zup_core::NonEmptyString::new(&op.name).map_err(|error| ServiceError::Refused {
+                zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
                     unit: unit.to_owned(),
                     reason: format!("service name: {error}"),
                 })?;
-            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ServiceError::Refused {
+            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ExecError::Refused {
                 unit: unit.to_owned(),
                 reason: format!("service id: {error}"),
             })?;
@@ -214,44 +184,33 @@ fn previous_source_bytes(
     }
 }
 
-/// Prove the plan still describes the world before mutating it.
-///
-/// A resume is not a substitution: when the source already holds the
-/// intended bytes with the policy still pending (a previous attempt that
-/// crashed between write and policy), the remaining steps replay
-/// idempotently instead of refusing.
 fn check_unchanged_resume(
     derived: &Derived,
     before: &Observed,
     op: &ServiceOperation,
     previous_policy: &str,
     force: bool,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     if before.source.map(|(d, _)| hex(&d)) == Some(hex(&digest_of(&derived.bytes).0)) {
         return Ok(());
     }
-    // Explicit force repair overwrites owned-but-damaged content. Every
-    // other ownership proof (collisions, overrides, symlinks, binary
-    // trust) already ran above and still refuses with force.
+
     if force {
         return Ok(());
     }
     check_unchanged(&derived.unit, before, op, previous_policy)
 }
 
-/// Prove the plan still describes the world before mutating it.
 fn check_unchanged(
     unit: &str,
     before: &Observed,
     op: &ServiceOperation,
     previous_policy: &str,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let wanted_source = previous_source_bytes(unit, op)?;
     let wanted_digest = wanted_source.as_ref().map(|bytes| hex(&digest_of(bytes).0));
     if before.source.map(|(d, _)| hex(&d)) != wanted_digest || before.policy != previous_policy {
-        // A fresh install expects absence; anything present is a collision
-        // the preflight names more precisely, so report plainly here.
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: unit.to_owned(),
             reason: "the service changed since planning".into(),
         });
@@ -259,18 +218,15 @@ fn check_unchanged(
     Ok(())
 }
 
-/// Prepare-time ownership proof: no mutation, only refusal.
 fn prepare(
     op: &ServiceOperation,
     payload_bytes: &[u8],
-) -> Result<(Derived, ServicePayload), ServiceError> {
+) -> Result<(Derived, ServicePayload), ExecError> {
     let derived = derive_operation(op)?;
     let payload: ServicePayload =
-        crate::service_ops::decode_payload(payload_bytes).map_err(|error| {
-            ServiceError::Refused {
-                unit: derived.unit.clone(),
-                reason: error.to_string(),
-            }
+        crate::service_ops::decode_payload(payload_bytes).map_err(|error| ExecError::Refused {
+            unit: derived.unit.clone(),
+            reason: error.to_string(),
         })?;
     let ServicePayload::Apply {
         service,
@@ -280,13 +236,13 @@ fn prepare(
         ..
     } = &payload
     else {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: "a service apply node holds apply intent".into(),
         });
     };
     if *unit != derived.unit || *unit_bytes != derived.bytes || *service != *op || !binary_owned {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: "a service payload does not match its operation".into(),
         });
@@ -294,12 +250,11 @@ fn prepare(
     Ok((derived, payload))
 }
 
-/// Apply one service: write source, reload, reconcile policy, verify.
 pub fn apply(
     op: &ServiceOperation,
     payload_bytes: &[u8],
     context: &mut ServiceContext<'_>,
-) -> Result<ServiceReceipt, ServiceError> {
+) -> Result<ServiceReceipt, ExecError> {
     let (derived, payload) = prepare(op, payload_bytes)?;
     let ServicePayload::Apply {
         previous_policy: planned_policy,
@@ -307,7 +262,7 @@ pub fn apply(
         ..
     } = &payload
     else {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: "a service apply node holds apply intent".into(),
         });
@@ -315,43 +270,33 @@ pub fn apply(
     let planned_policy = planned_policy.clone();
     let planned_force = *planned_force;
     let canonical = authorize_systemd_unit(&derived.unit, context.systemd).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: derived.unit.clone(),
             reason: error.to_string(),
         }
     })?;
     refuse_source_symlink(&derived.unit, &canonical)?;
     check_collisions(&derived.unit, &canonical, &load_path_dirs())?;
-    // The payload correspondence rode the journal (proven in `prepare`
-    // from the payload flag); the live ownership bits are re-proven here
-    // against the world as it is now.
+
     validate_executable_live(&derived.command, context.roots, context.expected_uid)?;
-    // systemd must answer before anything mutates: writing a unit no
-    // manager will ever load is exactly the half-installation the
-    // capability preflight exists to prevent.
+
     let probe = context
         .manager
         .unit_file_state(&derived.unit)
-        .map_err(ServiceError::from)?;
+        .map_err(ExecError::from)?;
     if policy_for_state(&probe).is_none() {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: format!("systemd reports unit-file state `{probe}`, which Zup does not own"),
         });
     }
-    // The `Type=exec` baseline is proven before the source is written,
-    // and foreign integration before it is changed: both refuse here,
-    // with nothing mutated yet.
+
     crate::service_ops::require_exec_baseline(context.manager)?;
     refuse_foreign_integration(&derived.unit, &canonical)?;
     let before = observe(&derived.unit, &canonical, context.manager)?;
-    // The previous half is what planning journaled, not a guess: source
-    // absence never implies a policy, because policy persists on its own.
+
     let previous_source = before.source.map(|(digest, _)| hex(&digest));
-    // Idempotent resume: a previous attempt may have completed the
-    // mutation while losing the reply. When the world already holds the
-    // intended source and policy, report it rather than refusing on the
-    // change-since-planning check below.
+
     let wanted_digest = hex(&digest_of(&derived.bytes).0);
     let wanted_policy = desired_policy(derived.start).to_owned();
     if before.source.map(|(d, _)| hex(&d)) == Some(wanted_digest.clone())
@@ -370,8 +315,7 @@ pub fn apply(
     }
     check_unchanged_resume(&derived, &before, op, &planned_policy, planned_force)?;
     let must_be_absent = before.source.is_none();
-    // The previous bytes for compensation: a policy failure below must
-    // not leave a half-written unit behind to poison the next plan.
+
     let previous_bytes_rendered = previous_source_bytes(&derived.unit, op)?;
     write_source(&derived.unit, &canonical, &derived.bytes, must_be_absent)?;
     let mutated = apply_reload_policy_verify(&derived, &canonical, context);
@@ -396,19 +340,12 @@ pub fn apply(
     })
 }
 
-/// Reload, reconcile policy, validate returned changes, and verify the
-/// installed unit: the fallible tail of [`apply`] after the source write.
-///
-/// The second reload is load-bearing, not belt-and-braces: the owned-link
-/// removal below is a plain filesystem unlink, not a D-Bus call, so only
-/// an explicit reload makes the manager re-read enablement before the
-/// verification that follows.
 fn apply_reload_policy_verify(
     derived: &Derived,
     canonical: &std::path::Path,
     context: &mut ServiceContext<'_>,
-) -> Result<Vec<UnitChange>, ServiceError> {
-    context.manager.reload().map_err(ServiceError::from)?;
+) -> Result<Vec<UnitChange>, ExecError> {
+    context.manager.reload().map_err(ExecError::from)?;
     let mut changes = Vec::new();
     apply_policy(
         &derived.unit,
@@ -420,15 +357,11 @@ fn apply_reload_policy_verify(
     for change in &changes {
         validate_changes(&derived.unit, std::slice::from_ref(change))?;
     }
-    context.manager.reload().map_err(ServiceError::from)?;
+    context.manager.reload().map_err(ExecError::from)?;
     verify_installed(derived, canonical, context.manager)?;
     Ok(changes)
 }
 
-/// Restore the previous source after a failed tail: remove what was
-/// absent, rewrite what was there, reload best-effort. A failure here is
-/// reported through the original error's path (reconciliation classifies
-/// whatever remains); this best-effort pass only narrows the window.
 fn compensate_source(
     unit: &str,
     canonical: &std::path::Path,
@@ -446,28 +379,26 @@ fn compensate_source(
     let _ = context.manager.reload();
 }
 
-/// Write (or replace) the canonical unit source: `0644`, no-follow,
-/// exclusive when the destination must be absent.
 fn write_source(
     unit: &str,
     canonical: &std::path::Path,
     bytes: &[u8],
     must_be_absent: bool,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "a unit source has a parent directory",
         ));
     };
     refuse_source_symlink(unit, canonical)?;
     if OwnedDirectory::open(parent).is_err() {
-        std::fs::create_dir_all(parent).map_err(|error| ServiceError::Refused {
+        std::fs::create_dir_all(parent).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: format!("the unit directory cannot be created: {error}"),
         })?;
     }
-    let directory = OwnedDirectory::open(parent).map_err(|error| ServiceError::Refused {
+    let directory = OwnedDirectory::open(parent).map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: format!("the unit directory cannot be opened: {error}"),
     })?;
@@ -475,89 +406,78 @@ fn write_source(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
-        .ok_or_else(|| ServiceError::refused(unit, "a unit source has a file name"))?;
+        .ok_or_else(|| ExecError::refused(unit, "a unit source has a file name"))?;
     use rustix::fs::Mode;
     if must_be_absent {
         directory
             .create_durable_exclusive(&name, bytes, Mode::from_bits_truncate(0o644))
-            .map_err(|error| ServiceError::Refused {
+            .map_err(|error| ExecError::Refused {
                 unit: unit.to_owned(),
                 reason: format!("the unit source cannot be created: {error}"),
             })?;
     } else {
         directory
             .write_durable(&name, bytes, Mode::from_bits_truncate(0o644))
-            .map_err(|error| ServiceError::Refused {
+            .map_err(|error| ExecError::Refused {
                 unit: unit.to_owned(),
                 reason: format!("the unit source cannot be written: {error}"),
             })?;
     }
-    crate::fs::sync_directory(parent).map_err(|error| ServiceError::Refused {
+    crate::fs::sync_directory(parent).map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: format!("the unit directory does not flush: {error}"),
     })?;
     Ok(())
 }
 
-/// Reconcile persistent policy without ever starting or stopping anything.
-///
-/// Mask transitions unmask first where required; enablement is retired by
-/// removing exactly the owned wants link (never a broad disable), and a
-/// foreign link anywhere nearby refuses the transition before anything is
-/// removed — see `refuse_foreign_integration` at the call sites.
 fn apply_policy(
     unit: &str,
     canonical: &std::path::Path,
     start: ServiceStart,
     manager: &mut dyn SystemdManager,
     changes: &mut Vec<UnitChange>,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let canonical_text = canonical.to_string_lossy().into_owned();
     match start {
         ServiceStart::Automatic => {
-            let state = manager.unit_file_state(unit).map_err(ServiceError::from)?;
+            let state = manager.unit_file_state(unit).map_err(ExecError::from)?;
             if state == "masked" || state == "masked-runtime" {
-                changes.extend(manager.unmask(unit).map_err(ServiceError::from)?);
+                changes.extend(manager.unmask(unit).map_err(ExecError::from)?);
             }
-            changes.extend(manager.enable(unit).map_err(ServiceError::from)?);
+            changes.extend(manager.enable(unit).map_err(ExecError::from)?);
         }
         ServiceStart::Manual => {
-            let state = manager.unit_file_state(unit).map_err(ServiceError::from)?;
+            let state = manager.unit_file_state(unit).map_err(ExecError::from)?;
             if state == "masked" || state == "masked-runtime" {
-                changes.extend(manager.unmask(unit).map_err(ServiceError::from)?);
+                changes.extend(manager.unmask(unit).map_err(ExecError::from)?);
             }
             if state == "enabled" || state == "enabled-runtime" {
                 changes.extend(
                     manager
                         .remove_owned_enablement(unit, &canonical_text)
-                        .map_err(ServiceError::from)?,
+                        .map_err(ExecError::from)?,
                 );
             }
         }
         ServiceStart::Disabled => {
-            let state = manager.unit_file_state(unit).map_err(ServiceError::from)?;
+            let state = manager.unit_file_state(unit).map_err(ExecError::from)?;
             if state == "enabled" || state == "enabled-runtime" {
                 changes.extend(
                     manager
                         .remove_owned_enablement(unit, &canonical_text)
-                        .map_err(ServiceError::from)?,
+                        .map_err(ExecError::from)?,
                 );
             }
-            changes.extend(manager.mask(unit).map_err(ServiceError::from)?);
+            changes.extend(manager.mask(unit).map_err(ExecError::from)?);
         }
     }
     Ok(())
 }
 
-/// Refuse when administrator-owned systemd integration exists beyond the
-/// single link Zup owns: with exact-link removal there is no broad disable
-/// left to delete it, but a transition that would leave the unit enabled
-/// behind Zup's back must still fail closed instead of reporting success
-/// it did not achieve.
 pub(crate) fn refuse_foreign_integration(
     unit: &str,
     canonical: &std::path::Path,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let foreign = find_foreign_integration(
         unit,
         canonical,
@@ -567,7 +487,7 @@ pub(crate) fn refuse_foreign_integration(
     if foreign.is_empty() {
         return Ok(());
     }
-    Err(ServiceError::Ambiguous {
+    Err(ExecError::Ambiguous {
         unit: unit.to_owned(),
         reason: format!(
             "unrelated systemd integration exists, refusing to change enablement around it: {}",
@@ -580,23 +500,6 @@ pub(crate) fn refuse_foreign_integration(
     })
 }
 
-/// Every systemd integration link for `unit` that Zup does not own.
-///
-/// The owned link — `<etc_root>/multi-user.target.wants/<unit>` — is
-/// excluded by exact path. Everything else naming this unit is foreign:
-/// same-name links in other `.wants/` or `.requires/` directories (extra
-/// enablement or dependencies the administrator added), top-level aliases
-/// (other `.service` names resolving to the canonical source), and
-/// runtime links under the run layer. Mask links (targets of `/dev/null`)
-/// are policy state, not integration, and are excluded: they are read
-/// through unit-file state instead.
-///
-/// Observation only, and best-effort at the edges: entries that cannot be
-/// inspected are skipped rather than failed, because the authoritative
-/// proofs live in the exact-link verification (which refuses anything it
-/// cannot prove) and the post-mutation state check (which refuses a unit
-/// that did not reach the desired state). All reads are no-follow, so a
-/// link is never resolved through, only named.
 fn find_foreign_integration(
     unit: &str,
     canonical: &std::path::Path,
@@ -635,10 +538,6 @@ fn find_foreign_integration(
                 continue;
             };
             if !is_real_dir(&path) {
-                // Top-level symlinks and files named exactly like the
-                // unit are overrides or masks, owned by other proofs:
-                // `check_no_full_override` refuses shadowing files, and
-                // mask links resolve to `/dev/null`, never here.
                 if name == unit && is_symlink(&path) {
                     let target = std::fs::read_link(&path).unwrap_or_default();
                     if target.to_string_lossy() != canonical_text
@@ -647,8 +546,7 @@ fn find_foreign_integration(
                         push(path.clone());
                     }
                 }
-                // Other top-level names resolving to the canonical source
-                // are direct aliases of this unit.
+
                 if name != unit
                     && name.ends_with(".service")
                     && is_symlink(&path)
@@ -659,8 +557,7 @@ fn find_foreign_integration(
                 }
                 continue;
             }
-            // A `.wants/` or `.requires/` directory holding this unit's
-            // name integrates it independently of the owned link.
+
             let stem = name
                 .strip_suffix(".wants")
                 .or_else(|| name.strip_suffix(".requires"));
@@ -680,20 +577,15 @@ fn find_foreign_integration(
     foreign
 }
 
-/// Verify systemd resolves the unit as Zup installed it: the fragment is
-/// the canonical source (a mask resolves to `/dev/null` by design), and
-/// the persistent state matches the desired start policy.
 fn verify_installed(
     derived: &Derived,
     canonical: &std::path::Path,
     manager: &mut dyn SystemdManager,
-) -> Result<(), ServiceError> {
-    let info = manager
-        .load_unit(&derived.unit)
-        .map_err(ServiceError::from)?;
+) -> Result<(), ExecError> {
+    let info = manager.load_unit(&derived.unit).map_err(ExecError::from)?;
     let wanted = desired_policy(derived.start);
     if info.unit_file_state != wanted {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: format!(
                 "systemd reports unit-file state `{}`, want `{wanted}`",
@@ -703,7 +595,7 @@ fn verify_installed(
     }
     if derived.start == ServiceStart::Disabled {
         if info.load_state != "masked" && info.fragment_path != "/dev/null" {
-            return Err(ServiceError::Refused {
+            return Err(ExecError::Refused {
                 unit: derived.unit.clone(),
                 reason: format!(
                     "a masked unit loads as `{}`, not from `/dev/null`",
@@ -714,7 +606,7 @@ fn verify_installed(
         return Ok(());
     }
     if info.fragment_path != canonical.to_string_lossy() {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: format!(
                 "systemd loads `{}` instead of the Zup source",
@@ -723,7 +615,7 @@ fn verify_installed(
         });
     }
     if info.load_state != "loaded" {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: format!("the unit loads as `{}`, not `loaded`", info.load_state),
         });
@@ -731,34 +623,31 @@ fn verify_installed(
     Ok(())
 }
 
-/// Roll back one apply: the installed state must still hold (else something
-/// changed after installation), then the previous source returns, systemd
-/// reloads, and the previous policy returns.
 pub fn rollback_apply(
     payload: &ServicePayload,
     receipt: &ServiceReceipt,
     context: &mut ServiceContext<'_>,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let ServicePayload::Apply {
         service: op,
         unit: payload_unit,
         ..
     } = payload
     else {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: "a service apply rollback holds apply intent".into(),
         });
     };
     let derived = derive_operation(op)?;
     if receipt.unit != derived.unit || *payload_unit != derived.unit {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             &derived.unit,
             "a receipt for another unit",
         ));
     }
     let canonical = authorize_systemd_unit(&derived.unit, context.systemd).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: derived.unit.clone(),
             reason: error.to_string(),
         }
@@ -767,7 +656,7 @@ pub fn rollback_apply(
     if current.source.map(|(d, _)| hex(&d)) != receipt.installed_source_sha256
         || current.policy != receipt.installed_policy
     {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: "the service changed after installation".into(),
         });
@@ -783,11 +672,11 @@ pub fn rollback_apply(
             ..
         } => {
             let name =
-                zup_core::NonEmptyString::new(&op.name).map_err(|error| ServiceError::Refused {
+                zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
                     unit: derived.unit.clone(),
                     reason: format!("service name: {error}"),
                 })?;
-            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ServiceError::Refused {
+            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ExecError::Refused {
                 unit: derived.unit.clone(),
                 reason: format!("service id: {error}"),
             })?;
@@ -803,7 +692,7 @@ pub fn rollback_apply(
             write_source(&derived.unit, &canonical, &bytes, false)?;
         }
     }
-    context.manager.reload().map_err(ServiceError::from)?;
+    context.manager.reload().map_err(ExecError::from)?;
     restore_policy(
         &derived.unit,
         &canonical,
@@ -813,36 +702,35 @@ pub fn rollback_apply(
     Ok(())
 }
 
-/// Restore a previous persistent policy by name.
 fn restore_policy(
     unit: &str,
     canonical: &std::path::Path,
     previous: &str,
     manager: &mut dyn SystemdManager,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     match previous {
         "enabled" => {
-            manager.unmask(unit).map_err(ServiceError::from)?;
-            manager.enable(unit).map_err(ServiceError::from)?;
+            manager.unmask(unit).map_err(ExecError::from)?;
+            manager.enable(unit).map_err(ExecError::from)?;
         }
         "disabled" => {
-            manager.unmask(unit).map_err(ServiceError::from)?;
+            manager.unmask(unit).map_err(ExecError::from)?;
             manager
                 .remove_owned_enablement(unit, &canonical.to_string_lossy())
-                .map_err(ServiceError::from)?;
+                .map_err(ExecError::from)?;
         }
         "masked" => {
-            manager.mask(unit).map_err(ServiceError::from)?;
+            manager.mask(unit).map_err(ExecError::from)?;
         }
         _ => {
-            manager.unmask(unit).map_err(ServiceError::from)?;
+            manager.unmask(unit).map_err(ExecError::from)?;
         }
     }
-    manager.reload().map_err(ServiceError::from)?;
+    manager.reload().map_err(ExecError::from)?;
     Ok(())
 }
 
-fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), ServiceError> {
+fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), ExecError> {
     let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return Ok(());
     };
@@ -860,17 +748,17 @@ fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), 
         Ok(Some(EntryKind::Regular)) => {
             directory
                 .remove_file(&name)
-                .map_err(|error| ServiceError::Refused {
+                .map_err(|error| ExecError::Refused {
                     unit: unit.to_owned(),
                     reason: format!("the unit source cannot be removed: {error}"),
                 })?;
-            directory.sync().map_err(|error| ServiceError::Refused {
+            directory.sync().map_err(|error| ExecError::Refused {
                 unit: unit.to_owned(),
                 reason: format!("the unit directory does not flush: {error}"),
             })?;
             Ok(())
         }
-        Ok(Some(_)) => Err(ServiceError::conflict(
+        Ok(Some(_)) => Err(ExecError::conflict(
             unit,
             "the unit source path is no longer a regular file",
         )),
@@ -878,49 +766,43 @@ fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), 
     }
 }
 
-/// Remove one service: owned enablement/mask retire, the canonical source
-/// goes, systemd reloads. Administrator drop-ins, full `/etc` overrides,
-/// and unrelated unit files are never touched; a full override refuses the
-/// removal rather than being deleted.
 pub fn apply_remove(
     key: &ResourceKey,
     unit: &str,
     owned: &OwnedResource,
     context: &mut ServiceContext<'_>,
-) -> Result<ServiceReceipt, ServiceError> {
+) -> Result<ServiceReceipt, ExecError> {
     let OwnedResource::Service {
         name, installed, ..
     } = owned
     else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "a service removal names a service",
         ));
     };
     let ResourceKey::Service { id } = key else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "a service removal names a service key",
         ));
     };
-    let expected = unit_name(id).map_err(|error| ServiceError::Refused {
+    let expected = unit_name(id).map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: error.to_string(),
     })?;
     if expected != unit {
-        return Err(ServiceError::refused(unit, "a removal for another unit"));
+        return Err(ExecError::refused(unit, "a removal for another unit"));
     }
     let canonical =
-        authorize_systemd_unit(unit, context.systemd).map_err(|error| ServiceError::Refused {
+        authorize_systemd_unit(unit, context.systemd).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
     refuse_source_symlink(unit, &canonical)?;
-    // A full administrator override shadows the source: removing Zup's
-    // source under it would leave the admin file dangling while claiming
-    // retirement. Refuse and report instead.
+
     crate::service_ops::check_no_full_override(unit, &crate::service_ops::admin_override_dir())
-        .map_err(|error| ServiceError::Refused {
+        .map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
@@ -930,20 +812,18 @@ pub fn apply_remove(
         start,
     } = installed
     else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
         ));
     };
-    let service_name =
-        zup_core::NonEmptyString::new(name).map_err(|error| ServiceError::Refused {
-            unit: unit.to_owned(),
-            reason: format!("service name: {error}"),
-        })?;
+    let service_name = zup_core::NonEmptyString::new(name).map_err(|error| ExecError::Refused {
+        unit: unit.to_owned(),
+        reason: format!("service name: {error}"),
+    })?;
     let installed_bytes =
         render_registration(unit, display_name, command, *start, key, id, &service_name)?;
-    // Idempotent resume: an earlier attempt may have retired everything
-    // while losing the reply.
+
     let retired = observe(unit, &canonical, context.manager)?;
     if retired.source.is_none() && retired.policy != "enabled" && retired.policy != "masked" {
         return Ok(ServiceReceipt {
@@ -956,40 +836,35 @@ pub fn apply_remove(
             changes: Vec::new(),
         });
     }
-    // Retire owned policy first, then the source, then reload: systemd
-    // never observes a policy for a source that is already gone.
-    // Foreign integration refuses before anything is retired: the owned
-    // link and mask go, administrator state stays, and a surviving
-    // enabled state fails the verification below instead of being
-    // silently deleted around.
+
     refuse_foreign_integration(unit, &canonical)?;
     let mut changes = Vec::new();
     let state = context
         .manager
         .unit_file_state(unit)
-        .map_err(ServiceError::from)?;
+        .map_err(ExecError::from)?;
     if state == "masked" || state == "masked-runtime" {
-        changes.extend(context.manager.unmask(unit).map_err(ServiceError::from)?);
+        changes.extend(context.manager.unmask(unit).map_err(ExecError::from)?);
     }
     if state == "enabled" || state == "enabled-runtime" {
         changes.extend(
             context
                 .manager
                 .remove_owned_enablement(unit, &canonical.to_string_lossy())
-                .map_err(ServiceError::from)?,
+                .map_err(ExecError::from)?,
         );
     }
     remove_file_no_follow(unit, &canonical)?;
-    context.manager.reload().map_err(ServiceError::from)?;
+    context.manager.reload().map_err(ExecError::from)?;
     let after = observe(unit, &canonical, context.manager)?;
     if after.source.is_some() {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: unit.to_owned(),
             reason: "the unit source is still there".into(),
         });
     }
     if after.policy == "enabled" || after.policy == "masked" {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: unit.to_owned(),
             reason: format!("persistent state `{}` survives removal", after.policy),
         });
@@ -1005,26 +880,24 @@ pub fn apply_remove(
     })
 }
 
-/// Roll back one removal: the source returns, systemd reloads, the previous
-/// policy returns.
 pub fn rollback_remove(
     key: &ResourceKey,
     unit: &str,
     owned: &OwnedResource,
     receipt: &ServiceReceipt,
     context: &mut ServiceContext<'_>,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let OwnedResource::Service {
         name, installed, ..
     } = owned
     else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "a service removal names a service",
         ));
     };
     let ResourceKey::Service { id } = key else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "a service removal names a service key",
         ));
@@ -1035,55 +908,53 @@ pub fn rollback_remove(
         start,
     } = installed
     else {
-        return Err(ServiceError::refused(
+        return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
         ));
     };
     let canonical =
-        authorize_systemd_unit(unit, context.systemd).map_err(|error| ServiceError::Refused {
+        authorize_systemd_unit(unit, context.systemd).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
     let current = observe(unit, &canonical, context.manager)?;
     if current.source.is_some() {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: unit.to_owned(),
             reason: "the service changed after removal".into(),
         });
     }
-    let service_name =
-        zup_core::NonEmptyString::new(name).map_err(|error| ServiceError::Refused {
-            unit: unit.to_owned(),
-            reason: format!("service name: {error}"),
-        })?;
+    let service_name = zup_core::NonEmptyString::new(name).map_err(|error| ExecError::Refused {
+        unit: unit.to_owned(),
+        reason: format!("service name: {error}"),
+    })?;
     let bytes = render_registration(unit, display_name, command, *start, key, id, &service_name)?;
     write_source(unit, &canonical, &bytes, true)?;
-    context.manager.reload().map_err(ServiceError::from)?;
+    context.manager.reload().map_err(ExecError::from)?;
     restore_policy(unit, &canonical, &receipt.previous_policy, context.manager)?;
     Ok(())
 }
 
-/// Confirm an applied node still holds its receipt before commit.
 pub fn verify_receipt(
     receipt: &ServiceReceipt,
     context: &mut ServiceContext<'_>,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let canonical = authorize_systemd_unit(&receipt.unit, context.systemd).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: error.to_string(),
         }
     })?;
     let current = observe(&receipt.unit, &canonical, context.manager)?;
     if current.source.map(|(d, _)| hex(&d)) != receipt.installed_source_sha256 {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: "the unit source is not the installed one".into(),
         });
     }
     if current.policy != receipt.installed_policy {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: "the persistent policy is not the installed one".into(),
         });
@@ -1091,7 +962,6 @@ pub fn verify_receipt(
     Ok(())
 }
 
-/// Classify a crashed node: installed, not applied, or ambiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceReconcile {
     Applied,
@@ -1104,10 +974,10 @@ pub fn reconcile_apply(
     previous_policy: &str,
     receipt: Option<&ServiceReceipt>,
     context: &mut ServiceContext<'_>,
-) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ServiceError> {
+) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ExecError> {
     let derived = derive_operation(op)?;
     let canonical = authorize_systemd_unit(&derived.unit, context.systemd).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: derived.unit.clone(),
             reason: error.to_string(),
         }
@@ -1134,8 +1004,6 @@ pub fn reconcile_apply(
                 } else if installed {
                     Ok((ServiceReconcile::Applied, Some(receipt.clone())))
                 } else if current_digest == Some(intended_digest.clone()) {
-                    // The source holds the intended bytes while the policy
-                    // is still pending: resume rather than recover.
                     Ok((ServiceReconcile::NotApplied, None))
                 } else {
                     Ok((ServiceReconcile::Ambiguous, None))
@@ -1144,9 +1012,6 @@ pub fn reconcile_apply(
         }
         None => {
             if installed {
-                // Interrupted after the mutation completed: rebuild the
-                // receipt from the observed world. The previous half is
-                // what the operation recorded, not a guess.
                 let previous_source = previous_source_bytes(&derived.unit, op)?;
                 Ok((
                     ServiceReconcile::Applied,
@@ -1167,9 +1032,7 @@ pub fn reconcile_apply(
                 let previous_digest = previous_source
                     .as_ref()
                     .map(|bytes| hex(&digest_of(bytes).0));
-                // Not applied covers both the untouched previous world
-                // and a source that already holds the intended bytes with
-                // the policy still pending (resume rather than recover).
+
                 let resume = current_digest.clone() == previous_digest
                     && current.policy == previous_policy
                     || current_digest == Some(intended_digest.clone());
@@ -1183,27 +1046,25 @@ pub fn reconcile_apply(
     }
 }
 
-/// Confirm a removal still holds before commit: the source stays absent
-/// and no persistent policy crept back.
 pub fn verify_remove_receipt(
     receipt: &ServiceReceipt,
     context: &mut ServiceContext<'_>,
-) -> Result<(), ServiceError> {
+) -> Result<(), ExecError> {
     let canonical = authorize_systemd_unit(&receipt.unit, context.systemd).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: error.to_string(),
         }
     })?;
     let current = observe(&receipt.unit, &canonical, context.manager)?;
     if current.source.is_some() {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: "the unit source came back after removal".into(),
         });
     }
     if current.policy != receipt.installed_policy {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: receipt.unit.clone(),
             reason: "the persistent policy is not the retired one".into(),
         });
@@ -1211,15 +1072,14 @@ pub fn verify_remove_receipt(
     Ok(())
 }
 
-/// Classify a crashed removal: retired, not removed, or ambiguous.
 pub fn reconcile_remove(
     unit: &str,
     _owned: &OwnedResource,
     receipt: Option<&ServiceReceipt>,
     context: &mut ServiceContext<'_>,
-) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ServiceError> {
+) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ExecError> {
     let canonical =
-        authorize_systemd_unit(unit, context.systemd).map_err(|error| ServiceError::Refused {
+        authorize_systemd_unit(unit, context.systemd).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
@@ -1229,31 +1089,21 @@ pub fn reconcile_remove(
             if current.source.is_none() && current.policy == receipt.installed_policy {
                 Ok((ServiceReconcile::Applied, Some(receipt.clone())))
             } else {
-                // Present again, or retired to another policy: the removal
-                // did not establish what the receipt claims.
                 Ok((ServiceReconcile::Ambiguous, None))
             }
         }
-        None => {
-            // Removal is idempotent either way: present re-removes, absent
-            // retires again cleanly, so an interrupted removal replays
-            // rather than recovers.
-            Ok((ServiceReconcile::NotApplied, None))
-        }
+        None => Ok((ServiceReconcile::NotApplied, None)),
     }
 }
 
-/// Decode one backend node's payload or fail closed.
-pub fn payload_for(
-    node: &zup_transaction::TransactionNode,
-) -> Result<ServicePayload, ServiceError> {
-    let missing = || ServiceError::Refused {
+pub fn payload_for(node: &zup_transaction::TransactionNode) -> Result<ServicePayload, ExecError> {
+    let missing = || ExecError::Refused {
         unit: node.id.to_string(),
         reason: "a service node without its payload".into(),
     };
     let backend = node.meta.backend.clone().ok_or_else(missing)?;
     let payload = crate::service_ops::decode_payload(&backend.payload).map_err(|error| {
-        ServiceError::Refused {
+        ExecError::Refused {
             unit: node.id.to_string(),
             reason: error.to_string(),
         }
@@ -1265,7 +1115,7 @@ pub fn payload_for(
         ),
     };
     if backend.key != expected_key || backend.id != expected_id {
-        return Err(ServiceError::Refused {
+        return Err(ExecError::Refused {
             unit: node.id.to_string(),
             reason: "a service node whose identity is not its payload".into(),
         });
@@ -1273,7 +1123,6 @@ pub fn payload_for(
     Ok(payload)
 }
 
-/// Build the apply backend operation for one executable service delta.
 pub fn apply_operation(
     op: &ServiceOperation,
     unit: &str,
@@ -1281,7 +1130,7 @@ pub fn apply_operation(
     binary_owned: bool,
     previous_policy: &str,
     force: bool,
-) -> Result<zup_transaction::BackendOperation, ServiceError> {
+) -> Result<zup_transaction::BackendOperation, ExecError> {
     let key = crate::service_ops::backend_key_for_unit(unit);
     let id = crate::service_ops::backend_id_for_unit(unit);
     let payload = ServicePayload::Apply {
@@ -1297,7 +1146,7 @@ pub fn apply_operation(
         id,
         privilege: op.privilege,
         intent: zup_transaction::BackendOperationIntent::Apply,
-        payload: encode_payload(&payload).map_err(|error| ServiceError::Refused {
+        payload: encode_payload(&payload).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?,
@@ -1305,13 +1154,12 @@ pub fn apply_operation(
     })
 }
 
-/// Build the removal backend operation for one owned service.
 pub fn remove_operation(
     key: &ResourceKey,
     unit: &str,
     owned: &OwnedResource,
     privilege: Privilege,
-) -> Result<zup_transaction::BackendOperation, ServiceError> {
+) -> Result<zup_transaction::BackendOperation, ExecError> {
     let backend_key = crate::service_ops::backend_key_for_unit(unit);
     let id = crate::service_ops::backend_id_for_unit(unit);
     let payload = ServicePayload::Remove {
@@ -1324,7 +1172,7 @@ pub fn remove_operation(
         id,
         privilege,
         intent: zup_transaction::BackendOperationIntent::Remove,
-        payload: encode_payload(&payload).map_err(|error| ServiceError::Refused {
+        payload: encode_payload(&payload).map_err(|error| ExecError::Refused {
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?,
@@ -1332,9 +1180,10 @@ pub fn remove_operation(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
+    use crate::test_support::FakeSystemd;
     use std::path::PathBuf;
 
     fn operation_at(
@@ -1381,9 +1230,6 @@ mod tests {
         assert_eq!(crate::service_ops::ledger_key_for_payload(&payload), op.key);
     }
 
-    /// A D-Bus enable failure compensates its own source write: the
-    /// failed install leaves neither a half-written unit nor a policy
-    /// behind, so the next plan sees the previous world, not drift.
     #[test]
     fn an_enable_failure_compensates() {
         let dir = tempfile::tempdir().unwrap();
@@ -1400,7 +1246,7 @@ mod tests {
         let backend =
             apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false).unwrap();
         let node_payload = backend.payload.clone();
-        let mut manager = crate::systemd::FakeSystemd::default();
+        let mut manager = FakeSystemd::default();
         manager.seed_fragment(
             &derived.unit,
             &systemd.unit_dir.join(&derived.unit).to_string_lossy(),
@@ -1427,8 +1273,6 @@ mod tests {
         );
     }
 
-    /// An unmapped unit-file state refuses before mutation: runtime-only
-    /// and foreign states are never accepted as persistent policy.
     #[test]
     fn an_unmapped_unit_file_state_refuses_before_mutation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1445,7 +1289,7 @@ mod tests {
         let backend =
             apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false).unwrap();
         let node_payload = backend.payload.clone();
-        let mut manager = crate::systemd::FakeSystemd::default();
+        let mut manager = FakeSystemd::default();
         manager.seed(&derived.unit, "enabled-runtime", "/nowhere.service");
         let uid = rustix::process::getuid().as_raw();
         let mut context = ServiceContext {
@@ -1461,9 +1305,6 @@ mod tests {
         );
     }
 
-    /// Every start policy applies through the fake manager: source bytes
-    /// update, enablement changes, masks change, and no StartUnit ever
-    /// runs (the fake has none to call).
     #[test]
     fn start_policies_apply_with_distinct_persistent_state() {
         for (start, expected) in [
@@ -1486,7 +1327,7 @@ mod tests {
                 apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false)
                     .unwrap();
             let node_payload = backend.payload.clone();
-            let mut manager = crate::systemd::FakeSystemd::default();
+            let mut manager = FakeSystemd::default();
             manager.seed(
                 &derived.unit,
                 "disabled",
@@ -1514,9 +1355,6 @@ mod tests {
         }
     }
 
-    /// The foreign-integration scan: a clean tree reports nothing, the
-    /// owned wants link is excluded by exact path, and every other
-    /// same-name link, alias, or runtime link is named.
     mod foreign_integration {
         use super::*;
 
@@ -1563,63 +1401,29 @@ mod tests {
             assert!(scan(&base, UNIT, canonical).is_empty());
         }
 
-        #[test]
-        fn a_foreign_requires_link_is_named() {
+        #[rstest::rstest]
+        #[case::foreign_requires("etc", "some.target.requires", UNIT, CANONICAL)]
+        #[case::foreign_wants("etc", "graphical.target.wants", UNIT, CANONICAL)]
+        #[case::direct_alias("etc", "", "zup-scan-alias.service", CANONICAL)]
+        #[case::runtime_run_link("run", "multi-user.target.wants", UNIT, CANONICAL)]
+        #[case::same_name_elsewhere("etc", "", UNIT, "/usr/lib/systemd/system/zup-scan.service")]
+        fn foreign_integration_is_named(
+            #[case] tree: &str,
+            #[case] sub: &str,
+            #[case] name: &str,
+            #[case] target: &str,
+        ) {
             let base = tempfile::tempdir().unwrap();
-            let etc = layer(&base, "etc");
-            layer(&base, "run");
-            let requires = etc.join("some.target.requires");
-            std::fs::create_dir_all(&requires).unwrap();
-            let link = requires.join(UNIT);
-            std::os::unix::fs::symlink(CANONICAL, &link).unwrap();
-            let canonical = std::path::Path::new(CANONICAL);
-            assert_eq!(scan(&base, UNIT, canonical), vec![link]);
-        }
-
-        #[test]
-        fn a_foreign_wants_link_is_named() {
-            let base = tempfile::tempdir().unwrap();
-            let etc = layer(&base, "etc");
-            layer(&base, "run");
-            let wants = etc.join("graphical.target.wants");
-            std::fs::create_dir_all(&wants).unwrap();
-            let link = wants.join(UNIT);
-            std::os::unix::fs::symlink(CANONICAL, &link).unwrap();
-            let canonical = std::path::Path::new(CANONICAL);
-            assert_eq!(scan(&base, UNIT, canonical), vec![link]);
-        }
-
-        #[test]
-        fn a_direct_alias_is_named() {
-            let base = tempfile::tempdir().unwrap();
-            let etc = layer(&base, "etc");
-            layer(&base, "run");
-            let alias = etc.join("zup-scan-alias.service");
-            std::os::unix::fs::symlink(CANONICAL, &alias).unwrap();
-            let canonical = std::path::Path::new(CANONICAL);
-            assert_eq!(scan(&base, UNIT, canonical), vec![alias]);
-        }
-
-        #[test]
-        fn a_runtime_run_link_is_named() {
-            let base = tempfile::tempdir().unwrap();
-            layer(&base, "etc");
-            let run = layer(&base, "run");
-            let wants = run.join("multi-user.target.wants");
-            std::fs::create_dir_all(&wants).unwrap();
-            let link = wants.join(UNIT);
-            std::os::unix::fs::symlink(CANONICAL, &link).unwrap();
-            let canonical = std::path::Path::new(CANONICAL);
-            assert_eq!(scan(&base, UNIT, canonical), vec![link]);
-        }
-
-        #[test]
-        fn a_same_name_link_elsewhere_is_named() {
-            let base = tempfile::tempdir().unwrap();
-            let etc = layer(&base, "etc");
-            layer(&base, "run");
-            let link = etc.join(UNIT);
-            std::os::unix::fs::symlink("/usr/lib/systemd/system/zup-scan.service", &link).unwrap();
+            let root = layer(&base, tree);
+            for other in ["etc", "run"] {
+                if other != tree {
+                    layer(&base, other);
+                }
+            }
+            let dir = if sub.is_empty() { root } else { root.join(sub) };
+            std::fs::create_dir_all(&dir).unwrap();
+            let link = dir.join(name);
+            std::os::unix::fs::symlink(target, &link).unwrap();
             let canonical = std::path::Path::new(CANONICAL);
             assert_eq!(scan(&base, UNIT, canonical), vec![link]);
         }

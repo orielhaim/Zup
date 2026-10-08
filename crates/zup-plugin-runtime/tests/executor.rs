@@ -52,7 +52,6 @@ fn component_for_body(body: &str) -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", VALID_WIT).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = wat::parse_str(&wat).unwrap();
-    // `false` matches the encoder below, which leaves canonical names off.
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
@@ -271,23 +270,10 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     ));
 }
 
-/// Which kind of failure a plugin's misbehaviour has to arrive as. Named rather than
-/// constructed because the payload-carrying variants (`Trap`, `Rejected`) hold a message
-/// a fixture is not required to predict, and what matters is which failure it is: a
-/// caller that cannot tell a fuel exhaustion from a trap cannot decide whether to retry.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Expected {
     Cancelled,
     Trapped,
-    /// Stopped by one of the two bounds, whichever ran out first.
-    ///
-    /// A plugin that spins spends its fuel and its wall-clock at the same time, so a
-    /// machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
-    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
-    /// deadline. Both are the plugin being contained, and which bound fired is a fact
-    /// about the machine rather than about the executor. That each bound is mapped
-    /// from its own trap is proved directly, over the traps, in
-    /// `zup_plugin_contract`'s `a_trap_is_reported_as_its_own_failure`.
     Bound,
     OutOfMemory,
     Rejected,
@@ -308,8 +294,6 @@ impl Expected {
     }
 }
 
-/// A misbehaving plugin is contained, and each way it can misbehave arrives at the
-/// caller as its own typed failure rather than as one generic "the plugin failed".
 #[rstest]
 #[case::cancelled("fuel", Expected::Cancelled, Cancellation::AfterFirstPoll)]
 #[case::trapped("trap", Expected::Trapped, Cancellation::Never)]
@@ -338,9 +322,6 @@ fn a_misbehaving_plugin_is_contained_and_named(
     );
 }
 
-/// Whether a cancellation query ever says yes. `NeverCancelled` is the crate's own "no",
-/// and the counting closure is the "yes, after the first poll" that proves the watchdog
-/// polls rather than checking once.
 enum Cancellation {
     Never,
     AfterFirstPoll,
@@ -372,9 +353,6 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     ));
 }
 
-/// Bytes that are not a trusted precompiled component are refused by name before the
-/// engine is asked to deserialize anything: a raw module is not a component, and a
-/// component that was never precompiled by this engine's cranelift is not trusted.
 #[rstest]
 #[case::raw_webassembly(b"\0asm\x01\0\0\0")]
 #[case::never_precompiled(b"not a precompiled component")]
