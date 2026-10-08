@@ -124,44 +124,6 @@ fn verify_one(path: &Path) -> Result<(), ContentStoreError> {
     Ok(())
 }
 
-pub fn remove_store(base_root: &Path, store: &Path) -> Result<(), ContentStoreError> {
-    let namespace = base_root.join(zup_transaction::CONTENT_STORE_DIRECTORY);
-    let unsafe_path = |reason: &str| ContentStoreError::UnsafePath {
-        path: store.display().to_string(),
-        reason: reason.to_owned(),
-    };
-    if store.strip_prefix(&namespace).is_err() {
-        return Err(unsafe_path(
-            "a store is outside the content store namespace",
-        ));
-    }
-    if !zup_transaction::is_store_shape(store) {
-        return Err(unsafe_path(
-            "a content store directory has an unexpected shape",
-        ));
-    }
-    match std::fs::symlink_metadata(store) {
-        Ok(metadata) if crate::path_safety::is_real_dir(store, &metadata) => {
-            std::fs::remove_dir_all(store).map_err(|source| io_error(store, source))?
-        }
-        Ok(_) => {
-            return Err(unsafe_path(
-                "a content store is a reparse point or special file",
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => return Err(io_error(store, source)),
-    }
-    for ancestor in [store.parent(), store.parent().and_then(Path::parent)]
-        .into_iter()
-        .flatten()
-    {
-        let _ = std::fs::remove_dir(ancestor);
-    }
-    let _ = std::fs::remove_dir(&namespace);
-    Ok(())
-}
-
 fn io_error(path: &Path, source: std::io::Error) -> ContentStoreError {
     ContentStoreError::Io {
         path: path.display().to_string(),
@@ -195,11 +157,5 @@ mod tests {
             validate_content_store_base(state, SelectedScope::Machine, Path::new("relative"), "x")
                 .is_err()
         );
-    }
-
-    #[test]
-    fn removal_refuses_a_path_outside_the_namespace() {
-        let base = tempfile::tempdir().unwrap();
-        assert!(remove_store(base.path(), &base.path().join("elsewhere")).is_err());
     }
 }

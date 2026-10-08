@@ -445,7 +445,11 @@ fn check_linux_lowering(
             let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
                 miette::miette!("semantic plan for target `{}`: {error}", config.target)
             })?;
-            zup_linux::resolve_target(&install).map_err(|error| {
+            zup_linux::resolve_target(
+                &install,
+                &zup_linux::LinuxInstallLocationResolver::default(),
+            )
+            .map_err(|error| {
                 miette::miette!("Linux lowering for target `{}`: {error}", config.target)
             })?;
         }

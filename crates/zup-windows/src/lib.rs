@@ -53,7 +53,7 @@ pub use cmdline::{
     parse_command_line, quote_arg, split_command_line,
 };
 pub use content_store::{
-    ContentStoreError, content_store_base, ensure_directory, preset_executable_name, remove_store,
+    ContentStoreError, content_store_base, ensure_directory, preset_executable_name,
     validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{

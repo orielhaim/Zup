@@ -26,7 +26,7 @@ pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,
     TransactionPhase, TransactionRecord,
 };
-pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity, is_store_shape};
+pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, TransactionStore};
 pub use storage::{
     MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, MAINTENANCE_RUNTIME_DIRECTORY, STATE_FOLDER,

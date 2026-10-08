@@ -22,7 +22,7 @@ mod linux;
 mod maintenance;
 #[cfg(windows)]
 mod package;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub mod run;
 
 use zup_presentation::ProcessOutcome;

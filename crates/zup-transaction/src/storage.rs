@@ -224,31 +224,6 @@ fn field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-pub fn is_store_shape(store: &Path) -> bool {
-    let Ok(relative) = store.strip_prefix(store.parent().unwrap_or(Path::new("."))) else {
-        return false;
-    };
-    let mut components = relative.components();
-    let digest = |value: Option<&std::ffi::OsStr>| {
-        value.is_some_and(|value| {
-            value.to_str().is_some_and(|value| {
-                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        })
-    };
-    let scope = components
-        .next()
-        .and_then(|component| component.as_os_str().to_str());
-    matches!(
-        (
-            digest(components.next().map(|c| c.as_os_str())),
-            scope,
-            components.next()
-        ),
-        (true, Some("user" | "machine"), None)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

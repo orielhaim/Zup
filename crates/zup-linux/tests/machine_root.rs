@@ -5,11 +5,11 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxAction, LinuxOutcome};
+use zup_linux::{LinuxAction, LinuxOutcome, SystemPkexec};
 
 use zup_linux::test_support::{
     MachineTestRoots, machine_fixture, machine_maintenance_path, machine_v1_files,
-    run_machine_isolated,
+    run_machine_elevated_for_test, run_machine_isolated,
 };
 
 fn root_only() -> bool {
@@ -246,8 +246,51 @@ fn root_public_run_dispatches_machine_scope() {
 }
 
 #[test]
-fn real_pkexec_proof_is_manual() {
-    eprintln!(
-        "manual proof required: unprivileged installer -> real pkexec -> worker -> machine install"
+fn root_real_pkexec_drives_a_worker_to_commit() {
+    if !root_only() {
+        return;
+    }
+    if std::env::var_os("ZUP_LINUX_ELEVATED_SMOKE").is_none() {
+        eprintln!(
+            "skipping real pkexec smoke: set ZUP_LINUX_ELEVATED_SMOKE=1 with ZUP_TEST_WORKER_EXE \
+             pointing at a serving installer binary; the smoke installs into the production \
+             machine roots and needs polkit to authorize pkexec non-interactively"
+        );
+        return;
+    }
+    let launcher = match SystemPkexec::resolve() {
+        Ok(launcher) => launcher,
+        Err(error) => {
+            eprintln!("skipping real pkexec smoke: {error}");
+            return;
+        }
+    };
+    let worker = std::env::var_os("ZUP_TEST_WORKER_EXE").expect(
+        "ZUP_TEST_WORKER_EXE names a serving installer binary (for example zup-setup-headless)",
     );
+    assert!(
+        Path::new(&worker).is_file(),
+        "ZUP_TEST_WORKER_EXE names a serving installer binary"
+    );
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let outcome = run_machine_elevated_for_test(
+        &installer,
+        &roots.state,
+        LinuxAction::Install,
+        None,
+        &launcher,
+    );
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "real pkexec elevates a worker that commits: {outcome:?}"
+    );
+    let tool = Path::new("/opt/tool/tool");
+    assert!(
+        tool.is_file(),
+        "the elevated worker installed through the production program tree"
+    );
+    assert_eq!(uid_of(tool), 0, "the installed payload is owned by root");
+    let _ = std::fs::remove_dir_all(Path::new("/opt/tool"));
 }

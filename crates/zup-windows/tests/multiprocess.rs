@@ -59,6 +59,61 @@ struct Worker {
     payload_overlay_root: Option<PathBuf>,
 }
 
+fn worker_with_bundle(work_root: &Path, version: &str) -> PathBuf {
+    std::fs::create_dir_all(work_root.join("dist")).unwrap();
+    let manifest = format!(
+        r#"
+schema = 1
+[app]
+id = "com.acme.app"
+name = "Acme App"
+version = "{version}"
+[build]
+[build.targets.default]
+target = "x86_64-pc-windows-msvc"
+source = {{ directory = "dist" }}
+[install]
+scope = "user"
+[install.directory]
+user = "${{location.user_data}}/AcmeApp"
+"#
+    );
+    let parsed = zup_manifest::parse(&manifest).unwrap();
+    let installer = zup_manifest::parse_and_compile(&manifest, "default").unwrap();
+    let config = zup_manifest::select_targets(
+        &parsed,
+        &["default"],
+        &zup_manifest::TargetOverrides::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .next()
+    .unwrap();
+    let mut build = zup_build::materialize(
+        &work_root.join("zup.toml"),
+        &parsed,
+        vec![(config, installer)],
+        zup_build::Writes::None,
+    )
+    .unwrap();
+    let plan = build.targets.pop().unwrap();
+    let package = work_root.join("worker.zup");
+    std::fs::write(
+        &package,
+        zup_bundle::BundleWriter::encode(&plan, &[]).unwrap(),
+    )
+    .unwrap();
+    let worker = work_root.join("worker.exe");
+    zup_windows::embed_bundle_file(
+        &PathBuf::from(env!("CARGO_BIN_EXE_zup-test-worker")),
+        &worker,
+        &package,
+        None,
+    )
+    .unwrap();
+    worker
+}
+
 async fn execute_with_test_worker(worker: &Worker) -> String {
     let Worker {
         plan,
@@ -99,8 +154,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
         target: plan.target.clone(),
         expected_plan_hash: plan_hash.clone(),
     };
-    let zup_bin = PathBuf::from(env!("CARGO_BIN_EXE_zup-test-worker"));
-    assert!(zup_bin.exists(), "zup binary not found at {zup_bin:?}");
+    let zup_bin = worker_with_bundle(work_root, &worker.version);
     let worker =
         launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap)).expect("spawn worker");
     tokio::time::timeout(Duration::from_secs(5), server.connect())
