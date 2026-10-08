@@ -8,10 +8,6 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
-# Test-only privileged-worker surface: isolated machine roots and a
-# loopback elevation path for the machine-scope suite. Production binaries
-# never enable this; the real worker always enforces the production roots,
-# and no IPC message or environment variable selects them.
 test-support = []
 
 [dependencies]
@@ -46,11 +42,6 @@ zup-platform.workspace = true
 zup-toolchain.workspace = true
 zup-transaction.workspace = true
 
-# The systemd manager integration is Linux-only: `zbus_systemd` does not
-# compile for other targets (file-descriptor passing is Unix-only), and no
-# portable or cross-platform crate may reach it (see the boundary verifier).
-# Only the generated `systemd1` manager interface plus the Tokio integration
-# the short-lived worker blocks on.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio.workspace = true
 zbus_systemd.workspace = true

@@ -1,8 +1,8 @@
-name: ci
+name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -10,138 +10,166 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
 
 jobs:
-  windows:
-    name: windows
-    runs-on: windows-latest
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025
+            platform: windows
+          - name: Linux
+            runner: ubuntu-24.04
+            platform: linux
+
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99"
           components: rustfmt, clippy
+          targets: ${{ matrix.platform == 'windows' && 'i686-pc-windows-msvc,wasm32-unknown-unknown,x86_64-unknown-linux-gnu' || '' }}
+
+      - uses: rui314/setup-mold@v1
+        if: matrix.platform == 'linux'
+        with:
+          mold-version: 3.0.0
+          make-default: "true"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-full
+          key: ${{ matrix.platform }}
+          cache-on-failure: true
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.146,cargo-machete,cargo-deny@0.20.0
+          tool: ${{ matrix.platform == 'windows' && 'cargo-nextest@0.9.146,cargo-machete,cargo-deny@0.20.0,cargo-zigbuild@0.23.4' || 'cargo-nextest@0.9.146' }}
 
-      - name: Format
+      - name: Formatting
+        if: matrix.platform == 'windows'
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Toolchain
-        run: cargo xtask toolchain build
-
-      - name: Tests
-        run: cargo nextest run --workspace --all-features
-
-      # The generated projects are the first thing a new author compiles, and a
-      # template that does not build is found by them rather than by us. Ignored by
-      # the run above because they compile the whole GPUI stack and the bindings
-      # generator, which is minutes rather than seconds.
-      - name: Generated projects
-        run: cargo nextest run -p zup --all-features --run-ignored all -E 'test(compiles)'
-
-      - name: Doc tests
-        run: cargo test --workspace --all-features --doc
-
-      - name: Unused dependencies
-        run: cargo machete
-
-      - name: Supply chain policy
-        run: cargo deny check
-
       - name: Dependency graph
+        if: matrix.platform == 'windows'
         run: cargo xtask verify-dependency-graph
 
-      - name: Whitespace
-        run: git diff --check
-
-      - name: Portable boundary
+      - name: Portable boundaries
+        if: matrix.platform == 'windows'
         run: cargo xtask verify-portable-boundaries
 
+      - name: Action references
+        if: matrix.platform == 'windows'
+        run: cargo xtask github-action-pins check
+
+      - name: Automation contract
+        if: matrix.platform == 'windows'
+        run: cargo xtask automation check
+
       - name: Published authoring surface
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/verify-public-crates.ps1
 
-      - name: Action refs
-        run: cargo xtask github-action-pins check
-
-      - name: Published schema
-        run: |
-          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
-          git diff --exit-code -- schema/zup.schema.json
-
-      - name: Automation contract
-        run: cargo xtask automation check
-
       - name: Role boundaries
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/verify-frontend-features.ps1
 
-  cross-linux:
-    name: windows cross (linux target)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+      - name: Whitespace
+        if: matrix.platform == 'windows'
+        run: git diff --check HEAD^1 HEAD
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Supply chain policy
+        if: matrix.platform == 'windows'
+        run: cargo deny check
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: windows-cross-linux
+      - name: Unused dependencies
+        if: matrix.platform == 'windows'
+        run: cargo machete
 
-      # Pinned by version: a cross linker that moves under the build is a
-      # toolchain nobody can reproduce.
-      - name: Zig
-        uses: mlugg/setup-zig@v2
+      - name: Windows Clippy
+        if: matrix.platform == 'windows'
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Windows toolchain
+        if: matrix.platform == 'windows'
+        run: cargo xtask toolchain build
+
+      - name: Windows tests
+        if: matrix.platform == 'windows'
+        run: cargo nextest run --workspace --all-features
+
+      - name: Generated projects
+        if: matrix.platform == 'windows'
+        run: cargo nextest run -p zup --all-features --run-ignored all -E 'test(compiles)'
+
+      - name: Windows doc tests
+        if: matrix.platform == 'windows'
+        run: cargo test --workspace --all-features --doc
+
+      - name: Published schema
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- schema/zup.schema.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Clean-room release
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          cargo xtask toolchain package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo xtask release clean-room
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: mlugg/setup-zig@v2
+        if: matrix.platform == 'windows'
         with:
           version: 0.17.0
 
-      - name: cargo-zigbuild
-        run: cargo install cargo-zigbuild --version 0.23.4 --locked
-
-      # The contributor-side producer for the templates a Linux `zup build`
-      # composes: cross-built on this host, staged under the same
-      # target-qualified names a native build stages.
-      - name: Linux toolchain templates
+      - name: Cross-build Linux toolchain
+        if: matrix.platform == 'windows'
         run: cargo xtask toolchain build --target x86_64-unknown-linux-gnu
 
-      - name: Build zup
+      - name: Build Windows CLI
+        if: matrix.platform == 'windows'
         run: cargo build -p zup
 
-      # The public Windows-host workflow: check, build, and a byte-correct
-      # Linux installer. The artifact cannot execute here, so identity is
-      # proven structurally: ELF magic, an opening carrier for the Linux
-      # target, and release metadata that names no Windows concept.
-      - name: Windows-host Linux-target build
+      - name: Windows-host Linux E2E
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
           function Invoke-Zup {
             & .\target\debug\zup.exe @args
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
           $fixture = Join-Path $env:RUNNER_TEMP 'zup-linux-fixture'
           Remove-Item -Recurse -Force $fixture -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $fixture, (Join-Path $fixture 'dist') | Out-Null
+
           @'
           schema = 1
 
@@ -172,21 +200,43 @@ jobs:
           source = "keep.dat"
           destination = "${install}"
           '@ | Set-Content (Join-Path $fixture 'zup.toml') -NoNewline -Encoding utf8
-          [IO.File]::WriteAllBytes((Join-Path $fixture 'dist/tool'), [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n"))
-          [IO.File]::WriteAllBytes((Join-Path $fixture 'dist/keep.dat'), [Text.Encoding]::UTF8.GetBytes('keep-v1'))
+
+          [IO.File]::WriteAllBytes(
+            (Join-Path $fixture 'dist/tool'),
+            [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n")
+          )
+          [IO.File]::WriteAllBytes(
+            (Join-Path $fixture 'dist/keep.dat'),
+            [Text.Encoding]::UTF8.GetBytes('keep-v1')
+          )
+
           $manifest = Join-Path $fixture 'zup.toml'
           Invoke-Zup check --manifest $manifest --target linux
           Invoke-Zup doctor --manifest $manifest --target linux
           Invoke-Zup build --manifest $manifest --target linux
           Invoke-Zup artifact inspect (Join-Path $fixture 'Tool-Setup')
-          python -c "import json,sys; data = open(r'$fixture\Tool-Setup','rb').read(4); assert data == b'\x7fELF', data; release = json.load(open(r'$fixture\zup-release.json')); assert release['variants'][0]['target'] == 'x86_64-unknown-linux-gnu', release; assert release['artifacts'][0]['path'] == 'Tool-Setup', release; text = json.dumps(release); assert '.exe' not in text and 'Authenticode' not in text, text; print('linux artifact verified')"
-          # Phase 5: a Windows host cross-builds the exact Linux
-          # machine-scope installer bytes. Authorization is a target runtime
-          # concern, so no pkexec exists here and none is needed: check,
-          # doctor (elevation skips off Linux), and build all succeed.
+
+          $env:ZUP_FIXTURE = $fixture
+          @'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["ZUP_FIXTURE"])
+          assert (root / "Tool-Setup").read_bytes()[:4] == b"\x7fELF"
+
+          release = json.loads((root / "zup-release.json").read_text())
+          assert release["variants"][0]["target"] == "x86_64-unknown-linux-gnu"
+          assert release["artifacts"][0]["path"] == "Tool-Setup"
+          text = json.dumps(release)
+          assert ".exe" not in text
+          assert "Authenticode" not in text
+          '@ | python -
+
           $machine = Join-Path $env:RUNNER_TEMP 'zup-linux-machine-fixture'
           Remove-Item -Recurse -Force $machine -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $machine, (Join-Path $machine 'dist') | Out-Null
+
           @'
           schema = 1
 
@@ -213,158 +263,91 @@ jobs:
           destination = "${install}"
           executable = true
           '@ | Set-Content (Join-Path $machine 'zup.toml') -NoNewline -Encoding utf8
-          [IO.File]::WriteAllBytes((Join-Path $machine 'dist/tool'), [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n"))
+
+          [IO.File]::WriteAllBytes(
+            (Join-Path $machine 'dist/tool'),
+            [Text.Encoding]::UTF8.GetBytes("#!/bin/sh`n")
+          )
+
           $machineManifest = Join-Path $machine 'zup.toml'
           Invoke-Zup check --manifest $machineManifest --target linux
           Invoke-Zup doctor --manifest $machineManifest --target linux
           Invoke-Zup build --manifest $machineManifest --target linux
-          python -c "data = open(r'$machine\Tool-Setup','rb').read(4); assert data == b'\x7fELF', data; print('linux machine artifact verified')"
 
-  clean-room:
-    name: clean room
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
+          $env:ZUP_FIXTURE = $machine
+          @'
+          import os
+          from pathlib import Path
 
-      - uses: dtolnay/rust-toolchain@stable
+          root = Path(os.environ["ZUP_FIXTURE"])
+          assert (root / "Tool-Setup").read_bytes()[:4] == b"\x7fELF"
+          '@ | python -
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: clean-room
-
-      - name: Toolchain
-        run: cargo xtask toolchain build
-
-      - name: Package
-        run: cargo xtask toolchain package
-
-      - name: Clean room
-        run: cargo xtask release clean-room
-
-  release-size:
-    name: release size
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-size
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146
-
-      - name: Toolchain (release)
-        run: cargo xtask toolchain build --profile release
-
-      - name: Bootstrapper budget
-        run: cargo nextest run -p zup-dispatch --all-features --run-ignored all -E 'test(a_thin_bootstrapper)'
-
-  ubuntu-portable:
-    name: ubuntu (portable + linux backend)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ubuntu-portable
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146,cargo-machete
-
-      # Both lists come from the package matrices rather than from this workflow.
-      # A hand-maintained list would be a second place a package could be dropped
-      # from coverage, and the boundary's whole job is that there is only one.
-      - name: Package matrices
+      - name: Release bootstrapper budget
+        if: matrix.platform == 'windows' && github.event_name != 'pull_request'
+        shell: pwsh
         run: |
+          cargo xtask toolchain build --profile release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo nextest run -p zup-dispatch --all-features --run-ignored all -E 'test(a_thin_bootstrapper)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Linux package selection
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo xtask emit-portable-matrix
           cargo xtask emit-host-packages --host any
           cargo xtask emit-host-packages --host linux
           portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
           linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable $linux" "$linux" >> "$GITHUB_ENV"
+          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
-      # The two structural gates run on Linux as well as Windows, because both are
-      # read from Cargo metadata rather than from anything host-specific: a
-      # backend-isolation or portable-dependency violation is the same violation
-      # whichever machine runs the check.
-      - name: Portable boundary
-        run: cargo xtask verify-portable-boundaries
-
-      - name: Dependency graph
-        run: cargo xtask verify-dependency-graph
-
-      - name: Check
-        run: cargo check --all-features $PORTABLE $LINUX
-
-      # The process, lifecycle, security, and readiness tests compose and
-      # execute genuine installers from staged runtime templates, so the
-      # toolchain is built first. The templates are products, not fixtures:
-      # no checked-in binary stands in for them.
-      - name: Linux toolchain templates
-        run: cargo xtask toolchain build
-
-      # Phase 4 integration tests exercise the real freedesktop database
-      # tools rather than only fakes, and validate generated entries with
-      # the specification validator where it exists.
-      - name: Freedesktop integration tooling
+      - name: Linux dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info
           command -v update-mime-database
           command -v update-desktop-database
           command -v desktop-file-validate
+          command -v setpriv
+          mold --version
 
-      # The Linux backend's own suite runs natively rather than being cross-checked,
-      # because what it tests is filesystem semantics - symlinks, permission bits,
-      # XDG resolution - that a build check cannot establish. This is the full
-      # product path: fresh install, upgrade, repair, uninstall, recovery, and
-      # carrier security against real ELF installers, executed as child
-      # processes with hermetic environments. `--all-features` enables the
-      # machine-scope `test-support` surface: the privileged worker's
-      # lifecycle, locking, recovery, and attack cases run with isolated
-      # roots, never the host's `/opt` or `/var/lib/zup`.
-      - name: Linux backend tests
-        run: cargo nextest run --all-features $LINUX
+      - name: Linux Clippy
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
 
-      # The root proofs need uid 0: ownership, modes, write resistance by
-      # attempt, and tamper refusal. Still isolated roots - `sudo` is test
-      # infrastructure that stages a root-owned environment, never the
-      # production elevation mechanism, which stays `pkexec`. A scratch
-      # target directory keeps root-owned artifacts out of the workspace.
-      # The non-root proofs skip gracefully outside uid 0; under `sudo` the
-      # whole root binary runs.
-      - name: Privileged machine tests
-        run: |
-          sudo --preserve-env=PATH,HOME,CARGO_HOME,RUSTUP_HOME \
-            env CARGO_TARGET_DIR=/tmp/zup-sudo-target \
-            cargo nextest run -p zup-linux --features test-support --test machine_root
+      - name: Linux toolchain
+        if: matrix.platform == 'linux'
+        run: cargo xtask toolchain build
 
-      # The public surface, not only the backend crates: the real `zup`
-      # binary checks, builds, and produces a runnable Linux installer from
-      # a fixture project, then the installer runs install, the installed
-      # application runs, and uninstall cleans up - all with an isolated home
-      # the CI account's own profile never sees.
-      - name: Public Linux build
+      - name: Linux and portable tests
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo nextest run --all-features $PORTABLE $LINUX
+
+      - name: Privileged Linux tests
+        if: matrix.platform == 'linux'
+        shell: bash
         run: |
           set -euo pipefail
+          test_binary="$(cargo test -p zup-linux --features test-support --test machine_root --no-run --message-format=json | python3 -c 'import json,sys; print(next(item["executable"] for line in sys.stdin if (item := json.loads(line)).get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "machine_root" and item.get("executable")))')"
+          test -x "$test_binary"
+          sudo "$test_binary" --nocapture
+
+      - name: Public Linux installer E2E
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
           rm -rf /tmp/zup-public-linux /tmp/zup-public-home /tmp/zup-public-state
           mkdir -p /tmp/zup-public-linux/dist /tmp/zup-public-home /tmp/zup-public-state
+
           cat > /tmp/zup-public-linux/zup.toml <<'EOF'
           schema = 1
 
@@ -412,26 +395,32 @@ jobs:
           description = "Tool document"
           executable = "${install}/tool"
           EOF
+
           printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "tool 1.0.0"; exit 0; fi\nif [ "$1" = "--url" ]; then echo "opened $2"; exit 0; fi\nexit 1\n' > /tmp/zup-public-linux/dist/tool
           printf 'keep-v1' > /tmp/zup-public-linux/dist/keep.dat
           printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#00ff00"/></svg>' > /tmp/zup-public-linux/icon.svg
+
           cargo run -p zup -- check --manifest /tmp/zup-public-linux/zup.toml --target linux
           cargo run -p zup -- doctor --manifest /tmp/zup-public-linux/zup.toml --target linux
           cargo run -p zup -- build --manifest /tmp/zup-public-linux/zup.toml --target linux
+
           file /tmp/zup-public-linux/Tool-Setup | grep ELF
           test -x /tmp/zup-public-linux/Tool-Setup
           grep -q x86_64-unknown-linux-gnu /tmp/zup-public-linux/zup-release.json
           test "$(grep -c '\.exe' /tmp/zup-public-linux/zup-release.json || true)" = "0"
+
           export HOME=/tmp/zup-public-home
           export XDG_DATA_HOME=/tmp/zup-public-home/.local/share
           export XDG_STATE_HOME=/tmp/zup-public-home/.local/state
           export XDG_CONFIG_HOME=/tmp/zup-public-home/.config
           export XDG_CACHE_HOME=/tmp/zup-public-home/.cache
           export XDG_RUNTIME_DIR=/tmp/zup-public-home/run
+
           mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
+
           /tmp/zup-public-linux/Tool-Setup --state-root /tmp/zup-public-state
           /tmp/zup-public-home/.local/lib/zup/apps/tool/tool --version | grep 'tool 1.0.0'
-          # Phase 4 desktop integration from the public build path.
+
           test -f "$XDG_DATA_HOME/applications/com.example.tool.desktop"
           grep -q '^Type=Application$' "$XDG_DATA_HOME/applications/com.example.tool.desktop"
           grep -q '^Name=Tool$' "$XDG_DATA_HOME/applications/com.example.tool.desktop"
@@ -441,23 +430,25 @@ jobs:
           grep -q 'application/x-com.example.tool-tool' "$XDG_DATA_HOME/mime/globs2"
           test -f "$XDG_DATA_HOME/icons/hicolor/48x48/apps/com.example.tool.png"
           test -f "$XDG_DATA_HOME/icons/hicolor/scalable/apps/com.example.tool.svg"
+
           desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool.desktop"
           desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool-uri.desktop"
           desktop-file-validate "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
+
           /tmp/zup-public-home/.local/lib/zup/apps/tool/tool --url tool:hello | grep 'opened tool:hello'
+
           /tmp/zup-public-linux/Tool-Setup uninstall --state-root /tmp/zup-public-state
+
           test ! -e /tmp/zup-public-home/.local/lib/zup/apps/tool/tool
           test ! -e "$XDG_DATA_HOME/applications/com.example.tool.desktop"
           test ! -e "$XDG_DATA_HOME/applications/com.example.tool-uri.desktop"
           test ! -e "$XDG_DATA_HOME/applications/com.example.tool-files.desktop"
           test ! -e "$XDG_DATA_HOME/mime/packages/com.example.tool.xml"
           test ! -e "$XDG_DATA_HOME/icons/hicolor/48x48/apps/com.example.tool.png"
-          # Phase 5 machine scope from the public build path: check, doctor
-          # (elevation capability, no prompt), and a byte-correct machine
-          # installer. Installing it needs interactive administrator
-          # authorization, so CI proves the artifact structurally and the
-          # harnessed suites prove the privileged runtime.
-          rm -rf /tmp/zup-public-machine && mkdir -p /tmp/zup-public-machine/dist
+
+          rm -rf /tmp/zup-public-machine
+          mkdir -p /tmp/zup-public-machine/dist
+
           cat > /tmp/zup-public-machine/zup.toml <<'EOF'
           schema = 1
 
@@ -484,25 +475,18 @@ jobs:
           destination = "${install}"
           executable = true
           EOF
+
           printf '#!/bin/sh\necho "tool 1.0.0"\n' > /tmp/zup-public-machine/dist/tool
+
           cargo run -p zup -- check --manifest /tmp/zup-public-machine/zup.toml --target linux
           cargo run -p zup -- doctor --manifest /tmp/zup-public-machine/zup.toml --target linux
           cargo run -p zup -- build --manifest /tmp/zup-public-machine/zup.toml --target linux
+
           file /tmp/zup-public-machine/Tool-Setup | grep ELF
           test -x /tmp/zup-public-machine/Tool-Setup
           grep -q x86_64-unknown-linux-gnu /tmp/zup-public-machine/zup-release.json
 
-      - name: Tests
-        run: cargo nextest run --all-features $PORTABLE
-
-      - name: Doc tests
-        run: cargo test --doc --all-features $PORTABLE
-
-      - name: Clippy
-        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
-
-      - name: Unused dependencies
-        run: cargo machete
-
-      - name: Whitespace
-        run: git diff --check
+      - name: Linux doc tests
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo test --doc --all-features $PORTABLE $LINUX

@@ -8,19 +8,11 @@ description = "The default native GPUI installer and maintenance preset for zup"
 publish = false
 
 [dependencies]
-# Zup's own preset, so it depends on the implementation crate directly rather
-# than through the facade. That is a real difference from a third-party preset:
-# this one is built inside the repository and its settings carry hand-written
-# schemas for types the SDK cannot generate, so it names the crates it uses
-# instead of reaching them through a facade meant for projects outside.
 serde = { workspace = true, features = ["derive"] }
 schemars.workspace = true
 zup-preset-sdk = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
-# Reached through `zup-preset-sdk`, which re-exports it so a preset does not
-# coordinate GPUI versions itself. Named here so the SDK and this preset agree
-# on one version rather than resolving two.
 ignored = ["gpui-kit"]
 
 [dev-dependencies]

@@ -96,27 +96,12 @@ zup-xtask = { path = "crates/zup-xtask" }
 # Graph
 petgraph = "0.8"
 
-# Managed child processes. `process-wrap` owns the platform mechanics - a job
-# object on Windows, a process group on Unix - so that terminating a child
-# terminates the tree it started, on every supported desktop platform, from one
-# code path. Which children get this treatment, and when they may be left
-# running, stays zup's decision.
 process-wrap = { version = "10", default-features = false, features = [
   "job-object",
   "process-group",
   "std",
 ] }
 
-# A Linux mechanism layer needs exactly two things `std` does not provide: raw
-# filesystem semantics that are not racy with respect to the entry being asked
-# about, and the base-directory model the specification defines. `rustix` supplies
-# both safely, so no backend needs `unsafe` for either. `nix` is deliberately not
-# here as well: it overlaps `rustix` rather than complementing it, and a workspace
-# that reaches for both has two answers to every question.
-# Beyond `fs`/`std`/`system`, the Linux backend uses `rustix` for the privileged
-# worker's peer identity: Unix credential passing on its private IPC socket
-# (`net`), the invoking and peer user ids (`process`), and pinning the
-# authenticated peer against PID reuse (`thread` pidfd).
 rustix = { version = "1.1", default-features = false, features = [
   "event",
   "fs",
@@ -174,8 +159,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 secrecy = "0.10"
 git-url-parse = "0.6"
 
-# Retry with exponential backoff and jitter. `backon` supplies the curve; what
-# counts as retryable and when to move to another origin stays zup's policy.
 backon = { version = "1.6", default-features = false, features = [
   "std",
   "tokio",
@@ -191,11 +174,6 @@ windows-service = "0.8"
 # Bindings for Windows APIs without an appropriate focused crate.
 windows-bindgen = "0.100"
 
-# systemd manager access for the Linux service backend. Only `zup-linux`
-# reaches this: portable crates stay out via the boundary verifier. Only the
-# generated `systemd1` manager interface plus the Tokio async integration the
-# short-lived worker blocks on; every other generated service would be unused
-# API surface pulled into the installer.
 zbus_systemd = { version = "0.26200.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
