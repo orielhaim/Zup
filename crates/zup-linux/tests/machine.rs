@@ -313,17 +313,7 @@ fn machine_lock_serializes_one_application() {
         &mut client_a,
         session_a,
         1,
-        PrepareOperation {
-            operation: privileged_operation::INSTALL.to_owned(),
-            force_files: false,
-            install_dir_override: None,
-            selected_components: Vec::new(),
-            expected_plan_digest: None,
-            app_id: app_id().to_string(),
-            app_version: "1.0.0".to_owned(),
-            scope: "machine".to_owned(),
-            target: linux_target(),
-        },
+        install_intent(&roots.state, None),
     );
     let prepared = next_prepared(&mut client_a);
     assert_eq!(prepared.app_id, app_id().to_string());
@@ -347,17 +337,7 @@ fn machine_lock_serializes_one_application() {
         &mut client_b,
         session_b,
         1,
-        PrepareOperation {
-            operation: privileged_operation::INSTALL.to_owned(),
-            force_files: false,
-            install_dir_override: None,
-            selected_components: Vec::new(),
-            expected_plan_digest: None,
-            app_id: app_id().to_string(),
-            app_version: "1.0.0".to_owned(),
-            scope: "machine".to_owned(),
-            target: linux_target(),
-        },
+        install_intent(&roots.state, None),
     );
     let failed = next_failed(&mut client_b);
     assert_eq!(failed.kind, zup_protocol::failure::INSTALLATION_BUSY);
@@ -405,7 +385,7 @@ fn machine_plan_substitution_is_refused() {
         )
     });
     let _ = next_hello(&mut client);
-    send_prepare(&mut client, session, 1, install_intent(None));
+    send_prepare(&mut client, session, 1, install_intent(&roots.state, None));
     let prepared = next_prepared(&mut client);
 
     let other = "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9";
@@ -457,7 +437,7 @@ fn machine_execute_replay_reaches_no_worker() {
     let outcome = drive_client_isolated(
         &mut client,
         session,
-        &install_intent(None),
+        &install_intent(&roots.state, None),
         &expected_digest(&installer, &roots, LinuxAction::Install),
         &linux_target(),
     );
@@ -520,7 +500,12 @@ fn machine_cross_session_execute_is_refused() {
         )
     });
     let _ = next_hello(&mut client_a);
-    send_prepare(&mut client_a, session_a, 1, install_intent(None));
+    send_prepare(
+        &mut client_a,
+        session_a,
+        1,
+        install_intent(&roots_a.state, None),
+    );
     let prepared_a = next_prepared(&mut client_a);
 
     let session_b = SessionId::new_v7();
@@ -545,7 +530,7 @@ fn machine_cross_session_execute_is_refused() {
         PrepareOperation {
             operation: privileged_operation::UPGRADE.to_owned(),
             app_version: "2.0.0".to_owned(),
-            ..install_intent(None)
+            ..install_intent(&roots_b.state, None)
         },
     );
     let prepared_b = next_prepared(&mut client_b);
@@ -707,7 +692,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             )
         });
         let _ = next_hello(&mut client);
-        let mut intent = install_intent(None);
+        let mut intent = install_intent(&roots.state, None);
         intent.expected_plan_digest =
             Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned());
         send_envelope_on(
@@ -758,7 +743,7 @@ fn machine_package_substitution_is_detected() {
         )
     });
     let _ = next_hello(&mut client);
-    send_prepare(&mut client, session, 1, install_intent(None));
+    send_prepare(&mut client, session, 1, install_intent(&roots.state, None));
     let prepared = next_prepared(&mut client);
 
     let swap = scratch.path().join("swap");
@@ -1038,7 +1023,7 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     );
 }
 
-fn install_intent(expected: Option<String>) -> PrepareOperation {
+fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
     PrepareOperation {
         operation: privileged_operation::INSTALL.to_owned(),
         force_files: false,
@@ -1049,6 +1034,7 @@ fn install_intent(expected: Option<String>) -> PrepareOperation {
         app_version: "1.0.0".to_owned(),
         scope: "machine".to_owned(),
         target: linux_target(),
+        state_root: state.display().to_string(),
     }
 }
 
@@ -1148,7 +1134,7 @@ fn machine_cancel_before_execute_mutates_nothing() {
         )
     });
     let _ = next_hello(&mut client);
-    send_prepare(&mut client, session, 1, install_intent(None));
+    send_prepare(&mut client, session, 1, install_intent(&roots.state, None));
     let _ = next_prepared(&mut client);
     send_envelope_on(
         &mut client,
@@ -1206,7 +1192,7 @@ fn machine_override_swap_is_refused() {
         )
     });
     let _ = next_hello(&mut client);
-    let mut intent_b = install_intent(Some(digest_a));
+    let mut intent_b = install_intent(&roots.state, Some(digest_a));
     intent_b.install_dir_override = Some(dir_b.display().to_string());
     send_prepare(&mut client, session, 1, intent_b);
     let failed = next_failed(&mut client);

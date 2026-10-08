@@ -208,6 +208,7 @@ pub(crate) fn plan_expected(
         app_version: target_plan.app.version.to_string(),
         scope: "machine".to_owned(),
         target: target.clone(),
+        state_root: state_root.display().to_string(),
     };
     Ok((
         intent,

@@ -126,7 +126,7 @@ try {
         $path = "target/release/$($entry.Split('/')[1]).exe"
         if (-not (Test-Path -LiteralPath $path)) { continue }
         $item = Get-Item -LiteralPath $path
-        "{ 0, -22 } { 1, 10:N1 } MiB" -f $entry, ($item.Length / 1MB)
+        "{0,-22} {1,10:N1} MiB" -f $entry, ($item.Length / 1MB)
     }
 }
 finally {

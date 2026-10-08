@@ -166,6 +166,7 @@ pub struct PrepareOperation {
     pub app_version: String,
     pub scope: String,
     pub target: TargetTriple,
+    pub state_root: String,
 }
 
 impl PrepareOperation {
@@ -180,6 +181,7 @@ impl PrepareOperation {
             || !bounded(&self.app_id)
             || !bounded(&self.app_version)
             || !bounded(&self.scope)
+            || !bounded(&self.state_root)
         {
             return Err(crate::WireError::FrameTooLarge {
                 max: MAX_INTENT_STRING_BYTES,

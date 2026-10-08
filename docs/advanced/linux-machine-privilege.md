@@ -51,7 +51,8 @@ its own verified inputs.
 | Replay of old worker messages | Versioned bounded framing, per-sender sequences, one Prepare and one Execute per session, enforced by the portable session tracker. |
 | Cross-session message confusion | Every frame binds the session identity; strangers refuse. |
 | Plan substitution after authorization | Prepare carries the client's expected digest; Prepared echoes the worker's reconstruction; Execute names it exactly; mismatch refuses. |
-| Package substitution after authorization | The carrier inode is pinned at verification and rechecked before Execute; per-file digests and post-publish verification add depth. |
+| State-root confusion between client and worker | The resolved machine state root travels in the intent; the worker authorizes it with the full hierarchy and trust battery and derives every state path from it, so digests only match when both sides plan from the same authorized root. |
+| Package substitution after authorization | The carrier content hash is pinned at verification and rechecked before Execute; per-file digests and post-publish verification add depth. |
 | Symlink and path substitution | Descriptor-relative operations, symlink-ancestor refusal, no-follow opens, and the privileged destination allowlist (`/opt`, `/var/opt`, `/var/lib/zup`, plus typed `<unit>.service` sources under `/usr/local/lib/systemd/system`). |
 | Filesystem races | No check-then-act on names: kernel-enforced exclusive publication, durable backups before replace, atomic renames. |
 | Hard links | Nothing publishes in place: creates are exclusive, replaces rename over the name, removals unlink the name. A hard-linked victim keeps its bytes because the inode is never truncated or written through. |
@@ -99,12 +100,18 @@ its own verified inputs.
   entry, sets explicit modes, and never inherits umask behavior (the
   worker additionally runs under a restrictive umask).
 - Public metadata (ledger) is root-owned `0644` so unprivileged planning
-  and status inspection can read it; private state (journals) is `0600`
-  under `0700` directories; lock markers are `0644`; maintenance
+  and status inspection can read it; transaction journals are `0600` files
+  under a `0700` transactions directory that is itself normalized to
+  `0700`; lock markers are `0644`; maintenance
   generations are runnable but never writable below root.
 - Ownership and privacy are verified before trust, on the ledger, the
   journals, the lock markers, and the maintenance generation - never
   assumed from a pathname.
 - Test isolation never flows through environment variables or IPC: tests
   inject explicit roots through constructors the production paths never
-  call, and the real worker always enforces the production roots.
+  call. The machine state root is resolved once per request (explicit
+  override or production default), travels in the PrepareOperation
+  intent, and the worker authorizes it with the standard hierarchy and
+  trust checks before deriving ledger, lock, journal, and maintenance
+  paths from it. Program, shared-data, and systemd roots always
+  describe the production machine.

@@ -352,15 +352,24 @@ fn prepare_operation(
         .parse()
         .map_err(|error| IpcError::Policy(format!("app version: {error}")))?;
 
-    let state_root = crate::machine::ensure_machine_state_root(
-        &context.roots,
-        rustix::process::geteuid().as_raw(),
-    )
-    .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    let state_root = PathBuf::from(&intent.state_root);
+    if !state_root.is_absolute() {
+        return Err(IpcError::Policy(
+            "machine state travels as an absolute path".into(),
+        ));
+    }
+    crate::machine::ensure_machine_state_dir(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    let roots = MachineRoots {
+        state: state_root.clone(),
+        ..context.roots.clone()
+    };
 
     let (carrier_path, carrier_pin) = select_trusted_carrier(
         &state_root,
@@ -426,9 +435,9 @@ fn prepare_operation(
     }
     if let Some(directory) = &intent.install_dir_override {
         let host = PathBuf::from(directory);
-        authorize_machine_install_directory(&host, &context.roots)
+        authorize_machine_install_directory(&host, &roots)
             .map_err(|error| IpcError::Policy(error.to_string()))?;
-        let template = crate::machine::host_to_install_template(&host, &context.roots, &target)
+        let template = crate::machine::host_to_install_template(&host, &roots, &target)
             .map_err(|error| IpcError::Policy(format!("install directory override: {error}")))?;
         plan_request.install_directory = Some(template);
     }
@@ -442,7 +451,7 @@ fn prepare_operation(
     .map_err(|error| IpcError::Policy(format!("plan: {error}")))?;
     let mut target_plan = crate::resolve::resolve_target(
         &install,
-        &crate::locations::LinuxInstallLocationResolver::with_machine_roots(context.roots.clone()),
+        &crate::locations::LinuxInstallLocationResolver::with_machine_roots(roots.clone()),
     )
     .map_err(|error| IpcError::Policy(format!("target plan: {error}")))?;
     crate::run::attach_maintenance_copy_for(
@@ -452,9 +461,9 @@ fn prepare_operation(
         SelectedScope::Machine,
     )
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    enforce_machine_policy(&target_plan, &context.roots)?;
+    enforce_machine_policy(&target_plan, &roots)?;
     if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
-        authorize_machine_install_directory(&host, &context.roots)
+        authorize_machine_install_directory(&host, &roots)
             .map_err(|error| IpcError::Policy(error.to_string()))?;
         crate::fs::refuse_symlink_ancestors(&host)
             .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
@@ -480,7 +489,7 @@ fn prepare_operation(
         &app_id,
         &carrier,
         &carrier_path,
-        &context.roots,
+        &roots,
         &context.systemd,
     )?;
 
@@ -536,7 +545,7 @@ fn prepare_operation(
             &execution,
             &target_plan,
             crate::input::ServiceCompilation {
-                roots: &context.roots,
+                roots: &roots,
                 systemd: &context.systemd,
                 manager,
                 force_services,
@@ -623,7 +632,7 @@ fn prepare_operation(
             }
         },
         state_root,
-        roots: context.roots.clone(),
+        roots: roots.clone(),
         systemd: context.systemd.clone(),
         payload: PreparedPayload {
             maintenance,

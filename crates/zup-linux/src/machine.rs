@@ -156,21 +156,23 @@ pub fn ensure_machine_state_root(
     roots: &MachineRoots,
     expected_uid: u32,
 ) -> Result<PathBuf, PathError> {
-    let parent = roots
-        .state
-        .parent()
-        .ok_or_else(|| PathError::StateRefused {
-            path: roots.state.display().to_string(),
-            reason: "a machine state root has a parent".to_owned(),
-        })?;
+    ensure_machine_state_dir(&roots.state, expected_uid)?;
+    Ok(roots.state.clone())
+}
+
+pub fn ensure_machine_state_dir(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    let parent = state_root.parent().ok_or_else(|| PathError::StateRefused {
+        path: state_root.display().to_string(),
+        reason: "a machine state root has a parent".to_owned(),
+    })?;
     verify_trusted_parent(parent, expected_uid)?;
-    create_or_verify_dir(&roots.state, MACHINE_STATE_DIR_MODE, expected_uid)?;
+    create_or_verify_dir(state_root, MACHINE_STATE_DIR_MODE, expected_uid)?;
 
     crate::fs::sync_directory(parent).map_err(|error| PathError::StateRefused {
         path: parent.display().to_string(),
         reason: format!("the state parent does not flush: {error}"),
     })?;
-    Ok(roots.state.clone())
+    Ok(())
 }
 
 fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), PathError> {
@@ -461,12 +463,15 @@ pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(),
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         match (name, metadata.is_dir()) {
-            ("transactions", true) => normalize_tree(
-                &path,
-                MACHINE_PRIVATE_DIR_MODE,
-                MACHINE_PRIVATE_FILE_MODE,
-                expected_uid,
-            )?,
+            ("transactions", true) => {
+                set_mode(&path, MACHINE_PRIVATE_DIR_MODE)?;
+                normalize_tree(
+                    &path,
+                    MACHINE_PRIVATE_DIR_MODE,
+                    MACHINE_PRIVATE_FILE_MODE,
+                    expected_uid,
+                )?
+            }
             ("installations" | "generated", true) => {
                 set_mode(&path, MACHINE_STATE_DIR_MODE)?;
                 normalize_tree(
@@ -757,6 +762,47 @@ mod tests {
         let link = base.path().join("link.json");
         std::os::unix::fs::symlink(&file, &link).expect("a link");
         assert!(verify_trusted_state_file(&link, uid).is_err());
+    }
+
+    #[test]
+    fn normalization_enforces_the_ownership_model() {
+        let (_base, roots) = isolated();
+        std::fs::create_dir_all(roots.state.parent().expect("a parent")).expect("a parent");
+        let uid = current_uid();
+        let transactions = roots.state.join("transactions");
+        let record = transactions.join("some-id");
+        std::fs::create_dir_all(&record).expect("a tree");
+        std::fs::write(record.join("transaction.json"), b"{}").expect("a file");
+        let installations = roots.state.join("installations");
+        std::fs::create_dir_all(&installations).expect("a tree");
+        std::fs::write(installations.join("owned.json"), b"{}").expect("a file");
+        let lock = roots.state.join("zup-install-test-machine.lock");
+        std::fs::write(&lock, b"").expect("a lock");
+        for path in [&transactions, &record, &installations] {
+            let mut permissions = std::fs::metadata(path).expect("stat").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).expect("chmod");
+        }
+        normalize_state_modes(&roots.state, uid).expect("normalizes");
+        let mode = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(&transactions), MACHINE_PRIVATE_DIR_MODE);
+        assert_eq!(mode(&record), MACHINE_PRIVATE_DIR_MODE);
+        assert_eq!(
+            mode(&record.join("transaction.json")),
+            MACHINE_PRIVATE_FILE_MODE
+        );
+        assert_eq!(mode(&installations), MACHINE_STATE_DIR_MODE);
+        assert_eq!(
+            mode(&installations.join("owned.json")),
+            MACHINE_PUBLIC_FILE_MODE
+        );
+        assert_eq!(mode(&lock), MACHINE_LOCK_FILE_MODE);
     }
 
     fn current_uid() -> u32 {

@@ -226,23 +226,31 @@ fn root_public_run_dispatches_machine_scope() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    let outcome = zup_linux::run(&zup_linux::LinuxRunRequest {
-        installer,
+    let request = |action| zup_linux::LinuxRunRequest {
+        installer: installer.clone(),
         scope: SelectedScope::Machine,
         state_root: Some(roots.state.clone()),
-        action: LinuxAction::Install,
+        action,
         install_dir_override: None,
-    });
+    };
+    let tool = PathBuf::from("/opt/tool/tool");
+    let _ = std::fs::remove_dir_all(tool.parent().expect("a parent"));
+    let outcome = zup_linux::run(&request(LinuxAction::Install));
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "the public machine run commits without pkexec: {outcome:?}"
     );
-    let tool = roots.roots.programs.join("tool").join("tool");
     assert!(
         tool.is_file(),
         "the payload installed through the public path"
     );
     assert_eq!(uid_of(&tool), 0);
+    let outcome = zup_linux::run(&request(LinuxAction::Uninstall));
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "the public machine run uninstalls: {outcome:?}"
+    );
+    assert!(!tool.exists(), "uninstall removes the payload");
 }
 
 #[test]
