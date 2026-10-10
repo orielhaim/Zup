@@ -28,6 +28,10 @@ pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError>
         }
         .into());
     }
+    crate::machine::resolve_machine_state_root(
+        request.state_root.as_deref(),
+        &MachineRoots::production(),
+    )?;
     if rustix::process::geteuid().as_raw() == 0 {
         return run_machine_loopback(request, &MachineRoots::production());
     }
@@ -221,13 +225,6 @@ pub(crate) fn plan_expected(
     ))
 }
 
-fn planning_state_root(request: &LinuxRunRequest) -> PathBuf {
-    request
-        .state_root
-        .clone()
-        .unwrap_or_else(|| MachineRoots::production().state)
-}
-
 pub(crate) fn run_machine_elevated(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
@@ -243,7 +240,8 @@ pub(crate) fn run_machine_elevated_once(
     launcher: &impl PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
     let roots = MachineRoots::production();
-    let state_root = planning_state_root(request);
+    let state_root =
+        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), &roots)?;
     let systemd = crate::machine::SystemdRoots::production();
     let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
     let session = SessionId::new_v7();
@@ -474,10 +472,8 @@ fn run_machine_loopback(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
 ) -> Result<LinuxOutcome, ExecError> {
-    let state_root = request
-        .state_root
-        .clone()
-        .unwrap_or_else(|| roots.state.clone());
+    let state_root =
+        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
     run_machine_loopback_on(request, &state_root, roots)
 }
 
@@ -509,10 +505,8 @@ fn run_machine_loopback_with(
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
 ) -> Result<LinuxOutcome, ExecError> {
-    let state_root = request
-        .state_root
-        .clone()
-        .unwrap_or_else(|| roots.state.clone());
+    let state_root =
+        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
     run_machine_loopback_with_on(request, &state_root, roots, systemd)
 }
 

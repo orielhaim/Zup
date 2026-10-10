@@ -33,10 +33,18 @@ pub struct App {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
+/// The preset this application presents, as its author configures it.
+///
+/// The only customization system an application has. What a preset draws is the
+/// preset's business, so there is nothing here for an application author to
+/// describe a window: the package is chosen, and its own settings are filled in.
 pub struct Ui {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The `.zupui` to present. Absent means the preset Zup ships.
     pub preset: Option<ProjectPath>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
+    /// Values for the chosen preset's settings, validated against the schema the
+    /// package carries before anything is composed.
     pub settings: Map<String, serde_json::Value>,
 }
 
@@ -75,6 +83,7 @@ impl std::fmt::Display for Frontend {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
+/// Installation scope and destination templates.
 pub struct Install {
     pub scope: InstallScope,
     #[serde(default)]
@@ -90,6 +99,7 @@ pub struct Install {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Scope an installer may target.
 pub enum InstallScope {
     User,
     Machine,
@@ -119,6 +129,7 @@ impl std::fmt::Display for InstallScope {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
+/// Unresolved install-root templates by scope.
 pub struct InstallDirectory {
     #[serde(default)]
     pub user: Option<Template>,
@@ -129,19 +140,30 @@ pub struct InstallDirectory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// How clearly a component group should be presented.
+///
+/// This is about the group as one decision, not about where a preset draws it.
+/// `Auto` is conservative: a group with nothing optional to choose disappears,
+/// a group that requires an explicit selection is primary, and everything else
+/// is secondary.
 pub enum ComponentProminence {
     #[default]
     Auto,
+    /// The person should see that this decision exists before installing.
     Primary,
+    /// A sensible default. The whole group can stay out of the happy path.
     Secondary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Whether a group's defaults are enough to install.
 pub enum SelectionRequirement {
     #[default]
+    /// The declared defaults are a valid choice.
     Defaulted,
+    /// At least one optional component in the group must be selected.
     Explicit,
 }
 
@@ -176,6 +198,7 @@ pub struct Component {
     #[serde(default)]
     pub requires: Vec<ComponentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The group this component belongs to. Absent means the implicit group.
     pub group: Option<NonEmptyString>,
 }
 
@@ -205,14 +228,28 @@ pub struct FileMapping {
     #[serde(default)]
     pub when: Option<Condition>,
     #[serde(default)]
+    /// Allow a pattern that matches zero files. Default: reject.
     pub allow_empty: bool,
     #[serde(default)]
+    /// This file is intended to be executable.
+    ///
+    /// The intent is portable; how it is honoured is not. A backend that has
+    /// filesystem modes applies one, and a backend that does not has nothing to
+    /// change. What is *not* portable is a raw mode, so there is deliberately no
+    /// way to write `0755` here: a build machine on Windows has no meaningful mode
+    /// bits to preserve, and a mode authored on Linux would silently disagree with
+    /// the same manifest built elsewhere.
+    ///
+    /// Not inferred from the file's bytes either. A script, a data file and an ELF
+    /// are each identifiable without permission bits, but a file happening to be
+    /// ELF does not make it something a user should be able to run.
     pub executable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "kebab-case")]
+/// Portable application launcher location.
 pub enum LauncherLocation {
     Menu,
     Desktop,
@@ -258,6 +295,7 @@ pub struct PathEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Platform-neutral service start policy.
 pub enum ServiceStart {
     Automatic,
     Manual,
@@ -362,17 +400,24 @@ impl<'de> Deserialize<'de> for FileExtension {
     }
 }
 
+/// Authorization an operation needs on the target host.
+///
 /// This names *who* must perform an operation, never *how* the host obtains
+/// that authority. Elevation, impersonation, and policy prompts are platform
+/// concerns resolved by a platform runtime, not by this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Privilege {
+    /// The signed-in user is enough.
     User,
+    /// Host-wide authority is required.
     System,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+/// Payload source for the installer (build-time, not install-time).
 pub struct Source {
     pub directory: PathBuf,
 }

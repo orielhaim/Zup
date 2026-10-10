@@ -78,8 +78,8 @@ pub use machine::{
     MACHINE_STATE_DIR_MODE, MACHINE_STATE_ROOT, MachineDestination, MachineRoots, SYSTEMD_UNIT_DIR,
     SYSTEMD_UNIT_FILE_MODE, SystemdRoots, authorize_machine_destination,
     authorize_machine_install_directory, authorize_systemd_unit, ensure_machine_state_root,
-    normalize_state_modes, verify_ledger_trust, verify_machine_hierarchy, verify_machine_structure,
-    verify_trusted_state_file,
+    normalize_state_modes, resolve_machine_state_root, verify_ledger_trust,
+    verify_machine_hierarchy, verify_machine_structure, verify_trusted_state_file,
 };
 #[cfg(target_os = "linux")]
 pub use paths::{

@@ -71,6 +71,7 @@ fn padding(value: f64) -> Result<u16, String> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[allow(dead_code)]
 #[serde(untagged, deny_unknown_fields)]
+/// An application icon: a path in the project, or a table with `source` and optional `padding`.
 pub enum IconSetting {
     Source(ProjectPath),
     Options(IconOptions),
@@ -79,8 +80,10 @@ pub enum IconSetting {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
+/// `icon` written as a table.
 pub struct IconOptions {
     pub source: ProjectPath,
     #[serde(default)]
+    /// Fraction of the canvas left empty on each side. `0.10` insets by a tenth.
     pub padding: Option<f64>,
 }

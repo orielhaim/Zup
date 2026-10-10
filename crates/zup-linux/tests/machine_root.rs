@@ -27,7 +27,6 @@ static MOUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct ProductionMountIsolation {
     _lock: std::sync::MutexGuard<'static, ()>,
     mounts: Vec<PathBuf>,
-    shared_data_missing: bool,
 }
 
 fn require_real_dir(path: &Path, what: &str) {
@@ -81,8 +80,9 @@ impl ProductionMountIsolation {
         // SIGKILL. Drop only restores the in-process view for later tests
         // in this binary. Setup itself performs zero host-visible
         // filesystem mutations: mountpoints are never created on the host.
-        // State coverage mounts the existing parent `/var/lib`, so the
-        // state directory itself is created inside the disposable mount.
+        // The variable-data tree is covered at `/var`, so the state parent
+        // is staged inside the disposable mount and shared data lands there
+        // too: the whole machine namespace is isolated before any write.
         unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNS) }
             .expect("a private mount namespace needs privilege to unshare");
         rustix::mount::mount_change(
@@ -96,30 +96,17 @@ impl ProductionMountIsolation {
         require_real_dir(&roots.programs, "the program tree");
         cover_with_tmpfs(&roots.programs);
         mounts.push(roots.programs.clone());
-        let var_lib = roots.state.parent().expect("the state root has a parent");
-        require_real_dir(var_lib, "the state parent");
-        cover_with_tmpfs(var_lib);
-        mounts.push(var_lib.to_path_buf());
-        let shared_data_missing = std::fs::symlink_metadata(&roots.shared_data).is_err();
-        if !shared_data_missing {
-            require_real_dir(&roots.shared_data, "the shared-data tree");
-            cover_with_tmpfs(&roots.shared_data);
-            mounts.push(roots.shared_data.clone());
-        }
+        let parent = roots.state.parent().expect("the state root has a parent");
+        let grandparent = parent.parent().expect("the state parent has a parent");
+        require_real_dir(grandparent, "the variable-data tree");
+        cover_with_tmpfs(grandparent);
+        mounts.push(grandparent.to_path_buf());
+        std::fs::create_dir(parent).expect("the state parent stages inside the mount");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755))
+            .expect("the staged parent takes production modes");
         Self {
             _lock: lock,
             mounts,
-            shared_data_missing,
-        }
-    }
-
-    fn assert_host_untouched(&self) {
-        if self.shared_data_missing {
-            assert!(
-                std::fs::symlink_metadata(zup_linux::MachineRoots::production().shared_data)
-                    .is_err(),
-                "shared data stays absent: the product writes no shared data"
-            );
         }
     }
 }
@@ -335,7 +322,7 @@ fn root_public_run_dispatches_machine_scope() {
     if !root_only() {
         return;
     }
-    let isolation = ProductionMountIsolation::isolate();
+    let _isolation = ProductionMountIsolation::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let request = |action| zup_linux::LinuxRunRequest {
@@ -366,7 +353,6 @@ fn root_public_run_dispatches_machine_scope() {
         "the public machine run uninstalls: {outcome:?}"
     );
     assert!(!tool.exists(), "uninstall removes the payload");
-    isolation.assert_host_untouched();
 }
 
 #[test]

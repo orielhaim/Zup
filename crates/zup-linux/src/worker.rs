@@ -368,11 +368,8 @@ fn prepare_operation(
             "machine state names plain components".into(),
         ));
     }
-    if state_root != context.roots.state {
-        return Err(IpcError::WorkerAuth(
-            "machine state is the worker's own state root, never a client path".into(),
-        ));
-    }
+    crate::machine::resolve_machine_state_root(Some(&state_root), &context.roots)
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::ensure_machine_state_dir(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())

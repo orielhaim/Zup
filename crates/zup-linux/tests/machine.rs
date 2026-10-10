@@ -914,6 +914,26 @@ fn machine_production_worker_refuses_foreign_state() {
 }
 
 #[test]
+fn machine_custom_state_root_refuses_before_elevation() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let foreign = scratch.path().join("foreign-state");
+    std::fs::create_dir_all(&foreign).expect("a well-formed directory");
+    let outcome = zup_linux::run(&zup_linux::LinuxRunRequest {
+        installer,
+        scope: SelectedScope::Machine,
+        state_root: Some(foreign),
+        action: LinuxAction::Install,
+        install_dir_override: None,
+    });
+    let error = outcome.expect_err("a custom machine state root refuses");
+    assert!(
+        error.to_string().contains("own state root"),
+        "the refusal names the namespace binding: {error}"
+    );
+}
+
+#[test]
 fn machine_wrong_peer_uid_is_refused() {
     let (_base, roots) = isolated();
     let (mut client, mut worker) = UnixStream::pair().expect("a pair");
@@ -1417,9 +1437,11 @@ fn machine_launcher_failures_surface_at_once() {
         }
     }
 
-    let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    // The elevated client binds machine state to the production namespace
+    // before elevation, so launcher mapping is exercised from there.
+    let production = zup_linux::MachineRoots::production();
     let cases = [
         (
             "dismissal",
@@ -1447,7 +1469,7 @@ fn machine_launcher_failures_surface_at_once() {
         let start = std::time::Instant::now();
         let outcome = run_machine_elevated_for_test(
             &installer,
-            &roots.state,
+            &production.state,
             LinuxAction::Install,
             None,
             &launcher,

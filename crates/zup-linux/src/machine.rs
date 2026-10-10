@@ -160,6 +160,25 @@ pub fn ensure_machine_state_root(
     Ok(roots.state.clone())
 }
 
+pub fn resolve_machine_state_root(
+    requested: Option<&Path>,
+    roots: &MachineRoots,
+) -> Result<PathBuf, PathError> {
+    let state = requested
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| roots.state.clone());
+    if state != roots.state {
+        return Err(PathError::StateRefused {
+            path: state.display().to_string(),
+            reason: format!(
+                "machine state is the worker's own state root ({}), never a client path",
+                roots.state.display()
+            ),
+        });
+    }
+    Ok(state)
+}
+
 pub fn ensure_machine_state_dir(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
     let parent = state_root.parent().ok_or_else(|| PathError::StateRefused {
         path: state_root.display().to_string(),

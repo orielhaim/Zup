@@ -100,6 +100,7 @@ impl<'de> Deserialize<'de> for TargetProfileId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
+/// Build payload declared for one target profile.
 pub struct TargetProfile {
     pub target: TargetTriple,
     pub source: Source,

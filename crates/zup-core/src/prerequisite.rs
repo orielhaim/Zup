@@ -244,9 +244,17 @@ pub struct FileVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
+/// The portable semantic condition a prerequisite must satisfy.
+///
+/// Every variant names a fact the target system can be asked about. Detection
+/// mechanics, package formats, and registry layout belong to the platform
+/// provider, not to this model.
 pub enum PrerequisiteRequirement {
+    /// A runtime that must be present, optionally within a version range.
     Runtime(Runtime),
+    /// An installed package that must be present, optionally within a version range.
     InstalledPackage(InstalledPackage),
+    /// A file that must exist, optionally with a matching file version.
     FileVersion(FileVersion),
 }
 
@@ -306,6 +314,10 @@ impl PrerequisitePackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
+/// How a prerequisite package is run once its requirement is unsatisfied.
+///
+/// The provider owns the command line it builds; the manifest only supplies
+/// extra arguments, the accepted exit codes, and the privilege it needs.
 pub struct PrerequisiteInstaller {
     #[serde(default)]
     pub arguments: Vec<String>,

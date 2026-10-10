@@ -177,22 +177,18 @@
       "type": "object",
       "properties": {
         "id": {
-          "$ref": "#/$defs/AppId"
+          "type": "string"
         },
         "name": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "version": {
           "type": "string"
         },
         "publisher": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonEmptyString"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -231,14 +227,6 @@
         "name",
         "version"
       ]
-    },
-    "AppId": {
-      "description": "Stable logical application identifier.",
-      "type": "string"
-    },
-    "NonEmptyString": {
-      "description": "Non-empty display name or label.",
-      "type": "string"
     },
     "Template": {
       "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
@@ -469,7 +457,7 @@
           "description": "The target profiles this artifact includes. Required.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           }
         },
         "channel": {
@@ -522,10 +510,6 @@
         }
       ]
     },
-    "TargetProfileId": {
-      "description": "Stable, human-readable identity for a target profile.",
-      "type": "string"
-    },
     "Targeted": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
@@ -534,7 +518,7 @@
           "type": "string"
         },
         "name": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "description": {
           "type": [
@@ -544,13 +528,9 @@
           "default": null
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -592,7 +572,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -604,10 +584,6 @@
         "requirement",
         "package"
       ]
-    },
-    "ComponentId": {
-      "description": "Stable logical component identifier.",
-      "type": "string"
     },
     "Condition": {
       "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
@@ -635,7 +611,7 @@
           "type": "object",
           "properties": {
             "id": {
-              "$ref": "#/$defs/RuntimeRequirementId"
+              "type": "string"
             },
             "version": {
               "type": [
@@ -660,7 +636,7 @@
           "type": "object",
           "properties": {
             "id": {
-              "$ref": "#/$defs/InstalledPackageId"
+              "type": "string"
             },
             "version": {
               "type": [
@@ -706,14 +682,6 @@
           ]
         }
       ]
-    },
-    "RuntimeRequirementId": {
-      "description": "Opaque identifier of a runtime a platform provider knows how to observe.\n\nThe identifier is a namespaced, lowercase dotted path such as\n`provider.toolchain.v14`. Portable crates validate its shape but never\ninterpret it; the platform backend owns the meaning of each id it\npublishes, and only the backend may attach a meaning to a segment.",
-      "type": "string"
-    },
-    "InstalledPackageId": {
-      "description": "Opaque identifier of an installed package, such as a product code.\n\nPortable crates validate the shape only; the platform backend decides which\nidentifiers it can answer and what they mean.",
-      "type": "string"
     },
     "PrerequisitePackage": {
       "oneOf": [
@@ -1121,10 +1089,10 @@
       "type": "object",
       "properties": {
         "id": {
-          "$ref": "#/$defs/ComponentId"
+          "type": "string"
         },
         "name": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "description": {
           "type": [
@@ -1144,25 +1112,21 @@
         "requires": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ComponentId"
+            "type": "string"
           },
           "default": []
         },
         "group": {
           "description": "The group this component belongs to. Absent means the implicit group.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonEmptyString"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1178,16 +1142,12 @@
       "type": "object",
       "properties": {
         "id": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "label": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonEmptyString"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "description": {
@@ -1207,7 +1167,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1264,13 +1224,9 @@
           "type": "string"
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1288,7 +1244,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1310,13 +1266,9 @@
           "$ref": "#/$defs/Template"
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1344,7 +1296,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1363,7 +1315,7 @@
           "$ref": "#/$defs/LauncherLocation"
         },
         "name": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "target": {
           "$ref": "#/$defs/Template"
@@ -1387,13 +1339,9 @@
           "default": null
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1411,7 +1359,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1439,13 +1387,9 @@
           "$ref": "#/$defs/Template"
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1463,7 +1407,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1478,19 +1422,15 @@
       "type": "object",
       "properties": {
         "id": {
-          "$ref": "#/$defs/ServiceId"
+          "type": "string"
         },
         "name": {
-          "$ref": "#/$defs/NonEmptyString"
+          "type": "string"
         },
         "display_name": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonEmptyString"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1508,13 +1448,9 @@
           "$ref": "#/$defs/ServiceStart"
         },
         "component": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ComponentId"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ],
           "default": null
         },
@@ -1532,7 +1468,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1544,10 +1480,6 @@
         "binary",
         "start"
       ]
-    },
-    "ServiceId": {
-      "description": "Stable logical service identifier.",
-      "type": "string"
     },
     "ServiceStart": {
       "description": "Platform-neutral service start policy.",
@@ -1563,7 +1495,7 @@
       "type": "object",
       "properties": {
         "scheme": {
-          "$ref": "#/$defs/ProtocolScheme"
+          "type": "string"
         },
         "executable": {
           "$ref": "#/$defs/Template"
@@ -1589,7 +1521,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1600,19 +1532,15 @@
         "executable"
       ]
     },
-    "ProtocolScheme": {
-      "description": "URI scheme such as `acme` in `acme://`.",
-      "type": "string"
-    },
     "Targeted10": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
         "extension": {
-          "$ref": "#/$defs/FileExtension"
+          "type": "string"
         },
         "id": {
-          "$ref": "#/$defs/FileAssociationId"
+          "type": "string"
         },
         "description": {
           "type": [
@@ -1638,7 +1566,7 @@
         "targets": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/TargetProfileId"
+            "type": "string"
           },
           "default": []
         }
@@ -1649,14 +1577,6 @@
         "id",
         "executable"
       ]
-    },
-    "FileExtension": {
-      "description": "A bare file extension such as `.acme`.",
-      "type": "string"
-    },
-    "FileAssociationId": {
-      "description": "Stable logical file-association identifier.",
-      "type": "string"
     }
   }
 }
