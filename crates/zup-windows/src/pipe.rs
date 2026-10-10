@@ -248,7 +248,7 @@ macro_rules! impl_recv_send {
                 let bytes = encode_payload(envelope)
                     .map_err(|e| PipeError::MalformedProtocol(e.to_string()))?;
                 self.inner
-                    .send(bytes.into())
+                    .send(bytes.as_slice())
                     .await
                     .map_err(|e| PipeError::Io(e.to_string()))
             }
