@@ -368,6 +368,11 @@ fn prepare_operation(
             "machine state names plain components".into(),
         ));
     }
+    if state_root != context.roots.state {
+        return Err(IpcError::WorkerAuth(
+            "machine state is the worker's own state root, never a client path".into(),
+        ));
+    }
     crate::machine::ensure_machine_state_dir(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
@@ -378,10 +383,7 @@ fn prepare_operation(
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    let roots = MachineRoots {
-        state: state_root.clone(),
-        ..context.roots.clone()
-    };
+    let roots = context.roots.clone();
 
     let (carrier_path, carrier_pin) = select_trusted_carrier(
         &state_root,

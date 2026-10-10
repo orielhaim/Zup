@@ -436,13 +436,18 @@ mod tests {
 
     #[test]
     fn a_dead_peer_is_not_alive() {
-        let mut child = std::process::Command::new("/bin/true")
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
             .spawn()
-            .expect("a short child");
+            .expect("a blocking child");
         let pid = child.id();
         let uid = rustix::process::getuid().as_raw();
         let pinned = pin_peer(pid, uid).expect("a child pins");
-        assert!(peer_alive(&pinned));
+        assert!(
+            peer_alive(&pinned),
+            "a running child is alive while it sleeps"
+        );
+        child.kill().expect("the child dies on demand");
         child.wait().expect("reap");
 
         for _ in 0..50 {
@@ -452,6 +457,37 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("a reaped child must stop being alive");
+    }
+
+    #[test]
+    fn legacy_pin_binds_identity_to_start_time_and_uid() {
+        let pid = std::process::id();
+        let uid = rustix::process::getuid().as_raw();
+        let start = process_start_time(pid).expect("this process has a start time");
+        let live = PeerPin::Legacy(LegacyPin {
+            pid,
+            uid,
+            start_time: start,
+        });
+        assert!(peer_alive(&live), "the current identity is alive");
+        let reused = PeerPin::Legacy(LegacyPin {
+            pid,
+            uid,
+            start_time: start.wrapping_add(1),
+        });
+        assert!(
+            !peer_alive(&reused),
+            "a reused pid presents a new start time"
+        );
+        let stranger = PeerPin::Legacy(LegacyPin {
+            pid,
+            uid: uid.wrapping_add(1),
+            start_time: start,
+        });
+        assert!(
+            !peer_alive(&stranger),
+            "a foreign uid is never the pinned peer"
+        );
     }
 
     #[test]

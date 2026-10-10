@@ -793,6 +793,11 @@ fn machine_unauthorized_state_roots_refuse() {
     permissions.set_mode(0o777);
     std::fs::set_permissions(&writable, permissions).expect("chmod");
     let missing = roots.state.join("missing-parent").join("state");
+    let elsewhere = scratch.path().join("elsewhere-state");
+    std::fs::create_dir_all(&elsewhere).expect("a well-formed directory");
+    let mut permissions = std::fs::metadata(&elsewhere).expect("stat").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&elsewhere, permissions).expect("chmod");
 
     let cases = [
         (
@@ -816,8 +821,13 @@ fn machine_unauthorized_state_roots_refuse() {
             missing,
             zup_protocol::failure::AUTHENTICATION,
         ),
+        (
+            "absolute-elsewhere",
+            elsewhere,
+            zup_protocol::failure::AUTHENTICATION,
+        ),
     ];
-    for (name, root, kind) in cases {
+    for (name, root, kind) in &cases {
         let session = SessionId::new_v7();
         let (mut client, mut worker) = UnixStream::pair().expect("a pair");
         let roots_clone = roots.roots.clone();
@@ -838,7 +848,7 @@ fn machine_unauthorized_state_roots_refuse() {
         send_prepare(&mut client, session, 1, intent);
         let failed = next_failed(&mut client);
         assert_eq!(
-            failed.kind, kind,
+            failed.kind, *kind,
             "an unauthorized state root refuses: {name}"
         );
         handle
@@ -849,6 +859,57 @@ fn machine_unauthorized_state_roots_refuse() {
     assert!(
         !machine_install_dir(&roots.roots).exists(),
         "a refused state root installs nothing"
+    );
+    let elsewhere = &cases[5].1;
+    assert!(
+        std::fs::read_dir(elsewhere)
+            .expect("the foreign root reads")
+            .next()
+            .is_none(),
+        "a refused state root gains no state entries"
+    );
+}
+
+#[test]
+fn machine_production_worker_refuses_foreign_state() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
+    let foreign = scratch.path().join("foreign-state");
+    std::fs::create_dir_all(&foreign).expect("a well-formed directory");
+    let uid = rustix::process::getuid().as_raw();
+    let session = SessionId::new_v7();
+    let (mut client, mut worker) = UnixStream::pair().expect("a pair");
+    let installer_clone = installer.clone();
+    let handle = std::thread::spawn(move || {
+        serve_worker_isolated(
+            &mut worker,
+            &zup_linux::MachineRoots::production(),
+            uid,
+            std::process::id(),
+            session,
+            &installer_clone,
+        )
+    });
+    let _ = next_hello(&mut client);
+    let mut intent = install_intent(&foreign, None);
+    intent.state_root = foreign.display().to_string();
+    send_prepare(&mut client, session, 1, intent);
+    let failed = next_failed(&mut client);
+    assert_eq!(
+        failed.kind,
+        zup_protocol::failure::AUTHENTICATION,
+        "a production worker serves only its own state root"
+    );
+    handle
+        .join()
+        .expect("the worker exits")
+        .expect_err("refused");
+    assert!(
+        std::fs::read_dir(&foreign)
+            .expect("the foreign root reads")
+            .next()
+            .is_none(),
+        "a refused state root gains no state entries"
     );
 }
 

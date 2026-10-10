@@ -26,7 +26,43 @@ static MOUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ProductionMountIsolation {
     _lock: std::sync::MutexGuard<'static, ()>,
-    mounts: Vec<(PathBuf, bool)>,
+    mounts: Vec<PathBuf>,
+    shared_data_missing: bool,
+}
+
+fn require_real_dir(path: &Path, what: &str) {
+    let metadata = std::fs::symlink_metadata(path)
+        .unwrap_or_else(|_| panic!("isolation needs {what} at {}", path.display()));
+    assert!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "isolation needs {what} at {}, a real directory",
+        path.display()
+    );
+}
+
+fn cover_with_tmpfs(target: &Path) {
+    rustix::mount::mount(
+        c"tmpfs",
+        target,
+        c"tmpfs",
+        rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+        None::<&std::ffi::CStr>,
+    )
+    .unwrap_or_else(|_| panic!("a disposable mount covers {}", target.display()));
+    let fstype = rustix::fs::statfs(target)
+        .unwrap_or_else(|_| panic!("the covered path stats: {}", target.display()))
+        .f_type;
+    assert_eq!(
+        fstype,
+        TMPFS_MAGIC,
+        "isolation covers {} with tmpfs",
+        target.display()
+    );
+    // A fresh tmpfs root is world-writable; production machine parents
+    // are root-owned 0755, so mirror that inside the namespace. This
+    // mutation lands in the disposable mount, never on the host.
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|_| panic!("the disposable mount takes modes: {}", target.display()));
 }
 
 impl ProductionMountIsolation {
@@ -38,6 +74,15 @@ impl ProductionMountIsolation {
         // descriptor tables diverge and no memory is shared differently.
         // The process-wide lock serializes isolated tests so mounts never
         // interleave; other tests never touch production machine paths.
+        //
+        // Host safety never depends on Drop: propagation is made private
+        // before any mount, so every mount below is invisible to the host,
+        // and the kernel tears the namespace down with the process even on
+        // SIGKILL. Drop only restores the in-process view for later tests
+        // in this binary. Setup itself performs zero host-visible
+        // filesystem mutations: mountpoints are never created on the host.
+        // State coverage mounts the existing parent `/var/lib`, so the
+        // state directory itself is created inside the disposable mount.
         unsafe { rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNS) }
             .expect("a private mount namespace needs privilege to unshare");
         rustix::mount::mount_change(
@@ -48,56 +93,41 @@ impl ProductionMountIsolation {
         .expect("the private namespace propagates nothing to the host");
         let roots = zup_linux::MachineRoots::production();
         let mut mounts = Vec::new();
-        for target in [&roots.programs, &roots.state, &roots.shared_data] {
-            let created = if std::fs::symlink_metadata(target).is_err() {
-                std::fs::create_dir_all(target).expect(
-                    "isolation stages a missing production machine path inside its own namespace",
-                );
-                true
-            } else {
-                false
-            };
-            let metadata = std::fs::symlink_metadata(target).expect(
-                "isolation covers a production machine path that exists as a real directory",
-            );
-            assert!(
-                metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "isolation covers {target}, a real directory",
-                target = target.display()
-            );
-            rustix::mount::mount(
-                c"tmpfs",
-                target,
-                c"tmpfs",
-                rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
-                None::<&std::ffi::CStr>,
-            )
-            .expect("a disposable mount covers the production path");
-            let fstype = rustix::fs::statfs(target)
-                .expect("the covered path stats")
-                .f_type;
-            assert_eq!(
-                fstype,
-                TMPFS_MAGIC,
-                "isolation covers {target} with tmpfs",
-                target = target.display()
-            );
-            mounts.push((target.clone(), created));
+        require_real_dir(&roots.programs, "the program tree");
+        cover_with_tmpfs(&roots.programs);
+        mounts.push(roots.programs.clone());
+        let var_lib = roots.state.parent().expect("the state root has a parent");
+        require_real_dir(var_lib, "the state parent");
+        cover_with_tmpfs(var_lib);
+        mounts.push(var_lib.to_path_buf());
+        let shared_data_missing = std::fs::symlink_metadata(&roots.shared_data).is_err();
+        if !shared_data_missing {
+            require_real_dir(&roots.shared_data, "the shared-data tree");
+            cover_with_tmpfs(&roots.shared_data);
+            mounts.push(roots.shared_data.clone());
         }
         Self {
             _lock: lock,
             mounts,
+            shared_data_missing,
+        }
+    }
+
+    fn assert_host_untouched(&self) {
+        if self.shared_data_missing {
+            assert!(
+                std::fs::symlink_metadata(zup_linux::MachineRoots::production().shared_data)
+                    .is_err(),
+                "shared data stays absent: the product writes no shared data"
+            );
         }
     }
 }
 
 impl Drop for ProductionMountIsolation {
     fn drop(&mut self) {
-        for (target, created) in self.mounts.iter().rev() {
+        for target in self.mounts.iter().rev() {
             let _ = rustix::mount::unmount(target, rustix::mount::UnmountFlags::empty());
-            if *created {
-                let _ = std::fs::remove_dir(target);
-            }
         }
     }
 }
@@ -305,14 +335,13 @@ fn root_public_run_dispatches_machine_scope() {
     if !root_only() {
         return;
     }
-    let _isolation = ProductionMountIsolation::isolate();
-    let (_base, roots) = isolated();
+    let isolation = ProductionMountIsolation::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
     let request = |action| zup_linux::LinuxRunRequest {
         installer: installer.clone(),
         scope: SelectedScope::Machine,
-        state_root: Some(roots.state.clone()),
+        state_root: None,
         action,
         install_dir_override: None,
     };
@@ -327,12 +356,17 @@ fn root_public_run_dispatches_machine_scope() {
         "the payload installed through the public path"
     );
     assert_eq!(uid_of(&tool), 0);
+    assert!(
+        Path::new("/var/lib/zup").is_dir(),
+        "machine state lives in the isolated production namespace"
+    );
     let outcome = zup_linux::run(&request(LinuxAction::Uninstall));
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "the public machine run uninstalls: {outcome:?}"
     );
     assert!(!tool.exists(), "uninstall removes the payload");
+    isolation.assert_host_untouched();
 }
 
 #[test]

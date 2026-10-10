@@ -51,7 +51,7 @@ its own verified inputs.
 | Replay of old worker messages | Versioned bounded framing, per-sender sequences, one Prepare and one Execute per session, enforced by the portable session tracker. |
 | Cross-session message confusion | Every frame binds the session identity; strangers refuse. |
 | Plan substitution after authorization | Prepare carries the client's expected digest; Prepared echoes the worker's reconstruction; Execute names it exactly; mismatch refuses. |
-| State-root confusion between client and worker | The resolved machine state root travels in the intent; the worker authorizes it with the full hierarchy and trust battery and derives every state path from it, so digests only match when both sides plan from the same authorized root. |
+| State-root confusion between client and worker | The worker serves exactly its own configured state root: the intent echoes the root for digest binding, and any mismatch refuses before any filesystem effect. Client and worker plan identically, so digests only match on the same root. |
 | Package substitution after authorization | The carrier content hash is pinned at verification and rechecked before Execute; per-file digests and post-publish verification add depth. |
 | Symlink and path substitution | Descriptor-relative operations, symlink-ancestor refusal, no-follow opens, and the privileged destination allowlist (`/opt`, `/var/opt`, `/var/lib/zup`, plus typed `<unit>.service` sources under `/usr/local/lib/systemd/system`). |
 | Filesystem races | No check-then-act on names: kernel-enforced exclusive publication, durable backups before replace, atomic renames. |
@@ -110,12 +110,19 @@ its own verified inputs.
 - Test isolation never flows through environment variables or IPC: tests
   inject explicit roots through constructors the production paths never
   call. The machine state root is resolved once per request (explicit
-  override or production default), travels in the PrepareOperation
-  intent, and the worker authorizes it with the standard hierarchy and
-  trust checks before deriving ledger, lock, journal, and maintenance
-  paths from it. Program, shared-data, and systemd roots always
-  describe the production machine. The privileged end-to-end test
-  additionally enters a private mount namespace with disposable tmpfs
-  mounts over the production machine paths, so the real installation,
-  commit, and uninstall exercise production paths without ever
-  touching the host.
+  override or production default) and travels in the PrepareOperation
+  intent for digest binding, but the worker only serves its own
+  configured state root: a production worker accepts exactly
+  `/var/lib/zup`, never a client-supplied directory, no matter how
+  well-formed. Test loopback workers are constructed with isolated
+  roots, so the same equality check confines them without granting the
+  production worker any broader filesystem authority. Program,
+  shared-data, and systemd roots always describe the production
+  machine. The privileged end-to-end test enters a private mount
+  namespace with disposable tmpfs mounts over the production program
+  tree and the state parent (the state directory itself is created
+  inside the disposable mount), so the real installation, commit, and
+  uninstall run against the default production namespace without ever
+  touching the host. Host safety comes from private propagation plus
+  kernel namespace teardown, never from userspace cleanup: setup
+  performs no host-visible filesystem mutation at all.
