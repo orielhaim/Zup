@@ -259,10 +259,14 @@ fn crate_directory(name: &str) -> String {
 /// behind nineteen of them, and the machine ran out of disk partway through the
 /// workspace run.
 ///
-/// Cargo takes a lock on a target directory, so concurrent processes here queue
-/// rather than collide: the first builds, and the rest find it fresh and finish in
-/// the time it takes to read a manifest. The build product is the same bytes either
-/// way, which is all these tests ask of it.
+/// Sharing one directory means sharing its initialization, across processes:
+/// every test process runs `built()` below, and `built()` coordinates through an
+/// exclusive file lock plus a stamp file, because the `OnceLock` in this file
+/// only synchronizes threads within one process. Cargo's own target-directory
+/// lock serializes concurrent `cargo build` invocations, but it cannot protect
+/// the manifest and source writes that happen before Cargo starts - so those
+/// writes happen only while holding the fixture lock, and every builder writes
+/// the same bytes.
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -295,36 +299,156 @@ fn fixture_build(root: &Path) -> Command {
     command
 }
 
+/// The fixture manifest with its path dependencies resolved for this checkout.
+///
+/// Rendered once per process from constants, so every builder writes byte-identical
+/// content: concurrent builders can never disagree about what the tree holds.
+fn fixture_manifest() -> String {
+    PROBE_MANIFEST
+        .replace("zup_preset_ipc", &crate_directory("zup-preset-ipc"))
+        .replace(
+            "zup_preset_protocol",
+            &crate_directory("zup-preset-protocol"),
+        )
+}
+
 /// The fixture preset, built once for the whole run.
 ///
-/// Once per process, and cheap for every process after the first, because the
-/// directory is shared: these tests are about behaviour after a build, and a nested
+/// Once per process through the `OnceLock`, and once across processes through the
+/// protocol in `ensure_built`: a stamp file holding the exact input bytes marks a
+/// completed build, and an exclusive cross-process file lock serializes the
+/// builders. These tests are about behaviour after a build, and a nested
 /// cargo per test would be a second build inside a build.
 fn built() -> &'static PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT.get_or_init(|| {
-        let root = fixture_root();
-        std::fs::create_dir_all(root.join("src")).expect("a source directory");
-        std::fs::write(root.join("src/main.rs"), PRESET).expect("the preset source");
-        std::fs::write(
-            root.join("Cargo.toml"),
-            PROBE_MANIFEST
-                .replace("zup_preset_ipc", &crate_directory("zup-preset-ipc"))
-                .replace(
-                    "zup_preset_protocol",
-                    &crate_directory("zup-preset-protocol"),
-                ),
-        )
-        .expect("the manifest");
+    BUILT.get_or_init(ensure_built)
+}
 
-        let output = fixture_build(&root).output().expect("cargo runs");
-        assert!(
-            output.status.success(),
-            "the probe preset builds: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        executable_of(&output.stdout, "probe").expect("cargo named the executable")
-    })
+/// The marker a completed build leaves beside the manifest.
+///
+/// Its content is the manifest bytes plus the preset bytes, so any change to
+/// either input invalidates it without trusting filenames, clocks, or versions.
+fn fixture_stamp(root: &Path) -> PathBuf {
+    root.join("build.stamp")
+}
+
+/// The cross-process lock serializing fixture builders.
+///
+/// An OS file lock, not a marker file: the kernel releases it when the holder
+/// dies, so an interrupted build can never wedge every later run.
+fn fixture_lock(root: &Path) -> PathBuf {
+    root.join("build.lock")
+}
+
+/// The stamp content a finished build must leave: the exact input bytes.
+fn expected_stamp(manifest: &str) -> Vec<u8> {
+    let mut stamp = manifest.as_bytes().to_vec();
+    stamp.extend_from_slice(b"\0preset\0");
+    stamp.extend_from_slice(PRESET.as_bytes());
+    stamp
+}
+
+/// The executable a completed build produces, without asking Cargo.
+fn fixture_executable(root: &Path) -> PathBuf {
+    root.join("target")
+        .join("debug")
+        .join(format!("probe{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Whether the tree already holds a completed build of these exact inputs.
+///
+/// A stale stamp, an unreadable stamp, or a missing executable all answer no,
+/// and every one of those answers leads back under the lock - never to a retry
+/// loop, and never to trusting a half-written tree.
+fn is_fresh(root: &Path, expected: &[u8]) -> bool {
+    std::fs::read(fixture_stamp(root)).is_ok_and(|actual| actual == expected)
+        && fixture_executable(root).is_file()
+}
+
+/// A held exclusive fixture lock; dropping the file releases it.
+struct BuildLock {
+    _file: std::fs::File,
+}
+
+impl BuildLock {
+    fn acquire(root: &Path) -> Self {
+        // Write access only so `create` works; the file is never written and
+        // must never be truncated while another process may hold it locked.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(fixture_lock(root))
+            .expect("the fixture lock opens");
+        // `File::lock` blocks until exclusive ownership transfers; the kernel
+        // releases it if this process dies, so an interrupted build can never
+        // wedge every later run.
+        file.lock().expect("one builder owns the fixture tree");
+        Self { _file: file }
+    }
+}
+
+/// The fixture preset, built under the cross-process protocol.
+///
+/// The fast path needs no lock: a matching stamp plus a present executable
+/// means no builder is active (a builder only starts when exactly that check
+/// fails), and the `cargo build` it runs is serialized by Cargo's own
+/// target-directory lock while keeping its usual freshness tracking for the
+/// path dependencies. The slow path holds the exclusive lock, rechecks (a
+/// builder may have finished while this process waited), then rewrites both
+/// source files unconditionally - so whatever an interrupted predecessor left
+/// behind is gone before Cargo starts - builds, and stamps only on success.
+/// A failed build leaves the stamp stale or absent, so the next process builds
+/// again instead of trusting the tree.
+fn ensure_built() -> PathBuf {
+    let root = fixture_root();
+    std::fs::create_dir_all(root.join("src")).expect("a source directory");
+    let manifest = fixture_manifest();
+    let expected = expected_stamp(&manifest);
+    if is_fresh(&root, &expected) {
+        return build(&root);
+    }
+    let _lock = BuildLock::acquire(&root);
+    if is_fresh(&root, &expected) {
+        return build(&root);
+    }
+    std::fs::write(root.join("src/main.rs"), PRESET).expect("the preset source");
+    std::fs::write(root.join("Cargo.toml"), &manifest).expect("the manifest");
+    let executable = build(&root);
+    std::fs::write(fixture_stamp(&root), &expected).expect("the completed build stamps");
+    executable
+}
+
+/// One Cargo build of the fixture tree, returning the preset executable.
+///
+/// Every caller runs this - the lock only gates the source writes, never the
+/// build - because Cargo's freshness tracking for the path dependencies must
+/// keep working exactly as if each process built the tree itself.
+fn build(root: &Path) -> PathBuf {
+    let output = fixture_build(root).output().expect("cargo runs");
+    assert!(
+        output.status.success(),
+        "the probe preset builds: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable_of(&output.stdout, "probe").expect("cargo named the executable")
+}
+
+#[test]
+fn a_stale_stamp_rebuilds_instead_of_trusting_the_tree() {
+    let root = fixture_root();
+    std::fs::create_dir_all(root.join("src")).expect("a source directory");
+    std::fs::write(fixture_stamp(&root), b"from a build of other inputs").expect("a stale stamp");
+    let executable = ensure_built();
+    assert!(
+        executable.is_file(),
+        "a stale stamp rebuilds the executable"
+    );
+    assert!(
+        is_fresh(&root, &expected_stamp(&fixture_manifest())),
+        "and leaves a stamp for these exact inputs"
+    );
 }
 
 /// One executable out of a Cargo JSON stream, by binary name.
