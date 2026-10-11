@@ -200,6 +200,10 @@ fn a_damaged_package_is_refused_before_anything_is_read_from_it() {
 /// A target the package does not carry is a refusal that names both what was
 /// asked for and what is there, because "unsupported target" alone leaves the
 /// author guessing.
+///
+/// The missing target is one neither host carries: the package holds this
+/// host's triple plus one foreign one, so the refusal names both on every
+/// machine the suite runs on.
 #[test]
 fn a_target_the_package_does_not_carry_names_what_it_has() {
     let directory = tempfile::tempdir().expect("a directory");
@@ -207,12 +211,12 @@ fn a_target_the_package_does_not_carry_names_what_it_has() {
     let error = select(
         &path,
         &installer(),
-        &target("x86_64-unknown-linux-gnu"),
+        &target("aarch64-unknown-linux-gnu"),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
-    .expect_err("this package has no Linux binary");
+    .expect_err("this package has no such binary");
     let message = error.to_string();
-    assert!(message.contains("x86_64-unknown-linux-gnu"), "{message}");
+    assert!(message.contains("aarch64-unknown-linux-gnu"), "{message}");
     assert!(message.contains(HOST), "{message}");
     assert!(message.contains("aarch64-apple-darwin"), "{message}");
 }

@@ -1,11 +1,17 @@
 //! `zup preview`: the application's own window, resolved as a build resolves it.
 //!
+//! Windows-only: previewing presents a window through the Windows preset host,
+//! and the fixtures are Windows GUI projects with PE templates. A Linux
+//! console installer presents no window, so there is nothing to preview there.
+
+#![cfg(windows)]
+//!
 //! Every claim here is about reuse, and reuse is invisible when it is missing, so
 //! each test states the same thing a build would state about the same project and
 //! then checks that the preview says it too.
 //!
 //! The window is `zup-preset-test`: a real preset, built against the public
-//! `zup-preset-sdk` and nothing else, staged by the same run as every other real
+//! `zup-sdk` and nothing else, staged by the same run as every other real
 //! binary. It is the right thing to preview with because it behaves like a
 //! third-party preset rather than like a test: it reads the settings the
 //! application configured, reports what it received to a path those settings

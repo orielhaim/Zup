@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Platform abstraction layer for zup"
 
 [dependencies]
+atomic-write-file.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 typed-path.workspace = true
@@ -14,4 +15,5 @@ zup-core.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true
 serde_json.workspace = true

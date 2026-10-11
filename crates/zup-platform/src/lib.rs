@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod command;
+mod document;
 mod install_locations;
 mod resolve;
 mod source_policy;
@@ -13,6 +14,7 @@ mod target_path;
 mod target_plan;
 
 pub use command::CommandSpec;
+pub use document::{DocumentError, publish, publish_new};
 pub use install_locations::{InstallLocationError, InstallLocationResolver};
 pub use resolve::{TemplateResolveError, resolve_template_path};
 pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};

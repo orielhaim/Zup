@@ -38,6 +38,7 @@ fn file_work(key: ResourceKey, source: &str, destination: TargetPath) -> FileWor
         expected_size: contents.len() as u64,
         privilege: Privilege::User,
         delta: FileDelta::Create,
+        executable: false,
     }
 }
 
@@ -233,4 +234,55 @@ fn self_dependency_names_the_operation_key() {
             resource: TransactionResource::key(&key),
         }
     );
+}
+
+/// A retired removal is a valid backend dependency: regenerating derived
+/// state from the removed world is exactly what a refresh does.
+#[test]
+fn a_backend_apply_may_follow_a_removal() {
+    use zup_transaction::{OperationId, compile_transaction};
+
+    let id = BackendResourceId::new("fake.refresh").unwrap();
+    let backend = ResourceKey::Backend { id: id.clone() };
+    let retired = file_key("old.exe");
+    let mut input = TransactionInput::new(target());
+    input.retired_keys = vec![retired.clone()];
+    input.removals = vec![removal(retired.clone(), tpath(r"C:\PF\Acme\old.exe"))];
+    input.backend_operations = vec![
+        BackendOperation::apply(backend.clone(), id, Privilege::User, b"refresh".to_vec())
+            .with_dependencies(vec![retired.clone()]),
+    ];
+    input.validate().expect("a removal is a valid dependency");
+
+    let plan = compile_transaction(&input).expect("the plan compiles");
+    let position = |token: &str, key: &ResourceKey| {
+        plan.execution_order
+            .iter()
+            .position(|node| node == &OperationId::resource(token, key))
+            .expect("the node is planned")
+    };
+    assert!(
+        position("remove_file", &retired) < position("backend_apply", &backend),
+        "the refresh follows the removal it derives from"
+    );
+}
+
+/// Without an explicit dependency a backend apply is not ordered against
+/// removals: the blanket edge that once forced it is gone, so ordering is
+/// stated where it is needed rather than inherited.
+#[test]
+fn a_backend_apply_without_dependencies_is_unordered_against_removals() {
+    let id = BackendResourceId::new("fake.refresh").unwrap();
+    let retired = file_key("old.exe");
+    let mut input = TransactionInput::new(target());
+    input.retired_keys = vec![retired.clone()];
+    input.removals = vec![removal(retired.clone(), tpath(r"C:\PF\Acme\old.exe"))];
+    input.backend_operations = vec![BackendOperation::apply(
+        ResourceKey::Backend { id: id.clone() },
+        id,
+        Privilege::User,
+        b"refresh".to_vec(),
+    )];
+    input.validate().expect("no dependency is still valid");
+    zup_transaction::compile_transaction(&input).expect("the plan compiles");
 }

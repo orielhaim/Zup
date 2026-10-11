@@ -1,16 +1,14 @@
-//! Windows file executor integration tests (temporary trees only).
-
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{RelativePath, Sha256Digest, TargetTriple, hash_reader};
 use zup_transaction::{
-    FileDelta, FilePrecondition, OperationId, TransactionInput, compile_transaction,
+    FileDelta, FilePrecondition, InstallationLock, LockScope, OperationId, TransactionInput,
+    compile_transaction,
 };
 use zup_windows::{
-    InstallationLock, LockScope, NullProgress, WindowsFileExecutor, apply_node, create_durable,
-    reconcile_node, to_host_path,
+    NullProgress, WindowsFileExecutor, apply_node, create_durable, reconcile_node, to_host_path,
 };
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
@@ -55,6 +53,9 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
         source,
         dir.path().join("work"),
         "removal-test".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     assert_eq!(
@@ -173,6 +174,9 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         source,
         dir.path().join("work"),
         record.transaction_id.to_string(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     ));
     record.phase = TransactionPhase::Applying;
@@ -244,10 +248,6 @@ fn installation_lock_exclusive() {
     assert!(third.is_some(), "lock released on drop");
 }
 
-/// The lock's identity is the installation, not the operation or the machine
-/// layout. Everything here is a case where getting it wrong means either two
-/// processes mutating one ledger, or two unrelated installs refusing to run at
-/// the same time.
 #[test]
 fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
     let acme = InstallationLock::lock_key("com.acme.desktop", "user");
@@ -260,10 +260,6 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
          separate ledgers, separate directories and separate uninstall entries"
     );
 
-    // A bootstrap and a transaction on the same installation are the same
-    // authority, but a parent that is staging prerequisites and a worker that is
-    // installing files are different moments of one operation, and the key has
-    // to say so without the two ever colliding.
     let bootstrap = InstallationLock::key_for("com.acme.desktop", "user", LockScope::Bootstrap);
     let lifecycle = InstallationLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle);
     assert_eq!(
@@ -283,16 +279,11 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
         "two applications are two installations, bootstrap phase included"
     );
 
-    // The key has to survive a character an application id may legally contain
-    // but a file name may not.
     let awkward = InstallationLock::lock_key("com.acme.desktop/../../etc", "user");
     assert!(!awkward.contains('/'), "{awkward}");
     assert!(!awkward.contains(".."), "{awkward}");
 }
 
-/// A lock marker left behind by an uninstall must not be removable while
-/// somebody holds it, and removing an absent one must not be an error - an
-/// uninstall that fails because it ran twice is worse than useless.
 #[test]
 fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
     let dir = TempDir::new().unwrap();
@@ -308,19 +299,14 @@ fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
     drop(held);
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
     assert!(!dir.path().join(format!("{key}.lock")).exists());
-    // And removing again is not an error: uninstall is idempotent.
+
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
 }
 
-/// A staged file becomes an installed one through two nodes, and what the
-/// receipt says afterwards differs by whether anything was there before: a
-/// create names what it installed, a replace names what it displaced and keeps a
-/// copy of it.
 #[test]
 fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
     let rel = RelativePath::new("a.bin").unwrap();
 
-    // A create names what it installed.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"hello").unwrap();
     let dest = target_root.join("a.bin");
@@ -328,6 +314,9 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
         src,
         target_root.join("work"),
         "tx1".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -344,7 +333,6 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
     }
     assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
 
-    // A replace names what it displaced and keeps a copy of it.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
     let dest = target_root.join("a.bin");
@@ -353,6 +341,9 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
         src,
         target_root.join("work"),
         "tx2".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -407,9 +398,6 @@ fn mutation_node(verb: &str, delta: FileDelta, dest: &Path) -> zup_transaction::
     }
 }
 
-/// A precondition that no longer holds is drift, and drift is never resolved by
-/// overwriting: whatever is at the destination is somebody's, whoever wrote it
-/// after the plan was made.
 #[test]
 fn a_target_that_changed_after_the_plan_is_refused_and_left_alone() {
     for (delta, on_disk, expected) in [
@@ -433,12 +421,14 @@ fn a_target_that_changed_after_the_plan_is_refused_and_left_alone() {
             src,
             target_root.join("work"),
             "tx-drift".into(),
+            TargetTriple::parse("x86_64-pc-windows-msvc")
+                .unwrap()
+                .executable_suffix(),
             Box::new(NullProgress),
         );
         let rel = RelativePath::new("a.bin").unwrap();
         let op = mutation_node("drift", delta, &dest);
-        // The plan recorded the state the executor found when the plan was made,
-        // which is not the state the destination is in now.
+
         exec.note_file(
             &op.id,
             FilePrecondition::Exact {
@@ -488,17 +478,10 @@ fn reconcile_absent_and_applied() {
     );
 }
 
-/// A receipt is a claim about bytes on disk, so verification is only as good as
-/// the receipt it was handed. Every part of a receipt has to be checked: a
-/// published payload is no longer staged, a replaced file's backup is as much a
-/// part of the claim as the file in front of it, and a removed file is verified
-/// by its absence.
 #[test]
 fn verification_follows_every_part_of_a_receipt() {
     use zup_windows::verify_installed_file;
 
-    // Create: the staged copy is consumed by the publish, and anything other
-    // than the recorded bytes fails.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"hello").unwrap();
     let dest = target_root.join("a.bin");
@@ -506,6 +489,9 @@ fn verification_follows_every_part_of_a_receipt() {
         src,
         target_root.join("work"),
         "tx-verify".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     let rel = RelativePath::new("a.bin").unwrap();
@@ -542,7 +528,6 @@ fn verification_follows_every_part_of_a_receipt() {
         "a missing installed file is not verified"
     );
 
-    // Replace: the backup is part of the claim, not a leftover.
     let (_dir, payload_root, target_root, src) = setup();
     std::fs::write(payload_root.join("a.bin"), b"new!").unwrap();
     let dest = target_root.join("a.bin");
@@ -551,6 +536,9 @@ fn verification_follows_every_part_of_a_receipt() {
         src,
         target_root.join("work"),
         "tx-verify-replace".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -623,12 +611,14 @@ fn removal_verification_requires_absent_destination_and_intact_backup() {
         source,
         dir.path().join("work"),
         "removal-verify".into(),
+        TargetTriple::parse("x86_64-pc-windows-msvc")
+            .unwrap()
+            .executable_suffix(),
         Box::new(NullProgress),
     );
     let receipt = exec.apply_owned_file_removal(node).unwrap();
     verify_installed_file(&receipt).expect("removal matches its receipt");
 
-    // A file that reappeared at the destination is no longer removed.
     std::fs::write(to_host_path(&destination).unwrap(), b"owned").unwrap();
     assert!(
         verify_installed_file(&receipt).is_err(),

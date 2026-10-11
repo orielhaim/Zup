@@ -1,71 +1,21 @@
-//! `zup sign`: hand a build's output to an external signer and finalize it.
-//!
-//! # Why signing is a file contract and not a call
-//!
-//! Signing is the one build step zup cannot perform, for a reason that has
-//! nothing to do with architecture: the credential belongs to a key the project
-//! owns, and a build tool that can reach a private key is a build tool whose
-//! compromise is a signing compromise. So zup writes down what needs signing,
-//! gets out of the way, and then *proves* what came back.
-//!
-//! That makes three commands where a naive design would have one, and the middle
-//! one is the user's own tooling:
-//!
-//! ```text
-//! zup build            →  artifacts, zup-release.json, zup-signing.json
-//! signtool /tr … /fd SHA256 …   ← whatever the project already uses
-//! zup sign verify      →  signatures checked, zup-release.json finalized
-//! ```
-//!
-//! It also means the pipeline is not GitHub-shaped. Azure Artifact Signing,
-//! SignPath, a hardware token, a company KMS, and a shell script that shells out
-//! to `signtool` are the same contract, and none of them needs a zup feature.
-//!
-//! # What `verify` proves, in order
-//!
-//! 1. Every file in the plan exists.
-//! 2. Every file carries a signature, and the signature covers *its* bytes.
-//! 3. The signature is from the expected publisher, when one was named.
-//! 4. The signature carries an RFC 3161 timestamp, unless the plan says
-//!    otherwise - which only a development plan does.
-//! 5. For a composed artifact, the native runtime embedded inside it is
-//!    byte-for-byte the runtime the plan named, and that runtime is signed.
-//!
-//! Step 5 is the one a signing-only pipeline misses, and it is the one that
-//! matters: the outer artifact's signature covers the embedded runtime as
-//! resource data, and the runtime is later extracted to `maintenance.exe` and
-//! executed. A release that skips step 5 ships an unsigned executable on every
-//! user's machine, behind a well-signed one.
-//!
 //! # What `verify` never does
-//!
-//! It does not sign, and it does not hold a credential. A project that cannot
-//! produce a signed artifact is asked to say so with `--allow-unsigned`, and the
-//! release stays unfinalized, and a publisher refuses to upload it.
-//!
-//! # Where the answers come from
-//!
-//! Windows is the only platform that can say whether a signature is *trusted*, so
-//! the trust and publisher questions are `zup_windows::signing`'s to answer and
-//! this module's only to act on. The portable plan, the requirement it states,
-//! the evidence recorded, and the built-to-finalized transition are
-//! `zup_signing`'s, and the release description that carries the result is
-//! `zup_artifact`'s. None of the three knows about the other two's job.
 
 use std::path::{Path, PathBuf};
 
 use zup_automation::{
     AutomationResult, ByteCount, Details, Diagnostic, Digest, Identifier, LogLevel, SignSubject,
 };
+#[cfg(windows)]
+use zup_signing::TimestampRequirement;
 use zup_signing::{
     Measured as FileMeasured, SIGNING_PLAN_NAME, SigningPlan, SigningReason, SigningRole,
-    SigningStage, SigningStep, SigningSubject, TimestampRequirement, covers_bytes, publisher,
-    timestamp,
+    SigningStage, SigningStep, SigningSubject, covers_bytes, publisher, timestamp,
 };
+#[cfg(windows)]
 use zup_windows::signing::{SignaturePolicy, Timestamp};
 
 use crate::cli::{SignPrepareCommand, SignVerifyCommand};
-use crate::report::Reporter;
+use crate::failure::Reporter;
 
 fn manifest_path(root: &Path) -> PathBuf {
     root.join(zup_artifact::RELEASE_MANIFEST_NAME)
@@ -109,10 +59,6 @@ fn read_plan(root: &Path) -> miette::Result<SigningPlan> {
     })
 }
 
-/// Write the signing plan, from the release description beside it.
-///
-/// `prepare` re-derives rather than re-reads, so a plan can be regenerated after
-/// an artifact was replaced and cannot describe a release that no longer exists.
 pub fn run_prepare(root: PathBuf, args: SignPrepareCommand) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let release = read_manifest(&root)?;
@@ -167,7 +113,7 @@ pub fn run_prepare(root: PathBuf, args: SignPrepareCommand) -> miette::Result<Au
             format!("signing plan: {error}"),
         )
     })?;
-    zup_windows::write_durable(&path, &encoded).map_err(|error| {
+    zup_platform::publish(&path, &encoded).map_err(|error| {
         crate::failure::error(
             "zup.signing.plan_unwritable",
             format!("`{}`: {error}", path.display()),
@@ -196,7 +142,6 @@ pub fn run_prepare(root: PathBuf, args: SignPrepareCommand) -> miette::Result<Au
     )
 }
 
-/// One signing step, as the protocol reports it.
 fn subject_of(
     step: &SigningStep,
     verified: bool,
@@ -226,13 +171,6 @@ fn subject_of(
     }
 }
 
-/// The plan, as a person reads it.
-///
-/// Deterministic and derived entirely from the plan, so two machines that built
-/// the same release print the same thing - which is what makes a CI log diffable.
-/// The subject names are the release's own (`windows-x64`, a variant id), not a
-/// crate or a type, because the reader of this output is a person deciding what to
-/// hand to their signing service.
 fn render(plan: &SigningPlan) -> String {
     let mut out = String::new();
     out.push_str("Signing plan\n\n");
@@ -272,14 +210,6 @@ fn render(plan: &SigningPlan) -> String {
     out
 }
 
-/// One native runtime the release needs signed before composition.
-///
-/// A composed artifact's runtime lives at `runtime/<variant>.exe` beside the
-/// artifacts, because a build does not copy the toolchain's template into the
-/// release: a release pipeline stages the *signed* copy there, and composes from
-/// that. A missing file is a fact worth reporting rather than an error here -
-/// the pipeline may not have staged it yet, and `verify` is where absence is
-/// fatal.
 fn runtime_step(
     root: &Path,
     release: &zup_artifact::ReleaseManifest,
@@ -318,8 +248,6 @@ fn runtime_step(
     ))
 }
 
-/// The variants a release's universal artifacts embed, and which artifacts carry
-/// them.
 fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, Vec<String>)> {
     let mut by_variant: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
@@ -337,15 +265,10 @@ fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, 
     by_variant.into_iter().collect()
 }
 
-/// The policy a plan's requirement becomes.
-///
-/// The two vocabularies state the same requirements, and this is the one place
-/// they are translated, so a new field has to be answered twice or not at all.
+#[cfg(windows)]
 fn policy(plan: &SigningPlan, online_revocation: bool) -> SignaturePolicy {
     SignaturePolicy {
         require_trusted_chain: plan.requirement.trusted_chain,
-        // The requirement is one decision, so the policy's two timestamp rules
-        // cannot disagree: relaxing the timestamp relaxes the legacy form with it.
         require_rfc3161_timestamp: plan.requirement.timestamp == TimestampRequirement::Required,
         reject_legacy_timestamp: plan.requirement.timestamp == TimestampRequirement::Required,
         subject: plan.requirement.publisher.clone(),
@@ -354,31 +277,114 @@ fn policy(plan: &SigningPlan, online_revocation: bool) -> SignaturePolicy {
     }
 }
 
-/// What verification concluded about one file.
 struct Finding {
     path: String,
     detail: String,
     ok: bool,
-    /// Measured from the bytes on disk, when they could be read.
     measured: Option<(zup_core::Sha256Digest, u64)>,
 }
 
-/// Verify every signature and finalize the release description.
+fn step_is_linux(release: &zup_artifact::ReleaseManifest, step: &SigningStep) -> bool {
+    let mut targets = Vec::new();
+    if step.role == SigningRole::OuterArtifact {
+        if let Some(artifact) = release
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == step.subject.path)
+        {
+            for variant in &artifact.variants {
+                if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
+                    targets.push(entry.target.clone());
+                }
+            }
+        }
+    } else {
+        for variant in &step.subject.variants {
+            if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
+                targets.push(entry.target.clone());
+            }
+        }
+    }
+    !targets.is_empty()
+        && targets
+            .iter()
+            .all(|target| target.operating_system() == zup_core::TargetOperatingSystem::Linux)
+}
+
 pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
     let mut release = read_manifest(&root)?;
     let plan = read_plan(&root)?;
+    #[cfg(windows)]
     let policy = policy(&plan, args.online_revocation);
     let mut findings: Vec<Finding> = Vec::new();
 
-    // The pre-compose subjects are verified first and their post-signature
-    // digests kept, because step 5 compares them against what an artifact
-    // actually embeds. A runtime discovered later in the list is still verified
-    // before any artifact is finalized: the plan's order is the order.
+    #[cfg(windows)]
     let mut signed_runtimes: std::collections::BTreeMap<String, zup_core::Sha256Digest> =
         std::collections::BTreeMap::new();
     for file in &plan.steps {
+        #[cfg(windows)]
         let path = file.subject.resolve(&root);
+        if step_is_linux(&release, file) {
+            if !args.allow_unsigned {
+                findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: "this Linux installer carries no platform-native signature: its \
+                             artifact digest and release identity are its authenticity; re-run \
+                             with `--allow-unsigned` to finalize the measured bytes"
+                        .to_owned(),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                });
+                continue;
+            }
+            match unsigned_finalize(&mut release, &root, file) {
+                Ok(detail) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail,
+                    ok: true,
+                    measured: measured_of(&root, file),
+                }),
+                Err(problem) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: format!("it cannot be finalized unsigned: {problem}"),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                }),
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
+        {
+            if !args.allow_unsigned {
+                findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: "signature verification for this Windows artifact requires a \
+                             Windows build host; re-run with `--allow-unsigned` to finalize \
+                             the measured bytes instead"
+                        .to_owned(),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                });
+                continue;
+            }
+            match unsigned_finalize(&mut release, &root, file) {
+                Ok(detail) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail,
+                    ok: true,
+                    measured: measured_of(&root, file),
+                }),
+                Err(problem) => findings.push(Finding {
+                    path: file.subject.path.clone(),
+                    detail: format!("it cannot be finalized unsigned: {problem}"),
+                    ok: false,
+                    measured: measured_of(&root, file),
+                }),
+            }
+            continue;
+        }
+        #[cfg(windows)]
         match zup_windows::signing::verify(&path, &policy) {
             Ok(verified) => {
                 let measured = FileMeasured::of(&path).map_err(|error| {
@@ -400,11 +406,6 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
                     ok: true,
                     measured: Some((measured.digest, measured.size)),
                 });
-                // A post-compose subject is the published file, so it is
-                // finalized here and nowhere else: the digest and size recorded
-                // are measured from the bytes that carry the signature that was
-                // just checked, and `finalize` measures them a second time so a
-                // file that moved in between cannot be published.
                 if file.role == SigningRole::OuterArtifact {
                     let id = artifact_id(&release, &file.subject.path)?;
                     release
@@ -418,11 +419,7 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
                 }
             }
             Err(error) if args.allow_unsigned => {
-                // An unsigned release is legitimate for an internal or
-                // development distribution, and its published identity is simply
                 // the bytes as they stand. What must never happen is finalizing
-                // something that is *not* what it claims to be, so the file is
-                // still measured and the refusal is reported as a fact.
                 match unsigned_finalize(&mut release, &root, file) {
                     Ok(detail) => findings.push(Finding {
                         path: file.subject.path.clone(),
@@ -452,17 +449,24 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
         }
     }
 
-    // The nested-runtime check: an artifact embeds the runtime it was composed
-    // from, and that runtime's own signature is what a user ultimately executes.
-    //
-    // It is a separate pass because the answer is not in the artifact: the bytes
-    // have to be read back out of it, and compared against the *signed* runtime
-    // rather than against the plan's pre-signature digest.
     for step in plan.post_compose().collect::<Vec<_>>() {
         let path = step.subject.resolve(&root);
         if !path.is_file() {
             continue;
         }
+        // composition machinery. A Linux release never embeds one, so this
+        #[cfg(not(windows))]
+        if !plan.embeds(step).is_empty() {
+            findings.push(Finding {
+                path: step.subject.path.clone(),
+                detail: "this composed artifact embeds a native runtime that can only be proven \
+                         on a Windows build host"
+                    .to_owned(),
+                ok: false,
+                measured: measured_of(&root, step),
+            });
+        }
+        #[cfg(windows)]
         for embedded in plan.embeds(step) {
             let runtime_path = embedded.subject.path.clone();
             let Some(signed) = signed_runtimes.get(&runtime_path) else {
@@ -521,9 +525,6 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
                 }),
             }
         }
-        // A single-target installer is its own runtime, so the outer signature is
-        // the runtime's signature. Recording it is what tells a downloader the
-        // persisted maintenance executable is signed.
         if plan.embeds(step).is_empty()
             && step.subject.variants.len() == 1
             && let Some(variant) = step.subject.variants.first()
@@ -541,9 +542,6 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
     }
 
     for finding in &findings {
-        // Streamed as it is found rather than at the end: verifying a large release
-        // takes minutes, and a pipeline watching it wants the first failure while the
-        // rest is still running.
         let diagnostic = Diagnostic::error("zup.signing.failed", finding.detail.clone())
             .with_help(format!("`{}`", finding.path));
         if finding.ok {
@@ -596,9 +594,6 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
         .with_release_manifest(crate::automation::project_path(&path));
 
     if failed > 0 {
-        // A failure here is a report, not a refusal: `--report-only` exists so a
-        // pipeline can see every finding before it decides to stop, and the exit code
-        // is the same either way because the release is not finalized in both cases.
         let _ = args.report_only;
         let mut result = result.failed().with_summary(format!(
             "{failed} of {} check(s) failed; the release was not finalized",
@@ -636,7 +631,7 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
             format!("release description: {error}"),
         )
     })?;
-    zup_windows::write_durable(&path, &encoded).map_err(|error| {
+    zup_platform::publish(&path, &encoded).map_err(|error| {
         crate::failure::error(
             "zup.signing.manifest_unwritable",
             format!("`{}`: {error}", path.display()),
@@ -646,14 +641,41 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
     let unsigned = release.unsigned();
     reporter.log(LogLevel::Info, finalize_text(&release, &unsigned, &path));
     if !unsigned.is_empty() {
+        let all_linux = unsigned.iter().all(|id| {
+            release
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == *id)
+                .is_some_and(|artifact| {
+                    artifact.variants.iter().all(|variant| {
+                        release
+                            .variants
+                            .iter()
+                            .find(|entry| entry.id == *variant)
+                            .is_some_and(|entry| {
+                                entry.target.operating_system()
+                                    == zup_core::TargetOperatingSystem::Linux
+                            })
+                    })
+                })
+        });
         reporter.log(
             LogLevel::Warning,
-            format!(
-                "\n! {} artifact(s) are unsigned: {}\n  Windows SmartScreen will warn about them. \
-                 See docs/signing.md.",
-                unsigned.len(),
-                unsigned.join(", ")
-            ),
+            if all_linux {
+                format!(
+                    "\n! {} artifact(s) carry no platform-native signature: {}\n  Linux \
+                     installers are authenticated by their artifact digest and release identity.",
+                    unsigned.len(),
+                    unsigned.join(", ")
+                )
+            } else {
+                format!(
+                    "\n! {} artifact(s) are unsigned: {}\n  Windows SmartScreen will warn about them. \
+                     See docs/signing.md.",
+                    unsigned.len(),
+                    unsigned.join(", ")
+                )
+            },
         );
     }
     result = result.with_details(Details::SignVerify(zup_automation::SignVerifyDetails {
@@ -665,13 +687,10 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
     Ok(result)
 }
 
-/// A count that is structurally small, and so is inside the range every consumer holds
-/// exactly.
 fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// What a person reads after a successful verification.
 fn finalize_text(
     release: &zup_artifact::ReleaseManifest,
     unsigned: &[&str],
@@ -714,11 +733,6 @@ fn finalize_text(
     out
 }
 
-/// Measure a subject from the bytes on disk, when they can be read.
-///
-/// Verification has already refused or accepted the file by this point; this is only
-/// so a report can carry the identity it is talking about, and a file that vanished
-/// between the two is a `None` rather than a second failure.
 fn measured_of(root: &Path, step: &SigningStep) -> Option<(zup_core::Sha256Digest, u64)> {
     let path = step.subject.resolve(root);
     FileMeasured::of(&path)
@@ -726,12 +740,7 @@ fn measured_of(root: &Path, step: &SigningStep) -> Option<(zup_core::Sha256Diges
         .map(|measured| (measured.digest, measured.size))
 }
 
-/// A code for the failure the platform reported, when it names one.
-///
-/// `zup_windows::signing`'s errors are the platform's own wording, so a code is
-/// chosen from the words rather than parsed out of a string. Anything unrecognised
-/// falls back to `zup.signing.failed`, which is still better than a code per possible
-/// platform message.
+#[cfg(windows)]
 fn signing_diagnostic_code(
     error: &zup_windows::signing::VerificationError,
 ) -> Option<&'static str> {
@@ -749,14 +758,15 @@ fn signing_diagnostic_code(
     })
 }
 
-/// The signing evidence of a subject whose file is already on disk and was
-/// already found to carry a signature.
-///
-/// Read with [`zup_windows::signing::inspect`] rather than `verify`, deliberately:
-/// the policy was applied once, in the loop above, and a second pass with a
-/// different policy would be a second opinion from a laxer question. What is
-/// wanted here is the *evidence* about a file whose signature has already been
-/// accepted, not a fresh decision about whether to accept it.
+#[cfg(not(windows))]
+fn signed_evidence_of(
+    _root: &Path,
+    _step: &SigningStep,
+) -> Option<Vec<zup_signing::SigningEvidence>> {
+    None
+}
+
+#[cfg(windows)]
 fn signed_evidence_of(
     root: &Path,
     step: &SigningStep,
@@ -770,14 +780,6 @@ fn signed_evidence_of(
     }
 }
 
-/// Finalize one file that carries no signature.
-///
-/// The identity is the bytes, re-measured from the file rather than copied from
-/// the build, so an unsigned release is as verifiable as a signed one - the only
-/// difference is that nothing proves who produced it. A runtime that is unsigned
-/// cannot be "verified", so it is finalized against its own bytes and reported
-/// plainly; an outer artifact is finalized through the manifest so the release
-/// records the fact rather than the reader inferring it.
 fn unsigned_finalize(
     release: &mut zup_artifact::ReleaseManifest,
     root: &Path,
@@ -814,6 +816,7 @@ fn unsigned_finalize(
     ))
 }
 
+#[cfg(windows)]
 fn timestamp_text(timestamp: Timestamp) -> &'static str {
     match timestamp {
         Timestamp::Rfc3161 => "RFC 3161 timestamp",
@@ -822,7 +825,6 @@ fn timestamp_text(timestamp: Timestamp) -> &'static str {
     }
 }
 
-/// The artifact id a signable path belongs to.
 fn artifact_id(release: &zup_artifact::ReleaseManifest, path: &str) -> miette::Result<String> {
     release
         .artifacts
@@ -837,11 +839,7 @@ fn artifact_id(release: &zup_artifact::ReleaseManifest, path: &str) -> miette::R
         })
 }
 
-/// The digest of the native runtime a composed artifact actually embeds.
-///
-/// Read out of the artifact rather than taken from the release description,
-/// because the question is what the bytes are, not what anybody claimed about
-/// them. A resource-addressed store is the only place they exist.
+#[cfg(windows)]
 fn embedded_runtime_digest(
     artifact: &Path,
     variant: &str,
@@ -893,9 +891,7 @@ mod tests {
         SigningPlan::new(&app(), requirement)
     }
 
-    /// A production requirement is the only one that may demand a trusted chain
-    /// and a real TSA. Nothing in a test can prove a signature verifies, so the
-    /// property pinned here is the policy those two booleans drive.
+    #[cfg(windows)]
     #[test]
     fn a_production_requirement_becomes_a_production_policy() {
         let policy = policy(
@@ -908,10 +904,7 @@ mod tests {
         assert_eq!(policy.subject.as_deref(), Some("Acme"));
     }
 
-    /// A development requirement is one decision - a self-signed chain and no
-    /// TSA - so it cannot produce a policy that demands a timestamp it has already
-    /// stopped requiring. The two old flags could be passed separately and reach
-    /// that contradiction; the single `TimestampRequirement` cannot.
+    #[cfg(windows)]
     #[test]
     fn a_development_requirement_relaxes_the_whole_timestamp_rule() {
         let policy = policy(&plan(zup_signing::SigningRequirement::development()), false);
@@ -923,14 +916,9 @@ mod tests {
         );
     }
 
-    /// The printed plan is what a person reads to decide what to hand their
-    /// signing service, so it names the release's own subjects rather than any
-    /// crate or type.
     #[test]
     fn the_printed_plan_names_no_crate_and_orders_runtimes_before_installers() {
         let mut plan = plan(zup_signing::SigningRequirement::production());
-        // Two variants, so the order is asserted against subjects of different
-        // lengths rather than being trivially one element.
         for variant in ["windows-x64", "windows-arm64"] {
             plan.push(SigningStep::new(
                 SigningRole::NativeRuntime,
@@ -961,8 +949,6 @@ mod tests {
             ))
             .expect("a distinct path");
         }
-        // The runtimes are signed first, whichever variant was pushed first: the
-        // order is a property of the plan, not of how it was built.
         let printed = render(&plan);
         assert!(printed.find("native_runtime").unwrap() < printed.find("outer_artifact").unwrap());
         assert!(printed.contains("dist/Acme-windows-x64-Setup.exe"));

@@ -1,24 +1,13 @@
-//! The transport, exercised across a real process boundary.
-//!
-//! A transport that only ever meets its own peer in the same process has proved
-//! that two halves of a struct fit together. These tests spawn a second process
-//! that collects the endpoint and performs the real handshake, which is the only
-//! way to find out whether a frame survives an actual serialisation boundary and
-//! whether the session id actually arrives.
-
 use std::path::PathBuf;
 use std::process::Command;
 
 use zup_preset_ipc::{Bootstrap, Endpoint, Error};
 use zup_preset_protocol::{Envelope, Message, PRESET_PROTOCOL_VERSION, PresetHello, SessionId};
 
-/// The child is this crate's own preset, built behind a test-only feature, so the
-/// peer is a real preset that does the real handshake.
 fn preset() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_zup-preset-ipc-test-preset"))
 }
 
-/// A preset is launched with one argument and nothing else.
 #[test]
 fn a_bootstrap_is_one_argument() {
     let endpoint = Endpoint::create().expect("create an endpoint");
@@ -30,8 +19,6 @@ fn a_bootstrap_is_one_argument() {
     );
 }
 
-/// A preset that is not launched by a host has nothing to connect to, and says
-/// so rather than trying.
 #[test]
 fn a_preset_launched_without_an_endpoint_cannot_connect() {
     for arguments in [
@@ -50,7 +37,6 @@ fn a_preset_launched_without_an_endpoint_cannot_connect() {
     }
 }
 
-/// Arguments a host did not write are ignored, because a host may pass more.
 #[test]
 fn arguments_that_are_not_the_endpoint_are_ignored() {
     let endpoint = Endpoint::create().expect("create an endpoint");
@@ -62,12 +48,6 @@ fn arguments_that_are_not_the_endpoint_are_ignored() {
     assert!(Bootstrap::from_arguments(arguments).is_ok());
 }
 
-/// A frame survives the process boundary in both directions, carrying the
-/// session both sides agreed on.
-///
-/// The child asserts the session matches and states the same protocol version,
-/// and answers with the host hello a real host sends; a session id that did not
-/// survive the boundary would panic in the child rather than pass here.
 #[test]
 fn a_frame_survives_a_real_process_boundary() {
     let host = Endpoint::create().expect("create an endpoint");
@@ -116,8 +96,6 @@ fn a_frame_survives_a_real_process_boundary() {
     let _ = child.wait();
 }
 
-/// Each endpoint is its own name, so a stale name from a finished session cannot
-/// be replayed into a new one.
 #[test]
 fn an_endpoint_is_its_own_name() {
     let first = Endpoint::create().expect("create an endpoint");

@@ -1,12 +1,8 @@
-//! Strongly typed logical identifiers.
-
 use std::fmt;
 
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-use crate::value::ValueError;
 
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
@@ -17,7 +13,6 @@ macro_rules! id_type {
         pub struct $name(String);
 
         impl $name {
-            /// Create an id from `value`, trimming surrounding whitespace.
             pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
                 let trimmed = value.as_ref().trim();
                 if trimmed.is_empty() {
@@ -26,7 +21,6 @@ macro_rules! id_type {
                 Ok(Self(trimmed.to_owned()))
             }
 
-            /// Borrow the id as a string slice.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -75,16 +69,8 @@ macro_rules! id_type {
     };
 }
 
-id_type!(
-    /// Stable logical application identifier.
-    AppId,
-    "app id"
-);
-id_type!(
-    /// Stable logical component identifier.
-    ComponentId,
-    "component id"
-);
+id_type!(AppId, "app id");
+id_type!(ComponentId, "component id");
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
@@ -154,30 +140,16 @@ impl<'de> Deserialize<'de> for PluginId {
     }
 }
 
-id_type!(
-    /// Stable logical service identifier.
-    ServiceId,
-    "service id"
-);
-id_type!(
-    /// Stable logical file-association identifier.
-    FileAssociationId,
-    "file association id"
-);
-id_type!(
-    /// Stable identity for an opaque platform backend resource.
-    BackendResourceId,
-    "backend resource id"
-);
+id_type!(ServiceId, "service id");
+id_type!(FileAssociationId, "file association id");
+id_type!(BackendResourceId, "backend resource id");
 
-/// URI scheme such as `acme` in `acme://`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct ProtocolScheme(String);
 
 impl ProtocolScheme {
-    /// Create a scheme from RFC 3986 syntax: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
     pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
         let scheme = value.as_ref().trim();
         if scheme.is_empty() {
@@ -203,7 +175,6 @@ impl ProtocolScheme {
         Ok(Self(scheme.to_owned()))
     }
 
-    /// Borrow the scheme as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -242,14 +213,12 @@ impl<'de> Deserialize<'de> for ProtocolScheme {
     }
 }
 
-/// Non-empty display name or label.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct NonEmptyString(String);
 
 impl NonEmptyString {
-    /// Create a label from `value`, trimming surrounding whitespace.
     pub fn new(value: impl AsRef<str>) -> Result<Self, ValueError> {
         let trimmed = value.as_ref().trim();
         if trimmed.is_empty() {
@@ -258,7 +227,6 @@ impl NonEmptyString {
         Ok(Self(trimmed.to_owned()))
     }
 
-    /// Borrow the label as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -294,5 +262,202 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+use base64::Engine;
+
+pub fn base64_encode(input: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(input)
+}
+
+pub fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    base64::engine::general_purpose::STANDARD.decode(input)
+}
+
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ValueError {
+    #[error("{kind} must not be empty")]
+    Empty { kind: &'static str },
+
+    #[error("invalid URI scheme `{scheme}`")]
+    InvalidScheme { scheme: String },
+
+    #[error("invalid file extension `{extension}`")]
+    InvalidExtension { extension: String },
+
+    #[error("invalid plugin id `{id}`")]
+    InvalidPluginId { id: String },
+
+    #[error("invalid prerequisite id `{id}`")]
+    InvalidPrerequisiteId { id: String },
+
+    #[error("invalid runtime requirement id `{id}`")]
+    InvalidRuntimeRequirementId { id: String },
+
+    #[error("invalid installed package id `{id}`")]
+    InvalidInstalledPackageId { id: String },
+}
+
+use crate::model::{FileExtension, LauncherLocation};
+
+/// matching. Never use runtime UUIDs here.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKey {
+    Maintenance {
+        app_id: String,
+        version: String,
+        destination: String,
+    },
+    Backend {
+        id: BackendResourceId,
+    },
+    File {
+        destination: String,
+    },
+    Launcher {
+        location: LauncherLocation,
+        name: String,
+    },
+    PathEntry {
+        value: String,
+    },
+    Service {
+        id: ServiceId,
+    },
+    Protocol {
+        scheme: ProtocolScheme,
+    },
+    FileAssociation {
+        id: FileAssociationId,
+    },
+    FileAssociationExtension {
+        extension: FileExtension,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename_all = "snake_case"))]
+pub enum InstallLocation {
+    Programs,
+    UserData,
+    SharedData,
+    Menu,
+    Desktop,
+}
+
+pub const INSTALL_LOCATIONS: [InstallLocation; 5] = [
+    InstallLocation::Programs,
+    InstallLocation::UserData,
+    InstallLocation::SharedData,
+    InstallLocation::Menu,
+    InstallLocation::Desktop,
+];
+
+impl InstallLocation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Programs => "programs",
+            Self::UserData => "user_data",
+            Self::SharedData => "shared_data",
+            Self::Menu => "menu",
+            Self::Desktop => "desktop",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        INSTALL_LOCATIONS
+            .into_iter()
+            .find(|location| location.as_str() == name)
+    }
+}
+
+impl fmt::Display for InstallLocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for InstallLocation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallLocation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown install location `{raw}`; expected one of {}",
+                INSTALL_LOCATIONS
+                    .iter()
+                    .map(|location| location.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct TransactionId(pub uuid::Uuid);
+impl TransactionId {
+    pub fn new_v7() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+    pub fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+    pub fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+}
+impl std::fmt::Display for TransactionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::str::FromStr for TransactionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<uuid::Uuid>().map(Self)
+    }
+}
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct SessionId(pub uuid::Uuid);
+impl SessionId {
+    pub fn new_v7() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        s.parse::<uuid::Uuid>().map(Self)
+    }
+}
+impl std::str::FromStr for SessionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }

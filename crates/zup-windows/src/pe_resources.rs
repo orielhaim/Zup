@@ -1,16 +1,3 @@
-//! Applying and reading the resource documents a zup container carries.
-//!
-//! A PE resource table is a file format, and `zup-pe` reads it as one. *Changing*
-//! one is not: `UpdateResourceW` and `FindResourceW` are the loader's
-//! interpretation of a file it is willing to map, and the loader is Windows. The
-//! split is the same one that runs through the signing code - structure belongs
-//! to the format, and anything that asks the host to believe the file belongs at
-//! the platform boundary.
-//!
-//! Nothing here decides what a signature means. It rewrites a resource table and
-//! reads one back; whether the result is a trustworthy executable is a question
-//! for `WinVerifyTrust`, in [`crate::signing`].
-
 use std::path::Path;
 
 use windows_link::link;
@@ -34,15 +21,8 @@ link!("kernel32.dll" "system" fn LockResource(resource: Handle) -> *const core::
 link!("kernel32.dll" "system" fn FreeLibrary(module: Handle) -> i32);
 link!("kernel32.dll" "system" fn GetLastError() -> Dword);
 
-/// `LOAD_LIBRARY_AS_DATAFILE`: the file is opened for its resources and never
-/// executed, so a data file cannot run code by being read.
 const LOAD_LIBRARY_AS_DATAFILE: Dword = 0x0000_0002;
 
-/// Write `documents` into a copy of `executable` at `output`.
-///
-/// The copy happens first and the resources are applied to the copy, so a
-/// failure part-way through never leaves a half-written artifact. Signing happens
-/// after this returns, because Authenticode covers the embedded resources.
 pub fn write_resources(
     executable: &Path,
     output: &Path,
@@ -95,7 +75,6 @@ pub fn write_resources(
     Ok(())
 }
 
-/// Read one resource document out of an image.
 pub fn read_resource(path: &Path, id: usize) -> Result<Vec<u8>, ResourceError> {
     use std::{os::windows::ffi::OsStrExt, ptr};
 
@@ -131,8 +110,6 @@ pub fn read_resource(path: &Path, id: usize) -> Result<Vec<u8>, ResourceError> {
                     std::slice::from_raw_parts(data.cast::<u8>(), size)
                 });
                 if bytes.len() as u64 > MAX_RESOURCE_SIZE || id > MAX_RESOURCE_ID {
-                    // Unreachable for a table the loader built, and cheap to
-                    // refuse rather than to hand on a length nothing bounded.
                     Err(ResourceError::Absent(id))
                 } else {
                     Ok(bytes)
@@ -146,15 +123,10 @@ pub fn read_resource(path: &Path, id: usize) -> Result<Vec<u8>, ResourceError> {
     result
 }
 
-/// `RT_ICON`.
 const ICON_RESOURCE: u16 = 3;
-/// `RT_GROUP_ICON`.
+
 const ICON_GROUP_RESOURCE: u16 = 14;
 
-/// Add an application icon to an executable that already exists.
-///
-/// `images` are stored under ids 1..n and `group` is the directory stored as
-/// id 1. Existing resources of other types are left in place.
 pub fn apply_icon(
     executable: &Path,
     images: &[Vec<u8>],
@@ -223,7 +195,6 @@ fn write_typed(update: Handle, kind: u16, id: usize, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
-/// Why a resource table could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceError {
     #[error("executable has no resource {0}")]
@@ -240,8 +211,6 @@ pub enum ResourceError {
 mod tests {
     use super::*;
 
-    /// A document set is refused before any byte is written, so a container that
-    /// would not be readable is never created.
     #[test]
     fn an_unwritable_document_set_is_refused() {
         let document = |id: usize| ResourceDocument {

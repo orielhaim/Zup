@@ -129,6 +129,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content).into()),
             component: None,
             condition: None,
+            executable: false,
         });
     }
     drop(files);
@@ -141,6 +142,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             component: None,
             when: None,
             allow_empty: false,
+            executable: false,
         })
         .collect();
     installer_files.sort_by(|left, right| {

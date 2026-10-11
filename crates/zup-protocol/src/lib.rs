@@ -1,41 +1,21 @@
-//! Versioned IPC wire types for zup parent ↔ elevated worker.
-//!
-//! Pure data: no Tokio, Kameo, Windows, or GPUI.
-
 #![forbid(unsafe_code)]
 
 mod messages;
 
+pub use messages::PrivilegedSession;
 pub use messages::{
-    BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteTransaction,
-    FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
-    MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES, Message, PREREQUISITE_BOOTSTRAP_V1,
-    PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport, SequenceTracker,
+    BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteOperation,
+    ExecuteTransaction, FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
+    MAX_INTENT_COMPONENTS, MAX_INTENT_STRING_BYTES, MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES,
+    Message, PREREQUISITE_BOOTSTRAP_V1, PRIVILEGED_OPERATIONS, PROTOCOL_VERSION, ParentHello,
+    PrepareOperation, PreparedOperation, ProgressKind, ProgressReport, SequenceTracker,
     TransactionStateChanged, WireEnvelope, WorkerHello, decode_payload, encode_payload, failure,
+    privileged_operation,
 };
+pub use zup_core::SessionId;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
-/// Runtime identity of one parent/worker IPC relationship.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(pub Uuid);
-
-impl SessionId {
-    pub fn new_v7() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Protocol / framing errors.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("frame exceeds maximum size {max}")]
@@ -53,6 +33,8 @@ pub enum WireError {
     #[error("duplicate sequence {sequence}")]
     DuplicateSequence { sequence: u64 },
 
+    #[error("replayed execute")]
+    Replay,
     #[error("sequence went backwards: {previous} → {next}")]
     SequenceRegression { previous: u64, next: u64 },
 

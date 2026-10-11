@@ -1,12 +1,5 @@
-//! Why a session was refused.
-
 use crate::ConfigurationError;
 
-/// Protocol, framing, and session errors.
-///
-/// Every variant is a refusal. None of them is a retry hint: a peer that
-/// produced one is not one this build can talk to, and continuing would mean
-/// guessing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WireError {
     #[error("frame exceeds maximum size {max}")]

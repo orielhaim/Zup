@@ -1,0 +1,48 @@
+[package]
+name = "zup-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux backend for zup"
+publish = false
+
+[features]
+test-support = ["dep:tempfile"]
+
+[dependencies]
+rustix.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
+typed-path.workspace = true
+uuid.workspace = true
+xdg.workspace = true
+zup-artifact.workspace = true
+zup-binary.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-plan.workspace = true
+zup-platform.workspace = true
+zup-protocol.workspace = true
+zup-transaction.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+semver.workspace = true
+tempfile.workspace = true
+zup-build.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-manifest.workspace = true
+zup-platform.workspace = true
+zup-toolchain.workspace = true
+zup-transaction.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio.workspace = true
+zbus_systemd.workspace = true

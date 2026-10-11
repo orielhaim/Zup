@@ -1,22 +1,3 @@
-//! The development session: build, watch, run, and replace.
-//!
-//! The machine, the child, the controls and the loop are `zup-preview`'s. What
-//! is here is the half that only a preset author needs: a compiler to supervise,
-//! and the rule that a source change is a build while a document or a file the
-//! document names is not.
-//!
-//! That rule is the reason a settings change feels immediate, and it is also the
-//! reason the build is the expensive path. Everything expensive in this tool goes
-//! through [`Session::start_build`], and nothing else starts one: a change that
-//! does not compile leaves the running window alone, and a change that does
-//! compile replaces it only once the new child has opened its session.
-//!
-//! Both children this session owns - the compiler and the preset it built - are
-//! launched managed, and their termination is this crate's decision rather than
-//! `process-wrap`'s. A build that is still running when a session ends is ended
-//! with it, and a preset is replaced only after its successor has proved it can
-//! start.
-
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,16 +11,12 @@ use crate::development::{Development, DevelopmentError};
 use crate::project::Project;
 use crate::watch::{Change, Watched, Watcher};
 
-/// What a person asked for.
 #[derive(Debug, Clone)]
 pub struct Request {
-    /// The preset project to develop.
     pub root: PathBuf,
-    /// The Cargo profile to build with.
     pub profile: String,
 }
 
-/// Why a development session could not run.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("could not read the preset project: {0}")]
@@ -52,22 +29,18 @@ pub enum SessionError {
     Cargo(String),
 }
 
-/// The development session.
 pub struct Session {
     runtime: Runtime,
     project: Project,
     development: Development,
     supervisor: Supervisor,
-    /// Whether a build is wanted but not yet started.
     queued: bool,
-    /// The settings schema the current preset generates, once one has been built.
     schema: Option<serde_json::Value>,
     events: Sender<Event<Change, Build>>,
     cargo: PathBuf,
 }
 
 impl Session {
-    /// Open a development session and run it until somebody quits.
     pub fn run(request: Request) -> Result<(), SessionError> {
         let project = Project::read(&request.root)?;
         let development = Development::read(&project.root)?;
@@ -84,9 +57,6 @@ impl Session {
                         while let Some(seen) = watcher.next_change() {
                             let event = match seen {
                                 Watched::Changed(change) => Event::Changed(change),
-                                // Said rather than swallowed. A session that has
-                                // stopped watching must not look like a session in
-                                // which nothing needed rebuilding.
                                 Watched::Failed(reason) => {
                                     Event::Report(format!("watching: {reason}"))
                                 }
@@ -123,9 +93,6 @@ impl Session {
 
     fn start_build(&mut self) {
         self.queued = false;
-        // Said before the process starts, because a preset's first build
-        // compiles the whole GPUI stack and takes minutes, and a session that
-        // has said nothing for two of them looks like one that has hung.
         println!("  build    {}", self.supervisor.binary());
         let (out, build) = match self.supervisor.start(&self.cargo) {
             Ok(started) => started,
@@ -143,8 +110,6 @@ impl Session {
                     BufReader::new(out),
                     &binary,
                 )));
-                // The build is this thread's to finish with, which is what lets the
-                // next build start rather than finding a tree nobody ended.
                 build.wait();
             })
             .expect("a build reader thread");
@@ -154,9 +119,6 @@ impl Session {
         match build {
             Build::Succeeded { executable } => self.replace(executable),
             Build::Failed { diagnostics } => {
-                // The window stays. A preset that no longer compiles is a fact
-                // about the source, not about the process already running the
-                // last version that did.
                 println!("  build    did not compile; the previous preset is still running");
                 for diagnostic in diagnostics {
                     println!("    {diagnostic}");
@@ -166,8 +128,6 @@ impl Session {
         }
     }
 
-    /// Start a new child and, only once it has opened the session, replace the
-    /// one that is running.
     fn replace(&mut self, executable: PathBuf) {
         let description = match self.describe(&executable) {
             Ok(description) => description,
@@ -176,9 +136,6 @@ impl Session {
                 return;
             }
         };
-        // The preset's own account of itself is the only thing that says what it
-        // needs, and the SDK wrote it. A compatibility failure here is the same
-        // refusal a build would give, arrived at from the other side.
         let preset = PresetRuntime {
             name: zup_core::NonEmptyString::new(description.name.clone()).expect("a named preset"),
             version: semver::Version::parse(&description.version)
@@ -190,9 +147,6 @@ impl Session {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            // The configuration the child receives is the session's own, and it
-            // is set below from the development document. Only the protocol and
-            // the required capabilities are read before the child is launched.
             settings: serde_json::Value::Null,
             assets: Vec::new(),
         };
@@ -211,7 +165,6 @@ impl Session {
         self.reload_configuration();
     }
 
-    /// Re-read the document, and give the preset what it now says.
     fn reload_configuration(&mut self) {
         self.runtime.clear_assets();
         let files = match self.development.asset_files(&self.project.root) {
@@ -229,11 +182,6 @@ impl Session {
         let Some(schema) = self.schema.clone() else {
             return;
         };
-        // Validated here rather than in the preset, because the schema is on this
-        // side of the process boundary and the preset is a program that is about
-        // to be launched. A document that does not fit leaves the last one in
-        // force, which is the point of checking: a typo must not empty a window
-        // that is working.
         let problems = validator(&schema)(&self.development.settings);
         if !problems.is_empty() {
             for problem in problems {
@@ -248,9 +196,6 @@ impl Session {
 
     fn changed(&mut self, change: Change) {
         match change {
-            // The document and the files it names are data. Rebuilding for them
-            // would spend the slowest thing this tool does on a comma, and the
-            // whole reason a settings change feels immediate is that it does not.
             Change::Configuration | Change::Asset(_) => match Development::read(&self.project.root)
             {
                 Ok(development) => self.development = development,
@@ -269,11 +214,6 @@ impl Session {
         }
     }
 
-    /// What the preset says it is, read the way `zup preset pack` reads it.
-    ///
-    /// The same document, produced by the same code, so a preset that cannot be
-    /// developed against is refused for the reason a build would refuse it
-    /// rather than for a new one.
     fn describe(
         &self,
         executable: &Path,
@@ -328,11 +268,6 @@ impl Driver for Session {
     }
 }
 
-/// The settings a preset accepts, as a check that needs no preset process.
-///
-/// The same offline validator the build uses, and for the same reason: a
-/// development document that does not fit is refused before anything is launched
-/// rather than by a program that has already opened a window.
 fn validator(schema: &serde_json::Value) -> impl Fn(&serde_json::Value) -> Vec<String> + use<'_> {
     let compiled = jsonschema::options()
         .offline()

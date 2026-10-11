@@ -65,9 +65,9 @@ frontend = "gui"
 | `console` | A console front end |
 | `headless` | No interface. Progress on the console, no prompts |
 
-`gui` and `console` need a preset package. `headless` does not - it has no
-window - so it is the one frontend that builds on a machine with no toolchain
-preset.
+Only `gui` needs a preset package: it is the window the installer presents.
+`console` and `headless` present no window, so a Linux console or headless
+target builds with just its runtime template.
 
 A profile can override the top-level value, and `--frontend` overrides the
 profile.

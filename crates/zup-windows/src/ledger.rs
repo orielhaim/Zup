@@ -10,7 +10,7 @@ use zup_platform::TargetPath;
 use zup_transaction::{
     BackendOperationIntent, FileDelta, FilePrecondition, FilesystemTransactionStore, NodeKind,
     OperationReceipt, TransactionId, TransactionPhase, TransactionPlan, TransactionRecord,
-    TransactionStore,
+    TransactionStore, maintenance_directory, maintenance_root as transaction_maintenance_root,
 };
 
 use crate::durable::{DurableError, write_durable};
@@ -44,19 +44,12 @@ pub struct InstallLedgerStore {
     root: PathBuf,
 }
 
-/// What a committing transaction knows about the release graph it came from.
-///
-/// Three cases, not two. Collapsing "no graph" into "keep the old one" would
-/// leave a development run claiming a release it never touched, and collapsing
-/// "keep the old one" into "no graph" would erase a real identity the first time
-/// the machine replayed its journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseRecord<'a> {
-    /// Record this authenticated graph.
     Identity(&'a ReleaseIdentity),
-    /// This transaction was not produced from a release graph.
+
     None,
-    /// This is a replay of an already-committed transaction.
+
     Preserve,
 }
 
@@ -100,7 +93,6 @@ impl InstallLedgerStore {
         Ok(Some(ledger))
     }
 
-    /// Where one application's ownership record is kept.
     pub fn path_for(&self, app_id: &AppId, scope: SelectedScope) -> PathBuf {
         self.path(app_id, scope)
     }
@@ -317,13 +309,6 @@ impl InstallLedgerStore {
         Ok(())
     }
 
-    /// The plan's preset runtime and the plan's files have to be the same generation.
-    ///
-    /// A plan that names a window must install exactly the content that window
-    /// needs, at the paths the runtime will look in - otherwise a machine
-    /// believes it can present a preset whose bytes it never wrote. A plan that
-    /// names no window must retire the bytes the previous one owned, so an
-    /// update cannot leave an installation holding a preset nothing will launch.
     fn validate_ui(
         &self,
         app_id: &AppId,
@@ -332,15 +317,13 @@ impl InstallLedgerStore {
         plan: &TransactionPlan,
         ledger: Option<&InstallLedger>,
     ) -> Result<(), LedgerError> {
-        let root = crate::plain_path_text(&crate::content_store::maintenance_root(
-            &self.root, app_id, scope,
-        ));
+        let root = crate::plain_path_text(&transaction_maintenance_root(&self.root, app_id, scope));
         let owned: BTreeMap<&str, &Sha256Digest> = ledger
             .into_iter()
             .flat_map(|ledger| ledger.resources.iter())
             .filter_map(|(key, resource)| match (key, resource) {
                 (ResourceKey::File { destination }, OwnedResource::File { sha256, .. })
-                    if crate::preset_runtime::is_content_path(Path::new(&root), destination) =>
+                    if zup_bundle::is_content_path(Path::new(&root), destination) =>
                 {
                     Some((destination.as_str(), sha256))
                 }
@@ -364,28 +347,21 @@ impl InstallLedgerStore {
             })
             .collect();
         let retired: BTreeSet<&ResourceKey> = plan.retired_keys.iter().collect();
-        // Compared as the ledger spells a path, which is without the extended
-        // length prefix Windows hands back once a component is long. Two
-        // spellings of one file are two identities to everything that stores
-        // ownership, and this is one of the things that stores it.
+
         let wanted: BTreeMap<String, Sha256Digest> = match &plan.preset {
             Some(ui) => {
-                let directory = crate::content_store::maintenance_directory(
-                    &self.root,
-                    app_id,
-                    scope,
-                    app_version,
-                );
+                let directory = maintenance_directory(&self.root, app_id, scope, app_version);
                 std::iter::once((
-                    crate::plain_path_text(&crate::preset_runtime::preset_path(
+                    crate::plain_path_text(&zup_bundle::preset_path(
                         &directory,
                         &ui.executable,
+                        plan.target.executable_suffix(),
                     )),
                     ui.executable,
                 ))
                 .chain(ui.preset.assets.iter().map(|asset| {
                     (
-                        crate::plain_path_text(&crate::preset_runtime::asset_path(
+                        crate::plain_path_text(&zup_bundle::asset_path(
                             &directory,
                             asset.name.as_str(),
                             &asset.sha256,
@@ -398,9 +374,6 @@ impl InstallLedgerStore {
             None => BTreeMap::new(),
         };
         for (path, digest) in &wanted {
-            // Provided either by this plan or already owned at exactly this
-            // content: a repair of a working installation installs nothing, and
-            // requiring it to would make repair impossible on a healthy machine.
             if installed.get(path.as_str()) != Some(digest)
                 && !owned
                     .get(path.as_str())
@@ -420,7 +393,6 @@ impl InstallLedgerStore {
                 continue;
             }
             let Some(ledger) = ledger else {
-                // Nothing was owned, so there is nothing to retire.
                 continue;
             };
             let retired_here = ledger.resources.keys().any(|key| {
@@ -437,11 +409,6 @@ impl InstallLedgerStore {
         Ok(())
     }
 
-    /// Publish a committed transaction as the installation's ownership state.
-    ///
-    /// `release` says what this transaction knows about the graph it came from.
-    /// The three cases are genuinely different and conflating any two of them
-    /// would make the ledger lie.
     pub fn publish_committed(
         &self,
         record: &TransactionRecord,
@@ -508,15 +475,9 @@ impl InstallLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
-        // The preset this installation presents, replaced as one value. Carried
-        // in the plan rather than passed in beside it, so a replay of a journal
-        // restores the same preset the first commit recorded and recovery has
-        // something to present with.
+
         ledger.preset = record.plan.preset.clone();
-        // The identity follows the transaction, not the ledger. A replay keeps
-        // whatever the first commit recorded, because the journal cannot supply
-        // it; a development run clears it, because claiming a graph it did not
-        // come from would make a later repair restore the wrong bytes.
+
         ledger.release = match release {
             ReleaseRecord::Identity(identity) => Some(identity.clone()),
             ReleaseRecord::None => None,
@@ -545,6 +506,7 @@ impl InstallLedgerStore {
                         installed_sha256,
                         installed_size,
                         created_directories,
+                        ..
                     } => {
                         let mut directories = created_directories
                             .iter()
@@ -604,7 +566,7 @@ impl InstallLedgerStore {
                         sha256,
                         size,
                         created_directories,
-                        // File authority is stated per operation by the plan.
+
                         privilege: node.meta.privilege.ok_or(LedgerError::Invalid)?,
                     },
                 );
@@ -677,10 +639,7 @@ impl InstallLedgerStore {
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         write_durable(Path::new(&path), &bytes)?;
         cleanup_committed_files(record)?;
-        // Whatever this transaction retired, the directories it emptied go too.
-        // A generation that has been replaced is not a directory tree somebody
-        // left to find, and a state root that accumulates one per version is a
-        // state root nobody can read.
+
         cleanup_removed_directories(record)?;
         Ok(ledger)
     }

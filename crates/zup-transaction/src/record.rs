@@ -1,5 +1,3 @@
-//! Durable transaction state.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -13,10 +11,8 @@ use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::TransactionPlan;
 
-/// Persistent journal schema version.
 pub const JOURNAL_SCHEMA: u32 = 1;
 
-/// Transaction-level phase state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionPhase {
@@ -29,7 +25,6 @@ pub enum TransactionPhase {
 }
 
 impl TransactionPhase {
-    /// Validated phase transition.
     pub fn transition(self, next: Self) -> Result<Self, PhaseError> {
         use TransactionPhase::*;
         let ok = matches!(
@@ -54,7 +49,6 @@ impl TransactionPhase {
     }
 }
 
-/// Invalid phase transition.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[error("invalid transaction phase transition {from:?} → {to:?}")]
 pub struct PhaseError {
@@ -62,7 +56,6 @@ pub struct PhaseError {
     pub to: TransactionPhase,
 }
 
-/// Per-node durable state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeState {
@@ -71,7 +64,6 @@ pub enum NodeState {
     Applied {
         receipt: Box<crate::executor::OperationReceipt>,
     },
-    /// Applied and observed to match its receipt.
     Verified {
         receipt: Box<crate::executor::OperationReceipt>,
     },
@@ -81,7 +73,6 @@ pub enum NodeState {
 }
 
 impl NodeState {
-    /// Validated node state transition.
     pub fn transition(self, next: Self) -> Result<Self, NodeStateError> {
         use NodeState::*;
         let ok = matches!(
@@ -112,7 +103,6 @@ impl NodeState {
     }
 }
 
-/// Invalid node state transition.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("invalid node state transition")]
 pub struct NodeStateError {
@@ -120,7 +110,6 @@ pub struct NodeStateError {
     pub to: NodeState,
 }
 
-/// Durable state of one execution attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionRecord {
     pub schema: u32,
@@ -139,7 +128,6 @@ pub struct TransactionRecord {
 }
 
 impl TransactionRecord {
-    /// Create a prepared record from a compiled plan.
     pub fn new(
         transaction_id: TransactionId,
         app_id: AppId,
@@ -171,7 +159,6 @@ impl TransactionRecord {
         }
     }
 
-    /// Validate internal consistency (schema, fingerprint, node map).
     pub fn validate(&self) -> Result<(), CorruptReason> {
         if self.schema != JOURNAL_SCHEMA {
             return Err(CorruptReason::UnsupportedSchema { found: self.schema });
@@ -209,13 +196,11 @@ impl TransactionRecord {
         Ok(())
     }
 
-    /// Bump revision and timestamps after a durable mutation.
     pub fn touch(&mut self) {
         self.revision = self.revision.saturating_add(1);
         self.updated_at = Timestamp::now();
     }
 
-    /// The receipt a node landed, whether or not it has been verified.
     pub fn receipt(&self, id: &OperationId) -> Option<&crate::executor::OperationReceipt> {
         match self.nodes.get(id) {
             Some(NodeState::Applied { receipt }) | Some(NodeState::Verified { receipt }) => {
@@ -226,7 +211,6 @@ impl TransactionRecord {
     }
 }
 
-/// A node's durable state must be reachable in the phase the record is in.
 fn phase_accepts(
     phase: TransactionPhase,
     node: &crate::plan::TransactionNode,
@@ -234,7 +218,6 @@ fn phase_accepts(
 ) -> bool {
     use crate::plan::NodeKind;
     match phase {
-        // Before commit intent only preparation and staging may have landed.
         TransactionPhase::Prepared => match &node.kind {
             NodeKind::Barrier | NodeKind::StageFile { .. } => matches!(
                 state,
@@ -246,8 +229,6 @@ fn phase_accepts(
             _ => matches!(state, NodeState::Pending),
         },
         TransactionPhase::Applying | TransactionPhase::RollingBack => true,
-        // Commit is only reachable once every barrier ran and every
-        // installed-state change was observed against its receipt.
         TransactionPhase::Committed => {
             if node.kind.requires_verification() {
                 matches!(state, NodeState::Verified { .. })
@@ -303,7 +284,6 @@ fn receipt_matches_node(
     }
 }
 
-/// Typed journal corruption reasons.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CorruptReason {
     #[error("missing journal")]
@@ -328,7 +308,6 @@ pub enum CorruptReason {
     RevisionMismatch { expected: u64, found: u64 },
 }
 
-/// Store-level errors (including optimistic concurrency conflicts).
 #[derive(Debug, Error, Diagnostic)]
 pub enum StoreError {
     #[error("journal corrupt: {0}")]

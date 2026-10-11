@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The production chain, from a host that launches a preset to a real child
 //! process answering over the real transport.
 //!
@@ -5,7 +7,7 @@
 //! a child executable that collects it, the `PresetHello` and `HostHello` a shipped
 //! preset exchanges, the first snapshot, an action the child sends, and the state
 //! machine validating it. The peer is a real binary built against the public
-//! `zup-preset-sdk`, not an in-process fake, because a fake can only prove that the
+//! `zup-sdk`, not an in-process fake, because a fake can only prove that the
 //! code agrees with itself.
 //!
 //! What this cannot cover is the window itself. Between "the host launched a
@@ -298,6 +300,7 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )
@@ -349,6 +352,7 @@ fn a_preset_whose_assets_are_absent_is_refused() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )

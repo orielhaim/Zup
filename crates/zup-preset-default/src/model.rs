@@ -1,34 +1,16 @@
-//! What the window says, as a pure function of one snapshot.
-//!
-//! Every word a person reads and every action a control would ask for is
-//! decided here, without GPUI, so the rules can be tested directly. A host that
-//! publishes the wrong state is a bug in the host; a window that offers the
-//! wrong thing for a state is a bug here, and only this half is visible without
-//! a display.
-
-use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::presentation::{
+use zup_sdk::preset::prelude::*;
+use zup_sdk::preset::presentation::{
     ChangeGroup, ChangeKind, DiagnosticKind, InstallOptions, InstallationHealth, OperationPhase,
     RequirementStatus, ResourceCategory, UpdateState,
 };
 
-/// The one screen a snapshot belongs to.
-///
-/// These follow the lifecycle, not a sequence: there is no step a person
-/// navigates to, only the state the installation is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    /// Deciding what to install, and where.
     Install,
-    /// Looking after an installation that exists.
     Maintenance,
-    /// An operation is running.
     Operation,
-    /// The last operation committed.
     Outcome,
-    /// Applications hold files the operation needs.
     Blocked,
-    /// The last operation failed, or left work to reconcile.
     Problem,
 }
 
@@ -45,7 +27,6 @@ impl Screen {
     }
 }
 
-/// The operation a snapshot is about.
 pub fn operation(snapshot: &Snapshot) -> OperationKind {
     snapshot
         .operation
@@ -58,7 +39,6 @@ pub fn operation(snapshot: &Snapshot) -> OperationKind {
         })
 }
 
-/// A byte count as a person usually reads a file size.
 pub fn size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1024 {
@@ -77,9 +57,6 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-// -- Install ----------------------------------------------------------------
-
-/// What one summary fact is about, which decides its icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactKind {
     Size,
@@ -88,18 +65,12 @@ pub enum FactKind {
     Approval { required: bool },
 }
 
-/// One thing a person should know before pressing the button.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     pub kind: FactKind,
     pub text: String,
 }
 
-/// Whether the current choices need an administrator's approval.
-///
-/// The plan is the authority once there is one. Before it arrives, installing
-/// for everyone is the choice that needs approval on this platform, and saying
-/// so early is better than surprising somebody at the prompt.
 pub fn needs_approval(snapshot: &Snapshot) -> bool {
     match snapshot.plan.latest() {
         Some(plan) if plan.scope == snapshot.surface.scope() => plan.requires_authorization,
@@ -107,7 +78,6 @@ pub fn needs_approval(snapshot: &Snapshot) -> bool {
     }
 }
 
-/// The facts the install summary shows, in reading order.
 pub fn summary(snapshot: &Snapshot) -> Vec<Fact> {
     let mut facts = Vec::new();
     match snapshot.plan.latest() {
@@ -149,20 +119,14 @@ pub fn summary(snapshot: &Snapshot) -> Vec<Fact> {
     facts
 }
 
-/// The commit bar's facts. Every fact stays visible when the window is resized;
-/// the bar wraps instead of dropping one.
 pub fn commit_facts(snapshot: &Snapshot) -> Vec<Fact> {
     summary(snapshot)
 }
 
-/// Where the installation goes, as the window shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
-    /// The concrete path, when one is known.
     pub path: Option<String>,
-    /// Whether the person chose it, rather than the application.
     pub custom: bool,
-    /// Whether a person may choose another.
     pub changeable: bool,
 }
 
@@ -180,11 +144,6 @@ pub fn location(snapshot: &Snapshot) -> Location {
     }
 }
 
-/// The folder an installation goes into when a person picks `chosen`.
-///
-/// A person who picks `D:\Apps` means "under D:\Apps", not "spread my files
-/// across D:\Apps", so the application's own folder is added unless they
-/// already picked one by that name.
 pub fn folder_for(chosen: &std::path::Path, product: &str) -> String {
     let named = chosen
         .file_name()
@@ -198,7 +157,6 @@ pub fn folder_for(chosen: &std::path::Path, product: &str) -> String {
     folder.to_string_lossy().into_owned()
 }
 
-/// One scope a person can choose between.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeChoice {
     pub scope: InstallScope,
@@ -207,7 +165,6 @@ pub struct ScopeChoice {
     pub needs_approval: bool,
 }
 
-/// The scopes on offer, or nothing when there is no choice to make.
 pub fn scope_choices(snapshot: &Snapshot) -> Vec<ScopeChoice> {
     let Surface::Install(options) = &snapshot.surface else {
         return Vec::new();
@@ -235,16 +192,12 @@ pub fn scope_choices(snapshot: &Snapshot) -> Vec<ScopeChoice> {
         .collect()
 }
 
-/// What a component row shows and does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComponentKind {
-    /// Always included; drawn as included, not as a disabled control.
     Required,
-    /// A person's choice.
     Optional { selected: bool },
 }
 
-/// What applying the current choices would do to one installed component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pending {
     Add,
@@ -257,12 +210,10 @@ pub struct ComponentRow {
     pub name: String,
     pub description: Option<String>,
     pub kind: ComponentKind,
-    /// On an existing installation, what the choice would change.
     pub pending: Option<Pending>,
 }
 
 impl ComponentRow {
-    /// The action a press asks for: the opposite of what the row shows.
     pub fn toggle(&self) -> Option<Action> {
         match self.kind {
             ComponentKind::Required => None,
@@ -299,7 +250,6 @@ pub fn component_rows(surface: &Surface) -> Vec<ComponentRow> {
         .collect()
 }
 
-/// Whether any component is a person's choice.
 pub fn has_optional_components(surface: &Surface) -> bool {
     surface
         .components()
@@ -307,7 +257,6 @@ pub fn has_optional_components(surface: &Surface) -> bool {
         .any(|component| !component.required)
 }
 
-/// What the main button on the install screen says.
 pub fn install_label(snapshot: &Snapshot) -> &'static str {
     match &snapshot.surface {
         Surface::Install(options) if options.existing_version.is_some() => "Upgrade",
@@ -315,7 +264,6 @@ pub fn install_label(snapshot: &Snapshot) -> &'static str {
     }
 }
 
-/// The line under the product's name on the install screen.
 pub fn install_subtitle(snapshot: &Snapshot) -> Option<String> {
     match &snapshot.surface {
         Surface::Install(options) => options
@@ -326,7 +274,6 @@ pub fn install_subtitle(snapshot: &Snapshot) -> Option<String> {
     }
 }
 
-/// Who published the product and which version it is, in one line.
 pub fn byline(product: &ProductIdentity) -> String {
     match &product.publisher {
         Some(publisher) => format!("{publisher} · Version {}", product.version),
@@ -334,9 +281,6 @@ pub fn byline(product: &ProductIdentity) -> String {
     }
 }
 
-// -- Operation --------------------------------------------------------------
-
-/// The operation's title, as the progress screen says it.
 pub fn operation_title(kind: OperationKind, product: &str) -> String {
     match kind {
         OperationKind::Install => format!("Installing {product}"),
@@ -347,7 +291,6 @@ pub fn operation_title(kind: OperationKind, product: &str) -> String {
     }
 }
 
-/// What the current phase is doing, in words.
 pub fn phase_label(phase: OperationPhase, kind: OperationKind) -> &'static str {
     match (phase, kind) {
         (OperationPhase::Prepare, OperationKind::Uninstall) => "Preparing to uninstall",
@@ -363,18 +306,13 @@ pub fn phase_label(phase: OperationPhase, kind: OperationKind) -> &'static str {
     }
 }
 
-/// How the progress screen reads right now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     pub title: String,
     pub phase: String,
-    /// What the engine says it is doing, when it adds something to the phase.
     pub activity: Option<String>,
-    /// 0..=1, or `None` while the work is not countable.
     pub fraction: Option<f32>,
-    /// How much of a download is done, when the phase is one.
     pub amount: Option<String>,
-    /// Whether a stop was asked for and the engine is on its way to a safe point.
     pub stopping: bool,
 }
 
@@ -422,18 +360,12 @@ pub fn progress(snapshot: &Snapshot) -> Progress {
     }
 }
 
-// -- Outcome ----------------------------------------------------------------
-
-/// How a committed operation reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub title: String,
     pub detail: String,
-    /// What the person should know that the title does not say.
     pub note: Option<String>,
-    /// Resources a repair left as they were, because they had been changed.
     pub left_alone: Vec<String>,
-    /// The launcher the host can start, when it can.
     pub launch: Option<String>,
     pub removed: bool,
 }
@@ -498,15 +430,10 @@ pub fn outcome(snapshot: &Snapshot) -> Outcome {
     }
 }
 
-// -- Maintenance ------------------------------------------------------------
-
-/// What the installation's health says to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {
-    /// Nothing has inspected it in this session.
     Unknown,
     Healthy,
-    /// These managed resources no longer match what was installed.
     Drifted(Vec<String>),
 }
 
@@ -519,7 +446,6 @@ pub fn health(state: &MaintenanceState) -> Health {
     }
 }
 
-/// How serious an update row is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
@@ -528,13 +454,11 @@ pub enum Tone {
     Negative,
 }
 
-/// The update situation, as one row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateRow {
     pub title: String,
     pub detail: String,
     pub tone: Tone,
-    /// The button, and whether it is the one this row is about.
     pub action: Option<(&'static str, bool)>,
     pub busy: bool,
 }
@@ -602,7 +526,6 @@ pub fn update_row(snapshot: &Snapshot) -> Option<UpdateRow> {
     })
 }
 
-/// Which components applying the current choices would add and remove.
 pub fn pending_changes(surface: &Surface) -> (Vec<String>, Vec<String>) {
     let rows = component_rows(surface);
     let named = |wanted: Pending| {
@@ -614,7 +537,6 @@ pub fn pending_changes(surface: &Surface) -> (Vec<String>, Vec<String>) {
     (named(Pending::Add), named(Pending::Remove))
 }
 
-/// The sentence that says what applying the changes would do.
 pub fn pending_sentence(surface: &Surface) -> Option<String> {
     let (added, removed) = pending_changes(surface);
     let list = |names: &[String]| match names {
@@ -634,7 +556,6 @@ pub fn pending_sentence(surface: &Surface) -> Option<String> {
     }
 }
 
-/// Who an installation is for, as a phrase.
 pub fn audience(scope: InstallScope) -> &'static str {
     match scope {
         InstallScope::User => "Installed for your account",
@@ -642,14 +563,9 @@ pub fn audience(scope: InstallScope) -> &'static str {
     }
 }
 
-// -- Problems ---------------------------------------------------------------
-
-/// How serious a problem is, which decides how loudly it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    /// Nothing was changed; trying again is safe.
     Failure,
-    /// The installation is between two states until it is reconciled.
     Recovery,
 }
 
@@ -702,7 +618,6 @@ pub fn problem(snapshot: &Snapshot) -> Problem {
     }
 }
 
-/// A blocked operation, as the person can act on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blocked {
     pub title: String,
@@ -746,7 +661,6 @@ pub fn blocked(snapshot: &Snapshot) -> Blocked {
     }
 }
 
-/// The readable part of a blocker, without the process detail after it.
 pub fn app_name(blocker: &str) -> &str {
     blocker
         .split_once(" (")
@@ -754,7 +668,6 @@ pub fn app_name(blocker: &str) -> &str {
         .trim()
 }
 
-/// The process detail of a blocker, when it has one.
 pub fn app_detail(blocker: &str) -> Option<&str> {
     blocker
         .split_once(" (")
@@ -762,9 +675,6 @@ pub fn app_detail(blocker: &str) -> Option<&str> {
         .filter(|detail| !detail.is_empty())
 }
 
-// -- Plan -------------------------------------------------------------------
-
-/// One resource category, as a person reads it.
 pub fn category_title(category: ResourceCategory) -> &'static str {
     match category {
         ResourceCategory::Files => "Files",
@@ -780,7 +690,6 @@ pub fn category_title(category: ResourceCategory) -> &'static str {
     }
 }
 
-/// Why a category matters, for somebody who has not met the term.
 pub fn category_about(category: ResourceCategory) -> &'static str {
     match category {
         ResourceCategory::Files => "The application's own files.",
@@ -798,7 +707,6 @@ pub fn category_about(category: ResourceCategory) -> &'static str {
     }
 }
 
-/// What a change does, as a verb a person reads.
 pub fn change_label(kind: ChangeKind) -> &'static str {
     match kind {
         ChangeKind::Create => "Added",
@@ -810,7 +718,6 @@ pub fn change_label(kind: ChangeKind) -> &'static str {
     }
 }
 
-/// How many changes of each kind a group holds, in a stable order.
 pub fn change_counts(group: &ChangeGroup) -> Vec<(ChangeKind, usize)> {
     [
         ChangeKind::Create,
@@ -835,7 +742,6 @@ pub fn change_counts(group: &ChangeGroup) -> Vec<(ChangeKind, usize)> {
     .collect()
 }
 
-/// A group's counts as one line: "12 added · 1 removed".
 pub fn counts_line(group: &ChangeGroup) -> String {
     change_counts(group)
         .into_iter()
@@ -851,11 +757,6 @@ pub fn counts_line(group: &ChangeGroup) -> String {
         .join(" · ")
 }
 
-/// The plan's context, compressed so the sheet can start on the changes.
-///
-/// The same facts sit on the main screen as a decision summary. Here they are
-/// one line of context, because the sheet has to make sense on its own without
-/// repeating that summary as a form.
 pub fn review_context(snapshot: &Snapshot) -> (String, Option<String>) {
     let line = summary(snapshot)
         .into_iter()
@@ -871,7 +772,6 @@ pub fn review_context(snapshot: &Snapshot) -> (String, Option<String>) {
     (line, location)
 }
 
-/// Whether a group changes anything, rather than only confirming what is there.
 pub fn group_changes_anything(group: &ChangeGroup) -> bool {
     group
         .changes
@@ -879,7 +779,6 @@ pub fn group_changes_anything(group: &ChangeGroup) -> bool {
         .any(|change| change.kind != ChangeKind::NoChange)
 }
 
-/// How a requirement stands, in words.
 pub fn requirement_status(status: RequirementStatus) -> &'static str {
     match status {
         RequirementStatus::Satisfied => "Already installed",

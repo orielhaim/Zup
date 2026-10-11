@@ -51,7 +51,7 @@ What a preset is given, once, at launch:
 - `session()` - the connection to the installer
 - `settings()` - `PresetSettings<T>`
 - `assets()` - `ApplicationAssets`
-- `host()` - what the host says it is
+- `capabilities()` - what the host says it provides
 
 Use the supplied session. Do not open a second one.
 

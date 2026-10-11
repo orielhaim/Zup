@@ -149,6 +149,9 @@ pub struct FileOperation {
     pub expected_sha256: Sha256Digest,
     pub expected_size: u64,
     pub privilege: Privilege,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    #[serde(default)]
+    pub executable: bool,
     pub conflict: Option<Conflict>,
 }
 

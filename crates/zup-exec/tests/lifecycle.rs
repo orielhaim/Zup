@@ -25,6 +25,7 @@ fn file(name: &str, contents: &[u8]) -> TargetFile {
         size: contents.len() as u64,
         sha256: hash_reader(contents).unwrap().1,
         privilege: Privilege::User,
+        executable: false,
     }
 }
 

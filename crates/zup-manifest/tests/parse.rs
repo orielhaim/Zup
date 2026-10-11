@@ -1,5 +1,3 @@
-//! Parsing tests for `zup_manifest::parse`.
-
 use rstest::rstest;
 use zup_manifest::{AppId, Frontend, ManifestError, SCHEMA_VERSION, parse, parse_and_compile};
 
@@ -153,9 +151,6 @@ fn frontend_reaches_the_installer_from_the_manifest() {
     }
 }
 
-/// `[ui]` is a preset selection and that preset's own settings. There is no
-/// second customization system: a preset author decides what a window looks
-/// like, and the application fills in the values that preset declared.
 #[test]
 fn a_ui_section_names_a_preset_and_its_settings() {
     let source = minimal("user").replace(
@@ -185,8 +180,6 @@ fn a_ui_section_names_a_preset_and_its_settings() {
     );
 }
 
-/// A preset path that leaves the project is refused by the type that holds it,
-/// before anything tries to open it.
 #[test]
 fn a_preset_path_outside_the_project_is_refused() {
     for path in ["../elsewhere/aurora.zupui", "C:/elsewhere/aurora.zupui"] {
@@ -201,8 +194,6 @@ fn a_preset_path_outside_the_project_is_refused() {
     }
 }
 
-/// A `.zupui` is a build input, not something a manifest carries into a plan:
-/// the resolved preset is attached by the build, from a verified package.
 #[test]
 fn the_compiled_installer_carries_no_preset_until_a_build_proves_one() {
     let source = minimal("user").replace(
@@ -303,7 +294,6 @@ fn unknown_field_is_rejected_wherever_it_appears() {
             "{}\n[[plugins]]\nid = \"acme.plugin\"\nsource = \"plugins/acme.wasm\"\nextra = true\n",
             minimal("user")
         ),
-        // A top-level `source` is the pre-`[build]` spelling and is not authorable.
         minimal("user").replace(
             "[build]\n\n[build.targets.windows-x64]\ntarget = \"x86_64-pc-windows-msvc\"\nsource = { directory = \"dist/windows-x64\" }",
             "[source]\ndirectory = \"dist\"",

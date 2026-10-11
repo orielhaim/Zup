@@ -91,17 +91,10 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    /// True for a control node that orders the plan without mutating.
     pub fn is_barrier(&self) -> bool {
         matches!(self, Self::Barrier)
     }
 
-    /// True when the node changes installed state that must be observed
-    /// against its receipt before commit.
-    ///
-    /// Staged payloads are excluded: the file mutation that publishes them
-    /// verifies the same bytes at their destination, and the staged copy is
-    /// gone by then.
     pub fn requires_verification(&self) -> bool {
         matches!(
             self,
@@ -129,6 +122,7 @@ pub struct NodeMeta {
     pub expected_sha256: Option<Sha256Digest>,
     pub expected_size: Option<u64>,
     pub privilege: Option<Privilege>,
+    pub executable: Option<bool>,
     pub backend: Option<BackendOperation>,
     pub removal: Option<FileRemoval>,
 }
@@ -160,11 +154,6 @@ pub struct TransactionPlan {
     pub audit: TransactionAudit,
     pub execution_order: Vec<OperationId>,
     pub rollback_order: Vec<OperationId>,
-    /// The preset runtime this plan makes durable, or leaves absent.
-    ///
-    /// Journalled with the rest of the plan so that a recovery run, which sees
-    /// nothing but this record, can still state which preset the installation
-    /// presents.
     pub preset: Option<InstalledPreset>,
 }
 
@@ -176,10 +165,7 @@ impl TransactionPlan {
         Sha256Digest::from_hasher(hasher)
     }
 
-    /// True when at least one node needs system authority.
-    ///
     /// Authorization is read from each node, never from a scope, so a
-    /// per-user transaction that owns a host-wide service still reports true.
     pub fn requires_authorization(&self) -> bool {
         self.nodes
             .iter()
@@ -448,6 +434,7 @@ pub fn compile_transaction(
 
     let mut backend_ids = BTreeMap::new();
     let mut backend_node_ids = Vec::new();
+    let mut backend_removal_ids = std::collections::BTreeSet::new();
     for operation in &input.backend_operations {
         let id = OperationId::resource(
             match operation.intent {
@@ -457,6 +444,9 @@ pub fn compile_transaction(
             &operation.key,
         );
         backend_ids.insert(operation.key.clone(), id.clone());
+        if operation.intent == BackendOperationIntent::Remove {
+            backend_removal_ids.insert(id.clone());
+        }
         let kind = match operation.intent {
             BackendOperationIntent::Apply => NodeKind::BackendOperation {
                 key: operation.key.clone(),
@@ -485,6 +475,7 @@ pub fn compile_transaction(
     }
 
     let mut file_removal_ids = Vec::new();
+    let mut removal_ids_by_key = std::collections::BTreeMap::new();
     for removal in &input.removals {
         if removal.kind == FileRemovalKind::Drift {
             audit.drifted_removals += 1;
@@ -508,6 +499,7 @@ pub fn compile_transaction(
             &mut order,
             &mut nodes,
         );
+        removal_ids_by_key.insert(removal.key.clone(), id.clone());
         file_removal_ids.push(id);
     }
 
@@ -563,7 +555,8 @@ pub fn compile_transaction(
         for dependency in &operation.dependencies {
             let from = backend_ids
                 .get(dependency)
-                .or_else(|| file_ids_by_key.get(dependency));
+                .or_else(|| file_ids_by_key.get(dependency))
+                .or_else(|| removal_ids_by_key.get(dependency));
             let from = from.ok_or_else(|| TransactionPlanError::UnknownDependency {
                 id: format!("{:?}", dependency),
             })?;
@@ -574,16 +567,20 @@ pub fn compile_transaction(
         }
     }
     for file in &file_removal_ids {
-        for predecessor in file_ids
-            .iter()
-            .chain(backend_node_ids.iter())
-            .chain(std::iter::once(&commit_intent))
-        {
+        for predecessor in file_ids.iter().chain(
+            backend_node_ids
+                .iter()
+                .filter(|id| backend_removal_ids.contains(*id)),
+        ) {
             edges.push(Dependency {
                 from: predecessor.clone(),
                 to: file.clone(),
             });
         }
+        edges.push(Dependency {
+            from: commit_intent.clone(),
+            to: file.clone(),
+        });
     }
     let tails = file_ids
         .iter()
@@ -650,6 +647,7 @@ fn file_meta(file: &FileWork) -> NodeMeta {
         expected_sha256: Some(file.expected_sha256),
         expected_size: Some(file.expected_size),
         privilege: Some(file.privilege),
+        executable: Some(file.executable),
         ..Default::default()
     }
 }

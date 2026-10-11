@@ -1,5 +1,3 @@
-//! Windows target resolution and read-only inspection tests.
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,13 +5,16 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zup_build::materialize;
 use zup_core::{INSTALL_LOCATIONS, InstallLocation, SelectedScope, TargetTriple};
-use zup_exec::{FileOperationKind, ObservedFileState, plan_execution};
+use zup_exec::ObservedFileState;
+#[cfg(feature = "test-launcher")]
+use zup_exec::{FileOperationKind, plan_execution};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{InstallPlan, PlanRequest, plan};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
+#[cfg(feature = "test-launcher")]
+use zup_windows::{InspectReads, inspect_target_with};
 use zup_windows::{
-    FakeServiceReader, FakeShortcutReader, TargetResolveError, WindowsInstallLocationResolver,
-    WindowsRegistryReader, WindowsTargetContext, inspect_files, inspect_target_with,
+    TargetResolveError, WindowsInstallLocationResolver, WindowsTargetContext, inspect_files,
     resolve_target,
 };
 
@@ -487,22 +488,19 @@ fn inspect_files_absent_present_directory() {
 }
 
 #[test]
+#[cfg(feature = "test-launcher")]
 fn inspect_target_with_fakes_and_plan_execution() {
     let root = temp_root();
     let (_dir, target) = pipeline(root.path(), SelectedScope::User);
     let pf = root.path().join("LocalAppData/Programs/Acme");
     write(&pf.join("Acme.exe"), b"main-correct");
     write(&pf.join("acme-agent.exe"), b"agent-OLD");
-    // bin/acme.exe intentionally absent → Create
 
-    let services = FakeServiceReader::default();
-    let shortcuts = FakeShortcutReader::default();
-    let registry = WindowsRegistryReader;
+    let reads = InspectReads::without_native_readers();
 
-    let snapshot = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
+    let snapshot = inspect_target_with(&target, &reads).unwrap();
     let plan = plan_execution(&target, &snapshot, None).unwrap();
 
-    // An existing different file has no proven owner.
     let mut file_kinds = BTreeMap::new();
     for op in &plan.files {
         let name = op.destination.file_name().unwrap().to_owned();
@@ -517,7 +515,6 @@ fn inspect_target_with_fakes_and_plan_execution() {
         zup_exec::LauncherOperationKind::Create
     );
 
-    // Zero mutation: payload on disk unchanged.
     assert_eq!(fs::read(pf.join("acme-agent.exe")).unwrap(), b"agent-OLD");
 }
 
@@ -536,19 +533,15 @@ fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
     }
 }
 
-/// The resolver and the state root are the same question asked two ways, so they
-/// are answered from the same place: a user install's state lives in the user
-/// data directory that `${location.user_data}` resolves to, whatever the machine
-/// happens to call that directory.
 #[test]
+#[ignore = "touches the real user profile"]
 fn the_user_state_root_and_the_user_data_location_are_one_directory() {
     let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
     let user_data = WindowsInstallLocationResolver
         .resolve(InstallLocation::UserData, SelectedScope::User, &target)
         .unwrap();
     let state = zup_windows::default_state_root(SelectedScope::User).unwrap();
-    // A state root is canonicalized, because the ledger treats two spellings of
-    // one directory as two identities, so the location is compared the same way.
+
     let expected = PathBuf::from(user_data.as_str())
         .join("zup")
         .canonicalize()

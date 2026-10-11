@@ -1,5 +1,3 @@
-//! Command line for the zup repository tasks.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -12,10 +10,15 @@ xtask emit-portable-matrix [--matrix <name>]... [--format <text|cargo-args>]
     Print the package matrices. --format cargo-args prints `-p <package>`
     arguments for cargo and needs exactly one --matrix.
 
+xtask emit-host-packages --host <windows|linux> [--format <text|cargo-args>]
+    Print every package verified on one build host, as `-p` arguments by default.
+    Derived from the same matrices as emit-portable-matrix, so a CI job derives its
+    own package list rather than a workflow maintaining a second one.
+
 xtask verify-portable-boundaries [--root <dir>]
-    Report every way a portable package depends on Windows, reintroduces a
-    Windows-specific identifier, or spells a Windows concept in a string
-    literal.
+    Report every way a portable package depends on a native backend,
+    reintroduces a native-backend identifier, or spells a native concept in a
+    string literal.
 
 xtask github-action-pins check [--root <dir>] [--online]
     Check github-actions.lock.json: syntax, version and SHA agreement, that
@@ -29,11 +32,14 @@ xtask github-action-pins refresh [--root <dir>] [--add <owner/name>]...
     are pinned here too, because a runner that installs a different Bun produces
     a bundle nobody can reproduce.
 
-xtask toolchain build [--profile <name>]
+xtask toolchain build [--profile <name>] [--target <triple>]
     Build the runtime templates and dispatchers this repository produces, and
     stage them beside `zup` with the descriptors the toolchain resolver checks.
     Run it once per profile; a contributor running `cargo test` or `cargo run`
-    needs the debug profile, which is the default.
+    needs the debug profile, which is the default. `--target
+    x86_64-unknown-linux-gnu` cross-builds the Linux runtime templates from
+    another host with `cargo zigbuild`, so a Windows machine can stage what a
+    Linux `zup build` composes.
 
 xtask toolchain package [--profile <name>] [--out <dir>]
     Assemble one directory that is a complete zup release: `zup`, the toolchain
@@ -50,8 +56,9 @@ xtask release clean-room [--material <dir>] [--work <dir>]
 xtask verify-dependency-graph [--root <dir>]
     Refuse a dependency graph that grew by accident. Fails when a workspace
     package reaches two versions of one external crate, when development tooling
-    has reached the graph of a binary that ships to users, and when a published
-    published crate has reached a crate that exists only in this repository.
+    has reached the graph of a binary that ships to users, when one native
+    backend has reached another's, and when a published crate has reached a
+    crate that exists only in this repository.
 
 xtask automation generate [--root <dir>]
     Write the artifacts derived from the automation contract: the JSON Schema, the
@@ -64,9 +71,13 @@ xtask automation check [--root <dir>]
 
 options:
     --root <dir>         workspace to inspect (default: this repository)
+    --matrix <name>      matrix to emit (repeatable)
+    --host <name>        build host whose packages to emit
+    --format <format>    text or cargo-args
     --online             reach GitHub to report newer releases
     --add <owner/name>   add an action to the lock before refreshing
     --profile <name>     cargo profile to build and stage beside (default: dev)
+    --target <triple>      cross-build target for `toolchain build` (Linux only)
     --out <dir>          where to write the packaged release
     --material <dir>     release material to test (default: target/release-material/<version>)
     --work <dir>         an empty directory to run in (default: a fresh temp directory)
@@ -77,14 +88,15 @@ exit codes:
     2  usage or unreadable workspace
 ";
 
-/// Every option this tool understands.
 const OPTIONS: &[&str] = &[
     "--root",
     "--matrix",
+    "--host",
     "--format",
     "--online",
     "--add",
     "--profile",
+    "--target",
     "--out",
     "--material",
     "--work",
@@ -101,10 +113,12 @@ enum Format {
 struct Options {
     root: Option<PathBuf>,
     matrices: Vec<String>,
+    host: Option<String>,
     format: Format,
     online: bool,
     add: Vec<String>,
     profile: Option<String>,
+    target: Option<String>,
     out: Option<PathBuf>,
     material: Option<PathBuf>,
     work: Option<PathBuf>,
@@ -131,6 +145,7 @@ fn run() -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "emit-portable-matrix" => emit(&mut arguments),
+        "emit-host-packages" => emit_host(&mut arguments),
         "verify-portable-boundaries" => verify(&mut arguments),
         "github-action-pins" => action_pins(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
@@ -156,6 +171,40 @@ fn emit(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String
         return Ok(ExitCode::SUCCESS);
     }
     print!("{}", matrix::render(&selected));
+    Ok(ExitCode::SUCCESS)
+}
+
+fn emit_host(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let options = parse(arguments, "emit-host-packages", &["--host", "--format"])?;
+    let Some(name) = options.host else {
+        return Err("emit-host-packages needs --host <windows|linux>".to_owned());
+    };
+    let host = match name.as_str() {
+        "windows" => matrix::Host::Windows,
+        "linux" => matrix::Host::Linux,
+        "any" | "portable" => matrix::Host::Any,
+        other => matrix::matrix(other)
+            .map(|entry| entry.host)
+            .ok_or_else(|| {
+                format!("unknown host `{other}`; expected windows, linux, any, or a matrix name")
+            })?,
+    };
+    let packages = matrix::packages_for_host(host);
+    if options.format == Format::CargoArgs {
+        println!(
+            "{}",
+            packages
+                .iter()
+                .map(|package| format!("-p {package}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("{}:", matrix::host_name(host));
+    for package in packages {
+        println!("  {package}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -204,9 +253,6 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
         _ => pins::check(&root, options.online),
     };
 
-    // Problems go to stderr, because that is where a failing build's diagnostics
-    // are read, and because a caller piping stdout to a file should not have a
-    // list of failures silently written into it.
     if report.is_clean() {
         print!("{}", pins::render_report(&report));
         println!("github-action-pins: {}", report.detail);
@@ -217,14 +263,12 @@ fn action_pins(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode,
     Ok(ExitCode::from(1))
 }
 
-/// Build the local toolchain a contributor's `zup build` composes from, or
-/// assemble it into a directory a developer can unzip and use.
 fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("toolchain needs `build` or `package`\n\n".to_owned() + USAGE);
     };
     let allowed: &[&str] = match subcommand.as_str() {
-        "build" => &["--root", "--profile"],
+        "build" => &["--root", "--profile", "--target"],
         "package" => &["--root", "--profile", "--out"],
         unknown => {
             return Err(format!(
@@ -262,7 +306,7 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
     }
 
     println!("Building the zup {version} toolchain ({profile})");
-    let written = zup_xtask::toolchain::build(&root, &profile)?;
+    let written = zup_xtask::toolchain::build(&root, &profile, options.target.as_deref())?;
     let staged = zup_xtask::toolchain::staging_directory(&root, &profile, &version);
     println!();
     println!(
@@ -274,7 +318,6 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
     Ok(ExitCode::SUCCESS)
 }
 
-/// Refuse a dependency graph that grew by accident.
 fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let options = parse(arguments, "verify-dependency-graph", &["--root"])?;
     let root = match options.root {
@@ -286,8 +329,6 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
         println!("verify-dependency-graph: clean");
         return Ok(ExitCode::SUCCESS);
     }
-    // Every finding is printed, not a count. A count tells a reviewer that
-    // something is wrong; the offending edge is what they can act on.
     for duplicate in &findings.duplicates {
         eprintln!("xtask: {duplicate}");
     }
@@ -310,7 +351,6 @@ fn dependency_graph(arguments: &mut impl Iterator<Item = String>) -> Result<Exit
     Ok(ExitCode::from(1))
 }
 
-/// Generate the automation contract's derived files, or report that they have drifted.
 fn automation(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("automation needs `generate` or `check`\n\n".to_owned() + USAGE);
@@ -352,7 +392,6 @@ fn automation(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, 
     Ok(ExitCode::from(1))
 }
 
-/// Prove a packaged release works from outside this repository.
 fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let Some(subcommand) = arguments.next() else {
         return Err("release needs `clean-room`\n\n".to_owned() + USAGE);
@@ -369,9 +408,6 @@ fn release(arguments: &mut impl Iterator<Item = String>) -> Result<ExitCode, Str
     let material = options
         .material
         .unwrap_or_else(|| root.join("target").join("release-material").join(&version));
-    // A fresh directory every run: the assertion that matters is that the
-    // project starts with nothing in it, and reusing one would test whatever the
-    // last run left behind.
     let work = options
         .work
         .unwrap_or_else(|| std::env::temp_dir().join(format!("zup-clean-room-{version}")));
@@ -409,11 +445,6 @@ fn select(names: &[String]) -> Result<Vec<&'static Matrix>, String> {
         .collect()
 }
 
-/// The options that are flags rather than value-taking.
-///
-/// A flag must not consume the next argument: `--check --online` and
-/// `--check --root .` differ only in where the flag sits, and a parser that
-/// cannot tell them apart will eventually read a directory as a boolean.
 const FLAGS: &[&str] = &["--online"];
 
 fn parse(
@@ -453,8 +484,10 @@ fn parse(
         match flag.as_str() {
             "--root" => options.root = Some(PathBuf::from(value)),
             "--matrix" => options.matrices.push(value),
+            "--host" => options.host = Some(value),
             "--add" => options.add.push(value),
             "--profile" => options.profile = Some(value),
+            "--target" => options.target = Some(value),
             "--out" => options.out = Some(PathBuf::from(value)),
             "--material" => options.material = Some(PathBuf::from(value)),
             "--work" => options.work = Some(PathBuf::from(value)),
@@ -475,8 +508,6 @@ fn parse(
     Ok(options)
 }
 
-/// The workspace containing this xtask, found by walking up to the manifest
-/// that declares `[workspace]`.
 fn repository_root() -> PathBuf {
     let mut directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {

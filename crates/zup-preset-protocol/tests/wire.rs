@@ -1,9 +1,3 @@
-//! What a frame has to satisfy before either peer acts on it.
-//!
-//! The wire rules are the only thing standing between a native executable and
-//! the engine driving it, so each one is tested by breaking it rather than by
-//! asserting the happy path alone.
-
 use zup_preset_protocol::{
     Action, Capabilities, Capability, ComponentId, ComponentOption, DiagnosticKind,
     DiagnosticPresentation, Envelope, HostHello, InstallOptions, InstallScope, InstallerState,
@@ -96,8 +90,6 @@ fn bytes_that_are_not_a_frame_are_refused() {
     ));
 }
 
-/// A frame longer than the limit is refused on its declared length, before a
-/// peer allocates a buffer for it.
 #[test]
 fn an_oversized_frame_is_refused() {
     let bytes = vec![b'x'; zup_preset_protocol::MAX_FRAME_BYTES + 1];
@@ -115,8 +107,6 @@ fn an_oversized_frame_is_refused() {
     assert!(encode(&envelope(Message::Snapshot(Box::new(huge)))).is_err());
 }
 
-/// An action is a closed vocabulary. A peer that sends a method name and an
-/// argument object is not speaking this protocol.
 #[test]
 fn an_action_that_is_not_in_the_vocabulary_is_refused() {
     let bytes = br#"{"version":1,"session":"0192f0f0-0000-7000-8000-000000000000","sequence":1,"message":{"type":"action","action":"run_method","method":"install","arguments":{}}}"#;
@@ -191,8 +181,6 @@ fn the_handshake_names_the_protocol_and_the_session_on_both_sides() {
     assert!(negotiate(&host.capabilities, &hello.required_capabilities).is_ok());
 }
 
-/// Two sessions may legitimately be running at once on one machine, so the id
-/// is what tells a frame apart from a straggler of a session that already ended.
 #[test]
 fn a_frame_from_another_session_is_recognizable() {
     let first = envelope(Message::Action(Action::Install));

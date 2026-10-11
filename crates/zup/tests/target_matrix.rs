@@ -29,6 +29,11 @@ const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
 /// CLI has no presentation features, so there is nothing for a test binary's own
 /// build to have selected. `zup build` finds the matching runtime template through
 /// the toolchain resolver, exactly as it does for a person who installed `zup`.
+///
+/// Windows-only coverage: the matrix project pairs two Windows triples, which a
+/// Linux host cannot lower, so the selection assertions that need them stay
+/// where a Windows host runs them.
+#[cfg(windows)]
 const FRONTEND: &str = "gui";
 
 fn zup() -> Command {
@@ -80,6 +85,7 @@ user = "${{location.user_data}}/CliMatrix"
 }
 
 #[test]
+#[cfg(windows)]
 fn repeated_profile_and_raw_triple_selection_are_checked() {
     let (root, manifest) = write_matrix_project();
     // Both targets present a window, and a window needs a preset carrying its
@@ -221,17 +227,24 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
     let alpha = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
     let beta = toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
     toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
+    // `--output` alignment is resolved during composition, after the backend
+    // boundary. On a Linux host the Windows beta profile is refused there
+    // first, so that combination is Windows-only coverage; Linux output
+    // alignment is covered by the public Linux build tests instead.
+    let mut flags = vec![
+        ("--source", "dist/alpha", "sources"),
+        ("--install-directory", "C:/Acme", "install directories"),
+        // One output for two targets is the same rule, and a refused build
+        // must leave the output path untouched. `check` and `doctor` do not
+        // take `--output` at all; the commands that compose are the ones that
+        // need the rule.
+    ];
+    if cfg!(windows) {
+        flags.push(("--output", output_path.to_str().unwrap(), "outputs"));
+    }
     for command in ["build", "check", "doctor"] {
-        for (flag, value, noun) in [
-            ("--source", "dist/alpha", "sources"),
-            ("--install-directory", "C:/Acme", "install directories"),
-            // One output for two targets is the same rule, and a refused build
-            // must leave the output path untouched. `check` and `doctor` do not
-            // take `--output` at all; the commands that compose are the ones that
-            // need the rule.
-            ("--output", output_path.to_str().unwrap(), "outputs"),
-        ] {
-            if flag == "--output" && command != "build" {
+        for (flag, value, noun) in &flags {
+            if *flag == "--output" && command != "build" {
                 continue;
             }
             let mut command_line = zup();
@@ -244,7 +257,7 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
                     .arg("--runtime")
                     .arg(&beta);
             }
-            let output = command_line.arg(flag).arg(value).output().unwrap();
+            let output = command_line.arg(*flag).arg(*value).output().unwrap();
             assert!(
                 !output.status.success(),
                 "{command} {flag} accepted one value for two targets"
@@ -497,11 +510,23 @@ fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
         .args(["--target", "alpha", "--format", "json"])
         .output()
         .unwrap();
-    assert!(
-        explicit.status.success(),
-        "{}",
-        String::from_utf8_lossy(&explicit.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-    assert_eq!(value["targets"][0]["target"], HOST_TARGET);
+    // `plan` previews a Windows installation transaction. On a Windows host
+    // the selected profile plans; on a Linux host the Linux target is refused
+    // with the transaction it belongs to named.
+    if cfg!(windows) {
+        assert!(
+            explicit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+        assert_eq!(value["targets"][0]["target"], HOST_TARGET);
+    } else {
+        assert!(!explicit.status.success());
+        assert!(
+            String::from_utf8_lossy(&explicit.stderr).contains("cannot plan Linux target"),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+    }
 }

@@ -1,5 +1,3 @@
-//! Restart Manager blocker discovery (read-only).
-
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::RestartManager::{
@@ -12,7 +10,6 @@ use zup_platform::TargetPath;
 
 use crate::lowering::host_path;
 
-/// A process/service blocking a target resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingProcess {
     pub pid: u32,
@@ -21,7 +18,6 @@ pub struct BlockingProcess {
     pub restartable: bool,
 }
 
-/// Preflight result before crossing commit intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilePreflight {
     Ready,
@@ -31,9 +27,6 @@ pub enum FilePreflight {
     },
 }
 
-/// Discover processes locking files this transaction may mutate.
-///
-/// Read-only: never calls `RmShutdown` / `RmRestart`.
 pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
     if files.is_empty() {
         return Ok(FilePreflight::Ready);
@@ -102,11 +95,6 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
     }
 }
 
-/// Files a transaction plan will mutate, as host paths.
-///
-/// The preflight before a transaction starts and the barrier preflight
-/// immediately before commit intent read this one set, so the two can never
-/// disagree about what is at risk.
 pub fn plan_mutating_paths(
     plan: &zup_transaction::TransactionPlan,
     target: &TargetTriple,
@@ -140,7 +128,6 @@ pub fn plan_mutating_paths(
         .collect()
 }
 
-/// Why a preflight is blocked, one line per blocker.
 pub fn blocked_reason(blocked: &FilePreflight) -> Option<String> {
     let FilePreflight::Blocked {
         processes,
@@ -203,7 +190,6 @@ fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> File
     }
 }
 
-/// Files that a plan will actually mutate (Create/Replace only).
 pub fn mutating_paths(files: &[FileOperation]) -> Vec<std::path::PathBuf> {
     files
         .iter()

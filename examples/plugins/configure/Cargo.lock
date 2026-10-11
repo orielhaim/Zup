@@ -415,16 +415,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "zup-plugin-sdk"
+name = "zup-sdk"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
  "zup-plugin-abi",
-]
-
-[[package]]
-name = "zup-sdk"
-version = "0.1.0"
-dependencies = [
- "zup-plugin-sdk",
 ]

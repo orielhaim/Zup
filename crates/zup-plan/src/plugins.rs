@@ -851,6 +851,7 @@ impl MergeContext<'_> {
             size,
             sha256,
             privilege,
+            executable: false,
         });
         self.generated_files.push(GeneratedFile {
             source_relative,
@@ -1280,7 +1281,6 @@ pub(crate) fn summarize_plan(
         + plan.services.len()
         + plan.protocols.len()
         + plan.file_associations.len();
-    // Authorization is a property of each resource, never of the scope.
     let requires_authorization = plan
         .prerequisites
         .iter()

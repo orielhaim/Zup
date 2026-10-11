@@ -1,5 +1,3 @@
-//! A two-architecture fixture for the Windows artifact tests.
-
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -9,7 +7,6 @@ use zup_core::{
     NonEmptyString, TargetProfileId, TargetTriple, Template, UpdateConfig,
 };
 
-/// The application the fixture installs.
 pub fn app() -> App {
     App {
         id: AppId::new("com.acme.desktop").unwrap(),
@@ -65,21 +62,14 @@ const SHARED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Two resolved variants over one shared content set.
 pub struct Fixture {
-    /// The variants, in the order the composer receives them.
     pub variants: Vec<DistributionVariant>,
-    /// Kept alive so the materialized source files outlive the variants.
+
     #[allow(dead_code)]
     root: tempfile::TempDir,
 }
 
 impl Fixture {
-    /// Build every variant, materializing their bytes under a temporary root.
-    ///
-    /// The 32-bit one is here because it is the one that decides how wide a
-    /// dispatcher may be: an artifact that serves it must be startable on
-    /// 32-bit Windows.
     pub fn new() -> Self {
         let root = tempfile::tempdir().expect("fixture root");
         let variants = vec![
@@ -90,7 +80,6 @@ impl Fixture {
         Self { variants, root }
     }
 
-    /// Keep the source root alive for as long as the fixture is.
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         self.root.path()
@@ -143,6 +132,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
             component: None,
             condition: None,
+            executable: name.ends_with(".exe"),
         });
     }
 
@@ -154,6 +144,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             component: None,
             when: None,
             allow_empty: false,
+            executable: file.executable,
         })
         .collect();
     installer_files.sort_by(|left, right| {

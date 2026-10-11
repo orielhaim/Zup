@@ -1,25 +1,20 @@
-//! `zup check` and `zup plan`: what the project says, and what it would do.
-//!
-//! Neither command changes anything. `check` answers "is this project coherent";
-//! `plan` answers "what would installing it do on this machine". They share the
-//! selection and materialization path with `build` on purpose: a check that
-//! re-implements the build's own traversal is a check that agrees with the build
-//! until the day it does not.
-
+#[cfg(windows)]
 use std::path::Path;
 
 use zup_automation::{
-    AutomationResult, ByteCount, CheckDetails, Composition, Details, Diagnostic, Identifier,
-    LogLevel, PlanDetails,
+    AutomationResult, CheckDetails, Composition, Details, Diagnostic, Identifier, LogLevel,
 };
+#[cfg(windows)]
+use zup_automation::{ByteCount, PlanDetails};
+#[cfg(windows)]
 use zup_core::SelectedScope;
+#[cfg(windows)]
 use zup_exec::LifecycleAction;
 
 use crate::cli::{CheckCommand, PlanCommand};
+use crate::failure::Reporter;
 use crate::project::{self, LoadedProject};
-use crate::report::Reporter;
 
-/// Validate a project and the files it will ship.
 pub fn run_check(
     args: CheckCommand,
     toolchain_root: Option<std::path::PathBuf>,
@@ -35,9 +30,7 @@ pub fn run_check(
     let mut variants = Vec::with_capacity(loaded.selected_targets.len());
     let mut files = 0usize;
     for (config, plan) in loaded.selected_targets.iter().zip(&loaded.build.targets) {
-        // A check that stopped at the manifest would report a project with a
         // broken plugin as valid, which is the one thing a check must never do.
-        // The plugin compile is in memory and writes nothing.
         if !plan.installer.plugins.is_empty() {
             zup_plugin_build::compile_plugins(plan).map_err(|error| {
                 crate::failure::error_with_help(
@@ -79,9 +72,6 @@ pub fn run_check(
     if let Some(composition) = &composition {
         reporter.log(LogLevel::Info, composition_text(composition));
     }
-    // A warning, not an error: the project is valid and `zup check` succeeds. What
-    // cannot be composed is a fact about how the release has to be built, and turning
-    // it into an error would make a green project read as a broken one.
     let diagnostics = match &composition {
         Some(composition) if !composition.composable => vec![
             Diagnostic::warning("zup.check.not_composable", composition.detail.clone())
@@ -106,11 +96,6 @@ pub fn run_check(
     Ok(result)
 }
 
-/// Whether the selected targets can become one artifact.
-///
-/// `None` when fewer than two were selected: that is not a finding, it is the ordinary
-/// case, and a report that said "cannot be composed" about one target would be
-/// reporting a problem nobody has.
 fn composition(
     loaded: &LoadedProject,
     variants: &[zup_artifact::DistributionVariant],
@@ -125,9 +110,18 @@ fn composition(
         .map(|config| config.profile.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    // Composition is refused loudly rather than suggested quietly, because a project
-    // that silently ships two installers where one would do has a problem nobody was
-    // told about.
+    if borrowed.iter().any(|variant| {
+        variant.target().operating_system() == zup_core::TargetOperatingSystem::Linux
+    }) {
+        return Some(Composition {
+            composable: false,
+            dimension: Some(Identifier::fixed("platform")),
+            detail: format!(
+                "{names} ship one self-contained Linux installer each and cannot be composed: \
+                 build them separately with `zup build --target <profile>`"
+            ),
+        });
+    }
     Some(match zup_artifact::check_compatibility(&borrowed) {
         Err(incompatible) => Composition {
             composable: false,
@@ -158,7 +152,6 @@ fn composition(
     })
 }
 
-/// What a person reads for a composition finding.
 fn composition_text(composition: &Composition) -> String {
     if composition.composable {
         return format!(
@@ -174,19 +167,57 @@ fn composition_text(composition: &Composition) -> String {
     format!("\n✗ {}\n  {}", composition.detail, dimension)
 }
 
-/// Show what installing this project would do, without changing anything.
 pub fn run_plan(
     args: PlanCommand,
     toolchain_root: Option<std::path::PathBuf>,
 ) -> miette::Result<AutomationResult> {
     let reporter = Reporter::new(args.format);
-    let loaded = project::load_single_project(
+    let selected = project::select_project(
         &args.project.manifest,
         &args.project.target,
         &args.project.overrides(),
-        &crate::resolver(toolchain_root)?,
-        zup_build::Writes::None,
+        true,
     )?;
+    let config = selected
+        .selected_targets
+        .first()
+        .expect("a single-target selection has one target");
+    if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+        return Err(crate::failure::error_with_help(
+            "zup.plan.linux_target",
+            format!(
+                "`zup plan` previews a Windows installation and cannot plan Linux target \
+                 `{}`",
+                config.target
+            ),
+            "Build the Linux installer and run it to see what it does.",
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&reporter, &selected, config, &toolchain_root);
+        Err(crate::failure::error(
+            "zup.plan.unsupported_host",
+            "Windows lowering requires a Windows build host",
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let loaded = project::materialize_project(
+            selected,
+            &crate::resolver(toolchain_root)?,
+            zup_build::Writes::None,
+        )?;
+        plan_windows(args, &reporter, &loaded)
+    }
+}
+
+#[cfg(windows)]
+fn plan_windows(
+    args: PlanCommand,
+    reporter: &Reporter,
+    loaded: &LoadedProject,
+) -> miette::Result<AutomationResult> {
     let config = loaded
         .selected_targets
         .first()
@@ -199,9 +230,6 @@ pub fn run_plan(
         .load(&installer.app.id, scope)
         .map_err(|error| crate::failure::error("zup.plan.ledger", format!("ledger: {error}")))?;
     let mut request = zup_plan::PlanRequest::new(config.target.clone(), scope);
-    // `plan` plans one target, so the repeatable `--install-directory` has one
-    // value in scope. More than one is a mistake the shared alignment check
-    // already refuses.
     request.install_directory = choose_directory(
         args.project
             .install_directory
@@ -265,10 +293,7 @@ pub fn run_plan(
         )))
 }
 
-/// The install directory a plan should use.
-///
-/// `--install-directory` is honoured only where the project permits one. A plan
-/// that silently ignored the flag would describe an install the user cannot get.
+#[cfg(windows)]
 fn choose_directory(
     explicit: Option<&Path>,
     prior: Option<&zup_exec::InstallLedger>,

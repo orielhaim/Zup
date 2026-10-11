@@ -1,11 +1,3 @@
-//! The Windows universal artifact, end to end.
-//!
-//! Compose an artifact, open it the way the dispatcher does, select a variant,
-//! stage it, and prove the staged package is a valid single-variant package the
-//! native runtime already knows how to read. The interesting assertion is the
-//! negative one: a machine that staged one variant must not be able to see the
-//! other's content.
-
 use std::path::{Path, PathBuf};
 
 use zup_artifact::{ArtifactComposer, ArtifactRequest};
@@ -17,17 +9,10 @@ mod fixture;
 
 use fixture::{Fixture, app as app_identity};
 
-/// The dispatcher template beside the built test binaries.
-///
-/// The fixture is a console installer, so its launcher is the console
-/// dispatcher. The dispatcher is a required input: these tests are about
-/// composing into a real image, and a missing template means the step that
-/// builds it was skipped, not that there is nothing to prove.
 fn dispatcher_template() -> PathBuf {
     template(zup_xtask::dispatcher::CONSOLE)
 }
 
-/// The windowed dispatcher, used to prove a mismatch is refused.
 fn gui_dispatcher_template() -> PathBuf {
     template(zup_xtask::dispatcher::GUI)
 }
@@ -99,7 +84,6 @@ fn a_staged_variant_is_a_package_the_native_runtime_already_reads() {
     let store = root.path().join("store");
     let staged = stage_variant(&artifact, id, &store).expect("staged");
 
-    // The staged runtime is exactly the image the index named, byte for byte.
     assert!(staged.runtime.is_file());
     let variant = artifact.index().variant("windows-x64").unwrap();
     let runtime = variant.runtime.expect("the variant carries a runtime");
@@ -108,8 +92,6 @@ fn a_staged_variant_is_a_package_the_native_runtime_already_reads() {
     let (_, digest) = zup_core::hash_reader(staged_bytes.as_slice()).unwrap();
     assert_eq!(digest, runtime.digest);
 
-    // The staged package opens through the ordinary package reader, which is what
-    // a maintenance copy reads.
     let package = Package::open(&staged.package).expect("the staged package opens");
     assert_eq!(package.plan().installer.target.as_str(), {
         artifact.index().variant(id).unwrap().target.as_str()
@@ -130,7 +112,6 @@ fn a_staged_variant_carries_no_other_architecture_content() {
     let staged = stage_variant(&artifact, "windows-x64", &store).expect("staged");
     let package = Package::open(&staged.package).expect("the staged package opens");
 
-    // Every blob the ARM64 variant alone needs is absent from the x64 store.
     let arm = artifact
         .view()
         .variant_manifest("windows-arm64")
@@ -180,17 +161,12 @@ fn this_host_selects_exactly_one_variant_and_it_is_its_own() {
     assert!(!selection.emulated, "a supported host selects natively");
 }
 
-/// A dispatcher has to be an image this host can execute, and it has to be the
-/// same kind of window the artifact promises its user. Both refusals happen
-/// before anything is written.
 #[test]
 fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
     let fixture = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let (_output, graph) = compose(root.path(), &fixture);
 
-    // A windowed template cannot produce a console artifact, because the artifact
-    // is the launcher experience a user sees.
     let error = compose_universal_executable(
         &gui_dispatcher_template(),
         &root.path().join("mismatch.exe"),
@@ -208,9 +184,6 @@ fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
         "{error}"
     );
 
-    // The same launcher, relabelled 64-bit. This is the case a project hits when
-    // it composes with a host-built launcher instead of the shipped one: the
-    // build machine runs every variant, and the artifact only works there.
     let dispatcher = dispatcher_template();
     assert_eq!(
         zup_binary::Executable::read(&dispatcher)
@@ -241,11 +214,6 @@ fn a_dispatcher_that_cannot_launch_the_artifact_is_refused() {
     assert!(!too_wide.exists(), "a refused composition writes nothing");
 }
 
-/// Where the machine field sits in an image, found the way the reader finds it.
-///
-/// The one place this test still reads a header by hand, and only because it has
-/// to *rewrite* one: a widened dispatcher is a real image with a different
-/// `Machine` field, and no reader turns an existing file into a different one.
 fn pe_machine_offset(bytes: &[u8]) -> usize {
     let header = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
     assert_eq!(&bytes[header..header + 4], b"PE\0\0");
@@ -257,8 +225,7 @@ fn a_missing_resource_is_reported_rather_than_read_as_empty() {
     let fixture = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let (_output, _graph) = compose(root.path(), &fixture);
-    // A file that is not an artifact at all is refused, not treated as an
-    // artifact with nothing in it.
+
     let plain = root.path().join("plain.exe");
     std::fs::write(&plain, b"MZ not really an image").unwrap();
     assert!(UniversalArtifact::open(&plain).is_err());

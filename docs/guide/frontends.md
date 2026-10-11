@@ -6,7 +6,9 @@
 frontend = "gui"
 ```
 
-Three frontends are available.
+Three frontends are available. GUI is Windows-only in this phase: a Linux
+target with `frontend = "gui"` is refused with that diagnostic before any
+artifact work. Console and headless build on either host.
 
 ## GUI
 

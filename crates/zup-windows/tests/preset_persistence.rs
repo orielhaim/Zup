@@ -1,13 +1,5 @@
 #![cfg(windows)]
 
-//! The window an installation records, and the plan that has to justify it.
-//!
-//! The gate under test is `InstallLedgerStore::validate_plan`, because that is
-//! what every transaction passes through before it is allowed to run: it is the
-//! one place that sees the plan, the machine's existing installation, and the
-//! paths the window's content will live at. Everything asserted here is a
-//! property of that decision, not of a fixture that was arranged to pass.
-
 use std::path::{Path, PathBuf};
 
 use zup_core::{
@@ -20,7 +12,6 @@ use zup_transaction::{
     TransactionPlan, compile_transaction,
 };
 
-/// The wire version a preset on this host would speak.
 fn zup_core_preset_protocol_version() -> u32 {
     1
 }
@@ -42,7 +33,6 @@ fn target_path(path: &Path) -> zup_platform::TargetPath {
         .expect("a target path")
 }
 
-/// A window with settings deep enough to be worth checking, and one asset.
 fn window(executable: &[u8], logo: &[u8]) -> InstalledPreset {
     InstalledPreset {
         preset: PresetRuntime {
@@ -65,13 +55,12 @@ fn window(executable: &[u8], logo: &[u8]) -> InstalledPreset {
     }
 }
 
-/// Where one scope keeps one generation's window content.
 fn content_directory(
     state_root: &Path,
     scope: SelectedScope,
     version: &semver::Version,
 ) -> PathBuf {
-    zup_windows::maintenance_directory(state_root, &app_id(), scope, version)
+    zup_transaction::maintenance_directory(state_root, &app_id(), scope, version)
 }
 
 fn content_files(
@@ -81,19 +70,18 @@ fn content_files(
 ) -> Vec<(PathBuf, Sha256Digest)> {
     let directory = content_directory(state_root, scope, &version());
     let mut files = vec![(
-        zup_windows::preset_runtime::preset_path(&directory, &ui.executable),
+        zup_bundle::preset_path(&directory, &ui.executable, target().executable_suffix()),
         ui.executable,
     )];
     files.extend(ui.preset.assets.iter().map(|asset| {
         (
-            zup_windows::preset_runtime::asset_path(&directory, asset.name.as_str(), &asset.sha256),
+            zup_bundle::asset_path(&directory, asset.name.as_str(), &asset.sha256),
             asset.sha256,
         )
     }));
     files
 }
 
-/// A plan that installs a window's content into one scope.
 fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
@@ -108,13 +96,13 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -
             expected_size: 1,
             privilege: scope.authorization(),
             delta: FileDelta::Create,
+            executable: false,
         });
     }
     input.preset = Some(ui.clone());
     compile_transaction(&input).expect("the plan compiles")
 }
 
-/// A plan that retires a window's content and declares no window in its place.
 fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
@@ -163,8 +151,6 @@ fn validate(
         .map_err(|error| error.to_string())
 }
 
-/// A fresh install declares its window and installs exactly its content, so the
-/// gate has nothing to complain about. This is the shape every later test varies.
 #[test]
 fn a_window_and_its_content_are_accepted_together() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -178,9 +164,6 @@ fn a_window_and_its_content_are_accepted_together() {
     .expect("a plan that installs the window it declares");
 }
 
-/// The mistake this gate exists for: a window declared, and content the
-/// transaction never installs. It would commit an installation whose only window
-/// cannot open, and be reported at the next launch as a missing file.
 #[test]
 fn a_window_whose_content_the_plan_does_not_install_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -196,8 +179,6 @@ fn a_window_whose_content_the_plan_does_not_install_is_refused() {
     );
 }
 
-/// Replacing a window retires the content the old one owned. Left behind, those
-/// bytes are a preset on a machine that no longer has a reason to run it.
 #[test]
 fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -236,6 +217,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
             expected_size: 1,
             privilege: zup_core::Privilege::User,
             delta: FileDelta::Create,
+            executable: false,
         });
     }
     for (path, sha256) in content_files(state_root.path(), SelectedScope::User, &first) {
@@ -271,8 +253,6 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
     let _ = &mut previous;
 }
 
-/// A plan that stops presenting a window but keeps its content is refused for the
-/// same reason: bytes with nothing to launch them.
 #[test]
 fn dropping_the_window_without_retiring_its_content_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -314,8 +294,6 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
     .expect("and a plan that retires it is accepted");
 }
 
-/// The settings a preset receives survive the journal unchanged, including the
-/// nested and typed values a hand-written check usually leaves out.
 #[test]
 fn settings_survive_the_journal_unchanged() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -328,12 +306,6 @@ fn settings_survive_the_journal_unchanged() {
     assert_eq!(recorded, ui, "and the whole window, as one value");
 }
 
-/// Each scope keeps its own window, under its own authority.
-///
-/// A machine-scope installation's preset content is installed content in the
-/// machine's own state root, moved by the elevated worker. One shared directory
-/// would be a machine install reading from a per-user location, which is the
-/// failure a user-scope install works and a machine install does not.
 #[test]
 fn each_scope_keeps_its_own_window_under_its_own_authority() {
     let state_root = tempfile::tempdir().expect("a state root");
@@ -355,8 +327,8 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
         }
         for (path, _) in content_files(state_root.path(), scope, &ui) {
             assert!(
-                zup_windows::preset_runtime::is_content_path(
-                    &zup_windows::maintenance_root(state_root.path(), &app_id(), scope),
+                zup_bundle::is_content_path(
+                    &zup_transaction::maintenance_root(state_root.path(), &app_id(), scope),
                     &zup_windows::plain_path_text(&path),
                 ),
                 "{} is recognised as {scope}'s own window content",
@@ -368,11 +340,6 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
     assert_ne!(seen[0], seen[1], "two scopes are two storages");
 }
 
-/// The persisted form is the runtime model, read back as itself.
-///
-/// A ledger that deserializes into something else would mean a second model of a
-/// preset, and a preset that is one value at runtime and another in a file is
-/// two presets.
 #[test]
 fn the_persisted_window_is_the_runtime_model() {
     let ui = window(b"a preset executable", b"<svg/>");
@@ -385,9 +352,7 @@ fn the_persisted_window_is_the_runtime_model() {
         "selected_components": [],
         "install_directory": null,
         "release": null,
-        // The persisted ledger. Its keys come from the Rust field names, so
-        // renaming the model renamed what is written; there is no older format
-        // to stay compatible with.
+
         "preset": {
             "preset": {
                 "name": "aurora",
@@ -408,13 +373,6 @@ fn the_persisted_window_is_the_runtime_model() {
     assert_eq!(recorded.preset.version, ui.preset.version);
 }
 
-/// A ledger of a superseded format is refused rather than read.
-///
-/// The format changed to carry a window, and a record written before that
-/// change says nothing about one. Reading it as "this installation has no
-/// window" would drop the window of an installed application on the first launch
-/// after the change, and the refusal is the honest answer: what this record says
-/// is not what this machine should be running.
 #[test]
 fn a_ledger_of_a_superseded_format_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");

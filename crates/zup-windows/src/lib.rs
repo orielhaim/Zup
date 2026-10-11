@@ -1,8 +1,3 @@
-//! Windows platform backend for zup.
-//!
-//! Prefers focused `windows-*` crates over the `windows` umbrella crate.
-//! Generated Win32 bindings stay private to this crate.
-
 mod acquired;
 mod bindings;
 mod bootstrap_fs;
@@ -11,7 +6,6 @@ mod cmdline;
 mod content_store;
 mod durable;
 mod file_executor;
-mod fs_bindings;
 mod host;
 mod host_dirs;
 mod inspect;
@@ -19,12 +13,12 @@ mod integration;
 mod ledger;
 mod lowering;
 mod machine_state;
+mod path_safety;
 mod payload_overlay;
 mod pe_resources;
 mod pipe;
 mod planning;
 mod prerequisites;
-pub mod preset_runtime;
 mod process;
 mod registry;
 mod resolve;
@@ -40,9 +34,7 @@ pub mod signing;
 mod source_policy;
 mod transaction_payload;
 mod transport;
-mod transport_bindings;
 mod universal;
-mod worker;
 mod worker_rt;
 
 pub use acquired::{
@@ -61,14 +53,11 @@ pub use cmdline::{
     parse_command_line, quote_arg, split_command_line,
 };
 pub use content_store::{
-    CONTENT_STORE_DIRECTORY, ContentStoreError, ContentStoreIdentity, MAINTENANCE_EXECUTABLE_NAME,
-    MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, content_store_base, ensure_directory,
-    maintenance_directory, maintenance_root, preset_executable_name, remove_store,
+    ContentStoreError, content_store_base, ensure_directory, preset_executable_name,
     validate_content_store_base, verify_directory_chain,
 };
 pub use durable::{
-    DurableError, InstallationLock, LockScope, copy_new_durable, create_durable, move_durable,
-    volume_root, write_durable,
+    DurableError, copy_new_durable, create_durable, move_durable, volume_root, write_durable,
 };
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
@@ -82,7 +71,7 @@ pub use host::{
 pub use host_dirs::{
     HostDirError, WindowsInstallLocationResolver, shared_data, user_data, user_desktop,
 };
-pub use inspect::{InspectError, inspect_files, inspect_target, inspect_target_with};
+pub use inspect::{InspectError, InspectReads, inspect_files, inspect_target, inspect_target_with};
 pub use integration::{
     IntegrationError, apply_managed, apply_owned_removal, inspect_uninstall_registration,
     notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
@@ -93,8 +82,7 @@ pub use lowering::{
     windows_target_path_identity,
 };
 pub use machine_state::{
-    MachineStateError, default_state_root, ensure_state_root, is_maintenance_executable,
-    maintenance_destination, plain_path_text, resolve_state_root,
+    MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,
 };
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,
@@ -104,8 +92,8 @@ pub use payload_overlay::{
 };
 pub use pe_resources::{ResourceError, apply_icon, read_resource, write_resources};
 pub use pipe::{
-    ClientReader, ClientWriter, HELLO_TIMEOUT, PipeError, PipeSecurity, PipeServer, ServerReader,
-    ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,
+    ClientReader, ClientWriter, HANDSHAKE_TIMEOUT, PipeError, PipeSecurity, PipeServer,
+    ServerReader, ServerWriter, WORKER_CONNECT_TIMEOUT, check_version, frame_client, frame_server,
 };
 pub use planning::{WindowsPlanError, plan_target_lifecycle, plan_target_lifecycle_with_frontend};
 pub use prerequisites::{
@@ -116,7 +104,7 @@ pub use process::{
     ChildProcess, HandOff, LaunchError, LaunchRequest, Launcher, WindowsLauncher, launch,
     quote_argument,
 };
-pub use registry::{RegistryError, RegistryReader, RegistryValue, WindowsRegistryReader};
+pub use registry::{RegistryError, RegistryValue, open_classes_key, open_environment_key};
 pub use resolve::{TargetResolveError, WindowsTargetContext, resolve_target};
 pub use restart_manager::{
     BlockingProcess, FilePreflight, blocked_reason, mutating_paths, plan_mutating_paths, preflight,
@@ -125,12 +113,15 @@ pub use runtime::{
     OverlayPolicy, WindowsRuntimeBackend, run_install, run_install_control,
     run_install_control_with_policy, run_local_install,
 };
+pub use scm::ScmError;
 pub use search_path::{
     PATH_VALUE_NAME, VALUE_TYPE_EXPAND, VALUE_TYPE_MISSING, VALUE_TYPE_PLAIN,
     contains as search_path_contains, lost_expansion, split as split_search_path, write_value_type,
 };
-pub use services::{FakeServiceReader, ServiceReader, WindowsServiceReader};
-pub use shortcuts::{FakeShortcutReader, ShortcutReader, WindowsShortcutReader};
+pub use services::{ServiceError, read_service};
+pub use shell_link::ShellLinkError;
+pub use shortcut_name::{ShortcutNameError, validate_shortcut_filename};
+pub use shortcuts::{ShortcutError, read_shortcut};
 pub use source_policy::WindowsSourceFilePolicy;
 pub use transaction_payload::{
     AppsFeaturesOperation, AppsFeaturesState, AppsFeaturesValue, TransactionPayloadError,
@@ -146,12 +137,9 @@ pub use universal::{
     compose_universal_executable, read_variant_manifest, stage_variant, staged_descriptor,
     verify_selected_variant,
 };
-pub use worker::{
-    WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,
-    format_bootstrap, parse_bootstrap, plan_hash_hex, worker_capabilities,
-};
-pub use worker_rt::run_worker;
 #[cfg(feature = "test-launcher")]
 pub use worker_rt::run_worker_for_test;
-pub use zup_bundle::AcquiredPayloadSource;
-pub use zup_transaction::FilePrecondition;
+pub use worker_rt::{
+    WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,
+    format_bootstrap, parse_bootstrap, plan_hash_hex, run_worker, worker_capabilities,
+};

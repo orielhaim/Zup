@@ -1,5 +1,4 @@
-//! Worker bootstrap, handshake, and security-negative tests.
-
+use rstest::rstest;
 use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
 use zup_core::TargetTriple;
 use zup_protocol::{
@@ -27,10 +26,6 @@ fn bootstrap() -> WorkerBootstrap {
     }
 }
 
-/// The only message a worker will act on is an `ExecuteBootstrap` whose target
-/// matches the one it was started for. Everything else about the bootstrap
-/// string - the plan hash, the session, the pipe - is already bound by the
-/// handshake this replays.
 #[test]
 fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
     let plan = BootstrapPlan::new(
@@ -108,8 +103,6 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
     ));
 }
 
-/// A well-formed bootstrap string with one field replaced, so each negative case
-/// below fails at the check it names rather than at the field-count gate.
 fn bootstrap_with(field: usize, value: &str) -> String {
     let good = format_bootstrap(&bootstrap());
     let mut parts: Vec<String> = good.split('|').map(str::to_owned).collect();
@@ -117,20 +110,23 @@ fn bootstrap_with(field: usize, value: &str) -> String {
     parts.join("|")
 }
 
-#[test]
-fn bootstrap_rejects_malformed() {
-    assert!(parse_bootstrap("").is_err());
-    assert!(parse_bootstrap("1|sess|pipe|1").is_err());
-    assert!(
-        parse_bootstrap("not-a-number|00000000-0000-0000-0000-000000000000|p|1|a|x|y").is_err()
-    );
-    assert!(parse_bootstrap(&bootstrap_with(1, "not-a-uuid")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(2, "")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(2, "bad\\pipe")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(3, "0")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(4, "not-a-sid")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(5, "zz")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(6, "tooshort")).is_err());
+#[rstest]
+#[case(None, "")]
+#[case(None, "1|sess|pipe|1")]
+#[case(None, "not-a-number|00000000-0000-0000-0000-000000000000|p|1|a|x|y")]
+#[case(Some(1), "not-a-uuid")]
+#[case(Some(2), "")]
+#[case(Some(2), "bad\\pipe")]
+#[case(Some(3), "0")]
+#[case(Some(4), "not-a-sid")]
+#[case(Some(5), "zz")]
+#[case(Some(6), "tooshort")]
+fn bootstrap_rejects_malformed(#[case] field: Option<usize>, #[case] value: &str) {
+    let input = match field {
+        Some(field) => bootstrap_with(field, value),
+        None => value.to_owned(),
+    };
+    assert!(parse_bootstrap(&input).is_err());
 }
 
 #[test]
@@ -151,9 +147,6 @@ fn pipe_name_has_no_secrets() {
     assert!(name.len() <= 48);
 }
 
-/// The three properties that make a wire channel safe to run a worker over: the
-/// envelope is the worker's own session, it is the protocol both sides speak,
-/// and no message is ever delivered twice.
 #[test]
 fn an_envelope_offers_a_channel_no_replay() {
     let b = bootstrap();
@@ -170,7 +163,7 @@ fn an_envelope_offers_a_channel_no_replay() {
             .handle_message(envelope(SessionId::new_v7(), PROTOCOL_VERSION))
             .is_err()
     );
-    // decode_payload rejects the version before the session ever sees it.
+
     assert!(
         decode_payload(
             &encode_payload(&envelope(b.session_id, PROTOCOL_VERSION + 1)).unwrap_or_default()

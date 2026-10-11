@@ -79,32 +79,38 @@ zup-preset-host = { path = "crates/zup-preset-host" }
 zup-preset-compose = { path = "crates/zup-preset-compose" }
 zup-preview = { path = "crates/zup-preview" }
 zup-preset-dev = { path = "crates/zup-preset-dev" }
-zup-preset-sdk = { path = "crates/zup-preset-sdk", version = "0.1.0" }
+zup-sdk-macros = { path = "crates/zup-sdk-macros", version = "0.1.0" }
+zup-sdk = { path = "crates/zup-sdk", version = "0.1.0" }
 zup-preset-ipc = { path = "crates/zup-preset-ipc", version = "0.1.0" }
 zup-windows = { path = "crates/zup-windows" }
+zup-linux = { path = "crates/zup-linux" }
 zup-update = { path = "crates/zup-update" }
 zup-plugin-abi = { path = "crates/zup-plugin-abi", version = "0.1.0" }
-zup-plugin-sdk = { path = "crates/zup-plugin-sdk", version = "0.1.0" }
 zup-plugin-contract = { path = "crates/zup-plugin-contract" }
 zup-plugin-build = { path = "crates/zup-plugin-build" }
 zup-plugin-runtime = { path = "crates/zup-plugin-runtime" }
-zup-preset-sdk-macros = { path = "crates/zup-preset-sdk-macros", version = "0.1.0" }
-zup-sdk = { path = "crates/zup-sdk", version = "0.1.0" }
 zup-xtask = { path = "crates/zup-xtask" }
 
 # Graph
 petgraph = "0.8"
 
-# Managed child processes. `process-wrap` owns the platform mechanics - a job
-# object on Windows, a process group on Unix - so that terminating a child
-# terminates the tree it started, on every supported desktop platform, from one
-# code path. Which children get this treatment, and when they may be left
-# running, stays zup's decision.
 process-wrap = { version = "10", default-features = false, features = [
   "job-object",
   "process-group",
   "std",
 ] }
+
+rustix = { version = "1.1", default-features = false, features = [
+  "event",
+  "fs",
+  "mount",
+  "net",
+  "process",
+  "std",
+  "system",
+  "thread",
+] }
+xdg = "3"
 
 # Build / filesystem
 atomic-write-file = "0.3"
@@ -152,8 +158,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 secrecy = "0.10"
 git-url-parse = "0.6"
 
-# Retry with exponential backoff and jitter. `backon` supplies the curve; what
-# counts as retryable and when to move to another origin stays zup's policy.
 backon = { version = "1.6", default-features = false, features = [
   "std",
   "tokio",
@@ -168,3 +172,8 @@ lnks = { version = "0.2", default-features = false, features = ["runas"] }
 windows-service = "0.8"
 # Bindings for Windows APIs without an appropriate focused crate.
 windows-bindgen = "0.100"
+
+zbus_systemd = { version = "0.26200.0", default-features = false, features = [
+  "systemd1",
+  "zbus-async-tokio",
+] }

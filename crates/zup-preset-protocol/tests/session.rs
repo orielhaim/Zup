@@ -1,14 +1,3 @@
-//! A whole session, driven by two [`Session`] values and nothing else.
-//!
-//! No pipe, no window, no runtime. A host and a preset running the same state
-//! machine is what makes "the same protocol in production and in `zup preset dev`"
-//! a fact rather than an intention, and it can only be checked if a test can
-//! drive one end of a session without a process.
-//!
-//! Each case breaks one rule and asserts the refusal, because a handshake that
-//! is only ever tested in the order it is supposed to happen proves nothing
-//! about what a preset that does not follow it gets.
-
 use zup_preset_protocol::{
     Action, Capabilities, Capability, ComponentId, ComponentOption, Configuration, Envelope,
     Handshake, InstallOptions, InstallScope, InstallerState, MaintenanceState, Message,
@@ -59,7 +48,6 @@ fn every_capability() -> Capabilities {
     Capabilities::new(Capability::ALL.iter().copied())
 }
 
-/// One host and one preset, connected.
 struct Pair {
     host: Session,
     preset: Session,
@@ -86,7 +74,6 @@ impl Pair {
         Self { host, preset, id }
     }
 
-    /// Push both messages the host publishes, into the preset.
     fn publish(&mut self, configuration: Configuration) -> Vec<Message> {
         let frames = self
             .host
@@ -107,8 +94,6 @@ fn decode_frame(envelope: &Envelope) -> Envelope {
     zup_preset_protocol::decode(&bytes).expect("decode")
 }
 
-/// The two messages a preset must be able to draw from are exactly these, in
-/// this order, and a preset that reconnects gets them again from scratch.
 #[test]
 fn a_connected_preset_receives_its_configuration_then_the_current_state() {
     let mut pair = Pair::connected();
@@ -124,11 +109,6 @@ fn a_connected_preset_receives_its_configuration_then_the_current_state() {
     assert!(matches!(pair.host.handshake(), Handshake::Live { .. }));
 }
 
-/// A preset that reconnects gets the whole state again.
-///
-/// Reconnection is a new connection, so it is a new session: the host's
-/// authoritative state is not in the session at all, and publishing into a
-/// fresh one hands the new preset everything without replaying anything.
 #[test]
 fn a_reconnecting_preset_is_sent_the_whole_state_again() {
     let mut pair = Pair::connected();
@@ -162,9 +142,6 @@ fn a_reconnecting_preset_is_sent_the_whole_state_again() {
     ));
 }
 
-/// A preset that asks for a capability the host does not provide is refused
-/// before it can draw anything, rather than being given a window with a dead
-/// control in it.
 #[test]
 fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
     let id = SessionId::new_v7();
@@ -182,8 +159,6 @@ fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
     );
 }
 
-/// A host that provides what the preset needs is the same handshake with a
-/// different set, and a preset that needs nothing at all is still connected.
 #[test]
 fn a_preset_that_needs_nothing_still_connects() {
     let id = SessionId::new_v7();
@@ -193,8 +168,6 @@ fn a_preset_that_needs_nothing_still_connects() {
     assert!(matches!(host.receive(hello), Ok(SessionProgress::Send(_))));
 }
 
-/// The session id is not decoration: a frame from a session this end is not in
-/// is refused whatever it says.
 #[test]
 fn a_frame_from_another_session_is_refused() {
     let mut pair = Pair::connected();
@@ -209,14 +182,9 @@ fn a_frame_from_another_session_is_refused() {
     assert_eq!(pair.host.receive(stranger), Err(WireError::SessionMismatch));
 }
 
-/// A host cannot answer its own hello, and a preset cannot send one. A peer
-/// that mixes the roles up is not a peer this protocol can follow.
 #[test]
 fn a_message_from_the_wrong_side_is_refused() {
     let mut pair = Pair::connected();
-    // A preset that answers the host's hello with another hello. The host is
-    // past the handshake, so the refusal has to come from the state, not from
-    // the direction: the direction is right and the message is still wrong.
     let second_hello = pair
         .preset
         .frame(Message::PresetHello(zup_preset_protocol::PresetHello {
@@ -248,8 +216,6 @@ fn a_message_from_the_wrong_side_is_refused() {
     );
 }
 
-/// A version a peer cannot follow is refused in the frame and in the hello, so
-/// there is no way to reach a session by lying in only one of the two.
 #[test]
 fn a_version_this_build_does_not_speak_is_refused() {
     let id = SessionId::new_v7();
@@ -274,8 +240,6 @@ fn a_version_this_build_does_not_speak_is_refused() {
         })
     );
 
-    // The same hello, correctly framed but claiming a version the body cannot
-    // follow, is refused on the version rather than trusted.
     let mut host = Session::host(id, every_capability(), product());
     assert_eq!(
         host.receive(Envelope {
@@ -297,8 +261,6 @@ fn a_version_this_build_does_not_speak_is_refused() {
     );
 }
 
-/// A hello that claims a different protocol version than its frame is refused
-/// on the version, not on trust.
 #[test]
 fn a_hello_that_claims_the_wrong_version_is_refused() {
     let id = SessionId::new_v7();
@@ -324,8 +286,6 @@ fn a_hello_that_claims_the_wrong_version_is_refused() {
     );
 }
 
-/// A retransmitted action is how a confirmation ends up applying twice, so the
-/// sequence is checked before the message means anything.
 #[test]
 fn a_replayed_sequence_is_refused() {
     let mut pair = Pair::connected();
@@ -346,10 +306,6 @@ fn a_replayed_sequence_is_refused() {
     );
 }
 
-/// A frame that arrives after a newer one means the transport is not the one
-/// this protocol assumes. The preset's counter is read back out of the frames
-/// it produced, because a test that hand-writes a sequence number is testing
-/// its own arithmetic.
 #[test]
 fn a_sequence_that_goes_backwards_is_refused() {
     let mut pair = Pair::connected();
@@ -385,9 +341,6 @@ fn a_sequence_that_goes_backwards_is_refused() {
     );
 }
 
-/// Once either side has ended the session, nothing else is accepted: a
-/// message that arrives after a close is a peer that did not agree to the
-/// close.
 #[test]
 fn a_closed_session_accepts_nothing_further() {
     let mut pair = Pair::connected();
@@ -407,9 +360,6 @@ fn a_closed_session_accepts_nothing_further() {
     assert_eq!(pair.host.receive(action), Err(WireError::SessionClosed));
 }
 
-/// Configuration a host could not have produced is refused before a preset sees
-/// it, because a preset that trusted a hostile asset path would read a file it
-/// was never given.
 #[test]
 fn a_configuration_beyond_the_limits_is_refused() {
     let mut pair = Pair::connected();
@@ -429,8 +379,6 @@ fn a_configuration_beyond_the_limits_is_refused() {
     ));
 }
 
-/// The role a session runs as is fixed when it is built, which is what lets one
-/// type serve both peers without either of them second-guessing the other.
 #[test]
 fn a_session_knows_which_side_it_is() {
     let id = SessionId::new_v7();
@@ -442,8 +390,6 @@ fn a_session_knows_which_side_it_is() {
     assert_eq!(preset.id(), id);
 }
 
-/// A maintenance surface reaches a preset exactly as an install surface does:
-/// the protocol has no screen names, and the same two messages carry both.
 #[test]
 fn a_maintenance_session_is_the_same_handshake() {
     let id = SessionId::new_v7();

@@ -1,5 +1,3 @@
-//! Desired-state planner tests.
-
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -152,8 +150,6 @@ package = { type = "remote", url = "https://cdn.example.test/runtime.exe", filen
     assert!(result.prerequisites.is_empty());
 }
 
-// --- Scope ---
-
 #[rstest]
 #[case::user_manifest_user(InstallScope::User, SelectedScope::User, true)]
 #[case::user_manifest_machine(InstallScope::User, SelectedScope::Machine, false)]
@@ -237,8 +233,6 @@ fn install_directory_override_is_rejected_when_not_authored() {
     ));
 }
 
-// --- Components ---
-
 const GRAPH: &str = r#"
 [[components]]
 id = "core"
@@ -289,8 +283,6 @@ fn component_overrides_select_the_transitive_closure(
 
 #[test]
 fn disabling_a_selected_component_is_refused() {
-    // A required component cannot be switched off, whether it is named
-    // directly or is a dependency of a component the caller enabled.
     let result = graph_plan(PlanRequest {
         components: overrides(&["developer"], &["core"]),
         ..PlanRequest::new(target(), SelectedScope::User)
@@ -300,7 +292,6 @@ fn disabling_a_selected_component_is_refused() {
         Err(PlanError::RequiredComponentDisabled { .. })
     ));
 
-    // A non-required component an enabled one depends on cannot be either.
     let source = with(
         r#"
 [[components]]
@@ -344,8 +335,6 @@ fn contradictory_and_unknown_component_overrides_are_refused() {
         assert!(refused, "{enable:?}/{disable:?}");
     }
 }
-
-// --- Conditions ---
 
 #[test]
 fn condition_filters_resources() {
@@ -452,9 +441,6 @@ when = 'component("core") && component("cli")'
 
 #[test]
 fn nested_condition_expressions() {
-    // A parenthesised term nested inside `!` and `||`. Both operands are over an
-    // always-selected component, so the expression is true either way; what this
-    // guards is that the parser accepts the nesting at all.
     let source = with(
         r#"
 [[components]]
@@ -470,8 +456,6 @@ when = '!(component("core") && component("core")) || component("core")'
     let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
     assert_eq!(result.path_entries.len(), 1);
 }
-
-// --- Files ---
 
 #[test]
 fn inactive_component_files_are_excluded_from_the_plan_and_its_summary() {
@@ -535,12 +519,9 @@ destination = "${install}/tools"
         "${location.user_data}/Programs/Acme/tools/acme.exe"
     );
 
-    // Portable plan must not serialize build-machine source paths.
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("\"source\":"));
 }
-
-// --- Collisions ---
 
 #[rstest]
 #[case::launchers(
@@ -585,8 +566,6 @@ value = "${install}/bin"
 "#,
     None
 )]
-// Two identical launchers, but the second only becomes active when a
-// non-selected component is enabled.
 #[case::gated_launchers(
     r#"
 [[components]]
@@ -671,8 +650,6 @@ id = "Acme.B"
     assert!(parse_and_compile(&source, "default").is_err());
 }
 
-// --- Privilege ---
-
 #[rstest]
 #[case::user(SelectedScope::User, Privilege::User, false)]
 #[case::machine(SelectedScope::Machine, Privilege::System, true)]
@@ -712,8 +689,6 @@ executable = "${install}/a.txt"
     assert_eq!(result.files[0].privilege, privilege);
     assert_eq!(result.launchers[0].privilege, privilege);
 
-    // A registration resource belongs to the store the selected scope names,
-    // which is independent of the privilege each resource carries.
     for store in [
         &result.path_entries[0].scope,
         &result.protocols[0].scope,
@@ -733,10 +708,6 @@ executable = "${install}/a.txt"
 
 #[test]
 fn a_service_makes_a_user_scope_plan_system_authorized() {
-    // The scope says where the application lives. The service says what
-    // authority its registration needs. A per-user install that declares a
-    // service must therefore report system authorization, whether the service
-    // is always selected or gated behind a component.
     let source = with(
         r#"
 [[components]]
@@ -771,8 +742,6 @@ component = "service"
     assert_eq!(with_svc.services[0].privilege, Privilege::System);
     assert!(with_svc.summary.requires_authorization);
 }
-
-// --- Determinism / serialization ---
 
 #[test]
 fn repeated_plans_are_identical_and_fully_resolved() {
@@ -810,13 +779,11 @@ executable = "${install}/a.exe"
         serde_json::to_string(&b).unwrap()
     );
 
-    // Every authoring-time variable must be resolved out of the plan.
     let json = serde_json::to_string(&a).unwrap();
     assert!(!json.contains("${install}"), "json: {json}");
     assert!(!json.contains("${app."), "json: {json}");
     assert!(json.contains("${location."), "json: {json}");
 
-    // A resource is identified by what it registers, not by its position.
     assert_eq!(a.files[0].key, b.files[0].key);
     assert_eq!(
         a.services[0].key,

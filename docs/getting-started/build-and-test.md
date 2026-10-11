@@ -89,7 +89,8 @@ Two files, and both matter:
   anyone.
 
 Without `--output`, artifacts are written beside `zup.toml`. The name depends on
-what you are building:
+what you are building, and carries the target's own executable suffix (`.exe`
+on Windows, none on Linux):
 
 | You are building | Name |
 | --- | --- |
@@ -98,6 +99,7 @@ what you are building:
 | A declared `universal` artifact | `Acme-Windows-Setup.exe` |
 | A declared `single` artifact | `Acme-Setup.exe` |
 | A declared artifact with a channel | `Acme-Windows-stable-Setup.exe` |
+| One Linux target, no declared artifacts | `Acme-Setup` |
 
 An existing output is refused rather than replaced:
 

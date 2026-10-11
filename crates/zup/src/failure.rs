@@ -1,42 +1,10 @@
-//! Turning what a command failed with into something an integration can act on.
-//!
-//! # miette owns the error, zup owns the identity
-//!
-//! `miette` renders diagnostics beautifully and is not a wire contract: its JSON
-//! report handler is a rendering of a Rust error type, and it changes when the error
-//! type, the crate layout or the handler's own defaults change. So it stays exactly
-//! where it is - the thing that produces a good terminal message and a source span -
-//! and this module reads the four things zup promises on the wire out of it:
-//!
-//! ```text
-//! code       a stable zup.* identifier
-//! severity   error, warning or notice
-//! help       the line a developer can act on
-//! source     the file and, when miette has one, the line and column
-//! ```
-//!
-//! An error that carries none of them still becomes a real diagnostic with a real
-//! message, under [`FALLBACK_CODE`]. That is the point: a consumer that matches on
-//! codes gets silence for the untyped ones, and a consumer that shows messages gets
-//! every failure.
-//!
-//! # Where a code comes from
-//!
-//! From [`Coded`], and only from [`Coded`]. A code is a published identifier, so it is
-//! a `&'static str` chosen at the call site where somebody decided what the failure
-//! *means* - not a formatted string, not a `Debug` rendering, and never a Rust type or
-//! module name. `zup_manifest::UnknownTarget` is not a code: it is renamed the day
-//! somebody reorganises a module, and every integration that matched on it would break
-//! on a change no operator could see.
-
 use std::fmt;
 
-use zup_automation::{Diagnostic, DiagnosticSource, FALLBACK_CODE, Identifier, Severity};
+use zup_automation::{
+    AutomationResult, Diagnostic, DiagnosticSource, FALLBACK_CODE, Identifier, LogLevel, Severity,
+    StreamEvent, StreamVersion,
+};
 
-/// A failure that knows what it is.
-///
-/// Implements `miette::Diagnostic` so it flows through the same `?` as everything
-/// else, and carries the three things the protocol promises on top of the message.
 #[derive(Debug)]
 pub struct Coded {
     severity: Severity,
@@ -46,15 +14,10 @@ pub struct Coded {
 }
 
 impl Coded {
-    /// An error with a code.
     pub fn error(code: &'static str, message: impl Into<String>) -> Self {
         Self::identified(Identifier::fixed(code), message)
     }
 
-    /// An error with a code that was decided at run time, rather than at a call site.
-    ///
-    /// For the one place a code comes from a document rather than from a literal: the
-    /// exit path of a command whose result already carries one.
     pub fn identified(code: Identifier, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
@@ -64,7 +27,6 @@ impl Coded {
         }
     }
 
-    /// The same failure with the line a developer can act on.
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
@@ -99,12 +61,10 @@ impl miette::Diagnostic for Coded {
     }
 }
 
-/// A coded error, as the value a command returns.
 pub fn error(code: &'static str, message: impl Into<String>) -> miette::Report {
     miette::Report::new(Coded::error(code, message))
 }
 
-/// A coded error with a remedy attached.
 pub fn error_with_help(
     code: &'static str,
     message: impl Into<String>,
@@ -113,16 +73,11 @@ pub fn error_with_help(
     miette::Report::new(Coded::error(code, message).with_help(help))
 }
 
-/// A coded error whose code was decided at run time.
 pub fn identified(code: Identifier, message: impl Into<String>) -> miette::Report {
     miette::Report::new(Coded::identified(code, message))
 }
 
-/// The wire diagnostic for anything a command failed with.
-///
 /// Never fails and never guesses a code: a code that is not a valid identifier becomes
-/// [`FALLBACK_CODE`], because a code a consumer cannot match on is worse than one that
-/// says plainly that nothing is known.
 pub fn diagnostic(report: &miette::Report) -> Diagnostic {
     let source: &dyn miette::Diagnostic = report.as_ref();
     let mut diagnostic = Diagnostic {
@@ -132,7 +87,6 @@ pub fn diagnostic(report: &miette::Report) -> Diagnostic {
         source: source_span(source),
         help: source.help().map(|help| help.to_string()),
     };
-    // A report wrapping a coded error, several layers down, is still a coded error.
     if let Some(coded) = find_coded(report) {
         diagnostic.code = coded.code.clone();
         diagnostic.severity = coded.severity;
@@ -143,12 +97,9 @@ pub fn diagnostic(report: &miette::Report) -> Diagnostic {
     diagnostic
 }
 
-/// A failure result for an operation that got far enough to be named.
 pub fn failure(operation: &str, report: &miette::Report, summary: impl Into<String>) -> Diagnostic {
     let mut diagnostic = diagnostic(report);
     if diagnostic.code.is(FALLBACK_CODE) {
-        // The operation is a better identity than `zup.internal` for a failure that
-        // happened before any of zup's own checks ran: it names where to look.
         diagnostic.code = Identifier::fixed(match operation {
             "build" => "zup.build.failed",
             "check" => "zup.check.failed",
@@ -169,10 +120,6 @@ pub fn failure(operation: &str, report: &miette::Report, summary: impl Into<Stri
     diagnostic
 }
 
-/// miette's levels as the protocol's three.
-///
-/// `Advice` is a notice rather than a warning: miette uses it for a suggestion, and a
-/// suggestion turned into a warning would be something every pipeline has to triage.
 fn wire_severity(severity: miette::Severity) -> Severity {
     match severity {
         miette::Severity::Error => Severity::Error,
@@ -181,7 +128,6 @@ fn wire_severity(severity: miette::Severity) -> Severity {
     }
 }
 
-/// The code a `miette` diagnostic carries, or the fallback.
 fn code_of(source: &dyn miette::Diagnostic) -> Identifier {
     source
         .code()
@@ -189,12 +135,6 @@ fn code_of(source: &dyn miette::Diagnostic) -> Identifier {
         .unwrap_or_else(|| Identifier::fixed(FALLBACK_CODE))
 }
 
-/// The first [`Coded`] in a report's chain, which is where a wrapped one keeps its
-/// identity.
-///
-/// A `miette` report is a chain because `wrap_err` produces one, and a command that
-/// adds context at each layer is doing the right thing - the identity is what was
-/// decided at the bottom of it, not at the top.
 fn find_coded(report: &miette::Report) -> Option<&Coded> {
     if let Some(coded) = report.downcast_ref::<Coded>() {
         return Some(coded);
@@ -210,14 +150,7 @@ fn find_coded(report: &miette::Report) -> Option<&Coded> {
     None
 }
 
-/// Where a diagnostic points, when miette knows.
-///
-/// `read_span` is how miette answers "which line is that offset on", and asking it
 /// rather than counting newlines is what makes a span in a file the error never opened
-/// land on the right line - and it is where the file's name comes from, because a
-/// `SourceCode` has no name of its own and only the span it produced does. A
-/// diagnostic with no source code, no label, or a span it cannot read is a diagnostic
-/// with no location, which is a normal outcome rather than a failure to report.
 fn source_span(source: &dyn miette::Diagnostic) -> Option<DiagnosticSource> {
     let code = source.source_code()?;
     let label = source.labels()?.next()?;
@@ -269,7 +202,6 @@ mod tests {
     }
 
     /// Context added on the way out must not erase the identity decided at the bottom
-    /// of it, or every wrapped error would be indistinguishable from an untyped one.
     #[test]
     fn a_wrapped_code_survives_the_wrapping() {
         let inner = error(
@@ -284,8 +216,6 @@ mod tests {
         );
     }
 
-    /// The per-operation fallback exists for the failures that happen before any of
-    /// zup's own checks can run, where `zup.internal` would name nothing at all.
     #[test]
     fn an_untyped_failure_is_named_after_the_operation() {
         let report = miette::miette!("no `zup.toml` here");
@@ -299,9 +229,6 @@ mod tests {
         }
     }
 
-    /// A location, when the error carries one. A manifest error carries a name, a span
-    /// and a label, and the line and column are what a CI annotation hangs off. The span
-    /// is on the second `p` of `app`, so the answer is line 2, column 3.
     #[test]
     fn a_diagnostic_with_a_span_points_at_a_line_and_column() {
         let diagnostic = diagnostic(&spanned("zup.toml", "schema = 1\napp = 2\n", 13));
@@ -311,8 +238,6 @@ mod tests {
         assert_eq!(location.start_column, Some(3));
     }
 
-    /// The shape the manifest layer produces: a code, a message, a named source and a
-    /// label on the offending bytes.
     #[derive(Debug)]
     struct Spanned {
         inner: Coded,
@@ -352,4 +277,105 @@ mod tests {
             offset,
         })
     }
+}
+
+use std::io::Write;
+
+use crate::cli::OutputArg;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Reporter {
+    format: OutputArg,
+}
+
+impl Reporter {
+    pub fn new(format: OutputArg) -> Self {
+        Self { format }
+    }
+
+    pub fn format(self) -> OutputArg {
+        self.format
+    }
+
+    pub fn is_human(self) -> bool {
+        self.format == OutputArg::Human
+    }
+
+    pub fn begin(self, operation: &'static str) {
+        if self.format != OutputArg::Jsonl {
+            return;
+        }
+        self.emit(StreamEvent::Version(StreamVersion::new(Identifier::fixed(
+            operation,
+        ))));
+    }
+
+    pub fn phase(self, phase: &str, message: impl AsRef<str>) {
+        match self.format {
+            OutputArg::Human => line(&mut std::io::stdout().lock(), message.as_ref()),
+            OutputArg::Json => line(&mut std::io::stderr().lock(), message.as_ref()),
+            OutputArg::Jsonl => self.emit(StreamEvent::Phase {
+                phase: phase.to_owned(),
+                message: message.as_ref().to_owned(),
+            }),
+        }
+    }
+
+    pub fn log(self, level: LogLevel, message: impl AsRef<str>) {
+        match self.format {
+            OutputArg::Human => {
+                let mut out = std::io::stdout().lock();
+                line(&mut out, message.as_ref());
+                if level != LogLevel::Info {
+                    line(&mut std::io::stderr().lock(), message.as_ref());
+                }
+            }
+            OutputArg::Json => line(&mut std::io::stderr().lock(), message.as_ref()),
+            OutputArg::Jsonl => self.emit(StreamEvent::Log {
+                level,
+                message: message.as_ref().to_owned(),
+            }),
+        }
+    }
+
+    pub fn diagnostic(self, diagnostic: &Diagnostic) {
+        if self.format != OutputArg::Jsonl {
+            return;
+        }
+        self.emit(StreamEvent::Diagnostic {
+            diagnostic: diagnostic.clone(),
+        });
+    }
+
+    pub fn finish(self, result: AutomationResult) {
+        match self.format {
+            OutputArg::Human => {}
+            OutputArg::Json => {
+                let mut out = std::io::stdout().lock();
+                let written = serde_json::to_writer_pretty(&mut out, &result);
+                if let Err(error) = written {
+                    eprintln!("zup: the result could not be written: {error}");
+                } else {
+                    let _ = out.write_all(b"\n");
+                }
+                let _ = out.flush();
+            }
+            OutputArg::Jsonl => self.emit(StreamEvent::completed(result)),
+        }
+    }
+
+    fn emit(self, event: StreamEvent) {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(event.to_line().as_bytes());
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    }
+}
+
+fn line(out: &mut impl Write, text: &str) {
+    let _ = out.write_all(text.as_bytes());
+    if !text.ends_with('\n') {
+        let _ = out.write_all(b"\n");
+    }
+    let _ = out.flush();
 }

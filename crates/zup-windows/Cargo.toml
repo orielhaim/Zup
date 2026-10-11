@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Windows backend for zup"
-# Never a tool a user installs: this package exists to produce zup-owned build
-# artifacts, and `cargo install` putting one on a PATH would make an internal
-# component a product with no review in between.
 publish = false
 
 [features]

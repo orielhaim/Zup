@@ -50,6 +50,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             size: 4,
             sha256: digest(b"data"),
             privilege: Privilege::System,
+            executable: false,
         }],
         launchers: vec![zup_platform::TargetLauncher {
             key: ResourceKey::Launcher {

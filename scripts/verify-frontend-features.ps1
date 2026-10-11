@@ -15,7 +15,7 @@ try {
     # `cargo run`, `cargo build`, and `cargo install` produce the same product with
     # no flag deciding otherwise.
     $featureRules = @{
-        "crates/zup/Cargo.toml" = @()
+        "crates/zup/Cargo.toml"           = @()
         "crates/zup-installer/Cargo.toml" = @("gui", "console", "headless")
     }
     foreach ($entry in $featureRules.GetEnumerator()) {
@@ -23,13 +23,13 @@ try {
         $declared = @()
         if ($manifest -match '(?ms)^\[features\](.*?)(?=^\[|\z)') {
             $declared = $Matches[1] -split "`n" |
-                ForEach-Object { $_.Trim() } |
-                Where-Object { $_ -match '^[A-Za-z0-9_-]+\s*=' } |
-                ForEach-Object { ($_ -split '=')[0].Trim() }
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^[A-Za-z0-9_-]+\s*=' } |
+            ForEach-Object { ($_ -split '=')[0].Trim() }
         }
         $unexpected = @($declared | Where-Object {
-            $_ -ne "default" -and $entry.Value -notcontains $_
-        })
+                $_ -ne "default" -and $entry.Value -notcontains $_
+            })
         if ($unexpected.Count -gt 0) {
             throw "$($entry.Key) declares features that select a role: $($unexpected -join ', ')"
         }
@@ -74,7 +74,7 @@ try {
     # The headless frontend is a pipeline, not a window: it must contain neither
     # the GPU stack nor any terminal presentation.
     $headless = cargo tree -p zup-installer --no-default-features --features headless --edges normal --prefix none
-    foreach ($pattern in @("^zup-preset-sdk v", "^zup-sdk v", "^gpui-kit v", "^cliclack v", "^indicatif v", "^console v")) {
+    foreach ($pattern in @("^zup-sdk v", "^gpui-kit v", "^cliclack v", "^indicatif v", "^console v")) {
         if ($headless | Select-String -Pattern $pattern -Quiet) {
             throw "the headless runtime depends on $pattern"
         }
@@ -82,7 +82,7 @@ try {
 
     # The console frontend is a terminal. It must not contain the GPU stack.
     $console = cargo tree -p zup-installer --no-default-features --features console --edges normal --prefix none
-    foreach ($pattern in @("^zup-preset-sdk v", "^zup-sdk v", "^gpui-kit v")) {
+    foreach ($pattern in @("^zup-sdk v", "^gpui-kit v")) {
         if ($console | Select-String -Pattern $pattern -Quiet) {
             throw "the console runtime depends on $pattern"
         }
@@ -93,7 +93,7 @@ try {
     # engine crates it does reach for - `zup-windows` for the artifact backend,
     # `zup-plan` for `zup plan` - are the developer's, and are not this rule.
     $developer = cargo tree -p zup --edges normal --prefix none
-    foreach ($pattern in @("^zup-preset-sdk v", "^zup-sdk v", "^gpui-kit v", "^cliclack v", "^indicatif v", "^console v", "^zup-installer v")) {
+    foreach ($pattern in @("^zup-sdk v", "^gpui-kit v", "^cliclack v", "^indicatif v", "^console v", "^zup-installer v")) {
         if ($developer | Select-String -Pattern $pattern -Quiet) {
             throw "the developer CLI depends on $pattern"
         }

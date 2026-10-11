@@ -1,28 +1,19 @@
-//! What the current choices would change, in full.
-//!
-//! The cost and the blast radius first, then every change grouped by what kind
-//! of thing it touches. It is for a person deciding whether to go ahead, so it
-//! reads as a list of consequences rather than a transaction log.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
-use zup_preset_sdk::gpui_kit::component::tag::Tag;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::spinner::Spinner;
+use zup_sdk::preset::gpui_kit::component::tag::Tag;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
-use zup_preset_sdk::presentation::{
+use zup_sdk::preset::presentation::{
     ChangeGroup, ChangeKind, PlanStatus, PlannedChange, RequirementPresentation, RequirementStatus,
     ResourceCategory,
 };
@@ -31,7 +22,6 @@ use crate::model;
 use crate::theme::{size, space, text};
 use crate::ui::{Callout, ChoiceHandler, Handler, Section, Tone, caption, muted};
 
-/// The icon a resource category is marked with.
 fn category_icon(category: ResourceCategory) -> IconName {
     match category {
         ResourceCategory::Files => IconName::Files,
@@ -47,8 +37,6 @@ fn category_icon(category: ResourceCategory) -> IconName {
     }
 }
 
-/// A change's verb as a small coloured tag; the word carries the meaning, the
-/// colour only repeats it.
 fn change_tag(kind: ChangeKind) -> Tag {
     let label = model::change_label(kind);
     match kind {
@@ -62,7 +50,6 @@ fn change_tag(kind: ChangeKind) -> Tag {
     }
 }
 
-/// The content of the "What will change" sheet.
 #[derive(IntoElement)]
 pub struct PlanDetails {
     plan: PlanStatus,
@@ -171,7 +158,6 @@ impl RenderOnce for PlanDetails {
     }
 }
 
-/// The facts the main screen already summarized, as one piece of context.
 #[derive(IntoElement)]
 struct ContextLine {
     line: String,
@@ -270,7 +256,6 @@ fn requirements(requirements: &[RequirementPresentation], cx: &App) -> AnyElemen
         .into_any_element()
 }
 
-/// One category of change, collapsed to its counts until it is opened.
 #[derive(IntoElement)]
 struct Group {
     group: ChangeGroup,
@@ -402,7 +387,6 @@ impl RenderOnce for Group {
     }
 }
 
-/// Whether there is anything worth opening the sheet for.
 pub fn has_details(plan: &PlanStatus) -> bool {
     !matches!(plan, PlanStatus::Unsupported)
 }

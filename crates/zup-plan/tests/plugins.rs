@@ -1,3 +1,4 @@
+use rstest::rstest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -245,8 +246,6 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.services.len(), 1);
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
-    // Registering a service is a machine operation whatever scope the
-    // application itself installs to.
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
     assert_eq!(result.plan.launchers[0].privilege, Privilege::User);
     assert_eq!(result.plan.file_associations[0].privilege, Privilege::User);
@@ -621,8 +620,25 @@ source = "plugins/two.wasm"
     ));
 }
 
-#[test]
-fn malformed_resources_are_rejected() {
+#[rstest]
+#[case::unresolved_template(PluginResource::PathEntry {
+    value: "${unknown}".to_owned(),
+})]
+#[case::uninstalled_executable(PluginResource::FileAssociation {
+    extension: "plugin".to_owned(),
+    id: "Plugin.Type".to_owned(),
+    description: None,
+    executable: "${install}/base.txt".to_owned(),
+})]
+#[case::nul_service_id(PluginResource::Service {
+    id: "\0".to_owned(),
+    name: "service".to_owned(),
+    display_name: None,
+    binary: "${install}/base.txt".to_owned(),
+    arguments: Vec::new(),
+    start: ServiceStart::Manual,
+})]
+fn malformed_resources_are_rejected(#[case] resource: PluginResource) {
     let build = build(&with(
         r#"
 [[plugins]]
@@ -630,37 +646,16 @@ id = "helper"
 source = "plugins/one.wasm"
 "#,
     ));
-    let cases = vec![
-        PluginResource::PathEntry {
-            value: "${unknown}".to_owned(),
-        },
-        PluginResource::FileAssociation {
-            extension: "plugin".to_owned(),
-            id: "Plugin.Type".to_owned(),
-            description: None,
-            executable: "${install}/base.txt".to_owned(),
-        },
-        PluginResource::Service {
-            id: "\0".to_owned(),
-            name: "service".to_owned(),
-            display_name: None,
-            binary: "${install}/base.txt".to_owned(),
-            arguments: Vec::new(),
-            start: ServiceStart::Manual,
-        },
-    ];
-    for resource in cases {
-        let mut executor = FakeExecutor::new([(
-            "helper".to_owned(),
-            PluginResourceProposal::new(vec![resource]),
-        )]);
-        let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
-            .expect_err("malformed resource");
-        assert!(matches!(
-            error,
-            PlanError::PluginResourceRejected { .. } | PlanError::PluginResourceLimit { .. }
-        ));
-    }
+    let mut executor = FakeExecutor::new([(
+        "helper".to_owned(),
+        PluginResourceProposal::new(vec![resource]),
+    )]);
+    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
+        .expect_err("malformed resource");
+    assert!(matches!(
+        error,
+        PlanError::PluginResourceRejected { .. } | PlanError::PluginResourceLimit { .. }
+    ));
 }
 
 #[test]

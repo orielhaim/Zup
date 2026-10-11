@@ -1,7 +1,6 @@
-//! Real worker runtime: connect, authenticate, handshake, one transaction, exit.
 use std::path::{Path, PathBuf};
 
-use std::time::Duration;
+use thiserror::Error;
 use zup_bootstrap::{
     BootstrapId, BootstrapState, BootstrapStateStore, BoundBootstrapPlan,
     FilesystemBootstrapStateStore, Quarantine, execute_plan_with_persist, recover,
@@ -9,76 +8,400 @@ use zup_bootstrap::{
 
 use crate::{AutoPayloadSource, EmbeddedBundle};
 use tokio_util::sync::CancellationToken;
+use zup_core::TargetTriple;
 use zup_protocol::{
-    Message, PROTOCOL_VERSION, ProgressKind, ProgressReport, SequenceTracker, SessionId,
-    WireEnvelope, WorkerHello,
+    Capabilities, Message, PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport,
+    SequenceTracker, SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
 };
 use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, OperationExecutor, OperationReceipt,
     ReconcileResult, TransactionCoordinator, TransactionNode, TransactionOutcome, TransactionPlan,
 };
 
-use crate::FilePrecondition;
-use crate::durable::InstallationLock;
-use crate::durable::LockScope;
 use crate::file_executor::{NullProgress, WindowsFileExecutor, apply_node};
 use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
     verify_payload_overlay,
 };
 use zup_protocol::failure;
+use zup_transaction::FilePrecondition;
+use zup_transaction::{InstallationLock, LockScope};
 
-use crate::pipe::{ClientReader, ClientWriter, PipeError, frame_client};
+use crate::pipe::{ClientReader, ClientWriter, HANDSHAKE_TIMEOUT, PipeError, frame_client};
 use crate::transport::{UserSid, verify_server_pid};
-use crate::worker::{WorkerBootstrap, WorkerError, plan_hash_hex};
 
-/// Timeouts (no timeout on installation execution).
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-
-struct WorkerOverlayCleanup {
-    base: Option<PathBuf>,
-    root: Option<PathBuf>,
-    retain: bool,
+fn drop_overlay(base: Option<&Path>, root: Option<&Path>) {
+    if let (Some(base), Some(root)) = (base, root) {
+        let _ = cleanup_payload_overlay(base, Some(root));
+    }
 }
 
-impl WorkerOverlayCleanup {
-    fn new(base: Option<PathBuf>, root: Option<PathBuf>, retain_on_error: bool) -> Self {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerBootstrap {
+    pub protocol_version: u32,
+    pub session_id: SessionId,
+    pub pipe_name: String,
+    pub expected_parent_pid: u32,
+    pub expected_parent_sid: String,
+    pub target: TargetTriple,
+    pub expected_plan_hash: String,
+}
+
+#[derive(Debug, Error)]
+pub enum WorkerError {
+    #[error("invalid bootstrap: {0}")]
+    InvalidBootstrap(String),
+
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
+
+    #[error("plan hash mismatch")]
+    PlanHashMismatch,
+
+    #[error("target mismatch")]
+    TargetMismatch,
+
+    #[error("capability missing: {0}")]
+    MissingCapability(String),
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
+    #[error("transaction failed: {0}")]
+    Transaction(String),
+
+    #[error("another operation is running for this installation")]
+    Busy,
+
+    #[error("parent disconnect")]
+    ParentDisconnect,
+}
+
+pub fn worker_capabilities() -> Capabilities {
+    Capabilities {
+        file_transactions_v1: true,
+        backend_operations_v1: true,
+        lifecycle_v1: true,
+        prerequisite_bootstrap_v1: true,
+    }
+}
+
+pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
+    let parts: Vec<&str> = arg.split('|').collect();
+    if parts.len() != 7 {
+        return Err(WorkerError::InvalidBootstrap(format!(
+            "expected 6 fields, got {}",
+            parts.len()
+        )));
+    }
+    let protocol_version: u32 = parts[0]
+        .parse()
+        .map_err(|_| WorkerError::InvalidBootstrap("protocol version".into()))?;
+    if protocol_version != PROTOCOL_VERSION {
+        return Err(WorkerError::InvalidBootstrap(format!(
+            "protocol version {protocol_version}"
+        )));
+    }
+    let session_id = parts[1]
+        .parse::<uuid::Uuid>()
+        .map_err(|_| WorkerError::InvalidBootstrap("session id".into()))?;
+    let pipe_name = parts[2].to_owned();
+    if pipe_name.is_empty() || pipe_name.len() > 64 || pipe_name.contains('\\') {
+        return Err(WorkerError::InvalidBootstrap("pipe name".into()));
+    }
+    let expected_parent_pid: u32 = parts[3]
+        .parse()
+        .map_err(|_| WorkerError::InvalidBootstrap("parent pid".into()))?;
+    if expected_parent_pid == 0 {
+        return Err(WorkerError::InvalidBootstrap("parent pid is zero".into()));
+    }
+    let expected_parent_sid = parts[4].to_owned();
+    if !expected_parent_sid.starts_with("S-1-") {
+        return Err(WorkerError::InvalidBootstrap("parent sid".into()));
+    }
+    let target = TargetTriple::parse(parts[5])
+        .map_err(|error| WorkerError::InvalidBootstrap(error.to_string()))?;
+    let expected_plan_hash = parts[6].to_owned();
+    if expected_plan_hash.len() != 64 || !expected_plan_hash.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(WorkerError::InvalidBootstrap("plan hash".into()));
+    }
+
+    Ok(WorkerBootstrap {
+        protocol_version,
+        session_id: SessionId(session_id),
+        pipe_name,
+        expected_parent_pid,
+        expected_parent_sid,
+        target,
+        expected_plan_hash: expected_plan_hash.to_lowercase(),
+    })
+}
+
+pub fn format_bootstrap(bootstrap: &WorkerBootstrap) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        bootstrap.protocol_version,
+        bootstrap.session_id,
+        bootstrap.pipe_name,
+        bootstrap.expected_parent_pid,
+        bootstrap.expected_parent_sid,
+        bootstrap.target,
+        bootstrap.expected_plan_hash
+    )
+}
+
+pub fn plan_hash_hex(plan_json: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(plan_json.as_bytes());
+    let digest = zup_core::Sha256Digest::from_hasher(hasher);
+    digest.to_hex()
+}
+
+pub struct WorkerSession {
+    pub bootstrap: WorkerBootstrap,
+    sequence: SequenceTracker,
+    authenticated: bool,
+    plan_hash_checked: bool,
+}
+
+impl WorkerSession {
+    pub fn new(bootstrap: WorkerBootstrap) -> Self {
         Self {
-            base,
-            root,
-            retain: retain_on_error,
+            bootstrap,
+            sequence: SequenceTracker::new(),
+            authenticated: false,
+            plan_hash_checked: false,
         }
     }
 
-    fn retain(&mut self) {
-        self.retain = true;
+    pub fn handle_message(
+        &mut self,
+        envelope: WireEnvelope,
+    ) -> Result<Option<WireEnvelope>, WorkerError> {
+        self.sequence
+            .accept(envelope.sequence)
+            .map_err(|e| WorkerError::Protocol(e.to_string()))?;
+        if envelope.session_id != self.bootstrap.session_id {
+            return Err(WorkerError::AuthFailed("session id mismatch".into()));
+        }
+        if envelope.version != PROTOCOL_VERSION {
+            return Err(WorkerError::AuthFailed("protocol version mismatch".into()));
+        }
+
+        match envelope.message {
+            Message::WorkerHello(_) => Err(WorkerError::Protocol(
+                "worker hello is parent-side only".into(),
+            )),
+            Message::ParentHello(hello) => self.on_parent_hello(envelope.sequence, hello),
+            Message::ExecuteTransaction(exec) => self.on_execute(envelope.sequence, *exec),
+            Message::ExecuteBootstrap(exec) => self.on_bootstrap(envelope.sequence, exec),
+            Message::Cancel => Ok(None),
+            Message::Ping => Ok(Some(WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: self.bootstrap.session_id,
+                sequence: envelope.sequence,
+                message: Message::Pong,
+            })),
+            Message::Pong
+            | Message::Progress(_)
+            | Message::TransactionStateChanged(_)
+            | Message::Completed(_)
+            | Message::Failed(_)
+            | Message::Prepare(_)
+            | Message::Prepared(_)
+            | Message::Execute(_) => Err(WorkerError::Protocol("unexpected message".into())),
+        }
     }
 
-    fn cleanup(&mut self) {
-        self.retain = false;
+    pub fn hello(&self) -> WireEnvelope {
+        WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: self.bootstrap.session_id,
+            sequence: 0,
+            message: Message::WorkerHello(WorkerHello {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: self.bootstrap.session_id,
+                target: self.bootstrap.target.clone(),
+                worker_pid: std::process::id(),
+                capabilities: worker_capabilities(),
+            }),
+        }
     }
-}
 
-impl Drop for WorkerOverlayCleanup {
-    fn drop(&mut self) {
-        if !self.retain
-            && let Some(root) = &self.root
-            && let Some(base) = &self.base
+    fn on_parent_hello(
+        &mut self,
+        sequence: u64,
+        hello: ParentHello,
+    ) -> Result<Option<WireEnvelope>, WorkerError> {
+        if self.authenticated {
+            return Err(WorkerError::Protocol("duplicate hello".into()));
+        }
+        if hello.protocol_version != PROTOCOL_VERSION {
+            return Err(WorkerError::AuthFailed("protocol version".into()));
+        }
+        if hello.session_id != self.bootstrap.session_id {
+            return Err(WorkerError::AuthFailed("session id".into()));
+        }
+        if hello.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
+        }
+        if hello.expected_plan_hash != self.bootstrap.expected_plan_hash {
+            return Err(WorkerError::PlanHashMismatch);
+        }
+        self.authenticated = true;
+        let _ = sequence;
+        Ok(None)
+    }
+
+    fn on_bootstrap(
+        &mut self,
+        _sequence: u64,
+        exec: zup_protocol::ExecuteBootstrap,
+    ) -> Result<Option<WireEnvelope>, WorkerError> {
+        if !self.authenticated {
+            return Err(WorkerError::AuthFailed("not authenticated".into()));
+        }
+        if self.plan_hash_checked {
+            return Err(WorkerError::Protocol("second operation rejected".into()));
+        }
+        if exec.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
+        }
+        if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
+            return Err(WorkerError::Protocol("bootstrap plan too large".into()));
+        }
+        let hash = plan_hash_hex(&exec.bootstrap_json);
+        if hash != self.bootstrap.expected_plan_hash || hash != exec.bootstrap_hash {
+            return Err(WorkerError::PlanHashMismatch);
+        }
+        let plan: zup_bootstrap::BoundBootstrapPlan = serde_json::from_str(&exec.bootstrap_json)
+            .map_err(|error| WorkerError::Protocol(format!("bad bootstrap plan: {error}")))?;
+        let declared_plan_hash = plan.plan_hash;
+        let validated =
+            zup_bootstrap::BoundBootstrapPlan::with_id(plan.id, plan.plan, plan.artifacts)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        if validated.plan.key.target != self.bootstrap.target
+            || exec.target != validated.plan.key.target
         {
-            let _ = cleanup_payload_overlay(base, Some(root));
+            return Err(WorkerError::TargetMismatch);
         }
+        if validated.plan_hash != declared_plan_hash
+            || validated.id.as_uuid() != exec.bootstrap_id
+            || validated.plan.key.app_id.as_str() != exec.app_id
+            || validated.plan.key.app_version.to_string() != exec.app_version
+            || validated.plan.key.scope.to_string() != exec.scope
+        {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap identity mismatch".into(),
+            ));
+        }
+        if exec.recovery_id.is_some() {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap recovery ids are not supported".into(),
+            ));
+        }
+        if exec.state_root.is_empty()
+            || exec.quarantine_root.is_empty()
+            || exec.state_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+            || exec.quarantine_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
+            || exec.state_root.contains('\0')
+            || exec.quarantine_root.contains('\0')
+            || !Path::new(&exec.state_root).is_absolute()
+            || !Path::new(&exec.quarantine_root).is_absolute()
+        {
+            return Err(WorkerError::AuthFailed(
+                "bootstrap roots must be absolute".into(),
+            ));
+        }
+        self.plan_hash_checked = true;
+        Ok(Some(WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: self.bootstrap.session_id,
+            sequence: 0,
+            message: Message::Progress(zup_protocol::ProgressReport {
+                kind: zup_protocol::ProgressKind::OperationStarted,
+                detail: "bootstrap plan accepted".into(),
+                completed: None,
+                total: None,
+            }),
+        }))
+    }
+
+    fn on_execute(
+        &mut self,
+        _sequence: u64,
+        exec: zup_protocol::ExecuteTransaction,
+    ) -> Result<Option<WireEnvelope>, WorkerError> {
+        if !self.authenticated {
+            return Err(WorkerError::AuthFailed("not authenticated".into()));
+        }
+        if self.plan_hash_checked {
+            return Err(WorkerError::Protocol("second transaction rejected".into()));
+        }
+        if exec.target != self.bootstrap.target {
+            return Err(WorkerError::TargetMismatch);
+        }
+        if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
+            return Err(WorkerError::Protocol("plan too large".into()));
+        }
+        let hash = plan_hash_hex(&exec.plan_json);
+        if hash != self.bootstrap.expected_plan_hash || hash != exec.plan_hash {
+            return Err(WorkerError::PlanHashMismatch);
+        }
+        self.plan_hash_checked = true;
+
+        let plan: zup_transaction::TransactionPlan = serde_json::from_str(&exec.plan_json)
+            .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
+        if exec.target != plan.target {
+            return Err(WorkerError::TargetMismatch);
+        }
+        plan.validate()
+            .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
+
+        Ok(Some(WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: self.bootstrap.session_id,
+            sequence: 0,
+            message: Message::Progress(zup_protocol::ProgressReport {
+                kind: zup_protocol::ProgressKind::OperationStarted,
+                detail: "plan accepted".into(),
+                completed: None,
+                total: None,
+            }),
+        }))
     }
 }
 
-/// Run the complete worker lifecycle against the parent named pipe.
-///
-/// Pre-auth zero-side-effect: no journal, lock, staging, or mutation until
-/// authentication + plan validation complete.
+pub fn encode_reply(session_id: SessionId, sequence: u64, message: Message) -> Vec<u8> {
+    encode_payload(&WireEnvelope {
+        version: PROTOCOL_VERSION,
+        session_id,
+        sequence,
+        message,
+    })
+    .unwrap_or_default()
+}
+
+pub fn decode_frame(bytes: &[u8]) -> Result<WireEnvelope, WorkerError> {
+    decode_payload(bytes).map_err(|e| WorkerError::Protocol(e.to_string()))
+}
+
+pub fn current_exe() -> Result<PathBuf, WorkerError> {
+    std::env::current_exe().map_err(|e| WorkerError::InvalidBootstrap(e.to_string()))
+}
+
 pub async fn run_worker(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
 ) -> Result<String, WorkerError> {
-    run_worker_inner(bootstrap, cancel, true).await
+    if !crate::transport::is_process_elevated()
+        .map_err(|e| WorkerError::AuthFailed(e.to_string()))?
+    {
+        return Err(WorkerError::AuthFailed("worker is not elevated".into()));
+    }
+    run_worker_inner(bootstrap, cancel).await
 }
 
 #[doc(hidden)]
@@ -87,15 +410,9 @@ pub async fn run_worker_for_test(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
 ) -> Result<String, WorkerError> {
-    run_worker_inner(bootstrap, cancel, false).await
+    run_worker_inner(bootstrap, cancel).await
 }
 
-/// What to record about the release graph an elevated transaction came from.
-///
-/// The parent sends it because the parent is the process that authenticated the
-/// graph; the worker publishes the ledger, so the identity has to arrive with the
-/// plan. An absent identity is recorded as absent, which is what a development
-/// run deserves.
 fn release_record(release: &Option<zup_core::ReleaseIdentity>) -> crate::ReleaseRecord<'_> {
     match release {
         Some(identity) => crate::ReleaseRecord::Identity(identity),
@@ -106,14 +423,11 @@ fn release_record(release: &Option<zup_core::ReleaseIdentity>) -> crate::Release
 async fn run_worker_inner(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
-    require_elevation: bool,
 ) -> Result<String, WorkerError> {
-    // 1. Connect (bounded retries for transient pipe-not-ready only).
     let client = crate::pipe::PipeClient::connect(&bootstrap.pipe_name)
         .await
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
 
-    // 2. Verify server PID matches bootstrap parent PID (zero mutation).
     verify_server_pid(client.as_raw() as isize, bootstrap.expected_parent_pid)
         .map_err(|e| WorkerError::AuthFailed(e.to_string()))?;
     let parent_sid = UserSid::for_process(bootstrap.expected_parent_pid)
@@ -122,21 +436,10 @@ async fn run_worker_inner(
         return Err(WorkerError::AuthFailed("parent SID mismatch".into()));
     }
 
-    // 3. Verify our own elevation for machine-scope workers.
-    if require_elevation
-        && !crate::transport::is_process_elevated()
-            .map_err(|e| WorkerError::AuthFailed(e.to_string()))?
-    {
-        return Err(WorkerError::AuthFailed("worker is not elevated".into()));
-    }
-
-    // 4. Parent SID check: server process user SID must match initiating SID
-    //    embedded in bootstrap. (Worker SID may differ - over-the-shoulder UAC.)
     let (mut reader, mut writer) = frame_client(client.into_inner());
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
 
-    // 5. WorkerHello
     let hello = WireEnvelope {
         version: PROTOCOL_VERSION,
         session_id: bootstrap.session_id,
@@ -146,7 +449,7 @@ async fn run_worker_inner(
             session_id: bootstrap.session_id,
             target: bootstrap.target.clone(),
             worker_pid: std::process::id(),
-            capabilities: crate::worker_capabilities(),
+            capabilities: worker_capabilities(),
         }),
     };
     writer
@@ -155,7 +458,6 @@ async fn run_worker_inner(
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
     outgoing = outgoing.saturating_add(1);
 
-    // 6. ParentHello (bounded timeout).
     let parent_hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.recv())
         .await
         .map_err(|_| WorkerError::Protocol("hello timeout".into()))?
@@ -175,9 +477,7 @@ async fn run_worker_inner(
         }
         _ => return Err(WorkerError::Protocol("expected ParentHello".into())),
     }
-    // Authenticated - only now may mutation state be created.
 
-    // 7. Read ExecuteTransaction (one only).
     let exec_env = tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.recv())
         .await
         .map_err(|_| WorkerError::Protocol("execute timeout".into()))?
@@ -201,7 +501,6 @@ async fn run_worker_inner(
         }
     };
 
-    // 8. Plan binding + capability check (still before lock/journal).
     if exec.target != bootstrap.target {
         return Err(WorkerError::TargetMismatch);
     }
@@ -241,9 +540,9 @@ async fn run_worker_inner(
         "machine" => zup_core::SelectedScope::Machine,
         _ => return Err(WorkerError::Protocol("invalid install scope".into())),
     };
-    if require_elevation {
-        let executable = crate::worker::current_exe()
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    {
+        let executable =
+            current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
         let bundle = EmbeddedBundle::open(&executable)
             .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
         validate_transaction_bundle_identity(
@@ -258,11 +557,6 @@ async fn run_worker_inner(
     let work_root = PathBuf::from(exec.work_root);
     let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
     let payload_overlay_base_root = decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
-    let mut overlay_cleanup = WorkerOverlayCleanup::new(
-        payload_overlay_base_root.clone(),
-        payload_overlay_root.clone(),
-        exec.recovery_id.is_some(),
-    );
     let identity =
         PayloadOverlayIdentity::from_transaction(app_id.clone(), app_version.clone(), scope, &plan)
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
@@ -325,7 +619,6 @@ async fn run_worker_inner(
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
     outgoing = outgoing.saturating_add(1);
 
-    // 9. NOW we may touch mutation state: lock + journal + executor.
     let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
     let _lock = InstallationLock::try_acquire(&state_root, &lock_key)
         .map_err(|e| WorkerError::Transaction(e.to_string()))?
@@ -375,6 +668,7 @@ async fn run_worker_inner(
             payload,
             work_root,
             record.transaction_id.to_string(),
+            record.target.executable_suffix(),
             Box::new(NullProgress),
         ),
         cancel: TokenProbe(cancel.clone()),
@@ -401,7 +695,6 @@ async fn run_worker_inner(
         }
     }
 
-    // Full-duplex: spawn a reader task for Cancel while executing.
     let cancel_token = cancel.clone();
     let reader_task = split_reader(reader, cancel_token, incoming);
 
@@ -437,7 +730,10 @@ async fn run_worker_inner(
 
     let (transaction_id, outcome) = match result {
         Ok((r, TransactionOutcome::Committed)) => {
-            overlay_cleanup.cleanup();
+            drop_overlay(
+                payload_overlay_base_root.as_deref(),
+                payload_overlay_root.as_deref(),
+            );
             let ledgers = crate::ledger::InstallLedgerStore::new(&state_root);
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
@@ -455,18 +751,16 @@ async fn run_worker_inner(
             (r.transaction_id.as_uuid(), "committed".to_owned())
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
-            overlay_cleanup.cleanup();
+            drop_overlay(
+                payload_overlay_base_root.as_deref(),
+                payload_overlay_root.as_deref(),
+            );
             (r.transaction_id.as_uuid(), "rolled_back".to_owned())
         }
         Ok((r, TransactionOutcome::RecoveryRequired)) => {
-            overlay_cleanup.retain();
             (r.transaction_id.as_uuid(), "recovery_required".to_owned())
         }
         Err(e) => {
-            // Send Failed then exit. The `kind` is the part a parent acts on, and
-            // "somebody else is installing this" is a different action from
-            // "this installation failed", so it gets its own kind rather than
-            // arriving as prose.
             let message = e.to_string();
             let _ = send_and_close(
                 writer,
@@ -483,7 +777,7 @@ async fn run_worker_inner(
         }
     };
     drop(_lock);
-    // 10. Durable terminal state → Completed → flush → close → exit.
+
     let _ = send_and_close(
         writer,
         bootstrap.session_id,
@@ -537,8 +831,7 @@ async fn run_bootstrap_worker(
         ));
     }
     let bound = validated;
-    let executable =
-        crate::worker::current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let executable = current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
     let bundle = EmbeddedBundle::open(&executable)
         .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
     validate_bootstrap_bundle(&bound.plan, &bundle)?;
@@ -590,15 +883,11 @@ async fn run_bootstrap_worker(
     state
         .validate(&bound.plan)
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    // Keyed by application and scope, not by bootstrap id: two sessions
-    // bootstrapping the same installation are the same operation, and an id in
-    // the key would let them both proceed.
+
     let lock_key = InstallationLock::key_for(&exec.app_id, &exec.scope, LockScope::Bootstrap);
     let _lock = match InstallationLock::try_acquire(&state_root, &lock_key) {
         Ok(Some(lock)) => lock,
-        // A bootstrap that cannot be taken is reported as the typed failure it
-        // is, so the parent's wire `kind` survives and the frontends can offer a
-        // retry rather than a red dialog.
+
         Ok(None) => {
             let _ = send_and_close(
                 writer,
@@ -926,7 +1215,6 @@ fn validate_worker_overlay(
     Ok(())
 }
 
-/// Split reader into a background task that cancels on `Cancel` messages.
 fn split_reader(
     mut reader: ClientReader,
     cancel: CancellationToken,
@@ -961,7 +1249,6 @@ async fn send_and_close(
         .await
 }
 
-/// Worker-side file executor wrapper (cancellation-aware).
 fn operation_work(operation: &TransactionNode) -> u64 {
     if matches!(
         operation.kind,
@@ -997,8 +1284,7 @@ struct WorkerFileExecutor {
     progress: tokio::sync::mpsc::UnboundedSender<ProgressReport>,
     completed_work: u64,
     total_work: u64,
-    /// Files this plan may mutate, for the Restart Manager preflight a barrier
-    /// repeats.
+
     blocked_paths: Vec<PathBuf>,
 }
 
@@ -1018,12 +1304,9 @@ impl OperationExecutor for WorkerFileExecutor {
             return Err("cancelled".into());
         }
         if !matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
-            // Barriers are the only nodes the coordinator preflights; a file
-            // node re-checks its own precondition in `apply`.
             return Ok(());
         }
-        // The plan orders this barrier immediately before commit intent, so
-        // this is the last chance to see a blocker before anything mutates.
+
         let blockers = self
             .blocked_paths
             .iter()

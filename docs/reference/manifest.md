@@ -46,7 +46,8 @@ Top-level `frontend` and per-target frontend values are:
 - `console`
 - `headless`
 
-The default is `gui`.
+The default is `gui`. A Linux target with `gui` is refused: the Linux backend
+ships `console` and `headless` runtimes only in this phase.
 
 ## `[build.targets.<profile>]`
 
@@ -132,7 +133,25 @@ See [Presets](/presets/).
 
 ### `[[files]]`
 
-`source` and `destination` are required. Optional: `component`, `when`, `allow_empty` (default `false`), `targets`.
+`source` and `destination` are required. Optional: `component`, `when`, `allow_empty` (default `false`), `executable` (default `false`), `targets`.
+
+`executable` states that the shipped file is meant to be runnable. It is an
+intent, not a permission: the platform decides how to satisfy it, and a platform
+with no notion of an execute bit satisfies it with no filesystem change at all.
+There is deliberately no way to author a raw mode here — a build machine's mode
+bits are not portable truth, so a `0755` written on one operating system would
+silently disagree with the same manifest built on another.
+
+```toml
+[[files]]
+source = "dist/tool"
+destination = "${install}/tool"
+executable = true
+```
+
+It is not inferred from the file's contents. A script, a data file and an ELF
+binary are each identifiable without permission bits, but a file happening to be
+an ELF does not make it something a user should be able to run.
 
 ### `[[launchers]]`
 

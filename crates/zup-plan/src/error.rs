@@ -1,5 +1,3 @@
-//! Desired-state planning errors.
-
 use miette::Diagnostic;
 use thiserror::Error;
 use zup_core::{ComponentId, PluginId, TargetTriple, Variable};
@@ -8,15 +6,12 @@ use crate::plugins::PluginFailure;
 
 pub use zup_core::SelectedScope;
 
-/// Errors produced while computing a desired [`crate::InstallPlan`].
 #[derive(Debug, Error, Diagnostic)]
 pub enum PlanError {
-    /// The requested target is not present in the aggregate build plan.
     #[error("build plan has no target `{target}`")]
     #[diagnostic(code(zup_plan::unknown_build_target))]
     UnknownBuildTarget { target: zup_core::TargetTriple },
 
-    /// Requested scope is not allowed by the manifest install scope.
     #[error("scope `{requested}` is not allowed (manifest scope is `{allowed}`)")]
     #[diagnostic(code(zup_plan::scope_not_allowed))]
     ScopeNotAllowed {
@@ -24,7 +19,6 @@ pub enum PlanError {
         allowed: zup_core::InstallScope,
     },
 
-    /// No install directory is configured for the concrete scope.
     #[error("install directory for scope `{scope}` is not configured")]
     #[diagnostic(code(zup_plan::scope_required))]
     ScopeRequired { scope: SelectedScope },
@@ -36,12 +30,10 @@ pub enum PlanError {
     )]
     InstallDirectoryOverrideNotAllowed,
 
-    /// The ordinary planner cannot execute an active plugin.
     #[error("active plugin `{plugin_id}` requires the plugin planning seam")]
     #[diagnostic(code(zup_plan::plugin_planning_required))]
     PluginPlanningRequired { plugin_id: PluginId },
 
-    /// The plugin executor target does not match the selected installation plan.
     #[error("plugin executor target `{found}` does not match plan target `{expected}`")]
     #[diagnostic(code(zup_plan::plugin_target_mismatch))]
     PluginTargetMismatch {
@@ -49,7 +41,6 @@ pub enum PlanError {
         found: TargetTriple,
     },
 
-    /// An executor failed while planning a plugin.
     #[error("plugin `{plugin_id}` failed: {failure}")]
     #[diagnostic(code(zup_plan::plugin_execution_failed))]
     PluginExecutionFailed {
@@ -58,12 +49,10 @@ pub enum PlanError {
         failure: PluginFailure,
     },
 
-    /// Planning was cancelled before a plugin was invoked.
     #[error("plugin `{plugin_id}` planning was cancelled")]
     #[diagnostic(code(zup_plan::plugin_cancelled))]
     PluginCancelled { plugin_id: PluginId },
 
-    /// A plugin returned a resource that cannot be represented by the core model.
     #[error("plugin `{plugin_id}` returned invalid resource `{resource}`: {reason}")]
     #[diagnostic(code(zup_plan::plugin_resource_rejected))]
     PluginResourceRejected {
@@ -72,7 +61,6 @@ pub enum PlanError {
         reason: String,
     },
 
-    /// A plugin resource collided with another active or proposed resource.
     #[error("plugin resource collision for `{resource}` at `{identity}`")]
     #[diagnostic(code(zup_plan::plugin_resource_collision))]
     PluginResourceCollision {
@@ -83,7 +71,6 @@ pub enum PlanError {
         existing_resource: String,
     },
 
-    /// A plugin proposal exceeded a bounded resource limit.
     #[error(
         "plugin `{plugin_id}` resource limit exceeded for `{resource}`: {actual} exceeds {limit}"
     )]
@@ -95,22 +82,18 @@ pub enum PlanError {
         limit: u64,
     },
 
-    /// An enable/disable override names an unknown component.
     #[error("unknown component `{id}` in plan request")]
     #[diagnostic(code(zup_plan::unknown_component_override))]
     UnknownComponentOverride { id: ComponentId },
 
-    /// The same component is both explicitly enabled and disabled.
     #[error("component `{id}` is both enabled and disabled")]
     #[diagnostic(code(zup_plan::component_both_enabled_and_disabled))]
     ComponentBothEnabledAndDisabled { id: ComponentId },
 
-    /// Explicit disable of a required component.
     #[error("required component `{id}` cannot be disabled")]
     #[diagnostic(code(zup_plan::required_component_disabled))]
     RequiredComponentDisabled { id: ComponentId },
 
-    /// A selected component depends on an explicitly disabled component.
     #[error("component `{id}` is required by the selection but was explicitly disabled")]
     #[diagnostic(
         code(zup_plan::dependency_explicitly_disabled),
@@ -118,52 +101,42 @@ pub enum PlanError {
     )]
     DependencyExplicitlyDisabled { id: ComponentId },
 
-    /// Install directory template still references `${install}` after validation.
     #[error("install directory references `${{install}}`")]
     #[diagnostic(code(zup_plan::recursive_install_directory))]
     RecursiveInstallDirectory,
 
-    /// Template substitution left the template in an invalid state.
     #[error("template resolution failed for variable `{variable}`")]
     #[diagnostic(code(zup_plan::template_resolution))]
     TemplateResolutionError { variable: Variable },
 
-    /// Two active launchers share location and name.
     #[error("active launcher collision at `{location}` / `{name}`")]
     #[diagnostic(code(zup_plan::active_launcher_collision))]
     ActiveLauncherCollision { location: String, name: String },
 
-    /// Two active search-path entries resolve to the same value.
     #[error("active search-path entry collision at `{value}`")]
     #[diagnostic(code(zup_plan::active_path_collision))]
     ActivePathCollision { value: String },
 
-    /// Two active services share an id.
     #[error("active service collision for `{id}`")]
     #[diagnostic(code(zup_plan::active_service_collision))]
     ActiveServiceCollision { id: String },
 
-    /// Two active protocols share a scheme.
     #[error("active protocol collision for scheme `{scheme}`")]
     #[diagnostic(code(zup_plan::active_protocol_collision))]
     ActiveProtocolCollision { scheme: String },
 
-    /// Two active file associations share an id.
     #[error("active file association collision for id `{id}`")]
     #[diagnostic(code(zup_plan::active_file_association_collision))]
     ActiveFileAssociationCollision { id: String },
 
-    /// Two active file associations own the same extension.
     #[error("active file extension collision for `{extension}`")]
     #[diagnostic(code(zup_plan::active_extension_collision))]
     ActiveExtensionCollision { extension: String },
 
-    /// Two active files share a destination identity.
     #[error("active file destination collision at `{destination}`")]
     #[diagnostic(code(zup_plan::active_file_collision))]
     ActiveFileCollision { destination: String },
 
-    /// Checked size arithmetic overflowed.
     #[error("plan size overflow")]
     #[diagnostic(code(zup_plan::size_overflow))]
     SizeOverflow,

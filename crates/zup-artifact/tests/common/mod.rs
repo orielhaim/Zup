@@ -215,6 +215,7 @@ pub fn build_target_with_preset(
                 .component
                 .map(|component| zup_core::ComponentId::new(component).unwrap()),
             condition: None,
+            executable: false,
         });
     }
 
@@ -226,6 +227,7 @@ pub fn build_target_with_preset(
             component: file.component.clone(),
             when: None,
             allow_empty: false,
+            executable: false,
         })
         .collect();
     installer_files.sort_by(|left, right| {

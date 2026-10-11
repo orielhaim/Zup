@@ -1,36 +1,3 @@
-//! Which repository a release belongs to, and how that is decided.
-//!
-//! # Precedence
-//!
-//! Three sources, in one fixed order, first answer wins:
-//!
-//! 1. **Explicit.** `--repo owner/name`, or `[publish.github] repository`.
-//! 2. **The environment.** `GITHUB_REPOSITORY`, which Actions sets to
-//!    `owner/name` for the repository the workflow is running in.
-//! 3. **The Git remote.** Asked of Git itself.
-//!
-//! # Why `git remote` rather than reading `.git/config`
-//!
-//! Because Git already knows how to answer this and knows more than a parser does. A
-//! remote URL can come from an `include` in a global config, a
-//! `url.<base>.insteadOf` rewrite, a conditional include that applies only inside a
-//! worktree, or the `.git` *file* a linked worktree uses to point at the real
-//! directory. Git resolves all four; an INI reader resolves none and gets the right
-//! answer for the wrong reason on the ones it does handle - which is worse than
-//! failing, because a release published to the wrong repository does not announce
-//! itself.
-//!
-//! The `.git/config` reader stays as a fallback for one real case: the project is on
-//! disk and there is no `git` binary, as in a release built from an extracted source
-//! archive. There the developer gets the local remote rather than a refusal.
-//!
-//! # Why it refuses rather than guesses
-//!
-//! A repository with an `origin` on github.com and a fork on another host has two
-//! plausible answers, and publishing to the wrong one succeeds, creates the tag, and
-//! gives the wrong project a `v1.4.0`. So: exactly one candidate, or a name the
-//! developer chose.
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,17 +7,14 @@ use git_url_parse::GitUrl;
 use crate::endpoint::{GITHUB_COM, GithubHost};
 use crate::error::GithubError;
 
-/// A repository on one GitHub installation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GithubRepository {
-    /// The installation's web hostname.
     pub host: GithubHost,
     pub owner: String,
     pub name: String,
 }
 
 impl GithubRepository {
-    /// A repository on `host`.
     pub fn new(host: GithubHost, owner: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             host,
@@ -59,12 +23,10 @@ impl GithubRepository {
         }
     }
 
-    /// A repository on github.com.
     pub fn dotcom(owner: impl Into<String>, name: impl Into<String>) -> Self {
         Self::new(GithubHost::dotcom(), owner, name)
     }
 
-    /// Parse `owner/name`, on `host`.
     pub fn parse(host: &GithubHost, value: &str) -> Result<Self, GithubError> {
         let value = value.trim().trim_end_matches(".git").trim_matches('/');
         if value.is_empty() {
@@ -89,15 +51,10 @@ impl GithubRepository {
         Ok(Self::new(host.clone(), owner, name))
     }
 
-    /// The `owner/name` path segment every release API addresses.
     pub fn path(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 
-    /// Whether this is github.com rather than an Enterprise installation.
-    ///
-    /// This is the case where a runtime client can fetch release assets with no
-    /// credential at all, which is a difference in what a project can promise.
     pub fn is_public_host(&self) -> bool {
         self.host.dotcom
     }
@@ -109,20 +66,14 @@ impl fmt::Display for GithubRepository {
     }
 }
 
-/// A GitHub repository named on the command line, possibly with a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositorySpec {
-    /// The installation, when the value named one.
     pub host: Option<GithubHost>,
     pub owner: String,
     pub name: String,
 }
 
 impl RepositorySpec {
-    /// Parse `owner/name` or `host/owner/name`.
-    ///
-    /// Three segments is how a project writes an Enterprise repository, and accepting
-    /// it here is what lets a single `--repo` flag cover both installations.
     pub fn parse(value: &str) -> Result<Self, GithubError> {
         let value = value.trim().trim_end_matches(".git").trim_matches('/');
         let parts: Vec<&str> = value.split('/').collect();
@@ -152,7 +103,6 @@ impl RepositorySpec {
         }
     }
 
-    /// Resolve this spec against `default`.
     pub fn resolve(&self, default: &GithubHost) -> GithubRepository {
         GithubRepository::new(
             self.host.clone().unwrap_or_else(|| default.clone()),
@@ -162,21 +112,15 @@ impl RepositorySpec {
     }
 }
 
-/// Where a resolved repository came from, for a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Discovery {
-    /// Named on the command line or in `zup.toml`.
     Configured,
-    /// `GITHUB_REPOSITORY`.
     Environment,
-    /// A Git remote.
     Remote,
-    /// Supplied by a caller that already knew.
     Given,
 }
 
 impl Discovery {
-    /// The name a report uses.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Configured => "configured",
@@ -187,16 +131,13 @@ impl Discovery {
     }
 }
 
-/// A repository, and how it was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub repository: GithubRepository,
     pub discovery: Discovery,
-    /// The remote that supplied it, when a remote did.
     pub remote: Option<String>,
 }
 
-/// Decide which repository a release belongs to.
 pub fn resolve(
     explicit: Option<&RepositorySpec>,
     environ: &dyn Environment,
@@ -233,11 +174,6 @@ pub fn resolve(
     resolve_from_remotes(environ, working_directory)
 }
 
-/// The installation the environment says this is, if it says one.
-///
-/// `GITHUB_API_URL` is the one that is actually authoritative: Actions sets it from
-/// the server the workflow runs against, so on an Enterprise installation it is
-/// already the API base with `/api/v3/` on the end of it.
 pub fn install_from_environ(environ: &dyn Environment) -> Option<GithubHost> {
     if let Some(base) = environ.get("GITHUB_API_URL")
         && let Ok(url) = url::Url::parse(base.trim())
@@ -256,10 +192,6 @@ pub fn install_from_environ(environ: &dyn Environment) -> Option<GithubHost> {
         .and_then(|host| GithubHost::enterprise(&host).ok())
 }
 
-/// Choose a repository from the Git remotes in `working_directory`.
-///
-/// Git is asked first and the config is the fallback; see the module
-/// documentation for why that order.
 pub fn resolve_from_remotes(
     _environ: &dyn Environment,
     working_directory: &Path,
@@ -280,8 +212,6 @@ pub fn resolve_from_remotes(
     if candidates.is_empty() {
         return Err(GithubError::NoRepository);
     }
-    // `origin` is the name a clone gives its upstream, so one named `origin` on a
-    // GitHub host is the answer by convention rather than by guess.
     if let Some((remote, path)) = candidates.iter().find(|(name, _)| name == "origin") {
         return build(remote.clone(), path, Discovery::Remote);
     }
@@ -307,12 +237,6 @@ fn build(remote: String, path: &str, discovery: Discovery) -> Result<Resolved, G
     })
 }
 
-/// Every remote Git itself reports for `working_directory`.
-///
-/// `git remote -v` is asked for the fetch URL, and `git remote get-url` supplies
-/// the resolved value for the `origin` the convention prefers. An empty result is
-/// not an error: no Git, not a repository, and no `git` on `PATH` all look the
-/// same, and the caller falls back to the config reader.
 fn git_remotes(working_directory: &Path) -> Vec<(String, String)> {
     let Some(directory) = git_root(working_directory) else {
         return Vec::new();
@@ -333,13 +257,11 @@ fn git_remotes(working_directory: &Path) -> Vec<(String, String)> {
     };
     let mut remotes: Vec<(String, String)> = Vec::new();
     for line in listed.lines() {
-        // `origin\thttps://github.com/owner/repo.git (fetch)`
         let Some((name, rest)) = line.split_once('\t') else {
             continue;
         };
         let url = rest.split_whitespace().next().unwrap_or_default();
         if url.is_empty() || url == "." {
-            // A local path remote is not a GitHub repository.
             continue;
         }
         if !remotes.iter().any(|(existing, _)| existing == name) {
@@ -349,11 +271,6 @@ fn git_remotes(working_directory: &Path) -> Vec<(String, String)> {
     remotes
 }
 
-/// The directory to pass to `git -C`.
-///
-/// A repository root, or the working directory as given - `git -C` inside a
-/// subdirectory still reports that repository's remotes, so the marker scan is an
-/// optimisation rather than a requirement.
 fn git_root(working_directory: &Path) -> Option<PathBuf> {
     Some(
         find_git_config(working_directory)
@@ -362,23 +279,12 @@ fn git_root(working_directory: &Path) -> Option<PathBuf> {
     )
 }
 
-/// Every remote in the `.git/config` under `working_directory`.
-///
-/// The fallback for a machine with no `git` binary. See the module documentation
-/// for why this is not the primary path.
 fn config_remotes(working_directory: &Path) -> Vec<(String, String)> {
     read_git_config(working_directory)
         .map(|config| parse_remotes(&config))
         .unwrap_or_default()
 }
 
-/// The GitHub parts of a Git remote URL.
-///
-/// The three shapes Git writes are an HTTPS URL, an SCP-style `user@host:path`, and
-/// an `ssh://` URL. `git-url-parse` reduces all three to the same three strings, and
-/// does so correctly for the awkward cases: a port on an SSH remote, a
-/// percent-encoded path, a `file://` remote that is not a repository at all. Anything
-/// that is not a GitHub-shaped host is not a candidate.
 pub fn parse_remote_url(url: &str) -> Option<(String, String, String)> {
     let url = url.trim();
     if url.is_empty() {
@@ -399,25 +305,15 @@ pub fn parse_remote_url(url: &str) -> Option<(String, String, String)> {
     Some((host.to_ascii_lowercase(), owner.to_owned(), name.to_owned()))
 }
 
-/// Whether a hostname is one zup will publish to.
-///
-/// `github.com` and anything that names itself as a GitHub installation. A hostname
-/// is *not* assumed from a remote: an unknown host is a question, not a match, and a
-/// project on a self-hosted forge must say so with an explicit `--repo`.
 fn is_github_host(host: &str) -> bool {
     let host = host.trim().to_ascii_lowercase();
     host == GITHUB_COM || host.ends_with(".github.com") || host.starts_with("github.")
 }
 
-/// The environment, narrowed to what discovery reads.
-///
-/// A trait rather than the process environment so every branch of the precedence
-/// order is reachable from a test.
 pub trait Environment {
     fn get(&self, name: &str) -> Option<String>;
 }
 
-/// The real process environment.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessEnvironment;
 
@@ -427,13 +323,11 @@ impl Environment for ProcessEnvironment {
     }
 }
 
-/// The `.git/config` for `directory`, following a worktree pointer.
 pub fn read_git_config(directory: &Path) -> Option<String> {
     let git = directory.join(".git");
     if git.is_dir() {
         return std::fs::read_to_string(git.join("config")).ok();
     }
-    // A linked worktree's `.git` is a file naming the real directory.
     let pointer = std::fs::read_to_string(&git).ok()?;
     let target = pointer
         .lines()
@@ -448,7 +342,6 @@ pub fn read_git_config(directory: &Path) -> Option<String> {
     std::fs::read_to_string(target.join("config")).ok()
 }
 
-/// Where a Git config lives for a directory, walking up to the repository root.
 pub fn find_git_config(directory: &Path) -> Option<PathBuf> {
     let mut current = Some(directory);
     while let Some(directory) = current {
@@ -461,7 +354,6 @@ pub fn find_git_config(directory: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Every remote in a Git config, as `(name, url)`, in file order.
 pub fn parse_remotes(config: &str) -> Vec<(String, String)> {
     let mut remotes = Vec::new();
     let mut section: Option<(String, String)> = None;
@@ -493,7 +385,6 @@ pub fn parse_remotes(config: &str) -> Vec<(String, String)> {
     remotes
 }
 
-/// `[remote "origin"]` → `("remote", "origin")`.
 fn parse_section(inner: &str) -> Option<(String, String)> {
     let inner = inner.trim();
     let (kind, rest) = inner.split_once(char::is_whitespace)?;

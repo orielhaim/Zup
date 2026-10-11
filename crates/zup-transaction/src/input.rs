@@ -11,24 +11,14 @@ use zup_platform::TargetPath;
 pub const MAX_BACKEND_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_BACKEND_DEPENDENCIES: usize = 256;
 
-/// What a [`TransactionInputError`] is about.
-///
-/// Errors name the thing that failed, so the name travels as the value itself
-/// rather than as a string built at the call site. The key is boxed to keep the
-/// error small, since errors are returned and stored rather than inspected in
-/// bulk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionResource {
-    /// The transaction's install directory, which is not a `ResourceKey`.
     InstallDirectory,
-    /// One entry of the selected component list.
     Component(ComponentId),
-    /// A keyed resource: a file, a removal, or a backend operation.
     Key(Box<ResourceKey>),
 }
 
 impl TransactionResource {
-    /// The resource named by `key`.
     pub fn key(key: &ResourceKey) -> Self {
         Self::Key(Box::new(key.clone()))
     }
@@ -72,6 +62,8 @@ pub struct FileWork {
     pub expected_sha256: Sha256Digest,
     pub expected_size: u64,
     pub privilege: Privilege,
+    #[serde(default)]
+    pub executable: bool,
     pub delta: FileDelta,
 }
 
@@ -194,11 +186,6 @@ pub struct TransactionInput {
     pub files: Vec<FileWork>,
     pub removals: Vec<FileRemoval>,
     pub backend_operations: Vec<BackendOperation>,
-    /// The preset runtime this transaction makes durable, or leaves absent.
-    ///
-    /// In the plan and the journal rather than beside them, because a recovery
-    /// run works from the journal alone. Settings that lived only in the caller
-    /// would be unrecoverable exactly when recovery is what is needed.
     pub preset: Option<InstalledPreset>,
 }
 
@@ -294,9 +281,14 @@ impl TransactionInput {
                 });
             }
         }
+        let removal_keys: std::collections::BTreeSet<_> =
+            self.removals.iter().map(|removal| &removal.key).collect();
         for operation in &self.backend_operations {
             for dependency in &operation.dependencies {
-                if !backend_keys.contains(dependency) && !file_keys.contains(dependency) {
+                if !backend_keys.contains(dependency)
+                    && !file_keys.contains(dependency)
+                    && !removal_keys.contains(dependency)
+                {
                     return Err(TransactionInputError::UnknownDependency {
                         resource: TransactionResource::key(&operation.key),
                         dependency: TransactionResource::key(dependency),

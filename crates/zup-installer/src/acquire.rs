@@ -1,36 +1,3 @@
-//! One release graph, four operations.
-//!
-//! A fresh install, an update, a modify, and a repair differ in exactly two
-//! things: which component set is asked for, and which lifecycle verb runs
-//! afterwards. They are otherwise the same call - resolve an authenticated
-//! release, select the machine's variant, compute the closure, fill a verified
-//! cache, cross the barrier, and hand a bound identity to the transaction engine.
-//!
-//! That is the whole architectural claim of this module, and it is why there is
-//! no update downloader and no repair downloader. There is a graph and an
-//! acquisition engine, and four operations are four arguments to it.
-//!
-//! # What each operation asks for
-//!
-//! | operation | closure |
-//! | --- | --- |
-//! | install | every component the user selected, on an empty machine |
-//! | update | the new release's whole closure, minus what the verified cache already holds |
-//! | modify | the committed selection plus whatever `--enable` added |
-//! | repair | exactly the digests behind the resources the ledger says drifted |
-//!
-//! The update row is a byte count, not an estimate. A blob this machine already
-//! downloaded is the same object the new release names, so it costs zero network
-//! bytes; a complete installer is the whole release on every machine for every
-//! update.
-//!
-//! # The barrier
-//!
-//! Everything here happens before the transaction engine is asked for a plan.
-//! `GraphError::left_machine_unchanged` is `true` for every variant, and the
-//! reason is structural rather than aspirational: this module has no way to
-//! publish an application file, a registry entry, or a service.
-
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +13,6 @@ use zup_update::{
     ComponentSelection, ReleaseResolver, ResolvedRelease, TrustContext, default_scheduler,
 };
 
-/// Why a graph could not be used for the requested operation.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
     #[error("the release graph could not be used: {0}")]
@@ -60,40 +26,22 @@ pub enum GraphError {
 }
 
 impl GraphError {
-    /// Whether this failure left the machine untouched.
-    ///
-    /// Always yes: every one of these is raised before the transaction engine is
-    /// asked for a plan, and the engine's own barrier is the only thing that
-    /// authorizes a mutation.
     pub const fn left_machine_unchanged(&self) -> bool {
         true
     }
 }
 
-/// A satisfied closure: the verified cache, and everything the graph said about
-/// it.
-///
-/// This is the barrier's payload. The machine may now be mutated, and only
-/// because every byte the plan named is present, re-hashed, and proven.
 pub struct Acquired {
-    /// The authenticated release.
     pub resolved: ResolvedRelease,
-    /// The variant manifest, parsed and checked against the release's claims.
     pub manifest: VariantManifest,
-    /// The exact closure that was satisfied.
     pub plan: AcquisitionPlan,
-    /// The verified cache the content lives in.
     pub cache: Arc<zup_acquire::ContentCache>,
-    /// The channel this graph was resolved through.
     pub channel: String,
-    /// The publisher's trust anchor.
     pub trust_anchor: Sha256Digest,
-    /// The barrier's own record.
     pub outcome: AcquisitionOutcome,
 }
 
 impl Acquired {
-    /// What the closure cost, for a frontend that is continuing a progress bar.
     pub fn summary(&self) -> SessionSummary {
         let estimate = self.estimate();
         SessionSummary {
@@ -107,11 +55,6 @@ impl Acquired {
         }
     }
 
-    /// What the closure costs given what the cache already holds.
-    ///
-    /// Exact, not approximate: the same authenticated catalog that scheduled the
-    /// session measures it, so a frontend can render the number before a byte
-    /// moves and be right.
     pub fn estimate(&self) -> zup_acquire::AcquisitionEstimate {
         let session = AcquisitionSession::new(
             self.plan.clone(),
@@ -121,7 +64,6 @@ impl Acquired {
         session.estimate()
     }
 
-    /// The identity an installation records when this commits.
     pub fn identity(&self) -> zup_core::ReleaseIdentity {
         zup_core::ReleaseIdentity {
             app_id: self.resolved.descriptor.app_id.clone(),
@@ -147,12 +89,7 @@ impl Acquired {
         }
     }
 
-    /// Record what the cache retains once the transaction commits.
-    ///
     /// Retention marks objects; it never copies them, so a retained object is the
-    /// same object the acquisition already published. `temporary` records an
-    /// empty set so a later sweep knows there is nothing to keep rather than
-    /// assuming there is a closure it cannot find.
     pub fn record_retention(&self, policy: CachePolicy) -> Result<(), std::io::Error> {
         let mut pinned = BTreeSet::new();
         if policy.retains_payload() {
@@ -165,10 +102,6 @@ impl Acquired {
             for artifact in &self.manifest.plan.plugins {
                 pinned.insert(artifact.blob);
             }
-            // A window's content is retained on the same terms as payload, and
-            // for the same reason: the cache is where a repair gets the bytes
-            // back. A retention record that left the preset and its assets out
-            // would let a sweep take exactly the content an offline repair needs.
             if let Some(preset) = self.manifest.preset.as_ref() {
                 pinned.insert(preset.digest);
             }
@@ -182,30 +115,16 @@ impl Acquired {
     }
 }
 
-/// What a caller wants done with a resolved graph.
-///
-/// The four operations differ in the lifecycle verb and in which component set is
-/// asked for; the closure, the cache, the barrier, and the identity are the same
-/// work. Naming the difference is what keeps one code path honest: there is no
-/// second downloader to drift.
 #[derive(Debug, Clone, Default)]
 pub struct Request {
-    /// The lifecycle verb. `None` lets the plan's own scope decide, which is what
-    /// a caller with no prior opinion wants.
     pub action: Option<zup_exec::LifecycleAction>,
-    /// Component identifiers to turn on.
     pub enable: Vec<String>,
-    /// Component identifiers to turn off.
     pub disable: Vec<String>,
-    /// A requested install directory, where the plan permits an override.
     pub install_directory: Option<PathBuf>,
-    /// The scope, when the caller knows it. A handoff states it; an updater reads
-    /// it from the ledger.
     pub scope: Option<zup_core::SelectedScope>,
 }
 
 impl Request {
-    /// A request for one lifecycle, with nothing narrowed.
     pub fn new(action: zup_exec::LifecycleAction) -> Self {
         Self {
             action: Some(action),
@@ -213,7 +132,6 @@ impl Request {
         }
     }
 
-    /// The same request with two component sets applied.
     pub fn components(mut self, enable: &[String], disable: &[String]) -> Self {
         self.enable = enable.to_vec();
         self.disable = disable.to_vec();
@@ -221,7 +139,6 @@ impl Request {
     }
 }
 
-/// Resolve a release for this machine, compute the closure, and fill the cache.
 pub async fn acquire(
     context: TrustContext,
     selection: ComponentSelection<'_>,
@@ -245,7 +162,6 @@ pub async fn acquire(
     barrier(&resolver, resolved, manifest, plan).await
 }
 
-/// Compute a closure from a component selection and acquire it.
 pub async fn acquire_closure(
     resolver: &ReleaseResolver,
     resolved: ResolvedRelease,
@@ -256,7 +172,6 @@ pub async fn acquire_closure(
     barrier(resolver, resolved, manifest, plan).await
 }
 
-/// The exact closure a component selection needs.
 pub fn component_closure(
     resolved: &ResolvedRelease,
     manifest: &VariantManifest,
@@ -290,14 +205,6 @@ pub fn component_closure(
     )?)
 }
 
-/// The content a variant declares beyond its payload and prerequisites.
-///
-/// Two kinds, and the acquisition layer is told which is which without being told
-/// anything about windows: the native image a graphical variant presents itself
-/// with, and the named assets that image was configured to expect. Both are
-/// required content, so neither is narrowed away by a component selection - a
-/// preset the application chose is not a thing a user can leave out of an
-/// install the way a documentation folder is.
 pub fn declared_content(
     manifest: &VariantManifest,
 ) -> Result<Vec<(Sha256Digest, ContentReason)>, GraphError> {
@@ -322,9 +229,6 @@ pub fn declared_content(
             declared.push((preset.digest, ContentReason::Preset));
             Ok(declared)
         }
-        // A window with no native image beside it is a release that cannot say
-        // which bytes its client should run, so it is refused rather than
-        // installed without one.
         (Some(_), None) => Err(GraphError::Manifest(format!(
             "variant `{}` presents a window but the release carries no native image for it",
             manifest.target
@@ -337,16 +241,11 @@ pub fn declared_content(
     }
 }
 
-/// The exact closure a repair needs: the digests behind drifted resources.
 pub fn repair_closure(
     resolved: &ResolvedRelease,
     manifest: &VariantManifest,
     drifted: &BTreeSet<Sha256Digest>,
 ) -> Result<AcquisitionPlan, GraphError> {
-    // Only content the release carries can be reacquired, and only content the
-    // plan names is content this machine installed. A digest in neither is a
-    // defect in the ledger, not something to fetch - and refusing it is what
-    // stops a repair from being talked into installing something it does not own.
     let known = drifted
         .iter()
         .filter(|digest| {
@@ -361,8 +260,6 @@ pub fn repair_closure(
                         .prerequisite_artifacts
                         .iter()
                         .any(|artifact| artifact.sha256 == **digest)
-                    // A window's content is installed content like any other, so
-                    // a repair that lost it needs it back from the same place.
                     || manifest
                         .plan
                         .ui_assets
@@ -394,12 +291,6 @@ pub fn repair_closure(
     Ok(AcquisitionPlan::build(items)?)
 }
 
-/// The variant manifest, checked against the release's own claims.
-///
-/// TUF already proved the manifest's digest, and the release's fingerprint
-/// already described it. This checks that the two documents *agree* - a graph
-/// whose manifest names a different target or frontend than the release claims
-/// is a defect in the release, and a defect is a refusal, not a re-derivation.
 pub fn parse_manifest(resolved: &ResolvedRelease) -> Result<VariantManifest, GraphError> {
     let manifest = VariantManifest::parse(&resolved.manifest)
         .map_err(|error| GraphError::Manifest(error.to_string()))?;
@@ -452,11 +343,6 @@ async fn barrier(
     })
 }
 
-/// A payload source over the verified cache.
-///
-/// The plan is the one the graph authenticated, and the digests it names are the
-/// keys the cache is addressed by, so a content map is the only translation
-/// needed - there is no second index to keep in step.
 pub fn payload_source(
     acquired: &Acquired,
 ) -> Result<zup_bundle::AcquiredPayloadSource, GraphError> {
@@ -477,19 +363,12 @@ pub fn payload_source(
     ))
 }
 
-/// Whether a release is newer than an installed identity.
-///
-/// Version decides *which* release to prefer; the digest decides whether two
-/// claims are the same thing. A rebuild of the same version is not an update,
-/// because the lifecycle would refuse it as a same-version upgrade anyway.
 pub fn is_newer(identity: &zup_core::ReleaseIdentity, version: &str) -> bool {
     match (
         semver::Version::parse(&identity.version),
         semver::Version::parse(version),
     ) {
         (Ok(installed), Ok(candidate)) => candidate > installed,
-        // A version that does not parse is not comparable, so it is not an
-        // update. Refusing here is better than a downgrade nobody asked for.
         _ => false,
     }
 }
@@ -498,12 +377,7 @@ pub fn is_newer(identity: &zup_core::ReleaseIdentity, version: &str) -> bool {
 mod tests {
     use super::*;
 
-    // A window's content, and the closure it produces.
-    //
     // Proved here rather than from a test target because the invariant spans the
-    // release metadata, the authenticated catalog and the plan, and a public
-    // module invented to reach it from outside would be a production surface with
-    // a test as its only reader.
 
     const PRESET: &[u8] = b"the preset executable";
     const LOGO: &[u8] = b"<svg/>";
@@ -521,19 +395,12 @@ mod tests {
         }
     }
 
-    /// A release presenting a window, carrying the bytes that window names.
     struct Release {
         manifest: VariantManifest,
         catalog: zup_acquire::ContentCatalog,
     }
 
     impl Release {
-        /// The closure a machine would download, exactly as the transition builds
-        /// it: every declared digest resolved through the authenticated catalog.
-        ///
-        /// No component selection, and that is the point rather than an omission:
-        /// declared content is required content, so it is the same set whichever
-        /// components are chosen. [`a_window_is_never_narrowed_away`] states that.
         fn closure(&self) -> Result<zup_acquire::AcquisitionPlan, String> {
             let declared = declared_content(&self.manifest).map_err(|error| error.to_string())?;
             let mut items = Vec::new();
@@ -551,8 +418,6 @@ mod tests {
         }
     }
 
-    /// Build a release presenting `window`, whose assets are `assets` and whose
-    /// executable is `preset_bytes`, carrying the bytes named in `carry`.
     fn release(
         window: bool,
         preset_bytes: &[u8],
@@ -628,10 +493,6 @@ mod tests {
             },
             logical_size: 0,
         };
-        // A release recomputes its own logical size and refuses a disagreement,
-        // so the fixture states the same one the shape derives rather than
-        // inventing one: no payload, no prerequisites, no plugins, and the two
-        // native images beside them.
         let mut manifest = manifest;
         manifest.logical_size = manifest
             .runtime
@@ -642,9 +503,6 @@ mod tests {
         let manifest = VariantManifest::parse(&serde_json::to_vec(&manifest).expect("serializes"))
             .expect("a manifest this crate wrote is one it reads");
 
-        // The catalog is a superset of any one closure: it carries every byte the
-        // release holds, and each closure narrows it. That is why a client can
-        // tell a missing blob from a missing reference.
         let mut entries: Vec<zup_acquire::CatalogEntry> = carry
             .iter()
             .copied()
@@ -665,7 +523,6 @@ mod tests {
         }
     }
 
-    /// A window with no assets still needs its executable, and it is fetched.
     #[test]
     fn a_window_with_no_assets_still_fetches_its_executable() {
         let release = release(true, PRESET, &[], &[]);
@@ -674,7 +531,6 @@ mod tests {
         assert_eq!(plan.items()[0].reason, ContentReason::Preset);
     }
 
-    /// Every asset the settings named is fetched, under the name it was named.
     #[test]
     fn every_named_asset_is_in_the_closure() {
         let release = release(
@@ -711,7 +567,6 @@ mod tests {
         );
     }
 
-    /// Two names over one piece of content is one download.
     #[test]
     fn one_content_under_two_names_is_fetched_once() {
         let release = release(
@@ -731,13 +586,7 @@ mod tests {
         );
     }
 
-    /// A window's content is required content: a user who left out a component did
-    /// not leave out the window.
-    ///
     /// The invariant is that the declared set is not a function of the selection
-    /// at all, so the test states it that way rather than running one selection
-    /// and calling it proof. Narrowing happens in the closure, and only over
-    /// content that has a component; declared content has none.
     #[test]
     fn a_window_is_never_narrowed_away() {
         let release = release(true, PRESET, &[("branding/logo.svg", LOGO)], &[]);
@@ -767,8 +616,6 @@ mod tests {
         );
     }
 
-    /// Content a release declares but does not carry is a malformed release, and
-    /// the refusal names what is missing.
     #[rstest::rstest]
     #[case::an_asset_the_catalog_does_not_carry(
         Some("branding/absent.svg"),
@@ -797,7 +644,6 @@ mod tests {
         );
     }
 
-    /// A variant with no window declares no content at all.
     #[test]
     fn a_variant_with_no_window_declares_no_content() {
         let release = release(false, PRESET, &[], &[b"an application payload"]);
@@ -809,8 +655,6 @@ mod tests {
         );
     }
 
-    /// Two generations of a window, one of them unchanged, fetch one blob between
-    /// them rather than two.
     #[test]
     fn a_window_that_did_not_change_is_the_same_content() {
         let digests = |preset_bytes: &[u8], asset: &[u8]| {
@@ -855,9 +699,6 @@ mod tests {
         }
     }
 
-    /// What counts as an update. A rebuild of the same version is not one: the bytes
-    /// differ, but the lifecycle would refuse a same-version upgrade, so calling it an
-    /// update would hand the caller a promise the run cannot keep.
     #[test]
     fn only_a_higher_version_is_an_update() {
         assert!(is_newer(&identity("1.4.0"), "1.5.0"));

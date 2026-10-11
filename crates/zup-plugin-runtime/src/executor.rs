@@ -174,10 +174,6 @@ fn map_invocation_error(error: InvocationError) -> PluginFailure {
 mod tests {
     use super::*;
 
-    /// The contract's `InvocationError` and the host's `PluginFailure` are two names for
-    /// one taxonomy, and the translation between them is what a caller switches on. The
-    /// output-limit case carries its numbers into the message, because "the plugin
-    /// returned too much" is not something a person can act on.
     #[test]
     fn maps_typed_contract_failures() {
         assert_eq!(

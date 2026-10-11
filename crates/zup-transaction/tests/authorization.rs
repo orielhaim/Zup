@@ -28,6 +28,7 @@ fn file_work(name: &str, privilege: Privilege) -> FileWork {
         expected_sha256: digest(contents),
         expected_size: contents.len() as u64,
         privilege,
+        executable: false,
         delta: FileDelta::Create,
     }
 }

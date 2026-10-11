@@ -1,54 +1,36 @@
-//! Wire messages and framing constants.
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zup_core::TargetTriple;
 
 use crate::SessionId;
 
-/// IPC protocol version.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Maximum length-delimited frame size (bytes). Rejects malicious length prefixes.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-/// Maximum serialized transaction-plan payload size (bytes).
 pub const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PAYLOAD_OVERLAY_PATH_BYTES: usize = 32 * 1024;
 
-/// Worker capability token for the file-transaction node set.
 pub const FILE_TRANSACTIONS_V1: &str = "file-transactions-v1";
 pub const BACKEND_OPERATIONS_V1: &str = "backend-operations-v1";
 pub const LIFECYCLE_V1: &str = "owned-lifecycle-v1";
 pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 
-/// The closed vocabulary of `Failed.kind`.
-///
-/// A closed set, and it lives here rather than in either peer, because the
-/// parent's response depends on it: a busy installation is a retry and an
-/// authentication failure is a refusal, and a parent that could not tell them
-/// apart offers the user the wrong advice. An unrecognized kind is a protocol
 /// error and never a default - a newer worker talking to an older parent has to be
-/// refused rather than reported as something the user did wrong.
 pub mod failure {
-    /// Another operation holds this installation's lock.
     pub const INSTALLATION_BUSY: &str = "installation_busy";
-    /// The worker could not prove who started it or what it was asked to do.
     pub const AUTHENTICATION: &str = "authentication";
-    /// The parent or the worker spoke something the other could not follow.
     pub const PROTOCOL: &str = "protocol";
-    /// A transaction or a prerequisite failed.
     pub const TRANSACTION: &str = "transaction";
-    /// The user cancelled.
     pub const CANCELLED: &str = "cancelled";
-    /// A transaction did not finish safely and a human has to look at it.
     pub const RECOVERY_REQUIRED: &str = "recovery_required";
-    /// The operation needs elevation the user did not grant.
     pub const AUTHORIZATION_REQUIRED: &str = "authorization_required";
+    /// session - never by reusing the old authorization.
+    pub const STALE_PLAN: &str = "stale_plan";
+    /// a policy refusal is never retryable against the same worker.
+    pub const POLICY: &str = "policy";
 }
 
-/// Every failure kind, so a reader can check the vocabulary is complete and a
-/// test can check nothing outside it is sent.
 pub const FAILURE_KINDS: &[&str] = &[
     failure::INSTALLATION_BUSY,
     failure::AUTHENTICATION,
@@ -57,24 +39,18 @@ pub const FAILURE_KINDS: &[&str] = &[
     failure::CANCELLED,
     failure::RECOVERY_REQUIRED,
     failure::AUTHORIZATION_REQUIRED,
+    failure::POLICY,
+    failure::STALE_PLAN,
 ];
 
-/// Versioned envelope wrapping every message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {
     pub version: u32,
     pub session_id: SessionId,
-    /// Monotonically increasing per sender.
     pub sequence: u64,
     pub message: Message,
 }
 
-/// All protocol messages. No generic "run command" surface.
-///
-/// `ExecuteTransaction` is boxed because it is by far the largest message, and an
-/// unboxed variant would put its size on the stack of every `match` over this
-/// enum - including the ones that only handle `Cancel` or `Pong`. `Box<T>` is
-/// transparent to serde, so the wire shape is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Message {
@@ -82,6 +58,9 @@ pub enum Message {
     ParentHello(ParentHello),
     ExecuteTransaction(Box<ExecuteTransaction>),
     ExecuteBootstrap(ExecuteBootstrap),
+    Prepare(PrepareOperation),
+    Prepared(PreparedOperation),
+    Execute(ExecuteOperation),
     Cancel,
     Progress(ProgressReport),
     TransactionStateChanged(TransactionStateChanged),
@@ -91,7 +70,6 @@ pub enum Message {
     Pong,
 }
 
-/// First message from worker → parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerHello {
     pub protocol_version: u32,
@@ -101,18 +79,15 @@ pub struct WorkerHello {
     pub capabilities: Capabilities,
 }
 
-/// Parent accepts the worker and binds the transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParentHello {
     pub protocol_version: u32,
     pub session_id: SessionId,
     pub target: TargetTriple,
     pub transaction_id: Uuid,
-    /// Fingerprint the worker must independently re-validate.
     pub expected_plan_hash: String,
 }
 
-/// Advertised capability set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Capabilities {
     pub file_transactions_v1: bool,
@@ -122,13 +97,10 @@ pub struct Capabilities {
     pub prerequisite_bootstrap_v1: bool,
 }
 
-/// Execute exactly one transaction plan (already compiled).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteTransaction {
     pub target: TargetTriple,
-    /// Canonical JSON of `zup_transaction::TransactionPlan`.
     pub plan_json: String,
-    /// SHA-256 hex of `plan_json` - must match launch-time `expected_plan_hash`.
     pub plan_hash: String,
     pub app_id: String,
     pub app_version: String,
@@ -140,13 +112,7 @@ pub struct ExecuteTransaction {
     pub payload_overlay_base_root: Option<String>,
     pub state_root: String,
     pub work_root: String,
-    /// Resume this durable transaction instead of beginning another one.
     pub recovery_id: Option<uuid::Uuid>,
-    /// The exact release graph being installed, for the worker to record.
-    ///
-    /// The worker publishes the ledger, so the identity has to reach it. It is
-    /// an `Option` because a development run has none, and an absent identity is
-    /// recorded as absent rather than invented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<zup_core::ReleaseIdentity>,
 }
@@ -166,7 +132,105 @@ pub struct ExecuteBootstrap {
     pub recovery_id: Option<uuid::Uuid>,
 }
 
-/// Synchronous progress sample / lifecycle notice.
+/// so a worker never sizes a buffer from one hostile string.
+pub const MAX_INTENT_STRING_BYTES: usize = 4096;
+pub const MAX_INTENT_COMPONENTS: usize = 64;
+
+pub mod privileged_operation {
+    pub const INSTALL: &str = "install";
+    pub const UPGRADE: &str = "upgrade";
+    pub const REPAIR: &str = "repair";
+    pub const UNINSTALL: &str = "uninstall";
+    pub const APPLY: &str = "apply";
+}
+
+pub const PRIVILEGED_OPERATIONS: &[&str] = &[
+    privileged_operation::INSTALL,
+    privileged_operation::UPGRADE,
+    privileged_operation::REPAIR,
+    privileged_operation::UNINSTALL,
+    privileged_operation::APPLY,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareOperation {
+    pub operation: String,
+    pub force_files: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir_override: Option<String>,
+    #[serde(default)]
+    pub selected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_plan_digest: Option<String>,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: TargetTriple,
+    pub state_root: String,
+}
+
+impl PrepareOperation {
+    pub fn validate_shape(&self) -> Result<(), crate::WireError> {
+        if !PRIVILEGED_OPERATIONS.contains(&self.operation.as_str()) {
+            return Err(crate::WireError::Malformed(
+                "unknown privileged operation".into(),
+            ));
+        }
+        let bounded = |value: &str| value.len() <= MAX_INTENT_STRING_BYTES;
+        if !bounded(&self.operation)
+            || !bounded(&self.app_id)
+            || !bounded(&self.app_version)
+            || !bounded(&self.scope)
+            || !bounded(&self.state_root)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if let Some(directory) = &self.install_dir_override
+            && !bounded(directory)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if let Some(digest) = &self.expected_plan_digest
+            && !bounded(digest)
+        {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if self.selected_components.len() > MAX_INTENT_COMPONENTS {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_COMPONENTS,
+            });
+        }
+        if self.selected_components.iter().any(|name| !bounded(name)) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedOperation {
+    pub plan_digest: String,
+    pub operation: String,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: TargetTriple,
+    pub file_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteOperation {
+    pub plan_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressReport {
     pub kind: ProgressKind,
@@ -191,13 +255,11 @@ pub enum ProgressKind {
     Committed,
 }
 
-/// Durable transaction phase change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionStateChanged {
     pub phase: String,
 }
 
-/// Terminal success.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completed {
     pub transaction_id: Uuid,
@@ -208,14 +270,12 @@ pub struct Completed {
     pub exit_code: Option<i32>,
 }
 
-/// Terminal failure with a typed reason tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failed {
     pub kind: String,
     pub message: String,
 }
 
-/// Encode an envelope to a length-delimited JSON payload (without length prefix).
 pub fn encode_payload(envelope: &WireEnvelope) -> Result<Vec<u8>, crate::WireError> {
     let bytes =
         serde_json::to_vec(envelope).map_err(|e| crate::WireError::Malformed(e.to_string()))?;
@@ -227,7 +287,6 @@ pub fn encode_payload(envelope: &WireEnvelope) -> Result<Vec<u8>, crate::WireErr
     Ok(bytes)
 }
 
-/// Decode a payload into an envelope, enforcing version and size.
 pub fn decode_payload(bytes: &[u8]) -> Result<WireEnvelope, crate::WireError> {
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(crate::WireError::FrameTooLarge {
@@ -245,7 +304,6 @@ pub fn decode_payload(bytes: &[u8]) -> Result<WireEnvelope, crate::WireError> {
     Ok(envelope)
 }
 
-/// Session sequence tracker (monotonic, no duplicates).
 #[derive(Debug, Default, Clone)]
 pub struct SequenceTracker {
     last: Option<u64>,
@@ -256,7 +314,6 @@ impl SequenceTracker {
         Self::default()
     }
 
-    /// Accept `sequence` if it is strictly greater than the last seen value.
     pub fn accept(&mut self, sequence: u64) -> Result<(), crate::WireError> {
         match self.last {
             None => {
@@ -275,5 +332,162 @@ impl SequenceTracker {
                 next: sequence,
             }),
         }
+    }
+}
+
+use super::WireError;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegedSession {
+    session: SessionId,
+    state: PrivilegedSessionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrivilegedSessionState {
+    AcceptingPrepare,
+    Prepared { plan_digest: String },
+    Executed,
+}
+
+impl PrivilegedSession {
+    pub fn new(session: SessionId) -> Self {
+        Self {
+            session,
+            state: PrivilegedSessionState::AcceptingPrepare,
+        }
+    }
+
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub fn prepared(&mut self, session: SessionId, plan_digest: &str) -> Result<(), WireError> {
+        if session != self.session {
+            return Err(WireError::SessionMismatch);
+        }
+        if !matches!(self.state, PrivilegedSessionState::AcceptingPrepare) {
+            return Err(WireError::UnexpectedMessage);
+        }
+        if plan_digest.len() != 64 || !plan_digest.chars().all(|char| char.is_ascii_hexdigit()) {
+            return Err(WireError::Malformed(
+                "plan digest is not SHA-256 hex".into(),
+            ));
+        }
+        self.state = PrivilegedSessionState::Prepared {
+            plan_digest: plan_digest.to_lowercase(),
+        };
+        Ok(())
+    }
+
+    pub fn execute(&mut self, session: SessionId, plan_digest: &str) -> Result<(), WireError> {
+        if session != self.session {
+            return Err(WireError::SessionMismatch);
+        }
+        match &self.state {
+            PrivilegedSessionState::Prepared { plan_digest: bound } => {
+                if plan_digest.to_lowercase() != *bound {
+                    return Err(WireError::PlanHashMismatch);
+                }
+                self.state = PrivilegedSessionState::Executed;
+                Ok(())
+            }
+            PrivilegedSessionState::AcceptingPrepare => Err(WireError::UnexpectedMessage),
+            PrivilegedSessionState::Executed => Err(WireError::Replay),
+        }
+    }
+
+    /// Whether this session has executed and must serve nothing further.
+    pub fn executed(&self) -> bool {
+        matches!(self.state, PrivilegedSessionState::Executed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIGEST_A: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const DIGEST_B: &str = "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9";
+
+    fn session() -> SessionId {
+        SessionId(uuid::Uuid::now_v7())
+    }
+
+    #[test]
+    fn prepare_then_execute_with_the_prepared_digest_succeeds_once() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        assert!(!tracker.executed());
+        tracker.prepared(id, DIGEST_A).expect("prepare binds");
+        tracker.execute(id, DIGEST_A).expect("exact execute runs");
+        assert!(tracker.executed());
+    }
+
+    #[test]
+    fn execute_before_prepare_authorizes_nothing() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        assert!(matches!(
+            tracker.execute(id, DIGEST_A),
+            Err(WireError::UnexpectedMessage)
+        ));
+    }
+
+    #[test]
+    fn a_different_digest_is_a_substitution_not_an_authorization() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        tracker.prepared(id, DIGEST_A).expect("prepare binds");
+        assert!(matches!(
+            tracker.execute(id, DIGEST_B),
+            Err(WireError::PlanHashMismatch)
+        ));
+        assert!(!tracker.executed());
+    }
+
+    #[test]
+    fn a_second_execute_is_a_replay() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        tracker.prepared(id, DIGEST_A).expect("prepare binds");
+        tracker.execute(id, DIGEST_A).expect("first execute runs");
+        assert!(tracker.execute(id, DIGEST_A).is_err());
+    }
+
+    #[test]
+    fn a_second_prepare_is_a_new_authorization_not_an_update() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        tracker.prepared(id, DIGEST_A).expect("prepare binds");
+        assert!(matches!(
+            tracker.prepared(id, DIGEST_B),
+            Err(WireError::UnexpectedMessage)
+        ));
+    }
+
+    #[test]
+    fn another_session_binds_nothing_here() {
+        let mut tracker = PrivilegedSession::new(session());
+        let stranger = session();
+        assert!(matches!(
+            tracker.prepared(stranger, DIGEST_A),
+            Err(WireError::SessionMismatch)
+        ));
+        assert!(matches!(
+            tracker.execute(stranger, DIGEST_A),
+            Err(WireError::SessionMismatch)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_digest_prepares_nothing() {
+        let id = session();
+        let mut tracker = PrivilegedSession::new(id);
+        assert!(tracker.prepared(id, "not-a-digest").is_err());
+        assert!(matches!(
+            tracker.execute(id, DIGEST_A),
+            Err(WireError::UnexpectedMessage)
+        ));
     }
 }

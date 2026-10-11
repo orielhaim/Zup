@@ -1,33 +1,16 @@
-//! Platform-independent installer engine primitives for zup.
-//!
-//! This crate owns the normalized Installer IR and the core domain types
-//! used to describe installation intent: identifiers, templates, conditions,
-//! components, and resource collections. It also owns the resolved inventory -
-//! `BuildPlan` and `TargetBuildPlan` - because the build plane produces those and
-//! the runtime consumes them, and a type both halves must name cannot live in
-//! either half's crate.
-//!
-//! It has no knowledge of `zup.toml` or any authoring format, and nothing in it
-//! reads a file.
-
 #![forbid(unsafe_code)]
 
 mod build_plan;
 mod condition;
 mod digest;
-mod encoding;
 mod ids;
 mod installer;
-mod location;
 mod model;
 mod path;
 mod prerequisite;
-mod project_path;
 mod release;
-mod resource_key;
 mod target;
 mod template;
-mod value;
 
 pub use build_plan::{
     BuildPlan, CompiledIcon, IconRole, ResolvedAsset, ResolvedFile, ResolvedPlugin,
@@ -35,20 +18,19 @@ pub use build_plan::{
 };
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};
-pub use encoding::{base64_decode, base64_encode};
 pub use ids::{
-    AppId, BackendResourceId, ComponentId, FileAssociationId, NonEmptyString, PluginId,
-    ProtocolScheme, ServiceId,
+    AppId, BackendResourceId, ComponentId, FileAssociationId, INSTALL_LOCATIONS, InstallLocation,
+    NonEmptyString, PluginId, ProtocolScheme, ResourceKey, ServiceId, SessionId, TransactionId,
+    ValueError, base64_decode, base64_encode,
 };
 pub use installer::{InstalledPreset, Installer, PresetAsset, PresetRuntime, UpdateConfig};
-pub use location::{INSTALL_LOCATIONS, InstallLocation};
 pub use model::{
     App, Component, ComponentGroup, ComponentProminence, FileAssociation, FileExtension,
     FileMapping, Frontend, Install, InstallDirectory, InstallScope, Launcher, LauncherLocation,
     MAX_PRESET_SETTINGS_BYTES, PathEntry, PluginBinding, Privilege, Protocol, SelectionRequirement,
-    Service, ServiceStart, Source, Ui,
+    Service, ServiceStart, Source, Ui, uri_placeholder_count,
 };
-pub use path::{RelativePath, RelativePathError};
+pub use path::{ProjectPath, RelativePath, RelativePathError};
 pub use prerequisite::{
     FileVersion, InstalledPackage, InstalledPackageId, MAX_INSTALLED_PACKAGE_ID_BYTES,
     MAX_PREREQUISITE_ARGUMENT_BYTES, MAX_PREREQUISITE_ARGUMENTS, MAX_PREREQUISITE_ID_BYTES,
@@ -56,21 +38,37 @@ pub use prerequisite::{
     PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
     PrerequisiteRequirement, Runtime, RuntimeRequirementId,
 };
-pub use project_path::ProjectPath;
 pub use release::{IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseIdentity};
-pub use resource_key::ResourceKey;
 pub use target::{
     ResolvedTargetConfig, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
     TargetParseError, TargetProfile, TargetProfileId, TargetTriple, host_architecture,
     host_operating_system,
 };
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
-pub use value::ValueError;
 
 pub const PLUGIN_PAYLOAD_ROOT: &str = "__zup_plugins__";
 pub const MAX_PLUGIN_ARTIFACTS: usize = 128;
 
-/// Concrete installation scope chosen for one plan.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{:.0} {}", value, UNITS[unit])
+    } else if value >= 10.0 {
+        format!("{:.1} {}", value, UNITS[unit])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit])
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -81,13 +79,6 @@ pub enum SelectedScope {
 }
 
 impl SelectedScope {
-    /// Default authorization for resources that a scope places on the host.
-    ///
-    /// A scope says *where* an application lives, not *how* the host authorizes
-    /// work. Planning uses this as the default for resources that declare no
-    /// narrower requirement; every resource may still carry its own
-    /// [`Privilege`], and nothing outside authoring derives authorization from
-    /// a scope.
     pub const fn authorization(self) -> Privilege {
         match self {
             Self::User => Privilege::User,

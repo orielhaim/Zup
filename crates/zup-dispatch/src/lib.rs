@@ -23,7 +23,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use zup_windows::{ContentStoreIdentity, UniversalArtifact};
+use zup_transaction::ContentStoreIdentity;
+use zup_windows::UniversalArtifact;
 
 mod report;
 

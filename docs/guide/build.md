@@ -16,6 +16,14 @@ zup build --target windows-x64
 
 `--target` names target profiles or canonical triples. It chooses native variants to build; it does not name the final distribution artifact.
 
+Linux targets build the same way, on either host:
+
+```bash
+zup build --target x86_64-unknown-linux-gnu
+```
+
+A Linux build writes one self-contained, extensionless installer per target (for example `Acme-Setup`). Universal and thin artifacts are Windows-only: a Linux target in an artifact composition is refused with the per-target alternative spelled out.
+
 ## Explicit artifacts
 
 When one release needs a specific file layout, declare `[build.artifacts.*]` profiles and build them by name:

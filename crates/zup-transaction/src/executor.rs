@@ -28,6 +28,7 @@ pub enum OperationReceipt {
         destination: String,
         installed_sha256: String,
         installed_size: u64,
+        executable: bool,
         created_directories: Vec<String>,
     },
     ReplaceFile {
@@ -37,6 +38,7 @@ pub enum OperationReceipt {
         backup_path: String,
         new_sha256: String,
         new_size: u64,
+        executable: bool,
     },
     RemoveFile {
         destination: TargetPath,
@@ -89,20 +91,10 @@ impl OperationReceipt {
 pub trait OperationExecutor {
     type Error;
 
-    /// Preflight one node before the transaction mutates anything.
-    ///
-    /// Called for the `Begin` and `Preflight` barriers, so it must observe
-    /// only: a prepare that changes state defeats the barrier it guards.
     fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error>;
 
     fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error>;
 
-    /// Confirm that an applied node's installed state matches its receipt.
-    ///
-    /// Called once per applied mutation, file removal, and backend operation
-    /// before the commit barrier. The receipt is the only durable record of
-    /// what the apply was supposed to install, so it is the comparison basis.
-    /// Must observe only.
     fn verify(
         &mut self,
         operation: &TransactionNode,

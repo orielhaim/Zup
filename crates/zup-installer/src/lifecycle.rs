@@ -1,27 +1,3 @@
-//! Applying a package to a machine.
-//!
-//! One question, four answers. A person who double-clicks a newer
-//! `Acme-Setup.exe`, a script that runs `install --yes`, the Apps & Features
-//! entry, and a framework updater all mean the same thing: make this machine
-//! match this package. Which lifecycle that is depends on what the machine
-//! already has, and the machine already knows - so the runtime reads its own
-//! ledger and resolves the verb, rather than asking the caller to get it right.
-//!
-//! The three sources of a package, in the order they are preferred:
-//!
-//! 1. **A handoff.** A dispatcher resolved an authenticated release, filled a
-//!    verified cache, and started this runtime. The handoff is checked against
-//!    the cache and against this image's own digest before it is believed.
-//! 2. **This image's embedded package.** A self-contained installer carries its
-//!    content with it.
-//! 3. **A plan the image was compiled with and a release graph to fill.** A thin
-//!    runtime carries the plan and none of the content, because the content came
-//!    from - and comes again from - a release graph.
-//!
-//! There is no fourth source. A runtime does not read `zup.toml`, does not walk
-//! a source tree, and does not compile a manifest. If this image carries no
-//! package, that is a refusal and not an invitation to go and find one.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,24 +12,19 @@ use zup_windows::WindowsRuntimeBackend;
 
 use crate::acquire;
 use crate::cli::LifecycleArgs;
-use crate::context::RuntimeContext;
 use crate::execute;
 use crate::frontend;
+use crate::maintenance as state;
 use crate::package;
-use crate::state;
+use crate::run::RuntimeContext;
 
-/// What the caller asked for: a verb, or "make this machine match this package".
 #[derive(Debug, Clone, Copy)]
 pub enum Request {
-    /// The caller named the lifecycle.
     Named(LifecycleAction),
-    /// The caller named no lifecycle and expects the machine's own record to
-    /// supply one.
     Apply,
 }
 
 impl Request {
-    /// The verb this request names, given what the machine already has.
     fn resolve(
         self,
         installed: Option<&semver::Version>,
@@ -66,22 +37,14 @@ impl Request {
     }
 }
 
-/// A plan and the backend that can satisfy it.
 #[derive(Clone)]
 pub struct PreparedRuntime {
     pub(crate) request: RuntimeRequest,
     pub(crate) backend: Arc<WindowsRuntimeBackend>,
-    /// The lifecycle this plan performs, after the machine's own record has
-    /// resolved an "apply this package" request into a verb.
     pub(crate) action: LifecycleAction,
 }
 
 impl PreparedRuntime {
-    /// The same plan, executed with a payload overlay that survives a refusal.
-    ///
-    /// The console frontend retries a blocked installation rather than starting
-    /// over, and re-downloading or re-staging the payload to do it would be the
-    /// slowest part of the retry.
     #[cfg(feature = "console")]
     pub(crate) fn retaining_overlay(&self) -> Self {
         let backend = self
@@ -97,7 +60,6 @@ impl PreparedRuntime {
     }
 }
 
-/// Apply this package: install, upgrade, or modify, resolved from the machine.
 pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     if args.ui {
         return frontend::graphical_for(context, args);
@@ -108,7 +70,6 @@ pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()>
     transition(context, Request::Apply, &args, policy_for(&args))
 }
 
-/// Run one named lifecycle.
 pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::Result<()> {
     if args.ui && context.frontend == zup_core::Frontend::Gui {
         return frontend::graphical_for(context, args);
@@ -129,7 +90,6 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
     )
 }
 
-/// The lifecycle verbs a caller may name.
 #[derive(Debug, Clone, Copy)]
 pub enum Verb {
     Modify,
@@ -138,7 +98,6 @@ pub enum Verb {
 }
 
 impl Verb {
-    /// The engine action this verb names.
     pub fn action(self) -> LifecycleAction {
         match self {
             Self::Modify => LifecycleAction::Modify,
@@ -156,12 +115,6 @@ fn policy_for(args: &LifecycleArgs) -> ExecutionPolicy {
     }
 }
 
-/// The GUI install or maintenance window, with no arguments.
-///
-/// This is what a double-click means. A fresh machine gets the installer; a
-/// machine that already has the application gets its maintenance surface; a
-/// package newer than what is installed offers the upgrade, and a package older
-/// than what is installed is refused by the same policy a command-line apply uses.
 pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
     let executable = package::current_executable()?;
     let bundle = package::open_bundle_if_present(&executable)?.ok_or_else(|| {
@@ -177,7 +130,6 @@ pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
     }
 }
 
-/// Run a lifecycle against whichever package this process can act on.
 pub fn transition(
     context: RuntimeContext,
     request: Request,
@@ -186,9 +138,6 @@ pub fn transition(
 ) -> miette::Result<()> {
     let executable = package::current_executable()?;
 
-    // A handoff arrives before anything else, because it is what says which
-    // release this process is installing. A handoff that does not verify is a
-    // refusal here rather than a surprise three phases later.
     if let Some(handoff_path) = &args.handoff {
         return run_handoff(&executable, request, args, policy, handoff_path);
     }
@@ -219,7 +168,6 @@ pub fn transition(
     }
 }
 
-/// Run a lifecycle the caller named, from an embedded package.
 pub fn run_embedded(
     request: Request,
     context: RuntimeContext,
@@ -248,7 +196,6 @@ pub fn run_embedded(
     }
 }
 
-/// Check a handoff and run the lifecycle it names.
 fn run_handoff(
     executable: &Path,
     request: Request,
@@ -268,20 +215,13 @@ fn run_handoff(
         args.handoff_digest.as_deref(),
     )
     .map_err(|error| {
-        // The guarantee is stated rather than implied: every one of these checks
-        // runs before the transaction engine is asked for a plan.
         debug_assert!(error.left_machine_unchanged());
         miette::miette!("{error}")
     })?;
-    // The dispatcher's progress is the runtime's starting point, not a new one:
-    // the bytes it already fetched are in this cache and are still here.
     let resume = accepted.session.resume_line();
     if args.output == crate::cli::OutputArg::Human && !resume.is_empty() {
         eprintln!("{resume}");
     }
-    // The handoff says which lifecycle this is, and it agrees with the verb the
-    // user typed. A disagreement means one of the two processes is not the one
-    // that thinks it is, which is worth a refusal.
     let expected = match accepted.mode {
         zup_acquire::HandoffMode::Install => LifecycleAction::Install,
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
@@ -297,7 +237,6 @@ fn run_handoff(
             state::action_name(action)
         ));
     }
-    // A handed-over graph is a graph a launcher resolved online.
     run_acquired_transition(
         acquire::Request {
             action: Some(expected),
@@ -312,18 +251,6 @@ fn run_handoff(
     )
 }
 
-/// Run a lifecycle for a thin runtime, against the release graph.
-///
-/// The embedded package is the runtime's own copy of the plan, and it is the only
-/// thing a runtime-only process knows: there is no manifest beside it and no
-/// source directory. The update configuration embedded in that plan is where the
-/// repository, the channel, and the trusted root come from - which is the point of
-/// inlining them: a machine that lost the installer file can still repair itself,
-/// because the identity of what it installed travels with it.
-///
-/// A repair narrows the closure to the resources the ledger says drifted, so a
-/// one-file repair costs one file. Every other lifecycle takes the whole
-/// selection. Both are the same code; only the closure differs.
 fn run_graph_transition(
     request: Request,
     args: &LifecycleArgs,
@@ -348,10 +275,6 @@ fn run_graph_transition(
         .load(&installer.app.id, scope)
         .map_err(|error| miette::miette!("installation ledger: {error}"))?;
 
-    // A repair is only meaningful against a committed installation, and a
-    // committed installation from a graph records which graph. An installation
-    // with no identity was made from a manifest, and repairing it through the
-    // graph would fetch a different release's bytes.
     if let Some(identity) = ledger
         .as_ref()
         .and_then(zup_exec::InstallLedger::release_identity)
@@ -370,9 +293,6 @@ fn run_graph_transition(
         ));
     }
 
-    // The cache lives beside the state, and the state a machine-scope install uses
-    // for content is the per-user one: a shared cache would need an authority the
-    // acquisition engine has no business holding.
     let content_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
         state::peer_user_state_root()?
     } else {
@@ -408,10 +328,6 @@ fn run_graph_transition(
         miette::miette!("release acquisition: {error}")
     })?;
 
-    // A repair restores what the machine owns. The ledger holds each owned
-    // resource's digest, so the closure is the intersection of what drifted and
-    // what the release carries - which is also the ownership check, because a
-    // digest in neither cannot be asked for.
     if let Request::Named(LifecycleAction::Repair { force_files }) = request {
         let drifted = drifted_digests(&state_root, &build.installer, scope, force_files)?;
         if drifted.is_empty() {
@@ -435,9 +351,6 @@ fn run_graph_transition(
 
     let action = match request {
         Request::Named(action) => action,
-        // A plan-only runtime that already has the application resolves the same
-        // way an embedded one does: an older installed release means the graph's
-        // release is the upgrade, and the same version means a modify.
         Request::Apply => {
             let action = state::resolve_applied_action(
                 ledger.as_ref().map(|ledger| &ledger.version),
@@ -486,12 +399,6 @@ fn run_graph_transition(
     )
 }
 
-/// The digests behind owned resources the machine no longer has correct.
-///
-/// An owned resource with no file on disk, or one whose file hashes to something
-/// else, is drift. The answer is a set of digests, not a decision: whether a
-/// drifted file is restored or the operation is refused is the executor's call,
-/// and this only says what the machine is missing.
 fn drifted_digests(
     state_root: &Path,
     installer: &zup_core::Installer,
@@ -505,12 +412,6 @@ fn drifted_digests(
     Ok(zup_exec::owned_content_digests(&ledger))
 }
 
-/// Plan and run one lifecycle against an acquired graph.
-///
-/// This is the only place a resolved graph turns into a machine change, and it
-/// hands the transaction engine the one thing it needs: a plan whose payload the
-/// executor reads out of the verified cache. Everything above this line is
-/// content and identity; everything below is the existing lifecycle, unchanged.
 pub fn run_acquired_transition(
     request: acquire::Request,
     acquired: &acquire::Acquired,
@@ -542,10 +443,6 @@ pub fn run_acquired_transition(
         .ok_or_else(|| miette::miette!("the release plan names no target"))?;
     let installer = &build.installer;
 
-    // A handoff states the scope, and it is stated rather than derived because
-    // the dispatcher resolved the same plan and reached the same answer. With no
-    // handoff, a plan that allows either scope goes to the user's profile on a
-    // fresh install, because that needs no elevation.
     let scope = match scope {
         Some(scope) => scope,
         None if installer.install.scope == zup_core::InstallScope::Machine => {
@@ -593,9 +490,6 @@ pub fn run_acquired_transition(
         .and_then(zup_exec::InstallLedger::release_identity)
         && installed.variant != acquired.resolved.variant.id
     {
-        // The installed machine runs a different variant than the graph offers.
-        // Installing it anyway would replace a working installation with another
-        // architecture's payload under the same identity.
         return Err(miette::miette!(
             "this installation runs variant `{}` and the release offers `{}`",
             installed.variant,
@@ -621,14 +515,8 @@ pub fn run_acquired_transition(
     let mut target =
         zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
             .map_err(|error| miette::miette!("target: {error}"))?;
-    // A window is release content, fetched and verified like everything else this
-    // transition installs, and planned as ordinary files under the same state
-    // root. The digest is the release's own - carried in the manifest and named
-    // in the release descriptor - so nothing here hashes a 20 MiB executable to
-    // discover what it is, and nothing here can choose different bytes from the
-    // ones the graph authenticated.
     if let Some(preset) = installer.preset.as_ref() {
-        let runtime_directory = zup_windows::maintenance_directory(
+        let runtime_directory = zup_transaction::maintenance_directory(
             &state_root,
             &installer.app.id,
             scope,
@@ -681,7 +569,6 @@ pub fn run_acquired_transition(
     } else {
         execute::execute_frontend(prepared, output, action).map_err(Into::into)
     };
-    // The retention record is written only after a commit, so a failed install
     // never leaves a machine believing it has content it does not.
     if result.is_ok() {
         let _ = acquired.record_retention(CachePolicy::Auto);
@@ -689,8 +576,6 @@ pub fn run_acquired_transition(
     result
 }
 
-/// Plan an install from a graph, honouring the component rules a lifecycle
-/// already had.
 fn plan_from_graph(
     build: &TargetBuildPlan,
     action: LifecycleAction,
@@ -757,18 +642,11 @@ fn plan_from_graph(
     .map_err(|error| miette::miette!("plan: {error}"))
 }
 
-/// How an embedded package is read, for callers that prepare more than one plan.
 pub struct EmbeddedPreparationMode<'a> {
-    /// Whether a cancelled window cancels the planning as well as the execution.
     pub cancellation: &'a dyn zup_plan::CancellationQuery,
-    /// Whether unsatisfied prerequisites are acquired now or left to the plan.
-    ///
-    /// A preview acquires nothing: it answers "what would this do" and a download
-    /// is not an answer to that.
     pub acquire_prerequisites: bool,
 }
 
-/// The inputs to one embedded-package lifecycle.
 pub struct EmbeddedPreparation<'a> {
     pub request: Request,
     pub scope: SelectedScope,
@@ -781,7 +659,6 @@ pub struct EmbeddedPreparation<'a> {
     pub install_directory: Option<PathBuf>,
 }
 
-/// Read this image's package and prepare a lifecycle from it.
 pub fn prepare_embedded_transition(
     request: Request,
     scope: SelectedScope,
@@ -804,7 +681,6 @@ pub fn prepare_embedded_transition(
     )
 }
 
-/// The same, with a window's cancellation query and a preview's cheaper mode.
 pub fn prepare_embedded_transition_with_cancellation(
     request: Request,
     scope: SelectedScope,
@@ -848,14 +724,8 @@ pub fn prepare_embedded_transition_with_cancellation(
     )
 }
 
-/// Turn an embedded package and a machine's record into an executable plan.
-///
-/// The plugin executor is a parameter rather than a construction so that a
 /// lifecycle which never plans a plugin - an uninstall, which removes files by
 /// ownership rather than by re-planning - never loads the component engine at
-/// all. That is a startup-time saving on the one path a user waits for least, and
-/// it is also a smaller attack surface on the one path that runs while another
-/// process is holding the application's files open.
 pub fn prepare_embedded_request<E>(
     preparation: EmbeddedPreparation<'_>,
     embedded_bundle: Option<&zup_windows::EmbeddedBundle>,
@@ -993,8 +863,12 @@ where
             .map_err(|error| miette::miette!("target: {error}"))?;
     attach_maintenance_copy(&mut target, &state_root, &app_id, scope, &payload_root)?;
     if let Some(preset) = build.installer.preset.as_ref() {
-        let runtime_directory =
-            zup_windows::maintenance_directory(&state_root, &app_id, scope, &target.app.version);
+        let runtime_directory = zup_transaction::maintenance_directory(
+            &state_root,
+            &app_id,
+            scope,
+            &target.app.version,
+        );
         let source = embedded_ui_source(&payload_root);
         attach_ui_runtime(&mut target, &runtime_directory, scope, preset, &source)?;
     }
@@ -1041,12 +915,6 @@ where
     })
 }
 
-/// Add this image to the plan as the installation's maintenance runtime.
-///
-/// This is what makes a machine that has lost `Acme-Setup.exe` still repairable:
-/// the runtime that performed the install is persisted beside the application,
-/// as an owned resource with its own digest, and it is the file Apps & Features
-/// and the recovery path both address.
 fn attach_maintenance_copy(
     target: &mut zup_platform::TargetPlan,
     state_root: &Path,
@@ -1063,7 +931,7 @@ fn attach_maintenance_copy(
         state_root,
         app_id,
         scope,
-        &target.app.version.to_string(),
+        &target.app.version,
         &target.target,
     )?;
     target.files.push(zup_platform::TargetFile {
@@ -1076,9 +944,8 @@ fn attach_maintenance_copy(
         destination,
         size,
         sha256,
-        // The maintenance executable lives in the scope's own state root, so it
-        // needs that scope's authority and no more.
         privilege: scope.authorization(),
+        executable: true,
     });
     target.summary.file_count += 1;
     target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
@@ -1086,18 +953,13 @@ fn attach_maintenance_copy(
     Ok(())
 }
 
-/// Read the preset runtime out of the installer image this process is running from.
-///
-/// The image's own resources, not a file beside it: beside it is what a previous
-/// run left behind, and a plan that read it would be planning an install out of
-/// the output of an install that may have been rolled back.
 fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Vec<u8>> {
     let executable = payload_root.to_path_buf();
     move |name| {
         let bundle = zup_windows::EmbeddedBundle::open(&executable).map_err(|error| {
             miette::miette!("installer package {}: {error}", executable.display())
         })?;
-        if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        if name == zup_bundle::PRESET_SOURCE {
             return bundle
                 .preset()
                 .map(<[u8]>::to_vec)
@@ -1112,19 +974,12 @@ fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Ve
     }
 }
 
-/// The logical asset name inside a reserved preset source name.
 fn ui_asset_name(source: &str) -> Option<&str> {
     source
-        .strip_prefix(zup_windows::preset_runtime::ASSET_SOURCE_PREFIX)
+        .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
         .and_then(|rest| rest.strip_prefix('/'))
 }
 
-/// Read a window's content out of the content this release was acquired into.
-///
-/// The same verified cache every other byte of the transition comes from, and the
-/// same plan-only package the rest of the payload is served through - so a preset
-/// reaches the machine by the identical integrity path as a payload file, and
-/// there is no second place a window's bytes could arrive from.
 fn acquired_ui_source(
     manifest: &zup_artifact::VariantManifest,
     payload: &zup_bundle::AcquiredPayloadSource,
@@ -1137,7 +992,7 @@ fn acquired_ui_source(
             miette::miette!("this release presents a window but carries no native image for it")
         });
     move |name| {
-        if name == zup_windows::preset_runtime::PRESET_SOURCE {
+        if name == zup_bundle::PRESET_SOURCE {
             let digest = executable
                 .as_ref()
                 .map_err(|error| miette::miette!("{error}"))?;
@@ -1153,26 +1008,6 @@ fn acquired_ui_source(
     }
 }
 
-/// Make this installation's window part of what it owns.
-///
-/// The preset executable and every asset its settings named become installed
-/// content, content-addressed beside the maintenance runtime and carrying the
-/// scope's own authority. They are planned as ordinary files, which is what
-/// makes the transaction engine do the rest: the window is published at the same
-/// commit as the application, a failed install leaves nothing behind, a rollback
-/// returns the previous window's bytes, an update replaces the whole generation
-/// at once, and an uninstall removes it without a second bookkeeping system to
-/// keep in step.
-///
-/// `bytes` reads content by its reserved source name, so this knows nothing
-/// about whether the payload is an installer image, a content store, or a
-/// directory. A caller that cannot supply the preset's bytes says so here rather
-/// than committing an installation whose window cannot open.
-///
-/// The plan is only touched once every byte is in hand, so a window that turns
-/// out to be incomplete leaves no half of itself behind. A window is one
-/// generation, and a generation that was partly written would be a machine with
-/// a preset from one release and an asset from another.
 fn attach_ui_runtime(
     target: &mut zup_platform::TargetPlan,
     runtime_directory: &Path,
@@ -1180,7 +1015,7 @@ fn attach_ui_runtime(
     preset: &zup_core::PresetRuntime,
     bytes: &impl Fn(&str) -> miette::Result<Vec<u8>>,
 ) -> miette::Result<()> {
-    let executable = bytes(zup_windows::preset_runtime::PRESET_SOURCE).map_err(|error| {
+    let executable = bytes(zup_bundle::PRESET_SOURCE).map_err(|error| {
         miette::miette!(
             "this application presents the preset `{}`, and its executable could not be read: \
              {error}",
@@ -1189,18 +1024,21 @@ fn attach_ui_runtime(
     })?;
     let executable_digest = zup_core::hash_bytes(&executable);
     let mut files = vec![(
-        zup_windows::preset_runtime::preset_path(runtime_directory, &executable_digest),
+        zup_bundle::preset_path(
+            runtime_directory,
+            &executable_digest,
+            target.target.executable_suffix(),
+        ),
         executable_digest,
         executable.len() as u64,
-        zup_core::RelativePath::new(zup_windows::preset_runtime::PRESET_SOURCE)
+        zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
             .expect("a reserved source name is always relative"),
+        true,
     )];
     for asset in &preset.assets {
-        let content =
-            bytes(zup_windows::preset_runtime::asset_source_name(asset.name.as_str()).as_str())
-                .map_err(|error| {
-                    miette::miette!("the asset `{}` could not be read: {error}", asset.name)
-                })?;
+        let content = bytes(zup_bundle::asset_source_name(asset.name.as_str()).as_str()).map_err(
+            |error| miette::miette!("the asset `{}` could not be read: {error}", asset.name),
+        )?;
         if content.len() as u64 != asset.size || zup_core::hash_bytes(&content) != asset.sha256 {
             return Err(miette::miette!(
                 "the asset `{}` is not the content this application configured",
@@ -1208,19 +1046,16 @@ fn attach_ui_runtime(
             ));
         }
         files.push((
-            zup_windows::preset_runtime::asset_path(
-                runtime_directory,
-                asset.name.as_str(),
-                &asset.sha256,
-            ),
+            zup_bundle::asset_path(runtime_directory, asset.name.as_str(), &asset.sha256),
             asset.sha256,
             asset.size,
-            zup_windows::preset_runtime::asset_source_name(asset.name.as_str()),
+            zup_bundle::asset_source_name(asset.name.as_str()),
+            false,
         ));
     }
 
     let triple = target.target.clone();
-    for (path, digest, size, source) in files {
+    for (path, digest, size, source, executable) in files {
         let destination =
             zup_platform::TargetPath::new(triple.clone(), zup_windows::plain_path_text(&path))
                 .map_err(|error| miette::miette!("preset runtime destination: {error}"))?;
@@ -1232,6 +1067,7 @@ fn attach_ui_runtime(
             size,
             sha256: digest,
             privilege: scope.authorization(),
+            executable,
         });
         target.summary.file_count += 1;
         target.summary.resource_count += 1;
@@ -1244,7 +1080,6 @@ fn attach_ui_runtime(
     Ok(())
 }
 
-/// A cancellation query backed by the engine's own handle.
 #[cfg(any(feature = "gui", test))]
 pub struct RuntimeCancellationQuery<'a>(pub &'a zup_runtime::CancellationHandle);
 

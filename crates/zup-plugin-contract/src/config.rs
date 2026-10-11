@@ -1,11 +1,3 @@
-//! The engine a plugin is compiled and loaded with.
-//!
-//! Every limit and version the host enforces is re-exported from
-//! `zup-plugin-abi` rather than restated here. They are re-exported so callers
-//! keep one path to name them, but there is one definition: a limit a guest is
-//! held to and a limit the host enforces have to be the same number, and two
-//! copies of a constant are two numbers the day one of them is edited.
-
 use thiserror::Error;
 use wasmtime::{Config, Engine, ProfilingStrategy, WasmBacktraceDetails, WasmFeatures};
 
@@ -17,7 +9,6 @@ pub use zup_plugin_abi::{
     WASMTIME_VERSION,
 };
 
-/// Why an engine could not be created for a target.
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("invalid Wasmtime target {target:?}: {message}")]
@@ -26,11 +17,6 @@ pub enum EngineError {
     Creation { message: String },
 }
 
-/// A configured engine, and the fingerprint that says what configuration it is.
-///
-/// The fingerprint is what an ahead-of-time artifact records, and what stops a
-/// host from loading output a differently configured engine produced: a
-/// precompiled component is only loadable by the exact engine that made it.
 #[derive(Clone, Debug)]
 pub struct PluginEngine {
     pub(crate) engine: Engine,
@@ -39,7 +25,6 @@ pub struct PluginEngine {
 }
 
 impl PluginEngine {
-    /// An engine that compiles and runs for `target`.
     pub fn new(target: &str) -> Result<Self, EngineError> {
         let config = engine_config(target)?;
         let engine = Engine::new(&config).map_err(|error| EngineError::Creation {
@@ -53,28 +38,19 @@ impl PluginEngine {
         })
     }
 
-    /// An engine for the target this host was compiled for.
     pub fn host() -> Result<Self, EngineError> {
         Self::new(crate::HOST_TARGET)
     }
 
-    /// What configuration this engine is.
     pub fn fingerprint(&self) -> crate::EngineFingerprint {
         self.fingerprint
     }
 
-    /// The target this engine compiles and runs for.
     pub fn target(&self) -> &str {
         &self.target
     }
 }
 
-/// An engine configured the way a plugin is allowed to run.
-///
-/// Deterministic and non-concurrent features only: a guest that could observe a
-/// floating-point result that differed between hosts, or spawn a thread, could
-/// produce a plan whose content depended on the machine that produced it, and
-/// the host validates plans by content.
 pub(crate) fn engine_config(target: &str) -> Result<Config, EngineError> {
     let mut config = Config::new();
     config
@@ -119,9 +95,6 @@ mod tests {
         assert!(matches!(error, EngineError::InvalidTarget { .. }));
     }
 
-    /// A plan's content has to depend on the context and nothing else, so the
-    /// engine may not be a source of variation. Every feature that would make a
-    /// result depend on the host, or let a guest run concurrently, is off.
     #[test]
     fn disables_non_deterministic_and_concurrent_features() {
         let features = engine_features();

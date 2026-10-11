@@ -1,5 +1,3 @@
-//! Manifest parse and validation diagnostics.
-
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -11,10 +9,8 @@ use crate::target::ResourceKind;
 
 type Src = Arc<NamedSource<String>>;
 
-/// Errors produced while parsing, validating, or compiling a `zup.toml` manifest.
 #[derive(Debug, Error, Diagnostic)]
 pub enum ManifestError {
-    /// The document is not a well-formed supported manifest.
     #[error("{message}")]
     #[diagnostic(code(zup_manifest::invalid))]
     Invalid {
@@ -25,7 +21,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// `schema` is not a supported version.
     #[error("unsupported schema version `{found}`")]
     #[diagnostic(
         code(zup_manifest::unsupported_schema),
@@ -40,7 +35,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// The build matrix contains no target profiles.
     #[error("the build target matrix must contain at least one profile")]
     #[diagnostic(
         code(zup_manifest::empty_target_matrix),
@@ -53,7 +47,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A targeted resource names a profile that is not declared.
     #[error("{resource} references unknown target profile `{profile}`")]
     #[diagnostic(
         code(zup_manifest::unknown_target_profile_reference),
@@ -68,7 +61,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A declared artifact names no targets.
     #[error("artifact `{artifact}` includes no target profile")]
     #[diagnostic(
         code(zup_manifest::empty_artifact),
@@ -82,7 +74,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A single-target artifact names more than one target.
     #[error("artifact `{artifact}` is `kind = \"single\"` but includes {count} target profiles")]
     #[diagnostic(
         code(zup_manifest::artifact_target_count),
@@ -99,7 +90,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A declared artifact names an empty channel.
     #[error("artifact `{artifact}` declares an empty channel")]
     #[diagnostic(
         code(zup_manifest::empty_artifact_channel),
@@ -113,7 +103,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A declared artifact names an output that is not a file name.
     #[error("artifact `{artifact}` declares output `{output}`, which is not a file name")]
     #[diagnostic(
         code(zup_manifest::artifact_output),
@@ -128,7 +117,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A target selector matches neither a profile name nor a configured target.
     #[error("unknown target selector `{selector}`")]
     #[diagnostic(
         code(zup_manifest::unknown_target_selector),
@@ -143,7 +131,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two target profiles resolve to the same canonical target triple.
     #[error(
         "target profile `{profile}` duplicates canonical target `{target}` from profile `{conflicts_with}`"
     )]
@@ -161,7 +148,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A resolved target config no longer matches its declared profile.
     #[error("invalid resolved target configuration for profile `{profile}`: {reason}")]
     #[diagnostic(
         code(zup_manifest::invalid_resolved_target_config),
@@ -176,7 +162,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two components share an id.
     #[error("duplicate component id `{id}`")]
     #[diagnostic(code(zup_manifest::duplicate_component))]
     DuplicateComponent {
@@ -187,7 +172,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two services share an id.
     #[error("duplicate service id `{id}`")]
     #[diagnostic(code(zup_manifest::duplicate_service))]
     DuplicateService {
@@ -218,7 +202,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A resource or dependency references a component that does not exist.
     #[error("unknown component `{id}` referenced by {context}")]
     #[diagnostic(code(zup_manifest::unknown_component))]
     UnknownComponent {
@@ -230,7 +213,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A component lists itself as a dependency.
     #[error("component `{id}` cannot depend on itself")]
     #[diagnostic(code(zup_manifest::component_self_dependency))]
     ComponentSelfDependency {
@@ -241,7 +223,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Component dependencies contain a cycle.
     #[error("component dependency cycle: {path}")]
     #[diagnostic(code(zup_manifest::component_cycle))]
     ComponentCycle {
@@ -252,7 +233,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// A required component is marked as not selected by default.
     #[error("required component `{id}` cannot default to disabled")]
     #[diagnostic(code(zup_manifest::required_component_disabled))]
     RequiredComponentDisabled {
@@ -263,7 +243,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// The install scope needs a directory template that was not configured.
     #[error("install directory for scope `{scope}` is not specified")]
     #[diagnostic(
         code(zup_manifest::missing_install_directory),
@@ -277,7 +256,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Install directory templates must not reference `${install}`.
     #[error("install directory for scope `{scope}` must not reference `${{install}}`")]
     #[diagnostic(
         code(zup_manifest::recursive_install_directory),
@@ -291,7 +269,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two unconditional declarations share a protocol scheme.
     #[error("duplicate protocol scheme `{scheme}`")]
     #[diagnostic(code(zup_manifest::duplicate_protocol))]
     DuplicateProtocol {
@@ -302,7 +279,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two unconditional declarations share a file association id.
     #[error("duplicate file association id `{id}`")]
     #[diagnostic(code(zup_manifest::duplicate_file_association))]
     DuplicateFileAssociation {
@@ -313,7 +289,6 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
-    /// Two unconditional declarations own the same file extension.
     #[error("duplicate file association extension `{extension}`")]
     #[diagnostic(code(zup_manifest::duplicate_extension))]
     DuplicateExtension {

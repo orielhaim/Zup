@@ -1,16 +1,9 @@
-//! Lowering a [`TargetPath`] onto this Windows host.
-//!
-//! The lexical half of a target path is already settled: absolute, canonical,
-//! free of device namespaces. What is left is what Windows will still refuse to
-//! name a file with, which `typed-path` does not model because it is a rule
-//! about a filesystem rather than about a path's spelling.
-
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-use typed_path::{
-    Utf8Component, Utf8WindowsComponent, constants::windows::RESERVED_DEVICE_NAMES_STR,
-};
+use typed_path::{Utf8Component, Utf8WindowsComponent};
+
+use crate::shortcut_name::is_reserved_device_stem;
 use zup_core::{TargetOperatingSystem, TargetTriple};
 use zup_platform::{TargetPath, TargetPathError};
 
@@ -38,7 +31,7 @@ pub fn validate_windows_target_path(path: &TargetPath) -> Result<(), TargetPathV
             target: path.target().to_string(),
         });
     };
-    // The prefix and the root are structural, so only the names are judged.
+
     for component in windows.components() {
         if let Utf8WindowsComponent::Normal(name) = component {
             validate_component(component, name)?;
@@ -47,7 +40,6 @@ pub fn validate_windows_target_path(path: &TargetPath) -> Result<(), TargetPathV
     Ok(())
 }
 
-/// Windows path identity: the canonical spelling, case-folded.
 pub fn windows_target_path_identity(path: &TargetPath) -> String {
     path.as_str().to_lowercase()
 }
@@ -74,11 +66,6 @@ pub(crate) fn target_path_from_host(
     TargetPath::new(target.clone(), crate::machine_state::plain_path_text(path))
 }
 
-/// Windows' own filename rules, applied to one component.
-///
-/// A reserved device name, a separator, an illegal character, or a trailing dot
-/// or space makes a component unrepresentable, and a path is only refused if
-/// one of its components is.
 fn validate_component(
     component: Utf8WindowsComponent<'_>,
     name: &str,
@@ -91,17 +78,13 @@ fn validate_component(
     if name.ends_with(' ') || name.ends_with('.') {
         return Err(invalid("trailing spaces and dots are not allowed"));
     }
-    // `is_valid` is the filename-character rule: a separator or a character
-    // Windows reserves inside a name.
+
     if !component.is_valid() || name.chars().any(char::is_control) {
         return Err(invalid("forbidden or control character"));
     }
-    // `nul.txt` is still the `NUL` device, so the name that matters is the stem.
+
     let stem = name.split('.').next().unwrap_or(name);
-    if RESERVED_DEVICE_NAMES_STR
-        .iter()
-        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
-    {
+    if is_reserved_device_stem(stem) {
         return Err(invalid("reserved device name"));
     }
     Ok(())
@@ -110,6 +93,7 @@ fn validate_component(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use zup_core::TargetTriple;
 
     fn target_path(path: &str) -> TargetPath {
@@ -138,49 +122,45 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn every_component_is_validated_without_host_path_semantics() {
-        for (path, accepted) in [
-            (r"C:\CON", false),
-            (r"C:\nul.txt", false),
-            (r"C:\PRN.txt", false),
-            (r"C:\AUX", false),
-            (r"C:\COM1.dat", false),
-            (r"C:\COM9.log", false),
-            (r"C:\LPT1", false),
-            (r"C:\LPT9.dat", false),
-            (r"C:\file.", false),
-            (r"C:\file ", false),
-            (r"C:\a:b", false),
-            (r"C:\a?b", false),
-            (r"C:\a*b", false),
-            (r"C:\a<b", false),
-            (r"C:\a>b", false),
-            (r"C:\a|b", false),
-            ("C:\\file\u{0001}.txt", false),
-            (r"C:\", true),
-            (r"C:\Program Files\Acme\app.exe", true),
-            (r"\\server\share\Acme\app.exe", true),
-        ] {
-            assert_eq!(
-                validate_windows_target_path(&target_path(path)).is_ok(),
-                accepted,
-                "{path:?}"
-            );
-        }
+    #[rstest]
+    #[case(r"C:\CON", false)]
+    #[case(r"C:\nul.txt", false)]
+    #[case(r"C:\PRN.txt", false)]
+    #[case(r"C:\AUX", false)]
+    #[case(r"C:\COM1.dat", false)]
+    #[case(r"C:\COM9.log", false)]
+    #[case(r"C:\LPT1", false)]
+    #[case(r"C:\LPT9.dat", false)]
+    #[case(r"C:\file.", false)]
+    #[case(r"C:\file ", false)]
+    #[case(r"C:\a:b", false)]
+    #[case(r"C:\a?b", false)]
+    #[case(r"C:\a*b", false)]
+    #[case(r"C:\a<b", false)]
+    #[case(r"C:\a>b", false)]
+    #[case(r"C:\a|b", false)]
+    #[case("C:\\file\u{0001}.txt", false)]
+    #[case(r"C:\", true)]
+    #[case(r"C:\Program Files\Acme\app.exe", true)]
+    #[case(r"\\server\share\Acme\app.exe", true)]
+    fn every_component_is_validated_without_host_path_semantics(
+        #[case] path: &str,
+        #[case] accepted: bool,
+    ) {
+        assert_eq!(
+            validate_windows_target_path(&target_path(path)).is_ok(),
+            accepted
+        );
     }
 
-    #[test]
-    fn device_paths_are_rejected_at_the_target_path_boundary() {
+    #[rstest]
+    #[case(r"\\.\PIPE\device")]
+    #[case(r"\\?\C:\Windows")]
+    #[case(r"\\?\UNC\server\share")]
+    #[case(r"\\??\C:\Windows")]
+    fn device_paths_are_rejected_at_the_target_path_boundary(#[case] path: &str) {
         let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-        for path in [
-            r"\\.\PIPE\device",
-            r"\\?\C:\Windows",
-            r"\\?\UNC\server\share",
-            r"\\??\C:\Windows",
-        ] {
-            assert!(TargetPath::new(&target, path).is_err(), "{path:?}");
-        }
+        assert!(TargetPath::new(&target, path).is_err());
     }
 
     #[test]

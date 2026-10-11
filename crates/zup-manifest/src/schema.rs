@@ -52,6 +52,7 @@ struct SchemaManifest {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
+/// Application identity and display metadata.
 struct SchemaApp {
     #[serde(flatten)]
     #[schemars(flatten)]

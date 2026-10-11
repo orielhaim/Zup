@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The lifecycle an end user performs, end to end against a real installer.
 //!
 //! Everything here runs a composed `Setup.exe` - the file a person double-clicks -
@@ -15,7 +17,8 @@
 use std::{collections::BTreeMap, fs};
 
 use zup_core::{AppId, SelectedScope};
-use zup_windows::{AppsFeaturesValue, InstallLedgerStore, InstallationLock};
+use zup_transaction::InstallationLock;
+use zup_windows::{AppsFeaturesValue, InstallLedgerStore};
 
 #[path = "support/project.rs"]
 mod project;

@@ -1,52 +1,3 @@
-//! The portable boundary.
-//!
-//! A portable crate is platform-neutral by construction. It may not depend on a
-//! Windows crate, name a Windows API, branch on `cfg(windows)` in production
-//! code, reintroduce an identifier that presents a Windows concept as part of
-//! the portable model, or spell a Windows concept inside a string literal.
-//!
-//! One structural rule has a narrow, declared relaxation: a package that owns a
-//! child process may branch to choose between the two process-tree mechanisms
-//! `process-wrap` provides, because it has no portable spelling for "the tree is
-//! mine". See [`matrix::PORTABLE_PLATFORM_DELEGATING`]. Every other rule still
-//! applies to such a package.
-//! Windows is allowed in the Windows adapter, in the product frontends and
-//! binaries, in tests and documentation, and inside target-lexicon identifiers
-//! such as `TargetOperatingSystem::Windows`.
-//!
-//! The concept vocabulary is closed: registry, COM class ids, the service
-//! control manager, elevation, named pipes, installer packages and the
-//! runtimes they install, PE resources, known folders, and the Windows payload
-//! and receipt registration. Blanking string content hid a leak through a
-//! literal, so literals are scanned separately from code, with escapes
-//! resolved, and matched case-insensitively.
-//!
-//! Comments are still blanked: prose may explain what a portable crate refuses
-//! to know, and a doc comment is not production behaviour. This crate is the
-//! one exemption, because its source is the vocabulary. The portable
-//! vocabulary that happens to share a word with a Windows concept stays legal
-//! by construction rather than by allowlist: `InstallLocation::Desktop` is an
-//! install location, `Service` is a portable model type, `Payload` and
-//! `Receipt` are portable transaction and bundle terms, and `Privilege` names
-//! an actor rather than an elevation mechanism.
-//!
-//! # Two vocabularies, one boundary
-//!
-//! [`matrix::Vocabulary`] decides whether the concept tables apply at all. A
-//! `Domain` package is held to all of them. A `FileFormat` package is held to
-//! every *structural* rule - no Windows dependency, no `cfg(windows)`, no
-//! `std::os::windows`, no Win32 namespace - and to neither concept table,
-//! because a crate whose domain is a Windows file format must name that format
-//! to be about it at all. `RCDATA` in `zup-pe` is the format's resource type,
-//! not a Windows concept leaking into a portable model.
-//!
-//! The relaxation is declared once, in the matrix every other command reads, so
-//! a package does not gain it by a line added next to the code it silences.
-//!
-//! Adding a rule means adding a [`Rule`] variant, its summary, a token table,
-//! and one [`check_source`] arm. Findings are ordered by matrix order, then
-//! package, then path, then line, so two runs over one workspace are equal.
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
@@ -57,42 +8,51 @@ use toml::Value;
 use crate::matrix;
 use crate::workspace::{self, Member};
 
-/// Crate names a portable package may not depend on. A name matches when it is
-/// the prefix itself or the prefix followed by `-`.
-pub const FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &["windows", "winapi", "zup-windows"];
+pub const FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &[
+    "windows",
+    "winapi",
+    "windows-bindgen",
+    "nix",
+    "rustix",
+    "zbus",
+    "libc",
+];
 
-/// Manifest tables that can declare a dependency.
 const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 
-/// The package that owns the rule tables in this module. Its source *is* the
-/// banned vocabulary, so it is the one portable package exempt from the source
-/// scan; its manifest is still checked.
 pub const ENFORCER: &str = "zup-xtask";
 
-/// Platform predicates a portable package may not branch on. `cfg(not(windows))`
-/// is a platform branch too: it is where a portable crate stops being portable.
-pub const WINDOWS_CFG_TOKENS: &[&str] = &[
+pub const PLATFORM_CFG_TOKENS: &[&str] = &[
     "cfg(windows)",
     "cfg!(windows)",
     "cfg(not(windows))",
-    "cfg(target_os = \"windows\")",
-    "cfg(target_family = \"windows\")",
+    "cfg(unix)",
+    "cfg!(unix)",
+    "cfg(not(unix))",
 ];
 
-/// Platform-specific `std` modules a portable package may not import.
-pub const OS_WINDOWS_TOKENS: &[&str] = &["std::os::windows"];
+pub const PLATFORM_CFG_VALUES: &[&str] = &[
+    "windows", "linux", "unix", "macos", "ios", "android", "wasi",
+];
 
-/// Windows API namespaces a portable package may not name.
-pub const WINDOWS_API_TOKENS: &[&str] =
-    &["windows::Win32", "Win32::", "winapi::", "windows_bindgen"];
+const UNIX_CFG_TOKENS: &[&str] = &["cfg(unix)", "cfg!(unix)", "cfg(not(unix))"];
 
-/// Identifiers that encode a Windows concept and belong to the adapter.
-///
-/// Matching is case-sensitive, so a token never fires on a portable
-/// identifier that merely uses a different casing of the same letters.
+const UNIX_CFG_VALUES: &[&str] = &["linux", "unix"];
+
+pub const OS_PLATFORM_TOKENS: &[&str] = &["std::os::windows", "std::os::linux", "std::os::unix"];
+
+const WINDOWS_OS_TOKENS: &[&str] = &["std::os::windows", "std::os::linux"];
+
+pub const NATIVE_API_TOKENS: &[&str] = &[
+    "windows::Win32",
+    "Win32::",
+    "winapi::",
+    "windows_bindgen",
+    "rustix::",
+    "zbus::",
+];
+
 pub const BANNED_IDENTIFIERS: &[&str] = &[
-    // Registry, which also covers `RegistryHive`, `RegistryKey`, and
-    // `RegistryValue` as prefixes.
     "Registry",
     "RegOpenKey",
     "RegQueryValue",
@@ -103,10 +63,8 @@ pub const BANNED_IDENTIFIERS: &[&str] = &[
     "HKEY_CURRENT_USER",
     "HKEY_CLASSES_ROOT",
     "HKEY_USERS",
-    // COM class identifiers.
     "ProgId",
     "CLSID",
-    // The service control manager.
     "ServiceControlManager",
     "OpenSCManager",
     "StartService",
@@ -114,17 +72,14 @@ pub const BANNED_IDENTIFIERS: &[&str] = &[
     "ChangeServiceConfig",
     "DeleteService",
     "SERVICE_WIN32",
-    // Elevation.
     "IsUserAnAdmin",
     "ShellExecute",
     "RequestedExecutionLevel",
-    // Named pipes.
     "CreateNamedPipe",
     "ConnectNamedPipe",
     "WaitNamedPipe",
     "PipeServer",
     "PipeClient",
-    // Installer packages and the runtimes they install.
     "MsiProduct",
     "MsiInstaller",
     "WindowsInstaller",
@@ -132,17 +87,14 @@ pub const BANNED_IDENTIFIERS: &[&str] = &[
     "VisualCpp",
     "WebView2",
     "VCRedist",
-    // PE resources.
     "RCDATA",
     "IconGroup",
     "VersionInfoResource",
-    // Known folders.
     "KnownFolder",
     "FOLDERID",
     "SHGetKnownFolderPath",
     "SHGetFolderPath",
     "CSIDL",
-    // The Windows payload and receipt registration.
     "UninstallEntry",
     "UninstallRegistry",
     "AppsFeaturesState",
@@ -153,24 +105,30 @@ pub const BANNED_IDENTIFIERS: &[&str] = &[
     "PayloadOverlayDirectory",
     "WindowsReceipt",
     "BundleReceipt",
-    // Rejected before the concept list existed.
     "PrerequisiteDetector",
     "PrerequisiteInstallerKind",
     "Shortcut",
     "ManagedResource",
+    "Systemd",
+    "SystemdUnit",
+    "Dbus",
+    "DBus",
+    "DesktopEntry",
+    "DesktopFile",
+    "MimeAssociation",
+    "Hicolor",
+    "XdgStateDir",
+    "XdgConfigDir",
+    "XdgDataDir",
+    "Polkit",
+    "Pkexec",
+    "AppImage",
+    "Landlock",
+    "Seccomp",
+    "Pidfd",
 ];
 
-/// Windows concept tokens a portable package may not spell in a string
-/// literal, matched case-insensitively because the same concept is written
-/// `HKEY_LOCAL_MACHINE`, `hkey_local_machine`, and `HkeyLocalMachine`.
-///
-/// Every token is compared against literal content with escapes already
-/// resolved, so a token may contain a single backslash and still match the
-/// escaped `\\` spelling in the source. Tokens are chosen to be distinctive: a
-/// token that also occurs inside an ordinary word is a defect in this table,
-/// not a portable concept.
 pub const BANNED_LITERALS: &[&str] = &[
-    // Registry.
     "registry",
     "hkey_local_machine",
     "hkey_current_user",
@@ -186,17 +144,14 @@ pub const BANNED_LITERALS: &[&str] = &[
     "software\\microsoft",
     "shell\\open\\command",
     "defaulticon",
-    // COM class identifiers.
     "progid",
     "clsid",
-    // The service control manager.
     "servicecontrolmanager",
     "openscmanager",
     "service_win32",
     "sc.exe",
     "sc create",
     "sc delete",
-    // Elevation.
     "runas",
     "shellexecute",
     "isuseranadmin",
@@ -204,11 +159,9 @@ pub const BANNED_LITERALS: &[&str] = &[
     "requireadministrator",
     "highestavailable",
     "asinvoker",
-    // Named pipes.
     "\\\\.\\pipe\\",
     "named_pipe",
     "pipe_access",
-    // Installer packages and the runtimes they install.
     "msi",
     "msiexec",
     "windowsinstaller",
@@ -222,14 +175,12 @@ pub const BANNED_LITERALS: &[&str] = &[
     "visualcpp",
     "msvcp",
     "vcruntime",
-    // PE resources.
     "rcdata",
     "pe_resource",
     "pe32",
     "vs_version_info",
     "icon_group",
     "rt_icon",
-    // Known folders.
     "folderid",
     "knownfolder",
     "shgetknownfolder",
@@ -238,7 +189,6 @@ pub const BANNED_LITERALS: &[&str] = &[
     "programdata",
     "programfiles",
     "localappdata",
-    // The Windows payload and receipt registration.
     "uninstallstring",
     "uninstall_string",
     "uninstallregistry",
@@ -248,87 +198,75 @@ pub const BANNED_LITERALS: &[&str] = &[
     "windowsreceipt",
     "bundlereceipt",
     ".zup-payload-overlays",
+    "systemd",
+    "dbus",
+    "org.freedesktop",
+    "hicolor",
+    "xdg-state",
+    "xdg_config",
+    "xdg-data",
+    "polkit",
+    "pkexec",
+    "appimage",
+    "landlock",
+    "seccomp",
+    "pidfd_open",
+    "/etc/systemd",
+    "/usr/share/applications",
+    "/var/lib",
 ];
 
-/// Source files that describe a machine rather than model one.
-///
-/// The portable boundary is about a package's model: it must not present a
-/// Windows concept as part of what it can represent. A preview scenario is not
-/// that. It is a description of a machine somebody might install onto, and
-/// naming the prerequisite such a machine would be asked for is the entire point
-/// of the scenario - a portable preview environment still previews the thing an
-/// installer actually installs.
-///
-/// The exemption is declared per package and per file, and it covers the literal
-/// table only: every structural rule still applies to these files, so a scenario
-/// that branched on the build host or reached for a Win32 namespace would be
-/// refused exactly as it would be anywhere else.
 pub const SCENARIO_FILES: &[(&str, &str)] = &[
-    // The named states `zup preview` offers. Each one describes a Windows
-    // machine, so each one may name what that machine would be missing.
     ("zup-preview", "crates/zup-preview/src/catalog.rs"),
-    // A scenario's footprint, which records where a demo installation lands.
     ("zup-preview", "crates/zup-preview/src/machine.rs"),
 ];
 
-/// Whether a source file describes a machine rather than modelling one.
 pub fn is_scenario(package: &str, location: &str) -> bool {
     SCENARIO_FILES
         .iter()
         .any(|(owner, path)| *owner == package && *path == location)
 }
-/// One boundary rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
-    /// The matrices and the workspace members must correspond exactly.
     MatrixMembership,
-    /// A portable crate depends on a Windows-only crate.
     ForbiddenDependency,
-    /// A portable manifest selects a Windows-only platform.
-    WindowsTargetScope,
-    /// Portable production code imports a platform-specific `std` module.
-    OsWindowsImport,
-    /// Portable production code names a Windows API namespace.
-    WindowsApiNamespace,
-    /// Portable production code branches on the build host.
-    WindowsCfgBranch,
-    /// Portable production code reintroduces a Windows-specific identifier.
+    PlatformTargetScope,
+    OsPlatformImport,
+    NativeApiNamespace,
+    PlatformCfgBranch,
     BannedIdentifier,
-    /// Portable production code spells a Windows concept in a string literal.
     BannedLiteral,
 }
 
 impl Rule {
-    /// Stable identifier used in reports.
     pub const fn id(self) -> &'static str {
         match self {
             Self::MatrixMembership => "matrix-membership",
             Self::ForbiddenDependency => "forbidden-dependency",
-            Self::WindowsTargetScope => "windows-target-scope",
-            Self::OsWindowsImport => "os-windows-import",
-            Self::WindowsApiNamespace => "windows-api-namespace",
-            Self::WindowsCfgBranch => "windows-cfg-branch",
+            Self::PlatformTargetScope => "platform-target-scope",
+            Self::OsPlatformImport => "os-platform-import",
+            Self::NativeApiNamespace => "native-api-namespace",
+            Self::PlatformCfgBranch => "platform-cfg-branch",
             Self::BannedIdentifier => "banned-identifier",
             Self::BannedLiteral => "banned-literal",
         }
     }
 
-    /// What the rule protects.
     pub const fn summary(self) -> &'static str {
         match self {
             Self::MatrixMembership => "the package matrices and the workspace must agree",
-            Self::ForbiddenDependency => "portable crate depends on a Windows-only crate",
-            Self::WindowsTargetScope => "portable manifest selects a Windows-only platform",
-            Self::OsWindowsImport => {
+            Self::ForbiddenDependency => "portable crate depends on a native backend",
+            Self::PlatformTargetScope => "portable manifest selects a single-platform table",
+            Self::OsPlatformImport => {
                 "portable production code imports a platform-specific std module"
             }
-            Self::WindowsApiNamespace => "portable production code names a Windows API namespace",
-            Self::WindowsCfgBranch => "portable production code branches on the build host",
+            Self::NativeApiNamespace => "portable production code names a native API namespace",
+            Self::PlatformCfgBranch => "portable production code branches on a platform",
             Self::BannedIdentifier => {
-                "portable production code reintroduces a Windows-specific identifier"
+                "portable production code reintroduces a native-backend identifier"
             }
             Self::BannedLiteral => {
-                "portable production code spells a Windows concept in a string literal"
+                "portable production code spells a native concept in a string literal"
             }
         }
     }
@@ -340,8 +278,6 @@ impl fmt::Display for Rule {
     }
 }
 
-/// One finding. `path` is workspace-relative with `/` separators, `line` is
-/// 1-based and absent for manifest and matrix findings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub rule: Rule,
@@ -368,7 +304,6 @@ impl fmt::Display for Violation {
     }
 }
 
-/// Check every portable package, and that the matrices match the workspace.
 pub fn check_workspace(root: &Path) -> Result<Vec<Violation>, String> {
     let members = workspace::members(root)?;
     let mut violations = coverage_violations(&members);
@@ -376,8 +311,6 @@ pub fn check_workspace(root: &Path) -> Result<Vec<Violation>, String> {
     Ok(violations)
 }
 
-/// Boundary rule findings for every portable member. Matrix membership is
-/// reported separately by [`coverage_violations`].
 pub fn check(root: &Path) -> Result<Vec<Violation>, String> {
     check_members(root, &workspace::members(root)?)
 }
@@ -393,11 +326,7 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
         if member.name == ENFORCER {
             continue;
         }
-        // A file-format crate is held to every structural rule and none of the
-        // vocabulary ones. Decided by the matrix rather than by an allowlist here,
-        // so the classification is the one the rest of the tooling already reads.
         let vocabulary = matrix::vocabulary_of(package);
-        let lifecycle = matrix::delegates_platform_lifecycle(package);
         for source in production_sources(&directory)? {
             violations.extend(check_source(
                 member,
@@ -408,14 +337,12 @@ fn check_members(root: &Path, members: &[Member]) -> Result<Vec<Violation>, Stri
                 ),
                 &source,
                 vocabulary,
-                lifecycle,
             )?);
         }
     }
     Ok(violations)
 }
 
-/// Workspace members without a matrix, and matrix packages without a member.
 pub fn coverage_violations(members: &[Member]) -> Vec<Violation> {
     let classified = matrix::all();
     let mut violations: Vec<Violation> = matrix::duplicated_packages()
@@ -459,7 +386,6 @@ fn membership(path: &str, package: &str, detail: String) -> Violation {
     }
 }
 
-/// Production Rust sources of one package: `src/**/*.rs` plus `build.rs`.
 fn production_sources(package: &Path) -> Result<Vec<PathBuf>, String> {
     let mut sources = BTreeSet::new();
     let build = package.join("build.rs");
@@ -508,13 +434,16 @@ fn check_manifest(member: &Member, package: &Path) -> Result<Vec<Violation>, Str
     };
     for (target, tables) in targets {
         let label = format!("target.'{target}'");
-        if is_windows_target(target) {
+        if let Some(platform) = single_platform_target(target) {
             violations.push(Violation {
-                rule: Rule::WindowsTargetScope,
+                rule: Rule::PlatformTargetScope,
                 package: member.name.clone(),
                 path: location.clone(),
                 line: None,
-                detail: format!("[{label}] is a Windows-only platform table"),
+                detail: format!(
+                    "[{label}] is a {}-only platform table",
+                    platform.crate_name()
+                ),
             });
         }
         let Some(tables) = tables.as_table() else {
@@ -564,27 +493,26 @@ fn check_source(
     location: &str,
     path: &Path,
     vocabulary: matrix::Vocabulary,
-    delegates_lifecycle: bool,
 ) -> Result<Vec<Violation>, String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    // The vocabulary tables are what a file-format crate is exempt from; every
-    // other table applies to it unchanged.
+    let delegates_lifecycle = matrix::delegates_platform_lifecycle(&member.name);
+    let writes_mode_bits = matrix::writes_posix_permissions(&member.name);
     let mut structural = vec![
         (
-            Rule::WindowsCfgBranch,
-            // A package that delegates process-tree lifecycle to `process-wrap`
-            // names that crate's two wrappers rather than branching on anything
-            // Windows-shaped. Every other rule still applies to it, and the
-            // decision comes from the matrix rather than from an allowlist here.
-            if delegates_lifecycle {
-                &[][..]
+            Rule::OsPlatformImport,
+            if writes_mode_bits {
+                WINDOWS_OS_TOKENS
             } else {
-                WINDOWS_CFG_TOKENS
+                OS_PLATFORM_TOKENS
             },
         ),
-        (Rule::OsWindowsImport, OS_WINDOWS_TOKENS),
-        (Rule::WindowsApiNamespace, WINDOWS_API_TOKENS),
+        (Rule::NativeApiNamespace, NATIVE_API_TOKENS),
     ];
+    let (allowed_cfg, allowed_cfg_values) = match (delegates_lifecycle, writes_mode_bits) {
+        (true, _) => (PLATFORM_CFG_TOKENS, PLATFORM_CFG_VALUES),
+        (false, true) => (UNIX_CFG_TOKENS, UNIX_CFG_VALUES),
+        (false, false) => (&[][..], &[][..]),
+    };
     if vocabulary == matrix::Vocabulary::Domain {
         structural.push((Rule::BannedIdentifier, BANNED_IDENTIFIERS));
     }
@@ -598,6 +526,16 @@ fn check_source(
             continue;
         }
         let number = index + 1;
+        let branches = platform_cfg_matches(&line, allowed_cfg, allowed_cfg_values);
+        if !branches.is_empty() {
+            violations.push(Violation {
+                rule: Rule::PlatformCfgBranch,
+                package: member.name.clone(),
+                path: location.to_owned(),
+                line: Some(number),
+                detail: branches.join(", "),
+            });
+        }
         for (rule, tokens) in &structural {
             let matched = tokens
                 .iter()
@@ -619,10 +557,6 @@ fn check_source(
             continue;
         }
         if is_scenario(&member.name, location) {
-            // A scenario describes a machine rather than modelling one, so it is
-            // allowed to name what such a machine has or is missing. The
-            // structural rules above have already run on this line and are
-            // unaffected: a scenario still may not branch on the build host.
             continue;
         }
         let literals = line.literals.to_ascii_lowercase();
@@ -645,35 +579,109 @@ fn check_source(
     Ok(violations)
 }
 
-fn is_forbidden_dependency(name: &str) -> bool {
-    FORBIDDEN_DEPENDENCY_PREFIXES.iter().any(|prefix| {
-        name == *prefix
-            || name
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('-'))
-    })
+fn platform_cfg_matches(
+    line: &Line,
+    allowed_tokens: &[&str],
+    allowed_values: &[&str],
+) -> Vec<String> {
+    let mut out: Vec<String> = PLATFORM_CFG_TOKENS
+        .iter()
+        .filter(|token| line.code.contains(**token) && !allowed_tokens.contains(*token))
+        .map(|token| (*token).to_owned())
+        .collect();
+    let code = line.code.as_str();
+    let raw: Vec<char> = line.raw.chars().collect();
+    let mut search = 0;
+    while let Some(found) = code[search..].find("cfg") {
+        let start = search + found;
+        search = start + 3;
+        if start > 0
+            && code[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+        let Some((argument, bang)) = cfg_argument(&raw[start + 3..]) else {
+            continue;
+        };
+        for value in PLATFORM_CFG_VALUES {
+            if allowed_values.contains(value) {
+                continue;
+            }
+            let named = argument == format!("target_os=\"{value}\"")
+                || argument == format!("target_family=\"{value}\"");
+            let negated = argument.strip_prefix("not(").is_some_and(|inner| {
+                inner == format!("target_os=\"{value}\"")
+                    || inner == format!("target_family=\"{value}\"")
+            });
+            if !named && !negated {
+                continue;
+            }
+            let spelled = format!("cfg{}({argument})", if bang { "!" } else { "" });
+            if !out.contains(&spelled) {
+                out.push(spelled);
+            }
+        }
+    }
+    out
 }
 
-fn is_windows_target(target: &str) -> bool {
+fn cfg_argument(characters: &[char]) -> Option<(String, bool)> {
+    let text: String = characters.iter().collect();
+    let (after, bang) = text
+        .strip_prefix('!')
+        .map(|after| (after, true))
+        .or_else(|| text.strip_prefix('(').map(|after| (after, false)))?;
+    let mut depth = 0usize;
+    for (index, character) in after.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                return Some((after[..index].replace([' ', '\t'], ""), bang));
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_forbidden_dependency(name: &str) -> bool {
+    matrix::backends()
+        .iter()
+        .chain(FORBIDDEN_DEPENDENCY_PREFIXES)
+        .any(|prefix| name_matches_prefix(name, prefix))
+}
+
+fn name_matches_prefix(name: &str, prefix: &str) -> bool {
+    name == prefix
+        || name
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
+fn single_platform_target(target: &str) -> Option<matrix::Platform> {
     let compact = target
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>();
-    compact == "cfg(windows)"
-        || compact == "cfg(target_os=\"windows\")"
-        || compact == "cfg(target_family=\"windows\")"
+    match compact.as_str() {
+        "cfg(windows)" | "cfg(target_os=\"windows\")" | "cfg(target_family=\"windows\")" => {
+            Some(matrix::Platform::Windows)
+        }
+        "cfg(target_os=\"linux\")" | "cfg(target_family=\"unix\")" => Some(matrix::Platform::Linux),
+        _ => None,
+    }
 }
 
-/// One scrubbed source line. `code` holds everything but comment and string
-/// content; `literals` holds only string content, with escapes resolved, so a
-/// concept spelled in a literal is matched in its decoded form.
 struct Line {
     code: String,
     literals: String,
+    raw: String,
 }
 
-/// Splits a line into code and literal content, blanking comments, so prose
-/// cannot satisfy or trip a rule while data still can.
 #[derive(Default)]
 struct Scrubber {
     block: bool,
@@ -681,6 +689,7 @@ struct Scrubber {
 
 impl Scrubber {
     fn scrub(&mut self, line: &str) -> Line {
+        let raw = line.to_owned();
         let characters = line.chars().collect::<Vec<_>>();
         let mut code = vec![' '; characters.len()];
         let mut literals: Vec<char> = Vec::new();
@@ -744,13 +753,11 @@ impl Scrubber {
         Line {
             code: code.into_iter().collect(),
             literals: literals.into_iter().collect(),
+            raw,
         }
     }
 }
 
-/// Whether the quote at `index` opens a raw literal, as in `r"..."`. A
-/// byte-string prefix is not raw, and a hash-delimited raw string is read to
-/// its first quote.
 fn is_raw_prefix(code: &[char], index: usize) -> bool {
     let mut cursor = index;
     while cursor > 0 && code[cursor - 1] == 'r' {
@@ -765,9 +772,6 @@ fn is_raw_prefix(code: &[char], index: usize) -> bool {
     }
 }
 
-/// The character an escape sequence denotes, or `None` for an escape this
-/// gate does not decode. An undecoded escape keeps its backslash, so a
-/// concept token is never matched against a mangled literal.
 fn resolve_escape(escape: char) -> Option<char> {
     match escape {
         'n' => Some('\n'),
@@ -779,8 +783,6 @@ fn resolve_escape(escape: char) -> Option<char> {
     }
 }
 
-/// Tracks `#[cfg(test)]` blocks, whose contents are tests rather than
-/// production code.
 #[derive(Default)]
 struct TestModules {
     depth: usize,
@@ -815,7 +817,7 @@ impl TestModules {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matrix::{Host, MATRICES, Vocabulary};
+    use matrix::{Host, Kind, MATRICES, Vocabulary};
 
     fn rules(violations: &[Violation]) -> Vec<Rule> {
         violations.iter().map(|violation| violation.rule).collect()
@@ -828,44 +830,38 @@ mod tests {
         }
     }
 
-    /// Write `source` to a scratch file and scan it under one vocabulary.
-    fn scan(vocabulary: Vocabulary, source: &str) -> Vec<Rule> {
-        scan_as(vocabulary, false, source)
-    }
-
-    /// The same scan for a package that delegates process-tree lifecycle.
-    fn scan_delegating(source: &str) -> Vec<Rule> {
-        scan_as(Vocabulary::Domain, true, source)
-    }
-
-    fn scan_as(vocabulary: Vocabulary, delegates: bool, source: &str) -> Vec<Rule> {
+    fn scan_as(package: &str, vocabulary: Vocabulary, source: &str) -> Vec<Rule> {
         let directory = tempfile::TempDir::new().expect("temp dir");
         let path = directory.path().join("source.rs");
         fs::write(&path, source).expect("write");
-        rules(
-            &check_source(&member("probe"), "probe.rs", &path, vocabulary, delegates)
-                .expect("scan"),
-        )
+        rules(&check_source(&member(package), "probe.rs", &path, vocabulary).expect("scan"))
     }
 
-    /// The relaxation is to the concept tables and to nothing else. Every
-    /// structural rule still fires for a file-format crate, which is what makes
-    /// the tier a boundary rather than an exemption. A tier that quietly dropped a
-    /// structural rule would be indistinguishable from no tier at all. The `cfg`
-    /// branch is the one that matters: a file-format crate is the most plausible
-    /// place to smuggle one in.
+    fn scan(vocabulary: Vocabulary, source: &str) -> Vec<Rule> {
+        scan_as("zup-core", vocabulary, source)
+    }
+
     #[test]
     fn a_file_format_crate_is_still_held_to_every_structural_rule() {
         for (source, expected) in [
-            ("#[cfg(windows)]\npub fn f() {}\n", Rule::WindowsCfgBranch),
+            ("#[cfg(windows)]\npub fn f() {}\n", Rule::PlatformCfgBranch),
+            (
+                "#[cfg(target_os = \"linux\")]\npub fn f() {}\n",
+                Rule::PlatformCfgBranch,
+            ),
             (
                 "use std::os::windows::ffi::OsStrExt;\n",
-                Rule::OsWindowsImport,
+                Rule::OsPlatformImport,
+            ),
+            (
+                "use std::os::unix::fs::PermissionsExt;\n",
+                Rule::OsPlatformImport,
             ),
             (
                 "use windows::Win32::System::SystemInformation;\n",
-                Rule::WindowsApiNamespace,
+                Rule::NativeApiNamespace,
             ),
+            ("use rustix::fs::stat;\n", Rule::NativeApiNamespace),
         ] {
             assert_eq!(
                 scan(Vocabulary::FileFormat, source),
@@ -875,9 +871,49 @@ mod tests {
         }
     }
 
-    /// A file-format crate's own vocabulary is the format's. `RCDATA` is what a
-    /// PE resource type is called in the PE specification, so a PE parser that
-    /// cannot write it is not a PE parser.
+    #[test]
+    fn a_portable_crate_may_not_acquire_either_backends_vocabulary() {
+        for (source, expected) in [
+            ("#[cfg(windows)]\npub fn f() {}\n", Rule::PlatformCfgBranch),
+            (
+                "#[cfg(target_os = \"linux\")]\npub fn f() {}\n",
+                Rule::PlatformCfgBranch,
+            ),
+            ("#[cfg(unix)]\npub fn f() {}\n", Rule::PlatformCfgBranch),
+            (
+                "use std::os::windows::ffi::OsStrExt;\n",
+                Rule::OsPlatformImport,
+            ),
+            (
+                "use std::os::unix::fs::PermissionsExt;\n",
+                Rule::OsPlatformImport,
+            ),
+            (
+                "use windows::Win32::System::SystemInformation;\n",
+                Rule::NativeApiNamespace,
+            ),
+            ("use rustix::fs::stat;\n", Rule::NativeApiNamespace),
+            (
+                "pub const UNIT: &str = \"/etc/systemd/system/acme.service\";\n",
+                Rule::BannedLiteral,
+            ),
+            (
+                "pub const BUS: &str = \"org.freedesktop.Notify\";\n",
+                Rule::BannedLiteral,
+            ),
+            (
+                "fn f() { let _ = SystemdUnit::new(); }\n",
+                Rule::BannedIdentifier,
+            ),
+        ] {
+            assert_eq!(
+                scan(Vocabulary::Domain, source),
+                vec![expected],
+                "{source:?} must be refused in a portable crate"
+            );
+        }
+    }
+
     #[test]
     fn a_file_format_crate_may_name_the_format() {
         assert!(
@@ -898,10 +934,6 @@ mod tests {
         );
     }
 
-    /// The classification comes from the matrix, so a package cannot acquire the
-    /// file-format relaxation by anything written next to the code it silences.
-    /// An unclassified package gets the strict rules, not none - the default is
-    /// the whole point, so it is what this pins.
     #[test]
     fn the_vocabulary_is_the_matrixs_and_an_unclaimed_package_gets_the_strict_one() {
         assert_eq!(matrix::vocabulary_of("zup-pe"), Vocabulary::FileFormat);
@@ -917,44 +949,132 @@ mod tests {
         );
     }
 
-    /// A package that delegates process-tree lifecycle to `process-wrap` may name
-    /// that crate's two wrappers, because a job object and a process group are two
-    /// spellings of one guarantee rather than two behaviours.
-    ///
-    /// The point of the test is what else still fires. A relaxation that dropped
-    /// the import and namespace rules too would be indistinguishable from not
-    /// enforcing the boundary here at all, so those are pinned as well.
     #[test]
     fn a_lifecycle_delegating_package_may_name_the_two_wrappers() {
         assert_eq!(
-            scan_delegating("#[cfg(windows)]\nfn f() {}\n#[cfg(unix)]\nfn g() {}\n"),
+            scan_as(
+                "zup-preset-host",
+                Vocabulary::Domain,
+                "#[cfg(windows)]\nfn f() {}\n#[cfg(unix)]\nfn g() {}\n"
+            ),
             Vec::new(),
             "the branch that selects process-wrap's per-platform tree mechanism is the one thing \
              it is exempt from"
         );
         assert_eq!(
-            scan_delegating("use std::os::windows::ffi::OsStrExt;\n"),
-            vec![Rule::OsWindowsImport],
+            scan_as(
+                "zup-preset-host",
+                Vocabulary::Domain,
+                "use std::os::windows::ffi::OsStrExt;\n"
+            ),
+            vec![Rule::OsPlatformImport],
             "and a platform std import is still a violation: the exemption is for the wrapper \
              names, not for reaching around them"
         );
         assert_eq!(
-            scan_delegating("use windows::Win32::System::SystemInformation;\n"),
-            vec![Rule::WindowsApiNamespace],
+            scan_as(
+                "zup-preset-host",
+                Vocabulary::Domain,
+                "use windows::Win32::System::SystemInformation;\n"
+            ),
+            vec![Rule::NativeApiNamespace],
             "as is naming a Win32 namespace directly"
         );
         assert_eq!(
-            scan_delegating("pub const KEY: &str = \"HKEY_LOCAL_MACHINE\";\n"),
+            scan_as(
+                "zup-preset-host",
+                Vocabulary::Domain,
+                "pub const KEY: &str = \"HKEY_LOCAL_MACHINE\";\n"
+            ),
             vec![Rule::BannedLiteral],
             "and the concept tables apply unchanged"
         );
     }
 
-    /// The delegation is declared in the matrix, so it cannot be acquired by
-    /// anything written next to the code it silences, and an unclassified package
-    /// gets the strict answer.
     #[test]
-    fn the_lifecycle_delegation_is_the_matrixs_and_is_claimed_by_someone() {
+    fn the_permission_relaxation_buys_one_import_and_nothing_else() {
+        assert_eq!(
+            scan_as(
+                "zup-preview",
+                Vocabulary::Domain,
+                "#[cfg(unix)]\nfn f() {}\nuse std::os::unix::fs::PermissionsExt;\n"
+            ),
+            Vec::new(),
+            "a staged preset has to be runnable, and std has no portable way to say so"
+        );
+        assert_eq!(
+            scan_as(
+                "zup-preview",
+                Vocabulary::Domain,
+                "#[cfg(windows)]\nfn f() {}\n"
+            ),
+            vec![Rule::PlatformCfgBranch],
+            "but choosing between two backends' permission models is a backend decision"
+        );
+        assert_eq!(
+            scan_as(
+                "zup-preview",
+                Vocabulary::Domain,
+                "use std::os::windows::ffi::OsStrExt;\n"
+            ),
+            vec![Rule::OsPlatformImport],
+            "as is the Windows half of the platform std surface"
+        );
+        assert_eq!(
+            scan_as("zup-preview", Vocabulary::Domain, "use rustix::fs::stat;\n"),
+            vec![Rule::NativeApiNamespace],
+            "and it grants no native API surface either"
+        );
+        assert_eq!(
+            scan_as("zup-core", Vocabulary::Domain, "#[cfg(unix)]\nfn f() {}\n"),
+            vec![Rule::PlatformCfgBranch],
+            "the relaxation is declared per package, so an ordinary portable crate still gets \
+             the strict answer"
+        );
+    }
+
+    #[test]
+    fn a_backend_package_is_a_forbidden_dependency_for_a_portable_crate() {
+        for backend in matrix::backends() {
+            assert!(
+                is_forbidden_dependency(backend),
+                "{backend} is a backend, so a portable crate may not depend on it"
+            );
+            assert!(
+                is_forbidden_dependency(&format!("{backend}-sys")),
+                "and the prefix rule covers a family, not one spelling"
+            );
+        }
+        assert!(is_forbidden_dependency("windows"));
+        assert!(is_forbidden_dependency("windows-link"));
+        assert!(!is_forbidden_dependency("zup-core"));
+        assert!(!is_forbidden_dependency("windowsy"));
+    }
+
+    #[test]
+    fn a_single_platform_target_table_is_recognised_for_every_platform() {
+        assert_eq!(
+            single_platform_target("cfg(windows)"),
+            Some(matrix::Platform::Windows)
+        );
+        assert_eq!(
+            single_platform_target("cfg( target_os = \"windows\" )"),
+            Some(matrix::Platform::Windows)
+        );
+        assert_eq!(
+            single_platform_target("cfg(target_os = \"linux\")"),
+            Some(matrix::Platform::Linux)
+        );
+        assert_eq!(
+            single_platform_target("cfg(target_family=\"unix\")"),
+            Some(matrix::Platform::Linux)
+        );
+        assert_eq!(single_platform_target("cfg(unix)"), None);
+        assert_eq!(single_platform_target("x86_64-pc-windows-msvc"), None);
+    }
+
+    #[test]
+    fn the_relaxations_are_the_matrixs_and_are_claimed_by_someone() {
         assert!(matrix::delegates_platform_lifecycle("zup-preset-host"));
         assert!(
             matrix::delegates_platform_lifecycle("zup-preset-dev"),
@@ -968,21 +1088,48 @@ mod tests {
             !matrix::delegates_platform_lifecycle("zup-core"),
             "and a package with no children to own does not get it"
         );
-        for package in matrix::PORTABLE_PLATFORM_DELEGATING {
+        for package in matrix::PORTABLE_PLATFORM_DELEGATING
+            .iter()
+            .chain(matrix::PORTABLE_POSIX_PERMISSIONS)
+        {
             assert!(
                 matrix::is_portable(package),
-                "{package} owns a child process, so it is portable and delegates: the two \
-                 classifications are not alternatives"
+                "{package} holds a relaxation, so it is portable: the two classifications are \
+                 not alternatives"
             );
         }
     }
 
-    /// A file-format crate is portable by definition. One that needed a Windows
-    /// build host would be a host adapter wearing a file format's name, and the
-    /// gate would be checking the wrong thing.
-    /// A file-format crate is portable by definition, so it must be built on
-    /// every host rather than verified only where a Windows toolchain exists.
-    /// Otherwise a cross-platform matrix member is quietly never compiled.
+    #[test]
+    fn each_backend_is_verified_on_its_own_host() {
+        for platform in matrix::Platform::ALL {
+            let crate_name = platform.crate_name();
+            let entry = MATRICES
+                .iter()
+                .find(|entry| entry.kind == Kind::Backend(*platform))
+                .unwrap_or_else(|| panic!("`{crate_name}` is claimed by a backend matrix"));
+            assert_eq!(entry.packages, &[crate_name]);
+            assert_eq!(entry.host, platform.host(), "{crate_name}");
+            assert!(
+                !matrix::is_portable(crate_name),
+                "a backend is never verified as portable"
+            );
+            assert_eq!(
+                matrix::sibling_backends(*platform).len(),
+                matrix::Platform::ALL.len() - 1,
+                "{crate_name} has every other backend as a sibling and not itself"
+            );
+        }
+        assert!(
+            !matrix::is_portable("zup-windows"),
+            "and that holds for the backend that existed first too"
+        );
+        assert!(
+            matrix::is_composition("zup-installer"),
+            "composition tooling is verified on a native host but is not portable"
+        );
+    }
+
     #[test]
     fn a_file_format_crate_is_verified_on_every_host() {
         let file_formats: Vec<_> = MATRICES
@@ -1000,12 +1147,13 @@ mod tests {
                 "`{}` is a file format, so it builds everywhere",
                 entry.name
             );
+            assert!(
+                entry.kind.is_portable(),
+                "and it is portable, not composition: the two are not alternatives"
+            );
         }
     }
 
-    /// The scrubber is what keeps prose from satisfying or tripping a rule, and
-    /// a file-format crate is held to the structural rules exactly as a domain
-    /// crate is, so its comments must be blanked the same way.
     #[test]
     fn a_comment_is_not_production_code() {
         assert!(

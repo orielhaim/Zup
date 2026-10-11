@@ -1,23 +1,10 @@
-//! What an application configured, and the limits a host enforces before a
-//! preset ever sees it.
-//!
-//! A configuration carries two things an application author wrote: settings
-//! the preset deserializes into its own types, and asset names the host has
-//! already resolved to files. Neither is a path a person typed at runtime and
-//! neither is a path the preset supplied, which is the point: the host
-//! materializes both, and a preset that received an arbitrary path would be
-//! reading a file nobody authorized.
-
 use zup_preset_protocol::{Configuration, ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS};
 
-/// Nothing configured is a valid configuration, not a missing one.
 #[test]
 fn a_configuration_may_be_empty() {
     Configuration::empty().validate().expect("empty is valid");
 }
 
-/// The name a preset uses to ask for an asset is what the host resolves, so the
-/// mapping is by name and not by index or by insertion order.
 #[test]
 fn assets_are_resolved_by_name() {
     let mut configuration = Configuration::empty();
@@ -35,8 +22,6 @@ fn assets_are_resolved_by_name() {
     assert!(!configuration.assets.contains_key("missing"));
 }
 
-/// An application cannot make the host carry an unbounded table. A preset that
-/// trusts `assets.len()` as a render budget is only safe because this refuses.
 #[test]
 fn more_assets_than_the_limit_are_refused() {
     let mut configuration = Configuration::empty();
@@ -54,8 +39,6 @@ fn more_assets_than_the_limit_are_refused() {
     );
 }
 
-/// An empty name would make two assets indistinguishable, and a preset has no
-/// way to tell which one an `AssetRef` meant.
 #[test]
 fn an_empty_asset_name_is_refused() {
     let mut configuration = Configuration::empty();
@@ -68,7 +51,6 @@ fn an_empty_asset_name_is_refused() {
     );
 }
 
-/// A path longer than anything the host writes is not a path this host wrote.
 #[test]
 fn an_over_long_asset_path_is_refused() {
     let mut configuration = Configuration::empty();
@@ -84,9 +66,6 @@ fn an_over_long_asset_path_is_refused() {
     );
 }
 
-/// Settings are the application's data and travel as JSON, because the
-/// protocol cannot know a preset's `Settings` type. Inventing a value type here
-/// would be a second, untyped protocol layered on the first.
 #[test]
 fn settings_travel_as_json_the_preset_deserializes_itself() {
     let mut configuration = Configuration::empty();
@@ -97,8 +76,6 @@ fn settings_travel_as_json_the_preset_deserializes_itself() {
     assert_eq!(read, configuration);
 }
 
-/// A field this version does not define is a refusal, not a field to skip: a
-/// configuration from a newer host is not one this preset can half-follow.
 #[test]
 fn a_configuration_with_an_unknown_field_is_refused() {
     let value = serde_json::json!({

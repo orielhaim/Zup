@@ -1,9 +1,3 @@
-//! The host's lifecycle state machine, driven without a window.
-//!
-//! Every assertion here is about what a preset would see. A host that renders
-//! correctly but reports the wrong state is the failure this exists to catch,
-//! and a test that needs a window cannot run in the portable matrix.
-
 use zup_core::{ComponentId as EngineComponentId, InstallScope, Installer, SelectedScope};
 use zup_exec::{InstallLedger, LifecycleAction};
 use zup_preset_protocol::{
@@ -68,8 +62,6 @@ fn installer() -> Installer {
     }
 }
 
-/// The blank plan a test fills in, so a host assertion never depends on how a
-/// transaction plan is built.
 fn preview(scope: SelectedScope) -> zup_presentation::PlanPreview {
     zup_presentation::PlanPreview {
         application: "com.acme.app".into(),
@@ -130,8 +122,6 @@ fn a_fresh_installation_opens_on_its_choices() {
             zup_preset_protocol::InstallScope::Machine
         ]
     );
-    // A fresh session offers what the application declares: the required
-    // component on, the optional one at its default.
     let core = options
         .components
         .iter()
@@ -206,8 +196,6 @@ fn an_install_runs_reports_progress_and_succeeds() {
     assert!(!host.snapshot().state.is_active());
 }
 
-/// A person who cancels is not told the operation failed. The engine stops at a
-/// safe boundary and the session returns to where it started.
 #[test]
 fn a_cancelled_operation_returns_to_its_surface() {
     let mut host = install_host();
@@ -223,8 +211,6 @@ fn a_cancelled_operation_returns_to_its_surface() {
         InstallerState::WaitingForSafeCancellation
     );
 
-    // Progress continues to arrive while the engine walks to a safe point, and
-    // must not pretend the cancellation request was withdrawn.
     host.observe(&RuntimeEvent::Progress {
         completed: 20,
         total: 100,
@@ -240,7 +226,6 @@ fn a_cancelled_operation_returns_to_its_surface() {
     assert!(host.snapshot().diagnostic.is_none());
 }
 
-/// The engine reports cancellation as events, and those events are not a success.
 #[test]
 fn a_cancelled_operation_reported_by_the_engine_returns_to_its_surface() {
     let mut host = install_host();
@@ -271,8 +256,6 @@ fn a_blocked_machine_reports_the_applications_holding_it() {
         }
     );
 
-    // The preflight's own outcome must not overwrite the actionable state with
-    // a generic failure.
     host.finish_with(&InstallOutcome::Failed(
         "blocked by running applications".into(),
     ));
@@ -386,8 +369,6 @@ fn a_required_component_cannot_be_turned_off() {
     );
 }
 
-/// The selection a preset changed is the selection the engine receives, with no
-/// second copy of the truth to fall out of step.
 #[test]
 fn the_selection_the_host_reports_is_the_one_it_will_run() {
     let mut host = install_host();
@@ -469,8 +450,6 @@ fn a_location_the_application_forbids_is_refused() {
     );
 }
 
-/// A plan is kept, not requested: the session asks for one when it opens, and
-/// every change of choice asks again.
 #[test]
 fn a_plan_answers_the_current_choices() {
     let mut host = install_host();
@@ -525,7 +504,6 @@ fn a_plan_answers_the_current_choices() {
     );
 }
 
-/// A plan that cannot be worked out is not a failed installation.
 #[test]
 fn a_plan_that_fails_leaves_the_choices_standing() {
     let mut host = install_host();
@@ -573,7 +551,6 @@ fn an_uninstall_asks_before_it_removes_anything() {
     ));
     assert_eq!(host.snapshot().state, InstallerState::ConfirmUninstall);
 
-    // Confirming is the only thing that starts it.
     let HostDecision::Run {
         action,
         cleanup_lock,
@@ -760,7 +737,6 @@ fn a_log_is_revealed_only_once_the_engine_has_named_one() {
     assert_eq!(host.accept(Action::OpenLog), HostDecision::OpenLog);
 }
 
-/// A preset is refused what this application cannot do, before it is launched.
 #[test]
 fn capabilities_describe_the_package_rather_than_the_build() {
     let installer = installer();
@@ -808,8 +784,6 @@ fn a_host_without_plans_says_so_rather_than_simulating_one() {
     );
 }
 
-/// The location a plan resolves is where the default goes, not a choice the
-/// person made: an install that never chose a location is not run with one.
 #[test]
 fn a_resolved_location_is_not_a_chosen_one() {
     let mut host = install_host();
@@ -822,8 +796,6 @@ fn a_resolved_location_is_not_a_chosen_one() {
     assert_eq!(selection.install_directory, None);
 }
 
-/// Once an installation commits, the host offers to start it through the
-/// launcher the application declared, and only then.
 #[test]
 fn a_committed_install_offers_its_launcher() {
     let installer = installer();
@@ -884,8 +856,6 @@ fn a_prerequisite_is_presented_as_a_requirement_not_as_a_failure() {
     );
 }
 
-/// A fresh session over an existing installation is an upgrade, and it says so
-/// in the choices it offers rather than presenting itself as a first install.
 #[test]
 fn a_fresh_session_over_an_existing_installation_names_what_it_replaces() {
     let installer = installer();
@@ -903,9 +873,6 @@ fn a_fresh_session_over_an_existing_installation_names_what_it_replaces() {
         Some(&ledger),
     );
     assert_eq!(options.existing_version.as_deref(), Some("1.0.0"));
-    // The ledger's selection wins over the application's defaults: the machine
-    // already has an answer, and asking again would offer to remove components
-    // the person did not choose to remove.
     let docs = options
         .components
         .iter()

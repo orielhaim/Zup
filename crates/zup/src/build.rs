@@ -1,49 +1,24 @@
-//! `zup build`: from a project to the files a user downloads.
-//!
-//! Two shapes of output, one code path. A run that names a `--target` builds that
-//! target's own installer. A run that names `--artifact`, or `--universal`, or
-//! nothing at all, composes the artifacts the project declares. Everything either
-//! shape needs - the payload, the plugins, the runtime template for each target,
-//! the release description - is prepared once and shared.
-//!
-//! The runtime template is not the developer's problem. `zup build` asks the
-//! toolchain resolver for the template each target needs, and a contributor
-//! working inside this repository stages a local toolchain with one command.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_automation::{AutomationResult, BuildDetails, Details, LogLevel};
-use zup_core::ResolvedTargetConfig;
+use zup_core::{ResolvedTargetConfig, TargetOperatingSystem};
 
 use crate::artifacts::ArtifactProfile;
 use crate::build_inputs::{self, Overwrite};
 use crate::cli::BuildCommand;
+use crate::failure::Reporter;
 use crate::project::{self, LoadedProject};
-use crate::report::Reporter;
 use crate::toolchain::{self, ToolchainResolver};
 
-/// What a build produced.
-///
-/// The domain answer, in domain terms: the release description a consumer verifies
-/// against, and the two documents written beside it. `zup build` knows this before it
-/// knows anything about JSON, and the adapter that turns it into an
-/// [`AutomationResult`] is one function away in `crate::automation` - so a build that
 /// fails halfway still says what it managed to write, and a caller never has to go
-/// looking in `dist/` for what happened.
 pub struct BuildOutcome {
-    /// The release description, exactly as it was written.
     pub release: zup_artifact::ReleaseManifest,
-    /// Where the release description went, project-relative, or `None` when the build
-    /// was told to skip it.
     pub release_manifest: Option<String>,
-    /// Where the signing plan went, project-relative.
     pub signing_plan: Option<String>,
-    /// How many files the plan says an external signer has to touch.
     pub pending_signatures: usize,
 }
 
-/// Build the configured distribution artifacts.
 pub fn run(
     args: BuildCommand,
     toolchain_root: Option<PathBuf>,
@@ -56,9 +31,6 @@ pub fn run(
         &[], // filled in below from the release's own variants
         outcome.release_manifest.clone(),
     );
-    // The targets a build covered are the release's own variants, not the profiles the
-    // caller typed: a composed artifact names every variant it carries, and that is the
-    // set a consumer has to know about.
     result = result.with_targets(
         outcome
             .release
@@ -76,7 +48,6 @@ pub fn run(
     Ok(result)
 }
 
-/// The build itself, with no wire types in it.
 fn execute(
     args: &BuildCommand,
     reporter: &Reporter,
@@ -91,11 +62,6 @@ fn execute(
         zup_build::Writes::Publish,
     )?;
 
-    // `--target` names a native variant, `--artifact` names a file a user
-    // downloads, and they are different questions. A run that names a target
-    // builds that target's own installer; a run that names artifacts composes
-    // them; a run that names neither builds the project's declared artifacts, or
-    // one installer per target when it declares none.
     let intent = build_intent(args, &loaded.manifest)?;
     reporter.phase(
         "validate",
@@ -109,20 +75,11 @@ fn execute(
     }
 }
 
-/// What a build run was asked to produce.
 enum Intent {
-    /// One installer per selected target.
     Variants,
-    /// Composed artifacts, in the order they were requested.
     Artifacts(Vec<ArtifactProfile>),
 }
 
-/// The runtime template each selected target contributes, in selection order.
-///
-/// The resolver has already checked every component against its descriptor, so
-/// what is left here is which file goes with which target profile. Outputs are
-/// not resolved here: a composed artifact has one output per *artifact*, and a
-/// per-target output alignment would be the wrong rule for one.
 fn resolve_runtimes(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -144,7 +101,6 @@ fn resolve_runtimes(
         .collect())
 }
 
-/// The dispatcher one composed artifact is built into.
 fn resolve_dispatcher(
     args: &BuildCommand,
     profile: &ArtifactProfile,
@@ -174,7 +130,6 @@ fn resolve_dispatcher(
         )
 }
 
-/// Build one self-contained installer per selected target.
 fn build_variants(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -239,20 +194,14 @@ fn build_variants(
             ),
         );
         let size = project::write_staged(output, args.force, |written| {
-            let (size, _) = zup_windows::build_self_contained_executable(
+            compose_target_installer(
+                config,
                 runtime,
                 written,
                 target_plan,
                 plugin_artifacts,
                 preset,
             )
-            .map_err(|error| {
-                crate::failure::error(
-                    "zup.build.compose_failed",
-                    format!("installer output: {error}"),
-                )
-            })?;
-            Ok(size)
         })?;
         let payload_bytes: u64 = target_plan.files.iter().map(|file| file.size).sum();
         report_single(
@@ -283,7 +232,71 @@ fn build_variants(
     finish(args, loaded, &outputs, release, reporter)
 }
 
-/// What one per-target build says, for a person.
+fn compose_target_installer(
+    config: &ResolvedTargetConfig,
+    runtime: &Path,
+    output: &Path,
+    plan: &zup_build::TargetBuildPlan,
+    plugin_artifacts: &[zup_bundle::CompiledPluginArtifact],
+    preset: Option<&[u8]>,
+) -> miette::Result<u64> {
+    match config.target.operating_system() {
+        TargetOperatingSystem::Linux => {
+            let package =
+                zup_bundle::BundleWriter::encode(plan, plugin_artifacts).map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("installer package for `{}`: {error}", config.profile),
+                    )
+                })?;
+            zup_linux::compose(runtime, output, &package).map_err(|error| {
+                crate::failure::error(
+                    "zup.build.compose_failed",
+                    format!("installer output: {error}"),
+                )
+            })?;
+            std::fs::metadata(output)
+                .map(|meta| meta.len())
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.output_unreadable",
+                        format!("installer output: {error}"),
+                    )
+                })
+        }
+        _ => {
+            #[cfg(windows)]
+            {
+                let (size, _) = zup_windows::build_self_contained_executable(
+                    runtime,
+                    output,
+                    plan,
+                    plugin_artifacts,
+                    preset,
+                )
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("installer output: {error}"),
+                    )
+                })?;
+                Ok(size)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (runtime, output, plan, plugin_artifacts, preset);
+                Err(crate::failure::error(
+                    "zup.build.unsupported_target",
+                    format!(
+                        "Windows lowering for target `{}` requires a Windows build host",
+                        config.target
+                    ),
+                ))
+            }
+        }
+    }
+}
+
 fn report_single(
     reporter: &Reporter,
     target_plan: &zup_build::TargetBuildPlan,
@@ -323,12 +336,6 @@ fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
     project::digest_of(path)
 }
 
-/// What a per-target installer reports in the release description.
-///
-/// Deliberately smaller than the `ArtifactIndex` a composed artifact carries: a
-/// per-target build has no graph, no dispatcher, and no shared store, so the only
-/// things a reader needs are which machine it is for, what it presents, and how
-/// big its plan is.
 fn single_target(
     config: &ResolvedTargetConfig,
     plan: &zup_build::TargetBuildPlan,
@@ -347,7 +354,6 @@ fn single_target(
     }
 }
 
-/// Build the composed artifacts a run asked for.
 fn build_artifacts(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -355,6 +361,22 @@ fn build_artifacts(
     resolver: &ToolchainResolver,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
+    if let Some(config) = loaded
+        .selected_targets
+        .iter()
+        .find(|config| config.target.operating_system() == TargetOperatingSystem::Linux)
+    {
+        return Err(crate::failure::error_with_help(
+            "zup.build.linux_composed_artifact",
+            format!(
+                "target `{}` (`{}`) cannot be composed into a dispatcher artifact: the Linux \
+                 backend ships one self-contained installer per target and has no universal \
+                 launcher",
+                config.profile, config.target
+            ),
+            "Build it separately with `zup build --target <profile>`.",
+        ));
+    }
     report_icon_warnings(reporter, loaded);
     let app = &loaded.manifest.app;
     let runtimes = resolve_runtimes(args, loaded, resolver)?;
@@ -451,25 +473,8 @@ fn build_artifacts(
             )
         })?;
         let dispatcher = resolve_dispatcher(args, profile, &composed, output, resolver)?;
-        let size = project::write_staged(output, args.force, |written| {
-            zup_windows::compose_universal_executable(&dispatcher, written, &graph).map_err(
-                |error| {
-                    crate::failure::error(
-                        "zup.build.compose_failed",
-                        format!("artifact `{id}`: {error}"),
-                    )
-                },
-            )?;
-            stamp_application_icon(written, &loaded.build)?;
-            std::fs::metadata(written)
-                .map(|meta| meta.len())
-                .map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.output_unreadable",
-                        format!("artifact output: {error}"),
-                    )
-                })
-        })?;
+        let size =
+            compose_universal_artifact(&dispatcher, output, &graph, &loaded.build, args.force, id)?;
         let savings = graph.savings();
         release
             .add_artifact(
@@ -508,7 +513,47 @@ fn build_artifacts(
     finish(args, loaded, &outputs, release, reporter)
 }
 
-/// One resolved distribution variant: a target with its runtime template.
+/// runtime is embedded into. A non-Windows host never reaches this - the
+fn compose_universal_artifact(
+    dispatcher: &Path,
+    output: &Path,
+    graph: &zup_artifact::ArtifactGraph,
+    build: &zup_build::BuildPlan,
+    force: bool,
+    id: &str,
+) -> miette::Result<u64> {
+    #[cfg(windows)]
+    {
+        project::write_staged(output, force, |written| {
+            zup_windows::compose_universal_executable(dispatcher, written, graph).map_err(
+                |error| {
+                    crate::failure::error(
+                        "zup.build.compose_failed",
+                        format!("artifact `{id}`: {error}"),
+                    )
+                },
+            )?;
+            stamp_application_icon(written, build)?;
+            std::fs::metadata(written)
+                .map(|meta| meta.len())
+                .map_err(|error| {
+                    crate::failure::error(
+                        "zup.build.output_unreadable",
+                        format!("artifact output: {error}"),
+                    )
+                })
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dispatcher, output, graph, build, force, id);
+        Err(crate::failure::error(
+            "zup.build.unsupported_host",
+            "composing a dispatcher artifact requires a Windows build host",
+        ))
+    }
+}
+
 fn resolve_variant(
     config: &ResolvedTargetConfig,
     plan: &zup_build::TargetBuildPlan,
@@ -533,11 +578,6 @@ fn resolve_variant(
     })
 }
 
-/// One composed artifact, as the report describes it.
-///
-/// The row a build prints is a fact about one artifact, so it is carried as one
-/// value rather than as seven parameters that have to be kept in the right order
-/// at the call site.
 struct ComposedArtifact<'a> {
     id: &'a str,
     profile: &'a ArtifactProfile,
@@ -595,8 +635,6 @@ fn percent(part: u64, whole: u64) -> f64 {
     }
 }
 
-/// Start a lowercase vocabulary word with a capital, for a summary line that
-/// reads as a sentence rather than as a serialized value.
 fn capitalize(value: &str) -> String {
     let mut characters = value.chars();
     match characters.next() {
@@ -605,7 +643,6 @@ fn capitalize(value: &str) -> String {
     }
 }
 
-/// Decide what a build run produces.
 fn build_intent(args: &BuildCommand, manifest: &zup_manifest::Manifest) -> miette::Result<Intent> {
     if !args.artifact.is_empty() {
         let mut profiles = Vec::with_capacity(args.artifact.len());
@@ -664,10 +701,6 @@ fn output_name(output: &Path) -> String {
         .unwrap_or_else(|| "Setup.exe".to_owned())
 }
 
-/// A release has one root: the directory its artifacts are written beside. Paths
-/// in the release description are therefore file names, and an output that does
-/// not share a directory with the others is refused rather than described with a
-/// build-machine path.
 fn release_relative(outputs: &[PathBuf], output: &Path) -> miette::Result<String> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     for other in outputs {
@@ -688,8 +721,6 @@ fn release_relative(outputs: &[PathBuf], output: &Path) -> miette::Result<String
     Ok(output_name(output))
 }
 
-/// The directory a build's artifacts are written beside, which is where its
-/// release description belongs.
 fn release_root(loaded: &LoadedProject, outputs: &[PathBuf]) -> miette::Result<PathBuf> {
     match outputs.split_first() {
         Some((first, rest)) => {
@@ -711,18 +742,6 @@ fn release_root(loaded: &LoadedProject, outputs: &[PathBuf]) -> miette::Result<P
     }
 }
 
-/// Write the release description and the signing plan, and say what remains.
-///
-/// Two documents, because they answer two different questions and are read at
-/// two different times. `zup-release.json` says what the build produced and is
-/// what a publisher reads; `zup-signing.json` says what an external signer has to
-/// touch, in what order, and is what a signing step reads. Collapsing them would
-/// mean the release description carries a credential-free signing instruction
-/// that a build cannot act on, or that a publisher is free to ignore.
-///
-/// Neither is written with a bare `write`: both are documents a later step parses
-/// and trusts, so they are published atomically and flushed, exactly like the
-/// ledger a running installer relies on.
 fn finish(
     args: &BuildCommand,
     loaded: &LoadedProject,
@@ -730,8 +749,6 @@ fn finish(
     release: zup_artifact::ReleaseManifest,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
-    // `none` is the one value that is a name rather than a path, and it is how a
-    // project opts out of producing a release it does not intend to publish.
     if args.release_manifest == "none" {
         return Ok(BuildOutcome {
             release,
@@ -741,8 +758,6 @@ fn finish(
         });
     }
     let destination = args.release_manifest.as_str();
-    // The description lives in the release root, which is the directory its
-    // artifacts are written beside.
     let root = release_root(loaded, outputs)?;
     let path = root.join(destination);
     if let Some(parent) = path.parent() {
@@ -759,7 +774,7 @@ fn finish(
             format!("release description: {error}"),
         )
     })?;
-    zup_windows::write_durable(&path, &bytes).map_err(|error| {
+    zup_platform::publish(&path, &bytes).map_err(|error| {
         crate::failure::error(
             "zup.build.release_unwritable",
             format!("release description: {error}"),
@@ -769,7 +784,7 @@ fn finish(
     let plan = signing_plan(&release, &root, args.signing_subject.as_deref())?;
     let pending = plan.pre_compose().count() + plan.post_compose().count();
     let plan_path = path.with_file_name(zup_signing::SIGNING_PLAN_NAME);
-    zup_windows::write_durable(
+    zup_platform::publish(
         &plan_path,
         &plan.encode().map_err(|error| {
             crate::failure::error(
@@ -813,14 +828,6 @@ fn finish(
     })
 }
 
-/// Derive the signing plan from what the build composed.
-///
-/// The plan is *derived* rather than accumulated, so it cannot disagree with the
-/// release description it is written beside. The interesting part is which files
-/// land in the pre-compose set: a single-target installer is its own runtime, so
-/// it is one post-compose file; a composed artifact embeds a runtime that is
-/// extracted and executed separately, so the runtime it was composed from is a
-/// pre-compose file of its own.
 fn signing_plan(
     release: &zup_artifact::ReleaseManifest,
     root: &Path,
@@ -832,13 +839,8 @@ fn signing_plan(
     }
     let mut plan = zup_signing::SigningPlan::new(&release.application, requirement);
 
-    // Pre-compose: every runtime an artifact embeds, named by the file it was
-    // composed from. A build does not copy the runtime into the release root - the
-    // toolchain owns those bytes and a release pipeline stages the *signed* copy
-    // there before composing - so the path recorded is the one verification will
-    // look at, and it is written by whatever signed it.
-    for (variant, _carriers) in embedded_by_variant(release) {
-        let path = format!("runtime/{variant}.exe");
+    for (variant, target, _carriers) in embedded_by_variant(release) {
+        let path = format!("runtime/{variant}{}", target.executable_suffix());
         let file = root.join(&path);
         plan.push(zup_signing::SigningStep::new(
             zup_signing::SigningRole::NativeRuntime,
@@ -886,25 +888,34 @@ fn signing_plan(
     Ok(plan)
 }
 
-/// The variants a release's universal artifacts embed, as `runtime/<variant>.exe`.
-///
-/// Only universal artifacts embed a runtime, because only a universal artifact is
-/// built around a dispatcher: the dispatcher is the base image, and each variant's
-/// runtime is a resource inside it. A single-target installer *is* its runtime.
-fn embedded_by_variant(release: &zup_artifact::ReleaseManifest) -> Vec<(String, Vec<String>)> {
-    let mut by_variant: BTreeMap<String, Vec<String>> = BTreeMap::new();
+fn embedded_by_variant(
+    release: &zup_artifact::ReleaseManifest,
+) -> Vec<(String, zup_core::TargetTriple, Vec<String>)> {
+    let targets: BTreeMap<&str, &zup_core::TargetTriple> = release
+        .variants
+        .iter()
+        .map(|variant| (variant.id.as_str(), &variant.target))
+        .collect();
+    let mut by_variant: BTreeMap<String, (zup_core::TargetTriple, Vec<String>)> = BTreeMap::new();
     for artifact in &release.artifacts {
         if artifact.kind != zup_artifact::ArtifactKind::Universal {
             continue;
         }
         for variant in &artifact.variants {
+            let Some(target) = targets.get(variant.as_str()) else {
+                continue;
+            };
             by_variant
                 .entry(variant.clone())
-                .or_default()
+                .or_insert_with(|| ((*target).clone(), Vec::new()))
+                .1
                 .push(artifact.id.clone());
         }
     }
-    by_variant.into_iter().collect()
+    by_variant
+        .into_iter()
+        .map(|(variant, (target, artifacts))| (variant, target, artifacts))
+        .collect()
 }
 
 fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProject) {
@@ -915,6 +926,7 @@ fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProj
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn stamp_application_icon(
     path: &Path,
     plan: &zup_build::BuildPlan,

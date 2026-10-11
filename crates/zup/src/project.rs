@@ -1,9 +1,3 @@
-//! Reading a project: the manifest, its target profiles, and its payload.
-//!
-//! Selection touches no source tree, so a caller can reject a target this host
-//! cannot build before paying for materialization. That is the whole reason
-//! selection and materialization are two steps and not one.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -11,44 +5,83 @@ use zup_toolchain::ToolchainComponent;
 
 use crate::toolchain::ToolchainResolver;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
+use zup_platform::SourceFilePolicy;
+
+#[cfg(windows)]
+static WINDOWS_SOURCE_POLICY: zup_windows::WindowsSourceFilePolicy =
+    zup_windows::WindowsSourceFilePolicy;
+#[cfg(target_os = "linux")]
+static LINUX_SOURCE_POLICY: zup_linux::LinuxSourceFilePolicy = zup_linux::LinuxSourceFilePolicy;
+static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
+    zup_platform::PortableSourceFilePolicy;
+
+pub fn source_policy_for(target: &zup_core::TargetTriple) -> &'static dyn SourceFilePolicy {
+    match target.operating_system() {
+        zup_core::TargetOperatingSystem::Linux => {
+            #[cfg(target_os = "linux")]
+            {
+                &LINUX_SOURCE_POLICY
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &PORTABLE_SOURCE_POLICY
+            }
+        }
+        _ => {
+            #[cfg(windows)]
+            {
+                &WINDOWS_SOURCE_POLICY
+            }
+            #[cfg(not(windows))]
+            {
+                &PORTABLE_SOURCE_POLICY
+            }
+        }
+    }
+}
+
+pub fn source_policy_for_selection(
+    targets: &[ResolvedTargetConfig],
+) -> &'static dyn SourceFilePolicy {
+    let all_linux = targets
+        .iter()
+        .all(|target| target.target.operating_system() == zup_core::TargetOperatingSystem::Linux);
+    if all_linux && !targets.is_empty() {
+        return source_policy_for(&targets[0].target);
+    }
+    #[cfg(windows)]
+    {
+        &WINDOWS_SOURCE_POLICY
+    }
+    #[cfg(not(windows))]
+    {
+        &PORTABLE_SOURCE_POLICY
+    }
+}
 
 use zup_core::Frontend;
 
 use crate::cli::ProjectSelection;
 
-/// A read manifest and its selected profiles, before anything is materialized.
 #[derive(Debug)]
 pub struct SelectedProject {
     pub manifest_path: PathBuf,
     pub manifest_name: String,
     pub source: String,
     pub manifest: zup_manifest::Manifest,
-    /// The caller's per-profile overrides, in the form `compile` revalidates.
     pub overrides: zup_manifest::TargetOverrideSet,
     pub selected_targets: Vec<ResolvedTargetConfig>,
 }
 
-/// A compiled, materialized project: what a build actually reads.
 #[derive(Debug)]
 pub struct LoadedProject {
     pub manifest_path: PathBuf,
     pub manifest: zup_manifest::Manifest,
     pub selected_targets: Vec<ResolvedTargetConfig>,
     pub build: zup_build::BuildPlan,
-    /// The preset executable each selected target will launch, in target order.
-    ///
-    /// Not part of the plan because it is a native program rather than a file the
-    /// project ships: composition writes it, and nothing materializes it from the
-    /// source tree. `None` for a target that presents no window, which is why this
-    /// is an option rather than an empty vector: an empty preset resource is still
-    /// a resource, and one is not what a console installer carries.
     pub presets: Vec<Option<Vec<u8>>>,
 }
 
-/// The caller-supplied per-target overrides of an authoring command.
-///
-/// Every repeatable flag here is aligned against the selected target count, so a
-/// single value against several targets is an error rather than a broadcast.
 #[derive(Debug, Clone, Default)]
 pub struct TargetOverrideArgs {
     pub source: Vec<PathBuf>,
@@ -57,7 +90,6 @@ pub struct TargetOverrideArgs {
 }
 
 impl TargetOverrideArgs {
-    /// The per-profile overrides, aligned with the selected profiles in order.
     pub fn resolve(
         &self,
         selected: &[ResolvedTargetConfig],
@@ -94,7 +126,6 @@ impl TargetOverrideArgs {
     }
 }
 
-/// The per-target overrides a `ProjectSelection` carries.
 impl From<&ProjectSelection> for TargetOverrideArgs {
     fn from(value: &ProjectSelection) -> Self {
         Self {
@@ -105,16 +136,6 @@ impl From<&ProjectSelection> for TargetOverrideArgs {
     }
 }
 
-/// A project directory a caller named, and the Cargo package that owns it.
-///
-/// A preset and a plugin are both projects of their own, and both need the same
-/// answer to "what is this directory called and what does it build". A preset
-/// that is a workspace member has no root package, so the member whose manifest
-/// sits in the requested directory is the one that was asked for.
-///
-/// Both sides of the comparison are canonicalized, because on Windows a
-/// canonicalized path and the one Cargo reports can differ in their prefix, and
-/// comparing two spellings of one directory has no useful answer.
 pub fn own_package(root: &Path) -> miette::Result<cargo_metadata::Package> {
     let mut command = cargo_metadata::MetadataCommand::new();
     command.no_deps().current_dir(root);
@@ -141,11 +162,6 @@ pub fn own_package(root: &Path) -> miette::Result<cargo_metadata::Package> {
         })
 }
 
-/// One target of `package`, by the kind Cargo reports it as.
-///
-/// The kind is the argument rather than a fixed name because a preset builds a
-/// binary and a plugin builds a `cdylib`, and both refusals have to name what
-/// was looked for.
 pub fn target_of_kind<'a>(
     package: &'a cargo_metadata::Package,
     kind: &str,
@@ -163,21 +179,12 @@ pub fn target_of_kind<'a>(
         })
 }
 
-/// Cargo, as this process found it.
-///
-/// Cargo puts itself in the environment for anything it runs, so a nested build
-/// uses the same one rather than whatever happens to be first on `PATH`.
 pub fn cargo_executable() -> PathBuf {
     std::env::var_os("CARGO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("cargo"))
 }
 
-/// A directory a caller named, as a path template.
-///
-/// A template variable in a chosen path is a refusal rather than a literal
-/// directory name: `${location.user_data}` in an install directory would create a
-/// directory whose name is that string.
 pub fn install_directory_template(path: &Path) -> miette::Result<zup_core::Template> {
     let value = path.to_string_lossy();
     if value.contains("${") {
@@ -188,7 +195,6 @@ pub fn install_directory_template(path: &Path) -> miette::Result<zup_core::Templ
     zup_core::Template::parse(&value).map_err(|error| miette::miette!("install directory: {error}"))
 }
 
-/// Read a manifest and resolve its selected targets without materializing them.
 pub fn select_project(
     path: &Path,
     selectors: &[String],
@@ -223,8 +229,6 @@ pub fn select_project(
         selectors.to_vec()
     };
     let selector_refs = effective.iter().map(String::as_str).collect::<Vec<_>>();
-    // The un-overridden selection names the profiles and their count, which is
-    // what the repeatable flags align against.
     let selection =
         zup_manifest::select_targets(&manifest, &selector_refs, &TargetOverrides::default())
             .map_err(|error| {
@@ -248,12 +252,6 @@ pub fn select_project(
     })
 }
 
-/// Compile and materialize the selected targets of a project.
-///
-/// A target that presents a window gets its preset selected here, before
-/// materialization, because a preset's settings name project files the build has
-/// to resolve and the compiled installer has to carry. The selection is one path
-/// whether the package came from `[ui].preset` or from the toolchain's own.
 pub fn materialize_project(
     selected: SelectedProject,
     resolver: &ToolchainResolver,
@@ -271,7 +269,16 @@ pub fn materialize_project(
     let mut compiled = Vec::with_capacity(selected_targets.len());
     let mut ui_assets = BTreeMap::new();
     let mut executables = Vec::with_capacity(selected_targets.len());
+    let policy = source_policy_for_selection(&selected_targets);
     for config in &selected_targets {
+        // A Linux GUI target never reaches preset resolution: there is no Linux
+        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
+            && config.frontend == Frontend::Gui
+        {
+            let errors =
+                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            return Err(miette::miette!("{}", errors.join("\n")));
+        }
         let mut installer =
             zup_manifest::compile(&manifest, config, overrides.get(&config.profile)).map_err(
                 |error| miette::Report::new(error.with_source_named(&source, &manifest_name)),
@@ -283,18 +290,13 @@ pub fn materialize_project(
                     .map(|resolved| resolved.path)
                     .map_err(|error| error.to_string())
             };
-            // The one resolver, so a preview and a build cannot disagree about
-            // which window this application presents. It is asked for the
-            // preset zup ships only when the project named none, because finding
-            // it costs a directory walk an application that chose its own window
-            // should not pay.
             let resolved = zup_preset_compose::resolve(
                 &manifest.ui,
                 &project_root,
                 &installer,
                 &config.target,
                 &shipped,
-                &zup_windows::WindowsSourceFilePolicy,
+                policy,
             )
             .map_err(preset_problem)?;
             installer.preset = Some(resolved.runtime);
@@ -311,7 +313,7 @@ pub fn materialize_project(
         &manifest,
         compiled,
         &ui_assets,
-        &zup_windows::WindowsSourceFilePolicy,
+        policy,
         writes,
     )
     .map_err(miette::Report::new)?;
@@ -324,7 +326,6 @@ pub fn materialize_project(
     })
 }
 
-/// Select, compile, and materialize in one step.
 pub fn load_single_project(
     path: &Path,
     selectors: &[String],
@@ -339,13 +340,6 @@ pub fn load_single_project(
     )
 }
 
-/// A window that could not be presented, as the diagnostic a build reports.
-///
-/// Two codes because there are two mistakes: nothing could be obtained at all, so
-/// the machine is missing a component or the project named a file that is not
-/// there; or something was obtained and it does not work here. A caller that has
-/// to tell those apart - a CI system deciding whether to stage a toolchain - can,
-/// and a build that collapsed them would answer that question wrongly.
 fn preset_problem(error: zup_preset_compose::PresetProblem) -> miette::Report {
     let code = match error {
         zup_preset_compose::PresetProblem::Unavailable { .. } => "zup.build.preset_unavailable",
@@ -354,7 +348,6 @@ fn preset_problem(error: zup_preset_compose::PresetProblem) -> miette::Report {
     crate::failure::error(code, error.to_string())
 }
 
-/// Read and compile a manifest, for a command that does not need its sources.
 pub fn load_manifest(path: &Path) -> miette::Result<zup_manifest::Manifest> {
     let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let source = std::fs::read_to_string(&absolute)
@@ -362,11 +355,6 @@ pub fn load_manifest(path: &Path) -> miette::Result<zup_manifest::Manifest> {
     zup_manifest::parse_named(&source, &crate::plain_path(&absolute)).map_err(miette::Report::new)
 }
 
-/// Read a manifest, refusing when this host cannot build one of its targets.
-///
-/// A refusal here costs nothing: no source tree is walked, no plugin is compiled,
-/// and no prerequisite is resolved. That is the difference between a clear message
-/// and a slow one.
 pub fn load_for_build(
     path: &Path,
     selectors: &[String],
@@ -375,10 +363,15 @@ pub fn load_for_build(
     writes: zup_build::Writes,
 ) -> miette::Result<LoadedProject> {
     let selected = select_project(path, selectors, args, false)?;
-    // The backend boundary reads no files, so an unsupported target is refused
-    // before the source tree is walked and prerequisites are resolved.
     for config in &selected.selected_targets {
         crate::build_inputs::check_backend_support(config)?;
+        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
+            let errors =
+                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            if !errors.is_empty() {
+                return Err(miette::miette!("{}", errors.join("\n")));
+            }
+        }
     }
     let loaded = materialize_project(selected, resolver, writes)?;
     for config in &loaded.selected_targets {
@@ -387,8 +380,6 @@ pub fn load_for_build(
     Ok(loaded)
 }
 
-/// Create the directory an output will be written into, so a caller naming a
-/// directory that does not exist yet gets the installer instead of an I/O error.
 pub fn ensure_output_parent(output: &Path) -> miette::Result<()> {
     let Some(parent) = output.parent() else {
         return Ok(());
@@ -400,8 +391,6 @@ pub fn ensure_output_parent(output: &Path) -> miette::Result<()> {
         .map_err(|error| miette::miette!("output directory {}: {error}", parent.display()))
 }
 
-/// A staging path beside an output, on the same volume so the move into place
-/// cannot cross a filesystem boundary.
 pub fn staging_output(output: &Path) -> miette::Result<PathBuf> {
     let name = output
         .file_name()
@@ -418,8 +407,6 @@ pub fn staging_output(output: &Path) -> miette::Result<PathBuf> {
     Ok(staging)
 }
 
-/// Put a finished artifact where the caller asked for it, replacing whatever
-/// `--force` authorized replacing.
 pub fn replace_output(staging: &Path, output: &Path) -> miette::Result<()> {
     if output.exists() {
         std::fs::remove_file(output)
@@ -434,13 +421,6 @@ pub fn replace_output(staging: &Path, output: &Path) -> miette::Result<()> {
     })
 }
 
-/// Write an artifact through a staging file when replacing an existing one, and
-/// return the writer's own result.
-///
-/// A partially written installer is worse than no installer: it looks like a
-/// build output, and the next build refuses to replace it without `--force`. So
-/// the bytes are written beside the destination on the same volume, and the move
-/// into place is the last thing that happens.
 pub fn write_staged<T>(
     output: &Path,
     force: bool,
@@ -471,18 +451,12 @@ pub fn write_staged<T>(
     Ok(written)
 }
 
-/// The SHA-256 of a file.
 pub fn digest_of(path: &Path) -> miette::Result<Sha256Digest> {
     let file = std::fs::File::open(path).map_err(|error| miette::miette!("{error}"))?;
     let (_, digest) = zup_core::hash_reader(file).map_err(|error| miette::miette!("{error}"))?;
     Ok(digest)
 }
 
-/// A TOML basic string, escaped.
-///
-/// Hand-built so `zup init` writes a manifest that is byte-identical on every
-/// platform and readable, rather than one that round-trips through a serializer
-/// whose output changes between releases.
 pub fn toml_string(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
     output.push('"');
@@ -506,7 +480,6 @@ pub fn toml_string(value: &str) -> String {
     output
 }
 
-/// A filesystem-safe slug, for a directory name a manifest template will use.
 pub fn slug(value: &str) -> String {
     let mut output = String::new();
     let mut separator = false;
@@ -529,10 +502,6 @@ pub fn slug(value: &str) -> String {
     }
 }
 
-/// The resolved install directory of a target, as one line.
-///
-/// A single scope's template is shown on its own; both are labeled when the
-/// target installs to two scopes.
 pub fn install_directory_text(install: &zup_core::Install) -> String {
     let user = install.directory.user.as_ref().map(ToString::to_string);
     let machine = install.directory.machine.as_ref().map(ToString::to_string);
@@ -560,9 +529,6 @@ mod tests {
     fn a_slug_is_filesystem_safe_and_never_empty() {
         assert_eq!(slug("Acme Desktop"), "acme-desktop");
         assert_eq!(slug("  ???  "), "app");
-        // A run of characters that is not ASCII alphanumeric becomes one
-        // separator, wherever it falls, so a name in any script still reads as
-        // words rather than as one run.
         assert_eq!(slug("Ünïcode"), "n-code");
     }
 

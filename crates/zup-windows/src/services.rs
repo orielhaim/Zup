@@ -1,6 +1,3 @@
-//! Windows service inspection and managed mutation, through the host's
-//! service control manager.
-
 use crate::transaction_payload::{BackendReceipt, NativeReconcileResult};
 use windows_service::service::{
     ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
@@ -11,55 +8,37 @@ use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind, Ser
 
 use crate::lowering::host_path;
 
-/// Read-only service inspection surface.
-pub trait ServiceReader {
-    /// Observe service `name`, or `Absent` if it does not exist.
-    fn read_service(
-        &self,
-        name: &str,
-        target: &TargetTriple,
-    ) -> Result<ObservedServiceState, String>;
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error(transparent)]
+    Scm(#[from] crate::scm::ScmError),
+    #[error("service `{name}` is not executable: {reason}")]
+    NotExecutable { name: String, reason: String },
+    #[error("service `{0}` changed since planning")]
+    ChangedSincePlanning(String),
+    #[error("service `{0}` changed after installation")]
+    ChangedAfterInstall(String),
+    #[error("service target is missing")]
+    MissingTarget,
+    #[error("service `{name}` could not be written: {reason}")]
+    WriteFailed { name: String, reason: String },
 }
 
-/// Production SCM-backed reader.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WindowsServiceReader;
-
-impl ServiceReader for WindowsServiceReader {
-    fn read_service(
-        &self,
-        name: &str,
-        target: &TargetTriple,
-    ) -> Result<ObservedServiceState, String> {
-        crate::scm::query_service(name, target)
+fn backend(name: &str, reason: impl std::fmt::Display) -> ServiceError {
+    ServiceError::WriteFailed {
+        name: name.to_owned(),
+        reason: reason.to_string(),
     }
 }
 
-/// Fake service table for tests.
-#[derive(Debug, Default, Clone)]
-pub struct FakeServiceReader {
-    pub services: std::collections::BTreeMap<String, ObservedServiceState>,
-    pub fail: bool,
+pub fn read_service(
+    name: &str,
+    target: &TargetTriple,
+) -> Result<ObservedServiceState, ServiceError> {
+    crate::scm::query_service(name, target).map_err(ServiceError::Scm)
 }
 
-impl ServiceReader for FakeServiceReader {
-    fn read_service(
-        &self,
-        name: &str,
-        _target: &TargetTriple,
-    ) -> Result<ObservedServiceState, String> {
-        if self.fail {
-            return Err("access denied".to_owned());
-        }
-        Ok(self
-            .services
-            .get(name)
-            .cloned()
-            .unwrap_or(ObservedServiceState::Absent))
-    }
-}
-
-fn state(name: &str, target: &TargetTriple) -> Result<ServiceState, String> {
+fn state(name: &str, target: &TargetTriple) -> Result<ServiceState, ServiceError> {
     match crate::scm::query_service(name, target)? {
         ObservedServiceState::Absent => Ok(ServiceState::Absent),
         ObservedServiceState::Service {
@@ -118,14 +97,17 @@ fn service_info(
     name: &str,
     desired: &ServiceState,
     existing: Option<&windows_service::service::ServiceConfig>,
-) -> Result<ServiceInfo, String> {
+) -> Result<ServiceInfo, ServiceError> {
     let ServiceState::Registration {
         display_name,
         command,
         start,
     } = desired
     else {
-        return Err("service registration required".into());
+        return Err(ServiceError::NotExecutable {
+            name: name.to_owned(),
+            reason: "service registration required".to_owned(),
+        });
     };
     Ok(ServiceInfo {
         name: name.into(),
@@ -141,18 +123,18 @@ fn service_info(
     })
 }
 
-fn write(name: &str, value: &ServiceState) -> Result<(), String> {
+fn write(name: &str, value: &ServiceState) -> Result<(), ServiceError> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| backend(name, error))?;
     match value {
         ServiceState::Absent => {
             let service = manager
                 .open_service(name, ServiceAccess::DELETE)
-                .map_err(|error| error.to_string())?;
-            service.delete().map_err(|error| error.to_string())
+                .map_err(|error| backend(name, error))?;
+            service.delete().map_err(|error| backend(name, error))
         }
         ServiceState::Registration { .. } => {
             let service = manager.open_service(
@@ -161,11 +143,13 @@ fn write(name: &str, value: &ServiceState) -> Result<(), String> {
             );
             match service {
                 Ok(service) => {
-                    let config = service.query_config().map_err(|error| error.to_string())?;
+                    let config = service
+                        .query_config()
+                        .map_err(|error| backend(name, error))?;
                     let info = service_info(name, value, Some(&config))?;
                     service
                         .change_config(&info)
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| backend(name, error))
                 }
                 Err(windows_service::Error::Winapi(error))
                     if error.raw_os_error() == Some(1060) =>
@@ -173,27 +157,30 @@ fn write(name: &str, value: &ServiceState) -> Result<(), String> {
                     let info = service_info(name, value, None)?;
                     manager
                         .create_service(&info, ServiceAccess::QUERY_CONFIG)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| backend(name, error))?;
                     Ok(())
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(backend(name, error)),
             }
         }
     }
 }
 
-pub fn apply(op: &ServiceOperation) -> Result<BackendReceipt, String> {
+pub fn apply(op: &ServiceOperation) -> Result<BackendReceipt, ServiceError> {
     if !matches!(
         op.kind,
         ServiceOperationKind::Create
             | ServiceOperationKind::UpdateOwned
             | ServiceOperationKind::RestoreOwned
     ) {
-        return Err("service is not executable".into());
+        return Err(ServiceError::NotExecutable {
+            name: op.name.clone(),
+            reason: "service is not executable".to_owned(),
+        });
     }
     let previous = previous(op);
     if state(&op.name, op.command.executable.target())? != previous {
-        return Err("service changed since planning".into());
+        return Err(ServiceError::ChangedSincePlanning(op.name.clone()));
     }
     let installed = installed(op);
     write(&op.name, &installed)?;
@@ -209,17 +196,17 @@ pub fn rollback(
     name: &str,
     previous: &ServiceState,
     installed: &ServiceState,
-) -> Result<(), String> {
+) -> Result<(), ServiceError> {
     let target = state_target(installed)
         .or_else(|| state_target(previous))
-        .ok_or_else(|| "service target is missing".to_owned())?;
+        .ok_or(ServiceError::MissingTarget)?;
     if state(name, target)? != *installed {
-        return Err("service changed after installation".into());
+        return Err(ServiceError::ChangedAfterInstall(name.to_owned()));
     }
     write(name, previous)
 }
 
-pub fn reconcile(op: &ServiceOperation) -> Result<NativeReconcileResult, String> {
+pub fn reconcile(op: &ServiceOperation) -> Result<NativeReconcileResult, ServiceError> {
     let current = match state(&op.name, op.command.executable.target()) {
         Ok(state) => state,
         Err(_) => return Ok(NativeReconcileResult::Ambiguous),

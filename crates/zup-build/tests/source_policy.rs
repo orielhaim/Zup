@@ -1,5 +1,3 @@
-//! The portable source-inspection policy and policy injection.
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,16 +14,12 @@ use zup_manifest::{Manifest, TargetOverrides, compile, parse, select_targets};
 
 const PREREQUISITE: &[u8] = b"runtime payload";
 
-/// A policy that records every path it is asked about, so a test can see that
-/// prerequisite inspection consults the injected policy.
 struct RecordingPolicy {
-    /// Paths the policy reports as links, resolved without touching the disk.
     links: Vec<PathBuf>,
     asked: Mutex<Vec<PathBuf>>,
 }
 
 impl RecordingPolicy {
-    /// A policy that reports `links` as links and nothing else as a link.
     fn reporting(links: &[&Path]) -> Self {
         Self {
             links: links.iter().map(|path| path.to_path_buf()).collect(),
@@ -45,8 +39,6 @@ impl SourceFilePolicy for RecordingPolicy {
     }
 }
 
-/// A policy whose inspection always fails, standing in for a host that cannot
-/// read a source's ancestry.
 struct Unreadable;
 
 impl SourceFilePolicy for Unreadable {
@@ -71,8 +63,6 @@ fn project(files: &[(&str, &[u8])]) -> TempDir {
     dir
 }
 
-/// A manifest with one embedded prerequisite at `path`, whose declared identity
-/// matches `PREREQUISITE`.
 fn manifest_with_prerequisite(path: &str) -> String {
     let digest = Sha256Digest::from_bytes(Sha256::digest(PREREQUISITE).into());
     format!(
@@ -111,8 +101,6 @@ package = {{ type = "embedded", path = "{path}", sha256 = "{}", size = {} }}
     )
 }
 
-/// A project whose embedded prerequisite is `vendor/runtime.exe`, with matching
-/// content in `runtime.exe` so identity never explains a rejection.
 fn prerequisite_project() -> (TempDir, Manifest) {
     let dir = project(&[
         ("dist/app.exe", b"app"),
@@ -168,8 +156,6 @@ fn unwrap_target(error: BuildError) -> BuildError {
     }
 }
 
-/// A symlink to `target`, or the `PermissionDenied` a host that withholds
-/// `SeCreateSymbolicLinkPrivilege` answers with.
 fn symlink_to(target: &Path, link: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -181,17 +167,11 @@ fn symlink_to(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether this host can create a symlink at all. The Windows adapter's
-/// junction test covers link refusal where it cannot.
 fn can_symlink() -> bool {
     let dir = project(&[("target.bin", PREREQUISITE)]);
     symlink_to(&dir.path().join("target.bin"), &dir.path().join("link.bin")).is_ok()
 }
 
-// --- The portable policy ---
-
-/// A path that cannot be read as a link is not a link. A missing path is the
-/// interesting one: treating "cannot tell" as "safe" is how a link gets followed.
 #[rstest]
 #[case::a_regular_file("payload.exe", false, false)]
 #[case::a_path_that_does_not_exist("absent.exe", false, false)]
@@ -227,8 +207,6 @@ fn materialize_defaults_to_the_portable_policy() {
     fs::remove_file(&source).unwrap();
     symlink_to(&target, &source).unwrap();
 
-    // The link resolves to content of exactly the declared size and digest, so
-    // only the link check can reject it.
     let error = materialize_default(dir.path(), &manifest).unwrap_err();
 
     assert!(
@@ -236,8 +214,6 @@ fn materialize_defaults_to_the_portable_policy() {
         "materialize must inspect sources with the portable policy"
     );
 }
-
-// --- Injection ---
 
 #[test]
 fn every_prerequisite_source_and_ancestor_is_inspected_through_the_injected_policy() {
@@ -265,8 +241,6 @@ fn every_prerequisite_source_and_ancestor_is_inspected_through_the_injected_poli
     );
 }
 
-/// A link anywhere on the path to a prerequisite makes it unusable: the bytes a
-/// link resolves to can change after the digest was recorded.
 #[rstest]
 #[case::the_source_itself("vendor/runtime.exe")]
 #[case::a_directory_holding_it("vendor")]
