@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Package matrices, portable boundary checks, action pins, and test inputs for zup"
+description = "Package matrices, toolchain staging, and test inputs for zup"
 publish = false
 
 [[bin]]
@@ -12,13 +12,12 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
-semver.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-zup-automation = { workspace = true, features = ["bindings"] }
 zup-artifact.workspace = true
+zup-automation = { workspace = true, features = ["bindings"] }
 zup-binary.workspace = true
 zup-core.workspace = true
 zup-publish-github.workspace = true

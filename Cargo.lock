@@ -12591,7 +12591,6 @@ name = "zup-xtask"
 version = "0.0.1"
 dependencies = [
  "rstest",
- "semver",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

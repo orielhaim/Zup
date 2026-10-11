@@ -13,8 +13,7 @@
     "different commit than the one recorded here is the one failure mode a",
     "version ref cannot show you on its own, so it is checked.",
     "",
-    "Read with `cargo xtask github-action-pins check`, updated with",
-    "`cargo xtask github-action-pins refresh`. `zup build` and",
+    "Read manually. `zup build` and",
     "`zup ci github generate` never touch this file: generating a workflow is",
     "offline and byte-reproducible, and a pin that moved under a developer who",
     "was only regenerating a matrix is a supply-chain change they did not make."

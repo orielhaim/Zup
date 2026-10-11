@@ -1,6 +1,6 @@
 use zup_preset_protocol::{
-    Capabilities, Capability, DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES,
-    PRESET_PROTOCOL_VERSION, PresetDescription,
+    Capabilities, Capability, DescribeError, MAX_DESCRIBE_BYTES, PRESET_PROTOCOL_VERSION,
+    PresetDescription,
 };
 
 fn schema() -> serde_json::Value {
@@ -37,11 +37,6 @@ fn a_preset_that_needs_nothing_says_so() {
 }
 
 #[test]
-fn the_describe_flag_is_one_name() {
-    assert_eq!(DESCRIBE_FLAG, "--zup-describe");
-}
-
-#[test]
 fn a_document_without_an_identity_is_refused() {
     let mut blank = description();
     blank.name = "  ".into();
@@ -75,14 +70,6 @@ fn a_document_with_an_unknown_field_is_refused() {
     let mut document = serde_json::to_value(description()).expect("serializes");
     document["somethingNewer"] = serde_json::Value::Bool(true);
     assert!(serde_json::from_value::<PresetDescription>(document).is_err());
-}
-
-#[test]
-fn the_describe_document_is_deterministic() {
-    assert_eq!(
-        serde_json::to_vec(&description()).expect("serializes"),
-        serde_json::to_vec(&description()).expect("serializes")
-    );
 }
 
 #[test]

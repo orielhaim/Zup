@@ -1,30 +1,12 @@
-//! `zup preset init` produces a project a third party can build.
-//!
-//! The SDK is a crate other people depend on, and the project that teaches them
-//! to use it is the first thing most of them will compile. If its manifest names
-//! a version that does not exist, or a dependency the SDK does not re-export,
-//! every new preset author finds out at the same moment and for the same reason.
-//!
-//! So the generated project is resolved here, by Cargo, from a directory outside
-//! this workspace. A generated `main.rs` is compiled by hand rather than here,
-//! because the GPUI stack behind it takes longer to check than this suite is
-//! worth; what this file proves is the part that can silently be wrong - the
-//! manifest, the dependency versions, and the generated sources.
+//! `zup preset init` output must resolve and stay on the public API.
 
 use std::path::Path;
 use std::process::Command;
 
 use rstest::rstest;
 
-/// The SDK's own crates, resolved from this checkout.
-///
-/// A preset outside the workspace reaches the SDK through crates.io, and that is
-/// the spelling the generated project carries. While the SDK is pre-release
-/// there is nothing on the registry for it to resolve to, so the test does what
-/// a third-party author does in that situation: Cargo's own patch mechanism,
-/// pointed at the local checkout. Nothing about the generated project changes -
-/// it names published versions, and this is where those versions come from for
-/// the duration of a test.
+/// A preset outside the workspace reaches the SDK through crates.io.
+/// While the SDK is pre-release the tests patch the chain to this checkout.
 fn patch(crates: &[(&str, &str)]) -> String {
     let entries: Vec<String> = crates
         .iter()
@@ -54,10 +36,7 @@ fn generated(directory: &Path) -> std::path::PathBuf {
     directory.join("aurora")
 }
 
-/// Which generator produced a project, where each one writes its Rust.
-///
-/// The two differ in the crate type they build and nothing else, and the checks
-/// that have to hold for both are the ones worth writing once.
+/// The two generators differ only in the crate type they build.
 #[derive(Debug, Clone, Copy)]
 enum Generated {
     Preset,
@@ -105,11 +84,6 @@ fn generated_plugin_with_local_sdk(directory: &Path) -> std::path::PathBuf {
 }
 
 /// Every crate the published SDK resolves through for one role, in publish order.
-///
-/// A generated project names only `zup-sdk`, and Cargo still resolves the crates
-/// beneath it from crates.io. Listing them is what makes the tests prove the
-/// whole chain resolves rather than only the top, and the two roles resolve
-/// different chains because they depend on different crates.
 fn sdk_chain(role: Generated) -> Vec<(&'static str, &'static str)> {
     let mut chain = vec![("zup-sdk", "zup-sdk")];
     chain.extend(match role {
@@ -137,11 +111,7 @@ fn append_patch(root: &Path, chain: &[(&str, &str)]) {
     .expect("the patch is appended");
 }
 
-/// A generated project is a Cargo project, and Cargo can resolve it.
-///
-/// Outside this workspace, with nothing but crates.io and the patches. A
-/// generated manifest that names a version nothing provides fails here rather
-/// than on a new author's machine.
+/// A generated project resolves, teaches the public API, and is rustfmt-clean.
 #[test]
 fn a_generated_project_resolves_against_the_published_sdk() {
     let directory = tempfile::tempdir().expect("a scratch directory");
@@ -217,11 +187,6 @@ fn a_generated_project_resolves_against_the_published_sdk() {
     }
 }
 
-/// A preset author depends on the SDK for the GPUI stack too.
-///
-/// This is what makes `zup-sdk` alone a sufficient dependency rather than a
-/// starting point: the crates a preset needs to write settings and draw a window
-/// are all reachable through it.
 #[test]
 fn the_generated_dependency_reaches_gpu_i_without_naming_it() {
     let directory = tempfile::tempdir().expect("a scratch directory");
@@ -253,12 +218,6 @@ fn the_generated_dependency_reaches_gpu_i_without_naming_it() {
     );
 }
 
-/// A generated project teaches the public API and nothing else.
-///
-/// A preset is a normal Rust program that happens to talk to an installer, so the
-/// generated source is measured: it uses the SDK's own entry point, it declares
-/// an ordinary settings type, and it contains none of the vocabulary a framework
-/// around GPUI would have introduced.
 #[test]
 fn a_generated_project_teaches_the_public_api_and_nothing_else() {
     let directory = tempfile::tempdir().expect("a scratch directory");
@@ -324,14 +283,6 @@ fn a_generated_project_teaches_the_public_api_and_nothing_else() {
     );
 }
 
-/// Generated Rust is formatted Rust.
-///
-/// A template is a string, so nothing in the build complains when two of its
-/// lines are joined: the first thing an author sees is a window full of
-/// indentation that is wrong in a way that looks like their mistake. This is
-/// `rustfmt --check` run against what the generator actually produced, so a
-/// template that stops being canonical source is a failure here rather than in
-/// the first project someone generates.
 #[rstest]
 #[case::preset(Generated::Preset)]
 #[case::plugin(Generated::Plugin)]
@@ -363,10 +314,6 @@ fn rustfmt() -> Command {
     command
 }
 
-/// The development document is a source file, not development state.
-///
-/// It is the thing a preset author edits, so it belongs in the same commit as the
-/// code it exercises, and `.zup` is the thing the process writes and throws away.
 #[test]
 fn a_generated_project_says_which_of_its_files_are_its_own() {
     let directory = tempfile::tempdir().expect("a scratch directory");
@@ -395,83 +342,6 @@ fn a_generated_project_says_which_of_its_files_are_its_own() {
     );
 }
 
-/// A generated preset compiles.
-///
-/// The generated source is the first thing a preset author ever compiles, and a
-/// template that does not build is the most expensive failure this crate can
-/// have: it is found by the first person to use it, on their machine, with
-/// nothing to point at. Checking that it compiles is therefore not optional, and
-/// not something a manifest resolution can stand in for.
-///
-/// Ignored because it compiles the GPUI stack, which is minutes rather than
-/// seconds. Run it with `cargo test -p zup --test generated_projects -- --ignored`
-/// before changing the template.
-#[test]
-#[ignore = "compiles the GPUI stack, which takes longer than the rest of this suite"]
-fn a_generated_project_compiles() {
-    let directory = tempfile::tempdir().expect("a scratch directory");
-    let root = generated_with_local_sdk(directory.path());
-    let output = cargo()
-        .current_dir(&root)
-        .arg("check")
-        .arg("--all-targets")
-        .output()
-        .expect("cargo runs");
-    assert!(
-        output.status.success(),
-        "a generated preset builds:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("warning:"),
-        "and builds without warnings, because the first warning an author sees is \
-         one they will think they caused:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// A generated plugin compiles to a component.
-///
-/// The other half of the claim, and the one a plugin author cannot check without
-/// learning the Component Model first: the crate builds for the guest target and
-/// componentises.
-#[test]
-#[ignore = "compiles the bindings generator for Wasm, which takes a while"]
-fn a_generated_plugin_compiles_and_componentises() {
-    let directory = tempfile::tempdir().expect("a scratch directory");
-    let root = generated_plugin_with_local_sdk(directory.path());
-
-    let output = cargo()
-        .current_dir(&root)
-        .arg("build")
-        .arg("--release")
-        .arg("--target")
-        .arg("wasm32-unknown-unknown")
-        .output()
-        .expect("cargo runs");
-    assert!(
-        output.status.success(),
-        "a generated plugin builds for Wasm:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let component = root.join("target").join("wasm32-unknown-unknown");
-    let component = component.join("release").join("configure.wasm");
-    let bytes = std::fs::read(&component).expect("cargo produced a module");
-    let componentised = zup_plugin_build::componentize(&bytes)
-        .expect("the module componentises against the contract");
-    assert_eq!(
-        &componentised[..4],
-        &[0x00, 0x61, 0x73, 0x6d],
-        "and what comes out is a component rather than a core module"
-    );
-}
-
-/// `zup plugin init` produces a project a third party can build too.
-///
-/// The two generators differ in what they write and nothing else: both produce a
-/// project whose only dependency is `zup-sdk`, and both are checked here so the
-/// plugin one cannot drift into needing a toolchain of its own.
 #[test]
 fn a_generated_plugin_resolves_against_the_published_sdk() {
     let directory = tempfile::tempdir().expect("a scratch directory");

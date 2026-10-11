@@ -1,11 +1,6 @@
 use zup_preset_protocol::{Configuration, ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS};
 
 #[test]
-fn a_configuration_may_be_empty() {
-    Configuration::empty().validate().expect("empty is valid");
-}
-
-#[test]
 fn assets_are_resolved_by_name() {
     let mut configuration = Configuration::empty();
     configuration

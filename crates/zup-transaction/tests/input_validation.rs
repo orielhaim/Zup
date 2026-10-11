@@ -1,8 +1,3 @@
-//! Transaction input validation reports the resource that failed.
-//!
-//! Every error names a `TransactionResource`, so a caller can tell an install
-//! directory mismatch from a keyed-resource mismatch without matching on text.
-
 mod common;
 
 use zup_core::{
@@ -16,7 +11,6 @@ use zup_transaction::{
 
 use common::{digest, target, tpath};
 
-/// A target whose paths cannot be mistaken for the Windows ones under test.
 fn other_target() -> zup_core::TargetTriple {
     zup_core::TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap()
 }
@@ -74,8 +68,6 @@ fn install_directory_mismatch_names_the_install_directory() {
     );
 }
 
-/// A target mismatch anywhere in the operation set is reported against the
-/// resource that actually carries the bad path, not against the operation.
 #[test]
 fn target_mismatch_carries_the_owning_resource_key() {
     let staged = file_key("a.exe");
@@ -236,8 +228,6 @@ fn self_dependency_names_the_operation_key() {
     );
 }
 
-/// A retired removal is a valid backend dependency: regenerating derived
-/// state from the removed world is exactly what a refresh does.
 #[test]
 fn a_backend_apply_may_follow_a_removal() {
     use zup_transaction::{OperationId, compile_transaction};
@@ -267,9 +257,6 @@ fn a_backend_apply_may_follow_a_removal() {
     );
 }
 
-/// Without an explicit dependency a backend apply is not ordered against
-/// removals: the blanket edge that once forced it is gone, so ordering is
-/// stated where it is needed rather than inherited.
 #[test]
 fn a_backend_apply_without_dependencies_is_unordered_against_removals() {
     let id = BackendResourceId::new("fake.refresh").unwrap();

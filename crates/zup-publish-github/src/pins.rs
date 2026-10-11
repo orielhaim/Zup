@@ -82,9 +82,7 @@ pub fn pin(repository: &str) -> Result<ActionPin, PinError> {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PinError {
-    #[error(
-        "`{repository}` is not in {LOCK_PATH}; add it with `cargo xtask github-action-pins refresh --add {repository}`"
-    )]
+    #[error("`{repository}` is not in {LOCK_PATH}")]
     Unknown { repository: String },
 }
 
@@ -199,7 +197,7 @@ mod tests {
     fn an_unknown_action_is_an_error_rather_than_a_panic() {
         let error = pin("someone/does-not-exist").expect_err("the lock has no such entry");
         assert!(matches!(error, PinError::Unknown { .. }));
-        assert!(error.to_string().contains("github-action-pins refresh"));
+        assert!(error.to_string().contains("someone/does-not-exist"));
     }
 
     #[test]

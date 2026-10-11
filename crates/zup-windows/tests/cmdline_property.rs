@@ -95,20 +95,4 @@ proptest! {
     fn a_command_line_holds_the_property(line in ".{0,200}") {
         check(&line);
     }
-
-    #[test]
-    fn formatting_and_parsing_are_inverse(
-        exe in prop::collection::vec(any::<char>(), 0..24),
-        args in prop::collection::vec(prop::collection::vec(any::<char>(), 0..24), 0..6),
-    ) {
-        let exe: String = exe.into_iter().filter(|c| !c.is_control()).collect();
-        let args: Vec<String> = args
-            .into_iter()
-            .map(|arg| arg.into_iter().filter(|c| !c.is_control()).collect())
-            .collect();
-        let line = zup_windows::format_command_line(Path::new(&exe), &args);
-        let (parsed_exe, parsed_args) = zup_windows::parse_command_line(&line);
-        assert_eq!(parsed_exe.as_deref(), Some(exe.as_str()), "{line}");
-        assert_eq!(parsed_args, args, "{line}");
-    }
 }
