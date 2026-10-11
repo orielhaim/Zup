@@ -310,12 +310,7 @@ pub fn compose(
 
     #[cfg(unix)]
     {
-        let template_mode = std::fs::symlink_metadata(runtime)
-            .map_err(|error| CarrierError::io(runtime, error))?
-            .permissions()
-            .mode()
-            & 0o777;
-        std::fs::set_permissions(output, std::fs::Permissions::from_mode(template_mode))
+        std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| CarrierError::io(output, error))?;
     }
 
@@ -376,6 +371,27 @@ mod tests {
                 CarrierError::Package(_) | CarrierError::TargetMismatch { .. }
             ),
             "the composed footer must be readable: {error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_composed_carrier_is_executable_whatever_its_template_carries() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("a temp directory");
+        let runtime = runtime_file(directory.path(), "zup-installer");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o644))
+            .expect("strip the template");
+        let output = directory.path().join("Acme-Setup");
+        compose(&runtime, &output, b"pkg").expect("compose");
+        let mode = std::fs::metadata(&output)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "the installer is executable; the template's bits are not inherited"
         );
     }
 

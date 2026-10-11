@@ -322,7 +322,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
         variant: resolved.variant.id.clone(),
         manifest: resolved.variant.manifest.digest,
         runtime: runtime_descriptor.digest,
-        target: resolved.variant.target.clone(),
+        target: resolved.variant.target,
         frontend: resolved.variant.frontend.clone(),
         mode: HandoffMode::Install,
         scope: scope.to_string(),

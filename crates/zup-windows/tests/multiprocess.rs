@@ -151,7 +151,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
         pipe_name: pipe_name.clone(),
         expected_parent_pid: std::process::id(),
         expected_parent_sid: UserSid::current().unwrap().display().to_owned(),
-        target: plan.target.clone(),
+        target: plan.target,
         expected_plan_hash: plan_hash.clone(),
     };
     let zup_bin = worker_with_bundle(work_root, &worker.version);
@@ -187,7 +187,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
             message: Message::ParentHello(ParentHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id,
-                target: plan.target.clone(),
+                target: plan.target,
                 transaction_id: uuid::Uuid::now_v7(),
                 expected_plan_hash: plan_hash.clone(),
             }),
@@ -200,7 +200,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
             session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-                target: plan.target.clone(),
+                target: plan.target,
                 plan_json,
                 plan_hash,
                 app_id: "com.acme.app".into(),

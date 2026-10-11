@@ -309,7 +309,7 @@ pub fn opening(executable: &Path, launch: Launch) -> miette::Result<Opening> {
             PresetSource::Installed {
                 runtime,
                 directory,
-                target: installer.target.clone(),
+                target: installer.target,
             }
         }
         None => PresetSource::Composed {
@@ -791,7 +791,7 @@ fn target_plan(
     let build =
         package::target_plan(&package::open_bundle(executable).map_err(found)?).map_err(found)?;
     let installer = build.installer.clone();
-    let mut request = zup_plan::PlanRequest::new(installer.target.clone(), selection.scope);
+    let mut request = zup_plan::PlanRequest::new(installer.target, selection.scope);
     for component in &installer.components {
         if selection.components.contains(&component.id) {
             request.components.enable.insert(component.id.clone());
