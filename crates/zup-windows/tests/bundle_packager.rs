@@ -1,17 +1,22 @@
-use std::{fs, path::Path};
+use std::fs;
+#[cfg(windows)]
+use std::path::Path;
 
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_binary::{Executable, ProgramKind};
+#[cfg(windows)]
 use zup_build::TargetBuildPlan;
+#[cfg(windows)]
 use zup_bundle::{BundleWriter, PayloadSource};
 use zup_core::Frontend;
+#[cfg(windows)]
 use zup_manifest::TargetOverrides;
-use zup_windows::{
-    BundleError, EmbeddedBundle, build_self_contained_executable, embed_bundle_file, read_frontend,
-    validate_frontend,
-};
+use zup_windows::{BundleError, read_frontend, validate_frontend};
+#[cfg(windows)]
+use zup_windows::{EmbeddedBundle, build_self_contained_executable, embed_bundle_file};
 
+#[cfg(windows)]
 fn plan(root: &Path) -> TargetBuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
     fs::write(root.join("dist/a.bin"), b"payload").unwrap();
@@ -66,8 +71,10 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
     let root = TempDir::new().unwrap();
     let runtime = root.path().join("runtime.exe");
     fs::write(&runtime, bytes).unwrap();
-    let target =
-        zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("the host target");
+    // The bytes are a Windows PE image on every host that runs this test, so
+    // they match a Windows triple rather than the host's own: on Linux the
+    // host target is an ELF triple a PE image must not claim to be.
+    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a Windows target");
 
     let Some(frontend) = declared else {
         if !readable_target {

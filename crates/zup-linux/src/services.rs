@@ -22,6 +22,8 @@ pub const WANTED_BY: &str = "multi-user.target";
 
 pub const UNIT_PREFIX: &str = "zup-";
 
+pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
+
 const MAX_UNIT_LEN: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub struct DesiredService {
 
     pub source_path: String,
 
+    // Rendered for the Linux runtime; other hosts validate shapes, not bytes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub bytes: Vec<u8>,
 
     pub sha256: zup_core::Sha256Digest,
@@ -57,7 +61,7 @@ impl DesiredService {
             })?;
         debug_assert_eq!(size, bytes.len() as u64);
         Ok(Self {
-            source_path: format!("{}/{unit}", crate::machine::SYSTEMD_UNIT_DIR),
+            source_path: format!("{SYSTEMD_UNIT_DIR}/{unit}"),
             unit,
             bytes,
             sha256,
@@ -280,6 +284,8 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
+// Parsed back by the Linux runtime and by the render round-trip tests.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
     let mut description: Option<String> = None;

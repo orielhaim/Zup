@@ -52,8 +52,6 @@ zup-preset-dev.workspace = true
 zup-preset-protocol.workspace = true
 zup-preview.workspace = true
 zup-linux.workspace = true
-
-[target.'cfg(windows)'.dependencies]
 zup-windows.workspace = true
 
 [dev-dependencies]

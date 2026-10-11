@@ -4,7 +4,6 @@ use zup_automation::{
     Artifact, AutomationResult, ByteCount, Details, LogLevel, Publication, PublishStageDetails,
     StagedPackage,
 };
-#[cfg(windows)]
 use zup_core::InstallScope;
 
 use crate::cli::{PublishGithubCommand, PublishStageCommand};
@@ -253,25 +252,14 @@ fn plan_only_runtime(
             "Publish without `--thin`.",
         ));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (template, plan);
-        Err(crate::failure::error(
-            "zup.publish.unsupported_host",
-            "building a thin runtime requires a Windows build host",
-        ))
-    }
-    #[cfg(windows)]
-    {
-        zup_windows::plan_only_runtime_bytes(template, plan, &[])
-            .map(|(bytes, _)| bytes)
-            .map_err(|error| {
-                crate::failure::error(
-                    "zup.publish.thin_runtime_failed",
-                    format!("building the thin runtime: {error}"),
-                )
-            })
-    }
+    zup_windows::plan_only_runtime_bytes(template, plan, &[])
+        .map(|(bytes, _)| bytes)
+        .map_err(|error| {
+            crate::failure::error(
+                "zup.publish.thin_runtime_failed",
+                format!("building the thin runtime: {error}"),
+            )
+        })
 }
 
 fn stage_thin_installers(
@@ -297,22 +285,10 @@ fn stage_thin_installers(
             "Publish without `--thin`.",
         ));
     }
-    #[cfg(windows)]
-    {
-        stage_thin_windows(args, loaded, variants, tree, resolver, reporter)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (args, loaded, variants, tree, resolver, reporter);
-        Err(crate::failure::error(
-            "zup.publish.unsupported_host",
-            "staging thin installers requires a Windows build host",
-        ))
-    }
+    stage_thin_windows(args, loaded, variants, tree, resolver, reporter)
 }
 
-/// branch: a non-Windows host never compiles it, and the dispatcher above
-#[cfg(windows)]
+/// Thin installers are Windows dispatcher artifacts, composed like any other.
 fn stage_thin_windows(
     args: &PublishStageCommand,
     loaded: &LoadedProject,
@@ -438,17 +414,12 @@ fn stage_thin_windows(
                 |resolved| Ok(resolved.path),
             )?;
         let file = output.join(&graph.index().artifact.output);
-        #[cfg(windows)]
         zup_windows::compose_universal_executable(&dispatcher, &file, &graph).map_err(|error| {
             crate::failure::error(
                 "zup.publish.thin_unwritable",
                 format!("`{}`: {error}", file.display()),
             )
         })?;
-        #[cfg(not(windows))]
-        {
-            let _ = (&dispatcher, &file, &graph);
-        }
         crate::build::stamp_application_icon(&file, &loaded.build)?;
         written.push((label, file));
     }

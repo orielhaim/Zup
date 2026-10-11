@@ -1,6 +1,6 @@
 # Quick start
 
-This guide assumes `zup` is available on `PATH`.
+This guide assumes `zup` is on `PATH`.
 
 ## Create a project
 
@@ -8,7 +8,23 @@ This guide assumes `zup` is available on `PATH`.
 zup init --name Acme --app-id com.acme.desktop
 ```
 
-`zup init` writes an editable `zup.toml` and a source directory. The generated manifest is deliberately small.
+`zup init` writes an editable `zup.toml` and a source directory. Without flags it asks for the values; in a script pass them:
+
+```bash
+zup init --name Acme --app-id com.acme.desktop --version 1.0.0 \
+  --source dist --main Acme.exe --scope user --non-interactive
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--name`, `--app-id` | display name, reverse-DNS id (required) |
+| `--version` | starting version (default `0.1.0`) |
+| `--source` | payload directory (default `dist`) |
+| `--main` | main executable |
+| `--scope` | `user`, `machine`, `either` |
+| `--frontend` | `gui`, `console`, `headless` |
+| `--manifest` | where to write (default `zup.toml`) |
+| `--force` | replace an existing manifest |
 
 A minimal project looks like this:
 
@@ -43,8 +59,6 @@ zup check
 zup doctor
 ```
 
-`check` validates the manifest and the files it will ship. `doctor` checks whether the selected targets can be built on the current machine.
-
 Fix both before building.
 
 ## Preview the installer
@@ -53,9 +67,7 @@ Fix both before building.
 zup preview
 ```
 
-Preview opens the installer UI over a simulated machine. It does not install application files or register system resources.
-
-Use it to check application metadata, scope choices, components and the selected preset before producing an installer.
+It does not install anything. Use it to check metadata, scope choices, components and the selected preset before building.
 
 ## Build
 

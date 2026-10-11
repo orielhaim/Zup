@@ -11,9 +11,8 @@ use zup_protocol::{
 };
 
 use crate::error::IpcError;
-use crate::machine::{
-    MachineRoots, authorize_machine_destination, authorize_machine_install_directory,
-};
+use crate::locations::MachineRoots;
+use crate::machine::{authorize_machine_destination, authorize_machine_install_directory};
 use crate::socket::{
     HANDSHAKE_TIMEOUT, PeerPin, peer_alive, peer_identity, pin_peer, recv_envelope, send_envelope,
 };

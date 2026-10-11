@@ -1,11 +1,17 @@
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use thiserror::Error;
 use typed_path::{Utf8Component, Utf8WindowsComponent};
 
 use crate::shortcut_name::is_reserved_device_stem;
-use zup_core::{TargetOperatingSystem, TargetTriple};
-use zup_platform::{TargetPath, TargetPathError};
+use zup_core::TargetOperatingSystem;
+#[cfg(windows)]
+use zup_core::TargetTriple;
+use zup_platform::TargetPath;
+#[cfg(windows)]
+use zup_platform::TargetPathError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetPathValidationError {
@@ -55,10 +61,12 @@ pub fn to_host_path(path: &TargetPath) -> Result<PathBuf, TargetPathLoweringErro
     Ok(PathBuf::from(path.as_str()))
 }
 
+#[cfg(windows)]
 pub(crate) fn host_path(path: &TargetPath) -> PathBuf {
     to_host_path(path).expect("Windows backend received an invalid target path")
 }
 
+#[cfg(windows)]
 pub(crate) fn target_path_from_host(
     path: &Path,
     target: &TargetTriple,
@@ -172,6 +180,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn strips_extended_host_prefix_before_target_parsing() {
         let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();

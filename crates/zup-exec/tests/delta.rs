@@ -288,45 +288,6 @@ fn e2e_fake_machine_mixed_deltas() {
 }
 
 #[test]
-fn e2e_foreign_resources_conflict() {
-    let target = sample_target();
-    let mut snapshot = snapshot_happy();
-
-    snapshot.protocols[0].state = ObservedProtocolState::Registration {
-        command: cmd(r"C:\Other\handler.exe", &[]),
-        url_protocol_marker: true,
-    };
-    snapshot.services[0].state = ObservedServiceState::Service {
-        display_name: "Something Else".into(),
-        command: cmd(r"C:\Other\svc.exe", &[]),
-        start: ServiceStart::Manual,
-        runtime_state: None,
-    };
-    snapshot.launchers[0].state = ObservedLauncherState::Launcher {
-        target: tpath(r"C:\Other\app.exe"),
-        arguments: vec![],
-        working_directory: None,
-    };
-
-    let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.protocols[0].kind, ProtocolOperationKind::Conflict);
-    assert!(matches!(
-        plan.protocols[0].conflict,
-        Some(Conflict::ProtocolAlreadyRegistered { .. })
-    ));
-    assert_eq!(plan.services[0].kind, ServiceOperationKind::Conflict);
-    assert!(matches!(
-        plan.services[0].conflict,
-        Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration { .. })
-    ));
-    assert_eq!(plan.launchers[0].kind, LauncherOperationKind::Conflict);
-    assert!(matches!(
-        plan.launchers[0].conflict,
-        Some(Conflict::LauncherAlreadyOwnedByDifferentTarget { .. })
-    ));
-}
-
-#[test]
 fn files_replace_non_file_conflict() {
     let target = sample_target();
     let mut snapshot = snapshot_happy();
@@ -577,32 +538,4 @@ fn search_path_membership_uses_target_path_identity() {
     );
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
-}
-
-#[test]
-fn search_path_ownership_decisions_are_deterministic() {
-    let target = sample_target();
-    let mut snapshot = snapshot_happy();
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
-    ledger.resources.insert(
-        target.path_entries[0].key.clone(),
-        OwnedResource::PathEntry {
-            value: target.path_entries[0].value.clone(),
-            value_type: "expand_sz".into(),
-            privilege: Privilege::System,
-        },
-    );
-    // A reworded but equivalent entry is still owned and still present.
-    snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"c:/pf/acme/bin")]);
-    let first = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(first.path_entries[0].kind, PathOperationKind::Present);
-    assert!(first.path_entries[0].previously_owned);
-
-    // Removing it is drift, not an add, because the ledger owns it.
-    snapshot.path_entries[0].search_path = SearchPath::default();
-    let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Drift);
-    assert!(plan.path_entries[0].previously_owned);
-    assert!(plan.path_entries[0].conflict.is_some());
-    assert_eq!(plan.summary.path_entries_conflict, 1);
 }

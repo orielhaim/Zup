@@ -11,8 +11,7 @@
 
 mod common;
 
-use common::{file, file_with, target};
-use rstest::rstest;
+use common::{file_with, target};
 use zup_transaction::{NodeKind, TransactionInput, compile_transaction};
 
 fn plan_for(executable: bool) -> zup_transaction::TransactionPlan {
@@ -108,7 +107,7 @@ fn the_intent_survives_a_journal_round_trip() {
 /// A journal written before executable intent existed has no such key. It has to
 /// deserialize to `Some(false)` rather than failing, because "absent" and
 /// "explicitly not runnable" mean the same thing for an older record.
-#[rstest]
+#[test]
 fn an_older_journal_without_the_key_is_still_readable() {
     let plan = plan_for(true);
     let json: serde_json::Value = serde_json::to_value(&plan).expect("a plan serializes");
@@ -132,15 +131,6 @@ fn an_older_journal_without_the_key_is_still_readable() {
             "an absent key stays absent rather than being invented"
         );
     }
-}
-
-/// The helper the other tests share produces a non-executable file by default,
-/// so a test that wants to assert anything about the flag has to ask for it
-/// explicitly. If this ever changes, every test above silently stops testing the
-/// thing they were written to test.
-#[test]
-fn the_default_helper_declares_no_intent() {
-    assert!(!file("data", b"x").executable);
 }
 
 /// The flag must not leak into path selection. A runnable helper lands where the

@@ -113,12 +113,22 @@ fn composition(
     if borrowed.iter().any(|variant| {
         variant.target().operating_system() == zup_core::TargetOperatingSystem::Linux
     }) {
+        let linux = loaded
+            .selected_targets
+            .iter()
+            .filter(|config| {
+                config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
+            })
+            .map(|config| config.profile.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Some(Composition {
             composable: false,
             dimension: Some(Identifier::fixed("platform")),
             detail: format!(
-                "{names} ship one self-contained Linux installer each and cannot be composed: \
-                 build them separately with `zup build --target <profile>`"
+                "{linux} ship one self-contained Linux installer each and cannot be composed \
+                 into a dispatcher artifact: build them separately with `zup build --target \
+                 <profile>`"
             ),
         });
     }

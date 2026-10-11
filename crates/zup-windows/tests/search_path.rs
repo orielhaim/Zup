@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 use std::collections::BTreeMap;
 
 use zup_core::{Privilege, ResourceKey, SelectedScope, TargetTriple};

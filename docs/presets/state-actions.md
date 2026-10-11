@@ -1,9 +1,6 @@
 # State and actions
 
-A preset renders the current `Snapshot` and sends typed `Action` requests.
-
-That is the whole control model. Do not infer installer state from which button
-was last pressed.
+A preset renders the current `Snapshot` and sends typed `Action` requests. Do not infer installer state from which button was last pressed.
 
 ## Snapshot
 
@@ -32,10 +29,7 @@ for component in snapshot.surface.components() {
 }
 ```
 
-`session.state()` is a GPUI entity, so observing it redraws the view when the
-host publishes a new one. There is no polling and no reconciliation: a snapshot
-is the whole state, so a preset that starts late or missed a message still renders
-correctly from what it was handed.
+`session.state()` is a GPUI entity: observing it redraws the view when the host publishes. A snapshot is the whole state, so a preset that missed a message still renders correctly.
 
 ## Actions
 
@@ -58,17 +52,8 @@ session.send(Action::Install);
 | Support | `OpenLog`, `CopyDiagnostics` |
 | Finish | `Launch`, `Close` |
 
-Actions are intent, not interaction. There is no "button was pressed", no widget
-id and no generic command channel. The host validates every action against the
-state it owns, so sending `Install` twice does not start two installations, and a
-preset should enable controls from the snapshot rather than keep a lifecycle
-state machine of its own.
+Actions are intent, not interaction. The host validates every action, so sending `Install` twice does not start two installations. Enable controls from the snapshot rather than keeping a lifecycle state machine.
 
 ## Component groups
 
 Render component groups from the snapshot rather than re-reading `zup.toml`.
-Groups carry display metadata - `label`, `description`, `prominence`, `selection`
-- plus the component ids they contain.
-
-`prominence` is product intent, not a required layout. A preset may present
-primary and secondary groups differently as long as the choice stays clear.

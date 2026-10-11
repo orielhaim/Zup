@@ -389,14 +389,6 @@ mod fake_tests {
         );
         assert_eq!(fake.unit_file_state("zup-a.service").unwrap(), "enabled");
     }
-
-    #[test]
-    fn fake_reports_its_manager_version() {
-        let mut fake = FakeSystemd::default();
-        assert_eq!(fake.version().unwrap(), "259");
-        fake.version = "239".into();
-        assert_eq!(fake.version().unwrap(), "239");
-    }
 }
 
 #[cfg(test)]

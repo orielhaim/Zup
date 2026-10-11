@@ -17,7 +17,7 @@ options:
     --host <name>        build host whose packages to emit
     --format <format>    text or cargo-args
     --profile <name>     cargo profile to build and stage beside (default: dev)
-    --target <triple>      cross-build target for `toolchain build` (Linux only)
+    --target <triple>      cross-build target for `toolchain build` (a Windows or Linux triple)
     --out <dir>          where to write the packaged release
     --material <dir>     release material to test (default: target/release-material/<version>)
     --work <dir>         an empty directory to run in (default: a fresh temp directory)

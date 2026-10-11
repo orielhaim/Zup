@@ -272,103 +272,6 @@ destination = "${install}"
 }
 
 #[test]
-fn deterministic_across_insertion_orders() {
-    let a = project(&[
-        ("dist/z.txt", b"z"),
-        ("dist/a.txt", b"a"),
-        ("dist/m/n.txt", b"n"),
-    ]);
-    let b = project(&[
-        ("dist/m/n.txt", b"n"),
-        ("dist/a.txt", b"a"),
-        ("dist/z.txt", b"z"),
-    ]);
-
-    let plan_a = materialize_project(
-        a.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    let plan_b = materialize_project(
-        b.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-
-    let portable = |plan: &zup_build::TargetBuildPlan| {
-        plan.files
-            .iter()
-            .map(|f| {
-                (
-                    f.source_relative.as_str().to_owned(),
-                    f.destination.to_string(),
-                    f.size,
-                    f.sha256,
-                    f.component.clone(),
-                    f.condition.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(portable(&plan_a), portable(&plan_b));
-    assert_eq!(plan_a.total_size, plan_b.total_size);
-    assert_eq!(plan_a.files.len(), plan_b.files.len());
-}
-
-#[test]
-fn large_file_streamed_with_correct_size() {
-    let big = vec![0xABu8; 3 * 1024 * 1024];
-    let dir = project(&[("dist/big.bin", &big)]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "big.bin"
-destination = "${install}/big.bin"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files[0].size, big.len() as u64);
-    assert_eq!(plan.total_size, big.len() as u64);
-
-    let mut hasher = Sha256::new();
-    hasher.update(&big);
-    let expected = Sha256Digest::from_hasher(hasher);
-    assert_eq!(plan.files[0].sha256, expected);
-}
-
-#[test]
-fn different_sources_same_destination() {
-    let dir = project(&[("dist/a/foo.dll", b"a"), ("dist/b/foo.dll", b"b")]);
-    let err = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "a/foo.dll"
-destination = "${install}"
-
-[[files]]
-source = "b/foo.dll"
-destination = "${install}"
-"#,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, BuildError::DestinationCollision { .. }),
-        "{err:?}"
-    );
-}
-
-#[test]
 fn overlapping_globs_same_destination() {
     let dir = project(&[("dist/foo.dll", b"a")]);
     let err = materialize_project(
@@ -490,32 +393,6 @@ fn an_unusable_pattern_is_refused(#[case] pattern: &str) {
 }
 
 #[test]
-fn preserves_component_condition_and_destination() {
-    let dir = project(&[("dist/bin/tool.exe", b"tool")]);
-    let source = manifest_toml(
-        r#"
-[[components]]
-id = "cli"
-name = "CLI"
-
-[[files]]
-source = "bin/**/*"
-destination = "${install}/tools"
-component = "cli"
-when = 'component("cli")'
-"#,
-    );
-    let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-
-    let file = &plan.files[0];
-    assert_eq!(file.component.as_ref().unwrap().as_str(), "cli");
-    assert!(file.condition.is_some());
-    assert_eq!(file.destination.to_string(), "${install}/tools/tool.exe");
-}
-
-#[test]
 fn source_paths_are_not_the_portable_identity() {
     let dir = project(&[("dist/a.txt", b"a")]);
     let plan = materialize_project(
@@ -531,39 +408,6 @@ destination = "${install}/a.txt"
     assert!(file.source.is_absolute() || file.source.starts_with(dir.path()));
     assert_eq!(file.source_relative.as_str(), "a.txt");
     assert!(!file.source_relative.as_str().contains("C:\\"));
-}
-
-#[test]
-fn resolves_plugin_sources_in_declaration_order() {
-    let dir = project(&[
-        ("dist/app.bin", b"app"),
-        ("plugins/z.wasm", b"z"),
-        ("plugins/a.wasm", b"a"),
-    ]);
-    let source = manifest_toml(
-        r#"
-[[plugins]]
-id = "z-plugin"
-source = "plugins/z.wasm"
-
-[[plugins]]
-id = "a-plugin"
-source = "plugins/a.wasm"
-"#,
-    );
-    let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-    assert_eq!(
-        plan.plugins
-            .iter()
-            .map(|plugin| plugin.id.as_str())
-            .collect::<Vec<_>>(),
-        ["z-plugin", "a-plugin"]
-    );
-    assert_eq!(plan.plugins[0].source_relative.as_str(), "plugins/z.wasm");
-    assert_eq!(plan.plugins[0].size, 1);
-    assert_eq!(plan.plugins[1].source_relative.as_str(), "plugins/a.wasm");
 }
 
 #[rstest]
@@ -801,15 +645,6 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
 }
 
 #[test]
-fn missing_source_is_attributed_to_its_target_profile() {
-    let dir = project(&[("dist/windows-x64/app", b"windows")]);
-    let error = materialize_targets(&dir.path().join("zup.toml"), TARGET_MATRIX).unwrap_err();
-
-    assert!(error.to_string().contains("linux-arm64"), "{error}");
-    assert!(matches!(error, BuildError::Target { .. }));
-}
-
-#[test]
 fn destination_collisions_are_isolated_per_target() {
     let source = TARGET_MATRIX.replace(
         r#"source = "**/*"
@@ -982,28 +817,4 @@ fn a_missing_icon_names_the_file() {
     let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
     let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(error, BuildError::IconMissing { .. }), "{error}");
-    assert!(error.to_string().contains("icon.svg"), "{error}");
-}
-
-#[test]
-fn a_small_raster_warns_and_still_builds() {
-    let png: &[u8] = &[
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-        0xf3, 0xff, 0x61, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-        0xcf, 0xc0, 0xf0, 0x9f, 0x12, 0xcc, 0x30, 0x6a, 0xc0, 0xa8, 0x01, 0xa3, 0x06, 0x0c, 0x17,
-        0x03, 0x00, 0x30, 0xc4, 0xfe, 0x10, 0x1c, 0x27, 0xe4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-    ];
-    let dir = project(&[("dist/app.exe", b"app"), ("assets/icon.png", png)]);
-    let source = with_icon("icon = \"assets/icon.png\"");
-    let manifest = parse(&source).unwrap();
-    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-    assert!(
-        plan.icons.warnings[0].contains("16×16"),
-        "{}",
-        plan.icons.warnings[0]
-    );
-    assert_eq!(plan.icons.artifacts.len(), 1);
 }

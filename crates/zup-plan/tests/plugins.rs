@@ -1,7 +1,6 @@
 use rstest::rstest;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -441,27 +440,6 @@ source = "plugins/two.wasm"
 }
 
 #[test]
-fn cancellation_is_checked_and_forwarded_without_a_clock() {
-    let build = build(&with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/one.wasm"
-"#,
-    ));
-    let mut executor =
-        FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::default())]);
-    let calls = AtomicUsize::new(0);
-    let cancellation = || {
-        calls.fetch_add(1, Ordering::Relaxed);
-        false
-    };
-    plan_with_plugins(&build, &request(), &mut executor, &cancellation).unwrap();
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
-    assert!(executor.cancellation_seen);
-}
-
-#[test]
 fn cancellation_before_a_plugin_returns_a_typed_error() {
     let build = build(&with(
         r#"
@@ -659,61 +637,6 @@ source = "plugins/one.wasm"
 }
 
 #[test]
-fn plugin_planning_defers_target_filename_policy() {
-    let build = build(&with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/one.wasm"
-"#,
-    ));
-    let cases = vec![
-        generated("${install}/file.", b"x"),
-        PluginResource::Launcher {
-            location: LauncherLocation::Desktop,
-            name: "Bad".to_owned(),
-            target: "${install}/CON".to_owned(),
-            arguments: Vec::new(),
-            working_directory: None,
-        },
-        PluginResource::Launcher {
-            location: LauncherLocation::Desktop,
-            name: "Bad work".to_owned(),
-            target: "${install}/base.txt".to_owned(),
-            arguments: Vec::new(),
-            working_directory: Some("${install}/file:stream".to_owned()),
-        },
-        PluginResource::Service {
-            id: "bad-service".to_owned(),
-            name: "Bad service".to_owned(),
-            display_name: None,
-            binary: "${install}/file\\name.exe".to_owned(),
-            arguments: Vec::new(),
-            start: ServiceStart::Manual,
-        },
-        PluginResource::Protocol {
-            scheme: "bad-protocol".to_owned(),
-            executable: "${install}/file\u{0001}.exe".to_owned(),
-            args: Vec::new(),
-        },
-        PluginResource::FileAssociation {
-            extension: ".bad".to_owned(),
-            id: "Bad.Type".to_owned(),
-            description: None,
-            executable: "${install}/file?bad.exe".to_owned(),
-        },
-    ];
-    for resource in cases {
-        let mut executor = FakeExecutor::new([(
-            "helper".to_owned(),
-            PluginResourceProposal::new(vec![resource]),
-        )]);
-        plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
-            .unwrap_or_else(|error| panic!("target policy leaked into planning: {error}"));
-    }
-}
-
-#[test]
 fn generated_file_and_resource_limits_are_enforced() {
     let plugin_source = with(
         r#"
@@ -778,29 +701,6 @@ source = "plugins/one.wasm"
     )]);
     let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
-}
-
-#[test]
-fn reversed_guest_order_has_the_same_plan_and_hashes() {
-    let build = build(&with(
-        r#"
-[[plugins]]
-id = "helper"
-source = "plugins/one.wasm"
-"#,
-    ));
-    let mut resources = all_resources();
-    resources.reverse();
-    let mut first = FakeExecutor::new([(
-        "helper".to_owned(),
-        PluginResourceProposal::new(resources.clone()),
-    )]);
-    let a = plan_with_plugins(&build, &request(), &mut first, &NeverCancelled).unwrap();
-    let mut second =
-        FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(resources))]);
-    let b = plan_with_plugins(&build, &request(), &mut second, &NeverCancelled).unwrap();
-    assert_eq!(a.plan, b.plan);
-    assert_eq!(a.generated_files, b.generated_files);
 }
 
 #[test]

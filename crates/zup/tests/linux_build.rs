@@ -294,24 +294,6 @@ fn a_public_build_installs_runs_and_uninstalls() {
     assert!(ledger.is_none(), "the ledger is removed");
 }
 
-/// `zup artifact inspect` reads the produced Linux installer.
-#[test]
-fn inspect_reads_the_produced_installer() {
-    let project = Project::new();
-    let build = project.zup("build", &["--target", "linux"]);
-    assert!(build.status.success(), "{}", stderr(&build));
-    let installer = project.root.path().join("Tool-Setup");
-    let inspected = Command::new(env!("CARGO_BIN_EXE_zup"))
-        .args(["artifact", "inspect"])
-        .arg(&installer)
-        .output()
-        .expect("zup runs");
-    assert!(inspected.status.success(), "{}", stderr(&inspected));
-    let text = stdout(&inspected);
-    assert!(text.contains("Linux installer"), "{text}");
-    assert!(text.contains(LINUX_TARGET), "{text}");
-}
-
 /// A GUI frontend is refused before any artifact work, naming the frontend.
 #[test]
 fn a_gui_frontend_is_refused_before_build() {

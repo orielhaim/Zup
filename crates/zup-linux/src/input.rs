@@ -206,7 +206,7 @@ fn compile_files_only(
 }
 
 pub struct ServiceCompilation<'a> {
-    pub roots: &'a crate::machine::MachineRoots,
+    pub roots: &'a crate::locations::MachineRoots,
 
     pub systemd: &'a crate::machine::SystemdRoots,
 
@@ -466,7 +466,7 @@ mod override_tests {
 fn validate_service_binary(
     op: &zup_exec::ServiceOperation,
     target_files: &std::collections::BTreeMap<String, bool>,
-    roots: &crate::machine::MachineRoots,
+    roots: &crate::locations::MachineRoots,
     unit: &str,
 ) -> Result<(), PlanError> {
     crate::service_ops::validate_executable(&op.command, target_files, roots, 0, false)
@@ -525,11 +525,11 @@ mod tests {
 
     fn isolated() -> (
         tempfile::TempDir,
-        crate::machine::MachineRoots,
+        crate::locations::MachineRoots,
         crate::machine::SystemdRoots,
     ) {
         let base = tempfile::tempdir().expect("an isolated base");
-        let roots = crate::machine::MachineRoots::new(
+        let roots = crate::locations::MachineRoots::new(
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
@@ -649,7 +649,7 @@ mod tests {
     fn compile(
         plan: &TargetPlan,
         execution: &ExecutionPlan,
-        roots: &crate::machine::MachineRoots,
+        roots: &crate::locations::MachineRoots,
         systemd: &crate::machine::SystemdRoots,
         manager: &mut dyn crate::systemd::SystemdManager,
         force: bool,

@@ -7,7 +7,8 @@ use zup_platform::TargetPlan;
 
 use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
-use crate::machine::{MachineRoots, SystemdRoots, authorize_systemd_unit};
+use crate::locations::MachineRoots;
+use crate::machine::{SystemdRoots, authorize_systemd_unit};
 use crate::services::{parse_unit, unit_name};
 use crate::systemd::{SystemdManager, UnitChange};
 

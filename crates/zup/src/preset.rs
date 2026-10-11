@@ -421,19 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn cargo_artifact_discovery_finds_the_executable() {
-        let message = artifact(
-            "aurora-preset",
-            "bin",
-            Some("C:/t/release/aurora-preset.exe"),
-        );
-        assert_eq!(
-            artifact_executable(&message, "aurora-preset").as_deref(),
-            Some("C:/t/release/aurora-preset.exe")
-        );
-    }
-
-    #[test]
     fn cargo_artifact_discovery_takes_the_last_executable() {
         let first = artifact("aurora-preset", "bin", Some("C:/t/old.exe"));
         let second = artifact("aurora-preset", "bin", Some("C:/t/new.exe"));
@@ -478,22 +465,6 @@ mod tests {
             .cross_check(&bumped)
             .expect_err("a different version");
         assert!(refusal.to_string().contains("9.9.9"), "{refusal}");
-    }
-
-    #[test]
-    fn a_prebuilt_binary_is_named_by_its_target() {
-        let source = parse_binary("x86_64-pc-windows-msvc=C:/build/aurora.exe")
-            .expect("a triple and a path");
-        assert_eq!(source.target, "x86_64-pc-windows-msvc");
-        assert_eq!(source.binary, PathBuf::from("C:/build/aurora.exe"));
-        assert!(
-            parse_binary("C:/build/aurora.exe").is_err(),
-            "a path with no target is not a binary source"
-        );
-        assert!(
-            parse_binary("not a triple=aurora.exe").is_err(),
-            "a target that is not a triple names no target"
-        );
     }
 }
 

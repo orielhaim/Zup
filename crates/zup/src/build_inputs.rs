@@ -348,18 +348,13 @@ pub fn default_build_target() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSupport {
     Ready,
-    HostBackendUnavailable,
     NotImplemented,
 }
 
 impl BackendSupport {
-    pub fn reason(self, target: &TargetTriple) -> Option<String> {
+    pub fn reason(self, _target: &TargetTriple) -> Option<String> {
         match self {
             Self::Ready => None,
-            Self::HostBackendUnavailable => Some(format!(
-                "backend unavailable: lowering `{target}` requires a {} build host",
-                platform_name(target.operating_system())
-            )),
             Self::NotImplemented => Some(
                 "backend not implemented: no implemented backend answers for this target's \
                  platform"
@@ -375,30 +370,13 @@ impl BackendSupport {
 }
 
 pub fn backend_support(target: &TargetTriple) -> BackendSupport {
-    let implemented = matches!(
+    if matches!(
         target.operating_system(),
         TargetOperatingSystem::Windows | TargetOperatingSystem::Linux
-    );
-    if !implemented {
-        return BackendSupport::NotImplemented;
-    }
-    if host_can_lower(target.operating_system()) {
+    ) {
         BackendSupport::Ready
     } else {
-        BackendSupport::HostBackendUnavailable
-    }
-}
-
-const fn host_can_lower(os: TargetOperatingSystem) -> bool {
-    matches!(os, TargetOperatingSystem::Linux)
-        || (matches!(os, TargetOperatingSystem::Windows) && cfg!(windows))
-}
-
-fn platform_name(os: TargetOperatingSystem) -> String {
-    match os {
-        TargetOperatingSystem::Windows => "windows".to_owned(),
-        TargetOperatingSystem::Linux => "linux".to_owned(),
-        other => other.to_string(),
+        BackendSupport::NotImplemented
     }
 }
 
@@ -438,21 +416,18 @@ fn check_linux_lowering(
         zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
         zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
     };
-    #[cfg(target_os = "linux")]
-    {
-        for scope in &scopes {
-            let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
-            let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
-                miette::miette!("semantic plan for target `{}`: {error}", config.target)
-            })?;
-            zup_linux::resolve_target(
-                &install,
-                &zup_linux::LinuxInstallLocationResolver::default(),
-            )
-            .map_err(|error| {
-                miette::miette!("Linux lowering for target `{}`: {error}", config.target)
-            })?;
-        }
+    for scope in &scopes {
+        let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
+        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
+            miette::miette!("semantic plan for target `{}`: {error}", config.target)
+        })?;
+        zup_linux::resolve_target(
+            &install,
+            &zup_linux::LinuxInstallLocationResolver::for_build(),
+        )
+        .map_err(|error| {
+            miette::miette!("Linux lowering for target `{}`: {error}", config.target)
+        })?;
     }
     Ok(scopes)
 }
@@ -467,29 +442,20 @@ fn check_windows_lowering(
         zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
     };
 
-    #[cfg(not(windows))]
-    {
-        let _ = (build, scopes);
-        Err(miette::miette!(
-            "Windows lowering for target `{}` requires a Windows build host",
-            config.target
-        ))
+    for scope in &scopes {
+        let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
+        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
+            miette::miette!("semantic plan for target `{}`: {error}", config.target)
+        })?;
+        zup_windows::resolve_target(
+            &install,
+            &zup_windows::WindowsTargetContext::for_build(*scope),
+        )
+        .map_err(|error| {
+            miette::miette!("Windows lowering for target `{}`: {error}", config.target)
+        })?;
     }
-
-    #[cfg(windows)]
-    {
-        for scope in &scopes {
-            let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
-            let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
-                miette::miette!("semantic plan for target `{}`: {error}", config.target)
-            })?;
-            zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(*scope))
-                .map_err(|error| {
-                    miette::miette!("Windows lowering for target `{}`: {error}", config.target)
-                })?;
-        }
-        Ok(scopes)
-    }
+    Ok(scopes)
 }
 
 pub fn sanitized_file_stem(value: &str, fallback: &str) -> String {
@@ -550,8 +516,7 @@ mod tests {
                 .reason(&macos)
                 .unwrap()
                 .contains("backend not implemented"),
-            "a platform no backend owns has no backend *anywhere*, which is a different answer \
-             from one this host cannot run"
+            "a platform no backend owns has no backend *anywhere*"
         );
         assert!(
             backend_support(&macos)
@@ -559,31 +524,17 @@ mod tests {
                 .unwrap()
                 .starts_with("unsupported backend for target")
         );
-        let windows_support = backend_support(&windows);
         assert_eq!(
-            windows_support,
-            if cfg!(windows) {
-                BackendSupport::Ready
-            } else {
-                BackendSupport::HostBackendUnavailable
-            },
-            "a Windows target is a question about the build host, not about whether a backend \
-             exists"
+            backend_support(&windows),
+            BackendSupport::Ready,
+            "a Windows target builds on any host: composition is target-selected, never host-selected"
         );
-        if let Some(reason) = windows_support.reason(&windows) {
-            assert!(reason.contains("backend unavailable"), "{reason}");
-            assert!(
-                !reason.contains("WindowsBackend"),
-                "the diagnostic names the host and the target, never a variant"
-            );
-        }
-
-        let linux_support = backend_support(&linux);
-        assert_eq!(linux_support, BackendSupport::Ready);
-        assert!(
-            linux_support.reason(&linux).is_none(),
+        assert_eq!(
+            backend_support(&linux),
+            BackendSupport::Ready,
             "a ready backend has no reason"
         );
+        assert!(backend_support(&linux).reason(&linux).is_none());
     }
 
     fn empty_resolver() -> ToolchainResolver {

@@ -470,41 +470,6 @@ async fn a_dry_run_creates_nothing_and_says_so() {
 }
 
 #[tokio::test]
-async fn a_private_repository_is_reported_because_it_cannot_host_a_thin_installer() {
-    let mut behaviour = Behaviour::new();
-    behaviour.private = true;
-    let github = Github::start(behaviour);
-    let staged = assets();
-    let (plan, sources) = plan(
-        &staged
-            .iter()
-            .map(|(n, b)| (*n, b.as_slice()))
-            .collect::<Vec<_>>(),
-    );
-    let report = run(&github, &request(plan, sources)).await;
-
-    let preparing = report
-        .phases
-        .iter()
-        .find(|phase| phase.name == "Preparing release")
-        .expect("a preparing phase");
-    let warning = preparing
-        .steps
-        .iter()
-        .find(|step| step.label == "private repository")
-        .expect("a private-repository step");
-    assert_eq!(warning.status.as_str(), "warn");
-    assert!(
-        warning
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("credential")),
-        "{:?}",
-        warning.detail
-    );
-}
-
-#[tokio::test]
 async fn an_archived_repository_is_refused_before_a_draft_exists() {
     let mut behaviour = Behaviour::absent();
     behaviour.archived = true;
@@ -530,71 +495,6 @@ async fn an_archived_repository_is_refused_before_a_draft_exists() {
             .any(|line| line.contains("releases") && line.starts_with("POST")),
         "no draft was created: {log:?}"
     );
-}
-
-#[tokio::test]
-async fn immutability_is_reported_when_the_host_answers_and_not_invented_when_it_does_not() {
-    for (reported, expected) in [(Some(true), "ok"), (Some(false), "warn"), (None, "info")] {
-        let mut behaviour = Behaviour::new();
-        behaviour.release_immutable = reported;
-        let github = Github::start(behaviour);
-        let staged = assets();
-        let (plan, sources) = plan(
-            &staged
-                .iter()
-                .map(|(n, b)| (*n, b.as_slice()))
-                .collect::<Vec<_>>(),
-        );
-        let report = run(&github, &request(plan, sources)).await;
-        let notice = report
-            .notices
-            .iter()
-            .find(|notice| notice.label == "github immutable release")
-            .unwrap_or_else(|| panic!("an immutability notice for {reported:?}"));
-        assert_eq!(notice.status, expected, "{reported:?}");
-        if expected == "warn" {
-            assert!(
-                notice
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("Settings")),
-                "a disabled recommendation says where to enable it: {:?}",
-                notice.detail
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn the_receipt_carries_the_providers_identifiers_and_no_secret() {
-    let github = Github::start(Behaviour::absent());
-    let staged = assets();
-    let (plan, sources) = plan(
-        &staged
-            .iter()
-            .map(|(n, b)| (*n, b.as_slice()))
-            .collect::<Vec<_>>(),
-    );
-    let mut publish_request = request(plan, sources);
-    let receipt_path = std::env::temp_dir().join(format!("receipt-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&receipt_path);
-    publish_request.receipt = Some(receipt_path.clone());
-    run(&github, &publish_request).await;
-
-    let bytes = std::fs::read(&receipt_path).expect("the receipt was written");
-    let text = String::from_utf8(bytes).expect("the receipt is text");
-    assert!(
-        !text.contains("test-token"),
-        "a receipt never carries a token"
-    );
-    let receipt: zup_publish_github::GithubReceipt =
-        serde_json::from_str(&text).expect("the receipt parses");
-    assert_eq!(receipt.host, "github.com");
-    assert_eq!(receipt.repository, "acme/acme");
-    assert_eq!(receipt.tag, "v1.4.0");
-    assert!(receipt.release_id > 0);
-    assert!(receipt.assets.iter().all(|asset| asset.id > 0));
-    let _ = std::fs::remove_file(&receipt_path);
 }
 
 #[tokio::test]

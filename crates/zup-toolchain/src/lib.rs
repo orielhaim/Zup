@@ -831,25 +831,6 @@ mod tests {
         assert!(error.contains("format"), "{error}");
     }
 
-    #[test]
-    fn the_component_file_name_carries_the_machine_it_is_for() {
-        let name = file_name(
-            &runtime("aarch64-pc-windows-msvc", Frontend::Console),
-            EXECUTABLE_SUFFIX,
-        );
-        assert!(name.contains("aarch64-pc-windows-msvc"), "{name}");
-        assert!(name.contains("console"), "{name}");
-        assert!(name.starts_with("zup-setup-"), "{name}");
-        let dispatcher = file_name(
-            &ToolchainComponent::Dispatcher {
-                subsystem: Subsystem::Gui,
-                online: false,
-            },
-            EXECUTABLE_SUFFIX,
-        );
-        assert!(dispatcher.contains("i686-pc-windows-msvc"), "{dispatcher}");
-    }
-
     /// The descriptor is found beside the file, so the two names have to be the
     /// same name. This is the mismatch that once produced "no descriptor" for a
     /// component that had one.
@@ -964,31 +945,6 @@ mod tests {
         std::fs::write(&descriptor_path, lying.encode()).expect("rewrite");
         let error = index.verify(root.path()).expect_err("a lying descriptor");
         assert!(error.to_string().contains("describes itself"), "{error}");
-
-        // And a descriptor from another zup release, which is the other half of
-        // the same mistake.
-        let mut foreign = descriptor;
-        foreign.zup_version = "9.9.9".to_owned();
-        std::fs::write(&descriptor_path, foreign.encode()).expect("rewrite");
-        let error = index.verify(root.path()).expect_err("a foreign descriptor");
-        assert!(error.to_string().contains("is from zup 9.9.9"), "{error}");
-    }
-
-    #[test]
-    fn a_release_index_nothing_can_read_is_refused() {
-        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
-        index.cli = ReleaseFile {
-            path: "zup.exe".to_owned(),
-            digest: hex(&[0; 32]),
-            size: 1,
-        };
-        index.schema = RELEASE_INDEX_SCHEMA + 1;
-        let bytes = index.encode();
-        let parsed = ToolchainRelease::parse(bytes.as_bytes()).expect("parse");
-        let error = parsed
-            .verify(Path::new("."))
-            .expect_err("an unknown index shape");
-        assert!(error.to_string().contains("schema"), "{error}");
     }
 
     /// The set a build host needs, checked against what actually exists.

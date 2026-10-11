@@ -69,15 +69,6 @@ pub fn runtime(target: &str, frontend: zup_core::Frontend) -> Staged {
     }
 }
 
-/// A launcher for one presentation experience.
-pub fn dispatcher(subsystem: Subsystem, online: bool) -> Staged {
-    Staged {
-        path: PathBuf::new(),
-        component: ToolchainComponent::Dispatcher { subsystem, online },
-        bytes: None,
-    }
-}
-
 /// The preset package a GUI build resolves when the application named none.
 ///
 /// One package for every target, because that is what a `.zupui` is: the build
@@ -181,11 +172,6 @@ fn elf_image(target: &str) -> Vec<u8> {
     bytes[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
     bytes[52..54].copy_from_slice(&64u16.to_le_bytes()); // header size
     bytes
-}
-
-/// A file that is not a PE image at all.
-pub fn not_an_image() -> Vec<u8> {
-    b"not a PE".to_vec()
 }
 
 /// A real preset package carrying one binary per named target.

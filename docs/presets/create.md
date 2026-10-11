@@ -26,7 +26,7 @@ zup-sdk = { version = "0.1.0", features = ["preset"] }
 
 ## The generated preset
 
-`src/main.rs` is about a hundred lines and is meant to be read once. Its shape:
+`src/main.rs` is about a hundred lines and is meant to be read once:
 
 ```rust
 use zup_sdk::preset::prelude::*;
@@ -101,8 +101,7 @@ fn main() {
 }
 ```
 
-The view is ordinary GPUI. It draws the product name, the `hero` setting, a
-button per component, and an Install button that sends `Action::Install`.
+The view is ordinary GPUI: product name, the `hero` setting, a button per component, and an Install button sending `Action::Install`.
 
 ::: warning Give the preset struct its own name
 It cannot be called `Preset`. A struct and a trait occupy the same namespace, so
@@ -127,19 +126,3 @@ inside `render` does not help, because the signature is outside its body.
 | `PresetSettings<S>` | the application's configuration, observable and read-only |
 | `AssetRef` | a settings field that names a file the application provides |
 | `zup_sdk::preset::run::<P>()` | the whole of a preset's `main` |
-
-## GPUI comes from the SDK
-
-`zup_sdk::preset::prelude::*` brings the GPUI stack with it - `gpui`, `App`,
-`Entity`, `Render`, and the `gpui-kit` component library. There is nothing else
-to add to the manifest and no Zup version to keep in step, because Zup owns the
-GPUI version the preset builds against.
-
-There is no Zup layout abstraction, no screen DSL and no markup. A preset draws
-with GPUI, so it can draw anything GPUI can draw. Split views into modules, keep
-state ownership explicit, and test presentation logic as ordinary Rust.
-
-## Next
-
-Run it with the [development loop](./develop), then read
-[Settings and assets](./settings-assets) and [State and actions](./state-actions).

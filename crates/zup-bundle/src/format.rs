@@ -1628,16 +1628,19 @@ impl BundleWriter {
         for artifact in &plan.plugins {
             required.push((artifact.blob, artifact.aot_size));
         }
+        for asset in &plan.ui_assets {
+            required.push((asset.sha256, asset.size));
+        }
         required.sort_unstable();
         required.dedup();
-        for (digest, size) in &required {
+        for (digest, _) in &required {
             let Some(bytes) = compressed.get(digest) else {
                 return Err(PackageError::Missing {
                     media_type: "content blob",
                     digest: digest.to_hex(),
                 });
             };
-            if *size == 0 || bytes.is_empty() || bytes.len() as u64 > *size {
+            if bytes.is_empty() {
                 return Err(PackageError::Invalid);
             }
         }
@@ -1916,6 +1919,83 @@ mod tests {
             },
             bytes: Vec::new(),
         }
+    }
+
+    /// A staged package holds whatever the dispatcher recompressed, including
+    /// blobs zstd cannot shrink and empty files: both are legitimate content a
+    /// dispatcher must stage, and the writer that serves staging refuses
+    /// neither. Preset assets ride along as content blobs too, or a staged GUI
+    /// installer would open a package that fails its own reference check.
+    #[test]
+    fn a_staged_plan_with_tiny_and_empty_blobs_round_trips() {
+        let tiny = b"hello cross matrix".to_vec();
+        let empty = Vec::new();
+        let logo = b"fake png bytes".to_vec();
+        let tiny_digest = Sha256Digest::from_bytes(Sha256::digest(&tiny).into());
+        let empty_digest = Sha256Digest::from_bytes(Sha256::digest(&empty).into());
+        let logo_digest = Sha256Digest::from_bytes(Sha256::digest(&logo).into());
+        assert!(
+            zstd::stream::encode_all(tiny.as_slice(), 9).unwrap().len() > tiny.len(),
+            "the fixture only proves something if zstd expands it"
+        );
+        let entry = |name: &str, bytes: &[u8], digest: Sha256Digest| PayloadEntry {
+            path: zup_core::RelativePath::new(name).unwrap(),
+            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            size: bytes.len() as u64,
+            sha256: digest,
+            blob: digest,
+            component: None,
+            condition: None,
+            executable: false,
+        };
+        let plan = PortableBuildPlan {
+            installer: plan_with_plugins(0).installer,
+            entries: vec![
+                entry("empty.txt", &empty, empty_digest),
+                entry("tiny.txt", &tiny, tiny_digest),
+            ],
+            prerequisite_artifacts: Vec::new(),
+            ui_assets: vec![zup_core::PresetAsset {
+                name: zup_core::NonEmptyString::new("logo.png").unwrap(),
+                size: logo.len() as u64,
+                sha256: logo_digest,
+            }],
+            plugins: Vec::new(),
+            total_size: tiny.len() as u64,
+        };
+        let mut compressed = std::collections::BTreeMap::new();
+        for (bytes, digest) in [
+            (&tiny, tiny_digest),
+            (&empty, empty_digest),
+            (&logo, logo_digest),
+        ] {
+            compressed.insert(
+                digest,
+                zstd::stream::encode_all(bytes.as_slice(), 9).unwrap(),
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("staged.zup");
+        BundleWriter::write_plan(&plan, &compressed, &output).unwrap();
+        let package = Package::open(&output).unwrap();
+        assert_eq!(package.blob_count(), 3);
+        for (name, bytes, digest) in [
+            ("tiny.txt", tiny.clone(), tiny_digest),
+            ("empty.txt", empty, empty_digest),
+        ] {
+            let mut reader = crate::PayloadSource::open(
+                &package,
+                &zup_core::RelativePath::new(name).unwrap(),
+                &digest,
+                bytes.len() as u64,
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut out).unwrap();
+            assert_eq!(out, bytes);
+        }
+        let (_, asset) = package.ui_asset("logo.png").unwrap();
+        assert_eq!(asset, logo);
     }
 
     /// The aggregate is refused twice over: by the canonicalization the writer runs

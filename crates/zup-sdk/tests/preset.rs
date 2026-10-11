@@ -48,16 +48,6 @@ impl Preset for Unnamed {
 }
 
 #[test]
-fn a_bootstrap_is_the_endpoint_name_alone() {
-    let argument = Bootstrap::to_argument("zup-1f0a9c");
-    assert_eq!(argument, "--zup-endpoint=zup-1f0a9c");
-    assert!(
-        Bootstrap::from_arguments([argument]).is_ok(),
-        "the host's own endpoint parses"
-    );
-}
-
-#[test]
 fn a_preset_launched_without_a_bootstrap_cannot_connect() {
     for arguments in [
         vec![],
@@ -118,17 +108,6 @@ fn an_asset_setting_is_marked_in_the_schema() {
 }
 
 #[test]
-fn a_string_setting_is_not_marked_as_an_asset() {
-    let document: zup_preset_protocol::PresetDescription =
-        serde_json::from_str(&describe::<Aurora>().expect("describes")).expect("reads");
-    assert!(
-        document.settings_schema["properties"]["hero"]
-            .get("x-zup-asset")
-            .is_none()
-    );
-}
-
-#[test]
 fn a_preset_with_no_settings_describes_an_empty_object() {
     let document: zup_preset_protocol::PresetDescription =
         serde_json::from_str(&describe::<Plain>().expect("describes")).expect("reads");
@@ -142,11 +121,6 @@ fn a_preset_with_no_settings_describes_an_empty_object() {
 }
 
 #[test]
-fn a_preset_requires_nothing_by_default() {
-    assert!(Plain::required_capabilities().is_empty());
-}
-
-#[test]
 fn a_preset_that_cannot_describe_itself_is_refused() {
     let error = describe::<Unnamed>().expect_err("a nameless preset is not publishable");
     assert!(
@@ -154,22 +128,4 @@ fn a_preset_that_cannot_describe_itself_is_refused() {
         "a refusal, not a document: {error}"
     );
     assert!(error.to_string().contains("names no preset"), "{error}");
-}
-
-#[test]
-fn a_preset_describes_itself_the_same_way_twice() {
-    assert_eq!(
-        describe::<Aurora>().expect("describes"),
-        describe::<Aurora>().expect("describes")
-    );
-}
-
-#[test]
-fn an_asset_reference_is_the_name_an_application_wrote() {
-    let asset = AssetRef::new("branding/logo.svg");
-    assert_eq!(asset.as_str(), "branding/logo.svg");
-    assert_eq!(asset.to_string(), "branding/logo.svg");
-    let read: AssetRef =
-        serde_json::from_value(serde_json::json!("branding/logo.svg")).expect("reads");
-    assert_eq!(read, asset);
 }

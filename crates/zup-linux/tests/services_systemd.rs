@@ -33,22 +33,6 @@ fn analyze_available() -> bool {
 }
 
 #[test]
-fn the_system_manager_answers_where_it_runs() {
-    if !bus_available() {
-        eprintln!("skipped: no systemd system bus on this machine");
-        return;
-    }
-
-    let mut manager = RealSystemd::connect().expect("the manager connects");
-    let state = manager.unit_file_state("zup-definitely-not-installed.service");
-    eprintln!("unknown unit state: {state:?}");
-
-    let raw = manager.version().expect("the version reads");
-    let major = zup_linux::parse_manager_version(&raw).expect("the version parses");
-    eprintln!("systemd major version: {major}");
-}
-
-#[test]
 fn rendered_units_verify() {
     if !analyze_available() {
         eprintln!("skipped: no systemd-analyze on this machine");

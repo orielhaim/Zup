@@ -54,6 +54,7 @@ pub enum PathError {
 }
 
 impl PathError {
+    #[cfg(target_os = "linux")]
     pub(crate) fn errno(path: &std::path::Path, error: rustix::io::Errno) -> Self {
         Self::Io {
             path: path.display().to_string(),
@@ -61,6 +62,7 @@ impl PathError {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn io(path: &std::path::Path, error: std::io::Error) -> Self {
         Self::Io {
             path: path.display().to_string(),
@@ -213,6 +215,7 @@ pub enum ExecError {
 }
 
 impl ExecError {
+    #[cfg(target_os = "linux")]
     pub(crate) fn refused(unit: &str, reason: impl Into<String>) -> Self {
         Self::Refused {
             unit: unit.to_owned(),
@@ -220,6 +223,7 @@ impl ExecError {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn conflict(unit: &str, reason: impl Into<String>) -> Self {
         Self::Conflict {
             unit: unit.to_owned(),
@@ -285,6 +289,7 @@ pub enum IpcError {
 }
 
 impl IpcError {
+    #[cfg(target_os = "linux")]
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::WorkerAuth(_) => zup_protocol::failure::AUTHENTICATION,

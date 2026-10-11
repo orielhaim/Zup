@@ -27,9 +27,19 @@ pub fn verify_within_base<E>(
 }
 
 pub fn is_real_dir(path: &Path, metadata: &std::fs::Metadata) -> bool {
-    metadata.is_dir() && !crate::bindings::is_link_metadata(metadata, path)
+    metadata.is_dir() && !is_link_metadata(path, metadata)
 }
 
 pub fn is_real_file(path: &Path, metadata: &std::fs::Metadata) -> bool {
-    metadata.is_file() && !crate::bindings::is_link_metadata(metadata, path)
+    metadata.is_file() && !is_link_metadata(path, metadata)
+}
+
+#[cfg(windows)]
+fn is_link_metadata(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    crate::bindings::is_link_metadata(metadata, path)
+}
+
+#[cfg(not(windows))]
+fn is_link_metadata(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }

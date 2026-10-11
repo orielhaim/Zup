@@ -168,24 +168,26 @@ pub fn resolve_target(
         }
     }
 
-    let integration = crate::integration::lower_integration(plan).map_err(|error| match error {
-        PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
-        PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
-        PlanError::Path(PathError::NoHome) => PlanError::Template {
-            kind: "XDG data home",
-            source: zup_platform::TemplateResolveError::InstallLocation(
-                zup_platform::InstallLocationError::ResolutionFailed {
-                    location: zup_core::InstallLocation::UserData,
-                    scope: plan.scope,
-                    source: Box::new(PathError::NoHome),
-                },
-            ),
-        },
-        other => PlanError::InvalidTargetPath {
-            path: String::new(),
-            reason: other.to_string(),
-        },
+    let data_home = resolver.data_home().map_err(|source| PlanError::Template {
+        kind: "XDG data home",
+        source: zup_platform::TemplateResolveError::InstallLocation(
+            zup_platform::InstallLocationError::ResolutionFailed {
+                location: zup_core::InstallLocation::UserData,
+                scope: plan.scope,
+                source: Box::new(source),
+            },
+        ),
     })?;
+    let integration = crate::integration::lower_integration_with(plan, &data_home).map_err(
+        |error| match error {
+            PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
+            PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
+            other => PlanError::InvalidTargetPath {
+                path: String::new(),
+                reason: other.to_string(),
+            },
+        },
+    )?;
     for generated in &integration.files {
         install_bytes = install_bytes.saturating_add(generated.size);
         claim(
@@ -339,7 +341,7 @@ mod tests {
     use zup_core::TargetTriple;
 
     fn resolve(input: &InstallPlan) -> Result<TargetPlan, PlanError> {
-        resolve_target(input, &LinuxInstallLocationResolver::default())
+        resolve_target(input, &LinuxInstallLocationResolver::for_build())
     }
 
     fn plan() -> InstallPlan {

@@ -265,34 +265,20 @@ fn compose_target_installer(
                 })
         }
         _ => {
-            #[cfg(windows)]
-            {
-                let (size, _) = zup_windows::build_self_contained_executable(
-                    runtime,
-                    output,
-                    plan,
-                    plugin_artifacts,
-                    preset,
+            let (size, _) = zup_windows::build_self_contained_executable(
+                runtime,
+                output,
+                plan,
+                plugin_artifacts,
+                preset,
+            )
+            .map_err(|error| {
+                crate::failure::error(
+                    "zup.build.compose_failed",
+                    format!("installer output: {error}"),
                 )
-                .map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.compose_failed",
-                        format!("installer output: {error}"),
-                    )
-                })?;
-                Ok(size)
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = (runtime, output, plan, plugin_artifacts, preset);
-                Err(crate::failure::error(
-                    "zup.build.unsupported_target",
-                    format!(
-                        "Windows lowering for target `{}` requires a Windows build host",
-                        config.target
-                    ),
-                ))
-            }
+            })?;
+            Ok(size)
         }
     }
 }
@@ -513,7 +499,7 @@ fn build_artifacts(
     finish(args, loaded, &outputs, release, reporter)
 }
 
-/// runtime is embedded into. A non-Windows host never reaches this - the
+/// Compose a universal artifact by embedding the content graph into the dispatcher template.
 fn compose_universal_artifact(
     dispatcher: &Path,
     output: &Path,
@@ -522,36 +508,23 @@ fn compose_universal_artifact(
     force: bool,
     id: &str,
 ) -> miette::Result<u64> {
-    #[cfg(windows)]
-    {
-        project::write_staged(output, force, |written| {
-            zup_windows::compose_universal_executable(dispatcher, written, graph).map_err(
-                |error| {
-                    crate::failure::error(
-                        "zup.build.compose_failed",
-                        format!("artifact `{id}`: {error}"),
-                    )
-                },
-            )?;
-            stamp_application_icon(written, build)?;
-            std::fs::metadata(written)
-                .map(|meta| meta.len())
-                .map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.output_unreadable",
-                        format!("artifact output: {error}"),
-                    )
-                })
-        })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (dispatcher, output, graph, build, force, id);
-        Err(crate::failure::error(
-            "zup.build.unsupported_host",
-            "composing a dispatcher artifact requires a Windows build host",
-        ))
-    }
+    project::write_staged(output, force, |written| {
+        zup_windows::compose_universal_executable(dispatcher, written, graph).map_err(|error| {
+            crate::failure::error(
+                "zup.build.compose_failed",
+                format!("artifact `{id}`: {error}"),
+            )
+        })?;
+        stamp_application_icon(written, build)?;
+        std::fs::metadata(written)
+            .map(|meta| meta.len())
+            .map_err(|error| {
+                crate::failure::error(
+                    "zup.build.output_unreadable",
+                    format!("artifact output: {error}"),
+                )
+            })
+    })
 }
 
 fn resolve_variant(
@@ -926,7 +899,6 @@ fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProj
     }
 }
 
-#[cfg(windows)]
 pub(crate) fn stamp_application_icon(
     path: &Path,
     plan: &zup_build::BuildPlan,

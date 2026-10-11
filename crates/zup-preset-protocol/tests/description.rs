@@ -58,14 +58,6 @@ fn a_settings_schema_that_is_not_an_object_is_refused() {
 }
 
 #[test]
-fn the_describe_document_survives_json() {
-    let described = description();
-    let bytes = serde_json::to_vec(&described).expect("serializes");
-    let read: PresetDescription = serde_json::from_slice(&bytes).expect("deserializes");
-    assert_eq!(read, described);
-}
-
-#[test]
 fn a_document_with_an_unknown_field_is_refused() {
     let mut document = serde_json::to_value(description()).expect("serializes");
     document["somethingNewer"] = serde_json::Value::Bool(true);

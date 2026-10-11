@@ -1,4 +1,4 @@
-#![cfg(feature = "test-launcher")]
+#![cfg(all(windows, feature = "test-launcher"))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

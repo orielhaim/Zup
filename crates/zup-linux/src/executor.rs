@@ -57,7 +57,7 @@ pub struct LinuxFileExecutor {
 }
 
 pub struct ServiceSupport {
-    roots: crate::machine::MachineRoots,
+    roots: crate::locations::MachineRoots,
     systemd: crate::machine::SystemdRoots,
     manager: Box<dyn crate::systemd::SystemdManager>,
     expected_uid: u32,
@@ -66,7 +66,7 @@ pub struct ServiceSupport {
 impl ServiceSupport {
     pub fn production() -> Result<Self, String> {
         Ok(Self {
-            roots: crate::machine::MachineRoots::production(),
+            roots: crate::locations::MachineRoots::production(),
             systemd: crate::machine::SystemdRoots::production(),
             manager: Box::new(
                 crate::systemd::RealSystemd::connect().map_err(|error| error.to_string())?,
@@ -76,7 +76,7 @@ impl ServiceSupport {
     }
 
     pub fn isolated(
-        roots: crate::machine::MachineRoots,
+        roots: crate::locations::MachineRoots,
         systemd: crate::machine::SystemdRoots,
         manager: impl crate::systemd::SystemdManager + 'static,
         expected_uid: u32,
@@ -85,7 +85,7 @@ impl ServiceSupport {
     }
 
     pub fn new(
-        roots: crate::machine::MachineRoots,
+        roots: crate::locations::MachineRoots,
         systemd: crate::machine::SystemdRoots,
         manager: Box<dyn crate::systemd::SystemdManager>,
         expected_uid: u32,

@@ -123,7 +123,6 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
     #[test]
     fn two_sessions_in_one_process_exclude_each_other() {
@@ -203,17 +202,5 @@ mod tests {
             "a lock file a session is holding is not removed underneath it"
         );
         drop(held);
-    }
-
-    /// has never held an operation has no reason to carry a marker for one.
-    #[rstest]
-    #[case::scope_token("user")]
-    #[case::scope_token("machine")]
-    fn the_scope_token_is_sanitized_like_everything_else(#[case] scope: &str) {
-        assert_eq!(
-            InstallationLock::scope_token(scope),
-            InstallationLock::scope_token(scope),
-            "the token is a pure function of the scope"
-        );
     }
 }

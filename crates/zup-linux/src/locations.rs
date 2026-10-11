@@ -4,7 +4,42 @@ use crate::error::PathError;
 use zup_core::{InstallLocation, SelectedScope, TargetTriple};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 
+pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
+
+pub const MACHINE_STATE_ROOT: &str = "/var/lib/zup";
+
+pub const MACHINE_SHARED_DATA_ROOT: &str = "/var/opt";
+
 const PROGRAMS_NAMESPACE: &str = ".local/lib/zup/apps";
+
+const CANONICAL_BUILD_HOME: &str = "/home/zup-build";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineRoots {
+    pub programs: PathBuf,
+
+    pub state: PathBuf,
+
+    pub shared_data: PathBuf,
+}
+
+impl MachineRoots {
+    pub fn production() -> Self {
+        Self {
+            programs: PathBuf::from(MACHINE_PROGRAMS_ROOT),
+            state: PathBuf::from(MACHINE_STATE_ROOT),
+            shared_data: PathBuf::from(MACHINE_SHARED_DATA_ROOT),
+        }
+    }
+
+    pub fn new(programs: PathBuf, state: PathBuf, shared_data: PathBuf) -> Self {
+        Self {
+            programs,
+            state,
+            shared_data,
+        }
+    }
+}
 
 pub fn user_data_home() -> Result<PathBuf, PathError> {
     let home = home_dir()?;
@@ -30,20 +65,53 @@ pub fn user_programs_root_in(home: &std::path::Path) -> PathBuf {
 
 #[derive(Debug, Clone)]
 pub struct LinuxInstallLocationResolver {
-    machine: crate::machine::MachineRoots,
+    machine: MachineRoots,
+    user_home: Option<PathBuf>,
 }
 
 impl Default for LinuxInstallLocationResolver {
     fn default() -> Self {
         Self {
-            machine: crate::machine::MachineRoots::production(),
+            machine: MachineRoots::production(),
+            user_home: None,
         }
     }
 }
 
 impl LinuxInstallLocationResolver {
-    pub fn with_machine_roots(machine: crate::machine::MachineRoots) -> Self {
-        Self { machine }
+    pub fn with_machine_roots(machine: MachineRoots) -> Self {
+        Self {
+            machine,
+            user_home: None,
+        }
+    }
+
+    /// Fixed roots for build-time validation on any host.
+    ///
+    /// The runtime resolves user roots live from the installing user's
+    /// environment; a build host validating a target plan needs the same
+    /// *relations* without touching its own environment. The resolved values
+    /// never reach an installer: the bundle carries templates, and the runtime
+    /// re-resolves them live.
+    pub fn for_build() -> Self {
+        Self {
+            machine: MachineRoots::production(),
+            user_home: Some(PathBuf::from(CANONICAL_BUILD_HOME)),
+        }
+    }
+
+    fn user_roots(&self) -> Result<(PathBuf, PathBuf), PathError> {
+        match &self.user_home {
+            Some(home) => Ok((home.clone(), user_data_home_in(None, home))),
+            None => Ok((home_dir()?, user_data_home()?)),
+        }
+    }
+
+    pub(crate) fn data_home(&self) -> Result<PathBuf, PathError> {
+        match &self.user_home {
+            Some(home) => Ok(user_data_home_in(None, home)),
+            None => user_data_home(),
+        }
     }
 }
 
@@ -60,24 +128,27 @@ impl InstallLocationResolver for LinuxInstallLocationResolver {
             source: Box::new(source),
         };
         let path = match scope {
-            SelectedScope::User => match location {
-                InstallLocation::UserData => user_data_home().map_err(failed)?,
-                InstallLocation::Programs => user_programs_root().map_err(failed)?,
-                InstallLocation::SharedData => {
-                    return Err(failed(PathError::UnsupportedLocation {
-                        location,
-                        scope: "user",
-                        reason: "there is no machine-wide data root without a privilege mechanism",
-                    }));
+            SelectedScope::User => {
+                let (home, data_home) = self.user_roots().map_err(failed)?;
+                match location {
+                    InstallLocation::UserData => data_home,
+                    InstallLocation::Programs => user_programs_root_in(&home),
+                    InstallLocation::SharedData => {
+                        return Err(failed(PathError::UnsupportedLocation {
+                            location,
+                            scope: "user",
+                            reason: "there is no machine-wide data root without a privilege mechanism",
+                        }));
+                    }
+                    InstallLocation::Menu | InstallLocation::Desktop => {
+                        return Err(failed(PathError::UnsupportedLocation {
+                            location,
+                            scope: "user",
+                            reason: "desktop integration is deferred past this phase",
+                        }));
+                    }
                 }
-                InstallLocation::Menu | InstallLocation::Desktop => {
-                    return Err(failed(PathError::UnsupportedLocation {
-                        location,
-                        scope: "user",
-                        reason: "desktop integration is deferred past this phase",
-                    }));
-                }
-            },
+            }
 
             SelectedScope::Machine => match location {
                 InstallLocation::Programs => self.machine.programs.clone(),
@@ -228,5 +299,29 @@ mod tests {
             assert!(!root.starts_with("/home"));
             assert!(!root.starts_with("/root"));
         }
+    }
+
+    #[test]
+    fn a_build_resolver_answers_without_an_environment() {
+        let resolver = LinuxInstallLocationResolver::for_build();
+        let programs = resolver
+            .resolve(
+                InstallLocation::Programs,
+                SelectedScope::User,
+                &linux_target(),
+            )
+            .expect("a build resolver answers user scope")
+            .to_string();
+        assert!(programs.starts_with(CANONICAL_BUILD_HOME), "{programs}");
+        let data = resolver
+            .resolve(
+                InstallLocation::UserData,
+                SelectedScope::User,
+                &linux_target(),
+            )
+            .expect("a build resolver answers user data")
+            .to_string();
+        assert!(data.starts_with(CANONICAL_BUILD_HOME), "{data}");
+        assert_ne!(programs, data);
     }
 }

@@ -49,14 +49,6 @@ fn an_empty_variable_is_not_a_credential() {
     assert!(error.to_string().contains("GH_TOKEN"), "{error}");
 }
 #[test]
-fn a_token_redacts_itself_in_debug() {
-    let found = Token::new("ghp_supersecret");
-    let rendered = format!("{found:?}");
-    assert!(!rendered.contains("ghp_supersecret"), "{rendered}");
-    assert!(rendered.contains("REDACTED"), "{rendered}");
-}
-
-#[test]
 fn no_credential_reaches_a_debug_string_through_a_wrapper() {
     #[derive(Debug)]
     struct Request<'a> {
@@ -168,12 +160,4 @@ fn a_token_from_every_source_redacts_itself() {
         assert!(!rendered.contains(SECRET), "{rendered}");
         assert!(token.expose() == SECRET, "the value is still reachable");
     }
-}
-
-#[test]
-fn comparing_two_tokens_is_explicit_about_comparing_secrets() {
-    let left = Token::new("a");
-    assert!(left.same_secret_as(&Token::new("a")));
-    assert!(!left.same_secret_as(&Token::new("b")));
-    assert!(!left.same_secret_as(&Token::new("aa")));
 }

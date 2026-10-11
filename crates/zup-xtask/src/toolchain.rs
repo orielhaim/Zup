@@ -29,7 +29,6 @@ pub const FRONTENDS: &[(&str, &str)] = &[
     ("headless", "zup-setup-headless"),
 ];
 
-#[cfg(windows)]
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
     ("online", "zup-dispatch", "gui"),
@@ -100,37 +99,9 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
 
     #[cfg(windows)]
     for (feature, binary, subsystem) in DISPATCHERS {
-        let online = !feature.is_empty();
-        let mut args = vec![
-            "build".to_owned(),
-            "-p".to_owned(),
-            DISPATCHER_PACKAGE.to_owned(),
-            "--bin".to_owned(),
-            (*binary).to_owned(),
-            "--target".to_owned(),
-            dispatcher::TARGET.to_owned(),
-            "--profile".to_owned(),
-            profile.to_owned(),
-        ];
-        if online {
-            args.push("--features".to_owned());
-            args.push((*feature).to_owned());
-        }
-        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let built = target_directory(root, dispatcher::TARGET)
-            .join(output_directory(profile))
-            .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-        cargo_build(root, &args, LAUNCHER_PROFILE)?;
-        let component = zup_toolchain::ToolchainComponent::Dispatcher {
-            subsystem: match *subsystem {
-                "gui" => zup_toolchain::Subsystem::Gui,
-                _ => zup_toolchain::Subsystem::Console,
-            },
-            online,
-        };
-        let staged_file = stage_component(&built, &staged, &component, &version)?;
-        println!("  dispatch {subsystem:<8} {}", component_name(&staged_file));
-        written.push(staged_file);
+        written.push(stage_dispatcher(
+            root, profile, &staged, &version, feature, binary, subsystem,
+        )?);
     }
 
     #[cfg(windows)]
@@ -148,15 +119,71 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     Ok(written)
 }
 
+#[cfg(windows)]
+fn stage_dispatcher(
+    root: &Path,
+    profile: &str,
+    staged: &Path,
+    version: &str,
+    feature: &str,
+    binary: &str,
+    subsystem: &str,
+) -> Result<PathBuf, String> {
+    let online = !feature.is_empty();
+    let mut args = vec![
+        "build".to_owned(),
+        "-p".to_owned(),
+        DISPATCHER_PACKAGE.to_owned(),
+        "--bin".to_owned(),
+        (*binary).to_owned(),
+        "--target".to_owned(),
+        dispatcher::TARGET.to_owned(),
+        "--profile".to_owned(),
+        profile.to_owned(),
+    ];
+    if online {
+        args.push("--features".to_owned());
+        args.push((*feature).to_owned());
+    }
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let built = target_directory(root, dispatcher::TARGET)
+        .join(output_directory(profile))
+        .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
+    cargo_build(root, &args, LAUNCHER_PROFILE)?;
+    let component = zup_toolchain::ToolchainComponent::Dispatcher {
+        subsystem: match subsystem {
+            "gui" => zup_toolchain::Subsystem::Gui,
+            _ => zup_toolchain::Subsystem::Console,
+        },
+        online,
+    };
+    let staged_file = stage_component(&built, staged, &component, version)?;
+    println!("  dispatch {subsystem:<8} {}", component_name(&staged_file));
+    Ok(staged_file)
+}
+
 fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>, String> {
     let component_target =
         zup_core::TargetTriple::parse(target).map_err(|error| format!("`{target}`: {error}"))?;
-    if component_target.operating_system() != zup_core::TargetOperatingSystem::Linux {
-        return Err(format!(
-            "cross toolchain builds support Linux targets; `{target}` is not one"
-        ));
+    match component_target.operating_system() {
+        zup_core::TargetOperatingSystem::Linux => {
+            build_cross_linux(root, profile, &component_target)
+        }
+        zup_core::TargetOperatingSystem::Windows => {
+            build_cross_windows(root, profile, &component_target)
+        }
+        _ => Err(format!(
+            "cross toolchain builds support Windows and Linux targets; `{target}` is neither"
+        )),
     }
-    if component_target.architecture() != zup_core::TargetArchitecture::X86_64 {
+}
+
+fn build_cross_linux(
+    root: &Path,
+    profile: &str,
+    target: &zup_core::TargetTriple,
+) -> Result<Vec<PathBuf>, String> {
+    if target.architecture() != zup_core::TargetArchitecture::X86_64 {
         return Err(format!(
             "cross toolchain builds support `{SUPPORTED_CROSS_TARGET}`; `{target}` is not one"
         ));
@@ -171,7 +198,7 @@ fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>,
             root,
             &[
                 "--target",
-                target,
+                target.as_str(),
                 "-p",
                 INSTALLER_PACKAGE,
                 "--no-default-features",
@@ -183,11 +210,11 @@ fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>,
                 profile,
             ],
         )?;
-        let built = target_directory(root, target)
+        let built = target_directory(root, target.as_str())
             .join(output_directory(profile))
             .join(&binary);
         let component = zup_toolchain::ToolchainComponent::Runtime {
-            target: component_target.clone(),
+            target: target.clone(),
             frontend: match frontend {
                 "console" => zup_core::Frontend::Console,
                 _ => zup_core::Frontend::Headless,
@@ -196,6 +223,80 @@ fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>,
         let staged_file = stage_component(&built, &staged, &component, &version)?;
         println!("  runtime  {frontend:<8} {}", component_name(&staged_file));
         written.push(staged_file);
+    }
+    Ok(written)
+}
+
+fn build_cross_windows(
+    root: &Path,
+    profile: &str,
+    target: &zup_core::TargetTriple,
+) -> Result<Vec<PathBuf>, String> {
+    if target.operating_system() != zup_core::TargetOperatingSystem::Windows {
+        return Err(format!("`{target}` is not a Windows target"));
+    }
+    let version = version()?;
+    let staged = staging_directory(root, profile, &version);
+    std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
+    let mut written = Vec::new();
+    for component in zup_toolchain::supported_components(target) {
+        match component {
+            zup_toolchain::ToolchainComponent::Runtime { frontend, .. } => {
+                let feature = frontend.as_str();
+                let binary = format!("zup-setup-{feature}");
+                cargo(
+                    root,
+                    &[
+                        "build",
+                        "-p",
+                        INSTALLER_PACKAGE,
+                        "--no-default-features",
+                        "--features",
+                        feature,
+                        "--bin",
+                        &binary,
+                        "--target",
+                        target.as_str(),
+                        "--profile",
+                        profile,
+                    ],
+                )
+                .map_err(|error| {
+                    format!(
+                        "{error}; building Windows runtimes off Windows needs a Windows target \
+                         toolchain (for example `cargo-xwin`), or install a release's toolchain \
+                         with `zup toolchain install <dir>` instead"
+                    )
+                })?;
+                let built = target_directory(root, target.as_str())
+                    .join(output_directory(profile))
+                    .join(format!("{binary}.exe"));
+                let staged_file = stage_component(&built, &staged, &component, &version)?;
+                println!("  runtime  {feature:<8} {}", component_name(&staged_file));
+                written.push(staged_file);
+            }
+            zup_toolchain::ToolchainComponent::Dispatcher { .. } => {}
+            zup_toolchain::ToolchainComponent::Preset => {
+                println!(
+                    "  preset             skipped: a preset package executes its binaries to \
+                     describe itself, so stage it on Windows or install a release's toolchain \
+                     with `zup toolchain install <dir>`"
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    for (feature, binary, subsystem) in DISPATCHERS {
+        written.push(stage_dispatcher(
+            root, profile, &staged, &version, feature, binary, subsystem,
+        )?);
+    }
+    #[cfg(not(windows))]
+    {
+        println!(
+            "  dispatch           skipped: launchers link against Windows libraries; build them \
+             on Windows or install a release's toolchain with `zup toolchain install <dir>`"
+        );
     }
     Ok(written)
 }
@@ -220,7 +321,6 @@ fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
 #[cfg(windows)]
 fn build_example_plugin(root: &Path) -> Result<(), String> {
     let project = root.join("examples").join("plugins").join("configure");

@@ -5,6 +5,7 @@ use zup_plan::InstallPlan;
 use zup_platform::TargetPath;
 
 use crate::error::PlanError;
+#[cfg(target_os = "linux")]
 use crate::locations::user_data_home;
 
 pub const GENERATED_PREFIX: &str = "__zup_generated__";
@@ -14,6 +15,8 @@ pub struct GeneratedFile {
     pub key: ResourceKey,
     pub source_relative: String,
     pub destination: TargetPath,
+    // Rendered for the Linux runtime; other hosts validate shapes, not bytes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub bytes: Vec<u8>,
     pub size: u64,
     pub sha256: zup_core::Sha256Digest,
@@ -28,7 +31,15 @@ pub struct IntegrationOutput {
     pub needs_desktop_refresh: bool,
 }
 
+#[cfg(target_os = "linux")]
 pub fn lower_integration(plan: &InstallPlan) -> Result<IntegrationOutput, PlanError> {
+    lower_integration_with(plan, &user_data_home()?)
+}
+
+pub fn lower_integration_with(
+    plan: &InstallPlan,
+    data_home: &std::path::Path,
+) -> Result<IntegrationOutput, PlanError> {
     refuse_unsupported(plan)?;
     if plan.scope != SelectedScope::User {
         if !plan.launchers.is_empty()
@@ -50,7 +61,7 @@ pub fn lower_integration(plan: &InstallPlan) -> Result<IntegrationOutput, PlanEr
     if plan.launchers.is_empty() && plan.protocols.is_empty() && plan.file_associations.is_empty() {
         return Ok(IntegrationOutput::default());
     }
-    lower_integration_in(plan, &user_data_home()?)
+    lower_integration_in(plan, data_home)
 }
 
 pub fn lower_integration_in(
@@ -239,6 +250,7 @@ pub fn lower_integration_in(
     Ok(output)
 }
 
+#[cfg(target_os = "linux")]
 pub fn generated_map(
     plan: &InstallPlan,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
@@ -250,6 +262,7 @@ pub fn generated_map(
         .collect())
 }
 
+#[cfg(target_os = "linux")]
 fn generated_store_path(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
@@ -266,6 +279,7 @@ fn generated_store_path(
         .join(format!("{}-{scope_token}.json", digest.to_hex()))
 }
 
+#[cfg(target_os = "linux")]
 pub fn save_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
@@ -302,6 +316,7 @@ pub fn save_generated(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn load_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,

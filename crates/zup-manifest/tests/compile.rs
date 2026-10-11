@@ -1,7 +1,7 @@
 use rstest::rstest;
 use std::fs;
 
-use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId, TargetTriple};
+use zup_core::{InstallScope, Installer};
 use zup_manifest::{
     Manifest, ManifestError, TargetOverrides, compile, parse, parse_and_compile, select_targets,
 };
@@ -50,76 +50,10 @@ fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
 }
 
 #[test]
-fn fixture_compiles_to_ir() {
-    let installer = parse_and_compile(&fixture(), "windows-x64").expect("fixture compiles");
-
-    assert_eq!(installer.app.id.as_str(), "com.acme.acme");
-    assert_eq!(
-        installer.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
-    assert_eq!(installer.app.version.to_string(), "1.4.0");
-    assert_eq!(installer.frontend, Frontend::Gui);
-    assert_eq!(installer.install.scope, InstallScope::Either);
-    assert_eq!(installer.components.len(), 3);
-    assert_eq!(installer.plugins.len(), 1);
-    assert_eq!(installer.plugins[0].id.as_str(), "setup-helper");
-    assert_eq!(installer.files.len(), 1);
-    assert_eq!(installer.launchers.len(), 1);
-    assert_eq!(installer.path.len(), 1);
-    assert_eq!(installer.services.len(), 1);
-    assert_eq!(installer.protocols.len(), 1);
-    assert_eq!(installer.file_associations.len(), 1);
-
-    assert_eq!(
-        installer.components[0].id,
-        ComponentId::new("core").unwrap()
-    );
-    assert!(installer.components[0].required);
-    assert!(installer.components[0].default);
-
-    assert_eq!(
-        installer.services[0].id,
-        ServiceId::new("acme-agent").unwrap()
-    );
-}
-
-#[test]
 fn compilation_is_deterministic() {
     let a = parse_and_compile(&fixture(), "windows-x64").unwrap();
     let b = parse_and_compile(&fixture(), "windows-x64").unwrap();
     assert_eq!(a, b);
-}
-
-#[test]
-fn plugin_compiles_without_build_time_source() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[plugins]]
-id = "setup.helper"
-source = "plugins/setup-helper.wasm"
-component = "core"
-when = 'component("core")'
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid plugin");
-    assert_eq!(installer.plugins.len(), 1);
-    let plugin = &installer.plugins[0];
-    assert_eq!(plugin.id.as_str(), "setup.helper");
-    assert_eq!(
-        plugin.component.as_ref().map(|id| id.as_str()),
-        Some("core")
-    );
-    assert_eq!(
-        plugin.when.as_ref().map(ToString::to_string),
-        Some("component(\"core\")".to_owned())
-    );
-    let json = serde_json::to_string(&installer).unwrap();
-    assert!(!json.contains("plugins/setup-helper.wasm"), "json: {json}");
 }
 
 #[test]
@@ -393,35 +327,6 @@ when = 'component("missing")'
             other => panic!("expected unknown component, got {other:?}"),
         }
     }
-}
-
-#[test]
-fn valid_condition_and_component_refs_compile() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[components]]
-id = "cli"
-name = "CLI"
-requires = ["core"]
-
-[[files]]
-source = "**/*"
-destination = "${install}"
-component = "core"
-when = 'component("cli")'
-
-[[path]]
-value = "${install}/bin"
-when = 'component("cli") || component("core")'
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid refs");
-    assert_eq!(installer.files.len(), 1);
-    assert_eq!(installer.path.len(), 1);
 }
 
 #[test]

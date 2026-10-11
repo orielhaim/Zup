@@ -16,9 +16,7 @@ Keep those URLs stable. They become part of the release/update contract for inst
 
 ## What belongs on the origin
 
-Publish the complete staged output. Do not hand-pick individual metadata or blob files from it.
-
-Do not edit a staged release tree after publishing it. Publish a new release or channel update instead.
+Publish the complete staged output. Do not hand-pick files from it, and do not edit a staged tree after publishing. Publish a new release or channel update instead.
 
 ## Static vs GitHub
 

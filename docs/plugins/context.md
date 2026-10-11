@@ -25,11 +25,7 @@ if context.scope == Scope::Machine {
 are resolved by Zup as it writes each resource, which is why a generated file
 declares `"${install}/notes.txt"` rather than a path.
 
-Every field is a fact about the installation, not about the machine. There is no
-way to ask what is already installed, what is running, or where anything else
-lives.
-
-A plugin should produce the same resource plan for the same context.
+Every field is a fact about the installation, not about the machine. A plugin produces the same plan for the same context.
 
 ## No manifest parsing
 

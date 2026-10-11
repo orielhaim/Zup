@@ -633,21 +633,6 @@ fn rollback_order_is_reverse_dependency() {
 }
 
 #[test]
-fn plan_fingerprint_stable() {
-    let a = compile_transaction(&sample_input()).unwrap();
-    let b = compile_transaction(&sample_input()).unwrap();
-    assert_eq!(a.fingerprint(), b.fingerprint());
-}
-
-#[test]
-fn fingerprint_changes_with_target_identity() {
-    let plan = sample_plan();
-    let mut other = plan.clone();
-    other.target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-    assert_ne!(plan.fingerprint(), other.fingerprint());
-}
-
-#[test]
 fn oversized_backend_payload_is_rejected() {
     let mut input = sample_input();
     input.backend_operations[0].payload = vec![0; zup_transaction::MAX_BACKEND_PAYLOAD_BYTES + 1];

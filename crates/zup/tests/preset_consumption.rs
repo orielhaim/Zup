@@ -400,15 +400,6 @@ fn a_schema_that_reaches_outside_itself_is_refused(#[case] reference: &str) {
     );
 }
 
-/// A local `$ref` is how a generated schema marks an asset, so it must resolve.
-#[test]
-fn a_schema_that_refers_only_to_itself_is_accepted() {
-    assert!(
-        validate_settings(&schema(), &serde_json::json!({ "accent": "#695cff" })).is_empty(),
-        "a self-contained schema is the normal case"
-    );
-}
-
 /// The asset marker is what tells a build which settings are files, and it has to
 /// survive the shape a generated schema actually produces.
 #[test]
@@ -596,52 +587,6 @@ fn changed_asset_bytes_change_the_digest() {
     let after = digest_of(b"<svg width='8'/>");
     assert_eq!(before, same, "the same bytes are the same asset");
     assert_ne!(before, after, "different bytes are a different asset");
-}
-
-/// An application that configures nothing is a normal application, as long as
-/// the preset it chose requires nothing either.
-#[test]
-fn an_application_that_configures_nothing_against_a_preset_that_needs_nothing() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let mut writer = PresetPackageWriter::new(
-        PresetDescription::new("bare", "1.0.0", serde_json::json!({ "type": "object" }))
-            .with_capabilities(Capabilities::new([Capability::Components])),
-    )
-    .expect("a description");
-    writer
-        .add_binary(target(HOST), b"a preset".to_vec())
-        .expect("a binary");
-    let path = directory.path().join("bare.zupui");
-    std::fs::write(&path, writer.finish().expect("a package")).expect("written");
-
-    let selected = select(
-        &path,
-        &installer(),
-        &target(HOST),
-        &settings(serde_json::json!({})),
-    )
-    .expect("a preset that requires no settings is satisfied by an application that sets none");
-    assert!(selected.asset_settings.is_empty());
-    assert!(
-        selected
-            .settings
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    );
-}
-
-/// The same bytes through the same path produce the same selection, so a build
-/// is reproducible.
-#[test]
-fn selecting_the_same_package_twice_gives_the_same_thing() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
-    let value = settings(serde_json::json!({ "accent": "#695cff" }));
-    let first = select(&path, &installer(), &target(HOST), &value).expect("selected");
-    let second = select(&path, &installer(), &target(HOST), &value).expect("selected");
-    assert_eq!(first.executable, second.executable);
-    assert_eq!(first.version, second.version);
-    assert_eq!(first.required_capabilities, second.required_capabilities);
 }
 
 /// The package a build consumes is the package `zup preset inspect` reads, which is

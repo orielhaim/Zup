@@ -341,12 +341,20 @@ mod tests {
         );
     }
 
-    /// question the suite must not assume: the whole point is to handle machines
+    /// Whether a name resolves, and with which OS error it fails, belongs to
+    /// the machine: a bare name is looked up in the ambient `PATH`, and on
+    /// some machines that lookup answers `PermissionDenied` for a name that
+    /// exists nowhere (WSL searching Windows directories, for example).
+    /// The probe runs in an empty directory on `PATH` so a missing compiler
+    /// is a missing compiler everywhere the suite runs.
     #[test]
     fn a_compiler_that_cannot_be_run_is_not_reported_as_a_missing_target() {
         let missing = "zup-no-such-rustc";
+        let empty = tempfile::tempdir().expect("an empty probe directory");
         let error = Command::new(missing)
             .args(["--print", "target-libdir"])
+            .env_clear()
+            .env("PATH", empty.path())
             .output()
             .expect_err("a compiler that does not exist cannot be run");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);

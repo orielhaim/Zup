@@ -37,20 +37,17 @@ Only configure the scope paths your project can use.
 
 ## Templates
 
-Paths are templates. Common values include:
+Paths are templates with `${...}` placeholders. There is no nesting, escaping, or default-value syntax; a `$` that does not start a placeholder is literal.
 
-```text
-${install}
-${app.id}
-${app.name}
-${app.version}
-${location.user_data}
-${location.shared_data}
-${location.programs}
-${location.menu}
-${location.desktop}
-```
+| Placeholder | Resolves to |
+| --- | --- |
+| `${app.id}`, `${app.name}`, `${app.version}` | application identity |
+| `${install}` | install root for the selected scope |
+| `${location.programs}` | Programs directory |
+| `${location.user_data}` | user application data |
+| `${location.shared_data}` | machine-wide application data |
+| `${location.menu}`, `${location.desktop}` | Start menu, desktop |
 
-`${install}` is the resolved install root for the current scope. Prefer it for payload destinations and resources tied to the installed application.
+`${app.*}` and `${install}` resolve at build time. `${location.*}` resolves on the target machine. `${install}` cannot appear in `[install.directory]` itself.
 
-Platform backends resolve semantic locations to native paths. Do not hard-code a Windows known-folder path when a location template expresses the intent.
+Prefer `${install}` for payload destinations. Do not hard-code a Windows known-folder path when a location template expresses the intent.

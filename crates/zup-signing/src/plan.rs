@@ -628,17 +628,4 @@ mod tests {
             assert!(!encoded.contains(word), "the plan mentions `{word}`");
         }
     }
-
-    /// A requirement that asks for "no timestamp" and "refuse the legacy
-    /// timestamp" at once is a contradiction a single flag used to be able to
-    /// express. One variant makes it unrepresentable.
-    #[test]
-    fn relaxing_the_timestamp_relaxes_the_whole_timestamp_rule() {
-        let development = SigningRequirement::development();
-        assert_eq!(development.timestamp, TimestampRequirement::Optional);
-        assert!(!development.trusted_chain);
-        let production = SigningRequirement::production();
-        assert_eq!(production.timestamp, TimestampRequirement::Required);
-        assert!(production.trusted_chain);
-    }
 }

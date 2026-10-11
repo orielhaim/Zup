@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use zup_artifact::ArtifactError;
 use zup_automation::{Application, AutomationResult, Details, LogLevel, Target};
-#[cfg(windows)]
 use zup_windows::UniversalArtifact;
 
 use crate::failure::Reporter;
@@ -57,9 +56,10 @@ pub struct InspectedTrust {
 pub enum InspectError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
-    #[cfg(windows)]
     #[error(transparent)]
     Universal(#[from] zup_windows::UniversalError),
+    #[error(transparent)]
+    Bundle(#[from] zup_windows::BundleError),
     #[error(transparent)]
     Portable(#[from] zup_pe::PeError),
     #[error(transparent)]
@@ -108,25 +108,23 @@ pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<Automatio
 }
 
 pub fn inspect(path: &std::path::Path) -> Result<Inspection, InspectError> {
-    #[cfg(windows)]
-    {
-        Ok(match UniversalArtifact::open(path) {
-            Ok(artifact) => inspect_composed(path, &artifact)?,
-            Err(first) => match inspect_carrier(path) {
-                Ok(inspection) => inspection,
-                Err(_) => return Err(InspectError::Universal(first)),
-            },
-        })
+    if let Ok(artifact) = UniversalArtifact::open(path) {
+        return inspect_composed(path, &artifact);
     }
-    #[cfg(not(windows))]
-    {
-        inspect_carrier(path)
+    if let Ok(carrier) = zup_linux::Carrier::open(path) {
+        return inspect_carrier(path, &carrier);
+    }
+    match zup_windows::EmbeddedBundle::open(path) {
+        Ok(bundle) => inspect_embedded(path, &bundle),
+        Err(error) => Err(InspectError::Bundle(error)),
     }
 }
 
 /// package parse, and image/target pairing - so a report never describes an
-fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
-    let carrier = zup_linux::Carrier::open(path)?;
+fn inspect_carrier(
+    path: &std::path::Path,
+    carrier: &zup_linux::Carrier,
+) -> Result<Inspection, InspectError> {
     let plan = carrier
         .package()
         .build_plan()?
@@ -134,6 +132,39 @@ fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
         .into_iter()
         .next()
         .ok_or(InspectError::Package(zup_bundle::PackageError::Invalid))?;
+    inspect_single_target(
+        path,
+        plan,
+        carrier.package().blob_count() as u64,
+        "not applicable: a Linux installer carries no Authenticode structure".to_owned(),
+    )
+}
+
+fn inspect_embedded(
+    path: &std::path::Path,
+    bundle: &zup_windows::EmbeddedBundle,
+) -> Result<Inspection, InspectError> {
+    let plan = bundle
+        .build_plan()
+        .map_err(InspectError::Bundle)?
+        .targets
+        .into_iter()
+        .next()
+        .ok_or(InspectError::Package(zup_bundle::PackageError::Invalid))?;
+    inspect_single_target(
+        path,
+        plan,
+        bundle.package().blob_count() as u64,
+        authenticode(path),
+    )
+}
+
+fn inspect_single_target(
+    path: &std::path::Path,
+    plan: zup_core::TargetBuildPlan,
+    blob_count: u64,
+    authenticode: String,
+) -> Result<Inspection, InspectError> {
     let installer = &plan.installer;
     let file_size = std::fs::metadata(path)?.len();
     let target_matches_binary = match zup_binary::Executable::read(path) {
@@ -173,12 +204,11 @@ fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
             content_size: plan.total_size,
             shared_size: 0,
             exclusive_size: plan.total_size,
-            unique_blob_count: carrier.package().blob_count() as u64,
+            unique_blob_count: blob_count,
             file_size,
         },
         trust: InspectedTrust {
-            authenticode: "not applicable: a Linux installer carries no Authenticode structure"
-                .to_owned(),
+            authenticode,
             index: "valid".to_owned(),
             content_digests: "valid".to_owned(),
             variants: "valid".to_owned(),
@@ -187,7 +217,6 @@ fn inspect_carrier(path: &std::path::Path) -> Result<Inspection, InspectError> {
 }
 
 /// Every content digest is verified, so a report never describes content the
-#[cfg(windows)]
 fn inspect_composed(
     path: &std::path::Path,
     artifact: &UniversalArtifact,
@@ -281,7 +310,6 @@ fn inspect_composed(
 
 /// "digest matches" and never "signed" - a word that would be read as a claim
 /// about a trust store this command never consulted.
-#[cfg(windows)]
 fn authenticode(path: &std::path::Path) -> String {
     let signature = match zup_pe::embedded_signature(path) {
         Ok(Some(signature)) => signature,

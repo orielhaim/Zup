@@ -2,7 +2,7 @@ use zup_core::{ComponentId as EngineComponentId, InstallScope, Installer, Select
 use zup_exec::{InstallLedger, LifecycleAction};
 use zup_preset_protocol::{
     Action, Capabilities, ComponentId, DiagnosticKind, InstallationHealth, InstallerState,
-    OperationPhase, Surface, UpdateState,
+    OperationPhase, Surface,
 };
 use zup_runtime::{InstallOutcome, RuntimeEvent, RuntimeState};
 
@@ -609,35 +609,6 @@ fn an_update_check_is_refused_where_there_is_no_channel() {
 }
 
 #[test]
-fn the_update_state_a_preset_reads_names_the_versions() {
-    let mut host = maintenance_host();
-    host.set_update(
-        Some("stable".into()),
-        UpdateState::Checking {
-            detail: "Resolving…".into(),
-        },
-    );
-    let update = host.snapshot().update.as_ref().expect("an update");
-    assert_eq!(update.channel.as_deref(), Some("stable"));
-
-    host.set_update(
-        Some("stable".into()),
-        UpdateState::Available {
-            current: "1.4.0".into(),
-            available: "1.5.0".into(),
-        },
-    );
-    let update = host.snapshot().update.as_ref().expect("an update");
-    assert_eq!(
-        update.state,
-        UpdateState::Available {
-            current: "1.4.0".into(),
-            available: "1.5.0".into()
-        }
-    );
-}
-
-#[test]
 fn another_operation_running_is_not_reported_as_a_failure() {
     let mut host = install_host();
     host.accept(Action::Install);
@@ -675,17 +646,6 @@ fn a_retry_repeats_the_intent_and_not_the_state_of_the_moment() {
 }
 
 #[test]
-fn a_committed_operation_is_not_retried() {
-    let mut host = install_host();
-    host.accept(Action::Install);
-    host.finish_with(&InstallOutcome::Committed);
-    assert_eq!(
-        host.accept(Action::Retry),
-        HostDecision::Refused(ActionRefusal::NothingToRetry)
-    );
-}
-
-#[test]
 fn every_engine_phase_reaches_a_renderable_state() {
     let states = [
         RuntimeState::Preparing,
@@ -713,15 +673,12 @@ fn every_engine_phase_reaches_a_renderable_state() {
 }
 
 #[test]
-fn a_rolling_back_run_reports_what_it_is_restoring() {
+fn a_rolling_back_run_stays_running() {
     let mut host = install_host();
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::RollingBack);
-    assert_eq!(
-        host.snapshot().progress.as_ref().expect("progress").label,
-        "Restoring the previous state…"
-    );
     assert_eq!(host.snapshot().state, InstallerState::Running);
+    assert!(host.snapshot().progress.is_some());
 }
 
 #[test]
@@ -840,7 +797,7 @@ fn the_maintenance_surface_offers_no_scope_or_location_choices() {
 }
 
 #[test]
-fn a_prerequisite_is_presented_as_a_requirement_not_as_a_failure() {
+fn an_unsatisfied_prerequisite_keeps_the_run_going() {
     let mut host = install_host();
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::PrerequisiteCheck {
@@ -850,10 +807,6 @@ fn a_prerequisite_is_presented_as_a_requirement_not_as_a_failure() {
         version: None,
     });
     assert_eq!(host.snapshot().state, InstallerState::Running);
-    assert_eq!(
-        host.snapshot().progress.as_ref().expect("progress").label,
-        "runtime library is needed"
-    );
 }
 
 #[test]

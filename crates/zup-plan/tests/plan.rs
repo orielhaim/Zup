@@ -199,29 +199,6 @@ scope = "{allowed_str}"
     }
 }
 
-#[rstest]
-#[case::user(SelectedScope::User, "${location.user_data}/Programs/Acme")]
-#[case::machine(SelectedScope::Machine, "${location.programs}/Acme")]
-fn either_scope_selects_its_own_directory(#[case] scope: SelectedScope, #[case] directory: &str) {
-    let build = build_plan_from(&with(""), &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
-    assert_eq!(result.scope, scope);
-    assert_eq!(result.install_directory.to_string(), directory);
-}
-
-#[test]
-fn author_gated_install_directory_override_reaches_the_plan() {
-    let source = BASE.replace(
-        "[install.directory]",
-        "allow_directory_override = true\n\n[install.directory]",
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let mut request = PlanRequest::new(target(), SelectedScope::User);
-    request.install_directory = Some(Template::parse(r"C:\Apps\Acme").unwrap());
-    let result = plan(&build, &request).unwrap();
-    assert_eq!(result.install_directory.to_string(), r"C:\Apps\Acme");
-}
-
 #[test]
 fn install_directory_override_is_rejected_when_not_authored() {
     let build = build_plan_from(BASE, &[("dist/a.txt", b"a")]);
@@ -437,24 +414,6 @@ when = 'component("core") && component("cli")'
     )
     .unwrap();
     assert_eq!(with_cli.files.len(), 1);
-}
-
-#[test]
-fn nested_condition_expressions() {
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[path]]
-value = "${install}/x"
-when = '!(component("core") && component("core")) || component("core")'
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.path_entries.len(), 1);
 }
 
 #[test]

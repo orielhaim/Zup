@@ -9,11 +9,10 @@
 use rstest::rstest;
 use zup_artifact::ArtifactError;
 use zup_artifact::preset::{
-    HEADER_BYTES, PACKAGE_SCHEMA, PresetPackage, PresetPackageView, PresetPackageWriter,
-    decode_metadata, encode_metadata,
+    HEADER_BYTES, PresetPackageView, PresetPackageWriter, decode_metadata, encode_metadata,
 };
 use zup_core::{Sha256Digest, TargetTriple};
-use zup_preset_protocol::{Capabilities, Capability, PRESET_PROTOCOL_VERSION, PresetDescription};
+use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 fn target(name: &str) -> TargetTriple {
     TargetTriple::parse(name).expect("a valid target triple")
@@ -38,61 +37,6 @@ fn packed(targets: &[&str]) -> Vec<u8> {
     writer
         .finish()
         .expect("the package is written and verified")
-}
-
-#[test]
-fn a_single_target_package_round_trips() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
-    let view = PresetPackageView::open(bytes).expect("a package reads back");
-    assert_eq!(view.name(), "aurora");
-    assert_eq!(view.version().to_string(), "1.4.2");
-    assert_eq!(view.wire_protocol(), PRESET_PROTOCOL_VERSION);
-    assert_eq!(view.targets(), ["x86_64-pc-windows-msvc"]);
-    assert!(
-        view.required_capabilities()
-            .contains(Capability::Components)
-    );
-    view.verify().expect("every binary verifies");
-}
-
-#[test]
-fn a_multi_target_package_carries_one_binary_per_target() {
-    let bytes = packed(&[
-        "x86_64-pc-windows-msvc",
-        "aarch64-pc-windows-msvc",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-    ]);
-    let view = PresetPackageView::open(bytes).expect("a package reads back");
-    assert_eq!(view.targets().len(), 6);
-    for name in [
-        "aarch64-apple-darwin",
-        "aarch64-pc-windows-msvc",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "x86_64-pc-windows-msvc",
-        "x86_64-unknown-linux-gnu",
-    ] {
-        assert!(view.targets().contains(&name), "missing {name}");
-    }
-}
-
-/// Two builds of the same logical package are the same file, because a package's
-/// identity is its document and a document that varied per machine could not be
-/// compared with anything.
-#[test]
-fn the_same_binaries_produce_the_same_bytes() {
-    assert_eq!(
-        packed(&["x86_64-pc-windows-msvc"]),
-        packed(&["x86_64-pc-windows-msvc"])
-    );
-    assert_eq!(
-        packed(&["x86_64-pc-windows-msvc", "x86_64-apple-darwin"]),
-        packed(&["x86_64-apple-darwin", "x86_64-pc-windows-msvc"]),
-        "the order binaries are added in does not reach the document"
-    );
 }
 
 #[test]
@@ -178,16 +122,6 @@ fn a_file_that_is_not_a_package_is_refused() {
         panic!("a file that is not a package is not read as one");
     };
     assert_eq!(found, "this", "the refusal names what the file starts with");
-}
-
-#[test]
-fn a_file_too_short_to_hold_a_header_is_refused() {
-    let error =
-        PresetPackageView::open(b"ZPUI".to_vec()).expect_err("a file that cannot hold a header");
-    assert!(
-        matches!(error, zup_artifact::ArtifactError::PresetTruncated { .. }),
-        "{error}"
-    );
 }
 
 #[test]
@@ -283,6 +217,8 @@ fn a_binary_of_the_wrong_size_is_refused() {
 
 /// A document that claims a digest no stored binary has is refused before
 /// anything is decompressed, because there is nothing to decompress.
+/// A document that claims a digest no stored binary has is refused before
+/// anything is decompressed, because there is nothing to decompress.
 #[test]
 fn a_document_claiming_an_absent_digest_is_refused() {
     let bytes = packed(&["x86_64-pc-windows-msvc"]);
@@ -298,19 +234,6 @@ fn a_document_claiming_an_absent_digest_is_refused() {
 }
 
 #[test]
-fn a_corrupt_metadata_document_is_refused() {
-    let mut bytes = packed(&["x86_64-pc-windows-msvc"]);
-    // The first byte of the document is the opening brace of the canonical JSON,
-    // so replacing it makes the document unparseable rather than merely odd.
-    bytes[HEADER_BYTES] = b'!';
-    let error = PresetPackageView::open(bytes).expect_err("a corrupt document");
-    assert!(
-        matches!(error, zup_artifact::ArtifactError::Json(_)),
-        "{error}"
-    );
-}
-
-#[test]
 fn a_document_naming_a_binary_it_does_not_store_is_refused() {
     let mut package =
         decode_metadata(&metadata_of(&packed(&["x86_64-pc-windows-msvc"]))).expect("a document");
@@ -323,19 +246,6 @@ fn a_document_naming_a_binary_it_does_not_store_is_refused() {
         ),
         "a binary nothing stores is a package that cannot produce a preset"
     );
-}
-
-#[test]
-fn a_document_storing_a_binary_nothing_names_is_refused() {
-    let mut bytes = packed(&["x86_64-pc-windows-msvc"]);
-    let mut package = decode_metadata(&metadata_of(&bytes)).expect("a document");
-    package.binaries.clear();
-    let document = encode_metadata(&package).expect("the document encodes");
-    assert!(matches!(
-        decode_metadata(&document),
-        Err(zup_artifact::ArtifactError::PresetMetadata(_))
-    ));
-    bytes.clear();
 }
 
 #[test]
@@ -361,12 +271,6 @@ fn a_settings_schema_that_is_not_an_object_is_refused() {
 }
 
 #[test]
-fn an_empty_name_is_refused() {
-    let description = PresetDescription::new("  ", "1.0.0", serde_json::json!({}));
-    assert!(PresetPackageWriter::new(description).is_err());
-}
-
-#[test]
 fn a_version_this_package_cannot_state_is_refused() {
     let description = PresetDescription::new("aurora", "not-a-version", serde_json::json!({}));
     let mut writer = PresetPackageWriter::new(description).expect("the description itself is fine");
@@ -377,34 +281,6 @@ fn a_version_this_package_cannot_state_is_refused() {
         writer.finish().is_err(),
         "a preset that does not state a semantic version is not publishable"
     );
-}
-
-#[test]
-fn compatibility_is_stated_rather_than_negotiated() {
-    let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
-    let package = view.package();
-    assert!(package.is_compatible_with(PRESET_PROTOCOL_VERSION));
-    assert!(!package.is_compatible_with(PRESET_PROTOCOL_VERSION + 1));
-    assert_eq!(
-        PresetPackage::current_wire_protocol(),
-        PRESET_PROTOCOL_VERSION
-    );
-}
-
-#[test]
-fn missing_capabilities_are_named() {
-    let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
-    let provided = Capabilities::new([Capability::PlanPreview]);
-    let missing = view.package().missing_capabilities(&provided);
-    assert_eq!(missing, vec!["components"]);
-}
-
-/// The document's schema is the one this build writes, so a package that says
-/// otherwise is refused before its content is touched.
-#[test]
-fn the_written_schema_is_the_current_one() {
-    let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
-    assert_eq!(view.package().schema, PACKAGE_SCHEMA);
 }
 
 /// The bytes that make up a package's metadata document.

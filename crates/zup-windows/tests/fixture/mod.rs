@@ -72,10 +72,19 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         let root = tempfile::tempdir().expect("fixture root");
+        // Staging embeds the variant runtime, which requires a real unsigned
+        // image; filler bytes would fail composition-time validation.
+        let runtime = std::fs::read(real_runtime()).expect("staged setup runtime");
         let variants = vec![
-            build(&root, "windows-x86", "i686-pc-windows-msvc", 3),
-            build(&root, "windows-x64", "x86_64-pc-windows-msvc", 1),
-            build(&root, "windows-arm64", "aarch64-pc-windows-msvc", 2),
+            build(&root, "windows-x86", "i686-pc-windows-msvc", 3, &runtime),
+            build(&root, "windows-x64", "x86_64-pc-windows-msvc", 1, &runtime),
+            build(
+                &root,
+                "windows-arm64",
+                "aarch64-pc-windows-msvc",
+                2,
+                &runtime,
+            ),
         ];
         Self { variants, root }
     }
@@ -86,7 +95,21 @@ impl Fixture {
     }
 }
 
-fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> DistributionVariant {
+fn real_runtime() -> PathBuf {
+    zup_xtask::dispatcher::beside_test_executable(
+        &std::env::current_exe().expect("test executable path"),
+        "zup-setup-console-x86_64-pc-windows-msvc",
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn build(
+    root: &tempfile::TempDir,
+    profile: &str,
+    target: &str,
+    tag: u64,
+    runtime: &[u8],
+) -> DistributionVariant {
     let root = root.path().join(profile);
     std::fs::create_dir_all(&root).expect("target root");
     let resolved = zup_core::ResolvedTargetConfig {
@@ -189,8 +212,6 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
         icons: zup_core::TargetIcons::default(),
     };
 
-    let mut runtime = filler("runtime-image", 0).into_bytes();
-    runtime.extend_from_slice(target.as_bytes());
-    DistributionVariant::resolve(&resolved, &plan, &[], &[(MediaType::RUNTIME, runtime)])
-        .expect("the variant resolves")
+    let natives = vec![(MediaType::RUNTIME, runtime.to_vec())];
+    DistributionVariant::resolve(&resolved, &plan, &[], &natives).expect("the variant resolves")
 }

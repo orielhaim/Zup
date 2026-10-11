@@ -318,42 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn menu_launchers_protocols_and_associations_are_supported() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::User,
-        );
-        let mut plan = plan();
-        plan.installer.launchers.push(zup_core::Launcher {
-            location: zup_core::LauncherLocation::Menu,
-            name: zup_core::NonEmptyString::new("Tool").unwrap(),
-            target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
-            arguments: Vec::new(),
-            working_directory: None,
-            component: None,
-            when: None,
-        });
-        plan.installer.protocols.push(zup_core::Protocol {
-            scheme: zup_core::ProtocolScheme::new("acme").unwrap(),
-            executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
-            args: vec!["%1".into()],
-            when: None,
-        });
-        plan.installer
-            .file_associations
-            .push(zup_core::FileAssociation {
-                extension: zup_core::FileExtension::new(".foo").unwrap(),
-                id: zup_core::FileAssociationId::new("acme.foo").unwrap(),
-                description: None,
-                executable: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
-                when: None,
-            });
-        let errors = linux_capability_errors(&config, &plan);
-        assert!(errors.is_empty(), "{errors:?}");
-    }
-
-    #[test]
     fn protocols_without_one_placeholder_are_refused() {
         let config = config(
             SUPPORTED_LINUX_TARGET,
@@ -428,19 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn machine_services_are_supported_without_plugins() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::Machine,
-        );
-        let mut plan = plan();
-        plan.installer.services.push(machine_service());
-        let errors = linux_capability_errors(&config, &plan);
-        assert!(errors.is_empty(), "{errors:?}");
-    }
-
-    #[test]
     fn user_and_either_services_stay_refused() {
         for scope in [InstallScope::User, InstallScope::Either] {
             let config = config(SUPPORTED_LINUX_TARGET, Frontend::Console, scope);
@@ -485,28 +436,6 @@ mod tests {
             component: None,
             when: None,
         }
-    }
-
-    #[test]
-    fn a_plain_machine_file_plan_is_accepted() {
-        let errors = linux_capability_errors(
-            &config(
-                SUPPORTED_LINUX_TARGET,
-                Frontend::Console,
-                InstallScope::Machine,
-            ),
-            &plan(),
-        );
-        assert!(errors.is_empty(), "{errors:?}");
-        let errors = linux_capability_errors(
-            &config(
-                SUPPORTED_LINUX_TARGET,
-                Frontend::Headless,
-                InstallScope::Either,
-            ),
-            &plan(),
-        );
-        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

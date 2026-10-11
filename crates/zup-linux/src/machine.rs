@@ -1,14 +1,8 @@
 use crate::error::PathError;
+use crate::locations::MachineRoots;
+use crate::services::SYSTEMD_UNIT_DIR;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-
-pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
-
-pub const MACHINE_STATE_ROOT: &str = "/var/lib/zup";
-
-pub const MACHINE_SHARED_DATA_ROOT: &str = "/var/opt";
-
-pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
 
 pub const SYSTEMD_UNIT_FILE_MODE: u32 = 0o644;
 
@@ -21,33 +15,6 @@ pub const MACHINE_PRIVATE_FILE_MODE: u32 = 0o600;
 pub const MACHINE_PUBLIC_FILE_MODE: u32 = 0o644;
 
 pub const MACHINE_LOCK_FILE_MODE: u32 = 0o644;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MachineRoots {
-    pub programs: PathBuf,
-
-    pub state: PathBuf,
-
-    pub shared_data: PathBuf,
-}
-
-impl MachineRoots {
-    pub fn production() -> Self {
-        Self {
-            programs: PathBuf::from(MACHINE_PROGRAMS_ROOT),
-            state: PathBuf::from(MACHINE_STATE_ROOT),
-            shared_data: PathBuf::from(MACHINE_SHARED_DATA_ROOT),
-        }
-    }
-
-    pub fn new(programs: PathBuf, state: PathBuf, shared_data: PathBuf) -> Self {
-        Self {
-            programs,
-            state,
-            shared_data,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineDestination {

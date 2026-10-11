@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;

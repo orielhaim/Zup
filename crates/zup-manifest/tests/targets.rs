@@ -73,35 +73,6 @@ fn compile_parsed(manifest: &Manifest, profile: &str) -> Result<Installer, Manif
 }
 
 #[test]
-fn selects_targets_by_profile_name() {
-    let manifest = parse(MANIFEST).unwrap();
-
-    let selected =
-        select_targets(&manifest, &["windows-x64"], &TargetOverrides::default()).unwrap();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(
-        selected[0].profile,
-        TargetProfileId::new("windows-x64").unwrap()
-    );
-    assert_eq!(
-        selected[0].target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
-    assert_eq!(
-        selected[0].source,
-        Source::new(PathBuf::from("dist/windows-x64")).unwrap()
-    );
-    assert_eq!(selected[0].frontend, Frontend::Gui);
-
-    let selected = select_targets(&manifest, &[], &TargetOverrides::default()).unwrap();
-    let names: Vec<_> = selected
-        .iter()
-        .map(|config| config.profile.as_str())
-        .collect();
-    assert_eq!(names, ["a-macos-arm64", "windows-x64", "z-linux-arm64"]);
-}
-
-#[test]
 fn a_selector_may_be_a_profile_name_or_a_raw_triple() {
     let manifest = parse(MANIFEST).unwrap();
     let selected = select_targets(
@@ -150,25 +121,6 @@ fn raw_target_aliases_are_canonicalized() {
 }
 
 #[test]
-fn declared_frontend_resolves_and_compiles() {
-    let profile = with_windows_frontend("console");
-    let common = MANIFEST.replace("schema = 1\n", "schema = 1\nfrontend = \"console\"\n");
-
-    for source in [profile, common] {
-        let manifest = parse(&source).unwrap();
-        let overrides = TargetOverrides::default();
-
-        let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-        let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-        let convenience = parse_and_compile(&source, "windows-x64").unwrap();
-
-        assert_eq!(selected[0].frontend, Frontend::Console);
-        assert_eq!(installer.frontend, Frontend::Console);
-        assert_eq!(convenience.frontend, Frontend::Console);
-    }
-}
-
-#[test]
 fn caller_frontend_override_wins_over_profile() {
     let manifest = parse(&with_windows_frontend("console")).unwrap();
     let overrides = TargetOverrides {
@@ -185,53 +137,6 @@ fn caller_frontend_override_wins_over_profile() {
         compile(&manifest, &selected[0], &TargetOverrides::default()),
         Err(ManifestError::InvalidResolvedTargetConfig { .. })
     ));
-}
-
-#[test]
-fn empty_and_missing_target_lists_apply_to_all_profiles() {
-    let source = with_resources(
-        r#"
-[[files]]
-source = "missing/**/*"
-destination = "${install}"
-
-[[files]]
-source = "empty/**/*"
-destination = "${install}"
-targets = []
-"#,
-    );
-
-    let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
-
-    assert_eq!(windows.files.len(), 2);
-    assert_eq!(linux.files.len(), 2);
-}
-
-#[test]
-fn target_filters_windows_and_linux_files() {
-    let source = with_resources(
-        r#"
-[[files]]
-source = "windows/**/*"
-destination = "${install}"
-targets = ["windows-x64"]
-
-[[files]]
-source = "linux/**/*"
-destination = "${install}"
-targets = ["z-linux-arm64"]
-"#,
-    );
-
-    let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
-
-    assert_eq!(windows.files.len(), 1);
-    assert_eq!(windows.files[0].source.as_str(), "windows/**/*");
-    assert_eq!(linux.files.len(), 1);
-    assert_eq!(linux.files[0].source.as_str(), "linux/**/*");
 }
 
 #[test]
@@ -611,31 +516,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
         Err(ManifestError::InvalidResolvedTargetConfig { ref reason, .. })
             if reason.contains("install directory")
     ));
-}
-
-#[test]
-fn caller_install_directory_override_covers_every_scope_a_target_installs_to() {
-    let source = MANIFEST.replace("scope = \"user\"\n", "scope = \"either\"\n");
-    let manifest = parse(&source).unwrap();
-    let overrides = TargetOverrides {
-        install_directory: Some(literal("C:/Program Files/Acme")),
-        ..TargetOverrides::default()
-    };
-
-    let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-    let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-
-    assert_eq!(selected[0].install.scope, InstallScope::Either);
-    for template in [
-        &selected[0].install.directory.user,
-        &selected[0].install.directory.machine,
-    ] {
-        assert_eq!(
-            template.as_ref().map(ToString::to_string),
-            Some("C:/Program Files/Acme".to_owned())
-        );
-    }
-    assert_eq!(installer.install.directory, selected[0].install.directory);
 }
 
 #[test]

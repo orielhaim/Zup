@@ -16,7 +16,7 @@ use zup_core::{
 use zup_protocol::{SessionId, WireEnvelope};
 
 use crate::error::{ExecError, IpcError};
-use crate::machine::MachineRoots;
+use crate::locations::MachineRoots;
 use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest, run};
 use crate::systemd::{SystemdManager, UnitChange, UnitInfo};
 
@@ -749,7 +749,7 @@ pub fn machine_v2_files() -> Vec<FixtureFile> {
     ]
 }
 
-pub fn machine_install_dir(roots: &crate::machine::MachineRoots) -> PathBuf {
+pub fn machine_install_dir(roots: &crate::locations::MachineRoots) -> PathBuf {
     roots.programs.join("tool")
 }
 

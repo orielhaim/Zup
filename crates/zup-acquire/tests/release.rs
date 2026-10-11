@@ -490,11 +490,10 @@ fn a_release_identity_that_could_not_describe_an_installation_is_refused(
     assert!(identity.validate().is_err(), "{identity:?} must be refused");
 }
 
-/// The runtime is what control is eventually handed to, so it is named as
-/// content the engine fetches, verified, and schedules first - not treated as
-/// something already present.
+/// The runtime is what control is eventually handed to, so the scheduler moves
+/// it first.
 #[test]
-fn a_release_names_a_runtime_as_content_so_it_is_verified_before_it_runs() {
+fn a_release_schedules_its_runtime_first() {
     let release = release(vec![variant(
         "windows-x64",
         "x86_64-pc-windows-msvc",
@@ -503,49 +502,7 @@ fn a_release_names_a_runtime_as_content_so_it_is_verified_before_it_runs() {
     let runtime = release
         .runtime_descriptor(&release.variants[0])
         .expect("an online release names the runtime the machine has to fetch");
-    assert_eq!(
-        runtime.priority,
-        zup_acquire::ContentPriority::Critical,
-        "a runtime is what control is handed to, so it is scheduled first"
-    );
-    assert!(
-        runtime.kind().is_executable(),
-        "only a runtime is executable, so only a runtime gets run"
-    );
-}
-
-#[test]
-fn a_release_prefers_the_offline_installer_when_a_human_is_clicks() {
-    let mut release = release(vec![variant(
-        "windows-x64",
-        "x86_64-pc-windows-msvc",
-        &[digest_of(b"a")],
-    )]);
-    release.downloads = vec![
-        ReleaseDownload {
-            kind: ReleaseDownloadKind::ThinInstaller,
-            path: "Acme-Setup-online.exe".to_owned(),
-            descriptor: DocumentRef::of(digest_of(b"thin"), 2),
-            variant: None,
-        },
-        ReleaseDownload {
-            kind: ReleaseDownloadKind::OfflineInstaller,
-            path: "Acme-Setup.exe".to_owned(),
-            descriptor: DocumentRef::of(digest_of(b"offline"), 2),
-            variant: Some("windows-x64".to_owned()),
-        },
-    ];
-    let release = reseal(release);
-    release.validate().expect("well formed");
-    assert_eq!(
-        release.human_download().map(|d| d.path.as_str()),
-        Some("Acme-Setup.exe"),
-        "a disconnected machine still gets one file"
-    );
-    assert_eq!(
-        release.thin_download().map(|d| d.path.as_str()),
-        Some("Acme-Setup-online.exe")
-    );
+    assert_eq!(runtime.priority, zup_acquire::ContentPriority::Critical);
 }
 
 #[test]

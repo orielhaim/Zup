@@ -1,10 +1,8 @@
 # Presets
 
-A preset is the installer UI.
+A preset is the installer UI: a native Rust program built with GPUI and `zup-sdk`, packaged as `.zupui`.
 
-Zup owns installation state and lifecycle behavior. A preset decides how that state is presented and which valid actions the user can request. It is a native Rust program built with GPUI and `zup-sdk`, then packaged as `.zupui` for one or more target triples.
-
-The default preset ships with Zup. Application authors can select another preset without changing installation logic.
+Zup owns installation state and lifecycle behavior. A preset decides how that state is presented and which valid actions the user can request. The default preset ships with Zup.
 
 ## Two users of the preset system
 

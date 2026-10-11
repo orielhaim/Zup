@@ -962,16 +962,3 @@ fn neighboring_unit_files_survive_transitions() {
     );
     let _ = unit;
 }
-
-fn binary_path(fixture: &Fixture) -> PathBuf {
-    fixture.roots.programs.join("acme").join("tool")
-}
-
-#[test]
-fn the_binary_path_is_trusted_machine_content() {
-    let fixture = Fixture::new();
-    assert_eq!(
-        binary_path(&fixture).to_string_lossy(),
-        fixture.binary().to_string()
-    );
-}

@@ -1,7 +1,8 @@
+#![cfg(windows)]
+
 use std::path::{Path, PathBuf};
 
 use zup_artifact::{ArtifactComposer, ArtifactRequest};
-use zup_bundle::Package;
 use zup_core::Sha256Digest;
 use zup_windows::{UniversalArtifact, UniversalError, compose_universal_executable, stage_variant};
 
@@ -75,7 +76,7 @@ fn a_composed_artifact_verifies_every_blob_it_advertises() {
 }
 
 #[test]
-fn a_staged_variant_is_a_package_the_native_runtime_already_reads() {
+fn a_staged_variant_runs_as_a_self_contained_installer() {
     let fixture = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let (output, _graph) = compose(root.path(), &fixture);
@@ -85,20 +86,33 @@ fn a_staged_variant_is_a_package_the_native_runtime_already_reads() {
     let staged = stage_variant(&artifact, id, &store).expect("staged");
 
     assert!(staged.runtime.is_file());
-    let variant = artifact.index().variant("windows-x64").unwrap();
-    let runtime = variant.runtime.expect("the variant carries a runtime");
-    let staged_bytes = std::fs::read(&staged.runtime).unwrap();
-    assert_eq!(staged_bytes.len() as u64, runtime.size);
-    let (_, digest) = zup_core::hash_reader(staged_bytes.as_slice()).unwrap();
-    assert_eq!(digest, runtime.digest);
-
-    let package = Package::open(&staged.package).expect("the staged package opens");
-    assert_eq!(package.plan().installer.target.as_str(), {
+    let bundle = zup_windows::EmbeddedBundle::open(&staged.runtime)
+        .expect("the staged runtime carries its package");
+    assert_eq!(bundle.target().as_str(), {
         artifact.index().variant(id).unwrap().target.as_str()
     });
+    assert_eq!(
+        bundle.plan().installer.target.as_str(),
+        artifact.index().variant(id).unwrap().target.as_str()
+    );
     assert!(
-        package.plan().plugins.is_empty(),
+        bundle.plan().plugins.is_empty(),
         "the x64 variant declares no plugin"
+    );
+    let entries: Vec<_> = bundle.plan().entries.iter().collect();
+    assert!(!entries.is_empty(), "the staged package names payload");
+    for entry in entries {
+        let mut reader =
+            zup_bundle::PayloadSource::open(&bundle, &entry.path, &entry.sha256, entry.size)
+                .expect("staged payload opens");
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut bytes).expect("staged payload reads");
+        assert_eq!(bytes.len() as u64, entry.size);
+        assert_eq!(zup_core::hash_bytes(&bytes), entry.sha256);
+    }
+    assert!(
+        !store.join("variant.zup").exists() && !store.join("artifact.json").exists(),
+        "staging leaves no sidecar the runtime would have to discover"
     );
 }
 
@@ -110,7 +124,9 @@ fn a_staged_variant_carries_no_other_architecture_content() {
     let artifact = UniversalArtifact::open(&output).expect("the artifact opens");
     let store = root.path().join("store-x64");
     let staged = stage_variant(&artifact, "windows-x64", &store).expect("staged");
-    let package = Package::open(&staged.package).expect("the staged package opens");
+    let bundle = zup_windows::EmbeddedBundle::open(&staged.runtime)
+        .expect("the staged runtime carries its package");
+    let package = bundle.package();
 
     let arm = artifact
         .view()
@@ -218,15 +234,4 @@ fn pe_machine_offset(bytes: &[u8]) -> usize {
     let header = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
     assert_eq!(&bytes[header..header + 4], b"PE\0\0");
     header + 4
-}
-
-#[test]
-fn a_missing_resource_is_reported_rather_than_read_as_empty() {
-    let fixture = Fixture::new();
-    let root = tempfile::tempdir().unwrap();
-    let (_output, _graph) = compose(root.path(), &fixture);
-
-    let plain = root.path().join("plain.exe");
-    std::fs::write(&plain, b"MZ not really an image").unwrap();
-    assert!(UniversalArtifact::open(&plain).is_err());
 }

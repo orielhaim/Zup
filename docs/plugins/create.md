@@ -34,10 +34,7 @@ crate-type = ["cdylib"]
 zup-sdk = { version = "0.1.0", features = ["plugin"] }
 ```
 
-The generated project is the whole of the scaffolding. The SDK generates its
-bindings against the WIT Zup owns, and `zup plugin build` owns compiling for
-`wasm32-unknown-unknown` and componentising the result, so there is nothing to
-install, configure or keep in step.
+The generated project is the whole scaffolding: bindings come from the WIT Zup owns, and `zup plugin build` owns compiling and componentising.
 
 ## Write the plugin
 
@@ -61,9 +58,7 @@ zup_sdk::plugin::export!(Configure);
 That is a complete plugin. `plan` receives the [context](./context) and returns a
 [plan](./resources); `export!` turns it into the component Zup loads.
 
-Returning an `Error` is a normal answer, not a failure. It says "this plugin
-cannot plan for that context", with a code a host can branch on and a message a
-person can read:
+Returning an `Error` says "this plugin cannot plan for that context", with a code a host can branch on and a message a person can read:
 
 ```rust
 if context.target.ends_with("-windows-msvc") {
@@ -77,9 +72,7 @@ if context.target.ends_with("-windows-msvc") {
 zup plugin build
 ```
 
-That is the whole command. It runs Cargo for `wasm32-unknown-unknown`, turns the
-resulting core module into a component that implements the plugin world, and
-writes `dist/configure.wasm`.
+It runs Cargo for `wasm32-unknown-unknown`, turns the module into a component implementing the plugin world, and writes `dist/configure.wasm`.
 
 | Flag | Meaning |
 | --- | --- |
@@ -87,9 +80,7 @@ writes `dist/configure.wasm`.
 | `--profile <p>` | Cargo profile. Defaults to `release` |
 | `--output <file>` | Where to write the component. Defaults to `dist/<name>.wasm` |
 
-Zup asks Cargo where its output actually is rather than guessing a path, because
-a guessed path is right until someone sets a target directory. The component
-comes from the WIT Zup owns, so there is no second copy to disagree.
+Zup asks Cargo where its output actually is rather than guessing a path.
 
 ## Bind it to an application
 
@@ -104,5 +95,3 @@ Then validate:
 ```bash
 zup check
 ```
-
-Next: [Configure a plugin](./configure) for `component`, `when` and `targets`.

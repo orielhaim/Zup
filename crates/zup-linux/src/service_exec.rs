@@ -4,7 +4,8 @@ use zup_platform::{CommandSpec, TargetService};
 
 use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
-use crate::machine::{MachineRoots, SystemdRoots, authorize_systemd_unit};
+use crate::locations::MachineRoots;
+use crate::machine::{SystemdRoots, authorize_systemd_unit};
 use crate::service_ops::{
     ServicePayload, ServiceReceipt, check_collisions, desired_policy, encode_payload,
     load_path_dirs, policy_for_state, refuse_source_symlink, validate_changes,

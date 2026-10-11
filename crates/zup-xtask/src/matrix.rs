@@ -90,14 +90,14 @@ pub const MATRICES: &[Matrix] = &[
     },
     Matrix {
         name: "windows-backend",
-        summary: "the Windows mechanism layer",
-        host: Host::Windows,
+        summary: "the Windows backend: portable composition on any host, native mechanisms on Windows",
+        host: Host::Both,
         packages: WINDOWS_BACKEND,
     },
     Matrix {
         name: "linux-backend",
-        summary: "the Linux mechanism layer",
-        host: Host::Linux,
+        summary: "the Linux backend: portable composition on any host, native mechanisms on Linux",
+        host: Host::Both,
         packages: LINUX_BACKEND,
     },
     Matrix {

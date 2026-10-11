@@ -15,14 +15,29 @@ name = "zup-test-worker"
 path = "src/bin/test_worker.rs"
 required-features = ["test-launcher"]
 
+# Portable composition: modules without a `cfg(windows)` gate compose Windows
+# installers from PE bytes on any host. Everything else is the native runtime
+# and lives under `[target.'cfg(windows)'.dependencies]`.
 [dependencies]
+thiserror.workspace = true
+typed-path.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+zup-artifact.workspace = true
+zup-binary.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-pe.workspace = true
+zup-plan.workspace = true
+zup-platform.workspace = true
+zup-transaction.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 directories.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
-typed-path.workspace = true
 tokio = { version = "1", features = [
   "net",
   "io-util",
@@ -32,32 +47,20 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tracing.workspace = true
 uuid.workspace = true
 windows-link.workspace = true
 windows-registry.workspace = true
 windows-result.workspace = true
 lnks.workspace = true
 windows-service.workspace = true
-zup-bootstrap.workspace = true
-zup-bundle.workspace = true
-zup-core.workspace = true
-zup-exec.workspace = true
-zup-plan.workspace = true
-zup-platform.workspace = true
 zup-acquire.workspace = true
-zup-artifact.workspace = true
-zup-binary.workspace = true
-zup-pe.workspace = true
-zstd.workspace = true
-semver.workspace = true
+zup-bootstrap.workspace = true
+zup-exec.workspace = true
 zup-protocol.workspace = true
 zup-runtime.workspace = true
 zup-signing.workspace = true
-zup-transaction.workspace = true
-tempfile.workspace = true
-
-[target.'cfg(windows)'.dependencies]
+zstd.workspace = true
+semver.workspace = true
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

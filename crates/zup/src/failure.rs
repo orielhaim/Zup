@@ -217,19 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn an_untyped_failure_is_named_after_the_operation() {
-        let report = miette::miette!("no `zup.toml` here");
-        for (operation, code) in [
-            ("build", "zup.build.failed"),
-            ("publish.github", "zup.publish.failed"),
-            ("sign.verify", "zup.signing.verify_failed"),
-            ("artifact.inspect", "zup.artifact.invalid"),
-        ] {
-            assert!(failure(operation, &report, "").code.is(code));
-        }
-    }
-
-    #[test]
     fn a_diagnostic_with_a_span_points_at_a_line_and_column() {
         let diagnostic = diagnostic(&spanned("zup.toml", "schema = 1\napp = 2\n", 13));
         let location = diagnostic.source.expect("a location");

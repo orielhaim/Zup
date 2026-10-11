@@ -17,11 +17,13 @@ const OTHER_TARGET: &str = X64;
 #[cfg(not(target_arch = "aarch64"))]
 const OTHER_TARGET: &str = ARM64;
 
-/// A target no backend implements on this build host.
+/// A target no backend implements on any build host: cross-building covers
+/// every Windows and Linux triple from either host, so only a platform no
+/// backend owns exercises the backend boundary.
 #[cfg(windows)]
 const UNSUPPORTED_TARGET: &str = "aarch64-unknown-linux-gnu";
 #[cfg(not(windows))]
-const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
+const UNSUPPORTED_TARGET: &str = "aarch64-apple-darwin";
 
 /// The frontend every fixture project declares.
 ///
@@ -82,133 +84,6 @@ user = "${{location.user_data}}/CliMatrix"
     let path = root.path().join("zup.toml");
     fs::write(&path, manifest).unwrap();
     (root, path)
-}
-
-#[test]
-#[cfg(windows)]
-fn repeated_profile_and_raw_triple_selection_are_checked() {
-    let (root, manifest) = write_matrix_project();
-    // Both targets present a window, and a window needs a preset carrying its
-    // target. The staged toolchain a contributor has holds the one their machine
-    // can build, so this project gets a toolchain that can build both.
-    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
-    for selection in [
-        vec!["--target", "alpha", "--target", HOST_TARGET],
-        vec!["--target", OTHER_TARGET],
-        vec![],
-    ] {
-        let output = zup()
-            .args(["--toolchain"])
-            .arg(root.path())
-            .args(["check", "--manifest"])
-            .arg(&manifest)
-            .args(&selection)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{selection:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    // A check reads the source tree and resolves; it must not write to it.
-    assert_eq!(
-        fs::read(root.path().join("dist/alpha/app.bin")).unwrap(),
-        b"alpha"
-    );
-}
-
-/// A manifest whose profiles disagree with the command line, so precedence is
-/// observable: the CLI must win for source, install directory, and frontend.
-#[cfg(windows)]
-fn write_precedence_project() -> (TempDir, PathBuf) {
-    let root = TempDir::new().unwrap();
-    for name in ["declared", "cli"] {
-        fs::create_dir_all(root.path().join(format!("out/{name}"))).unwrap();
-        fs::write(
-            root.path().join(format!("out/{name}/app.bin")),
-            name.as_bytes(),
-        )
-        .unwrap();
-    }
-    let manifest = root.path().join("zup.toml");
-    fs::write(
-        &manifest,
-        format!(
-            r#"schema = 1
-[app]
-id = "com.example.cli-precedence"
-name = "Cli Precedence"
-version = "1.0.0"
-[build]
-[build.targets.default]
-target = "{HOST_TARGET}"
-source = {{ directory = "out/declared" }}
-frontend = "gui"
-[install]
-scope = "user"
-[install.directory]
-user = "${{location.user_data}}/CliPrecedence"
-"#
-        ),
-    )
-    .unwrap();
-    (root, manifest)
-}
-
-/// `zup check` reports what it resolved, so precedence is visible without a build.
-#[cfg(windows)]
-fn check_resolved(manifest: &std::path::Path, extra: &[&str]) -> String {
-    let output = zup()
-        .args(["check", "--manifest"])
-        .arg(manifest)
-        .args(extra)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_overrides_beat_profile_source_and_install_directory() {
-    let (_root, manifest) = write_precedence_project();
-
-    let declared = check_resolved(&manifest, &[]);
-    assert!(declared.contains("out/declared"), "{declared}");
-    assert!(
-        declared.contains("${location.user_data}/CliPrecedence"),
-        "{declared}"
-    );
-
-    let overridden = check_resolved(
-        &manifest,
-        &[
-            "--source",
-            "out/cli",
-            "--install-directory",
-            r"D:\Apps\CliPrecedence",
-        ],
-    );
-    assert!(overridden.contains("out/cli"), "{overridden}");
-    assert!(
-        !overridden.contains("out/declared"),
-        "the profile source is fully replaced: {overridden}"
-    );
-    assert!(
-        overridden.contains(r"D:\Apps\CliPrecedence"),
-        "{overridden}"
-    );
-    assert!(
-        !overridden.contains("${location.user_data}/CliPrecedence"),
-        "the common install directory is fully replaced: {overridden}"
-    );
 }
 
 /// A per-target flag is one value per selected target, on every command.

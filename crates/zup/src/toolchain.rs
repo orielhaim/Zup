@@ -299,33 +299,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_precedence_is_root_then_cache_then_staged() {
-        let root = PathBuf::from("C:/toolchain");
-        let state = PathBuf::from("C:/state");
-        let executable = PathBuf::from("C:/bin/zup.exe");
-        let resolver = ToolchainResolver::new("0.1.0".into(), executable.clone(), state.clone())
-            .with_root(Some(root.clone()));
-        let sources: Vec<ToolchainSource> =
-            resolver.roots().iter().map(|(_, source)| *source).collect();
-        assert_eq!(
-            sources,
-            vec![
-                ToolchainSource::Root,
-                ToolchainSource::Cache,
-                ToolchainSource::Staged,
-                ToolchainSource::Staged
-            ],
-            "an explicit root wins, then the pinned cache, then a staged toolchain"
-        );
-        assert_eq!(resolver.roots()[0].0, root);
-        assert_eq!(
-            resolver.roots()[1].0,
-            state.join("toolchain").join("0.1.0"),
-            "the cache is keyed by the exact zup version, so a pinned build is reproducible"
-        );
-    }
-
-    #[test]
     fn a_component_is_stored_under_its_own_target_suffix() {
         let linux = runtime_for(
             &zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("valid"),

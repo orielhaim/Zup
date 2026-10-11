@@ -12,9 +12,7 @@ Most applications only need the first and fourth parts at the start.
 
 ## Current platform support
 
-Zup is designed around target profiles and portable installation intent. The Windows backend is the implementation that ships today. macOS and Linux backends are not available yet.
-
-That distinction matters: `zup.toml`, preset packaging and the public model are not Windows-shaped, but a non-Windows installation target is currently refused at the backend boundary.
+Windows and Linux installers build from either host. Linux ships `console` and `headless` runtimes for `x86_64-unknown-linux-gnu`; `gui` is Windows-only. There is no macOS backend: a macOS triple is refused at the backend boundary.
 
 See [Platforms and targets](./platforms) for the exact model.
 

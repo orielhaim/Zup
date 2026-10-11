@@ -9,7 +9,7 @@ use zup_protocol::{
 };
 
 use crate::error::{ExecError, PathError};
-use crate::machine::MachineRoots;
+use crate::locations::MachineRoots;
 use crate::pkexec::{PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
 use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest};
 use crate::socket::{

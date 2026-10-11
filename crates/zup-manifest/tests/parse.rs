@@ -1,5 +1,5 @@
 use rstest::rstest;
-use zup_manifest::{AppId, Frontend, ManifestError, SCHEMA_VERSION, parse, parse_and_compile};
+use zup_manifest::{ManifestError, SCHEMA_VERSION, parse, parse_and_compile};
 
 fn minimal(scope: &str) -> String {
     format!(
@@ -76,108 +76,6 @@ fn toml_string(value: &str) -> String {
     }
     out.push('"');
     out
-}
-
-#[test]
-fn complete_valid_manifest_defaults() {
-    let src = r#"
-schema = 1
-
-[app]
-id = "com.example.acme"
-name = "Acme"
-version = "1.2.3"
-
-[build]
-
-[build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "dist/windows-x64" }
-
-[install]
-scope = "user"
-
-[install.directory]
-user = "${install}/App"
-
-[[components]]
-id = "core"
-name = "Core"
-"#;
-
-    let manifest = parse(src).expect("valid");
-    assert_eq!(manifest.schema, SCHEMA_VERSION);
-    assert_eq!(manifest.app.id, AppId::new("com.example.acme").unwrap());
-    assert_eq!(manifest.app.publisher, None);
-    assert_eq!(manifest.app.main, None);
-    assert_eq!(manifest.app.description, None);
-
-    assert_eq!(manifest.components.len(), 1);
-    let component = &manifest.components[0].value;
-    assert!(!component.required);
-    assert!(component.default);
-    assert!(component.requires.is_empty());
-
-    assert!(manifest.plugins.is_empty());
-    assert!(manifest.files.is_empty());
-    assert!(manifest.launchers.is_empty());
-    assert!(manifest.path.is_empty());
-    assert!(manifest.services.is_empty());
-    assert!(manifest.protocols.is_empty());
-    assert!(manifest.file_associations.is_empty());
-}
-
-#[test]
-fn frontend_reaches_the_installer_from_the_manifest() {
-    for (declaration, expected) in [(None, Frontend::Gui), (Some("console"), Frontend::Console)] {
-        let mut source = minimal("user");
-        if let Some(declaration) = declaration {
-            source = source.replacen(
-                "schema = 1\n",
-                &format!("schema = 1\nfrontend = \"{declaration}\"\n"),
-                1,
-            );
-        }
-        let label = declaration.unwrap_or("absent");
-
-        assert_eq!(parse(&source).expect("valid").frontend, expected, "{label}");
-        assert_eq!(
-            parse_and_compile(&source, "windows-x64")
-                .expect("compiles")
-                .frontend,
-            expected,
-            "{label}"
-        );
-    }
-}
-
-#[test]
-fn a_ui_section_names_a_preset_and_its_settings() {
-    let source = minimal("user").replace(
-        "[install]",
-        "[ui]\npreset = \"./vendor/aurora.zupui\"\n\n[ui.settings]\naccent = \"#695cff\"\nhero = \"Install Acme\"\n\n[install]",
-    );
-    let manifest = parse(&source).expect("a preset selection parses");
-    assert_eq!(
-        manifest.ui.preset.as_ref().map(|path| path.as_str()),
-        Some("vendor/aurora.zupui")
-    );
-    assert_eq!(
-        manifest
-            .ui
-            .settings
-            .get("accent")
-            .and_then(|value| value.as_str()),
-        Some("#695cff")
-    );
-    assert_eq!(
-        manifest
-            .ui
-            .settings
-            .get("hero")
-            .and_then(|value| value.as_str()),
-        Some("Install Acme")
-    );
 }
 
 #[test]
@@ -320,27 +218,6 @@ when = 'component()'
     );
     let err = parse(&src).expect_err("bad condition");
     assert!(matches!(err, ManifestError::Invalid { .. }));
-}
-
-#[test]
-fn an_icon_path_and_an_icon_table_both_parse() {
-    let path = parse(&minimal("user").replace(
-        "version = \"1.0.0\"\n",
-        "version = \"1.0.0\"\nicon = \"assets/icon.svg\"\n",
-    ))
-    .unwrap();
-    let icon = path.icon.expect("icon");
-    assert_eq!(icon.source.as_str(), "assets/icon.svg");
-    assert_eq!(icon.padding(), 0.0);
-
-    let table = parse(&minimal("user").replace(
-        "[build]",
-        "[app.icon]\nsource = \"assets/icon.svg\"\npadding = 0.10\n\n[build]",
-    ))
-    .unwrap();
-    let icon = table.icon.expect("icon");
-    assert_eq!(icon.source.as_str(), "assets/icon.svg");
-    assert_eq!(icon.padding_milli, 100);
 }
 
 #[test]

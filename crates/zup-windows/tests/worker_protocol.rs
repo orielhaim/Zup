@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 use rstest::rstest;
 use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
 use zup_core::TargetTriple;

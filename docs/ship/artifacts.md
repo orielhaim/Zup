@@ -41,4 +41,6 @@ Thin artifacts require update/repository configuration. They also require a fixe
 
 A universal artifact can contain several target variants and select the matching one when launched. This is useful when one download should cover x64 and ARM64.
 
+Run it like the installer it stages: `install`, `repair`, `update`, `modify`, and `uninstall` (plus `--scope`, `--non-interactive`, `--yes`, and the install/modify/repair options) travel to the staged native runtime, which validates them exactly as if it had been started directly. Installing a newer artifact upgrades.
+
 Do not make every release universal by default. One file per target is easier to inspect and distribute when a single download is not a product requirement.

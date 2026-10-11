@@ -63,15 +63,26 @@ fn show(_message: &str) {}
 
 /// What this launcher accepts.
 ///
-/// Printed on `--help` and nowhere else. Two options, both of them locations:
-/// a state root and a local source tree. There is no option that names a
-/// release, a digest, or a URL, because nothing this program does would be
-/// safer for it.
+/// Printed on `--help` and nowhere else. A lifecycle verb plus locations and
+/// reporting flags: everything the staged runtime needs travels verbatim, and
+/// the runtime re-validates it. There is no option that names a release, a
+/// digest, or a URL, because nothing this program does would be safer for it.
 pub fn print_usage() {
     println!("zup installer launcher");
     println!();
-    println!("  --state-root <dir>   where this machine records its installations");
-    println!("  --source <dir>       a local release tree to read before the network");
-    println!("  --output jsonl       report progress as JSONL on stdout");
-    println!("  --help               this text");
+    println!("  [install | modify | repair | update | uninstall] [options]");
+    println!("  install is the default; installing a newer artifact upgrades");
+    println!();
+    println!("  --scope <user|machine>   whose installation to affect");
+    println!("  --state-root <dir>       where this machine records its installations");
+    println!("  --source <dir>           a local release tree to read before the network");
+    println!("  --non-interactive, --yes never ask a question");
+    println!("  --force-files            repair files even when nothing drifted");
+    println!("  --enable <id>, --disable <id>");
+    println!("                           components to include or skip");
+    println!("  --install-directory <dir>");
+    println!("                           where to install the application");
+    println!("  --output <human|json|jsonl>");
+    println!("                           report progress as JSONL on stdout");
+    println!("  --help                   this text");
 }

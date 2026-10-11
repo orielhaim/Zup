@@ -13,18 +13,30 @@ use zup_platform::{
     TargetService, TemplateResolveError, resolve_template_path,
 };
 
+#[cfg(windows)]
 use crate::host_dirs::WindowsInstallLocationResolver;
+use crate::locations::CanonicalWindowsLocations;
 use crate::lowering::{
     TargetPathValidationError, validate_windows_target_path, windows_target_path_identity,
 };
 use crate::shortcut_name::validate_shortcut_filename;
 
 #[derive(Debug, Clone, Copy)]
-pub struct WindowsTargetContext<R = WindowsInstallLocationResolver> {
+pub struct WindowsTargetContext<R = CanonicalWindowsLocations> {
     pub locations: R,
     pub scope: SelectedScope,
 }
 
+impl WindowsTargetContext<CanonicalWindowsLocations> {
+    pub fn for_build(scope: SelectedScope) -> Self {
+        Self {
+            locations: CanonicalWindowsLocations,
+            scope,
+        }
+    }
+}
+
+#[cfg(windows)]
 impl WindowsTargetContext<WindowsInstallLocationResolver> {
     pub fn new(scope: SelectedScope) -> Self {
         Self {

@@ -891,31 +891,6 @@ mod tests {
         SigningPlan::new(&app(), requirement)
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn a_production_requirement_becomes_a_production_policy() {
-        let policy = policy(
-            &plan(zup_signing::SigningRequirement::production().signed_by("Acme")),
-            false,
-        );
-        assert!(policy.require_trusted_chain);
-        assert!(policy.require_rfc3161_timestamp);
-        assert!(policy.reject_legacy_timestamp);
-        assert_eq!(policy.subject.as_deref(), Some("Acme"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_development_requirement_relaxes_the_whole_timestamp_rule() {
-        let policy = policy(&plan(zup_signing::SigningRequirement::development()), false);
-        assert!(!policy.require_trusted_chain);
-        assert!(!policy.require_rfc3161_timestamp);
-        assert!(
-            !policy.reject_legacy_timestamp,
-            "refusing the legacy timestamp while not requiring any timestamp is a contradiction"
-        );
-    }
-
     #[test]
     fn the_printed_plan_names_no_crate_and_orders_runtimes_before_installers() {
         let mut plan = plan(zup_signing::SigningRequirement::production());

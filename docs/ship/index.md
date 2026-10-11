@@ -1,12 +1,10 @@
 # Ship
 
-A release is a sequence of explicit operations:
-
 ```text
 build → sign externally → verify → publish
 ```
 
-Zup does not need access to your private signing key. It prepares the files that need signatures, verifies the result, and publishes the release description and artifacts.
+Zup does not need your private signing key. It prepares the files that need signatures, verifies the result, and publishes the release description and artifacts.
 
 ## Choose an artifact model
 

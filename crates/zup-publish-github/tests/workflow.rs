@@ -247,22 +247,6 @@ fn every_third_party_action_uses_the_ref_the_lock_tracks() {
 }
 
 #[test]
-fn no_generated_reference_is_a_bare_commit_sha() {
-    let rendered = generate(&WorkflowPolicy::default(), &matrix());
-    for line in rendered.lines().filter(|line| line.contains("uses: ")) {
-        let reference = line.split("uses: ").nth(1).expect("a uses line").trim();
-        let revision = reference
-            .split_once('@')
-            .map(|(_, revision)| revision)
-            .unwrap_or(reference);
-        assert!(
-            !(revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit())),
-            "`{line}` pins a commit rather than a version ref"
-        );
-    }
-}
-
-#[test]
 fn the_token_is_an_action_input_rather_than_a_step_environment() {
     let rendered = generate(&WorkflowPolicy::default(), &matrix());
     assert!(

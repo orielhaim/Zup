@@ -3,14 +3,17 @@ use std::path::Path;
 
 use thiserror::Error;
 use zup_artifact::{
-    ArtifactError, ArtifactGraph, ArtifactView, ContentSource, Descriptor, MediaType, MetadataSet,
-    SegmentReader, select_from_index,
+    ArtifactError, ArtifactGraph, ArtifactView, Descriptor, MediaType, MetadataSet, SegmentReader,
 };
+#[cfg(windows)]
+use zup_artifact::{ContentSource, select_from_index};
 use zup_binary::{BinaryArchitecture, Executable, ProgramKind};
 use zup_core::TargetTriple;
 use zup_pe::{RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument};
-use zup_transaction::{MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME};
+#[cfg(windows)]
+use zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY;
 
+#[cfg(windows)]
 use crate::host;
 #[derive(Debug, Error)]
 pub enum UniversalError {
@@ -24,6 +27,7 @@ pub enum UniversalError {
     Package(#[from] zup_bundle::PackageError),
     #[error(transparent)]
     Bundle(#[from] crate::BundleError),
+    #[cfg(windows)]
     #[error(transparent)]
     Durable(#[from] crate::durable::DurableError),
     #[error("image resources: {0}")]
@@ -247,6 +251,7 @@ impl UniversalArtifact {
         self.view.index()
     }
 
+    #[cfg(windows)]
     pub fn select(&self) -> Result<Selection, UniversalError> {
         let host = host::host_execution();
         let selected = select_from_index(&host, self.index())?;
@@ -337,12 +342,22 @@ pub fn verify_selected_variant(
 
 pub struct StagedVariant {
     pub runtime: std::path::PathBuf,
-
-    pub package: std::path::PathBuf,
-
-    pub index: std::path::PathBuf,
 }
 
+/// Materialize one variant as a self-contained installer.
+///
+/// The staged runtime carries the variant's package and preset as embedded
+/// resources, exactly like a build-time self-contained installer, so the
+/// installer lifecycle (install, repair, upgrade, uninstall, recovery, and
+/// the installed maintenance copy) runs unchanged: every one of those paths
+/// opens the bundle embedded in the executable it was started from. Staging
+/// writes nothing else beside the runtime; a sidecar the runtime never reads
+/// would be dead weight pretending to be a contract.
+///
+/// Every byte embedded here was digest-verified against the artifact on read,
+/// and the runtime re-verifies the embedded package on open, so staging moves
+/// no trust.
+#[cfg(windows)]
 pub fn stage_variant(
     artifact: &UniversalArtifact,
     id: &str,
@@ -361,25 +376,31 @@ pub fn stage_variant(
             id: artifact.index().artifact.id.clone(),
         })?;
     let runtime_bytes = artifact.view().read(&runtime_descriptor)?;
+    let preset = match &manifest.preset {
+        Some(descriptor) => Some(artifact.view().read(descriptor)?),
+        None => None,
+    };
     std::fs::create_dir_all(directory)?;
-
     let runtime = directory.join(format!(
         "{}{}",
-        zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY,
+        MAINTENANCE_RUNTIME_DIRECTORY,
         variant.target.executable_suffix()
     ));
-    write_durable(&runtime, &runtime_bytes)?;
-    let package = directory.join(MAINTENANCE_PACKAGE_NAME);
+    // One scratch directory per staging: concurrent dispatches of one artifact
+    // never share a temp name, and dropping it removes every temp whether this
+    // succeeds or fails. Only the final move touches the staged path.
+    let scratch = tempfile::tempdir_in(directory)?;
+    let template = scratch.path().join("runtime-template.exe");
+    let package = scratch.path().join("variant.zup");
+    let partial = scratch.path().join("staged.exe");
+    std::fs::write(&template, &runtime_bytes)?;
     write_variant_package(artifact, &manifest, &package)?;
-    let index = directory.join(MAINTENANCE_INDEX_NAME);
-    write_durable(&index, &artifact.index().encode()?)?;
-    Ok(StagedVariant {
-        runtime,
-        package,
-        index,
-    })
+    crate::bundle_packager::embed_bundle_file(&template, &partial, &package, preset.as_deref())?;
+    crate::durable::move_durable(&partial, &runtime)?;
+    Ok(StagedVariant { runtime })
 }
 
+#[cfg(windows)]
 fn write_variant_package(
     artifact: &UniversalArtifact,
     manifest: &zup_artifact::VariantManifest,
@@ -407,11 +428,6 @@ fn write_variant_package(
     }
     zup_bundle::BundleWriter::write_plan(&manifest.plan, &compressed, &temporary)?;
     std::fs::rename(&temporary, destination)?;
-    Ok(())
-}
-
-fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), UniversalError> {
-    crate::durable::write_durable(path, bytes)?;
     Ok(())
 }
 

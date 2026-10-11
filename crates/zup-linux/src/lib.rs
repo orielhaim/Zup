@@ -1,9 +1,24 @@
 #![deny(unsafe_code)]
 
+//! Linux installation backend and Linux installer composition.
+//!
+//! Two responsibilities share this crate, and the build host decides which one
+//! compiles:
+//!
+//! - **Composition** turns a runtime template and a portable package into an
+//!   installer for a Linux target by appending the package and a footer. It is
+//!   plain file I/O, so it runs on any host. The target plan is validated with
+//!   [`resolve_target`], which answers user roots from fixed build roots
+//!   instead of the build host's environment. These modules have no `cfg`
+//!   gate.
+//! - **The native runtime** installs, repairs, and removes software through
+//!   filesystem ownership, systemd, D-Bus, and a privileged worker. It
+//!   executes only on Linux, and every module it needs is gated on
+//!   `cfg(target_os = "linux")`.
+
 mod carrier;
 #[cfg(target_os = "linux")]
 mod elevate;
-#[cfg(target_os = "linux")]
 mod error;
 #[cfg(target_os = "linux")]
 mod executor;
@@ -11,13 +26,10 @@ mod executor;
 mod fs;
 #[cfg(target_os = "linux")]
 mod input;
-#[cfg(target_os = "linux")]
 mod integration;
 #[cfg(target_os = "linux")]
 mod ledger;
-#[cfg(target_os = "linux")]
 mod locations;
-#[cfg(target_os = "linux")]
 mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
@@ -27,7 +39,6 @@ mod paths;
 mod pkexec;
 #[cfg(target_os = "linux")]
 mod refresh;
-#[cfg(target_os = "linux")]
 mod resolve;
 #[cfg(target_os = "linux")]
 mod run;
@@ -35,7 +46,6 @@ mod run;
 mod service_exec;
 #[cfg(target_os = "linux")]
 mod service_ops;
-#[cfg(target_os = "linux")]
 mod services;
 #[cfg(target_os = "linux")]
 mod socket;
@@ -48,7 +58,6 @@ pub mod test_support;
 mod worker;
 
 pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
-#[cfg(target_os = "linux")]
 pub use error::{ExecError, IpcError, PathError, PlanError};
 #[cfg(target_os = "linux")]
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};
@@ -64,22 +73,20 @@ pub use input::{
 };
 #[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
-#[cfg(target_os = "linux")]
 pub use locations::{
-    LinuxInstallLocationResolver, user_data_home, user_data_home_in, user_programs_root,
+    LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
+    MACHINE_STATE_ROOT, MachineRoots, user_data_home, user_data_home_in, user_programs_root,
     user_programs_root_in,
 };
-#[cfg(target_os = "linux")]
 pub use lowering::{linux_target_path, target_path_from_host, to_host_path};
 #[cfg(target_os = "linux")]
 pub use machine::{
     MACHINE_LOCK_FILE_MODE, MACHINE_PRIVATE_DIR_MODE, MACHINE_PRIVATE_FILE_MODE,
-    MACHINE_PROGRAMS_ROOT, MACHINE_PUBLIC_FILE_MODE, MACHINE_SHARED_DATA_ROOT,
-    MACHINE_STATE_DIR_MODE, MACHINE_STATE_ROOT, MachineDestination, MachineRoots, SYSTEMD_UNIT_DIR,
-    SYSTEMD_UNIT_FILE_MODE, SystemdRoots, authorize_machine_destination,
-    authorize_machine_install_directory, authorize_systemd_unit, ensure_machine_state_root,
-    normalize_state_modes, resolve_machine_state_root, verify_ledger_trust,
-    verify_machine_hierarchy, verify_machine_structure, verify_trusted_state_file,
+    MACHINE_PUBLIC_FILE_MODE, MACHINE_STATE_DIR_MODE, MachineDestination, SYSTEMD_UNIT_FILE_MODE,
+    SystemdRoots, authorize_machine_destination, authorize_machine_install_directory,
+    authorize_systemd_unit, ensure_machine_state_root, normalize_state_modes,
+    resolve_machine_state_root, verify_ledger_trust, verify_machine_hierarchy,
+    verify_machine_structure, verify_trusted_state_file,
 };
 #[cfg(target_os = "linux")]
 pub use paths::{
@@ -88,7 +95,6 @@ pub use paths::{
 };
 #[cfg(target_os = "linux")]
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
-#[cfg(target_os = "linux")]
 pub use resolve::{resolve_target, validate_target_plan};
 #[cfg(target_os = "linux")]
 pub use run::{LinuxAction, LinuxOutcome, LinuxRunRequest, recover_transaction, run};
@@ -100,10 +106,9 @@ pub use service_ops::{
     policy_for_state, read_canonical_source, refuse_source_symlink, validate_changes,
     validate_executable, validate_executable_live,
 };
-#[cfg(target_os = "linux")]
 pub use services::{
-    DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, UNIT_PREFIX, WANTED_BY,
-    parse_manager_version,
+    DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, UNIT_PREFIX,
+    WANTED_BY, parse_manager_version,
 };
 #[cfg(target_os = "linux")]
 pub use socket::{

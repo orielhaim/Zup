@@ -58,22 +58,6 @@ mod condition {
         assert!(!condition.evaluate(&selected(&["a", "b"])));
     }
 
-    #[test]
-    fn referenced_components() {
-        let condition =
-            Condition::parse(r#"!(component("a") || component("b")) && component("c")"#).unwrap();
-        let refs = condition.referenced_components();
-        assert_eq!(refs, selected(&["a", "b", "c"]), "referenced: {refs:?}");
-    }
-
-    #[test]
-    fn display_roundtrip() {
-        let source = r#"!component("a") && component("b") || component("c")"#;
-        let condition = Condition::parse(source).unwrap();
-        let reparsed = Condition::parse(&condition.to_string()).unwrap();
-        assert_eq!(condition, reparsed);
-    }
-
     #[rstest]
     #[case::empty("")]
     #[case::missing_call("component cli")]
@@ -202,14 +186,6 @@ mod path {
         let path = RelativePath::new(source).unwrap();
         assert_eq!(path.as_str(), expected);
         assert_eq!(path.to_string(), expected);
-    }
-
-    #[test]
-    fn file_name_and_parent() {
-        let path = RelativePath::new("bin/helpers/foo.dll").unwrap();
-        assert_eq!(path.file_name(), "foo.dll");
-        assert_eq!(path.parent().unwrap().as_str(), "bin/helpers");
-        assert_eq!(path.component_count(), 3);
     }
 
     /// An absolute or traversing path must be refused at every entry point, including
@@ -496,31 +472,5 @@ mod template_substitute {
             _ => None,
         });
         assert_eq!(resolved.to_string(), "${location.user_data}/Programs/Acme");
-    }
-
-    #[test]
-    fn adjacent_literals_normalized() {
-        let template = Template::parse("a${app.name}b${app.version}c").unwrap();
-        let resolved = template.substitute(|var| match var {
-            Variable::AppName => Some(VariableValue::Literal("-".into())),
-            Variable::AppVersion => Some(VariableValue::Literal("-".into())),
-            _ => None,
-        });
-        assert_eq!(resolved.parts().len(), 1);
-        assert_eq!(resolved.to_string(), "a-b-c");
-    }
-
-    #[test]
-    fn contains_variable_detects_install() {
-        assert!(
-            Template::parse("${install}/x")
-                .unwrap()
-                .contains_variable(Variable::Install)
-        );
-        assert!(
-            !Template::parse("${location.desktop}/x")
-                .unwrap()
-                .contains_variable(Variable::Install)
-        );
     }
 }

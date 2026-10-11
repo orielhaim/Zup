@@ -39,4 +39,4 @@ steps:
 
 The action supports separate `setup`, `build`, `compose`, `finalize`, `attest`, `publish`, and `release` operations when a pipeline needs explicit phases.
 
-Prefer the generated workflow when you want Zup to keep the target matrix and release steps synchronized with `zup.toml`. Use the action directly when the repository owns a custom workflow structure.
+Prefer the generated workflow when you want Zup to keep the target matrix and release steps synchronized with `zup.toml`.
