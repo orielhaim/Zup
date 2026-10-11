@@ -48,6 +48,12 @@ jobs:
         with:
           cache-on-failure: true
 
+      - uses: rui314/setup-mold@v1
+        if: matrix.platform == 'linux'
+        with:
+          mold-version: 3.0.0
+          make-default: "true"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
@@ -69,6 +75,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info
+          command -v update-mime-database
+          command -v update-desktop-database
+          command -v desktop-file-validate
+          mold --version
 
       - name: Windows Clippy
         if: matrix.platform == 'windows'
