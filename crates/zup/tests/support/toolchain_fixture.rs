@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_toolchain::{ComponentDescriptor, DESCRIPTOR_SUFFIX, Subsystem, ToolchainComponent};
 
 /// The component a test asked for.
@@ -62,7 +62,7 @@ pub fn runtime(target: &str, frontend: zup_core::Frontend) -> Staged {
     Staged {
         path: PathBuf::new(),
         component: ToolchainComponent::Runtime {
-            target: TargetTriple::parse(target).expect("a valid target triple"),
+            target: Target::parse(target).expect("a valid target"),
             frontend,
         },
         bytes: None,
@@ -115,11 +115,11 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
     if let ToolchainComponent::Runtime { target, .. } = component
         && target.operating_system() == zup_core::TargetOperatingSystem::Linux
     {
-        return elf_image(target.as_str());
+        return elf_image(target);
     }
     let (machine, subsystem): (u16, u16) = match component {
         ToolchainComponent::Runtime { target, frontend } => (
-            machine_of(target.as_str()),
+            machine_of(target),
             match frontend {
                 zup_core::Frontend::Gui => 2,
                 zup_core::Frontend::Console | zup_core::Frontend::Headless => 3,
@@ -142,22 +142,23 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
     bytes
 }
 
-/// The COFF machine value a target triple's architecture names.
-fn machine_of(target: &str) -> u16 {
-    if target.starts_with("aarch64") {
-        0xaa64
-    } else if target.starts_with("i686") {
-        0x014c
-    } else {
-        0x8664
+/// The COFF machine value a target's architecture names.
+fn machine_of(target: &zup_core::Target) -> u16 {
+    match target.architecture() {
+        zup_core::TargetArchitecture::Aarch64(_) => 0xaa64,
+        zup_core::TargetArchitecture::X86_32(_) => 0x014c,
+        _ => 0x8664,
     }
 }
 
 /// A header-only ELF image for a Linux target: magic, class, data, version,
 /// type, and machine. No program or section tables - there is no content to
 /// describe, and the resolver reads only the architecture identity.
-fn elf_image(target: &str) -> Vec<u8> {
-    let machine: u16 = if target.starts_with("aarch64") {
+fn elf_image(target: &zup_core::Target) -> Vec<u8> {
+    let machine: u16 = if matches!(
+        target.architecture(),
+        zup_core::TargetArchitecture::Aarch64(_)
+    ) {
         183
     } else {
         62
@@ -186,7 +187,7 @@ pub fn package(targets: &[&str]) -> Vec<u8> {
     for target in targets {
         writer
             .add_binary(
-                TargetTriple::parse(target).expect("a valid target triple"),
+                Target::parse(target).expect("a valid target"),
                 format!("native preset for {target}")
                     .repeat(64)
                     .into_bytes(),

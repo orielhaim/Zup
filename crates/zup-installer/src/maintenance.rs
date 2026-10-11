@@ -164,7 +164,7 @@ fn prepare_from_ledger(
     let payload_root =
         std::env::current_dir().map_err(|error| miette::miette!("working directory: {error}"))?;
     let request = RuntimeRequest {
-        target: ledger.target.clone(),
+        target: ledger.target,
         app_id: app_id.clone(),
         app_version: ledger.version,
         scope,
@@ -342,7 +342,7 @@ mod tests {
                 main: None,
                 description: None,
             },
-            target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
+            target: zup_core::Target::parse("windows-x64").expect("valid"),
             frontend: Frontend::Headless,
             updates: None,
             install: zup_core::Install {
@@ -784,8 +784,8 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     });
     let target = embedded
         .as_ref()
-        .map(|build| build.installer.target.clone())
-        .unwrap_or_else(|| record.target.clone());
+        .map(|build| build.installer.target)
+        .unwrap_or_else(|| record.target);
     if target != record.target {
         return Err(miette::miette!(
             "this package targets `{target}` but the transaction targets `{}`",

@@ -571,7 +571,7 @@ pub fn normalize_published_modes(
 pub fn host_to_install_template(
     host: &Path,
     roots: &MachineRoots,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<zup_core::Template, PathError> {
     if host == roots.programs || !host.starts_with(&roots.programs) {
         return Err(PathError::PolicyRefused {

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use zup_core::{Privilege, ResourceKey, SelectedScope, TargetTriple};
+use zup_core::{Privilege, ResourceKey, SelectedScope, Target};
 use zup_exec::{
     HostSnapshot, InstallLedger, LifecycleAction, ObservedPathEntry, PathOperationKind,
     plan_execution, plan_lifecycle,
@@ -10,8 +10,8 @@ use zup_exec::{
 use zup_platform::TargetPath;
 use zup_windows::VALUE_TYPE_EXPAND;
 
-fn windows() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn windows() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn tpath(value: &str) -> TargetPath {
@@ -72,7 +72,7 @@ fn snapshot_for(target: &zup_platform::TargetPlan, stored: &[&str]) -> HostSnaps
 }
 
 fn ledger_owning(target: &zup_platform::TargetPlan, privilege: Privilege) -> InstallLedger {
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
+    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target, target.scope);
     ledger.version = "1.0.0".parse().unwrap();
     ledger.resources.insert(
         target.path_entries[0].key.clone(),

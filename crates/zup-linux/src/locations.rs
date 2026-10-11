@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::PathError;
-use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_core::{InstallLocation, SelectedScope, Target};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
@@ -120,7 +120,7 @@ impl InstallLocationResolver for LinuxInstallLocationResolver {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let failed = |source: PathError| InstallLocationError::ResolutionFailed {
             location,
@@ -190,8 +190,8 @@ fn home_dir() -> Result<PathBuf, PathError> {
 mod tests {
     use super::*;
 
-    fn linux_target() -> TargetTriple {
-        TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target")
+    fn linux_target() -> Target {
+        Target::parse("linux-x64").expect("a Linux target")
     }
 
     #[test]

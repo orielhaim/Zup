@@ -14,7 +14,7 @@ use zup_acquire::{
     ReleaseIdentity, ReleasePin, ReleaseVariant, ThinScope, WebLayout, blob_path, check_channel,
     check_segment,
 };
-use zup_core::{AppId, TargetTriple};
+use zup_core::{AppId, Target};
 
 /// Recompute the fingerprint after a fixture edited the body it covers.
 fn reseal(mut release: ReleaseDescriptor) -> ReleaseDescriptor {
@@ -22,8 +22,8 @@ fn reseal(mut release: ReleaseDescriptor) -> ReleaseDescriptor {
     release
 }
 
-fn target(triple: &str) -> TargetTriple {
-    TargetTriple::parse(triple).expect("the fixture triple parses")
+fn target(triple: &str) -> Target {
+    Target::parse(triple).expect("the fixture triple parses")
 }
 
 fn variant(id: &str, triple: &str, digests: &[zup_core::Sha256Digest]) -> ReleaseVariant {
@@ -62,7 +62,7 @@ fn identity() -> ReleaseIdentity {
         manifest: digest_of(b"manifest"),
         runtime: Some(digest_of(b"runtime")),
         version: "1.4.0".to_owned(),
-        target: target("x86_64-pc-windows-msvc"),
+        target: target("windows-x64"),
         channel: "stable".to_owned(),
         pinned: false,
         trust_anchor: digest_of(b"root"),
@@ -100,7 +100,7 @@ fn release(variants: Vec<ReleaseVariant>) -> ReleaseDescriptor {
 fn a_release_fingerprint_describes_the_release_and_cannot_be_forged_in_place() {
     let release = release(vec![variant(
         "windows-x64",
-        "x86_64-pc-windows-msvc",
+        "windows-x64",
         &[digest_of(b"a")],
     )]);
     assert_eq!(
@@ -131,7 +131,7 @@ fn a_release_fingerprint_describes_the_release_and_cannot_be_forged_in_place() {
 #[case::two_variants_for_one_target("same target", &|r: &mut ReleaseDescriptor| {
         r.variants.insert(
             0,
-            variant("aaa", "x86_64-pc-windows-msvc", &[digest_of(b"b")]),
+            variant("aaa", "windows-x64", &[digest_of(b"b")]),
         );
     })]
 #[case::a_download_naming_a_variant_it_does_not_carry("does not carry", &|r: &mut ReleaseDescriptor| {
@@ -148,7 +148,7 @@ fn a_release_that_cannot_describe_an_installation_is_refused(
 ) {
     let mut release = release(vec![variant(
         "windows-x64",
-        "x86_64-pc-windows-msvc",
+        "windows-x64",
         &[digest_of(b"a")],
     )]);
     break_it(&mut release);
@@ -163,7 +163,7 @@ fn a_release_that_cannot_describe_an_installation_is_refused(
 fn a_variant_a_client_cannot_select_on_is_refused() {
     // Target, platform, and frontend are what a client selects a variant by, so
     // a release that leaves one blank has described a variant nobody can choose.
-    let base = variant("one", "x86_64-pc-windows-msvc", &[digest_of(b"a")]);
+    let base = variant("one", "windows-x64", &[digest_of(b"a")]);
     let incomplete = vec![
         frontendless(base.clone()),
         ReleaseVariant {
@@ -197,7 +197,7 @@ fn a_variant_a_client_cannot_select_on_is_refused() {
 fn a_release_document_with_an_unknown_field_is_refused() {
     let release = release(vec![variant(
         "windows-x64",
-        "x86_64-pc-windows-msvc",
+        "windows-x64",
         &[digest_of(b"a")],
     )]);
     let mut extended = serde_json::to_value(&release).expect("serializes");
@@ -496,7 +496,7 @@ fn a_release_identity_that_could_not_describe_an_installation_is_refused(
 fn a_release_schedules_its_runtime_first() {
     let release = release(vec![variant(
         "windows-x64",
-        "x86_64-pc-windows-msvc",
+        "windows-x64",
         &[digest_of(b"a")],
     )]);
     let runtime = release

@@ -43,7 +43,7 @@ pub fn maintenance_destination(
     app_id: &AppId,
     scope: zup_core::SelectedScope,
     version: &semver::Version,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> miette::Result<zup_platform::TargetPath> {
     let path = zup_transaction::maintenance_runtime_path(
         state_root,
@@ -52,6 +52,6 @@ pub fn maintenance_destination(
         version,
         target.executable_suffix(),
     );
-    zup_platform::TargetPath::new(target.clone(), zup_windows::plain_path_text(&path))
+    zup_platform::TargetPath::new(*target, zup_windows::plain_path_text(&path))
         .map_err(|error| miette::miette!("maintenance destination: {error}"))
 }

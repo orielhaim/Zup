@@ -55,7 +55,7 @@ pub enum ComponentKind {
 pub enum ToolchainComponent {
     /// The runtime template for one target and one frontend.
     Runtime {
-        target: zup_core::TargetTriple,
+        target: zup_core::Target,
         frontend: Frontend,
     },
     /// The launcher for one presentation experience.
@@ -135,7 +135,7 @@ pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> Str
             format!(
                 "zup-dispatch-{}{online}-{}{executable_suffix}",
                 subsystem.as_str(),
-                DISPATCHER_TARGET
+                DISPATCHER_TARGET.as_str()
             )
         }
         // A package, so no executable suffix: the suffix is a property of one
@@ -171,7 +171,7 @@ pub fn test_preset_file_name(executable_suffix: &str) -> String {
 /// always 32-bit x86: it runs natively on x86, under WOW64 on x64, and under the
 /// x86 compatibility layer on arm64. It is also the smallest of the three, which
 /// matters for a file that is downloaded before any of it has been needed.
-pub const DISPATCHER_TARGET: &str = "i686-pc-windows-msvc";
+pub const DISPATCHER_TARGET: zup_core::Target = zup_core::Target::WINDOWS_X86;
 
 /// Every component a build host needs, in one order.
 ///
@@ -181,11 +181,11 @@ pub const DISPATCHER_TARGET: &str = "i686-pc-windows-msvc";
 /// moment one of the three gains a component the other two quietly stop covering
 /// it. The order is presentation: runtimes first, then launchers, because that is
 /// the order a reader cares about them in.
-pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponent> {
+pub fn host_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
     let mut out = Vec::with_capacity(8);
     for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
         out.push(ToolchainComponent::Runtime {
-            target: target.clone(),
+            target: *target,
             frontend,
         });
     }
@@ -204,15 +204,15 @@ pub fn host_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponen
 /// the preset host. Linux stages console and headless runtimes only - no GUI
 /// presenter, nothing to dispatch through, and no preset host exist there, so
 /// staging them would resolve components no build may use.
-pub fn supported_components(target: &zup_core::TargetTriple) -> Vec<ToolchainComponent> {
+pub fn supported_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
     if target.operating_system() == zup_core::TargetOperatingSystem::Linux {
         vec![
             ToolchainComponent::Runtime {
-                target: target.clone(),
+                target: *target,
                 frontend: Frontend::Console,
             },
             ToolchainComponent::Runtime {
-                target: target.clone(),
+                target: *target,
                 frontend: Frontend::Headless,
             },
         ]
@@ -257,7 +257,7 @@ pub struct ToolchainRelease {
     pub schema: u32,
     /// The zup release this material belongs to.
     pub zup_version: String,
-    /// The canonical target triple every component here is built for.
+    /// The canonical Zup target every component here is built for.
     ///
     /// One machine, because a release is one build. A developer on Windows x64
     /// downloads the x64 material; an arm64 machine downloads the arm64 material.
@@ -424,7 +424,7 @@ pub struct ComponentDescriptor {
     pub kind: ComponentKind,
     /// The zup release that produced it.
     pub zup_version: String,
-    /// The canonical target triple the bytes are for.
+    /// The canonical Zup target the bytes are for.
     pub target: String,
     /// The presentation the component presents, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,7 +465,7 @@ impl ComponentDescriptor {
                 format_version: FORMAT_VERSION,
                 kind: ComponentKind::Dispatcher,
                 zup_version: zup_version.to_owned(),
-                target: "i686-pc-windows-msvc".to_owned(),
+                target: DISPATCHER_TARGET.as_str().to_owned(),
                 frontend: None,
                 subsystem: Some(subsystem.as_str().to_owned()),
                 online: Some(*online),
@@ -705,7 +705,7 @@ mod tests {
 
     fn runtime(target: &str, frontend: Frontend) -> ToolchainComponent {
         ToolchainComponent::Runtime {
-            target: zup_core::TargetTriple::parse(target).expect("valid target"),
+            target: zup_core::Target::parse(target).expect("valid target"),
             frontend,
         }
     }
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn a_component_is_accepted_only_for_the_release_that_produced_it() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let path = write_component(root.path(), &component, "0.1.0");
         assert!(read(&path, &component, "0.1.0").is_ok());
         let error = read(&path, &component, "0.2.0")
@@ -738,24 +738,24 @@ mod tests {
     #[test]
     fn a_component_is_accepted_only_for_its_own_target_and_frontend() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let path = write_component(root.path(), &component, "0.1.0");
-        let wrong_frontend = runtime("x86_64-pc-windows-msvc", Frontend::Console);
+        let wrong_frontend = runtime("windows-x64", Frontend::Console);
         let error = read(&path, &wrong_frontend, "0.1.0")
             .expect_err("a console template is not a gui template")
             .to_string();
         assert!(error.contains("presents"), "{error}");
-        let wrong_target = runtime("aarch64-pc-windows-msvc", Frontend::Gui);
+        let wrong_target = runtime("windows-arm64", Frontend::Gui);
         let error = read(&path, &wrong_target, "0.1.0")
-            .expect_err("an aarch64 runtime is not an x64 runtime")
+            .expect_err("an arm64 runtime is not an x64 runtime")
             .to_string();
-        assert!(error.contains("aarch64"), "{error}");
+        assert!(error.contains("windows-arm64"), "{error}");
     }
 
     #[test]
     fn replaced_bytes_are_detected_even_when_the_descriptor_is_untouched() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Headless);
+        let component = runtime("windows-x64", Frontend::Headless);
         let path = write_component(root.path(), &component, "0.1.0");
         // The same length, so the size check passes and the digest check is the
         // one that has to catch it. A replacement that also changed the size would
@@ -812,12 +812,12 @@ mod tests {
 
     #[test]
     fn a_descriptor_from_an_unknown_format_is_refused_rather_than_half_read() {
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let descriptor = ComponentDescriptor {
             format_version: FORMAT_VERSION + 1,
             kind: ComponentKind::Runtime,
             zup_version: "0.1.0".to_owned(),
-            target: "x86_64-pc-windows-msvc".to_owned(),
+            target: "windows-x64".to_owned(),
             frontend: Some("gui".to_owned()),
             subsystem: None,
             online: None,
@@ -836,7 +836,7 @@ mod tests {
     /// component that had one.
     #[test]
     fn a_descriptor_is_named_after_the_component_beside_it() {
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let root = tempfile::TempDir::new().expect("temp dir");
         let path = write_component(root.path(), &component, "0.1.0");
         let descriptor = root
@@ -862,13 +862,13 @@ mod tests {
     #[test]
     fn a_release_index_proves_every_file_it_names() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let mut index = ToolchainRelease::new("0.1.0", "windows-x64");
         let cli = root.path().join("zup.exe");
         std::fs::write(&cli, b"a cli").expect("write");
         index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
         std::fs::create_dir_all(root.path().join("toolchain/0.1.0")).expect("the staged directory");
         for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
-            let component = runtime("x86_64-pc-windows-msvc", frontend);
+            let component = runtime("windows-x64", frontend);
             let file_name = file_name(&component, EXECUTABLE_SUFFIX);
             let path = write_component(root.path(), &component, "0.1.0");
             let staged = root.path().join(format!("toolchain/0.1.0/{file_name}"));
@@ -900,11 +900,11 @@ mod tests {
     #[test]
     fn a_release_index_without_a_descriptor_is_not_a_release() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let mut index = ToolchainRelease::new("0.1.0", "windows-x64");
         let cli = root.path().join("zup.exe");
         std::fs::write(&cli, b"a cli").expect("write");
         index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let file_name = file_name(&component, EXECUTABLE_SUFFIX);
         let path = root.path().join(&file_name);
         std::fs::write(&path, b"component bytes").expect("write");
@@ -922,14 +922,14 @@ mod tests {
     #[test]
     fn a_descriptor_that_disagrees_with_the_index_is_refused() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let component = runtime("x86_64-pc-windows-msvc", Frontend::Gui);
+        let component = runtime("windows-x64", Frontend::Gui);
         let file_name = file_name(&component, EXECUTABLE_SUFFIX);
         let path = write_component(root.path(), &component, "0.1.0");
         let descriptor_path = descriptor_path_for(&path);
         let descriptor =
             ComponentDescriptor::parse(&std::fs::read(&descriptor_path).unwrap()).expect("parse");
 
-        let mut index = ToolchainRelease::new("0.1.0", "x86_64-pc-windows-msvc");
+        let mut index = ToolchainRelease::new("0.1.0", "windows-x64");
         let cli = root.path().join("zup.exe");
         std::fs::write(&cli, b"a cli").expect("write");
         index.cli = ReleaseFile::of("zup.exe", &cli).expect("measure");
@@ -956,7 +956,7 @@ mod tests {
     /// accumulates a ninth has a component nothing asked for.
     #[test]
     fn a_host_needs_exactly_eight_components_and_they_are_the_ones_listed() {
-        let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid");
+        let target = zup_core::Target::parse("windows-x64").expect("valid");
         let components = host_components(&target);
         assert_eq!(components.len(), 8, "{components:?}");
         let names: Vec<String> = components
@@ -967,10 +967,10 @@ mod tests {
             "zup-setup-gui-",
             "zup-setup-console-",
             "zup-setup-headless-",
-            "zup-dispatch-gui-i686",
-            "zup-dispatch-gui-online-i686",
-            "zup-dispatch-console-i686",
-            "zup-dispatch-console-online-i686",
+            "zup-dispatch-gui-windows-x86",
+            "zup-dispatch-gui-online-windows-x86",
+            "zup-dispatch-console-windows-x86",
+            "zup-dispatch-console-online-windows-x86",
             PRESET_PACKAGE_NAME,
         ] {
             assert!(

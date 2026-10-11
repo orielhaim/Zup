@@ -67,7 +67,7 @@ fn compile_files_only(
     execution: &ExecutionPlan,
     target: &TargetPlan,
 ) -> Result<TransactionInput, PlanError> {
-    let mut input = TransactionInput::new(target.target.clone());
+    let mut input = TransactionInput::new(target.target);
     input.selected_components = execution.selected_components.clone();
     input.install_directory = Some(target.install_directory.clone());
     input.uninstall = execution.uninstall;
@@ -519,8 +519,8 @@ mod tests {
     use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind};
     use zup_platform::{CommandSpec, TargetPath};
 
-    fn target() -> zup_core::TargetTriple {
-        zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target")
+    fn target() -> zup_core::Target {
+        zup_core::Target::parse("linux-x64").expect("a target")
     }
 
     fn isolated() -> (

@@ -42,7 +42,7 @@ pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError>
 #[derive(Debug, Clone)]
 pub(crate) struct ExpectedPlan {
     pub digest: String,
-    pub target: zup_core::TargetTriple,
+    pub target: zup_core::Target,
 
     #[cfg(feature = "test-support")]
     pub plan: zup_transaction::TransactionPlan,
@@ -84,7 +84,7 @@ pub(crate) fn plan_expected(
         }
         .into());
     }
-    let target = build.installer.target.clone();
+    let target = build.installer.target;
     if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(PathError::Refused {
             path: target.to_string(),
@@ -93,7 +93,7 @@ pub(crate) fn plan_expected(
         .into());
     }
 
-    let mut plan_request = zup_plan::PlanRequest::new(target.clone(), SelectedScope::Machine);
+    let mut plan_request = zup_plan::PlanRequest::new(target, SelectedScope::Machine);
     let mut override_text: Option<String> = None;
     if let Some(directory) = &request.install_dir_override {
         crate::machine::authorize_machine_install_directory(directory, roots).map_err(|error| {
@@ -211,14 +211,14 @@ pub(crate) fn plan_expected(
         app_id: target_plan.app.id.to_string(),
         app_version: target_plan.app.version.to_string(),
         scope: "machine".to_owned(),
-        target: target.clone(),
+        target,
         state_root: state_root.display().to_string(),
     };
     Ok((
         intent,
         ExpectedPlan {
             digest,
-            target: target.clone(),
+            target,
             #[cfg(feature = "test-support")]
             plan,
         },
@@ -323,7 +323,7 @@ pub(crate) fn drive_client(
     session: SessionId,
     intent: &PrepareOperation,
     expected_digest: &str,
-    expected_target: &zup_core::TargetTriple,
+    expected_target: &zup_core::Target,
 ) -> Result<LinuxOutcome, ExecError> {
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
@@ -573,7 +573,7 @@ fn drive_client_loopback(
     session: SessionId,
     intent: &PrepareOperation,
     expected_digest: &str,
-    expected_target: &zup_core::TargetTriple,
+    expected_target: &zup_core::Target,
 ) -> Result<LinuxOutcome, ExecError> {
     let peer = peer_identity(stream).map_err(into_run_error)?;
     if peer.uid != rustix::process::geteuid().as_raw() {

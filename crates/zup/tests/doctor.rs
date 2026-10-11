@@ -15,21 +15,14 @@ mod toolchain_fixture;
 
 const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-#[cfg(windows)]
-const LINUX_TARGET: &str = "aarch64-unknown-linux-gnu";
 
-/// A target no backend implements on this build host.
-#[cfg(windows)]
-const UNSUPPORTED_TARGET: &str = LINUX_TARGET;
-/// Cross-building made every Windows and Linux triple buildable from any
-/// host, so the only unsupported target left is a platform no backend owns.
-#[cfg(not(windows))]
-const UNSUPPORTED_TARGET: &str = "aarch64-apple-darwin";
+/// A Linux target Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-arm64";
 
 #[cfg(target_arch = "aarch64")]
-const OTHER_TARGET: &str = "x86_64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-x64";
 #[cfg(not(target_arch = "aarch64"))]
-const OTHER_TARGET: &str = "aarch64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-arm64";
 
 /// PE templates, Windows lowering, and the Windows backend only exist on Windows.
 const ON_WINDOWS: bool = cfg!(windows);
@@ -259,7 +252,7 @@ fn healthy_single_target_passes_every_required_check() {
     );
     let report = report(&output);
     assert_eq!(report["ready"], true);
-    assert_eq!(report["host"], HOST_TARGET);
+    assert_eq!(report["host"], zup_core::Target::host().to_string());
     assert_eq!(report["targets"].as_array().unwrap().len(), 1);
 
     let rows = checks(&output, "default");
@@ -488,8 +481,14 @@ destination = "${{install}}"
 
     let alpha = checks(&output, "alpha");
     let beta = checks(&output, "beta");
-    assert_eq!(target_of(&output, "alpha")["target"], HOST_TARGET);
-    assert_eq!(target_of(&output, "beta")["target"], OTHER_TARGET);
+    assert_eq!(
+        target_of(&output, "alpha")["target"],
+        zup_core::Target::parse(HOST_TARGET).unwrap().to_string()
+    );
+    assert_eq!(
+        target_of(&output, "beta")["target"],
+        zup_core::Target::parse(OTHER_TARGET).unwrap().to_string()
+    );
     for rows in [&alpha, &beta] {
         assert_eq!(
             rows.iter()
@@ -526,7 +525,7 @@ destination = "${{install}}"
 /// projects skip, and machine projects name `pkexec` without prompting.
 #[test]
 fn machine_scope_reports_elevation_capability() {
-    let target = "x86_64-unknown-linux-gnu";
+    let target = "linux-x64";
     let project = TempDir::new().unwrap();
     // No application main: the fixture ships a payload no declared main
     // names, and the point here is elevation rather than main validation.
@@ -621,29 +620,15 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     assert_eq!(report["ready"], false);
     let rows = checks(&result, "default");
     assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
-    if ON_WINDOWS {
-        // An unsupported Linux triple on a Windows host: the backend exists,
-        // so the finding names the supported target rather than the host.
-        assert_eq!(statuses(&rows, "build_backend"), only("pass"));
-        assert_eq!(statuses(&rows, "target_lowering"), only("fail"));
-        assert!(
-            message(find(&rows, "target_lowering")).contains("x86_64-unknown-linux-gnu"),
-            "{}",
-            message(find(&rows, "target_lowering"))
-        );
-    } else {
-        assert_eq!(statuses(&rows, "build_backend"), only("fail"));
-        let backend = find(&rows, "build_backend");
-        // No backend answers for this platform on any host: cross-building
-        // covers Windows and Linux triples, so this is the genuinely
-        // unimplemented case, not a host mismatch.
-        assert!(
-            message(backend).contains("backend not implemented"),
-            "{}",
-            message(backend)
-        );
-        assert_eq!(statuses(&rows, "target_lowering"), only("skip"));
-    }
+    // Linux on ARM64 parses but no Linux backend builds it: the finding names
+    // the supported Linux target rather than the host.
+    assert_eq!(statuses(&rows, "build_backend"), only("pass"));
+    assert_eq!(statuses(&rows, "target_lowering"), only("fail"));
+    assert!(
+        message(find(&rows, "target_lowering")).contains("linux-x64"),
+        "{}",
+        message(find(&rows, "target_lowering"))
+    );
     for kind in [
         "manifest_compile",
         "source_payload",
@@ -655,7 +640,7 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     }
     // The derived output carries the target's own suffix, so the assertion
     // names the file the target would have produced.
-    let suffix = zup_core::TargetTriple::parse(UNSUPPORTED_TARGET)
+    let suffix = zup_core::Target::parse(UNSUPPORTED_TARGET)
         .expect("a valid target")
         .executable_suffix();
     assert!(
@@ -862,7 +847,7 @@ fn doctor_reports_every_output_state_and_never_writes() {
     let manifest = project.path().join("zup.toml");
     // The derived output carries the target's own suffix: extensionless on
     // Linux, `.exe` on Windows.
-    let suffix = zup_core::TargetTriple::parse(HOST_TARGET)
+    let suffix = zup_core::Target::parse(HOST_TARGET)
         .expect("a valid target")
         .executable_suffix();
     let derived = project.path().join(format!("Doctor App-Setup{suffix}"));

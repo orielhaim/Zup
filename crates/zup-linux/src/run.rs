@@ -86,7 +86,7 @@ fn run_user(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
 
     ledger_store.repair_committed(&build.installer.app.id, request.scope)?;
 
-    let plan_request = zup_plan::PlanRequest::new(build.installer.target.clone(), request.scope);
+    let plan_request = zup_plan::PlanRequest::new(build.installer.target, request.scope);
     let install = zup_plan::plan(
         &zup_plan::BuildPlan {
             targets: vec![build],
@@ -365,7 +365,7 @@ pub(crate) fn attach_maintenance_copy_for(
             source,
         })?;
     let destination = zup_platform::TargetPath::new(
-        target.target.clone(),
+        target.target,
         zup_transaction::maintenance_runtime_path(
             state_root,
             &target.app.id,

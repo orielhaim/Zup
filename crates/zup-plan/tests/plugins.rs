@@ -5,9 +5,7 @@ use std::fs;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildPlan, materialize};
-use zup_core::{
-    ComponentId, LauncherLocation, Privilege, SelectedScope, ServiceStart, TargetTriple,
-};
+use zup_core::{ComponentId, LauncherLocation, Privilege, SelectedScope, ServiceStart, Target};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{
     CancellationQuery, MAX_PLUGIN_ARGUMENTS, MAX_PLUGIN_GENERATED_FILE_BYTES, MAX_PLUGIN_RESOURCES,
@@ -26,7 +24,7 @@ version = "1.4.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -41,8 +39,8 @@ fn with(body: &str) -> String {
     format!("{BASE}\n{}", body.trim_start())
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn build(source: &str) -> BuildPlan {
@@ -79,7 +77,7 @@ fn request() -> PlanRequest {
 }
 
 struct FakeExecutor {
-    target: TargetTriple,
+    target: Target,
     responses: BTreeMap<String, Result<PluginResourceProposal, PluginFailure>>,
     calls: Vec<(String, PluginPlanningContext)>,
     cancellation_seen: bool,
@@ -120,7 +118,7 @@ impl FakeExecutor {
 }
 
 impl PluginExecutor for FakeExecutor {
-    fn target(&self) -> &TargetTriple {
+    fn target(&self) -> &Target {
         &self.target
     }
 
@@ -337,7 +335,7 @@ source = "plugins/one.wasm"
     ));
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::default())]);
-    executor.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
+    executor.target = Target::parse("windows-arm64").unwrap();
     let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginTargetMismatch { .. }));
     assert!(executor.calls.is_empty());
@@ -409,7 +407,7 @@ when = 'component("core")'
         vec![component_id("core"), component_id("extra")]
     );
     assert_eq!(context.target, target());
-    assert_eq!(context.target.as_str(), "x86_64-pc-windows-msvc");
+    assert_eq!(context.target.as_str(), "windows-x64");
     assert!(executor.cancellation_seen);
 }
 

@@ -13,9 +13,7 @@ use zup_bundle::{
     PayloadReader, PayloadSource,
 };
 use zup_core::TargetBuildPlan;
-use zup_core::{
-    Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, TargetTriple, hash_reader,
-};
+use zup_core::{Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, Target, hash_reader};
 use zup_pe::{
     MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, RESOURCE_ID_PRESET,
     ResourceDocument,
@@ -48,10 +46,7 @@ pub enum BundleError {
     #[error("runtime already has an Authenticode certificate table; embed before signing")]
     RuntimeAlreadySigned,
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
-    TargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    TargetMismatch { expected: Target, found: Target },
     #[error(transparent)]
     Target(#[from] zup_binary::TargetRefusal),
     #[error(transparent)]
@@ -165,7 +160,7 @@ impl EmbeddedBundle {
         self.package.plan()
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.package.plan().installer.target
     }
 
@@ -577,12 +572,12 @@ pub fn is_executable_image(path: &Path) -> bool {
 
 pub fn validate_embedded_bundle_target(
     bundle: &EmbeddedBundle,
-    expected: &TargetTriple,
+    expected: &Target,
 ) -> Result<(), BundleError> {
     if bundle.target() != expected {
         return Err(BundleError::TargetMismatch {
-            expected: expected.clone(),
-            found: bundle.target().clone(),
+            expected: *expected,
+            found: *bundle.target(),
         });
     }
     Ok(())

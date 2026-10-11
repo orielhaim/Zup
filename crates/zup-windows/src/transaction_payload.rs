@@ -460,8 +460,8 @@ pub(crate) fn compile_execution_plan(
     apps: AppsPlanningInput,
 ) -> Result<TransactionInput, TransactionPayloadError> {
     let target_triple = target
-        .map(|target| target.target.clone())
-        .or_else(|| ledger.map(|ledger| ledger.target.clone()))
+        .map(|target| target.target)
+        .or_else(|| ledger.map(|ledger| ledger.target))
         .ok_or_else(|| {
             TransactionPayloadError::Identity("target is missing from plan and ledger".into())
         })?;

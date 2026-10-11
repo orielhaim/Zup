@@ -5,7 +5,7 @@ use zup_core::{
     App, ComponentId, FileAssociationId, FileExtension, InstalledPreset, LauncherLocation,
     NonEmptyString, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
     PrerequisitePackage, PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, TargetTriple,
+    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target,
 };
 
 use crate::command::CommandSpec;
@@ -15,7 +15,7 @@ use crate::target_path::TargetPath;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPlan {
     pub app: App,
-    pub target: TargetTriple,
+    pub target: Target,
     pub scope: SelectedScope,
     pub install_directory: TargetPath,
     pub selected_components: Vec<ComponentId>,

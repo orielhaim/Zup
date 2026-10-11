@@ -4,7 +4,7 @@ use semver::Version;
 use zup_bootstrap::{BootstrapKey, BootstrapOperation, BootstrapPlan};
 use zup_core::{
     AppId, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
-    RelativePath, Runtime, RuntimeRequirementId, SelectedScope, Sha256Digest, TargetTriple,
+    RelativePath, Runtime, RuntimeRequirementId, SelectedScope, Sha256Digest, Target,
 };
 
 pub fn digest(bytes: &[u8]) -> Sha256Digest {
@@ -17,7 +17,7 @@ pub fn plan(package: PrerequisitePackage) -> BootstrapPlan {
             app_id: AppId::new("com.example.bootstrap").unwrap(),
             app_version: Version::new(1, 0, 0),
             scope: SelectedScope::User,
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            target: Target::parse("windows-x64").unwrap(),
         },
         vec![BootstrapOperation {
             id: PrerequisiteId::new("runtime").unwrap(),

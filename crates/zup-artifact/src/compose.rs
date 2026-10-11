@@ -367,7 +367,7 @@ impl ArtifactComposer {
             let content_entry = content[variant.id()].clone();
             descriptors.push(VariantDescriptor {
                 id: variant.id().to_owned(),
-                target: variant.target().clone(),
+                target: *variant.target(),
                 platform: variant.platform().clone(),
                 frontend: variant.frontend(),
                 manifest: manifest_descriptor,

@@ -47,7 +47,7 @@ fn a_built_plugin_answers_the_host() {
             app_version: "1.4.2".into(),
             install_directory: "${location.user_data}/Acme".into(),
             install_scope: InstallScope::User,
-            target: "x86_64-pc-windows-msvc".into(),
+            target: "windows-x64".into(),
             selected_components: vec!["core".into(), "docs".into()],
         })
         .expect("the call itself succeeds")
@@ -73,7 +73,7 @@ fn a_plugin_that_cannot_plan_refuses_rather_than_trapping() {
         app_version: "1.4.2".into(),
         install_directory: "${location.user_data}/Acme".into(),
         install_scope: InstallScope::User,
-        target: "x86_64-pc-windows-msvc".into(),
+        target: "windows-x64".into(),
         selected_components: Vec::new(),
     });
 

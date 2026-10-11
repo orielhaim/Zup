@@ -43,7 +43,7 @@ fn check(line: &str) {
         "formatting and re-parsing changed the arguments: `{line}` -> `{formatted}`"
     );
 
-    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target");
+    let target = zup_core::Target::parse("windows-x64").expect("a target");
     let Ok(spec) = zup_windows::command_spec_from_command_line(&formatted, &target) else {
         return;
     };

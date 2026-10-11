@@ -4,7 +4,7 @@
 //! what it records about itself, for PE/COFF, ELF and Mach-O. This crate is the
 //! one place that asks, and the only place that translates the answer into zup's
 //! vocabulary. Deciding whether the answer is *acceptable* is the caller's: a
-//! target triple is a claim a manifest makes, and this crate only reports where
+//! target is a claim a manifest makes, and this crate only reports where
 //! the file contradicts one.
 //!
 //! # What a file can prove
@@ -33,7 +33,7 @@ use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
 use object::read::{Object, ObjectKind};
 use object::{Architecture, Endian, Endianness, File, FileKind};
 use thiserror::Error;
-use zup_core::{TargetArchitecture, TargetOperatingSystem, TargetTriple};
+use zup_core::{Target, TargetArchitecture, TargetOperatingSystem};
 
 pub use target::{FrontendRefusal, TargetRefusal};
 
@@ -85,14 +85,15 @@ impl BinaryArchitecture {
         }
     }
 
-    /// The architecture a target triple names, or `None` when zup has no spelling.
-    pub fn of_target(target: &TargetTriple) -> Option<Self> {
+    /// The machine a target builds for. Every Zup target names one, so this
+    /// cannot fail: a target that named no machine would not parse.
+    pub fn of_target(target: &Target) -> Self {
         match target.architecture() {
-            TargetArchitecture::X86_32(_) => Some(Self::X86_32),
-            TargetArchitecture::X86_64 => Some(Self::X86_64),
-            TargetArchitecture::Arm(_) => Some(Self::Arm32),
-            TargetArchitecture::Aarch64(_) => Some(Self::Arm64),
-            _ => None,
+            TargetArchitecture::X86_32(_) => Self::X86_32,
+            TargetArchitecture::X86_64 => Self::X86_64,
+            TargetArchitecture::Arm(_) => Self::Arm32,
+            TargetArchitecture::Aarch64(_) => Self::Arm64,
+            _ => unreachable!("Target names only x86, x64 and arm64 machines"),
         }
     }
 

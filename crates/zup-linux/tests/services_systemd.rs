@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zup_bundle::DirectoryPayloadSource;
-use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, TargetTriple};
+use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, Target};
 use zup_linux::{
     DesiredService, LinuxFileExecutor, LinuxLedgerStore, MachineRoots, RealSystemd,
     ServiceCompilation, ServiceSupport, SystemdManager as _, SystemdRoots,
@@ -48,8 +48,8 @@ fn rendered_units_verify() {
         ServiceStart::Manual,
         ServiceStart::Disabled,
     ] {
-        let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
-        let executable = zup_platform::TargetPath::new(target.clone(), binary).expect("a path");
+        let target = zup_core::Target::parse("linux-x64").expect("a target");
+        let executable = zup_platform::TargetPath::new(target, binary).expect("a path");
         let service = zup_platform::TargetService {
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("verify").expect("an id"),
@@ -169,8 +169,8 @@ impl RealWorld {
         }
     }
 
-    fn target() -> TargetTriple {
-        zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target")
+    fn target() -> Target {
+        zup_core::Target::parse("linux-x64").expect("a target")
     }
 
     fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {

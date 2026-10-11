@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use zup_core::{
     App, AppId, FileMapping, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
     PluginBinding, PluginId, PresetAsset, PresetRuntime, RelativePath, ResolvedFile,
-    ResolvedPlugin, SelectedScope, TargetTriple, Template, hash_reader,
+    ResolvedPlugin, SelectedScope, Target, Template, hash_reader,
 };
 use zup_exec::LifecycleAction;
 use zup_plan::{
@@ -43,7 +43,7 @@ fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
                 main: None,
                 description: None,
             },
-            target: zup_core::TargetTriple::parse(HOST_TARGET).expect("a target"),
+            target: zup_core::Target::parse(HOST_TARGET).expect("a target"),
             frontend: zup_core::Frontend::Gui,
             updates: None,
             install: Install {
@@ -107,12 +107,12 @@ fn plan_with_plugin(root: &Path) -> TargetBuildPlan {
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
 struct RecordingExecutor {
-    target: zup_core::TargetTriple,
+    target: zup_core::Target,
     planned: Arc<AtomicUsize>,
 }
 
 impl RecordingExecutor {
-    fn new(target: zup_core::TargetTriple) -> (Self, Arc<AtomicUsize>) {
+    fn new(target: zup_core::Target) -> (Self, Arc<AtomicUsize>) {
         let planned = Arc::new(AtomicUsize::new(0));
         (
             Self {
@@ -125,7 +125,7 @@ impl RecordingExecutor {
 }
 
 impl PluginExecutor for RecordingExecutor {
-    fn target(&self) -> &zup_core::TargetTriple {
+    fn target(&self) -> &zup_core::Target {
         &self.target
     }
 
@@ -143,7 +143,7 @@ impl PluginExecutor for RecordingExecutor {
 fn committed_ledger(build: &TargetBuildPlan) -> zup_exec::InstallLedger {
     let mut ledger = zup_exec::InstallLedger::new(
         build.installer.app.id.clone(),
-        build.installer.target.clone(),
+        build.installer.target,
         SelectedScope::User,
     );
     ledger.version = build.installer.app.version.clone();
@@ -154,7 +154,7 @@ fn committed_ledger(build: &TargetBuildPlan) -> zup_exec::InstallLedger {
 fn an_uninstall_removes_by_ownership_and_never_loads_the_plugin_executor() {
     let root = TempDir::new().expect("temp dir");
     let build = plan_with_plugin(root.path());
-    let (executor, planned) = RecordingExecutor::new(build.installer.target.clone());
+    let (executor, planned) = RecordingExecutor::new(build.installer.target);
     let result = prepare_embedded_request(
         EmbeddedPreparation {
             request: Request::Named(LifecycleAction::Uninstall),
@@ -189,7 +189,7 @@ fn a_cancelled_window_cancels_planning_before_execution_starts() {
     let build = plan_with_plugin(root.path());
     let cancel = zup_runtime::CancellationHandle::new();
     cancel.cancel();
-    let (executor, _) = RecordingExecutor::new(build.installer.target.clone());
+    let (executor, _) = RecordingExecutor::new(build.installer.target);
     let result = prepare_embedded_request(
         EmbeddedPreparation {
             request: Request::Apply,
@@ -221,7 +221,7 @@ fn a_cancelled_window_cancels_planning_before_execution_starts() {
 fn a_repair_refuses_a_selection_it_does_not_use() {
     let root = TempDir::new().expect("temp dir");
     let build = plan_with_plugin(root.path());
-    let (executor, _) = RecordingExecutor::new(build.installer.target.clone());
+    let (executor, _) = RecordingExecutor::new(build.installer.target);
     let outcome = prepare_embedded_request(
         EmbeddedPreparation {
             request: Request::Named(LifecycleAction::Repair { force_files: false }),
@@ -246,7 +246,7 @@ fn a_repair_refuses_a_selection_it_does_not_use() {
     assert!(error.contains("committed component selection"), "{error}");
 }
 fn empty_target(scope: SelectedScope, id: &str) -> zup_platform::TargetPlan {
-    let target = TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target");
+    let target = Target::parse(zup_plugin_contract::HOST_TARGET).expect("a target");
     zup_platform::TargetPlan {
         app: App {
             id: AppId::new(id).expect("an app id"),
@@ -256,7 +256,7 @@ fn empty_target(scope: SelectedScope, id: &str) -> zup_platform::TargetPlan {
             main: None,
             description: None,
         },
-        target: target.clone(),
+        target,
         scope,
         install_directory: zup_platform::TargetPath::new(target, r"C:\Windows\Temp\app")
             .expect("a target path"),
@@ -338,7 +338,7 @@ fn a_window_is_attached_as_scope_aware_installed_content() {
         let executable = zup_bundle::preset_path(
             &directory,
             &runtime.executable,
-            zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
+            zup_core::Target::parse("windows-x64")
                 .expect("a target")
                 .executable_suffix(),
         );
@@ -482,7 +482,7 @@ fn a_windows_bytes_come_from_verified_acquired_content() {
         zup_windows::plain_path_text(&zup_bundle::preset_path(
             &directory,
             &recorded.executable,
-            zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
+            zup_core::Target::parse("windows-x64")
                 .expect("a target")
                 .executable_suffix(),
         )),
@@ -578,7 +578,7 @@ fn acquired_release(
                 main: None,
                 description: None,
             },
-            target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target"),
+            target: zup_core::Target::parse("windows-x64").expect("a target"),
             frontend: zup_core::Frontend::Gui,
             preset: Some(preset.clone()),
             updates: None,
@@ -619,9 +619,9 @@ fn acquired_release(
     let mut manifest = zup_artifact::VariantManifest {
         schema: zup_artifact::VARIANT_MANIFEST_SCHEMA,
         required_features: zup_artifact::FEATURE_VARIANT_MANIFESTS,
-        target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target"),
-        platform: zup_artifact::Platform::from_triple(
-            &zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target"),
+        target: zup_core::Target::parse("windows-x64").expect("a target"),
+        platform: zup_artifact::Platform::from_target(
+            &zup_core::Target::parse("windows-x64").expect("a target"),
         ),
         frontend: zup_core::Frontend::Gui,
         runtime: Some(zup_artifact::Descriptor::of(

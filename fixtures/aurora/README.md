@@ -8,7 +8,7 @@ Zup generates from the preset's own Rust type. The package it produces is
 therefore the same shape a third-party preset produces.
 
 ```bash
-zup preset pack --manifest fixtures/aurora --build x86_64-pc-windows-msvc
+zup preset pack --manifest fixtures/aurora --build windows-x64
 zup preset inspect fixtures/aurora/aurora-*.zupui
 ```
 

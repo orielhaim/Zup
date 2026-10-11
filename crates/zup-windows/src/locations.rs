@@ -1,4 +1,4 @@
-use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_core::{InstallLocation, SelectedScope, Target};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 /// Target-canonical Windows folders for build-time validation.
@@ -17,7 +17,7 @@ impl InstallLocationResolver for CanonicalWindowsLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let path = match (location, scope) {
             (InstallLocation::Programs, _) => r"C:\Program Files",
@@ -43,10 +43,10 @@ impl InstallLocationResolver for CanonicalWindowsLocations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::TargetTriple;
+    use zup_core::Target;
 
-    fn target() -> TargetTriple {
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+    fn target() -> Target {
+        Target::parse("windows-x64").unwrap()
     }
 
     #[test]

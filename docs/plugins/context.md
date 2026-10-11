@@ -10,7 +10,7 @@
 | `app_version` | application version |
 | `install_directory` | resolved install root |
 | `scope` | `Scope::User` or `Scope::Machine` |
-| `target` | canonical target triple |
+| `target` | Zup target, such as `windows-x64` |
 | `selected_components` | the component ids a person selected |
 
 ```rust

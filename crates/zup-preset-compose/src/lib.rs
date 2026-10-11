@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use jsonschema::error::ValidationErrorKind;
 use zup_artifact::preset::PresetPackageView;
 use zup_core::{
-    Installer, NonEmptyString, PresetAsset, PresetRuntime, ProjectPath, ResolvedAsset,
-    TargetTriple, Ui,
+    Installer, NonEmptyString, PresetAsset, PresetRuntime, ProjectPath, ResolvedAsset, Target, Ui,
 };
 use zup_preset_protocol::{Capabilities, HostOffers};
 
@@ -57,7 +56,7 @@ pub fn resolve(
     ui: &Ui,
     project_root: &Path,
     installer: &Installer,
-    target: &TargetTriple,
+    target: &Target,
     shipped: &dyn Fn() -> Result<PathBuf, String>,
     policy: &dyn zup_platform::SourceFilePolicy,
 ) -> Result<Resolved, PresetProblem> {
@@ -142,7 +141,7 @@ pub fn open(path: &Path) -> Result<(PresetPackageView, String), PresetProblem> {
 pub fn select(
     package: &Path,
     installer: &Installer,
-    target: &TargetTriple,
+    target: &Target,
     settings: &serde_json::Value,
 ) -> Result<Selected, PresetProblem> {
     let (view, _name) = open(package)?;

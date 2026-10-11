@@ -74,7 +74,7 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
     // The bytes are a Windows PE image on every host that runs this test, so
     // they match a Windows triple rather than the host's own: on Linux the
     // host target is an ELF triple a PE image must not claim to be.
-    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a Windows target");
+    let target = zup_core::Target::parse("windows-x64").expect("a Windows target");
 
     let Some(frontend) = declared else {
         if !readable_target {

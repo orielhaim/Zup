@@ -52,7 +52,7 @@ main = "app.bin"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -158,7 +158,7 @@ fn a_failure_still_emits_a_usable_document_and_exits_nonzero() {
         fs::read_to_string(project.path().join("zup.toml"))
             .unwrap()
             .replace(
-                "[build.targets.default]\ntarget = \"x86_64-pc-windows-msvc\"",
+                "[build.targets.default]\ntarget = \"windows-x64\"",
                 "[build.targets.default]\ntarget = \"not-a-triple\"",
             ),
     )

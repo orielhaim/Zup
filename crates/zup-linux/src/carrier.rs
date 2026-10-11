@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use zup_bundle::{Package, PackageError};
-use zup_core::{Sha256Digest, TargetTriple};
+use zup_core::{Sha256Digest, Target};
 
 pub const CARRIER_MAGIC: &[u8; 17] = b"ZUP-LINUX-CARRIER";
 
@@ -215,7 +215,7 @@ impl Carrier {
 
         let package = Package::from_bytes(bytes)?;
 
-        let expected = package.plan().installer.target.clone();
+        let expected = package.plan().installer.target;
         let image =
             zup_binary::Executable::read(&executable).map_err(|error| CarrierError::Io {
                 path: path.as_ref().display().to_string(),
@@ -255,7 +255,7 @@ impl Carrier {
         self.package
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.package.plan().installer.target
     }
 }

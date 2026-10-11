@@ -748,8 +748,7 @@ mod tests {
             catalog: DocumentRef::of(Sha256Digest::from_bytes([1; 32]), 8),
             variants: vec![ReleaseVariant {
                 id: "x64".to_owned(),
-                target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
-                    .expect("valid triple"),
+                target: zup_core::Target::parse("windows-x64").expect("valid triple"),
                 platform: "windows".to_owned(),
                 frontend: "gui".to_owned(),
                 manifest: DocumentRef::of(Sha256Digest::from_bytes([2; 32]), 8),
@@ -779,8 +778,7 @@ mod tests {
             descriptor_digest,
             variant: ReleaseVariant {
                 id: "x64".to_owned(),
-                target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc")
-                    .expect("valid triple"),
+                target: zup_core::Target::parse("windows-x64").expect("valid triple"),
                 platform: "windows".to_owned(),
                 frontend: "gui".to_owned(),
                 manifest: DocumentRef::of(Sha256Digest::from_bytes([2; 32]), 8),

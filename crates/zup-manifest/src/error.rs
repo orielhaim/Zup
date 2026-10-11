@@ -148,6 +148,22 @@ pub enum ManifestError {
         span: Option<SourceSpan>,
     },
 
+    #[error("target profile `{profile}` needs an explicit `target`: {reason}")]
+    #[diagnostic(
+        code(zup_manifest::missing_target),
+        help(
+            "rename the profile to a Zup target like `windows-x64`, or set `target = \"windows-x64\"`"
+        )
+    )]
+    MissingTarget {
+        profile: String,
+        reason: String,
+        #[source_code]
+        src: Option<Src>,
+        #[label("profile does not name a target")]
+        span: Option<SourceSpan>,
+    },
+
     #[error("invalid resolved target configuration for profile `{profile}`: {reason}")]
     #[diagnostic(
         code(zup_manifest::invalid_resolved_target_config),
@@ -440,6 +456,17 @@ impl ManifestError {
                 span: span.or(inferred),
                 src: existing.or(src),
             },
+            Self::MissingTarget {
+                profile,
+                reason,
+                span,
+                src: existing,
+            } => Self::MissingTarget {
+                profile,
+                reason,
+                span: span.or(inferred),
+                src: existing.or(src),
+            },
             Self::InvalidResolvedTargetConfig {
                 profile,
                 reason,
@@ -620,6 +647,7 @@ fn infer_span(error: &ManifestError, source: &str) -> Option<SourceSpan> {
             .map(|start| source_span(start..start + output.len())),
         ManifestError::UnknownTargetSelector { .. } => None,
         ManifestError::DuplicateTarget { profile, .. }
+        | ManifestError::MissingTarget { profile, .. }
         | ManifestError::InvalidResolvedTargetConfig { profile, .. } => source
             .find(profile.as_str())
             .map(|start| source_span(start..start + profile.len())),

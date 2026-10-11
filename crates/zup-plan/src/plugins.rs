@@ -6,7 +6,7 @@ use thiserror::Error;
 use zup_core::{
     App, ComponentId, FileAssociationId, FileExtension, LauncherLocation, NonEmptyString,
     PluginBinding, PluginId, PrerequisitePackage, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, TargetTriple, Template,
+    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target, Template,
 };
 
 use crate::error::PlanError;
@@ -32,7 +32,7 @@ pub struct PluginPlanningContext {
     pub install_directory: Template,
     pub scope: SelectedScope,
     pub selected_components: Vec<ComponentId>,
-    pub target: TargetTriple,
+    pub target: Target,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,10 +104,7 @@ pub enum PluginFailure {
     #[error("plugin returned invalid output: {message}")]
     InvalidOutput { message: String },
     #[error("plugin target `{found}` does not match expected target `{expected}`")]
-    TargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    TargetMismatch { expected: Target, found: Target },
     #[error("plugin invocation failed internally: {message}")]
     Internal { message: String },
 }
@@ -150,7 +147,7 @@ impl PluginFailure {
         }
     }
 
-    pub fn target_mismatch(expected: TargetTriple, found: TargetTriple) -> Self {
+    pub fn target_mismatch(expected: Target, found: Target) -> Self {
         Self::TargetMismatch { expected, found }
     }
 
@@ -213,7 +210,7 @@ impl CancellationQuery for NeverCancelled {
 }
 
 pub trait PluginExecutor {
-    fn target(&self) -> &TargetTriple;
+    fn target(&self) -> &Target;
 
     fn plan(
         &mut self,

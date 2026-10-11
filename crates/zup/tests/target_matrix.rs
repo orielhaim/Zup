@@ -8,22 +8,16 @@ use zup_windows::EmbeddedBundle;
 mod toolchain_fixture;
 
 #[cfg(target_arch = "aarch64")]
-const X64: &str = "x86_64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-x64";
 #[cfg(not(target_arch = "aarch64"))]
-const ARM64: &str = "aarch64-pc-windows-msvc";
-const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-#[cfg(target_arch = "aarch64")]
-const OTHER_TARGET: &str = X64;
-#[cfg(not(target_arch = "aarch64"))]
-const OTHER_TARGET: &str = ARM64;
+const OTHER_TARGET: &str = "windows-arm64";
 
-/// A target no backend implements on any build host: cross-building covers
-/// every Windows and Linux triple from either host, so only a platform no
-/// backend owns exercises the backend boundary.
-#[cfg(windows)]
-const UNSUPPORTED_TARGET: &str = "aarch64-unknown-linux-gnu";
-#[cfg(not(windows))]
-const UNSUPPORTED_TARGET: &str = "aarch64-apple-darwin";
+fn host_target() -> String {
+    zup_core::Target::host().to_string()
+}
+
+/// A Linux target Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-arm64";
 
 /// The frontend every fixture project declares.
 ///
@@ -32,7 +26,7 @@ const UNSUPPORTED_TARGET: &str = "aarch64-apple-darwin";
 /// build to have selected. `zup build` finds the matching runtime template through
 /// the toolchain resolver, exactly as it does for a person who installed `zup`.
 ///
-/// Windows-only coverage: the matrix project pairs two Windows triples, which a
+/// Windows-only coverage: the matrix project pairs two Windows targets, which a
 /// Linux host cannot lower, so the selection assertions that need them stay
 /// where a Windows host runs them.
 #[cfg(windows)]
@@ -61,6 +55,7 @@ fn write_matrix_project() -> (TempDir, PathBuf) {
     fs::create_dir_all(root.path().join("dist/beta")).unwrap();
     fs::write(root.path().join("dist/alpha/app.bin"), b"alpha").unwrap();
     fs::write(root.path().join("dist/beta/app.bin"), b"beta").unwrap();
+    let host = host_target();
     let manifest = format!(
         r#"schema = 1
 [app]
@@ -69,7 +64,7 @@ name = "CLI Matrix"
 version = "1.0.0"
 [build]
 [build.targets.alpha]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist/alpha" }}
 [build.targets.beta]
 target = "{OTHER_TARGET}"
@@ -99,9 +94,11 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
     // output, so both have to be individually correct or the output problem
     // would never be the one reported. One package carries both targets, which is
     // what a build actually reads.
-    let alpha = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    let alpha =
+        toolchain_fixture::runtime(&host_target(), zup_core::Frontend::Gui).write(root.path());
     let beta = toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
+    let host = host_target();
+    toolchain_fixture::preset(&[host.as_str(), OTHER_TARGET]).write(root.path());
     // `--output` alignment is resolved during composition, after the backend
     // boundary. On a Linux host the Windows beta profile is refused there
     // first, so that combination is Windows-only coverage; Linux output
@@ -162,6 +159,7 @@ fn one_value_per_target_install_directory_is_aligned_per_profile() {
         .unwrap();
     }
     let manifest = root.path().join("zup.toml");
+    let host = host_target();
     fs::write(
         &manifest,
         format!(
@@ -172,7 +170,7 @@ name = "Cli Install Matrix"
 version = "1.0.0"
 [build]
 [build.targets.alpha]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist/alpha" }}
 [build.targets.beta]
 target = "{OTHER_TARGET}"
@@ -185,9 +183,9 @@ user = "${{location.user_data}}/Shared"
         ),
     )
     .unwrap();
-    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::runtime(&host_target(), zup_core::Frontend::Gui).write(root.path());
     toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
+    toolchain_fixture::preset(&[host.as_str(), OTHER_TARGET]).write(root.path());
     let result = zup()
         .args(["--toolchain"])
         .arg(root.path())
@@ -238,7 +236,7 @@ name = "Output Lifecycle"
 version = "1.0.0"
 [build]
 [build.targets.default]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist" }}
 frontend = "{frontend}"
 [install]
@@ -250,6 +248,7 @@ source = "**/*"
 destination = "${{install}}"
 "#,
             frontend = FRONTEND,
+            host = host_target(),
         ),
     )
     .unwrap();
@@ -395,7 +394,7 @@ fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
             String::from_utf8_lossy(&explicit.stderr)
         );
         let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-        assert_eq!(value["targets"][0]["target"], HOST_TARGET);
+        assert_eq!(value["targets"][0]["target"], host_target());
     } else {
         assert!(!explicit.status.success());
         assert!(

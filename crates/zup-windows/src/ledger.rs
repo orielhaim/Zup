@@ -462,13 +462,12 @@ impl InstallLedgerStore {
             cleanup_application_state(&self.root, record)?;
             return Ok(InstallLedger::new(
                 record.app_id.clone(),
-                record.target.clone(),
+                record.target,
                 scope,
             ));
         }
-        let mut ledger = previous.unwrap_or_else(|| {
-            InstallLedger::new(record.app_id.clone(), record.target.clone(), scope)
-        });
+        let mut ledger = previous
+            .unwrap_or_else(|| InstallLedger::new(record.app_id.clone(), record.target, scope));
         if ledger.target != record.target {
             return Err(LedgerError::Ownership("target identity".into()));
         }
@@ -674,7 +673,7 @@ fn owned_from_backend_receipt(
     key: &ResourceKey,
     old: Option<&OwnedResource>,
     payload: &[u8],
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<Option<OwnedResource>, LedgerError> {
     let receipt = receipt_from_bytes(payload).map_err(|_| LedgerError::Invalid)?;
     Ok(match receipt {
@@ -789,7 +788,7 @@ fn valid_file_key(
     key: &ResourceKey,
     app_id: &AppId,
     app_version: &semver::Version,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> bool {
     match key {
         ResourceKey::File { .. } => true,

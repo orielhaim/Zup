@@ -5,15 +5,15 @@
 //! describes a Windows path on a Unix host and a Unix path on a Windows host.
 
 use rstest::rstest;
-use zup_core::{TargetOperatingSystem, TargetTriple};
+use zup_core::{Target, TargetOperatingSystem};
 use zup_platform::{TargetPath, TargetPathError};
 
-fn windows() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn windows() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
-fn unix() -> TargetTriple {
-    TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()
+fn unix() -> Target {
+    Target::parse("linux-x64").unwrap()
 }
 
 /// One spelling rule for every root, however the target writes it.
@@ -26,14 +26,14 @@ fn unix() -> TargetTriple {
 #[case::unix_root("/", unix())]
 fn a_root_is_spelled_without_a_trailing_separator_except_where_it_needs_one(
     #[case] authored: &str,
-    #[case] target: TargetTriple,
+    #[case] target: Target,
 ) {
     let expected = if target.operating_system() == TargetOperatingSystem::Windows {
         authored.replace('/', "\\")
     } else {
         authored.to_owned()
     };
-    let root = TargetPath::new(&target, authored).unwrap();
+    let root = TargetPath::new(target, authored).unwrap();
     assert_eq!(root.as_str(), expected);
     assert_eq!(root.parent(), None, "path: {authored:?}");
     assert_eq!(root.file_name(), None, "path: {authored:?}");
@@ -49,13 +49,13 @@ fn a_root_is_spelled_without_a_trailing_separator_except_where_it_needs_one(
 fn a_target_path_has_exactly_one_spelling(
     #[case] expected: &str,
     #[case] authored: &str,
-    #[case] target: TargetTriple,
+    #[case] target: Target,
 ) {
-    let path = TargetPath::new(&target, authored).unwrap();
+    let path = TargetPath::new(target, authored).unwrap();
     assert_eq!(path.as_str(), expected);
     // The canonical form is a fixed point: re-binding it changes nothing.
     assert_eq!(
-        TargetPath::new(&target, path.as_str()).unwrap().as_str(),
+        TargetPath::new(target, path.as_str()).unwrap().as_str(),
         expected
     );
 }
@@ -81,10 +81,10 @@ fn a_unix_backslash_is_part_of_the_name() {
 fn a_prefix_is_whole_components_only(
     #[case] base: &str,
     #[case] path: &str,
-    #[case] target: TargetTriple,
+    #[case] target: Target,
 ) {
-    let base = TargetPath::new(&target, base).unwrap();
-    let path = TargetPath::new(&target, path).unwrap();
+    let base = TargetPath::new(target, base).unwrap();
+    let path = TargetPath::new(target, path).unwrap();
     assert!(
         !path.starts_with(&base),
         "{path:?} should not start with {base:?}"
@@ -98,13 +98,9 @@ fn a_prefix_is_whole_components_only(
 #[rstest]
 #[case::windows_case_and_separator(r"C:\Apps\Acme", r"c:/apps/acme", windows())]
 #[case::windows_unc_case(r"\\server\share\Acme", r"\\SERVER\SHARE\acme", windows())]
-fn a_windows_path_folds_case(
-    #[case] left: &str,
-    #[case] right: &str,
-    #[case] target: TargetTriple,
-) {
-    let left = TargetPath::new(&target, left).unwrap();
-    let right = TargetPath::new(&target, right).unwrap();
+fn a_windows_path_folds_case(#[case] left: &str, #[case] right: &str, #[case] target: Target) {
+    let left = TargetPath::new(target, left).unwrap();
+    let right = TargetPath::new(target, right).unwrap();
     assert!(left.equivalent(&right), "{left:?} vs {right:?}");
 }
 
@@ -121,8 +117,8 @@ fn a_unix_path_compares_bytes() {
 #[test]
 fn a_path_is_only_equivalent_within_its_own_target() {
     let windows_path = TargetPath::new(windows(), r"C:\PF").unwrap();
-    let other_windows = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
-    let other = TargetPath::new(&other_windows, r"C:\PF").unwrap();
+    let other_windows = Target::parse("windows-arm64").unwrap();
+    let other = TargetPath::new(other_windows, r"C:\PF").unwrap();
     assert!(!windows_path.equivalent(&other));
     assert!(!windows_path.starts_with(&other));
 }
@@ -136,7 +132,7 @@ fn a_path_is_only_equivalent_within_its_own_target() {
 fn a_target_path_names_its_own_target_not_the_host(#[case] authored: &str, #[case] expected: &str) {
     let windows_target = authored.contains('\\');
     let target = if windows_target { windows() } else { unix() };
-    let path = TargetPath::new(&target, authored).unwrap();
+    let path = TargetPath::new(target, authored).unwrap();
     assert_eq!(path.as_str(), expected);
     assert_eq!(path.target(), &target);
 }
@@ -153,7 +149,7 @@ fn a_parent_chain_ends_at_the_root(#[case] authored: &str, #[case] ancestors: &[
     } else {
         unix()
     };
-    let path = TargetPath::new(&target, authored).unwrap();
+    let path = TargetPath::new(target, authored).unwrap();
     assert_eq!(
         path.file_name(),
         ancestors.first().map(|_| path.file_name().unwrap())
@@ -191,7 +187,7 @@ fn joining_extends_a_target_path(
     } else {
         unix()
     };
-    let base = TargetPath::new(&target, base).unwrap();
+    let base = TargetPath::new(target, base).unwrap();
     match (base.join(suffix), expected) {
         (Ok(joined), Ok(expected)) => assert_eq!(joined.as_str(), expected),
         (Ok(joined), Err(())) => panic!("{suffix:?} should not join: {joined:?}"),
@@ -229,10 +225,10 @@ fn a_unix_suffix_may_name_a_windows_drive() {
 #[case::unix_relative(r"opt/acme", unix())]
 #[case::unix_relative_drive(r"C:\Acme", unix())]
 #[case::windows_relative_unix(r"/opt/acme", windows())]
-fn a_relative_path_is_refused(#[case] authored: &str, #[case] target: TargetTriple) {
+fn a_relative_path_is_refused(#[case] authored: &str, #[case] target: Target) {
     assert!(
         matches!(
-            TargetPath::new(&target, authored),
+            TargetPath::new(target, authored),
             Err(TargetPathError::NotAbsolute { .. })
         ),
         "{authored:?}"
@@ -274,7 +270,7 @@ fn a_parent_component_is_refused(#[case] authored: &str) {
     };
     assert!(
         matches!(
-            TargetPath::new(&target, authored),
+            TargetPath::new(target, authored),
             Err(TargetPathError::Traversal { .. })
         ),
         "{authored:?}"
@@ -292,7 +288,7 @@ fn a_current_component_is_absorbed(#[case] authored: &str, #[case] expected: &st
         unix()
     };
     assert_eq!(
-        TargetPath::new(&target, authored).unwrap().as_str(),
+        TargetPath::new(target, authored).unwrap().as_str(),
         expected
     );
 }
@@ -313,7 +309,7 @@ fn a_target_path_round_trips_through_its_serialized_form() {
         } else {
             unix()
         };
-        let path = TargetPath::new(&target, authored).unwrap();
+        let path = TargetPath::new(target, authored).unwrap();
         let json = serde_json::to_string(&path).unwrap();
         let restored: TargetPath = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, path, "{authored:?}");
@@ -328,10 +324,8 @@ fn a_serialized_target_path_without_its_target_is_refused() {
         "a path with no target cannot be bound to one"
     );
     assert!(
-        serde_json::from_str::<TargetPath>(
-            r#"{"target":"x86_64-pc-windows-msvc","path":"/opt/acme"}"#
-        )
-        .is_err(),
+        serde_json::from_str::<TargetPath>(r#"{"target":"windows-x64","path":"/opt/acme"}"#)
+            .is_err(),
         "a Unix path is not absolute on a Windows target"
     );
 }

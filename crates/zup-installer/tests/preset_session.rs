@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use zup_core::{
     AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, TargetTriple, Template,
+    NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, Target, Template,
 };
 use zup_installer::host::{HostDecision, HostState, preset};
 use zup_preset_protocol::{Action, Capabilities, Capability, HostOffers, PRESET_PROTOCOL_VERSION};
@@ -54,7 +54,7 @@ fn installer() -> Installer {
             main: None,
             description: None,
         },
-        target: TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("the host's target"),
+        target: Target::parse(zup_plugin_contract::HOST_TARGET).expect("the host's target"),
         frontend: zup_core::Frontend::Gui,
         updates: None,
         install: Install {
@@ -249,7 +249,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     .expect("a valid description");
     writer
         .add_binary(
-            TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target"),
+            Target::parse(zup_plugin_contract::HOST_TARGET).expect("a target"),
             child_bytes.clone(),
         )
         .expect("one binary for the host");
@@ -258,7 +258,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     view.verify().expect("verifies");
     // What a build selects out of it: the target's native binary, not the package.
     let selected = view
-        .binary_for(&TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target"))
+        .binary_for(&Target::parse(zup_plugin_contract::HOST_TARGET).expect("a target"))
         .expect("the package has this target");
     assert_eq!(
         selected, child_bytes,

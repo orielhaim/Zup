@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Sha256Digest;
 use crate::ids::AppId;
-use crate::target::TargetTriple;
+use crate::target::Target;
 
 pub const MAX_IDENTITY_COMPONENTS: usize = 1024;
 
@@ -17,7 +17,7 @@ pub struct ReleaseIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<Sha256Digest>,
     pub version: String,
-    pub target: TargetTriple,
+    pub target: Target,
     #[serde(default)]
     pub channel: String,
     /// A pinned installer must not silently become a later release, and this is
@@ -120,11 +120,11 @@ mod tests {
             app_id: AppId::new("com.example.app").expect("valid app id"),
             release: Sha256Digest::from_bytes([1; 32]),
             catalog: Sha256Digest::from_bytes([2; 32]),
-            variant: "x86_64-pc-windows-msvc".to_owned(),
+            variant: "windows-x64".to_owned(),
             manifest: Sha256Digest::from_bytes([3; 32]),
             runtime: Some(Sha256Digest::from_bytes([4; 32])),
             version: "1.4.0".to_owned(),
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid target triple"),
+            target: Target::parse("windows-x64").expect("a valid target"),
             channel: "stable".to_owned(),
             pinned: false,
             trust_anchor: Sha256Digest::from_bytes([5; 32]),

@@ -11,7 +11,7 @@ use zup_bootstrap::{
     BootstrapFileSystem, BootstrapKey, BootstrapPlan, BootstrapState, BootstrapStateStore,
     BootstrapStoreError, FilesystemBootstrapStateStore, Quarantine, QuarantineError,
 };
-use zup_core::{AppId, PrerequisiteId, SelectedScope, Sha256Digest, TargetTriple, hash_reader};
+use zup_core::{AppId, PrerequisiteId, SelectedScope, Sha256Digest, Target, hash_reader};
 use zup_windows::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
 
 #[path = "fixture/junction.rs"]
@@ -32,7 +32,7 @@ fn bootstrap_state() -> BootstrapState {
                 app_id: AppId::new("com.example.bootstrap").unwrap(),
                 app_version: Version::new(1, 0, 0),
                 scope: SelectedScope::User,
-                target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                target: Target::parse("windows-x64").unwrap(),
             },
             Vec::new(),
         )

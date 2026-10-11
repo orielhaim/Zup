@@ -10,8 +10,8 @@ use zup_bundle::BundleWriter;
 use zup_core::{
     App, AppId, FileAssociation, FileAssociationId, FileExtension, Frontend, Install,
     InstallDirectory, InstallScope, Installer, Launcher, LauncherLocation, NonEmptyString,
-    Protocol, ProtocolScheme, RelativePath, ResolvedFile, SelectedScope, TargetBuildPlan,
-    TargetTriple, Template, hash_reader,
+    Protocol, ProtocolScheme, RelativePath, ResolvedFile, SelectedScope, Target, TargetBuildPlan,
+    Template, hash_reader,
 };
 use zup_protocol::{SessionId, WireEnvelope};
 
@@ -99,7 +99,7 @@ pub fn drive_client_isolated(
     session: SessionId,
     intent: &zup_protocol::PrepareOperation,
     expected_digest: &str,
-    expected_target: &zup_core::TargetTriple,
+    expected_target: &zup_core::Target,
 ) -> Result<crate::run::LinuxOutcome, crate::error::ExecError> {
     crate::elevate::drive_client(stream, session, intent, expected_digest, expected_target)
 }
@@ -616,7 +616,7 @@ pub fn v2_files() -> Vec<FixtureFile> {
 pub fn package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
     package_bytes_for(
         scratch,
-        &TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target"),
+        &Target::parse("linux-x64").expect("a Linux target"),
         version,
         files,
     )
@@ -628,7 +628,7 @@ pub fn machine_package_bytes(
     files: &[FixtureFile],
     allow_directory_override: bool,
 ) -> Vec<u8> {
-    let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+    let target = Target::parse("linux-x64").expect("a Linux target");
     let payload_dir = scratch.join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
     let resolved = files
@@ -662,7 +662,7 @@ pub fn machine_package_bytes(
                 main: None,
                 description: None,
             },
-            target: target.clone(),
+            target,
             frontend: Frontend::Console,
             updates: None,
             install: Install {
@@ -759,7 +759,7 @@ pub fn machine_maintenance_path(state: &Path, version: &str) -> PathBuf {
         &AppId::new("com.example.tool").expect("an id"),
         SelectedScope::Machine,
         &semver::Version::parse(version).expect("a version"),
-        TargetTriple::parse("x86_64-unknown-linux-gnu")
+        Target::parse("linux-x64")
             .expect("a Linux target")
             .executable_suffix(),
     )
@@ -837,7 +837,7 @@ pub fn v2_icons() -> Vec<FixtureIcon> {
 
 pub fn package_bytes_for(
     scratch: &Path,
-    target: &TargetTriple,
+    target: &Target,
     version: &str,
     files: &[FixtureFile],
 ) -> Vec<u8> {
@@ -847,7 +847,7 @@ pub fn package_bytes_for(
 #[allow(clippy::too_many_arguments)]
 pub fn package_bytes_full(
     scratch: &Path,
-    target: &TargetTriple,
+    target: &Target,
     version: &str,
     files: &[FixtureFile],
     launchers: &[Launcher],
@@ -855,7 +855,7 @@ pub fn package_bytes_full(
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
 ) -> Vec<u8> {
-    let target = target.clone();
+    let target = *target;
     let payload_dir = scratch.join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
     let resolved = files
@@ -907,7 +907,7 @@ pub fn package_bytes_full(
                 main: None,
                 description: None,
             },
-            target: target.clone(),
+            target,
             frontend: Frontend::Console,
             updates: None,
             install: Install {
@@ -971,7 +971,7 @@ pub fn compose_integration_fixture(
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
 ) -> PathBuf {
-    let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+    let target = Target::parse("linux-x64").expect("a Linux target");
     let package = package_bytes_full(
         scratch,
         &target,
@@ -1074,7 +1074,7 @@ pub fn genuine_template(frontend: &str) -> PathBuf {
         .and_then(|deps| deps.parent())
         .expect("a profile directory");
     let toolchain = profile.join("toolchain");
-    let name = format!("zup-setup-{frontend}-x86_64-unknown-linux-gnu");
+    let name = format!("zup-setup-{frontend}-linux-x64");
     let mut found = Vec::new();
     if let Ok(versions) = std::fs::read_dir(&toolchain) {
         for version in versions.flatten() {

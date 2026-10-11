@@ -20,13 +20,11 @@ description = "A minimal application for the cross-build matrix."
 
 [build]
 
-[build.targets.win]
-target = "x86_64-pc-windows-msvc"
+[build.targets.windows-x64]
 source = { directory = "payload" }
 frontend = "console"
 
-[build.targets.lnx]
-target = "x86_64-unknown-linux-gnu"
+[build.targets.linux-x64]
 source = { directory = "payload" }
 frontend = "console"
 

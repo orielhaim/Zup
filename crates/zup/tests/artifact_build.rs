@@ -35,8 +35,8 @@ fn runtime_template(root: &Path, profile: &str, target: &str) -> PathBuf {
         .write(&root.join(format!("templates/{profile}")))
 }
 
-const X64: &str = "x86_64-pc-windows-msvc";
-const ARM64: &str = "aarch64-pc-windows-msvc";
+const X64: &str = "windows-x64";
+const ARM64: &str = "windows-arm64";
 
 /// A two-architecture project whose payload is identical across machines except
 /// for one binary each, which is the shape a real application has.
@@ -88,11 +88,11 @@ version = "1.4.0"
 [build]
 
 [build.targets.arm64]
-target = "aarch64-pc-windows-msvc"
+target = "windows-arm64"
 source = { directory = "src-arm64" }
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "src-x64" }
 
 [install]
@@ -253,7 +253,7 @@ fn a_universal_build_writes_one_file_containing_every_selected_target() {
     assert!(report.contains("Kind        Universal"), "{report}");
     assert!(report.contains("Mode        Offline"), "{report}");
     assert!(
-        report.contains("aarch64-pc-windows-msvc console, x86_64-pc-windows-msvc console"),
+        report.contains("windows-arm64 console, windows-x64 console"),
         "both variants are named: {report}"
     );
 

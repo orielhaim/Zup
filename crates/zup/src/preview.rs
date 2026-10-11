@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use clap::{Args, ValueHint};
-use zup_core::{Frontend, Installer, Sha256Digest, TargetTriple, hash_bytes};
+use zup_core::{Frontend, Installer, Sha256Digest, Target, hash_bytes};
 use zup_preset_compose::{PresetProblem, Resolved};
 use zup_preview::{
     ControlOutcome, Driver, Event, Runtime, Scenario, Seen, StateDirectory, Watcher, serve,
@@ -190,7 +190,7 @@ impl Session {
     pub fn resolve(
         &self,
         installer: &Installer,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<Resolved, PreviewError> {
         let selected = select(&self.manifest, &self.targets)?;
         let shipped = || {
@@ -336,7 +336,7 @@ pub fn select(manifest: &Path, targets: &[String]) -> Result<SelectedProject, Pr
         .map_err(|error| PreviewError::Project(error.to_string()))
 }
 
-pub fn the_window(selected: &SelectedProject) -> Result<(Installer, TargetTriple), PreviewError> {
+pub fn the_window(selected: &SelectedProject) -> Result<(Installer, Target), PreviewError> {
     let config = selected
         .selected_targets
         .first()
@@ -355,7 +355,7 @@ pub fn the_window(selected: &SelectedProject) -> Result<(Installer, TargetTriple
             ),
         });
     }
-    Ok((installer, config.target.clone()))
+    Ok((installer, config.target))
 }
 
 impl Driver for Session {

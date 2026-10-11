@@ -335,7 +335,11 @@ pub struct PlanCommand {
 pub struct ProjectSelection {
     #[arg(long, default_value = crate::DEFAULT_MANIFEST, value_hint = ValueHint::FilePath)]
     pub manifest: PathBuf,
-    #[arg(long, value_name = "PROFILE_OR_TARGET")]
+    #[arg(
+        long,
+        value_name = "PROFILE_OR_TARGET",
+        help = "A target profile from [build.targets], or a Zup target such as windows-x64"
+    )]
     pub target: Vec<String>,
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Vec<PathBuf>,
@@ -490,7 +494,11 @@ pub struct PublishStageCommand {
     pub install_directory: Vec<PathBuf>,
     #[arg(long, value_enum)]
     pub frontend: Option<FrontendArg>,
-    #[arg(long, value_name = "PROFILE_OR_TARGET")]
+    #[arg(
+        long,
+        value_name = "PROFILE_OR_TARGET",
+        help = "A target profile from [build.targets], or a Zup target such as windows-x64"
+    )]
     pub target: Vec<String>,
     #[arg(long)]
     pub thin: bool,

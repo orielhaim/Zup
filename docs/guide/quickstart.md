@@ -39,8 +39,7 @@ name = "Acme"
 version = "1.0.0"
 main = "Acme.exe"
 
-[build.targets.windows]
-target = "x86_64-pc-windows-msvc"
+[build.targets.windows-x64]
 source = { directory = "dist" }
 
 [install]

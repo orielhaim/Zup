@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use zup_bundle::DirectoryPayloadSource;
-use zup_core::{RelativePath, Sha256Digest, TargetTriple, hash_reader};
+use zup_core::{RelativePath, Sha256Digest, Target, hash_reader};
 use zup_transaction::{
     FileDelta, FilePrecondition, InstallationLock, LockScope, OperationId, TransactionInput,
     compile_transaction,
@@ -15,7 +15,7 @@ use zup_windows::{
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
     zup_platform::TargetPath::new(
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        Target::parse("windows-x64").unwrap(),
         path.as_ref().to_string_lossy(),
     )
     .unwrap()
@@ -32,7 +32,7 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
     let key = ResourceKey::File {
         destination: destination.to_string(),
     };
-    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    let mut input = TransactionInput::new(Target::parse("windows-x64").unwrap());
     input.uninstall = true;
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
@@ -55,9 +55,7 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
         source,
         dir.path().join("work"),
         "removal-test".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     assert_eq!(
@@ -142,7 +140,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
     let key = ResourceKey::File {
         destination: destination.to_string(),
     };
-    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    let mut input = TransactionInput::new(Target::parse("windows-x64").unwrap());
     input.uninstall = true;
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
@@ -176,9 +174,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         source,
         dir.path().join("work"),
         record.transaction_id.to_string(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     ));
     record.phase = TransactionPhase::Applying;
@@ -316,9 +312,7 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
         src,
         target_root.join("work"),
         "tx1".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -343,9 +337,7 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
         src,
         target_root.join("work"),
         "tx2".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -423,9 +415,7 @@ fn a_target_that_changed_after_the_plan_is_refused_and_left_alone() {
             src,
             target_root.join("work"),
             "tx-drift".into(),
-            TargetTriple::parse("x86_64-pc-windows-msvc")
-                .unwrap()
-                .executable_suffix(),
+            Target::parse("windows-x64").unwrap().executable_suffix(),
             Box::new(NullProgress),
         );
         let rel = RelativePath::new("a.bin").unwrap();
@@ -491,9 +481,7 @@ fn verification_follows_every_part_of_a_receipt() {
         src,
         target_root.join("work"),
         "tx-verify".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     let rel = RelativePath::new("a.bin").unwrap();
@@ -538,9 +526,7 @@ fn verification_follows_every_part_of_a_receipt() {
         src,
         target_root.join("work"),
         "tx-verify-replace".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     let stage = stage_node(&dest);
@@ -590,7 +576,7 @@ fn removal_verification_requires_absent_destination_and_intact_backup() {
     let key = ResourceKey::File {
         destination: destination.to_string(),
     };
-    let mut input = TransactionInput::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap());
+    let mut input = TransactionInput::new(Target::parse("windows-x64").unwrap());
     input.uninstall = true;
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
@@ -613,9 +599,7 @@ fn removal_verification_requires_absent_destination_and_intact_backup() {
         source,
         dir.path().join("work"),
         "removal-verify".into(),
-        TargetTriple::parse("x86_64-pc-windows-msvc")
-            .unwrap()
-            .executable_suffix(),
+        Target::parse("windows-x64").unwrap().executable_suffix(),
         Box::new(NullProgress),
     );
     let receipt = exec.apply_owned_file_removal(node).unwrap();

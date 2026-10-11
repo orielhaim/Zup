@@ -340,7 +340,7 @@ impl Inspection {
         let linux = self.variants.iter().any(|variant| {
             variant
                 .target
-                .parse::<zup_core::TargetTriple>()
+                .parse::<zup_core::Target>()
                 .is_ok_and(|target| {
                     target.operating_system() == zup_core::TargetOperatingSystem::Linux
                 })

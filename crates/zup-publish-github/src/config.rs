@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{GithubHost, MatrixTarget, NotesPolicy, RepositorySpec, Signing, WorkflowPolicy};
+use crate::{GithubHost, NotesPolicy, RepositorySpec, Signing, WorkflowPolicy};
 
 use zup_manifest::ManifestError;
 use zup_manifest::{DistributionHost, Github, GithubNotes, GithubWorkflow, Manifest};
@@ -136,15 +136,6 @@ impl PublishConfig {
             .as_ref()
             .and_then(|spec| spec.host.clone())
             .unwrap_or_else(GithubHost::dotcom)
-    }
-
-    pub fn matrix(&self, manifest: &Manifest) -> Vec<MatrixTarget> {
-        manifest
-            .build
-            .targets
-            .iter()
-            .map(|(profile, target)| MatrixTarget::new(profile.as_str(), target.target.as_str()))
-            .collect()
     }
 }
 

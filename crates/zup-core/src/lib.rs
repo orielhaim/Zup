@@ -40,9 +40,8 @@ pub use prerequisite::{
 };
 pub use release::{IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseIdentity};
 pub use target::{
-    ResolvedTargetConfig, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
-    TargetParseError, TargetProfile, TargetProfileId, TargetTriple, host_architecture,
-    host_operating_system,
+    ResolvedTargetConfig, Target, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
+    TargetParseError, TargetProfile, TargetProfileId, host_architecture, host_operating_system,
 };
 pub use template::{Template, TemplateError, TemplatePart, Variable, VariableValue};
 

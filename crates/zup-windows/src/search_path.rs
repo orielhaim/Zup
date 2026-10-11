@@ -1,5 +1,5 @@
 use windows_registry::{Key, Type};
-use zup_core::{SelectedScope, TargetTriple};
+use zup_core::{SelectedScope, Target};
 use zup_exec::SearchPath;
 use zup_platform::TargetPath;
 
@@ -34,7 +34,7 @@ pub fn unquote(segment: &str) -> &str {
         .trim()
 }
 
-pub fn to_target_path(target: &TargetTriple, segment: &str) -> Option<TargetPath> {
+pub fn to_target_path(target: &Target, segment: &str) -> Option<TargetPath> {
     let segment = unquote(segment);
     if segment.is_empty() || is_variable_reference(segment) {
         return None;
@@ -42,14 +42,14 @@ pub fn to_target_path(target: &TargetTriple, segment: &str) -> Option<TargetPath
     TargetPath::new(target, segment).ok()
 }
 
-pub fn collect(target: &TargetTriple, value: &str) -> SearchPath {
+pub fn collect(target: &Target, value: &str) -> SearchPath {
     split(value)
         .into_iter()
         .filter_map(|segment| to_target_path(target, segment))
         .collect()
 }
 
-pub fn contains(target: &TargetTriple, value: &str, desired: &TargetPath) -> bool {
+pub fn contains(target: &Target, value: &str, desired: &TargetPath) -> bool {
     split(value)
         .into_iter()
         .filter_map(|segment| to_target_path(target, segment))
@@ -101,8 +101,8 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    fn windows() -> TargetTriple {
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+    fn windows() -> Target {
+        Target::parse("windows-x64").unwrap()
     }
 
     #[rstest]
@@ -131,7 +131,7 @@ mod tests {
     #[case(r"%SOMETHING%\bin", false)]
     fn quoting_and_case_are_windows_identity(#[case] stored: &str, #[case] found: bool) {
         let target = windows();
-        let desired = TargetPath::new(&target, r"C:\Apps\bin").unwrap();
+        let desired = TargetPath::new(target, r"C:\Apps\bin").unwrap();
         assert_eq!(contains(&target, stored, &desired), found);
     }
 

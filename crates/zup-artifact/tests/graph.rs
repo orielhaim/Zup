@@ -17,7 +17,7 @@ use zup_artifact::{
     HostArchitecture, HostExecution, HostVersion, MemorySegments, MetadataSet, PlatformOs,
     ReleaseManifest, SegmentSource, VariantRequirements, select_from_index,
 };
-use zup_core::{Sha256Digest, TargetTriple};
+use zup_core::{Sha256Digest, Target};
 
 fn request(id: &str) -> ArtifactRequest {
     ArtifactRequest::universal_offline(id, &common::app(), "Acme-Windows-Setup.exe")
@@ -235,7 +235,7 @@ fn x64_resolved(
 ) -> zup_core::ResolvedTargetConfig {
     zup_core::ResolvedTargetConfig {
         profile: variant.profile().clone(),
-        target: variant.target().clone(),
+        target: *variant.target(),
         source: zup_core::Source::new(root.to_path_buf()).unwrap(),
         frontend: variant.frontend(),
         install: variant.install().clone(),
@@ -476,7 +476,7 @@ fn a_plugin_is_compiled_for_one_target_only_and_selected_through_the_manifest() 
     let plugin = &arm.plan.plugins[0];
     assert_eq!(
         plugin.target,
-        TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
+        Target::parse("aarch64-pc-windows-msvc").unwrap(),
         "a plugin is never selected by filename; it is bound to the variant target"
     );
     // The plugin's ahead-of-time content is in the shared store, referenced by

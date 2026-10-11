@@ -72,10 +72,7 @@ fn package(binary: Vec<u8>) -> Vec<u8> {
             ]));
     let mut writer = PresetPackageWriter::new(description).expect("a valid description");
     writer
-        .add_binary(
-            zup_core::TargetTriple::parse(HOST).expect("a target"),
-            binary,
-        )
+        .add_binary(zup_core::Target::parse(HOST).expect("a target"), binary)
         .expect("one binary");
     writer.finish().expect("a verified package")
 }
@@ -842,7 +839,7 @@ source = {{ directory = "payload" }}
 frontend = "gui"
 
 [build.targets.linux]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = {{ directory = "payload" }}
 frontend = "gui"
 

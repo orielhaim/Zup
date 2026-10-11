@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ComponentId, Condition, Installer, NonEmptyString, PluginId, PrerequisiteId, RelativePath,
-    Sha256Digest, TargetTriple, Template,
+    Sha256Digest, Target, Template,
 };
 
 /// `source` is a **build-machine** path and must never become portable bundle
@@ -119,7 +119,7 @@ impl TargetBuildPlan {
 }
 
 impl BuildPlan {
-    pub fn target_by_triple(&self, target: &TargetTriple) -> Option<&TargetBuildPlan> {
+    pub fn by_target(&self, target: &Target) -> Option<&TargetBuildPlan> {
         self.targets
             .iter()
             .find(|plan| &plan.installer.target == target)

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
 use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PluginArtifact};
-use zup_core::{MAX_PLUGIN_ARTIFACTS, ResolvedPlugin, Sha256Digest, TargetBuildPlan, TargetTriple};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, ResolvedPlugin, Sha256Digest, Target, TargetBuildPlan};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,
     WASMTIME_VERSION, wit_package_digest,
@@ -65,7 +65,7 @@ pub fn compile_plugins(
         return Err(PluginBuildError::PlanMismatch);
     }
     let target = &plan.installer.target;
-    let engine = PluginEngine::new(target.as_str())?;
+    let engine = PluginEngine::new(target.rust_triple())?;
     compile_with_engine(&plan.plugins, target, &engine)
 }
 
@@ -87,7 +87,7 @@ fn add_aot_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::PackageErr
 
 fn compile_with_engine(
     plugins: &[ResolvedPlugin],
-    target: &TargetTriple,
+    target: &Target,
     engine: &PluginEngine,
 ) -> Result<Vec<CompiledPluginArtifact>, PluginBuildError> {
     let mut artifacts = Vec::with_capacity(plugins.len());
@@ -121,7 +121,7 @@ fn compile_with_engine(
             plugin_id: resolved.id.clone(),
             source_size: resolved.size,
             source_sha256: resolved.sha256,
-            target: target.clone(),
+            target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),

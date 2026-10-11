@@ -6,7 +6,7 @@ more native target binaries.
 ## Build and pack locally
 
 ```bash
-zup preset pack --build x86_64-pc-windows-msvc
+zup preset pack --build windows-x64
 ```
 
 `--build` asks Zup to build the preset for that target with Cargo and include it.
@@ -17,8 +17,8 @@ For a binary built elsewhere:
 
 ```bash
 zup preset pack \
-  --binary x86_64-pc-windows-msvc=dist/aurora.exe \
-  --binary aarch64-pc-windows-msvc=dist/aurora-arm64.exe
+  --binary windows-x64=dist/aurora.exe \
+  --binary windows-arm64=dist/aurora-arm64.exe
 ```
 
 Use both forms in CI when targets require different build machines. At least one
@@ -31,7 +31,7 @@ source is required.
 ## Choose the output
 
 ```bash
-zup preset pack --build x86_64-pc-windows-msvc -o dist/aurora.zupui
+zup preset pack --build windows-x64 -o dist/aurora.zupui
 ```
 
 The default Cargo profile is `release`. `--force` permits replacing an existing
@@ -51,7 +51,7 @@ capabilities  none required
 settings      accent, hero, logo (others permitted)
 
 targets
-  x86_64-pc-windows-msvc        4.2 MiB  sha256:...
+  windows-x64        4.2 MiB  sha256:...
 ```
 
 That reports identity, protocol, capabilities, accepted settings, and every target with size and digest - without launching anything.

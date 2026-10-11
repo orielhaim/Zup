@@ -24,19 +24,19 @@
   "details": {
     "kind": "doctor",
     "manifest": "zup.toml",
-    "host": "x86_64-pc-windows-msvc",
+    "host": "windows-x64",
     "ready": false,
     "checks": 3,
     "targets": [
       {
         "profile": "default",
-        "target": "x86_64-pc-windows-msvc",
+        "target": "windows-x64",
         "status": "fail",
         "checks": [
           {
             "kind": "canonical_target",
             "status": "pass",
-            "message": "canonical target is `x86_64-pc-windows-msvc`",
+            "message": "canonical target is `windows-x64`",
             "path": null
           },
           {

@@ -71,7 +71,7 @@ pub struct Application {
 pub struct Target {
     /// The profile name from `[build.targets]`.
     pub profile: String,
-    /// The canonical target triple the profile resolves to.
+    /// The canonical Zup target the profile resolves to.
     pub target: String,
 }
 
@@ -439,7 +439,7 @@ pub struct PlanDetails {
 pub struct DoctorDetails {
     /// The manifest it read, project-relative.
     pub manifest: String,
-    /// The build host's canonical target triple.
+    /// The build host's Zup target.
     pub host: String,
     /// Whether every selected target is ready to build.
     pub ready: bool,
@@ -693,7 +693,7 @@ pub struct ToolchainInstallDetails {
 pub struct ToolchainStatusDetails {
     /// The zup release these components have to come from.
     pub zup_version: String,
-    /// The build host's canonical target triple.
+    /// The build host's Zup target.
     pub host: String,
     /// Where this version's cache lives on this machine.
     ///
@@ -840,7 +840,7 @@ mod tests {
             kind: Identifier::fixed("single"),
             mode: Identifier::fixed("offline"),
             id: Some("windows-x64".to_owned()),
-            target: Some("x86_64-pc-windows-msvc".to_owned()),
+            target: Some("windows-x64".to_owned()),
             variants: None,
             signing: Some(SigningState::unsigned()),
         }

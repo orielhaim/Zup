@@ -75,7 +75,7 @@ mode: Identifier,
  */
 id: string | null, 
 /**
- * The target triple, for an artifact that serves exactly one machine.
+ * The Zup target, for an artifact that serves exactly one machine.
  */
 target: string | null, 
 /**
@@ -98,7 +98,7 @@ export type Target = {
  */
 profile: string, 
 /**
- * The canonical target triple the profile resolves to.
+ * The canonical Zup target the profile resolves to.
  */
 target: string, };
 
@@ -322,7 +322,7 @@ export type DoctorDetails = {
  */
 manifest: string, 
 /**
- * The build host's canonical target triple.
+ * The build host's Zup target.
  */
 host: string, 
 /**
@@ -539,7 +539,7 @@ export type ToolchainStatusDetails = {
  */
 zup_version: string, 
 /**
- * The build host's canonical target triple.
+ * The build host's Zup target.
  */
 host: string, 
 /**

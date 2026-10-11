@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zup_build::materialize;
-use zup_core::{ComponentId, Privilege, TargetTriple, Variable};
+use zup_core::{ComponentId, Privilege, Target, Variable};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{ComponentOverrides, PlanRequest, SelectedScope, plan};
 
@@ -13,8 +13,8 @@ fn write(path: PathBuf, contents: &[u8]) {
     fs::write(path, contents).unwrap();
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn acme_project() -> (TempDir, zup_build::BuildPlan) {

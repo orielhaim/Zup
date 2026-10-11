@@ -290,29 +290,60 @@ mod prerequisite {
 
 mod target {
     use rstest::rstest;
-    use zup_core::{Source, TargetProfile, TargetProfileId, TargetTriple};
+    use zup_core::{Source, Target, TargetProfile, TargetProfileId};
 
-    /// An alias is rewritten to the triple the toolchain actually names, so a plan
-    /// built on `arm64-` and one built on `aarch64-` are the same target.
+    /// Every spelling of one target resolves to one identity: Zup names,
+    /// architecture aliases, and Rust triples all name the same target.
     #[rstest]
-    #[case::arm64("arm64-pc-windows-msvc", "aarch64-pc-windows-msvc")]
-    #[case::x64("x64-pc-windows-msvc", "x86_64-pc-windows-msvc")]
-    fn canonicalizes_target_aliases(#[case] alias: &str, #[case] canonical: &str) {
-        let target = TargetTriple::parse(alias).unwrap();
+    #[case::short("windows-x64", "windows-x64", "x86_64-pc-windows-msvc")]
+    #[case::arch_alias("windows-x86_64", "windows-x64", "x86_64-pc-windows-msvc")]
+    #[case::triple("x86_64-pc-windows-msvc", "windows-x64", "x86_64-pc-windows-msvc")]
+    #[case::arm64("windows-arm64", "windows-arm64", "aarch64-pc-windows-msvc")]
+    #[case::arm64_triple("aarch64-pc-windows-msvc", "windows-arm64", "aarch64-pc-windows-msvc")]
+    #[case::x86("windows-x86", "windows-x86", "i686-pc-windows-msvc")]
+    #[case::linux("linux-x64", "linux-x64", "x86_64-unknown-linux-gnu")]
+    #[case::linux_alias("linux-amd64", "linux-x64", "x86_64-unknown-linux-gnu")]
+    #[case::linux_musl("linux-x64-musl", "linux-x64-musl", "x86_64-unknown-linux-musl")]
+    fn target_names_resolve_to_one_identity(
+        #[case] spelling: &str,
+        #[case] canonical: &str,
+        #[case] triple: &str,
+    ) {
+        let target = Target::parse(spelling).unwrap();
         assert_eq!(target.as_str(), canonical);
-        assert_eq!(
-            target.architecture().to_string(),
-            canonical.split('-').next().unwrap()
+        assert_eq!(target.to_string(), canonical);
+        assert_eq!(target.rust_triple(), triple);
+        assert_eq!(target, Target::parse(canonical).unwrap());
+        assert_eq!(target, Target::parse(triple).unwrap());
+    }
+
+    #[test]
+    fn gnu_and_musl_linux_are_distinct_targets() {
+        assert_ne!(
+            Target::parse("linux-x64").unwrap(),
+            Target::parse("linux-x64-musl").unwrap()
         );
-        assert_eq!(target.operating_system().to_string(), "windows");
-        assert_eq!(target, TargetTriple::parse(canonical).unwrap());
+        assert_eq!(
+            Target::parse("linux-x64-gnu").unwrap(),
+            Target::parse("linux-x64").unwrap()
+        );
     }
 
     #[rstest]
     #[case::malformed("not-a-target")]
-    #[case::unknown_components("unknown-unknown-unknown")]
-    fn rejects_invalid_target(#[case] source: &str) {
-        assert!(TargetTriple::parse(source).is_err(), "source: {source}");
+    #[case::bare_os("windows")]
+    #[case::bare_arch("x86_64")]
+    fn rejects_unusable_target(#[case] source: &str) {
+        assert!(Target::parse(source).is_err(), "source: {source}");
+    }
+
+    #[test]
+    fn a_real_triple_for_an_unsupported_platform_is_unsupported_not_unknown() {
+        let error = Target::parse("aarch64-apple-darwin")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported"), "{error}");
+        assert!(error.contains("aarch64-apple-darwin"), "{error}");
     }
 
     #[test]
@@ -322,22 +353,34 @@ mod target {
         assert!(TargetProfileId::new(" \t ").is_err());
     }
 
-    /// Deserialization is a normalization point: an aliased triple on the wire must
-    /// come back canonical, or two records naming the same target compare unequal.
+    /// Deserialization is a normalization point: any spelling on the wire comes
+    /// back canonical, or two records naming the same target compare unequal.
     #[test]
     fn target_profile_deserializes_canonical_target() {
-        let profile: TargetProfile = serde_json::from_str(
-            r#"{"target":"arm64-pc-windows-msvc","source":{"directory":"dist"}}"#,
-        )
-        .unwrap();
+        let profile: TargetProfile =
+            serde_json::from_str(r#"{"target":"windows-arm64","source":{"directory":"dist"}}"#)
+                .unwrap();
 
-        assert_eq!(
-            profile.target,
-            TargetTriple::parse("aarch64-pc-windows-msvc").unwrap()
-        );
+        assert_eq!(profile.target, Some(Target::WINDOWS_ARM64));
         assert_eq!(profile.source, Source::new("dist".into()).unwrap());
         assert_eq!(profile.frontend, None);
         assert_eq!(profile.install, None);
+    }
+
+    #[test]
+    fn a_profile_named_for_a_target_infers_it() {
+        let profile: TargetProfile =
+            serde_json::from_str(r#"{"source":{"directory":"dist/windows-x64"}}"#).unwrap();
+        let id = TargetProfileId::new("windows-x64").unwrap();
+        assert_eq!(profile.target(&id).unwrap(), Target::WINDOWS_X64);
+    }
+
+    #[test]
+    fn a_profile_with_an_arbitrary_name_names_no_target() {
+        let profile: TargetProfile =
+            serde_json::from_str(r#"{"source":{"directory":"dist"}}"#).unwrap();
+        let id = TargetProfileId::new("production").unwrap();
+        assert!(profile.target(&id).is_err());
     }
 }
 

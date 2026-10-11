@@ -2,7 +2,7 @@
 
 use rstest::rstest;
 use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_protocol::{
     ExecuteBootstrap, ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker,
     SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
@@ -12,8 +12,8 @@ use zup_windows::{
     plan_hash_hex,
 };
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn bootstrap() -> WorkerBootstrap {
@@ -57,7 +57,7 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
                 message: Message::ParentHello(ParentHello {
                     protocol_version: PROTOCOL_VERSION,
                     session_id,
-                    target: worker_bootstrap.target.clone(),
+                    target: worker_bootstrap.target,
                     transaction_id: bound.id.as_uuid(),
                     expected_plan_hash: hash.clone(),
                 }),
@@ -66,7 +66,7 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
         (session, session_id)
     };
 
-    let execute = |target_in_message: TargetTriple| ExecuteBootstrap {
+    let execute = |target_in_message: Target| ExecuteBootstrap {
         target: target_in_message,
         bootstrap_json: bootstrap_json.clone(),
         bootstrap_hash: hash.clone(),
@@ -97,9 +97,7 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
     assert!(matches!(
         foreign.handle_message(envelope(
             session_id,
-            Message::ExecuteBootstrap(execute(
-                TargetTriple::parse("arm64-pc-windows-msvc").unwrap()
-            ))
+            Message::ExecuteBootstrap(execute(Target::parse("arm64-pc-windows-msvc").unwrap()))
         )),
         Err(WorkerError::TargetMismatch)
     ));
@@ -207,7 +205,7 @@ fn handshake_requires_valid_plan_hash() {
 #[test]
 fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
     let mut b = bootstrap();
-    b.target = TargetTriple::parse("x64-pc-windows-msvc").unwrap();
+    b.target = Target::parse("x64-pc-windows-msvc").unwrap();
     let mut session = WorkerSession::new(b.clone());
     let mismatch = WireEnvelope {
         version: PROTOCOL_VERSION,
@@ -216,7 +214,7 @@ fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
         message: Message::ParentHello(ParentHello {
             protocol_version: PROTOCOL_VERSION,
             session_id: b.session_id,
-            target: TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+            target: Target::parse("arm64-pc-windows-msvc").unwrap(),
             transaction_id: uuid::Uuid::nil(),
             expected_plan_hash: b.expected_plan_hash.clone(),
         }),
@@ -227,12 +225,9 @@ fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
     ));
 
     let mut canonical = bootstrap();
-    canonical.target = TargetTriple::parse("x64-pc-windows-msvc").unwrap();
+    canonical.target = Target::parse("x64-pc-windows-msvc").unwrap();
     let parsed = parse_bootstrap(&format_bootstrap(&canonical)).unwrap();
-    assert_eq!(
-        parsed.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
+    assert_eq!(parsed.target, Target::parse("windows-x64").unwrap());
 }
 
 #[test]
@@ -277,7 +272,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             message: Message::ParentHello(ParentHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: b.session_id,
-                target: b.target.clone(),
+                target: b.target,
                 transaction_id: uuid::Uuid::nil(),
                 expected_plan_hash: b.expected_plan_hash.clone(),
             }),
@@ -289,7 +284,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             session_id: b.session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-                target: TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+                target: Target::parse("arm64-pc-windows-msvc").unwrap(),
                 plan_json: "not json".into(),
                 plan_hash: b.expected_plan_hash.clone(),
                 app_id: "com.acme.app".into(),

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tempfile::TempDir;
-use zup_core::{Privilege, RelativePath, ResourceKey, TargetTriple, hash_reader};
+use zup_core::{Privilege, RelativePath, ResourceKey, Target, hash_reader};
 use zup_platform::TargetPath;
 use zup_protocol::{
     ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SessionId, WireEnvelope,
@@ -22,8 +22,8 @@ fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
     hash_reader(bytes).unwrap().1
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn target_path(path: &Path) -> TargetPath {
@@ -70,7 +70,7 @@ name = "Acme App"
 version = "{version}"
 [build]
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 [install]
 scope = "user"

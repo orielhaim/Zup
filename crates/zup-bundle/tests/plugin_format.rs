@@ -7,7 +7,7 @@ use zup_build::{ResolvedPrerequisite, TargetBuildPlan, materialize};
 use zup_bundle::{
     BundleWriter, CompiledPluginArtifact, PACKAGE_SCHEMA, Package, PackageError, PluginArtifact,
 };
-use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, TargetTriple};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, Target};
 use zup_manifest::TargetOverrides;
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -77,13 +77,13 @@ fn artifact(plan: &TargetBuildPlan, id: &str, aot: &[u8]) -> CompiledPluginArtif
             plugin_id: resolved.id.clone(),
             source_size: resolved.size,
             source_sha256: resolved.sha256,
-            target: plan.installer.target.clone(),
+            target: plan.installer.target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
-                *engine_fingerprint(plan.installer.target.as_str()).as_bytes(),
+                *engine_fingerprint(plan.installer.target.rust_triple()).as_bytes(),
             ),
             aot_size: aot.len() as u64,
             aot_sha256: digest,
@@ -101,13 +101,13 @@ fn synthetic_artifact(id: &str, bytes: &[u8]) -> CompiledPluginArtifact {
             plugin_id: PluginId::new(id).unwrap(),
             source_size: bytes.len() as u64,
             source_sha256: digest,
-            target: TargetTriple::parse(HOST_TARGET).unwrap(),
+            target: Target::parse(HOST_TARGET).unwrap(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
-                *engine_fingerprint(HOST_TARGET).as_bytes(),
+                *engine_fingerprint(Target::parse(HOST_TARGET).unwrap().rust_triple()).as_bytes(),
             ),
             aot_size: bytes.len() as u64,
             aot_sha256: digest,
@@ -192,12 +192,12 @@ fn plugin_metadata_that_disagrees_with_itself_is_refused() {
     assert!(Package::parse(reordered).is_err());
 }
 
-fn other_target() -> TargetTriple {
-    let host = TargetTriple::parse(HOST_TARGET).unwrap();
-    if host.as_str() == "aarch64-unknown-linux-gnu" {
-        TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()
+fn other_target() -> Target {
+    let host = Target::parse(HOST_TARGET).unwrap();
+    if host.as_str() == "linux-arm64" {
+        Target::parse("linux-x64").unwrap()
     } else {
-        TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap()
+        Target::parse("linux-arm64").unwrap()
     }
 }
 
@@ -209,9 +209,9 @@ fn plugin_target_must_match_target_plan() {
     let mut second = artifact(&plan, "a-plugin", b"other aot");
     for artifact in [&mut first, &mut second] {
         let mut metadata = artifact.metadata().clone();
-        metadata.target = other.clone();
+        metadata.target = other;
         metadata.engine_fingerprint = Sha256Digest::from_bytes(
-            *zup_plugin_contract::engine_fingerprint(other.as_str()).as_bytes(),
+            *zup_plugin_contract::engine_fingerprint(other.rust_triple()).as_bytes(),
         );
         let bytes = artifact.bytes().to_vec();
         *artifact = CompiledPluginArtifact::new(metadata, bytes).unwrap();

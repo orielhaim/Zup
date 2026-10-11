@@ -27,6 +27,6 @@ pub use zup_core::{
     FileExtension, FileMapping, Frontend, Install, InstallDirectory, InstallLocation, InstallScope,
     Installer, Launcher, LauncherLocation, NonEmptyString, PathEntry, PluginBinding, PluginId,
     Privilege, Protocol, ProtocolScheme, ResolvedTargetConfig, Service, ServiceId, ServiceStart,
-    Source, TargetOverrides, TargetProfile, TargetProfileId, TargetTriple, Template, TemplateError,
+    Source, Target, TargetOverrides, TargetProfile, TargetProfileId, Template, TemplateError,
     TemplatePart, ValueError, Variable,
 };

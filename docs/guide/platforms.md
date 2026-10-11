@@ -1,34 +1,69 @@
 # Platforms and targets
 
-A target profile binds a project source directory to a canonical target triple:
+A target is an operating system and an architecture, named operating system
+first: `windows-x64`, `windows-arm64`, `windows-x86`, `linux-x64`, `linux-arm64`.
+
+A target profile binds a project source directory to a target. When the profile
+name is a target, no `target` field is needed:
 
 ```toml
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
 source = { directory = "dist/windows-x64" }
+
+[build.targets.windows-arm64]
+source = { directory = "dist/windows-arm64" }
 ```
 
-The profile name is project-local. The triple is the machine identity the build uses.
+A profile with any other name states its target explicitly:
 
-Declare one profile per payload/target pair. `--target` accepts profile names or triples:
+```toml
+[build.targets.production]
+target = "windows-x64"
+source = { directory = "dist/production" }
+```
+
+Declare one profile per payload/target pair. `--target` accepts profile names or targets:
 
 ```bash
 zup build --target windows-x64
+zup build --target linux-x64
 ```
 
 With no `--target`, commands select every declared profile where the command allows it.
 
+A bare operating system is not a target: `zup build --target windows` is
+refused rather than guessing an architecture.
+
+## Universal artifacts
+
+A universal artifact is a distribution containing several compatible targets,
+selected at launch time. It is declared separately from targets:
+
+```toml
+[build.artifacts.windows]
+targets = ["windows-x64", "windows-arm64"]
+```
+
+```bash
+zup build --artifact windows
+```
+
+Here `windows` names the artifact, not a target. If several Windows variants
+are configured, one Windows installer is produced whose dispatcher selects the
+matching architecture at runtime. A universal artifact supports only the
+architectures it was built with.
+
 ## Windows
 
-Supported triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`. Frontends: `gui`, `console`, `headless`. Universal and thin artifacts are Windows installers.
+Targets: `windows-x64`, `windows-arm64`, `windows-x86`. Frontends: `gui`, `console`, `headless`. Universal and thin artifacts are Windows installers.
 
 A Windows build embeds the package into the runtime template as PE resources — plain file I/O, no Windows API on the build host.
 
 ## Linux
 
 | Capability | Status |
-|---|---|
-| Target | `x86_64-unknown-linux-gnu` |
+| --- | --- |
+| Target | `linux-x64` |
 | Frontends | `console`, `headless` (`gui` is refused) |
 | Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
 | Artifact | one self-contained installer per target (no universal) |

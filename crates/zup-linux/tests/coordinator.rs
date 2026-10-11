@@ -5,8 +5,7 @@ use std::path::Path;
 
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{
-    AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, TargetTriple,
-    hash_reader,
+    AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target, hash_reader,
 };
 use zup_linux::LinuxFileExecutor;
 use zup_platform::TargetPath;
@@ -15,8 +14,8 @@ use zup_transaction::{
     TransactionInput, TransactionOutcome, compile_transaction, recover,
 };
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target")
+fn target() -> Target {
+    Target::parse("linux-x64").expect("a Linux target")
 }
 
 fn digest(bytes: &[u8]) -> Sha256Digest {

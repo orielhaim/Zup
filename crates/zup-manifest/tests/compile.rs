@@ -26,7 +26,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -404,7 +404,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist/windows-x64" }}
 
 [install]

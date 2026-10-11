@@ -20,12 +20,12 @@
   "details": {
     "kind": "toolchain.status",
     "zup_version": "0.0.1",
-    "host": "x86_64-pc-windows-msvc",
+    "host": "windows-x64",
     "cache": "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1",
     "complete": false,
     "components": [
       {
-        "component": "runtime gui for x86_64-pc-windows-msvc",
+        "component": "runtime gui for windows-x64",
         "found": false,
         "source": null,
         "path": null,

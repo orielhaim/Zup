@@ -782,7 +782,7 @@ fn io_error(path: &Path, source: std::io::Error) -> PayloadOverlayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::{App, NonEmptyString, ResourceKey, TargetTriple, Template};
+    use zup_core::{App, NonEmptyString, ResourceKey, Target, Template};
     use zup_plan::{PlanSummary, PlannedFile};
     use zup_platform::TargetPath;
     use zup_transaction::{
@@ -815,7 +815,7 @@ mod tests {
                 main: None,
                 description: None,
             },
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            target: Target::parse("windows-x64").unwrap(),
             scope: SelectedScope::User,
             install_directory: Template::parse("${location.user_data}/Overlay").unwrap(),
             selected_components: vec![ComponentId::new("core").unwrap()],
@@ -862,13 +862,13 @@ mod tests {
     #[test]
     fn install_and_transaction_derive_the_same_recovery_path() {
         let install = install_plan();
-        let mut input = TransactionInput::new(install.target.clone());
+        let mut input = TransactionInput::new(install.target);
         input.selected_components = install.selected_components.clone();
         input.files.push(FileWork {
             key: install.files[0].key.clone(),
             source_relative: install.files[0].source_relative.clone(),
             destination: TargetPath::new(
-                TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                Target::parse("windows-x64").unwrap(),
                 install.files[0].destination.to_string(),
             )
             .unwrap(),

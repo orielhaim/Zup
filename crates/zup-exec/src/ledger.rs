@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use zup_core::ReleaseIdentity;
 use zup_core::{
     AppId, BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
-    SelectedScope, ServiceStart, Sha256Digest, TargetTriple,
+    SelectedScope, ServiceStart, Sha256Digest, Target,
 };
 use zup_platform::{CommandSpec, TargetPath};
 
@@ -16,7 +16,7 @@ pub struct InstallLedger {
     pub schema: u32,
     pub app_id: AppId,
     pub scope: SelectedScope,
-    pub target: TargetTriple,
+    pub target: Target,
     pub version: semver::Version,
     pub selected_components: Vec<ComponentId>,
     #[serde(default)]
@@ -77,7 +77,7 @@ mod resource_map {
 }
 
 impl InstallLedger {
-    pub fn new(app_id: AppId, target: TargetTriple, scope: SelectedScope) -> Self {
+    pub fn new(app_id: AppId, target: Target, scope: SelectedScope) -> Self {
         Self {
             schema: INSTALL_LEDGER_SCHEMA,
             app_id,

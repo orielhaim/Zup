@@ -37,7 +37,7 @@ fn executor_for(
         &id(1),
         FileWork {
             destination: zup_platform::TargetPath::new(
-                zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target"),
+                zup_core::Target::parse("linux-x64").expect("a target"),
                 destination.to_string_lossy(),
             )
             .expect("a target path"),

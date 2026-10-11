@@ -26,7 +26,7 @@
 //! platform's convention, and it would be wrong the moment a Linux or macOS
 //! runtime resolved one of these paths: it would look for a file no composition
 //! for that target ever writes. The suffix therefore arrives from the target the
-//! content is for, through [`zup_core::TargetTriple::executable_suffix`], and
+//! content is for, through [`zup_core::Target::executable_suffix`], and
 //! this module's job is the part that is genuinely the same everywhere.
 //!
 //! That is also why [`PRESET_SOURCE`] - the payload-relative name a build stage

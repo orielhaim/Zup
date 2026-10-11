@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zup_core::{LauncherLocation, ResourceKey, SelectedScope, TargetTriple};
+use zup_core::{LauncherLocation, ResourceKey, SelectedScope, Target};
 use zup_plan::InstallPlan;
 use zup_platform::TargetPath;
 
@@ -423,7 +423,7 @@ fn refuse_unsupported(plan: &InstallPlan) -> Result<(), PlanError> {
 }
 
 fn resolve_install_template(
-    target: &TargetTriple,
+    target: &Target,
     template: &zup_core::Template,
 ) -> Result<TargetPath, PlanError> {
     use zup_platform::resolve_template_path;
@@ -444,9 +444,9 @@ fn resolve_install_template(
     Ok(path)
 }
 
-fn xdg_target(target: &TargetTriple, path: &Path) -> Result<TargetPath, PlanError> {
+fn xdg_target(target: &Target, path: &Path) -> Result<TargetPath, PlanError> {
     let text = path.to_string_lossy().into_owned();
-    TargetPath::new(target.clone(), &text).map_err(|error| PlanError::InvalidTargetPath {
+    TargetPath::new(*target, &text).map_err(|error| PlanError::InvalidTargetPath {
         path: text,
         reason: error.to_string(),
     })

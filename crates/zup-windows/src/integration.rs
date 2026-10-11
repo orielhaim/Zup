@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use windows_link::link;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
-use zup_core::{ResourceKey, SelectedScope, TargetTriple};
+use zup_core::{ResourceKey, SelectedScope, Target};
 use zup_exec::{
     ExtensionState, FileAssociationState, LauncherState, OwnedResource, ProtocolState, ServiceState,
 };
@@ -773,21 +773,21 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
     }
 }
 
-fn service_state_target(state: &ServiceState) -> Option<&TargetTriple> {
+fn service_state_target(state: &ServiceState) -> Option<&Target> {
     match state {
         ServiceState::Registration { command, .. } => Some(command.executable.target()),
         ServiceState::Absent => None,
     }
 }
 
-fn protocol_target(state: &ProtocolState) -> Option<&TargetTriple> {
+fn protocol_target(state: &ProtocolState) -> Option<&Target> {
     match state {
         ProtocolState::Registration { command, .. } => Some(command.executable.target()),
         ProtocolState::Absent => None,
     }
 }
 
-fn file_association_target(state: &FileAssociationState) -> Option<&TargetTriple> {
+fn file_association_target(state: &FileAssociationState) -> Option<&Target> {
     match state {
         FileAssociationState::Registration { command, .. } => Some(command.executable.target()),
         FileAssociationState::Absent => None,
@@ -1340,7 +1340,7 @@ fn set_path(key: &Key, value_type: &str, value: &str) -> Result<(), IntegrationE
 pub(crate) fn read_protocol(
     scope: SelectedScope,
     scheme: &str,
-    target: &TargetTriple,
+    target: &Target,
 ) -> Result<ProtocolState, IntegrationError> {
     let root = classes(scope, false)?;
     let Some(key) = open_optional(&root, scheme, false)? else {
@@ -1411,7 +1411,7 @@ fn write_protocol(
 pub(crate) fn read_progid(
     scope: SelectedScope,
     id: &str,
-    target: &TargetTriple,
+    target: &Target,
 ) -> Result<FileAssociationState, IntegrationError> {
     let root = classes(scope, false)?;
     let Some(key) = open_optional(&root, id, false)? else {

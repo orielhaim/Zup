@@ -330,8 +330,8 @@ fn single_target(
     zup_artifact::SingleTarget {
         id: config.profile.to_string(),
         version: plan.installer.app.version.clone(),
-        target: config.target.clone(),
-        platform: zup_artifact::Platform::from_triple(&config.target),
+        target: config.target,
+        platform: zup_artifact::Platform::from_target(&config.target),
         frontend: config.frontend,
         subsystem,
         file_count: plan.files.len() as u64,
@@ -863,13 +863,13 @@ fn signing_plan(
 
 fn embedded_by_variant(
     release: &zup_artifact::ReleaseManifest,
-) -> Vec<(String, zup_core::TargetTriple, Vec<String>)> {
-    let targets: BTreeMap<&str, &zup_core::TargetTriple> = release
+) -> Vec<(String, zup_core::Target, Vec<String>)> {
+    let targets: BTreeMap<&str, &zup_core::Target> = release
         .variants
         .iter()
         .map(|variant| (variant.id.as_str(), &variant.target))
         .collect();
-    let mut by_variant: BTreeMap<String, (zup_core::TargetTriple, Vec<String>)> = BTreeMap::new();
+    let mut by_variant: BTreeMap<String, (zup_core::Target, Vec<String>)> = BTreeMap::new();
     for artifact in &release.artifacts {
         if artifact.kind != zup_artifact::ArtifactKind::Universal {
             continue;
@@ -880,7 +880,7 @@ fn embedded_by_variant(
             };
             by_variant
                 .entry(variant.clone())
-                .or_insert_with(|| ((*target).clone(), Vec::new()))
+                .or_insert_with(|| (*(*target), Vec::new()))
                 .1
                 .push(artifact.id.clone());
         }

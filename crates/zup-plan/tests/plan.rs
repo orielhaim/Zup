@@ -5,16 +5,14 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{Sha256Digest, materialize};
-use zup_core::{
-    ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, TargetTriple, Template,
-};
+use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, Target, Template};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 use zup_plan::{
     ComponentOverrides, InstallPlan, PlanError, PlanRequest, ResourceKey, SelectedScope, plan,
 };
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn build_plan_from(source: &str, files: &[(&str, &[u8])]) -> zup_build::BuildPlan {
@@ -54,7 +52,7 @@ version = "1.4.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -182,7 +180,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 
 [install]
@@ -771,7 +769,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -797,11 +795,11 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -835,22 +833,15 @@ destination = "${install}"
         zup_build::Writes::None,
     )
     .unwrap();
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
 
-    let result = plan(
-        &build,
-        &PlanRequest::new(target.clone(), SelectedScope::User),
-    )
-    .unwrap();
+    let result = plan(&build, &PlanRequest::new(target, SelectedScope::User)).unwrap();
     assert_eq!(result.target, target);
     assert_eq!(result.files[0].size, 7);
 
     let error = plan(
         &build,
-        &PlanRequest::new(
-            TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
-            SelectedScope::User,
-        ),
+        &PlanRequest::new(Target::parse("windows-arm64").unwrap(), SelectedScope::User),
     )
     .unwrap_err();
     assert!(matches!(error, PlanError::UnknownBuildTarget { .. }));

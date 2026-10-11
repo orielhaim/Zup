@@ -3,7 +3,7 @@ use windows_service::service::{
     ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-use zup_core::{Privilege, TargetTriple};
+use zup_core::{Privilege, Target};
 use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind, ServiceState};
 
 use crate::lowering::host_path;
@@ -31,14 +31,11 @@ fn backend(name: &str, reason: impl std::fmt::Display) -> ServiceError {
     }
 }
 
-pub fn read_service(
-    name: &str,
-    target: &TargetTriple,
-) -> Result<ObservedServiceState, ServiceError> {
+pub fn read_service(name: &str, target: &Target) -> Result<ObservedServiceState, ServiceError> {
     crate::scm::query_service(name, target).map_err(ServiceError::Scm)
 }
 
-fn state(name: &str, target: &TargetTriple) -> Result<ServiceState, ServiceError> {
+fn state(name: &str, target: &Target) -> Result<ServiceState, ServiceError> {
     match crate::scm::query_service(name, target)? {
         ObservedServiceState::Absent => Ok(ServiceState::Absent),
         ObservedServiceState::Service {
@@ -78,7 +75,7 @@ fn installed(op: &ServiceOperation) -> ServiceState {
     }
 }
 
-fn state_target(state: &ServiceState) -> Option<&TargetTriple> {
+fn state_target(state: &ServiceState) -> Option<&Target> {
     match state {
         ServiceState::Registration { command, .. } => Some(command.executable.target()),
         ServiceState::Absent => None,
@@ -247,7 +244,7 @@ fn classify_reconcile(
 mod tests {
     use super::*;
     use crate::transaction_payload::NativeReconcileResult;
-    use zup_core::{Privilege, ResourceKey, ServiceId, ServiceStart, TargetTriple};
+    use zup_core::{Privilege, ResourceKey, ServiceId, ServiceStart, Target};
     use zup_platform::{CommandSpec, TargetPath};
 
     struct Cleanup(String);
@@ -270,11 +267,7 @@ mod tests {
         let desired = ServiceState::Registration {
             display_name: "Zup Test".into(),
             command: CommandSpec::new(
-                TargetPath::new(
-                    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-                    r"C:\Zup\svc.exe",
-                )
-                .unwrap(),
+                TargetPath::new(Target::parse("windows-x64").unwrap(), r"C:\Zup\svc.exe").unwrap(),
                 vec![],
             ),
             start: ServiceStart::Disabled,
@@ -318,12 +311,9 @@ mod tests {
         let name = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
         let _cleanup = Cleanup(name.clone());
         let id = ServiceId::new(&name).unwrap();
-        let target_triple = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-        let executable = TargetPath::new(
-            target_triple.clone(),
-            r"C:\Program Files\Zup Test\service.exe",
-        )
-        .unwrap();
+        let target_triple = Target::parse("windows-x64").unwrap();
+        let executable =
+            TargetPath::new(target_triple, r"C:\Program Files\Zup Test\service.exe").unwrap();
         let mut op = ServiceOperation {
             key: ResourceKey::Service { id },
             kind: ServiceOperationKind::Create,

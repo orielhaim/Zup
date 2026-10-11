@@ -24,8 +24,8 @@ main = "demo.cmd"
 [build]
 
 # One target, so `zup build` and `zup preview` do not have to be told which.
-[build.targets.windows]
-target = "x86_64-pc-windows-msvc"
+[build.targets.windows-x64]
+
 source = { directory = "payload" }
 frontend = "gui"
 

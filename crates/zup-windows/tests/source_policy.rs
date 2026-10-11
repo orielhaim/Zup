@@ -33,7 +33,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 
 [install]

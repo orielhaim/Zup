@@ -4,7 +4,7 @@ use thiserror::Error;
 use tracing::{info, info_span};
 use windows_registry::Key;
 use zup_core::hash_reader;
-use zup_core::{SelectedScope, TargetTriple};
+use zup_core::{SelectedScope, Target};
 use zup_exec::{
     HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
     ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
@@ -55,7 +55,7 @@ pub struct InspectReads {
     pub read_shortcut:
         fn(&TargetPath) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
     pub read_service:
-        fn(&str, &TargetTriple) -> Result<ObservedServiceState, crate::services::ServiceError>,
+        fn(&str, &Target) -> Result<ObservedServiceState, crate::services::ServiceError>,
     pub open_classes_key: fn(SelectedScope, &str) -> Result<Option<Key>, RegistryError>,
     pub open_environment_key: fn(SelectedScope) -> Result<Option<Key>, RegistryError>,
 }
@@ -242,10 +242,7 @@ fn inspect_path_entries(target: &TargetPlan) -> Result<Vec<ObservedPathEntry>, I
 
 fn inspect_services(
     target: &TargetPlan,
-    read_service: fn(
-        &str,
-        &TargetTriple,
-    ) -> Result<ObservedServiceState, crate::services::ServiceError>,
+    read_service: fn(&str, &Target) -> Result<ObservedServiceState, crate::services::ServiceError>,
 ) -> Result<Vec<ObservedService>, InspectError> {
     let mut out = Vec::with_capacity(target.services.len());
     for service in &target.services {

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{Engine, Precompiled};
 use zup_bundle::{Package, PackageError, PluginArtifact};
-use zup_core::{PluginId, Sha256Digest, TargetTriple};
+use zup_core::{PluginId, Sha256Digest, Target};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, HOST_TARGET, MAX_AOT_BYTES, PLUGIN_API_VERSION,
     PluginEngine, ValidatedComponent, WASMTIME_VERSION, wit_package_digest,
@@ -19,15 +19,9 @@ pub enum LoadError {
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error("expected target `{expected}` does not match the host compile target `{host}`")]
-    HostTargetMismatch {
-        expected: TargetTriple,
-        host: TargetTriple,
-    },
+    HostTargetMismatch { expected: Target, host: Target },
     #[error("plugin artifact target `{found}` does not match expected target `{expected}`")]
-    TargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    TargetMismatch { expected: Target, found: Target },
     #[error("plugin `{plugin_id}` is missing from the package artifact set")]
     MissingArtifact { plugin_id: PluginId },
     #[error("plugin artifact set has an unexpected number of entries")]
@@ -58,32 +52,32 @@ pub(crate) struct LoadedPlugin {
 pub(crate) struct LoadedBundle {
     pub(crate) package: Package,
     pub(crate) engine: PluginEngine,
-    pub(crate) target: TargetTriple,
+    pub(crate) target: Target,
     pub(crate) plugins: BTreeMap<PluginId, LoadedPlugin>,
 }
 
 pub(crate) fn load_bundle(
     package: Package,
-    expected_target: &TargetTriple,
+    expected_target: &Target,
 ) -> Result<LoadedBundle, LoadError> {
     if &package.plan().installer.target != expected_target {
         return Err(LoadError::TargetMismatch {
-            expected: expected_target.clone(),
-            found: package.plan().installer.target.clone(),
+            expected: *expected_target,
+            found: package.plan().installer.target,
         });
     }
     let host = host_target();
     if expected_target != &host {
         return Err(LoadError::HostTargetMismatch {
-            expected: expected_target.clone(),
+            expected: *expected_target,
             host,
         });
     }
-    let engine = PluginEngine::new(expected_target.as_str())?;
-    if engine.target() != expected_target.as_str() {
+    let engine = PluginEngine::new(expected_target.rust_triple())?;
+    if engine.target() != expected_target.rust_triple() {
         return Err(LoadError::TargetMismatch {
-            expected: expected_target.clone(),
-            found: TargetTriple::parse(engine.target()).expect("engine target is a valid triple"),
+            expected: *expected_target,
+            found: Target::parse(engine.target()).expect("engine target is a valid triple"),
         });
     }
     let expected_fingerprint = Sha256Digest::from_bytes(*engine.fingerprint().as_bytes());
@@ -111,7 +105,7 @@ pub(crate) fn load_bundle(
     Ok(LoadedBundle {
         package,
         engine,
-        target: expected_target.clone(),
+        target: *expected_target,
         plugins,
     })
 }
@@ -161,8 +155,8 @@ impl LoadedBundle {
     }
 }
 
-fn host_target() -> TargetTriple {
-    TargetTriple::parse(HOST_TARGET).expect("host target is a valid triple")
+fn host_target() -> Target {
+    Target::parse(HOST_TARGET).expect("host target is a valid triple")
 }
 
 fn exact_artifacts(package: &Package) -> Result<BTreeMap<PluginId, &PluginArtifact>, LoadError> {
@@ -209,13 +203,13 @@ fn exact_artifacts(package: &Package) -> Result<BTreeMap<PluginId, &PluginArtifa
 fn verify_metadata(
     plugin_id: &PluginId,
     artifact: &PluginArtifact,
-    expected_target: &TargetTriple,
+    expected_target: &Target,
     expected_fingerprint: Sha256Digest,
 ) -> Result<(), LoadError> {
     if artifact.target != *expected_target {
         return Err(LoadError::TargetMismatch {
-            expected: expected_target.clone(),
-            found: artifact.target.clone(),
+            expected: *expected_target,
+            found: artifact.target,
         });
     }
     if artifact.wasmtime_version != WASMTIME_VERSION {
@@ -272,7 +266,7 @@ fn verify_metadata(
     let host = host_target();
     if artifact.target != host {
         return Err(LoadError::HostTargetMismatch {
-            expected: artifact.target.clone(),
+            expected: artifact.target,
             host,
         });
     }

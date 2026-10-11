@@ -22,12 +22,12 @@ zup doctor
 
 Use `doctor` when the project is valid but cannot build on the current machine. It is read-only: it reports missing runtime templates and unsupported targets as checks rather than errors.
 
-A triple no backend answers for (such as `aarch64-apple-darwin`) is refused at the backend boundary before the payload is read. `arm64-` rewrites to `aarch64-` and `x64-` to `x86_64-`.
+A target no backend builds, such as `linux-arm64`, is refused before the payload is read. Architecture aliases such as `x86_64`, `aarch64`, `amd64` and `arm64` resolve to the canonical `x64` and `arm64` names.
 
 ## Missing toolchain
 
 ```text
-no runtime template for `gui` on x86_64-pc-windows-msvc was found.
+no runtime template for `gui` on windows-x64 was found.
 ```
 
 ```bash

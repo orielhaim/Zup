@@ -243,7 +243,7 @@ fn serve_inner(
         app_id: prepared.app_id.clone(),
         app_version: prepared.app_version.clone(),
         scope: prepared.scope.clone(),
-        target: prepared.target.clone(),
+        target: prepared.target,
         file_count: prepared.file_count,
     }))?;
 
@@ -289,10 +289,10 @@ fn worker_capabilities() -> Capabilities {
     }
 }
 
-fn worker_target(context: &WorkerContext) -> Result<zup_core::TargetTriple, IpcError> {
+fn worker_target(context: &WorkerContext) -> Result<zup_core::Target, IpcError> {
     let carrier = crate::carrier::Carrier::open(&context.worker_exe)
         .map_err(|error| IpcError::WorkerAuth(format!("worker carrier: {error}")))?;
-    Ok(carrier.target().clone())
+    Ok(*carrier.target())
 }
 
 struct PreparedPlan {
@@ -301,7 +301,7 @@ struct PreparedPlan {
     app_id: String,
     app_version: String,
     scope: String,
-    target: zup_core::TargetTriple,
+    target: zup_core::Target,
     file_count: u32,
     transaction_id: uuid::Uuid,
     carrier_path: PathBuf,
@@ -343,7 +343,7 @@ fn prepare_operation(
             "the privileged worker serves Linux targets only".into(),
         ));
     }
-    let target = intent.target.clone();
+    let target = intent.target;
     let app_id =
         AppId::new(&intent.app_id).map_err(|error| IpcError::Policy(format!("app id: {error}")))?;
     let app_version: semver::Version = intent
@@ -437,7 +437,7 @@ fn prepare_operation(
         }
     };
 
-    let mut plan_request = zup_plan::PlanRequest::new(target.clone(), SelectedScope::Machine);
+    let mut plan_request = zup_plan::PlanRequest::new(target, SelectedScope::Machine);
     for name in &intent.selected_components {
         let id = zup_core::ComponentId::new(name)
             .map_err(|error| IpcError::Policy(format!("component: {error}")))?;
@@ -866,7 +866,7 @@ fn select_trusted_carrier(
     worker_exe: &Path,
     app_id: &AppId,
     app_version: &semver::Version,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<(PathBuf, Option<FilePin>), IpcError> {
     let maintenance = zup_transaction::maintenance_runtime_path(
         state_root,
@@ -903,7 +903,7 @@ fn verify_carrier_declares(
     carrier: &crate::carrier::Carrier,
     app_id: &AppId,
     app_version: &semver::Version,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<(), IpcError> {
     let installer = carrier
         .package()
@@ -1060,9 +1060,9 @@ mod tests {
 
     #[test]
     fn machine_policy_rejects_a_foreign_destination() {
-        let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
+        let target = zup_core::Target::parse("linux-x64").expect("a target");
         let roots = MachineRoots::production();
-        let outside = zup_platform::TargetPath::new(target.clone(), "/etc/tool").expect("a path");
+        let outside = zup_platform::TargetPath::new(target, "/etc/tool").expect("a path");
         assert!(
             authorize_machine_destination(
                 &crate::lowering::to_host_path(&outside).expect("lowers"),

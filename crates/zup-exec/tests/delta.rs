@@ -2,7 +2,7 @@
 
 use zup_core::{
     LauncherLocation, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
-    ServiceId, ServiceStart, Sha256Digest, TargetTriple, hash_reader,
+    ServiceId, ServiceStart, Sha256Digest, Target, hash_reader,
 };
 use zup_exec::{
     Conflict, FileAssociationOperationKind, FileOperationKind, HostSnapshot, LauncherOperationKind,
@@ -19,7 +19,7 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
 }
 
 fn tpath(s: &str) -> TargetPath {
-    TargetPath::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(), s).unwrap()
+    TargetPath::new(Target::parse("windows-x64").unwrap(), s).unwrap()
 }
 
 fn cmd(path: &str, args: &[&str]) -> CommandSpec {
@@ -36,7 +36,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             main: None,
             description: None,
         },
-        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        target: Target::parse("windows-x64").unwrap(),
         scope: SelectedScope::Machine,
         install_directory: tpath(r"C:\PF\Acme"),
         selected_components: vec![],
@@ -212,11 +212,8 @@ fn launcher_and_service_ownership_decisions() {
     assert_eq!(foreign.launchers[0].kind, LauncherOperationKind::Conflict);
     assert_eq!(foreign.services[0].kind, ServiceOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(
-        target.app.id.clone(),
-        target.target.clone(),
-        SelectedScope::Machine,
-    );
+    let mut ledger =
+        InstallLedger::new(target.app.id.clone(), target.target, SelectedScope::Machine);
     ledger.resources.insert(
         target.launchers[0].key.clone(),
         OwnedResource::Launcher {
@@ -299,11 +296,8 @@ fn files_replace_non_file_conflict() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.files[0].kind, FileOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(
-        target.app.id.clone(),
-        target.target.clone(),
-        SelectedScope::Machine,
-    );
+    let mut ledger =
+        InstallLedger::new(target.app.id.clone(), target.target, SelectedScope::Machine);
     ledger.resources.insert(
         target.files[0].key.clone(),
         OwnedResource::File {
@@ -397,7 +391,7 @@ fn protocol_upgrade_requires_previous_owned_state() {
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(foreign.protocols[0].kind, ProtocolOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target.clone(), target.scope);
+    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target, target.scope);
     ledger.resources.insert(
         target.protocols[0].key.clone(),
         OwnedResource::Protocol {
@@ -426,7 +420,7 @@ fn ledger_target_mismatch_is_rejected() {
     let snapshot = snapshot_happy();
     let ledger = InstallLedger::new(
         target.app.id.clone(),
-        TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+        Target::parse("arm64-pc-windows-msvc").unwrap(),
         target.scope,
     );
     let error = plan_execution(&target, &snapshot, Some(&ledger)).unwrap_err();

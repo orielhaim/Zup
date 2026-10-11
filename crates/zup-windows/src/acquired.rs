@@ -318,7 +318,7 @@ impl AcquiredBundle {
         })
     }
 
-    pub fn target(&self) -> &zup_core::TargetTriple {
+    pub fn target(&self) -> &zup_core::Target {
         &self.package.plan().installer.target
     }
 

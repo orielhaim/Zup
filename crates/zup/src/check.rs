@@ -239,7 +239,7 @@ fn plan_windows(
     let prior = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
         .map_err(|error| crate::failure::error("zup.plan.ledger", format!("ledger: {error}")))?;
-    let mut request = zup_plan::PlanRequest::new(config.target.clone(), scope);
+    let mut request = zup_plan::PlanRequest::new(config.target, scope);
     request.install_directory = choose_directory(
         args.project
             .install_directory

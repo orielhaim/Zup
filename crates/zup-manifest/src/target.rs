@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use zup_core::{
-    Frontend, Install, ResolvedTargetConfig, TargetOverrides, TargetProfile, TargetProfileId,
-    TargetTriple,
+    Frontend, Install, ResolvedTargetConfig, Target, TargetOverrides, TargetProfile,
+    TargetProfileId,
 };
 
 use crate::error::ManifestError;
@@ -157,7 +157,7 @@ pub(crate) fn resolve_target_config(
     common_frontend: Frontend,
     common_install: &Install,
     overrides: &TargetOverrides,
-) -> ResolvedTargetConfig {
+) -> Result<ResolvedTargetConfig, ManifestError> {
     let mut install = config
         .install
         .clone()
@@ -170,9 +170,16 @@ pub(crate) fn resolve_target_config(
             install.directory.machine = Some(directory.clone());
         }
     }
-    ResolvedTargetConfig {
+    Ok(ResolvedTargetConfig {
         profile: profile.clone(),
-        target: config.target.clone(),
+        target: config
+            .target(profile)
+            .map_err(|error| ManifestError::MissingTarget {
+                profile: profile.to_string(),
+                reason: error.to_string(),
+                src: None,
+                span: None,
+            })?,
         source: overrides
             .source
             .clone()
@@ -182,7 +189,7 @@ pub(crate) fn resolve_target_config(
             .or(config.frontend)
             .unwrap_or(common_frontend),
         install,
-    }
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -227,7 +234,7 @@ pub fn select_targets_with(
 ) -> Result<Vec<ResolvedTargetConfig>, ManifestError> {
     let selected = resolve_selection(manifest, selectors)?;
 
-    Ok(manifest
+    manifest
         .build
         .targets
         .iter()
@@ -241,7 +248,26 @@ pub fn select_targets_with(
                 overrides.get(profile),
             )
         })
-        .collect())
+        .collect()
+}
+
+fn resolved_targets(manifest: &Manifest) -> Result<Vec<(&TargetProfileId, Target)>, ManifestError> {
+    manifest
+        .build
+        .targets
+        .iter()
+        .map(|(profile, config)| {
+            config
+                .target(profile)
+                .map(|target| (profile, target))
+                .map_err(|error| ManifestError::MissingTarget {
+                    profile: profile.to_string(),
+                    reason: error.to_string(),
+                    src: None,
+                    span: None,
+                })
+        })
+        .collect()
 }
 
 fn resolve_selection(
@@ -252,13 +278,13 @@ fn resolve_selection(
     validate_target_references(manifest)?;
     validate_artifacts(manifest)?;
 
-    let mut canonical_targets = BTreeMap::<TargetTriple, &TargetProfileId>::new();
-    for (profile, config) in &manifest.build.targets {
-        if let Some(conflicts_with) = canonical_targets.insert(config.target.clone(), profile) {
+    let mut canonical_targets = BTreeMap::<Target, &TargetProfileId>::new();
+    for (profile, target) in resolved_targets(manifest)? {
+        if let Some(conflicts_with) = canonical_targets.insert(target, profile) {
             return Err(ManifestError::DuplicateTarget {
                 profile: profile.to_string(),
                 conflicts_with: conflicts_with.to_string(),
-                target: config.target.to_string(),
+                target: target.to_string(),
                 src: None,
                 span: None,
             });
@@ -283,15 +309,14 @@ fn resolve_selection(
     if selectors.is_empty() {
         selected.extend(manifest.build.targets.keys().cloned());
     }
+    let resolved = resolved_targets(manifest)?;
     for selector in selectors {
         let profile = if let Some((profile, _)) = manifest.build.targets.get_key_value(*selector) {
             profile.clone()
-        } else if let Ok(target) = TargetTriple::parse(*selector) {
-            manifest
-                .build
-                .targets
+        } else if let Ok(target) = Target::parse(*selector) {
+            resolved
                 .iter()
-                .find_map(|(profile, config)| (config.target == target).then(|| profile.clone()))
+                .find_map(|(profile, resolved)| (*resolved == target).then(|| (*profile).clone()))
                 .ok_or_else(|| unknown(selector))?
         } else {
             return Err(unknown(selector));

@@ -209,7 +209,7 @@ mod tests {
     use crate::lowering::target_path_from_host;
     use crate::transaction_payload::NativeReconcileResult;
     use tempfile::TempDir;
-    use zup_core::{LauncherLocation, ResourceKey, TargetTriple};
+    use zup_core::{LauncherLocation, ResourceKey, Target};
 
     #[test]
     fn native_shortcut_create_update_and_ownership_safe_rollback() {
@@ -217,7 +217,7 @@ mod tests {
         let root = std::path::PathBuf::from(crate::machine_state::plain_path_text(
             &std::fs::canonicalize(dir.path()).unwrap(),
         ));
-        let target_triple = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let target_triple = Target::parse("windows-x64").unwrap();
         let launcher_path = target_path_from_host(&root.join("Acme.lnk"), &target_triple).unwrap();
         let target = target_path_from_host(&root.join("Acme App.exe"), &target_triple).unwrap();
         std::fs::write(host_path(&target), b"test").unwrap();

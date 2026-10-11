@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zup_core::{Sha256Digest, TargetTriple};
+use zup_core::{Sha256Digest, Target};
 use zup_preset_protocol::{Capabilities, Capability, PRESET_PROTOCOL_VERSION, PresetDescription};
 
 use crate::format::ArtifactError;
@@ -21,7 +21,7 @@ pub const MAX_TOTAL_BINARY_BYTES: u64 = 1024 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PresetBinary {
-    pub target: TargetTriple,
+    pub target: Target,
     pub size: u64,
     pub sha256: Sha256Digest,
 }
@@ -47,7 +47,7 @@ pub struct PresetPackage {
 }
 
 impl PresetPackage {
-    pub fn binary_for(&self, target: &TargetTriple) -> Result<&PresetBinary, ArtifactError> {
+    pub fn binary_for(&self, target: &Target) -> Result<&PresetBinary, ArtifactError> {
         self.binaries
             .iter()
             .find(|binary| &binary.target == target)
@@ -301,7 +301,7 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 pub struct Binary {
-    pub target: TargetTriple,
+    pub target: Target,
     pub bytes: Vec<u8>,
     pub digest: Sha256Digest,
 }
@@ -323,11 +323,7 @@ impl PresetPackageWriter {
         })
     }
 
-    pub fn add_binary(
-        &mut self,
-        target: TargetTriple,
-        bytes: Vec<u8>,
-    ) -> Result<(), ArtifactError> {
+    pub fn add_binary(&mut self, target: Target, bytes: Vec<u8>) -> Result<(), ArtifactError> {
         if self.binaries.len() >= MAX_BINARIES {
             return Err(ArtifactError::TooManyPresetBinaries {
                 count: self.binaries.len() + 1,
@@ -366,7 +362,7 @@ impl PresetPackageWriter {
                 .entry(binary.digest)
                 .or_insert_with(|| zstd::encode_all(binary.bytes.as_slice(), 19).expect("memory"));
             binaries.push(PresetBinary {
-                target: binary.target.clone(),
+                target: binary.target,
                 size: binary.bytes.len() as u64,
                 sha256: binary.digest,
             });
@@ -502,7 +498,7 @@ impl PresetPackageView {
         self.package.targets()
     }
 
-    pub fn binary_for(&self, target: &TargetTriple) -> Result<Vec<u8>, ArtifactError> {
+    pub fn binary_for(&self, target: &Target) -> Result<Vec<u8>, ArtifactError> {
         let entry = self.package.binary_for(target)?;
         let stored = self.stored_for(entry.sha256).ok_or_else(|| {
             ArtifactError::PresetMetadata(format!(

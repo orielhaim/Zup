@@ -14,7 +14,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist/windows-x64" }}
 
 [install]
@@ -193,7 +193,7 @@ fn unknown_field_is_rejected_wherever_it_appears() {
             minimal("user")
         ),
         minimal("user").replace(
-            "[build]\n\n[build.targets.windows-x64]\ntarget = \"x86_64-pc-windows-msvc\"\nsource = { directory = \"dist/windows-x64\" }",
+            "[build]\n\n[build.targets.windows-x64]\ntarget = \"windows-x64\"\nsource = { directory = \"dist/windows-x64\" }",
             "[source]\ndirectory = \"dist\"",
         ),
     ];

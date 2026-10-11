@@ -57,11 +57,11 @@ version = "1.4.0"
 [build]
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "src" }}
 
 [build.targets.arm64]
-target = "aarch64-pc-windows-msvc"
+target = "windows-arm64"
 source = {{ directory = "src" }}
 
 [install]

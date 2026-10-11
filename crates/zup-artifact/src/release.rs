@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use zup_core::{App, Sha256Digest, TargetTriple};
+use zup_core::{App, Sha256Digest, Target};
 use zup_signing::{FinalizedArtifact, Measured as FileMeasured, SigningEvidence, SigningSubject};
 
 use crate::compat::LauncherSubsystem;
@@ -17,7 +17,7 @@ pub const RELEASE_MANIFEST_NAME: &str = "zup-release.json";
 #[serde(deny_unknown_fields)]
 pub struct ReleaseVariant {
     pub id: String,
-    pub target: TargetTriple,
+    pub target: Target,
     pub platform: Platform,
     pub frontend: zup_core::Frontend,
     pub logical_size: u64,
@@ -41,7 +41,7 @@ pub struct ReleaseRuntime {
 pub struct SingleTarget {
     pub id: String,
     pub version: semver::Version,
-    pub target: TargetTriple,
+    pub target: Target,
     pub platform: Platform,
     pub frontend: zup_core::Frontend,
     pub subsystem: LauncherSubsystem,
@@ -254,7 +254,7 @@ impl ReleaseManifest {
                 }
                 None => self.variants.push(ReleaseVariant {
                     id: variant.id.clone(),
-                    target: variant.target.clone(),
+                    target: variant.target,
                     platform: variant.platform.clone(),
                     frontend: variant.frontend,
                     logical_size: variant.logical_size,
@@ -304,7 +304,7 @@ impl ReleaseManifest {
         let id = target.id.clone();
         let variant = ReleaseVariant {
             id: id.clone(),
-            target: target.target.clone(),
+            target: target.target,
             platform: target.platform.clone(),
             frontend: target.frontend,
             logical_size: measured.standalone_size,
@@ -344,7 +344,7 @@ impl ReleaseManifest {
     pub fn add_standalone_variant(&mut self, variant: &VariantDescriptor) {
         self.variants.push(ReleaseVariant {
             id: variant.id.clone(),
-            target: variant.target.clone(),
+            target: variant.target,
             platform: variant.platform.clone(),
             frontend: variant.frontend,
             logical_size: variant.logical_size,
@@ -530,10 +530,8 @@ mod tests {
         SingleTarget {
             id: "windows-x64".to_owned(),
             version: Version::parse("1.4.0").unwrap(),
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-            platform: Platform::from_triple(
-                &TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-            ),
+            target: Target::parse("windows-x64").unwrap(),
+            platform: Platform::from_target(&Target::parse("windows-x64").unwrap()),
             frontend: zup_core::Frontend::Gui,
             subsystem: LauncherSubsystem::Gui,
             file_count: 12,

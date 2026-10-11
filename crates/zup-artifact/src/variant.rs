@@ -5,7 +5,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use zup_bundle::{CompiledPluginArtifact, PayloadEntry, PluginArtifact, PortableBuildPlan};
 use zup_core::{
-    App, Frontend, Install, PluginId, PrerequisiteId, Sha256Digest, TargetProfileId, TargetTriple,
+    App, Frontend, Install, PluginId, PrerequisiteId, Sha256Digest, Target, TargetProfileId,
 };
 
 use crate::compat::frontend_subsystem;
@@ -166,7 +166,7 @@ impl VariantSources {
 pub struct DistributionVariant {
     id: String,
     profile: TargetProfileId,
-    target: TargetTriple,
+    target: Target,
     platform: Platform,
     frontend: Frontend,
     install: Install,
@@ -276,8 +276,8 @@ impl DistributionVariant {
         Ok(Self {
             id: config.profile.to_string(),
             profile: config.profile.clone(),
-            target: config.target.clone(),
-            platform: Platform::from_triple(&config.target),
+            target: config.target,
+            platform: Platform::from_target(&config.target),
             frontend: config.frontend,
             install: config.install.clone(),
             application: plan.installer.app.clone(),
@@ -321,7 +321,7 @@ impl DistributionVariant {
         &self.profile
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.target
     }
 
@@ -452,7 +452,7 @@ pub struct VariantDescriptorContent {
 #[serde(deny_unknown_fields)]
 pub struct VariantDescriptor {
     pub id: String,
-    pub target: TargetTriple,
+    pub target: Target,
     pub platform: Platform,
     pub frontend: Frontend,
     pub manifest: Descriptor,
@@ -468,7 +468,7 @@ pub struct VariantDescriptor {
 pub struct VariantManifest {
     pub schema: u32,
     pub required_features: u64,
-    pub target: TargetTriple,
+    pub target: Target,
     pub platform: Platform,
     pub frontend: Frontend,
     pub runtime: Option<Descriptor>,
@@ -485,7 +485,7 @@ impl VariantManifest {
         let manifest = Self {
             schema: VARIANT_MANIFEST_SCHEMA,
             required_features: crate::index::FEATURE_VARIANT_MANIFESTS,
-            target: variant.target.clone(),
+            target: variant.target,
             platform: variant.platform.clone(),
             frontend: variant.frontend,
             runtime: variant.runtime,
@@ -510,7 +510,7 @@ impl VariantManifest {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         crate::index::check_features(self.required_features, "variant manifest")?;
         if self.schema != VARIANT_MANIFEST_SCHEMA
-            || self.platform != Platform::from_triple(&self.target)
+            || self.platform != Platform::from_target(&self.target)
             || self.plan.installer.target != self.target
             || self.plan.installer.frontend != self.frontend
         {

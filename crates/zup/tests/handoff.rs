@@ -46,9 +46,9 @@ fn payload(seed: u64, size: usize) -> Vec<u8> {
 /// A real image on disk to stand in for the runtime.
 ///
 /// A real PE, because two of the checks are about the image rather than about a
-/// digest: `verify` reads this executable's own target triple, and a file of
-/// random bytes would fail that for the wrong reason. The test binary is a real
-/// x86_64 console PE, which is exactly what a native runtime is.
+/// digest: `verify` reads this executable's own machine and subsystem, and a file
+/// of random bytes would fail that for the wrong reason. The test binary is a
+/// real x86_64 console PE, which is exactly what a native runtime is.
 ///
 /// `salt` produces a *different* image that is still a valid PE - appending to
 /// the end of an image leaves its headers intact - so a substitution is a genuine
@@ -108,7 +108,7 @@ root = "root.json"
 [build]
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -196,7 +196,7 @@ fn fixture(files: usize) -> Fixture {
     let catalog_bytes = catalog.encode().expect("the catalog encodes");
     let catalog_digest = digest_of(&catalog_bytes);
 
-    let target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a triple");
+    let target = zup_core::Target::parse("windows-x64").expect("a triple");
     let mut release = ReleaseDescriptor {
         schema: RELEASE_SCHEMA,
         app_id: zup_core::AppId::new("com.example.handoff").expect("valid"),
@@ -270,7 +270,7 @@ fn handoff_for(fixture: &Fixture) -> RuntimeHandoff {
         variant: variant.id.clone(),
         manifest: variant.manifest.digest,
         runtime: variant.runtime.expect("a runtime").digest,
-        target: variant.target.clone(),
+        target: variant.target,
         frontend: variant.frontend.clone(),
         mode: HandoffMode::Install,
         scope: "user".to_owned(),
@@ -381,8 +381,7 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
 
     // 5. A different target. The release's variant descriptor carries it.
     let mut substituted = honest.clone();
-    substituted.target =
-        zup_core::TargetTriple::parse("aarch64-pc-windows-msvc").expect("a triple");
+    substituted.target = zup_core::Target::parse("windows-arm64").expect("a triple");
     let error =
         zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
     assert!(error.left_machine_unchanged());

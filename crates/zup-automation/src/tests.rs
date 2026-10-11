@@ -17,7 +17,7 @@ fn build() -> AutomationResult {
             name: "Acme".to_owned(),
             version: "1.4.0".to_owned(),
         })
-        .with_targets(vec![Target::new("windows-x64", "x86_64-pc-windows-msvc")])
+        .with_targets(vec![Target::new("windows-x64", "windows-x64")])
         .with_artifacts(vec![Artifact {
             path: "Acme-Setup.exe".to_owned(),
             digest: Digest::sha256("a".repeat(64)),
@@ -25,7 +25,7 @@ fn build() -> AutomationResult {
             kind: Identifier::fixed("single"),
             mode: Identifier::fixed("offline"),
             id: Some("windows-x64".to_owned()),
-            target: Some("x86_64-pc-windows-msvc".to_owned()),
+            target: Some("windows-x64".to_owned()),
             variants: None,
             signing: Some(SigningState::unsigned()),
         }])

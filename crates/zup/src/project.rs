@@ -15,7 +15,7 @@ static LINUX_SOURCE_POLICY: zup_linux::LinuxSourceFilePolicy = zup_linux::LinuxS
 static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
     zup_platform::PortableSourceFilePolicy;
 
-pub fn source_policy_for(target: &zup_core::TargetTriple) -> &'static dyn SourceFilePolicy {
+pub fn source_policy_for(target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
     match target.operating_system() {
         zup_core::TargetOperatingSystem::Linux => {
             #[cfg(target_os = "linux")]
@@ -364,7 +364,6 @@ pub fn load_for_build(
 ) -> miette::Result<LoadedProject> {
     let selected = select_project(path, selectors, args, false)?;
     for config in &selected.selected_targets {
-        crate::build_inputs::check_backend_support(config)?;
         if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
             let errors =
                 crate::linux_support::linux_selection_errors(&config.target, config.frontend);

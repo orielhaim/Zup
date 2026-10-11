@@ -1,5 +1,5 @@
 use thiserror::Error;
-use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_core::{InstallLocation, SelectedScope, Target};
 
 use crate::target_path::TargetPath;
 
@@ -24,6 +24,6 @@ pub trait InstallLocationResolver {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError>;
 }

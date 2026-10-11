@@ -6,7 +6,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
+use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
 
 use crate::filesystem::{BootstrapFileSystem, PortableBootstrapFileSystem};
 use crate::model::{BootstrapId, BootstrapState, MAX_BOOTSTRAP_STATE_BYTES};
@@ -50,7 +50,7 @@ pub trait BootstrapStateStore {
         &self,
         app_id: &AppId,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<Vec<BootstrapState>, BootstrapStoreError>;
     fn remove(&self, id: BootstrapId) -> Result<(), BootstrapStoreError>;
 }
@@ -233,7 +233,7 @@ impl BootstrapStateStore for FilesystemBootstrapStateStore {
         &self,
         app_id: &AppId,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<Vec<BootstrapState>, BootstrapStoreError> {
         let root = self.root.join("bootstrap");
         let entries = match fs::read_dir(&root) {

@@ -18,11 +18,9 @@ Set a project default and override only the profiles that differ:
 frontend = "gui"
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
 source = { directory = "dist/windows-x64" }
 
 [build.targets.windows-arm64]
-target = "aarch64-pc-windows-msvc"
 source = { directory = "dist/windows-arm64" }
 frontend = "headless"
 ```

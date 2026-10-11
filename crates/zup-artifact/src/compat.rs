@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_core::{App, Frontend, Install, Sha256Digest, TargetTriple, Template};
+use zup_core::{App, Frontend, Install, Sha256Digest, Target, Template};
 
 use crate::platform::Platform;
 use crate::variant::{
@@ -150,7 +150,7 @@ pub struct Incompatible {
 pub struct VariantShape {
     pub id: String,
     pub platform: Platform,
-    pub target: TargetTriple,
+    pub target: Target,
     pub subsystem: LauncherSubsystem,
     pub application: App,
     pub install: Install,
@@ -163,7 +163,7 @@ impl VariantShape {
         Self {
             id: variant.id().to_owned(),
             platform: variant.platform().clone(),
-            target: variant.target().clone(),
+            target: *variant.target(),
             subsystem: variant.subsystem(),
             application: variant.application().clone(),
             install: variant.install().clone(),

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{App, ResolvedTargetConfig, SelectedScope, TargetOperatingSystem, TargetTriple};
+use zup_core::{App, ResolvedTargetConfig, SelectedScope, Target, TargetOperatingSystem};
 
 use crate::toolchain::{ToolchainResolver, ToolchainSource};
 
@@ -332,60 +332,7 @@ fn derived_output_path(
 }
 
 pub fn default_build_target() -> String {
-    if cfg!(target_os = "linux") {
-        return crate::linux_support::SUPPORTED_LINUX_TARGET.to_owned();
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        "aarch64-pc-windows-msvc".to_owned()
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        "x86_64-pc-windows-msvc".to_owned()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendSupport {
-    Ready,
-    NotImplemented,
-}
-
-impl BackendSupport {
-    pub fn reason(self, _target: &TargetTriple) -> Option<String> {
-        match self {
-            Self::Ready => None,
-            Self::NotImplemented => Some(
-                "backend not implemented: no implemented backend answers for this target's \
-                 platform"
-                    .to_owned(),
-            ),
-        }
-    }
-
-    pub fn build_error(self, target: &TargetTriple) -> Option<String> {
-        self.reason(target)
-            .map(|reason| format!("unsupported backend for target `{target}`: {reason}"))
-    }
-}
-
-pub fn backend_support(target: &TargetTriple) -> BackendSupport {
-    if matches!(
-        target.operating_system(),
-        TargetOperatingSystem::Windows | TargetOperatingSystem::Linux
-    ) {
-        BackendSupport::Ready
-    } else {
-        BackendSupport::NotImplemented
-    }
-}
-
-/// the source tree: an unsupported target must not cost a source-tree walk or a
-pub fn check_backend_support(config: &ResolvedTargetConfig) -> miette::Result<()> {
-    match backend_support(&config.target).build_error(&config.target) {
-        Some(error) => Err(miette::miette!("{error}")),
-        None => Ok(()),
-    }
+    Target::host().to_string()
 }
 
 /// The dispatch is on the *target's* operating system, never on the build
@@ -393,7 +340,6 @@ pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
-    check_backend_support(config)?;
     match config.target.operating_system() {
         TargetOperatingSystem::Linux => check_linux_lowering(build, config),
         _ => check_windows_lowering(build, config),
@@ -405,7 +351,7 @@ fn check_linux_lowering(
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
     let plan = build
-        .target_by_triple(&config.target)
+        .by_target(&config.target)
         .ok_or_else(|| miette::miette!("no materialized plan for target `{}`", config.target))?;
     let errors = crate::linux_support::linux_capability_errors(config, plan);
     if !errors.is_empty() {
@@ -417,7 +363,7 @@ fn check_linux_lowering(
         zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
     };
     for scope in &scopes {
-        let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
+        let request = zup_plan::PlanRequest::new(config.target, *scope);
         let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
             miette::miette!("semantic plan for target `{}`: {error}", config.target)
         })?;
@@ -443,7 +389,7 @@ fn check_windows_lowering(
     };
 
     for scope in &scopes {
-        let request = zup_plan::PlanRequest::new(config.target.clone(), *scope);
+        let request = zup_plan::PlanRequest::new(config.target, *scope);
         let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
             miette::miette!("semantic plan for target `{}`: {error}", config.target)
         })?;
@@ -506,35 +452,14 @@ mod tests {
     use zup_core::Frontend;
 
     #[test]
-    fn backend_boundary_is_explicit_for_every_target_class() {
-        let windows = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-        let linux = TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap();
-        let macos = TargetTriple::parse("aarch64-apple-darwin").unwrap();
-        assert_eq!(backend_support(&macos), BackendSupport::NotImplemented);
-        assert!(
-            backend_support(&macos)
-                .reason(&macos)
-                .unwrap()
-                .contains("backend not implemented"),
-            "a platform no backend owns has no backend *anywhere*"
-        );
-        assert!(
-            backend_support(&macos)
-                .build_error(&macos)
-                .unwrap()
-                .starts_with("unsupported backend for target")
-        );
+    fn the_default_build_target_is_the_host_itself() {
+        let host = Target::host();
         assert_eq!(
-            backend_support(&windows),
-            BackendSupport::Ready,
+            host.is_windows(),
+            !cfg!(target_os = "linux"),
             "a Windows target builds on any host: composition is target-selected, never host-selected"
         );
-        assert_eq!(
-            backend_support(&linux),
-            BackendSupport::Ready,
-            "a ready backend has no reason"
-        );
-        assert!(backend_support(&linux).reason(&linux).is_none());
+        assert!(default_build_target() == host.to_string());
     }
 
     fn empty_resolver() -> ToolchainResolver {
@@ -690,7 +615,7 @@ mod tests {
     fn target_config(profile: &str) -> ResolvedTargetConfig {
         ResolvedTargetConfig {
             profile: zup_core::TargetProfileId::new(profile).unwrap(),
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            target: Target::parse("windows-x64").unwrap(),
             source: zup_core::Source::new(PathBuf::from("dist")).unwrap(),
             frontend: Frontend::Gui,
             install: zup_core::Install {

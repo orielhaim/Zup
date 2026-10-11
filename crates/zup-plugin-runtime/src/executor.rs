@@ -1,6 +1,6 @@
 use std::fmt;
 
-use zup_core::{LauncherLocation, PluginBinding, SelectedScope, ServiceStart, TargetTriple};
+use zup_core::{LauncherLocation, PluginBinding, SelectedScope, ServiceStart, Target};
 use zup_plan::{
     CancellationQuery, PluginExecutor, PluginFailure, PluginPlanningContext, PluginResource,
     PluginResourceProposal,
@@ -27,16 +27,13 @@ impl fmt::Debug for WasmtimePluginExecutor {
 }
 
 impl WasmtimePluginExecutor {
-    pub fn load(
-        package: zup_bundle::Package,
-        expected_target: &TargetTriple,
-    ) -> Result<Self, LoadError> {
+    pub fn load(package: zup_bundle::Package, expected_target: &Target) -> Result<Self, LoadError> {
         Ok(Self {
             loaded: load_bundle(package, expected_target)?,
         })
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.loaded.target
     }
 
@@ -46,7 +43,7 @@ impl WasmtimePluginExecutor {
 }
 
 impl PluginExecutor for WasmtimePluginExecutor {
-    fn target(&self) -> &TargetTriple {
+    fn target(&self) -> &Target {
         &self.loaded.target
     }
 
@@ -58,8 +55,8 @@ impl PluginExecutor for WasmtimePluginExecutor {
     ) -> Result<PluginResourceProposal, PluginFailure> {
         if context.target != self.loaded.target {
             return Err(PluginFailure::target_mismatch(
-                self.loaded.target.clone(),
-                context.target.clone(),
+                self.loaded.target,
+                context.target,
             ));
         }
         if cancellation.is_cancelled() {

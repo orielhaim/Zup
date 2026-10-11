@@ -12,9 +12,9 @@ fn zup() -> Command {
 /// The diagnostics under test are host-independent; the target carrying them
 /// has to lower far enough to reach the compile errors they describe.
 #[cfg(windows)]
-const TARGET: &str = "x86_64-pc-windows-msvc";
+const TARGET: &str = "windows-x64";
 #[cfg(not(windows))]
-const TARGET: &str = "x86_64-unknown-linux-gnu";
+const TARGET: &str = "linux-x64";
 
 #[cfg(windows)]
 const FRONTEND: &str = "gui";
@@ -82,7 +82,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 [install]
 scope = "user"
@@ -129,7 +129,7 @@ fn fmt_preserves_author_comments_and_check_detects_clean_manifests() {
     let manifest = root.path().join("zup.toml");
     fs::write(
         &manifest,
-        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget=\"x86_64-pc-windows-msvc\"\nsource={directory=\"dist\"}\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${location.user_data}/Fmt\"\n",
+        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget=\"windows-x64\"\nsource={directory=\"dist\"}\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${location.user_data}/Fmt\"\n",
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();

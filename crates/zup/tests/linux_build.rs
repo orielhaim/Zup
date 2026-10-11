@@ -19,7 +19,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 use zup_core::{AppId, SelectedScope};
 
-const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
+const LINUX_TARGET: &str = "linux-x64";
 
 const MANIFEST: &str = r#"
 schema = 1
@@ -32,7 +32,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux]
-target = "x86_64-unknown-linux-gnu"
+target = "linux-x64"
 frontend = "console"
 source = { directory = "dist" }
 

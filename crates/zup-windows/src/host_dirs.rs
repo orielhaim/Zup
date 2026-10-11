@@ -3,7 +3,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, UserDirs};
-use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_core::{InstallLocation, SelectedScope, Target};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 use crate::bindings::{
@@ -47,7 +47,7 @@ impl InstallLocationResolver for WindowsInstallLocationResolver {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let failed = |source: HostDirError| InstallLocationError::ResolutionFailed {
             location,

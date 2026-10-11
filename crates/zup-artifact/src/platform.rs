@@ -1,7 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use zup_core::TargetTriple;
+use zup_core::Target;
 
 use crate::format::ArtifactError;
 
@@ -19,8 +19,8 @@ pub struct Platform {
 }
 
 impl Platform {
-    pub fn from_triple(target: &TargetTriple) -> Self {
-        let mut parts = target.as_str().split('-');
+    pub fn from_target(target: &Target) -> Self {
+        let mut parts = target.rust_triple().split('-');
         let architecture = parts.next().unwrap_or_default().to_owned();
         let vendor = parts.next().map(str::to_owned);
         let os = parts.next().unwrap_or_default().to_owned();
@@ -38,7 +38,7 @@ impl Platform {
         }
     }
 
-    pub fn triple(&self) -> Result<TargetTriple, ArtifactError> {
+    pub fn target(&self) -> Result<Target, ArtifactError> {
         if self.os.is_empty() || self.architecture.is_empty() {
             return Err(ArtifactError::Invalid);
         }
@@ -55,7 +55,7 @@ impl Platform {
             canonical.push('-');
             canonical.push_str(variant);
         }
-        TargetTriple::parse(&canonical).map_err(|_| ArtifactError::Invalid)
+        Target::parse(&canonical).map_err(|_| ArtifactError::Invalid)
     }
 
     pub fn same_os(&self, other: &Self) -> bool {
@@ -131,21 +131,23 @@ mod tests {
     #[test]
     fn platform_round_trips_through_the_canonical_triple() {
         for text in [
-            "x86_64-pc-windows-msvc",
-            "aarch64-pc-windows-msvc",
-            "aarch64-apple-darwin",
+            "windows-x64",
+            "windows-arm64",
+            "windows-x86",
+            "linux-x64",
+            "linux-arm64",
         ] {
-            let target = TargetTriple::parse(text).unwrap();
+            let target = Target::parse(text).unwrap();
             assert_eq!(
-                Platform::from_triple(&target).triple().unwrap(),
+                Platform::from_target(&target).target().unwrap(),
                 target,
                 "{text}"
             );
         }
-        let linux = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-        let platform = Platform::from_triple(&linux);
+        let linux = Target::parse("linux-x64").unwrap();
+        let platform = Platform::from_target(&linux);
         assert_eq!(platform.vendor, None, "no vendor field, no vendor");
         assert_eq!(platform.abi.as_deref(), Some("gnu"), "the abi survives");
-        assert_eq!(platform.triple().unwrap(), linux);
+        assert_eq!(platform.target().unwrap(), linux);
     }
 }

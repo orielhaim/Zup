@@ -32,12 +32,12 @@ Without it, builds fail with `zup.toolchain.component_missing`.
 zup build --target windows-x64
 ```
 
-`--target` names target profiles or canonical triples. It chooses native variants to build; it does not name the final distribution artifact.
+`--target` names target profiles or Zup targets. It chooses native variants to build; it does not name the final distribution artifact.
 
 Linux targets build the same way, on either host:
 
 ```bash
-zup build --target x86_64-unknown-linux-gnu
+zup build --target linux-x64
 ```
 
 A Linux build writes one self-contained, extensionless installer per target (for example `Acme-Setup`). Universal and thin artifacts are Windows installers: a Linux target in an artifact composition is refused with the per-target alternative spelled out.

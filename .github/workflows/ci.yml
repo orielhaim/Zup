@@ -205,9 +205,9 @@ jobs:
         shell: pwsh
         run: |
           $zup = 'target/debug/zup.exe'
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target win --output dist/win.exe --force
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target lnx --output dist/lnx.bin --force
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target win --universal --output dist/uni.exe --force --release-manifest none
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
 
       - name: Verify every artifact
         shell: pwsh
@@ -284,9 +284,9 @@ jobs:
         run: |
           set -euo pipefail
           zup=target/debug/zup
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target win --output dist/win.exe --force
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target lnx --output dist/lnx.bin --force
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target win --universal --output dist/uni.exe --force --release-manifest none
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
 
       - name: Verify every artifact
         shell: bash

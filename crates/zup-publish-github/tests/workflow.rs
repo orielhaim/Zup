@@ -1,34 +1,36 @@
 use rstest::rstest;
 use std::collections::BTreeMap;
 
+use zup_core::Target;
 use zup_publish_github::MatrixTarget;
 use zup_publish_github::{WorkflowPolicy, generate};
 
 fn matrix() -> Vec<MatrixTarget> {
     vec![
-        MatrixTarget::new("windows-x64", "x86_64-pc-windows-msvc"),
-        MatrixTarget::new("windows-arm64", "aarch64-pc-windows-msvc"),
-        MatrixTarget::new("linux-x64", "x86_64-unknown-linux-gnu"),
-        MatrixTarget::new("linux-arm64", "aarch64-unknown-linux-gnu"),
-        MatrixTarget::new("macos-arm64", "aarch64-apple-darwin"),
+        MatrixTarget::new("windows-x64", Target::WINDOWS_X64),
+        MatrixTarget::new("windows-arm64", Target::WINDOWS_ARM64),
+        MatrixTarget::new("linux-x64", Target::LINUX_X64),
+        MatrixTarget::new("linux-arm64", Target::LINUX_ARM64),
     ]
 }
 
 #[rstest]
-#[case("x86_64-pc-windows-msvc", "windows-latest")]
-#[case("aarch64-pc-windows-msvc", "windows-11-arm")]
-#[case("x86_64-unknown-linux-gnu", "ubuntu-latest")]
-#[case("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm")]
-#[case("aarch64-apple-darwin", "macos-latest")]
-#[case("i686-pc-windows-msvc", "windows-latest")]
-fn a_runner_is_derived_from_the_target(#[case] triple: &str, #[case] runner: &str) {
+#[case("windows-x64", "windows-latest")]
+#[case("windows-arm64", "windows-11-arm")]
+#[case("linux-x64", "ubuntu-latest")]
+#[case("linux-arm64", "ubuntu-24.04-arm")]
+#[case("windows-x86", "windows-latest")]
+fn a_runner_is_derived_from_the_target(#[case] name: &str, #[case] runner: &str) {
     let rendered = generate(
         &WorkflowPolicy::default(),
-        &[MatrixTarget::new("the-target", triple)],
+        &[MatrixTarget::new(
+            "the-target",
+            Target::parse(name).unwrap(),
+        )],
     );
     assert!(
         rendered.contains(&format!("runner: {runner}")),
-        "{triple} is not built on {runner}:\n{rendered}"
+        "{name} is not built on {runner}:\n{rendered}"
     );
     assert_eq!(
         rendered.matches("- profile:").count(),
@@ -41,17 +43,14 @@ fn a_runner_is_derived_from_the_target(#[case] triple: &str, #[case] runner: &st
 fn a_runner_override_wins_over_the_default() {
     let policy = WorkflowPolicy {
         runner_overrides: BTreeMap::from([(
-            "aarch64-pc-windows-msvc".to_owned(),
+            "windows-arm64".to_owned(),
             "windows-11-vs2026-arm".to_owned(),
         )]),
         ..WorkflowPolicy::default()
     };
     let rendered = generate(
         &policy,
-        &[MatrixTarget::new(
-            "windows-arm64",
-            "aarch64-pc-windows-msvc",
-        )],
+        &[MatrixTarget::new("windows-arm64", Target::WINDOWS_ARM64)],
     );
     assert!(
         rendered.contains("runner: windows-11-vs2026-arm"),

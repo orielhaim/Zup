@@ -531,7 +531,7 @@ async fn run_elevated_bootstrap(
             .map_err(|error| SessionError::Protocol(error.to_string()))?
             .display()
             .to_owned(),
-        target: request.plan.plan.key.target.clone(),
+        target: request.plan.plan.key.target,
         expected_plan_hash: plan_hash.clone(),
     };
     let params = format!(
@@ -577,7 +577,7 @@ async fn run_elevated_bootstrap(
             message: zup_protocol::Message::ParentHello(zup_protocol::ParentHello {
                 protocol_version: zup_protocol::PROTOCOL_VERSION,
                 session_id,
-                target: request.plan.plan.key.target.clone(),
+                target: request.plan.plan.key.target,
                 transaction_id: request.plan.id.as_uuid(),
                 expected_plan_hash: plan_hash.clone(),
             }),
@@ -590,7 +590,7 @@ async fn run_elevated_bootstrap(
             session_id,
             sequence: 2,
             message: zup_protocol::Message::ExecuteBootstrap(zup_protocol::ExecuteBootstrap {
-                target: request.plan.plan.key.target.clone(),
+                target: request.plan.plan.key.target,
                 bootstrap_json,
                 bootstrap_hash: plan_hash,
                 bootstrap_id: request.plan.id.as_uuid(),
@@ -999,7 +999,7 @@ async fn run_elevated_worker(
             .map_err(|e| SessionError::Protocol(e.to_string()))?
             .display()
             .to_owned(),
-        target: request.target.clone(),
+        target: request.target,
         expected_plan_hash: plan_hash.clone(),
     };
     let bootstrap_arg = crate::format_bootstrap(&bootstrap);
@@ -1048,7 +1048,7 @@ async fn run_elevated_worker(
             message: zup_protocol::Message::ParentHello(zup_protocol::ParentHello {
                 protocol_version: zup_protocol::PROTOCOL_VERSION,
                 session_id,
-                target: request.target.clone(),
+                target: request.target,
                 transaction_id: uuid::Uuid::now_v7(),
                 expected_plan_hash: plan_hash.clone(),
             }),
@@ -1062,7 +1062,7 @@ async fn run_elevated_worker(
             sequence: 2,
             message: zup_protocol::Message::ExecuteTransaction(Box::new(
                 zup_protocol::ExecuteTransaction {
-                    target: request.target.clone(),
+                    target: request.target,
                     plan_json,
                     plan_hash,
                     app_id: request.app_id.to_string(),

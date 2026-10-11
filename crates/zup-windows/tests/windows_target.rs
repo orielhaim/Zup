@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use zup_build::materialize;
 #[cfg(windows)]
 use zup_core::INSTALL_LOCATIONS;
-use zup_core::{InstallLocation, SelectedScope, TargetTriple};
+use zup_core::{InstallLocation, SelectedScope, Target};
 #[cfg(windows)]
 use zup_exec::ObservedFileState;
 #[cfg(all(windows, feature = "test-launcher"))]
@@ -33,7 +33,7 @@ impl InstallLocationResolver for FakeInstallLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let name = match location {
             InstallLocation::Programs => "PF",
@@ -66,7 +66,7 @@ impl InstallLocationResolver for FixedInstallLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let path = match location {
             InstallLocation::Programs => r"C:\Program Files",
@@ -106,7 +106,7 @@ version = "1.4.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -191,7 +191,7 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan
     .expect("materialize");
     let install = plan(
         &build,
-        &PlanRequest::new(config.target.clone(), SelectedScope::User),
+        &PlanRequest::new(config.target, SelectedScope::User),
     )
     .expect("semantic plan");
     (dir, install)
@@ -230,8 +230,7 @@ fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_platform::TargetP
         zup_build::Writes::None,
     )
     .expect("materialize");
-    let install =
-        plan(&build, &PlanRequest::new(config.target.clone(), scope)).expect("install plan");
+    let install = plan(&build, &PlanRequest::new(config.target, scope)).expect("install plan");
 
     let context = WindowsTargetContext::with_resolver(
         FakeInstallLocations {
@@ -526,7 +525,7 @@ fn inspect_target_with_fakes_and_plan_execution() {
 #[cfg(windows)]
 fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
     let resolver = WindowsInstallLocationResolver;
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
     for location in INSTALL_LOCATIONS {
         for scope in [SelectedScope::User, SelectedScope::Machine] {
             let path = resolver.resolve(location, scope, &target).unwrap();
@@ -541,7 +540,7 @@ fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
 #[test]
 #[ignore = "touches the real user profile"]
 fn the_user_state_root_and_the_user_data_location_are_one_directory() {
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
     let user_data = WindowsInstallLocationResolver
         .resolve(InstallLocation::UserData, SelectedScope::User, &target)
         .unwrap();
@@ -565,8 +564,8 @@ mod transaction_fingerprint {
     use zup_build::{BuildPlan, TargetBuildPlan};
     use zup_core::{
         App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
-        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest,
-        TargetTriple, Template,
+        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target,
+        Template,
     };
     use zup_exec::LifecycleAction;
     use zup_plan::{
@@ -578,12 +577,12 @@ mod transaction_fingerprint {
     use super::FakeInstallLocations;
 
     struct GuestExecutor {
-        target: TargetTriple,
+        target: Target,
         resources: Vec<PluginResource>,
     }
 
     impl PluginExecutor for GuestExecutor {
-        fn target(&self) -> &TargetTriple {
+        fn target(&self) -> &Target {
             &self.target
         }
 
@@ -601,7 +600,7 @@ mod transaction_fingerprint {
         BuildPlan {
             targets: vec![TargetBuildPlan {
                 installer: Installer {
-                    target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                    target: Target::parse("windows-x64").unwrap(),
                     frontend: Frontend::Gui,
                     preset: None,
                     app: App {
@@ -659,15 +658,12 @@ mod transaction_fingerprint {
 
     fn fingerprint(root: &Path, state: &Path, resources: Vec<PluginResource>) -> Sha256Digest {
         let mut executor = GuestExecutor {
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            target: Target::parse("windows-x64").unwrap(),
             resources,
         };
         let planned = plan_with_plugins(
             &build_plan(),
-            &PlanRequest::new(
-                TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-                SelectedScope::User,
-            ),
+            &PlanRequest::new(Target::parse("windows-x64").unwrap(), SelectedScope::User),
             &mut executor,
             &NeverCancelled,
         )

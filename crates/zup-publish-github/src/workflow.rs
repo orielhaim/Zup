@@ -11,14 +11,14 @@ pub const WORKFLOW_PATH: &str = ".github/workflows/release.yml";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixTarget {
     pub profile: String,
-    pub triple: String,
+    pub target: zup_core::Target,
 }
 
 impl MatrixTarget {
-    pub fn new(profile: impl Into<String>, triple: impl Into<String>) -> Self {
+    pub fn new(profile: impl Into<String>, target: zup_core::Target) -> Self {
         Self {
             profile: profile.into(),
-            triple: triple.into(),
+            target,
         }
     }
 }
@@ -163,17 +163,17 @@ fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
     for target in targets {
         let runner = policy
             .runner_overrides
-            .get(&target.triple)
+            .get(target.target.as_str())
             .cloned()
             .unwrap_or_else(|| {
-                native_runner(&target.triple)
+                native_runner(target.target)
                     .map(|runner: Runner| runner.label().to_owned())
-                    .unwrap_or_else(|| cross_runner(&target.triple).to_owned())
+                    .unwrap_or_else(|| cross_runner(target.target).to_owned())
             });
         let _ = writeln!(
             out,
             "          - profile: {}\n            target: {}\n            runner: {runner}",
-            target.profile, target.triple
+            target.profile, target.target
         );
     }
     out.push_str("    steps:\n");

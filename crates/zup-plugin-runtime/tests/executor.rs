@@ -11,7 +11,7 @@ use zup_build::TargetBuildPlan;
 use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package, PluginArtifact};
 use zup_core::{
     App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, TargetTriple, Template,
+    NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target, Template,
 };
 use zup_plan::{NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource};
 use zup_plugin_contract::{
@@ -94,8 +94,8 @@ fn empty_aot() -> Vec<u8> {
     fixture("empty")
 }
 
-fn host_target() -> TargetTriple {
-    TargetTriple::parse(HOST_TARGET).unwrap()
+fn host_target() -> Target {
+    Target::parse(HOST_TARGET).unwrap()
 }
 
 fn installer() -> Installer {
@@ -137,7 +137,7 @@ fn installer() -> Installer {
     }
 }
 
-fn plan(target: TargetTriple) -> TargetBuildPlan {
+fn plan(target: Target) -> TargetBuildPlan {
     let mut installer = installer();
     installer.target = target;
     TargetBuildPlan {
@@ -152,20 +152,20 @@ fn plan(target: TargetTriple) -> TargetBuildPlan {
     }
 }
 
-fn artifact(bytes: &[u8], target: &TargetTriple) -> CompiledPluginArtifact {
+fn artifact(bytes: &[u8], target: &Target) -> CompiledPluginArtifact {
     let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
     CompiledPluginArtifact::new(
         PluginArtifact {
             plugin_id: PluginId::new(PLUGIN_ID).unwrap(),
             source_size: bytes.len() as u64,
             source_sha256: digest,
-            target: target.clone(),
+            target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
-                *engine_fingerprint(target.as_str()).as_bytes(),
+                *engine_fingerprint(target.rust_triple()).as_bytes(),
             ),
             aot_size: bytes.len() as u64,
             aot_sha256: digest,
@@ -176,8 +176,8 @@ fn artifact(bytes: &[u8], target: &TargetTriple) -> CompiledPluginArtifact {
     .unwrap()
 }
 
-fn build_package(bytes: &[u8], target: &TargetTriple) -> Package {
-    let package = BundleWriter::encode(&plan(target.clone()), &[artifact(bytes, target)]).unwrap();
+fn build_package(bytes: &[u8], target: &Target) -> Package {
+    let package = BundleWriter::encode(&plan(*target), &[artifact(bytes, target)]).unwrap();
     Package::parse(&package).unwrap()
 }
 
@@ -187,7 +187,7 @@ fn context(installer: &Installer) -> PluginPlanningContext {
         install_directory: installer.install.directory.user.clone().unwrap(),
         scope: SelectedScope::User,
         selected_components: Vec::new(),
-        target: installer.target.clone(),
+        target: installer.target,
     }
 }
 
@@ -327,14 +327,14 @@ enum Cancellation {
     AfterFirstPoll,
 }
 
-fn other_target() -> TargetTriple {
+fn other_target() -> Target {
     let (architecture, suffix) = HOST_TARGET.split_once('-').unwrap();
     let other = if architecture == "aarch64" {
         "x86_64"
     } else {
         "aarch64"
     };
-    TargetTriple::parse(format!("{other}-{suffix}")).unwrap()
+    Target::parse(format!("{other}-{suffix}")).unwrap()
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
-    context.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+    context.target = Target::parse("arm64-pc-windows-msvc").unwrap();
     let error = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap_err();

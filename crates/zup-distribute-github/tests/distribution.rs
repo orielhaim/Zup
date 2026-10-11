@@ -19,7 +19,7 @@ use zup_distribute_github::{
 };
 
 const VARIANT: &str = "win-x64";
-const TARGET: &str = "x86_64-pc-windows-msvc";
+const TARGET: &str = "windows-x64";
 const APPLICATION: &str = "com.acme.app";
 const ASSET: &str = "Acme-Windows-x64.zup";
 

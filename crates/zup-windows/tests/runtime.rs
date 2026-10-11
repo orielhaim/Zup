@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use zup_core::{
-    App, AppId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope, TargetTriple,
+    App, AppId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope, Target,
     hash_reader,
 };
 use zup_exec::{LifecycleAction, OwnedResource};
@@ -22,14 +22,14 @@ fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
 
 fn target_path(path: &Path) -> TargetPath {
     TargetPath::new(
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        Target::parse("windows-x64").unwrap(),
         path.to_string_lossy(),
     )
     .unwrap()
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
@@ -228,11 +228,8 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let app_id_text = app_id.as_str().to_owned();
     let version = semver::Version::parse("1.0.0").unwrap();
     let target_triple = target();
-    let maintenance_target = TargetPath::new(
-        target_triple.clone(),
-        maintenance.to_string_lossy().as_ref(),
-    )
-    .unwrap();
+    let maintenance_target =
+        TargetPath::new(target_triple, maintenance.to_string_lossy().as_ref()).unwrap();
     let target_plan = TargetPlan {
         app: App {
             id: app_id.clone(),
@@ -242,7 +239,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
             main: None,
             description: None,
         },
-        target: target_triple.clone(),
+        target: target_triple,
         scope: SelectedScope::User,
         install_directory: target_path(&install_directory),
         selected_components: Vec::new(),
@@ -294,7 +291,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let backend =
         zup_windows::WindowsRuntimeBackend::from_path(payload_root.clone(), None).unwrap();
     let request = RuntimeRequest {
-        target: target_triple.clone(),
+        target: target_triple,
         app_id: app_id.clone(),
         app_version: version.clone(),
         scope: SelectedScope::User,

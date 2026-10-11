@@ -536,7 +536,7 @@ pub fn run_acquired_transition(
     .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
     let bootstrap = crate::bootstrap::prepare(&install, &state_root, scope, None)?;
     let request = RuntimeRequest {
-        target: target.target.clone(),
+        target: target.target,
         app_id: installer.app.id.clone(),
         app_version: target.app.version.clone(),
         scope,
@@ -594,7 +594,7 @@ fn plan_from_graph(
             "repair uses the committed component selection and install location"
         ));
     }
-    let mut request = zup_plan::PlanRequest::new(installer.target.clone(), scope);
+    let mut request = zup_plan::PlanRequest::new(installer.target, scope);
     request.install_directory = if matches!(action, LifecycleAction::Repair { .. }) {
         allow_directory_override
             .then(|| state::persisted_install_directory(prior.as_ref()))
@@ -694,7 +694,7 @@ pub fn prepare_embedded_transition_with_cancellation(
     let bundle = package::open_bundle(&executable)?;
     let build = package::target_plan(&bundle)?;
     let app_id = build.installer.app.id.clone();
-    let plugin_target = build.installer.target.clone();
+    let plugin_target = build.installer.target;
     let state_root = state::resolve_state_root(state, scope)?;
     let prior = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&app_id, scope)
@@ -800,7 +800,7 @@ where
         )
         .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
         let request = RuntimeRequest {
-            target: build.installer.target.clone(),
+            target: build.installer.target,
             app_id,
             app_version: ledger.version,
             scope,
@@ -820,7 +820,7 @@ where
         });
     }
 
-    let mut plan_request = zup_plan::PlanRequest::new(build.installer.target.clone(), scope);
+    let mut plan_request = zup_plan::PlanRequest::new(build.installer.target, scope);
     plan_request.install_directory = selected_install_directory;
     if matches!(
         action,
@@ -897,7 +897,7 @@ where
     .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?;
     let work_root = state_root.join("work");
     let request = RuntimeRequest {
-        target: target.target.clone(),
+        target: target.target,
         app_id,
         app_version: target.app.version.clone(),
         scope,
@@ -1054,10 +1054,10 @@ fn attach_ui_runtime(
         ));
     }
 
-    let triple = target.target.clone();
+    let triple = target.target;
     for (path, digest, size, source, executable) in files {
         let destination =
-            zup_platform::TargetPath::new(triple.clone(), zup_windows::plain_path_text(&path))
+            zup_platform::TargetPath::new(triple, zup_windows::plain_path_text(&path))
                 .map_err(|error| miette::miette!("preset runtime destination: {error}"))?;
         let text = destination.to_string();
         target.files.push(zup_platform::TargetFile {

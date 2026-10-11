@@ -216,7 +216,7 @@ pub fn resolve_target(
     let resource_count = services.len();
     let target = TargetPlan {
         app: plan.app.clone(),
-        target: plan.target.clone(),
+        target: plan.target,
         scope: plan.scope,
         install_directory,
         selected_components: plan.selected_components.clone(),
@@ -338,14 +338,14 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), PlanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::TargetTriple;
+    use zup_core::Target;
 
     fn resolve(input: &InstallPlan) -> Result<TargetPlan, PlanError> {
         resolve_target(input, &LinuxInstallLocationResolver::for_build())
     }
 
     fn plan() -> InstallPlan {
-        let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+        let target = Target::parse("linux-x64").expect("a Linux target");
         InstallPlan {
             app: zup_core::App {
                 id: zup_core::AppId::new("com.example.tool").expect("an id"),
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn a_non_linux_plan_is_refused() {
         let mut input = plan();
-        input.target = TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target");
+        input.target = Target::parse("windows-x64").expect("a target");
         assert!(matches!(
             resolve(&input),
             Err(PlanError::UnsupportedTarget { .. })
@@ -593,7 +593,7 @@ mod tests {
     }
 
     fn empty_plan() -> TargetPlan {
-        let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target");
+        let target = Target::parse("linux-x64").expect("a Linux target");
         TargetPlan {
             app: zup_core::App {
                 id: zup_core::AppId::new("com.example.tool").expect("an id"),
@@ -603,7 +603,7 @@ mod tests {
                 main: None,
                 description: None,
             },
-            target: target.clone(),
+            target,
             scope: SelectedScope::User,
             install_directory: zup_platform::TargetPath::new(
                 target,
@@ -653,12 +653,12 @@ mod tests {
             location: zup_core::LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
             launcher_path: zup_platform::TargetPath::new(
-                plan.target.clone(),
+                plan.target,
                 "/home/u/.local/share/applications/tool.desktop",
             )
             .expect("a path"),
             target: zup_platform::TargetPath::new(
-                plan.target.clone(),
+                plan.target,
                 "/home/u/.local/lib/zup/apps/tool/tool",
             )
             .expect("a path"),
@@ -685,7 +685,7 @@ mod tests {
         );
     }
 
-    fn target_service(target: &zup_core::TargetTriple) -> zup_platform::TargetService {
+    fn target_service(target: &zup_core::Target) -> zup_platform::TargetService {
         zup_platform::TargetService {
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
@@ -694,7 +694,7 @@ mod tests {
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
             display_name: None,
             command: zup_platform::CommandSpec::new(
-                zup_platform::TargetPath::new(target.clone(), "/opt/tool/tool").expect("a path"),
+                zup_platform::TargetPath::new(*target, "/opt/tool/tool").expect("a path"),
                 Vec::new(),
             ),
             start: zup_core::ServiceStart::Automatic,
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn a_non_linux_target_is_refused() {
         let mut plan = empty_plan();
-        plan.target = zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target");
+        plan.target = zup_core::Target::parse("windows-x64").expect("a target");
         let error = validate_target_plan(&plan).expect_err("a Windows target refuses");
         assert!(
             error.reasons().contains("not a Linux target"),

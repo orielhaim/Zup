@@ -19,7 +19,7 @@ fn installer() -> Installer {
             main: None,
             description: Some("The Acme application.".into()),
         },
-        target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("target"),
+        target: zup_core::Target::parse("windows-x64").expect("target"),
         frontend: zup_core::Frontend::Gui,
         updates: None,
         install: zup_core::Install {
@@ -96,7 +96,7 @@ fn maintenance_host() -> HostState {
     });
     let mut ledger = InstallLedger::new(
         installer.app.id.clone(),
-        installer.target.clone(),
+        installer.target,
         SelectedScope::Machine,
     );
     ledger.version = installer.app.version.clone();
@@ -814,7 +814,7 @@ fn a_fresh_session_over_an_existing_installation_names_what_it_replaces() {
     let installer = installer();
     let mut ledger = InstallLedger::new(
         installer.app.id.clone(),
-        installer.target.clone(),
+        installer.target,
         SelectedScope::User,
     );
     ledger.version = semver::Version::parse("1.0.0").expect("version");

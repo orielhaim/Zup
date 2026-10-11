@@ -300,11 +300,11 @@ fn write_variant(
     };
     let runtime = native(&manifest.runtime);
     let preset = native(&manifest.preset);
-    let target = manifest.plan.installer.target.clone();
+    let target = manifest.plan.installer.target;
     Ok(ReleaseVariant {
         id: id.to_owned(),
         platform: target.to_string(),
-        target: target.clone(),
+        target,
         frontend: manifest.plan.installer.frontend.as_str().to_owned(),
         manifest: DocumentRef::of(
             zup_acquire::ContentDescriptor::of_document(

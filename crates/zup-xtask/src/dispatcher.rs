@@ -4,7 +4,7 @@ use zup_toolchain::{Subsystem, ToolchainComponent};
 
 pub const PACKAGE: &str = "zup-dispatch";
 
-pub const TARGET: &str = zup_toolchain::DISPATCHER_TARGET;
+pub const TARGET: zup_core::Target = zup_toolchain::DISPATCHER_TARGET;
 
 pub const GUI: &str = "zup-dispatch";
 pub const CONSOLE: &str = "zup-dispatch-console";

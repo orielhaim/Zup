@@ -119,7 +119,7 @@ fn validate_selection(selected: &[(ResolvedTargetConfig, Installer)]) -> Result<
                 profile: config.profile.to_string(),
             });
         }
-        if !targets.insert(config.target.clone()) {
+        if !targets.insert(config.target) {
             return Err(BuildError::DuplicateTarget {
                 target: config.target.to_string(),
             });

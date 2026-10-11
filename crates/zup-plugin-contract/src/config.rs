@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_target() {
-        let error = PluginEngine::new("not a target triple").unwrap_err();
+        let error = PluginEngine::new("not a triple").unwrap_err();
         assert!(matches!(error, EngineError::InvalidTarget { .. }));
     }
 

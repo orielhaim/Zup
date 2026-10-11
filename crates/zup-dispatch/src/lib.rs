@@ -235,7 +235,7 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
         index.artifact.application.id.clone(),
         index.artifact.application.version.clone(),
         scope,
-        manifest.target.clone(),
+        manifest.target,
         artifact_digest(&artifact),
     );
     let base = match zup_windows::content_store_base(&state_root, identity.scope()) {

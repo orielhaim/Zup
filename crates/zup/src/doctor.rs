@@ -9,7 +9,7 @@ use zup_automation::{AutomationResult, Details, LogLevel};
 use zup_core::{ResolvedTargetConfig, Sha256Digest, hash_reader};
 use zup_plugin_contract::{PluginEngine, WASMTIME_VERSION};
 
-use crate::build_inputs::{self, BackendSupport, BuildInputs};
+use crate::build_inputs::{self, BuildInputs};
 use crate::cli::OutputArg;
 use crate::failure::Reporter;
 #[cfg(target_os = "linux")]
@@ -318,7 +318,7 @@ fn inspect(
         .collect::<Vec<_>>();
     Ok(DoctorReport {
         manifest: manifest_name,
-        host: zup_plugin_contract::HOST_TARGET.to_owned(),
+        host: zup_core::Target::host().to_string(),
         status: if targets.iter().all(TargetReport::is_ready) {
             CheckStatus::Pass
         } else {
@@ -568,8 +568,8 @@ impl TargetChecks<'_> {
             return;
         }
         let source = plan.plugins.first().map(|plugin| plugin.source.clone());
-        let target = self.config.target.as_str();
-        let engine = match PluginEngine::new(target) {
+        let target = self.config.target;
+        let engine = match PluginEngine::new(target.rust_triple()) {
             Ok(engine) => engine,
             Err(error) => {
                 self.fail(
@@ -716,40 +716,17 @@ impl TargetChecks<'_> {
 
     fn backend(&mut self) {
         let target = &self.config.target;
-        match build_inputs::backend_support(target) {
-            BackendSupport::Ready => self.pass(
-                CheckKind::BuildBackend,
-                format!(
-                    "the implemented {} backend is ready on this build host for `{target}`",
-                    backend_name(target)
-                ),
-                None,
+        self.pass(
+            CheckKind::BuildBackend,
+            format!(
+                "the implemented {} backend is ready on this build host for `{target}`",
+                backend_name(target)
             ),
-            other => self.fail(
-                CheckKind::BuildBackend,
-                other
-                    .reason(target)
-                    .expect("only a ready backend has no reason"),
-                None,
-            ),
-        }
+            None,
+        );
     }
 
     fn lowering(&mut self, build: &zup_build::BuildPlan) {
-        let support = build_inputs::backend_support(&self.config.target);
-        if support != BackendSupport::Ready {
-            self.skip(
-                CheckKind::TargetLowering,
-                format!(
-                    "not evaluated: {}",
-                    support
-                        .reason(&self.config.target)
-                        .expect("an unavailable backend always has a reason")
-                ),
-                None,
-            );
-            return;
-        }
         match build_inputs::check_target_lowering(build, self.config) {
             Ok(scopes) => {
                 let scopes = scopes
@@ -954,7 +931,7 @@ impl TargetChecks<'_> {
 }
 
 /// The target's own platform, never the build host's: a Windows host building
-fn backend_name(target: &zup_core::TargetTriple) -> &'static str {
+fn backend_name(target: &zup_core::Target) -> &'static str {
     match target.operating_system() {
         zup_core::TargetOperatingSystem::Windows => "Windows",
         zup_core::TargetOperatingSystem::Linux => "Linux",
@@ -962,7 +939,7 @@ fn backend_name(target: &zup_core::TargetTriple) -> &'static str {
     }
 }
 
-fn lowering_name(target: &zup_core::TargetTriple) -> &'static str {
+fn lowering_name(target: &zup_core::Target) -> &'static str {
     match target.operating_system() {
         zup_core::TargetOperatingSystem::Windows => "Windows",
         zup_core::TargetOperatingSystem::Linux => "Linux",

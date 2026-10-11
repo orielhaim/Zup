@@ -292,7 +292,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     Ok(TargetPlan {
         app: plan.app.clone(),
-        target: plan.target.clone(),
+        target: plan.target,
         scope: plan.scope,
         install_directory,
 

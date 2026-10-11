@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zup_core::{
     BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
-    SelectedScope, Sha256Digest, TargetTriple,
+    SelectedScope, Sha256Digest, Target,
 };
 use zup_platform::TargetPath;
 
@@ -178,7 +178,7 @@ impl BackendOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionInput {
-    pub target: TargetTriple,
+    pub target: Target,
     pub selected_components: Vec<ComponentId>,
     pub install_directory: Option<TargetPath>,
     pub uninstall: bool,
@@ -190,7 +190,7 @@ pub struct TransactionInput {
 }
 
 impl TransactionInput {
-    pub fn new(target: TargetTriple) -> Self {
+    pub fn new(target: Target) -> Self {
         Self {
             target,
             selected_components: Vec::new(),

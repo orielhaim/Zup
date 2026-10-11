@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zup_core::{App, ComponentId, TargetTriple, Template};
+use zup_core::{App, ComponentId, Target, Template};
 
 use crate::error::SelectedScope;
 use crate::resources::{
@@ -21,7 +21,7 @@ pub struct PlanSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallPlan {
     pub app: App,
-    pub target: TargetTriple,
+    pub target: Target,
     pub scope: SelectedScope,
     pub install_directory: Template,
     pub selected_components: Vec<ComponentId>,

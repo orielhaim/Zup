@@ -294,14 +294,14 @@ fn step_is_linux(release: &zup_artifact::ReleaseManifest, step: &SigningStep) ->
         {
             for variant in &artifact.variants {
                 if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
-                    targets.push(entry.target.clone());
+                    targets.push(entry.target);
                 }
             }
         }
     } else {
         for variant in &step.subject.variants {
             if let Some(entry) = release.variants.iter().find(|entry| entry.id == *variant) {
-                targets.push(entry.target.clone());
+                targets.push(entry.target);
             }
         }
     }

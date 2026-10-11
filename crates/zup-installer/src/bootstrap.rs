@@ -36,7 +36,7 @@ pub fn prepare(
             app_id: install.app.id.clone(),
             app_version: install.app.version.clone(),
             scope,
-            target: install.target.clone(),
+            target: install.target,
         },
         operations,
     )

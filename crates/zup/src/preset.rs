@@ -3,14 +3,14 @@ use std::process::Command;
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_preset_protocol::{MAX_DESCRIBE_BYTES, PresetDescription};
 
 use crate::failure;
 
 #[derive(Debug, Args, Clone)]
 pub struct BinarySource {
-    #[arg(long, value_name = "TRIPLE")]
+    #[arg(long, value_name = "TARGET")]
     pub target: String,
     #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub binary: PathBuf,
@@ -71,9 +71,9 @@ pub struct PackCommand {
     pub manifest: Option<PathBuf>,
     #[arg(long, short, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub output: Option<PathBuf>,
-    #[arg(long = "binary", value_name = "TRIPLE=FILE", value_parser = parse_binary, num_args = 1)]
+    #[arg(long = "binary", value_name = "TARGET=FILE", value_parser = parse_binary, num_args = 1)]
     pub binaries: Vec<BinarySource>,
-    #[arg(long = "build", value_name = "TRIPLE")]
+    #[arg(long = "build", value_name = "TARGET")]
     pub build: Vec<String>,
     #[arg(long, value_name = "PROFILE", default_value = "release")]
     pub profile: String,
@@ -90,8 +90,8 @@ pub struct InspectCommand {
 fn parse_binary(raw: &str) -> Result<BinarySource, String> {
     let (target, binary) = raw
         .split_once('=')
-        .ok_or_else(|| "expected `--binary <triple>=<file>`".to_owned())?;
-    let target = TargetTriple::parse(target).map_err(|error| error.to_string())?;
+        .ok_or_else(|| "expected `--binary <target>=<file>`".to_owned())?;
+    let target = Target::parse(target).map_err(|error| error.to_string())?;
     Ok(BinarySource {
         target: target.as_str().to_owned(),
         binary: PathBuf::from(binary),
@@ -104,16 +104,23 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
     let identity = PresetIdentity::read(&root)?;
 
     let mut sources: Vec<BinarySource> = args.binaries.clone();
-    for triple in &args.build {
+    for name in &args.build {
+        let target = Target::parse(name).map_err(|error| miette::miette!("{error}"))?;
         sources.push(BinarySource {
-            target: triple.clone(),
-            binary: build_target(&root, &cargo, &identity.binary, triple, &args.profile)?,
+            target: target.as_str().to_owned(),
+            binary: build_target(
+                &root,
+                &cargo,
+                &identity.binary,
+                target.rust_triple(),
+                &args.profile,
+            )?,
         });
     }
     if sources.is_empty() {
         return Err(miette::miette!(
-            "nothing to package: pass `--build <triple>` to build a target here, or \
-             `--binary <triple>=<file>` for one built elsewhere"
+            "nothing to package: pass `--build <target>` to build a target here, or \
+             `--binary <target>=<file>` for one built elsewhere"
         ));
     }
 
@@ -127,8 +134,7 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
     let mut writer =
         PresetPackageWriter::new(description).map_err(|error| miette::miette!("{error}"))?;
     for source in &sources {
-        let target =
-            TargetTriple::parse(&source.target).map_err(|error| miette::miette!("{error}"))?;
+        let target = Target::parse(&source.target).map_err(|error| miette::miette!("{error}"))?;
         let bytes = std::fs::read(&source.binary).map_err(|error| {
             miette::miette!("preset binary `{}`: {error}", source.binary.display())
         })?;
@@ -248,10 +254,10 @@ fn describe(
     sources: &[BinarySource],
     profile: &str,
 ) -> miette::Result<PresetDescription> {
-    let host = TargetTriple::parse(&host_target()?).map_err(|error| miette::miette!("{error}"))?;
+    let host = Target::parse(&host_target()?).map_err(|error| miette::miette!("{error}"))?;
     let executable = match sources.iter().find(|source| source.target == host.as_str()) {
         Some(source) => source.binary.clone(),
-        None => build_target(root, cargo, &identity.binary, host.as_str(), profile)?,
+        None => build_target(root, cargo, &identity.binary, host.rust_triple(), profile)?,
     };
     let output = Command::new(&executable)
         .arg(zup_preset_protocol::DESCRIBE_FLAG)
@@ -323,7 +329,7 @@ fn build_target(
     root: &Path,
     cargo: &Path,
     binary_name: &str,
-    triple: &str,
+    rust_target: &str,
     profile: &str,
 ) -> miette::Result<PathBuf> {
     let mut command = Command::new(cargo);
@@ -336,13 +342,13 @@ fn build_target(
         .arg("--profile")
         .arg(profile)
         .arg("--target")
-        .arg(triple);
+        .arg(rust_target);
     let output = command
         .output()
         .map_err(|error| miette::miette!("could not run cargo: {error}"))?;
     if !output.status.success() {
         return Err(miette::miette!(
-            "building the preset for `{triple}` failed: {}",
+            "building the preset for `{rust_target}` failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -355,7 +361,7 @@ fn build_target(
     }
     found.ok_or_else(|| {
         miette::miette!(
-            "cargo built nothing named `{binary_name}` for `{triple}`; a preset package has to \
+            "cargo built nothing named `{binary_name}` for `{rust_target}`; a preset package has to \
              produce one executable per target it supports"
         )
     })

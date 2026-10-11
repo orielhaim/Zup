@@ -15,7 +15,7 @@ use typed_path::{
     PathType, Utf8TypedComponent, Utf8TypedComponents, Utf8TypedPath, Utf8TypedPathBuf,
     Utf8UnixComponent, Utf8WindowsComponent, Utf8WindowsPath, Utf8WindowsPrefix,
 };
-use zup_core::{TargetOperatingSystem, TargetTriple};
+use zup_core::{Target, TargetOperatingSystem};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetPathError {
@@ -52,7 +52,7 @@ pub enum TargetPathError {
 /// [`equivalent`]: TargetPath::equivalent
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetPath {
-    target: TargetTriple,
+    target: Target,
     /// Canonical spelling: the target's own separators, no redundant or
     /// relative components, no trailing separator unless the path is a root.
     lexical: Utf8TypedPathBuf,
@@ -62,7 +62,7 @@ impl TargetPath {
     /// Bind `path` to `target`, or refuse it.
     pub fn new<T>(target: T, path: impl AsRef<str>) -> Result<Self, TargetPathError>
     where
-        T: Borrow<TargetTriple>,
+        T: Borrow<Target>,
     {
         let target = target.borrow();
         let raw = path.as_ref();
@@ -81,12 +81,12 @@ impl TargetPath {
         }
         let lexical = canonical(target, raw)?;
         Ok(Self {
-            target: target.clone(),
+            target: *target,
             lexical,
         })
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.target
     }
 
@@ -133,14 +133,14 @@ impl TargetPath {
                 path: suffix.to_owned(),
                 component: suffix.to_owned(),
             })?;
-        Self::new(&self.target, lexical.as_str())
+        Self::new(self.target, lexical.as_str())
     }
 
     /// The containing directory, or `None` at the target's root.
     pub fn parent(&self) -> Option<Self> {
         self.lexical
             .parent()
-            .and_then(|parent| Self::new(&self.target, parent.as_str()).ok())
+            .and_then(|parent| Self::new(self.target, parent.as_str()).ok())
     }
 
     /// The final component, or `None` when the path is a root.
@@ -208,7 +208,7 @@ impl TargetPath {
 /// at the target's root, but a prefix or a `..` of its own would relocate the
 /// path instead of extending it.
 pub(crate) fn suffix_components<'a>(
-    target: &TargetTriple,
+    target: &Target,
     text: &'a str,
 ) -> Result<Vec<&'a str>, &'a str> {
     let mut segments = Vec::new();
@@ -227,7 +227,7 @@ pub(crate) fn suffix_components<'a>(
 
 /// Whether `raw` names a location the target can install to, in its canonical
 /// spelling.
-fn canonical(target: &TargetTriple, raw: &str) -> Result<Utf8TypedPathBuf, TargetPathError> {
+fn canonical(target: &Target, raw: &str) -> Result<Utf8TypedPathBuf, TargetPathError> {
     let path = lexical(target, raw);
 
     if let Utf8TypedPath::Windows(windows) = path
@@ -280,7 +280,7 @@ fn is_installable_prefix(prefix: Utf8WindowsPrefix<'_>) -> bool {
 /// only chooses separators: the target's own between names, no trailing
 /// separator unless the target's root requires one, and the prefix verbatim so
 /// an authored drive letter keeps its case.
-fn assemble(target: &TargetTriple, components: Utf8TypedComponents<'_>) -> Utf8TypedPathBuf {
+fn assemble(target: &Target, components: Utf8TypedComponents<'_>) -> Utf8TypedPathBuf {
     let separator = separator(target);
     let mut text = String::new();
     let mut rooted = false;
@@ -318,7 +318,7 @@ fn assemble(target: &TargetTriple, components: Utf8TypedComponents<'_>) -> Utf8T
 }
 
 /// The separator this target spells its paths with.
-fn separator(target: &TargetTriple) -> &'static str {
+fn separator(target: &Target) -> &'static str {
     if target.operating_system() == TargetOperatingSystem::Windows {
         typed_path::constants::windows::SEPARATOR_STR
     } else {
@@ -326,7 +326,7 @@ fn separator(target: &TargetTriple) -> &'static str {
     }
 }
 
-fn lexical<'a>(target: &TargetTriple, raw: &'a str) -> Utf8TypedPath<'a> {
+fn lexical<'a>(target: &Target, raw: &'a str) -> Utf8TypedPath<'a> {
     Utf8TypedPath::new(
         raw,
         match target.operating_system() {
@@ -348,7 +348,7 @@ fn is_absolute(path: &Utf8TypedPath<'_>) -> bool {
 }
 
 /// Windows spells paths case-insensitively; every other target compares bytes.
-fn folds_case(target: &TargetTriple) -> bool {
+fn folds_case(target: &Target) -> bool {
     target.operating_system() == TargetOperatingSystem::Windows
 }
 
@@ -360,11 +360,7 @@ fn same_component(left: &str, right: &str, folds_case: bool) -> bool {
     }
 }
 
-fn components_match(
-    left: &Utf8TypedPathBuf,
-    right: &Utf8TypedPathBuf,
-    target: &TargetTriple,
-) -> bool {
+fn components_match(left: &Utf8TypedPathBuf, right: &Utf8TypedPathBuf, target: &Target) -> bool {
     let folds_case = folds_case(target);
     let mut left = left.to_path().components();
     let mut right = right.to_path().components();
@@ -405,7 +401,7 @@ impl<'de> Deserialize<'de> for TargetPath {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Raw {
-            target: TargetTriple,
+            target: Target,
             path: String,
         }
         let raw = Raw::deserialize(deserializer)?;

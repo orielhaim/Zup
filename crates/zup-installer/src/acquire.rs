@@ -73,7 +73,7 @@ impl Acquired {
             manifest: self.resolved.variant.manifest.digest,
             runtime: self.resolved.variant.runtime.map(|runtime| runtime.digest),
             version: self.resolved.descriptor.version.clone(),
-            target: self.resolved.variant.target.clone(),
+            target: self.resolved.variant.target,
             channel: self.channel.clone(),
             pinned: self.resolved.pinned,
             trust_anchor: self.trust_anchor,
@@ -383,8 +383,8 @@ mod tests {
     const LOGO: &[u8] = b"<svg/>";
     const HERO: &[u8] = b"\x89PNG\r\n";
 
-    fn target_triple() -> zup_core::TargetTriple {
-        zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target")
+    fn target_triple() -> zup_core::Target {
+        zup_core::Target::parse("windows-x64").expect("a target")
     }
 
     fn asset(name: &str, content: &[u8]) -> zup_core::PresetAsset {
@@ -434,8 +434,8 @@ mod tests {
         let manifest = zup_artifact::VariantManifest {
             schema: zup_artifact::VARIANT_MANIFEST_SCHEMA,
             required_features: zup_artifact::FEATURE_VARIANT_MANIFESTS,
-            target: target.clone(),
-            platform: zup_artifact::Platform::from_triple(&target),
+            target,
+            platform: zup_artifact::Platform::from_target(&target),
             frontend: zup_core::Frontend::Gui,
             runtime: Some(zup_artifact::Descriptor::of(
                 zup_artifact::MediaType::RUNTIME,
@@ -690,7 +690,7 @@ mod tests {
             manifest: Sha256Digest::from_bytes([3; 32]),
             runtime: None,
             version: version.to_owned(),
-            target: zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
+            target: zup_core::Target::parse("windows-x64").expect("valid"),
             channel: "stable".to_owned(),
             pinned: false,
             trust_anchor: Sha256Digest::from_bytes([4; 32]),

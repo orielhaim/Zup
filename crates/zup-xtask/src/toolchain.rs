@@ -137,7 +137,7 @@ fn stage_dispatcher(
         "--bin".to_owned(),
         (*binary).to_owned(),
         "--target".to_owned(),
-        dispatcher::TARGET.to_owned(),
+        dispatcher::TARGET.rust_triple().to_owned(),
         "--profile".to_owned(),
         profile.to_owned(),
     ];
@@ -146,7 +146,7 @@ fn stage_dispatcher(
         args.push((*feature).to_owned());
     }
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let built = target_directory(root, dispatcher::TARGET)
+    let built = target_directory(root, dispatcher::TARGET.rust_triple())
         .join(output_directory(profile))
         .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
     cargo_build(root, &args, LAUNCHER_PROFILE)?;
@@ -164,7 +164,7 @@ fn stage_dispatcher(
 
 fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>, String> {
     let component_target =
-        zup_core::TargetTriple::parse(target).map_err(|error| format!("`{target}`: {error}"))?;
+        zup_core::Target::parse(target).map_err(|error| format!("`{target}`: {error}"))?;
     match component_target.operating_system() {
         zup_core::TargetOperatingSystem::Linux => {
             build_cross_linux(root, profile, &component_target)
@@ -181,7 +181,7 @@ fn build_cross(root: &Path, profile: &str, target: &str) -> Result<Vec<PathBuf>,
 fn build_cross_linux(
     root: &Path,
     profile: &str,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<Vec<PathBuf>, String> {
     if target.architecture() != zup_core::TargetArchitecture::X86_64 {
         return Err(format!(
@@ -198,7 +198,7 @@ fn build_cross_linux(
             root,
             &[
                 "--target",
-                target.as_str(),
+                target.rust_triple(),
                 "-p",
                 INSTALLER_PACKAGE,
                 "--no-default-features",
@@ -210,11 +210,11 @@ fn build_cross_linux(
                 profile,
             ],
         )?;
-        let built = target_directory(root, target.as_str())
+        let built = target_directory(root, target.rust_triple())
             .join(output_directory(profile))
             .join(&binary);
         let component = zup_toolchain::ToolchainComponent::Runtime {
-            target: target.clone(),
+            target: *target,
             frontend: match frontend {
                 "console" => zup_core::Frontend::Console,
                 _ => zup_core::Frontend::Headless,
@@ -230,7 +230,7 @@ fn build_cross_linux(
 fn build_cross_windows(
     root: &Path,
     profile: &str,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<Vec<PathBuf>, String> {
     if target.operating_system() != zup_core::TargetOperatingSystem::Windows {
         return Err(format!("`{target}` is not a Windows target"));
@@ -256,7 +256,7 @@ fn build_cross_windows(
                         "--bin",
                         &binary,
                         "--target",
-                        target.as_str(),
+                        target.rust_triple(),
                         "--profile",
                         profile,
                     ],
@@ -268,7 +268,7 @@ fn build_cross_windows(
                          with `zup toolchain install <dir>` instead"
                     )
                 })?;
-                let built = target_directory(root, target.as_str())
+                let built = target_directory(root, target.rust_triple())
                     .join(output_directory(profile))
                     .join(format!("{binary}.exe"));
                 let staged_file = stage_component(&built, &staged, &component, &version)?;
@@ -301,7 +301,7 @@ fn build_cross_windows(
     Ok(written)
 }
 
-const SUPPORTED_CROSS_TARGET: &str = "x86_64-unknown-linux-gnu";
+const SUPPORTED_CROSS_TARGET: &str = "linux-x64";
 
 fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
     let mut command = Command::new(cargo_executable());
@@ -394,7 +394,7 @@ fn build_and_stage_preset(
             "--manifest",
             &root.join(PRESET_DIRECTORY).to_string_lossy(),
             "--build",
-            machine_suffix(),
+            zup_core::Target::host().as_str(),
             "--profile",
             profile,
             "--output",
@@ -435,24 +435,9 @@ fn output_directory(profile: &str) -> &str {
     }
 }
 
-fn machine_suffix() -> &'static str {
-    if cfg!(target_os = "windows") {
-        if cfg!(target_arch = "aarch64") {
-            "aarch64-pc-windows-msvc"
-        } else {
-            "x86_64-pc-windows-msvc"
-        }
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64-unknown-linux-gnu"
-    } else {
-        "x86_64-unknown-linux-gnu"
-    }
-}
-
 fn runtime_component(frontend: &str) -> zup_toolchain::ToolchainComponent {
     zup_toolchain::ToolchainComponent::Runtime {
-        target: zup_core::TargetTriple::parse(machine_suffix())
-            .expect("the host's own target triple is valid"),
+        target: zup_core::Target::host(),
         frontend: match frontend {
             "gui" => zup_core::Frontend::Gui,
             "console" => zup_core::Frontend::Console,
@@ -579,14 +564,14 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
 pub fn machine_target() -> String {
     let machine = zup_binary::BinaryArchitecture::host().unwrap_or_else(|| {
         panic!(
-            "this host runs on a machine zup has no Windows target triple for. A release has \
+            "this host runs on a machine zup has no Windows target for. A release has \
              to name a machine its components can run on, and there is no honest name for \
              one that has none."
         )
     });
     match machine {
-        zup_binary::BinaryArchitecture::X86_64 => "x86_64-pc-windows-msvc".to_owned(),
-        zup_binary::BinaryArchitecture::Arm64 => "aarch64-pc-windows-msvc".to_owned(),
+        zup_binary::BinaryArchitecture::X86_64 => zup_core::Target::WINDOWS_X64.to_string(),
+        zup_binary::BinaryArchitecture::Arm64 => zup_core::Target::WINDOWS_ARM64.to_string(),
         other => panic!(
             "{} is not a machine a Windows toolchain release targets",
             other
@@ -659,9 +644,7 @@ mod tests {
             format!("zup-preset-test{EXECUTABLE_SUFFIX}"),
             "the peer is named by the contract crate, so this test would notice it moving"
         );
-        let listed = zup_toolchain::host_components(
-            &zup_core::TargetTriple::parse(machine_suffix()).expect("a valid triple"),
-        );
+        let listed = zup_toolchain::host_components(&zup_core::Target::host());
         for component in &listed {
             assert_ne!(
                 zup_toolchain::file_name(component, EXECUTABLE_SUFFIX),
@@ -713,7 +696,7 @@ mod tests {
 
     #[test]
     fn a_cross_staged_linux_toolchain_is_named_by_its_target() {
-        let target = zup_core::TargetTriple::parse(SUPPORTED_CROSS_TARGET).expect("a Linux target");
+        let target = zup_core::Target::parse(SUPPORTED_CROSS_TARGET).expect("a Linux target");
         let wanted: Vec<String> = zup_toolchain::supported_components(&target)
             .iter()
             .map(|component| zup_toolchain::file_name(component, component_suffix(component)))
@@ -736,8 +719,7 @@ mod tests {
 
     #[test]
     fn the_stager_produces_exactly_the_components_the_contract_names() {
-        let target = zup_core::TargetTriple::parse(machine_suffix())
-            .expect("the host's own target triple is valid");
+        let target = zup_core::Target::host();
         let wanted: Vec<String> = zup_toolchain::supported_components(&target)
             .iter()
             .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))

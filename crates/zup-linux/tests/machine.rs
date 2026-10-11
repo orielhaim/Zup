@@ -10,8 +10,7 @@ use std::time::Duration;
 use zup_bundle::BundleWriter;
 use zup_core::{
     App, AppId, Frontend, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
-    RelativePath, ResolvedFile, SelectedScope, TargetBuildPlan, TargetTriple, Template,
-    hash_reader,
+    RelativePath, ResolvedFile, SelectedScope, Target, TargetBuildPlan, Template, hash_reader,
 };
 use zup_linux::test_support::{
     MachineTestRoots, compose_installer, drive_client_isolated, inert_template, machine_fixture,
@@ -28,8 +27,8 @@ use zup_protocol::{
 
 const HANDSHAKE: Duration = Duration::from_secs(30);
 
-fn linux_target() -> TargetTriple {
-    TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target")
+fn linux_target() -> Target {
+    Target::parse("linux-x64").expect("a Linux target")
 }
 
 fn app_id() -> AppId {
@@ -1123,7 +1122,7 @@ fn machine_forbidden_destination_is_refused_by_policy() {
                 main: None,
                 description: None,
             },
-            target: target.clone(),
+            target,
             frontend: Frontend::Console,
             updates: None,
             install: Install {

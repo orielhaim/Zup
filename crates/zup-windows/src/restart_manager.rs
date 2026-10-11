@@ -4,7 +4,7 @@ use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
 };
 use windows::core::PCWSTR;
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_exec::FileOperation;
 use zup_platform::TargetPath;
 
@@ -97,7 +97,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
 
 pub fn plan_mutating_paths(
     plan: &zup_transaction::TransactionPlan,
-    target: &TargetTriple,
+    target: &Target,
 ) -> Vec<PathBuf> {
     plan.nodes
         .iter()
@@ -115,7 +115,7 @@ pub fn plan_mutating_paths(
                     | zup_core::ResourceKey::Maintenance { destination, .. } => destination,
                     _ => return None,
                 };
-                let path = TargetPath::new(target.clone(), destination).ok()?;
+                let path = TargetPath::new(*target, destination).ok()?;
                 Some(host_path(&path))
             }
             zup_transaction::NodeKind::FileRemoval { .. } => node

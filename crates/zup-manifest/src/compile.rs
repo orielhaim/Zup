@@ -105,7 +105,7 @@ pub fn compile(
 
     Ok(Installer {
         app: view.app,
-        target: target.target.clone(),
+        target: target.target,
         frontend: target.frontend,
         preset: None,
         updates: None,
@@ -162,7 +162,7 @@ fn validate_resolved_target(
         manifest.frontend,
         &manifest.install,
         overrides,
-    );
+    )?;
     if resolved.target != expected.target {
         return Err(invalid(format!(
             "target is `{}`, expected `{}`",

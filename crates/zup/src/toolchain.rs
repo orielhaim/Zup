@@ -214,9 +214,9 @@ fn check(
     Ok(descriptor)
 }
 
-pub fn runtime_for(target: &zup_core::TargetTriple, frontend: Frontend) -> ToolchainComponent {
+pub fn runtime_for(target: &zup_core::Target, frontend: Frontend) -> ToolchainComponent {
     ToolchainComponent::Runtime {
-        target: target.clone(),
+        target: *target,
         frontend,
     }
 }
@@ -301,35 +301,31 @@ mod tests {
     #[test]
     fn a_component_is_stored_under_its_own_target_suffix() {
         let linux = runtime_for(
-            &zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("valid"),
+            &zup_core::Target::parse("linux-x64").expect("valid"),
             Frontend::Console,
         );
         let name = file_name_for(&linux);
         assert!(
-            name == "zup-setup-console-x86_64-unknown-linux-gnu",
+            name == "zup-setup-console-linux-x64",
             "a Linux template is extensionless even when resolved on a Windows host: {name}"
         );
         let windows = runtime_for(
-            &zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
+            &zup_core::Target::parse("windows-x64").expect("valid"),
             Frontend::Console,
         );
-        assert_eq!(
-            file_name_for(&windows),
-            "zup-setup-console-x86_64-pc-windows-msvc.exe"
-        );
+        assert_eq!(file_name_for(&windows), "zup-setup-console-windows-x64.exe");
     }
 
     #[test]
     fn a_missing_component_refusal_names_how_to_produce_one() {
         let component = runtime_for(
-            &zup_core::TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid"),
+            &zup_core::Target::parse("windows-x64").expect("valid"),
             Frontend::Gui,
         );
         let error = ResolveError::NotFound {
             kind: "runtime template",
             wanted: describe(&component),
-            searched: "C:/state/toolchain/0.1.0/zup-setup-gui-x86_64-pc-windows-msvc.exe"
-                .to_owned(),
+            searched: "C:/state/toolchain/0.1.0/zup-setup-gui-windows-x64.exe".to_owned(),
         };
         let message = missing_component_message(&component, &error);
         assert!(message.contains("cargo xtask toolchain build"), "{message}");
@@ -894,7 +890,7 @@ fn report(
         .collect();
     ToolchainStatus {
         zup_version: crate::ZUP_VERSION.to_owned(),
-        host: zup_plugin_contract::HOST_TARGET.to_owned(),
+        host: zup_core::Target::host().to_string(),
         cache: crate::plain_path(&cache),
         cache_populated: cache.is_dir(),
         other_versions: crate::toolchain::other_cached_versions_for_self(state_root),
@@ -903,8 +899,8 @@ fn report(
 }
 
 fn host_components() -> Vec<ToolchainComponent> {
-    let target = zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
-        .expect("the build host's own target triple is valid");
+    let target = zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
+        .expect("the build host's own target is valid");
     zup_toolchain::supported_components(&target)
 }
 
@@ -1090,7 +1086,7 @@ mod toolchain_cli_tests {
             .expect("a valid description");
             writer
                 .add_binary(
-                    zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
+                    zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
                         .expect("a valid target"),
                     b"a preset".to_vec(),
                 )
@@ -1134,8 +1130,8 @@ mod toolchain_cli_tests {
     fn release(root: &Path) -> PathBuf {
         let staged = root.join(format!("toolchain/{}", crate::ZUP_VERSION));
         std::fs::create_dir_all(&staged).expect("the staged directory");
-        let target = zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
-            .expect("a valid target");
+        let target =
+            zup_core::Target::parse(zup_plugin_contract::HOST_TARGET).expect("a valid target");
         let mut index = ToolchainRelease::new(crate::ZUP_VERSION, target.as_str());
         let cli_name = format!("zup{}", std::env::consts::EXE_SUFFIX);
         let cli = root.join(&cli_name);

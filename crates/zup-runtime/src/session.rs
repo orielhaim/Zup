@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use zup_bootstrap::BoundBootstrapPlan;
 use zup_bundle::PayloadSource;
-use zup_core::{AppId, ReleaseIdentity, SelectedScope, TargetTriple};
+use zup_core::{AppId, ReleaseIdentity, SelectedScope, Target};
 use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, TransactionId, TransactionPlan, TransactionStore,
 };
@@ -56,7 +56,7 @@ pub enum SessionError {
 
 #[derive(Clone)]
 pub struct RuntimeRequest {
-    pub target: TargetTriple,
+    pub target: Target,
     pub app_id: AppId,
     pub app_version: semver::Version,
     pub scope: SelectedScope,

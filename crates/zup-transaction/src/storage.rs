@@ -146,7 +146,7 @@ impl TransactionStore for FilesystemTransactionStore {
 
 use semver::Version;
 use sha2::{Digest, Sha256};
-use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
+use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
 
 pub const CONTENT_STORE_DIRECTORY: &str = ".zup-content";
 
@@ -158,7 +158,7 @@ pub struct ContentStoreIdentity {
     app_id: AppId,
     version: Version,
     scope: SelectedScope,
-    target: TargetTriple,
+    target: Target,
     artifact: Sha256Digest,
 }
 
@@ -167,7 +167,7 @@ impl ContentStoreIdentity {
         app_id: AppId,
         version: Version,
         scope: SelectedScope,
-        target: TargetTriple,
+        target: Target,
         artifact: Sha256Digest,
     ) -> Self {
         Self {
@@ -202,7 +202,7 @@ impl ContentStoreIdentity {
             .join(self.digest().to_hex())
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.target
     }
 
@@ -233,7 +233,7 @@ mod tests {
             AppId::new("com.acme.desktop").unwrap(),
             Version::parse("1.4.0").unwrap(),
             SelectedScope::User,
-            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            Target::parse("windows-x64").unwrap(),
             Sha256Digest::from_bytes([7; 32]),
         )
     }
@@ -247,35 +247,35 @@ mod tests {
                 base.app_id().clone(),
                 base.version().clone(),
                 base.scope(),
-                TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
+                Target::parse("windows-arm64").unwrap(),
                 Sha256Digest::from_bytes([7; 32]),
             ),
             ContentStoreIdentity::new(
                 base.app_id().clone(),
                 base.version().clone(),
                 base.scope(),
-                base.target().clone(),
+                *base.target(),
                 Sha256Digest::from_bytes([8; 32]),
             ),
             ContentStoreIdentity::new(
                 base.app_id().clone(),
                 base.version().clone(),
                 SelectedScope::Machine,
-                base.target().clone(),
+                *base.target(),
                 Sha256Digest::from_bytes([7; 32]),
             ),
             ContentStoreIdentity::new(
                 base.app_id().clone(),
                 Version::parse("1.5.0").unwrap(),
                 base.scope(),
-                base.target().clone(),
+                *base.target(),
                 Sha256Digest::from_bytes([7; 32]),
             ),
             ContentStoreIdentity::new(
                 AppId::new("com.acme.other").unwrap(),
                 base.version().clone(),
                 base.scope(),
-                base.target().clone(),
+                *base.target(),
                 Sha256Digest::from_bytes([7; 32]),
             ),
         ] {
@@ -290,7 +290,7 @@ mod tests {
             AppId::new("com.acme.desktopx").unwrap(),
             base.version().clone(),
             base.scope(),
-            base.target().clone(),
+            *base.target(),
             Sha256Digest::from_bytes([7; 32]),
         );
         assert_ne!(base.digest(), absorbed.digest());
@@ -384,14 +384,14 @@ mod installed_tests {
     use super::*;
     use semver::Version;
     use std::path::Path;
-    use zup_core::{AppId, SelectedScope, TargetTriple};
+    use zup_core::{AppId, SelectedScope, Target};
 
     fn app_id() -> AppId {
         AppId::new("com.acme.desktop").expect("a valid id")
     }
 
-    fn target() -> TargetTriple {
-        TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target")
+    fn target() -> Target {
+        Target::parse("windows-x64").expect("a target")
     }
 
     fn version(text: &str) -> Version {
@@ -443,7 +443,7 @@ mod installed_tests {
             &app_id(),
             SelectedScope::User,
             &version("1.4.0"),
-            TargetTriple::parse("x86_64-unknown-linux-gnu")
+            Target::parse("linux-x64")
                 .expect("a target")
                 .executable_suffix(),
         );

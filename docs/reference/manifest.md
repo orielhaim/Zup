@@ -55,10 +55,13 @@ Every project needs at least one target profile.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `target` | yes | canonical target triple |
+| `target` | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ... |
 | `source` | yes | `{ directory = "..." }` payload source |
 | `frontend` | no | target-specific frontend override |
 | `install` | no | target-specific install override |
+
+A profile named `windows-x64` needs no `target` field. A profile with any
+other name, such as `production`, sets `target = "windows-x64"`.
 
 ## `[build.artifacts.<id>]`
 

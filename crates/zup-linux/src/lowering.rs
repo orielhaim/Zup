@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::PathError;
-use zup_core::{TargetOperatingSystem, TargetTriple};
+use zup_core::{Target, TargetOperatingSystem};
 use zup_platform::TargetPath;
 
 const NAME_MAX: usize = 255;
@@ -25,7 +25,7 @@ pub fn to_host_path(path: &TargetPath) -> Result<PathBuf, PathError> {
     Ok(PathBuf::from(text))
 }
 
-pub fn target_path_from_host(path: &Path, target: &TargetTriple) -> Result<TargetPath, PathError> {
+pub fn target_path_from_host(path: &Path, target: &Target) -> Result<TargetPath, PathError> {
     let text = path.to_str().ok_or_else(|| PathError::InvalidComponent {
         component: path.display().to_string(),
         reason: "a path is not text".to_owned(),
@@ -36,7 +36,7 @@ pub fn target_path_from_host(path: &Path, target: &TargetTriple) -> Result<Targe
             reason: "a Linux path is separated by `/` and has no drive prefix".to_owned(),
         });
     }
-    TargetPath::new(target.clone(), text).map_err(PathError::Path)
+    TargetPath::new(*target, text).map_err(PathError::Path)
 }
 
 fn windows_shaped(text: &str) -> Option<&str> {
@@ -71,8 +71,8 @@ fn validate_component(name: &str) -> Result<(), PathError> {
 mod tests {
     use super::*;
 
-    fn linux() -> TargetTriple {
-        TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target")
+    fn linux() -> Target {
+        Target::parse("linux-x64").expect("a Linux target")
     }
 
     fn target_path(text: &str) -> TargetPath {
@@ -81,11 +81,8 @@ mod tests {
 
     #[test]
     fn refuses_non_linux_target_lowering() {
-        let windows = TargetPath::new(
-            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-            r"C:\Acme",
-        )
-        .expect("a canonical Windows path");
+        let windows = TargetPath::new(Target::parse("windows-x64").unwrap(), r"C:\Acme")
+            .expect("a canonical Windows path");
         assert!(matches!(
             to_host_path(&windows),
             Err(PathError::UnsupportedTarget { .. })

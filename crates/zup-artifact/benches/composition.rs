@@ -17,16 +17,16 @@ use zup_artifact::{
 };
 use zup_core::{
     App, AppId, Component, FileMapping, Frontend, Install, InstallDirectory, InstallScope,
-    NonEmptyString, RelativePath, ResolvedTargetConfig, TargetProfileId, TargetTriple, Template,
+    NonEmptyString, RelativePath, ResolvedTargetConfig, Target, TargetProfileId, Template,
     UpdateConfig,
 };
 use zup_plugin_contract::{AOT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
 
 /// The three machines a Windows application is usually built for.
 const TARGETS: &[(&str, &str, u64)] = &[
-    ("windows-x86", "i686-pc-windows-msvc", 1),
-    ("windows-x64", "x86_64-pc-windows-msvc", 2),
-    ("windows-arm64", "aarch64-pc-windows-msvc", 3),
+    ("windows-x86", "windows-x86", 1),
+    ("windows-x64", "windows-x64", 2),
+    ("windows-arm64", "windows-arm64", 3),
 ];
 
 /// A managed runtime, an asset bundle, and a licence, in mebibytes. This is the
@@ -97,7 +97,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
     let source = root.join(profile);
     let resolved = ResolvedTargetConfig {
         profile: TargetProfileId::new(profile).unwrap(),
-        target: TargetTriple::parse(target).unwrap(),
+        target: Target::parse(target).unwrap(),
         source: zup_core::Source::new(source.clone()).unwrap(),
         frontend: Frontend::Console,
         install: install(),
@@ -161,7 +161,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             plugin_id: zup_core::PluginId::new("acme-plugins").unwrap(),
             source_size: 16,
             source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
-            target: resolved.target.clone(),
+            target: resolved.target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -187,7 +187,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
         &zup_build::TargetBuildPlan {
             installer: zup_core::Installer {
                 app: app(),
-                target: resolved.target.clone(),
+                target: resolved.target,
                 frontend: Frontend::Console,
                 preset: None,
                 updates: Some(updates()),

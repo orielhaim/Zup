@@ -5,7 +5,7 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildError, FilePattern, Sha256Digest, Writes, materialize};
-use zup_core::{MAX_PLUGIN_ARTIFACTS, TargetTriple};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, Target};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 
 fn write_file(path: &Path, contents: &[u8]) {
@@ -36,7 +36,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 
 [install]
@@ -529,11 +529,11 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -614,7 +614,7 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
             .iter()
             .map(|target| target.installer.target.as_str())
             .collect::<Vec<_>>(),
-        ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        ["linux-arm64", "windows-x64"]
     );
     let linux = &plan.targets[0];
     let windows = &plan.targets[1];
@@ -639,7 +639,7 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
     assert_eq!(windows.icons.artifacts.len(), 1);
     assert!(!windows.icons.artifacts[0].executable_group.is_empty());
     assert_eq!(
-        plan.target_by_triple(&TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()),
+        plan.by_target(&Target::parse("windows-x64").unwrap()),
         Some(windows)
     );
 }
@@ -741,13 +741,13 @@ fn selection_errors_are_rejected_before_filesystem_access() {
     assert!(matches!(error, BuildError::DuplicateTargetProfile { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
-    selected[1].0.target = selected[0].0.target.clone();
-    selected[1].1.target = selected[1].0.target.clone();
+    selected[1].0.target = selected[0].0.target;
+    selected[1].1.target = selected[1].0.target;
     let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::DuplicateTarget { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
-    selected[0].1.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
+    selected[0].1.target = Target::parse("windows-arm64").unwrap();
     let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::TargetMismatch { .. }));
 }

@@ -43,7 +43,7 @@ pub const VARIANT_CONFIG_SCHEMA: u32 = 1;
 pub struct VariantConfig {
     pub schema: u32,
     pub id: String,
-    pub target: zup_core::TargetTriple,
+    pub target: zup_core::Target,
     pub platform: Platform,
     pub frontend: zup_core::Frontend,
     pub requirements: VariantRequirements,
@@ -103,7 +103,7 @@ pub fn to_oci(graph: &ArtifactGraph) -> Result<OciLayout, ArtifactError> {
         let config = VariantConfig {
             schema: VARIANT_CONFIG_SCHEMA,
             id: variant.id.clone(),
-            target: variant.target.clone(),
+            target: variant.target,
             platform: variant.platform.clone(),
             frontend: variant.frontend,
             requirements: variant.requirements.clone(),

@@ -1209,7 +1209,7 @@ mod tests {
     }
 
     fn isolated_binary(dir: &tempfile::TempDir) -> (zup_platform::TargetPath, PathBuf) {
-        let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
+        let target = zup_core::Target::parse("linux-x64").unwrap();
         let host = dir.path().join("opt").join("acme").join("tool");
         std::fs::create_dir_all(host.parent().unwrap()).unwrap();
         std::fs::write(&host, b"elf").unwrap();

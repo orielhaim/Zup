@@ -119,7 +119,7 @@ fn application() -> Application {
 }
 
 fn target() -> Target {
-    Target::new("windows-x64", "x86_64-pc-windows-msvc")
+    Target::new("windows-x64", "windows-x64")
 }
 
 fn digest(byte: char) -> Digest {
@@ -134,7 +134,7 @@ fn artifact(path: &str, kind: &'static str, mode: &'static str, size: u64) -> Ar
         kind: Identifier::fixed(kind),
         mode: Identifier::fixed(mode),
         id: Some("windows-x64".to_owned()),
-        target: Some("x86_64-pc-windows-msvc".to_owned()),
+        target: Some("windows-x64".to_owned()),
         variants: None,
         signing: None,
     }
@@ -178,7 +178,7 @@ fn check_not_composable() -> AutomationResult {
         .with_application(application())
         .with_targets(vec![
             target(),
-            Target::new("windows-arm64", "aarch64-pc-windows-msvc"),
+            Target::new("windows-arm64", "windows-arm64"),
         ])
         .with_diagnostic(
             Diagnostic::warning(
@@ -221,18 +221,18 @@ fn doctor() -> AutomationResult {
         ))
         .with_details(Details::Doctor(DoctorDetails {
             manifest: "zup.toml".to_owned(),
-            host: "x86_64-pc-windows-msvc".to_owned(),
+            host: "windows-x64".to_owned(),
             ready: false,
             checks: 3,
             targets: vec![DoctorTarget::new(
                 "default",
-                "x86_64-pc-windows-msvc",
+                "windows-x64",
                 Identifier::fixed("fail"),
                 vec![
                     DoctorCheck::new(
                         Identifier::fixed("canonical_target"),
                         Identifier::fixed("pass"),
-                        "canonical target is `x86_64-pc-windows-msvc`",
+                        "canonical target is `windows-x64`",
                         None,
                     ),
                     DoctorCheck::new(
@@ -404,7 +404,7 @@ fn artifact_inspect() -> AutomationResult {
             subsystem: "console".to_owned(),
             variants: vec![InspectedVariant {
                 id: "windows-x64".to_owned(),
-                target: "x86_64-pc-windows-msvc".to_owned(),
+                target: "windows-x64".to_owned(),
                 frontend: "gui".to_owned(),
                 logical_size: ByteCount::new(248_512_896),
                 file_count: 1,
@@ -436,11 +436,11 @@ fn toolchain_status() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_STATUS)
         .with_details(Details::ToolchainStatus(ToolchainStatusDetails {
             zup_version: "0.0.1".to_owned(),
-            host: "x86_64-pc-windows-msvc".to_owned(),
+            host: "windows-x64".to_owned(),
             cache: "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1".to_owned(),
             complete: false,
             components: vec![ToolchainComponentStatus {
-                component: "runtime gui for x86_64-pc-windows-msvc".to_owned(),
+                component: "runtime gui for windows-x64".to_owned(),
                 found: false,
                 source: None,
                 path: None,

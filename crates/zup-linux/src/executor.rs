@@ -163,13 +163,12 @@ impl LinuxFileExecutor {
                     });
                 }
             };
-            let destination =
-                TargetPath::new(plan.target.clone(), destination_text).map_err(|error| {
-                    ExecError::PlanDrift {
-                        path: destination_text.clone(),
-                        reason: error.to_string(),
-                    }
-                })?;
+            let destination = TargetPath::new(plan.target, destination_text).map_err(|error| {
+                ExecError::PlanDrift {
+                    path: destination_text.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
             let host_path = to_host_path(&destination).map_err(|error| ExecError::PlanDrift {
                 path: destination_text.clone(),
                 reason: error.to_string(),
@@ -1027,14 +1026,12 @@ fn as_target(
     anchor: &zup_platform::TargetPath,
     host_path: &Path,
 ) -> Result<zup_platform::TargetPath, ExecError> {
-    zup_platform::TargetPath::new(
-        anchor.target().clone(),
-        host_path.to_string_lossy().as_ref(),
+    zup_platform::TargetPath::new(*anchor.target(), host_path.to_string_lossy().as_ref()).map_err(
+        |error| ExecError::PlanDrift {
+            path: host_path.display().to_string(),
+            reason: error.to_string(),
+        },
     )
-    .map_err(|error| ExecError::PlanDrift {
-        path: host_path.display().to_string(),
-        reason: error.to_string(),
-    })
 }
 
 fn staged_name(id: &OperationId) -> String {
@@ -1373,10 +1370,10 @@ fn observe_file(file: &zup_platform::TargetFile) -> ObservedFileState {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use zup_core::{AppId, NonEmptyString, Privilege, RelativePath, SelectedScope, TargetTriple};
+    use zup_core::{AppId, NonEmptyString, Privilege, RelativePath, SelectedScope, Target};
 
     fn target_with(files: Vec<(String, zup_platform::TargetPath)>) -> zup_platform::TargetPlan {
-        let target = TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
+        let target = Target::parse("linux-x64").expect("a target");
         zup_platform::TargetPlan {
             app: zup_core::App {
                 id: AppId::new("com.example.tool").expect("an id"),
@@ -1386,7 +1383,7 @@ mod snapshot_tests {
                 main: None,
                 description: None,
             },
-            target: target.clone(),
+            target,
             scope: SelectedScope::User,
             install_directory: zup_platform::TargetPath::new(target, "/tmp/zup-snapshot-test/tool")
                 .expect("a path"),
@@ -1426,7 +1423,7 @@ mod snapshot_tests {
 
     fn destination(root: &std::path::Path, name: &str) -> zup_platform::TargetPath {
         zup_platform::TargetPath::new(
-            TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target"),
+            Target::parse("linux-x64").expect("a target"),
             root.join(name).to_string_lossy(),
         )
         .expect("a path")

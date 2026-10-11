@@ -6,7 +6,7 @@ use miette::Diagnostic;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zup_core::{AppId, SelectedScope, Sha256Digest, TargetTriple};
+use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
 
 use crate::id::{OperationId, TransactionId};
 use crate::plan::TransactionPlan;
@@ -116,7 +116,7 @@ pub struct TransactionRecord {
     pub transaction_id: TransactionId,
     pub app_id: AppId,
     pub scope: SelectedScope,
-    pub target: TargetTriple,
+    pub target: Target,
     pub app_version: Version,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -136,7 +136,7 @@ impl TransactionRecord {
         plan: TransactionPlan,
     ) -> Self {
         let now = Timestamp::now();
-        let target = plan.target.clone();
+        let target = plan.target;
         let plan_hash = plan.fingerprint();
         let mut nodes = BTreeMap::new();
         for node in &plan.nodes {

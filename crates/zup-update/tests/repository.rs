@@ -85,8 +85,8 @@ fn content(sizes: &[usize]) -> Content {
     }
 }
 
-fn target(architecture: &str) -> zup_core::TargetTriple {
-    zup_core::TargetTriple::parse(format!("{architecture}-pc-windows-msvc"))
+fn target(architecture: &str) -> zup_core::Target {
+    zup_core::Target::parse(format!("{architecture}-pc-windows-msvc"))
         .expect("the fixture triple parses")
 }
 

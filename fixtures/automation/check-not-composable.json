@@ -10,11 +10,11 @@
   "targets": [
     {
       "profile": "windows-x64",
-      "target": "x86_64-pc-windows-msvc"
+      "target": "windows-x64"
     },
     {
       "profile": "windows-arm64",
-      "target": "aarch64-pc-windows-msvc"
+      "target": "windows-arm64"
     }
   ],
   "artifacts": [],

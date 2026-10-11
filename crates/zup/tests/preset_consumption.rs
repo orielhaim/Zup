@@ -16,7 +16,7 @@ use sha2::Digest;
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::{
     Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, TargetTriple, Template,
+    NonEmptyString, Target, Template,
 };
 use zup_platform::PortableSourceFilePolicy;
 use zup_preset_compose::{PresetProblem, asset_settings, select, validate_settings};
@@ -24,8 +24,8 @@ use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
-fn target(name: &str) -> TargetTriple {
-    TargetTriple::parse(name).expect("a valid target triple")
+fn target(name: &str) -> Target {
+    Target::parse(name).expect("a valid target")
 }
 
 /// The settings schema a real preset generates, including one setting that names
@@ -202,23 +202,26 @@ fn a_damaged_package_is_refused_before_anything_is_read_from_it() {
 /// author guessing.
 ///
 /// The missing target is one neither host carries: the package holds this
-/// host's triple plus one foreign one, so the refusal names both on every
+/// host's target plus one foreign one, so the refusal names both on every
 /// machine the suite runs on.
 #[test]
 fn a_target_the_package_does_not_carry_names_what_it_has() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
+    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
     let error = select(
         &path,
         &installer(),
-        &target("aarch64-unknown-linux-gnu"),
+        &target("linux-arm64"),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
     .expect_err("this package has no such binary");
     let message = error.to_string();
-    assert!(message.contains("aarch64-unknown-linux-gnu"), "{message}");
-    assert!(message.contains(HOST), "{message}");
-    assert!(message.contains("aarch64-apple-darwin"), "{message}");
+    let host = Target::parse(HOST)
+        .expect("the host target parses")
+        .to_string();
+    assert!(message.contains("linux-arm64"), "{message}");
+    assert!(message.contains(&host), "{message}");
+    assert!(message.contains("windows-arm64"), "{message}");
 }
 
 /// A preset built against another wire protocol is its own refusal, distinct from
@@ -594,14 +597,14 @@ fn changed_asset_bytes_change_the_digest() {
 #[test]
 fn a_build_and_an_inspector_read_one_package() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
+    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
     let view = PresetPackageView::open(std::fs::read(&path).expect("read")).expect("opens");
     view.verify().expect("verifies");
 
     let selected = select(
         &path,
         &installer(),
-        &target("aarch64-apple-darwin"),
+        &target("windows-arm64"),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
     .expect("selected");

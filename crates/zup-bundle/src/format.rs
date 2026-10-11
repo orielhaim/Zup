@@ -26,7 +26,7 @@ use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, Tar
 pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 use zup_core::{
     ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
-    RelativePath, Sha256Digest, TargetTriple, Template, hash_reader,
+    RelativePath, Sha256Digest, Target, Template, hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -87,10 +87,7 @@ pub enum PackageError {
         digest: String,
     },
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
-    TargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    TargetMismatch { expected: Target, found: Target },
     #[error("plugin artifact is invalid: {0}")]
     PluginArtifact(String),
 }
@@ -101,7 +98,7 @@ pub struct PluginArtifact {
     pub plugin_id: PluginId,
     pub source_size: u64,
     pub source_sha256: Sha256Digest,
-    pub target: TargetTriple,
+    pub target: Target,
     pub wasmtime_version: String,
     pub aot_format_version: u32,
     pub plugin_api_version: String,
@@ -152,10 +149,10 @@ impl PluginArtifact {
                 "WIT digest does not match the contract".to_owned(),
             ));
         }
-        zup_plugin_contract::PluginEngine::new(self.target.as_str())
+        zup_plugin_contract::PluginEngine::new(self.target.rust_triple())
             .map_err(|error| PackageError::PluginArtifact(error.to_string()))?;
         if self.engine_fingerprint
-            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.as_str()).as_bytes())
+            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.rust_triple()).as_bytes())
         {
             return Err(PackageError::PluginArtifact(
                 "engine fingerprint does not match the target".to_owned(),
@@ -1076,13 +1073,13 @@ fn parse_metadata(
 }
 
 fn validate_plugin_target(
-    expected: &TargetTriple,
+    expected: &Target,
     artifact: &PluginArtifact,
 ) -> Result<(), PackageError> {
     if artifact.target != *expected {
         return Err(PackageError::TargetMismatch {
-            expected: expected.clone(),
-            found: artifact.target.clone(),
+            expected: *expected,
+            found: artifact.target,
         });
     }
     Ok(())
@@ -1859,7 +1856,7 @@ mod tests {
                     main: None,
                     description: None,
                 },
-                target: TargetTriple::parse(HOST_TARGET).unwrap(),
+                target: Target::parse(HOST_TARGET).unwrap(),
                 frontend: Default::default(),
                 preset: None,
                 updates: None,
@@ -1905,7 +1902,7 @@ mod tests {
                 plugin_id: PluginId::new(id).unwrap(),
                 source_size: 1,
                 source_sha256: digest,
-                target: TargetTriple::parse(HOST_TARGET).unwrap(),
+                target: Target::parse(HOST_TARGET).unwrap(),
                 wasmtime_version: WASMTIME_VERSION.to_owned(),
                 aot_format_version: AOT_FORMAT_VERSION,
                 plugin_api_version: PLUGIN_API_VERSION.to_owned(),

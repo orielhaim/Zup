@@ -34,7 +34,7 @@ pub mod preset {
         Installed {
             directory: &'a Path,
             runtime: &'a zup_core::InstalledPreset,
-            target: &'a zup_core::TargetTriple,
+            target: &'a zup_core::Target,
         },
     }
 
@@ -207,7 +207,7 @@ pub enum PresetSource {
     Installed {
         runtime: zup_core::InstalledPreset,
         directory: PathBuf,
-        target: zup_core::TargetTriple,
+        target: zup_core::Target,
     },
 }
 

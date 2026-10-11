@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_exec::ObservedLauncherState;
 use zup_platform::TargetPath;
 
@@ -24,7 +24,7 @@ fn unreadable(path: &Path, reason: impl std::fmt::Display) -> ShellLinkError {
 
 pub fn load_shortcut(
     path: &Path,
-    target_triple: &TargetTriple,
+    target_triple: &Target,
 ) -> Result<ObservedLauncherState, ShellLinkError> {
     let link = match lnks::Shortcut::load(path) {
         Ok(link) => link,

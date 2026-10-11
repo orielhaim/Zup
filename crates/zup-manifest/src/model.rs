@@ -327,7 +327,7 @@ pub struct GithubWorkflow {
     /// The runner that composes the final artifacts.
     pub compose_runner: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    /// Runner labels the project pinned itself, by target triple.
+    /// Runner labels the project pinned itself, by Zup target.
     pub runners: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// The directory the release is composed in.

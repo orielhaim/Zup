@@ -2,8 +2,8 @@
 pub mod fake;
 
 use zup_core::{
-    BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest,
-    TargetTriple, hash_reader,
+    BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target,
+    hash_reader,
 };
 use zup_platform::TargetPath;
 use zup_transaction::{
@@ -11,8 +11,8 @@ use zup_transaction::{
     TransactionInput, TransactionPlan, compile_transaction,
 };
 
-pub fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+pub fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 pub fn tpath(value: &str) -> TargetPath {

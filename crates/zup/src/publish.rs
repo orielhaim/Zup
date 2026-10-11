@@ -1351,13 +1351,14 @@ fn search_tree(web: Option<&Path>, asset: &str, original: &str) -> miette::Resul
     })
 }
 
-pub fn matrix(manifest: &zup_manifest::Manifest) -> Vec<MatrixTarget> {
-    manifest
-        .build
-        .targets
+pub fn matrix(manifest: &zup_manifest::Manifest) -> miette::Result<Vec<MatrixTarget>> {
+    let selected =
+        zup_manifest::select_targets(manifest, &[], &zup_manifest::TargetOverrides::default())
+            .map_err(|error| miette::miette!("{error}"))?;
+    Ok(selected
         .iter()
-        .map(|(profile, target)| MatrixTarget::new(profile.as_str(), target.target.as_str()))
-        .collect()
+        .map(|target| MatrixTarget::new(target.profile.as_str(), target.target))
+        .collect())
 }
 
 pub fn workflow(
@@ -1366,12 +1367,18 @@ pub fn workflow(
     config: &PublishConfig,
 ) -> miette::Result<zup_publish_github::Freshness> {
     let policy: &WorkflowPolicy = &config.workflow;
-    let targets = matrix(manifest);
+    let targets = matrix(manifest)?;
     Ok(zup_publish_github::check(root, policy, &targets))
 }
 
-pub fn render_workflow(manifest: &zup_manifest::Manifest, config: &PublishConfig) -> String {
-    zup_publish_github::generate(&config.workflow, &matrix(manifest))
+pub fn render_workflow(
+    manifest: &zup_manifest::Manifest,
+    config: &PublishConfig,
+) -> miette::Result<String> {
+    Ok(zup_publish_github::generate(
+        &config.workflow,
+        &matrix(manifest)?,
+    ))
 }
 
 pub fn preview_tag(manifest: &zup_manifest::Manifest, config: &PublishConfig) -> String {

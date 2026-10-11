@@ -6,14 +6,14 @@ use crate::model::{
     PathEntry, PluginBinding, Protocol, Service,
 };
 use crate::prerequisite::Prerequisite;
-use crate::target::TargetTriple;
+use crate::target::Target;
 use crate::{NonEmptyString, Sha256Digest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installer {
     pub app: App,
-    pub target: TargetTriple,
+    pub target: Target,
     #[serde(default)]
     pub frontend: Frontend,
     #[serde(default, skip_serializing_if = "Option::is_none")]

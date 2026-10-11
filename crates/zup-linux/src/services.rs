@@ -331,7 +331,7 @@ mod tests {
     use super::*;
 
     fn service(id: &str, executable: &str, args: Vec<&str>, start: ServiceStart) -> TargetService {
-        let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
+        let target = zup_core::Target::parse("linux-x64").unwrap();
         TargetService {
             key: zup_core::ResourceKey::Service {
                 id: ServiceId::new(id).unwrap(),

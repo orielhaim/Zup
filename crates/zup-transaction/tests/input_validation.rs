@@ -11,8 +11,8 @@ use zup_transaction::{
 
 use common::{digest, target, tpath};
 
-fn other_target() -> zup_core::TargetTriple {
-    zup_core::TargetTriple::parse("aarch64-unknown-linux-gnu").unwrap()
+fn other_target() -> zup_core::Target {
+    zup_core::Target::parse("linux-arm64").unwrap()
 }
 
 fn file_key(name: &str) -> ResourceKey {

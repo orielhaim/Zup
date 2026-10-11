@@ -6,9 +6,9 @@ use thiserror::Error;
 use typed_path::{Utf8Component, Utf8WindowsComponent};
 
 use crate::shortcut_name::is_reserved_device_stem;
-use zup_core::TargetOperatingSystem;
 #[cfg(windows)]
-use zup_core::TargetTriple;
+use zup_core::Target;
+use zup_core::TargetOperatingSystem;
 use zup_platform::TargetPath;
 #[cfg(windows)]
 use zup_platform::TargetPathError;
@@ -69,9 +69,9 @@ pub(crate) fn host_path(path: &TargetPath) -> PathBuf {
 #[cfg(windows)]
 pub(crate) fn target_path_from_host(
     path: &Path,
-    target: &TargetTriple,
+    target: &Target,
 ) -> Result<TargetPath, TargetPathError> {
-    TargetPath::new(target.clone(), crate::machine_state::plain_path_text(path))
+    TargetPath::new(*target, crate::machine_state::plain_path_text(path))
 }
 
 fn validate_component(
@@ -102,10 +102,10 @@ fn validate_component(
 mod tests {
     use super::*;
     use rstest::rstest;
-    use zup_core::TargetTriple;
+    use zup_core::Target;
 
     fn target_path(path: &str) -> TargetPath {
-        TargetPath::new(TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(), path).unwrap()
+        TargetPath::new(Target::parse("windows-x64").unwrap(), path).unwrap()
     }
 
     #[test]
@@ -119,11 +119,7 @@ mod tests {
 
     #[test]
     fn refuses_non_windows_target_lowering() {
-        let path = TargetPath::new(
-            TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap(),
-            "/opt/acme",
-        )
-        .unwrap();
+        let path = TargetPath::new(Target::parse("linux-x64").unwrap(), "/opt/acme").unwrap();
         assert!(matches!(
             to_host_path(&path),
             Err(TargetPathLoweringError::UnsupportedTarget { .. })
@@ -167,23 +163,23 @@ mod tests {
     #[case(r"\\?\UNC\server\share")]
     #[case(r"\\??\C:\Windows")]
     fn device_paths_are_rejected_at_the_target_path_boundary(#[case] path: &str) {
-        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
-        assert!(TargetPath::new(&target, path).is_err());
+        let target = Target::parse("windows-x64").unwrap();
+        assert!(TargetPath::new(target, path).is_err());
     }
 
     #[test]
     fn identity_ignores_case_and_separator_spelling() {
-        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let target = Target::parse("windows-x64").unwrap();
         assert_eq!(
             windows_target_path_identity(&target_path(r"C:\Apps\Acme")),
-            windows_target_path_identity(&TargetPath::new(&target, r"c:/apps/acme").unwrap()),
+            windows_target_path_identity(&TargetPath::new(target, r"c:/apps/acme").unwrap()),
         );
     }
 
     #[cfg(windows)]
     #[test]
     fn strips_extended_host_prefix_before_target_parsing() {
-        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let target = Target::parse("windows-x64").unwrap();
         let path = target_path_from_host(Path::new(r"\\?\C:\Program Files\Acme"), &target).unwrap();
         assert_eq!(path.as_str(), r"C:\Program Files\Acme");
     }

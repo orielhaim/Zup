@@ -90,7 +90,7 @@ fn root_of(manifest: &Path) -> PathBuf {
 fn generate(args: CiGithubGenerateCommand) -> miette::Result<()> {
     let manifest = load(&args.manifest)?;
     let config = zup_publish_github::PublishConfig::resolve(&manifest)?;
-    let rendered = publish::render_workflow(&manifest, &config);
+    let rendered = publish::render_workflow(&manifest, &config)?;
     let root = root_of(&args.manifest);
     let path = args
         .output
@@ -132,7 +132,7 @@ fn generate(args: CiGithubGenerateCommand) -> miette::Result<()> {
     std::fs::write(&path, &rendered)
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
     println!("Wrote {}", path.display());
-    println!("  Targets     {}", publish::matrix(&manifest).len());
+    println!("  Targets     {}", publish::matrix(&manifest)?.len());
     println!("  Tag         {}", publish::preview_tag(&manifest, &config));
     println!(
         "  Attest      {}",
@@ -161,13 +161,13 @@ fn check(args: CiGithubCheckCommand) -> miette::Result<()> {
         current: freshness.current,
         detail: freshness.detail.clone(),
         tag: publish::preview_tag(&manifest, &config),
-        profiles: publish::matrix(&manifest)
+        profiles: publish::matrix(&manifest)?
             .iter()
             .map(|target| {
-                let native = zup_publish_github::native_runner(&target.triple);
+                let native = zup_publish_github::native_runner(target.target);
                 Profile {
                     profile: target.profile.clone(),
-                    target: target.triple.clone(),
+                    target: target.target.to_string(),
                     runner: native
                         .map(|runner| runner.label().to_owned())
                         .unwrap_or_else(|| "cross-compiled".to_owned()),

@@ -11,11 +11,11 @@ use zup_artifact::ArtifactError;
 use zup_artifact::preset::{
     HEADER_BYTES, PresetPackageView, PresetPackageWriter, decode_metadata, encode_metadata,
 };
-use zup_core::{Sha256Digest, TargetTriple};
+use zup_core::{Sha256Digest, Target};
 use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
-fn target(name: &str) -> TargetTriple {
-    TargetTriple::parse(name).expect("a valid target triple")
+fn target(name: &str) -> Target {
+    Target::parse(name).expect("a valid target")
 }
 
 fn description() -> PresetDescription {
@@ -41,27 +41,27 @@ fn packed(targets: &[&str]) -> Vec<u8> {
 
 #[test]
 fn a_binary_is_addressable_by_target() {
-    let bytes = packed(&["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]);
+    let bytes = packed(&["windows-x64", "windows-arm64"]);
     let view = PresetPackageView::open(bytes).expect("a package reads back");
     let windows = view
-        .binary_for(&target("x86_64-pc-windows-msvc"))
+        .binary_for(&target("windows-x64"))
         .expect("the windows binary is present");
     assert_eq!(
         String::from_utf8_lossy(&windows),
-        "native preset for x86_64-pc-windows-msvc".repeat(64)
+        "native preset for windows-x64".repeat(64)
     );
 }
 
 #[test]
 fn a_missing_target_names_the_ones_there_are() {
-    let view = PresetPackageView::open(packed(&["x86_64-pc-windows-msvc"])).expect("a package");
+    let view = PresetPackageView::open(packed(&["windows-x64"])).expect("a package");
     let error = view
-        .binary_for(&target("aarch64-apple-darwin"))
+        .binary_for(&target("windows-arm64"))
         .expect_err("no binary for an unbuilt target");
     let message = error.to_string();
-    assert!(message.contains("aarch64-apple-darwin"), "{message}");
+    assert!(message.contains("windows-arm64"), "{message}");
     assert!(
-        message.contains("x86_64-pc-windows-msvc"),
+        message.contains("windows-x64"),
         "the message names what the package does carry: {message}"
     );
 }
@@ -70,15 +70,12 @@ fn a_missing_target_names_the_ones_there_are() {
 fn the_same_target_twice_is_refused() {
     let mut writer = PresetPackageWriter::new(description()).expect("a description");
     writer
-        .add_binary(target("x86_64-pc-windows-msvc"), b"one".to_vec())
+        .add_binary(target("windows-x64"), b"one".to_vec())
         .expect("the first binary");
     let error = writer
-        .add_binary(target("x86_64-pc-windows-msvc"), b"two".to_vec())
+        .add_binary(target("windows-x64"), b"two".to_vec())
         .expect_err("a second binary for the same target");
-    assert!(
-        error.to_string().contains("x86_64-pc-windows-msvc"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("windows-x64"), "{error}");
 }
 
 /// Two targets can be built from the same bytes. The package stores those bytes
@@ -89,10 +86,10 @@ fn two_targets_with_identical_bytes_store_the_binary_once() {
     let mut writer = PresetPackageWriter::new(description()).expect("a valid description");
     let shared = b"one binary, two targets".repeat(64).to_vec();
     writer
-        .add_binary(target("x86_64-pc-windows-msvc"), shared.clone())
+        .add_binary(target("windows-x64"), shared.clone())
         .expect("the first target");
     writer
-        .add_binary(target("x86_64-apple-darwin"), shared.clone())
+        .add_binary(target("windows-x86"), shared.clone())
         .expect("the second target");
     let bytes = writer
         .finish()
@@ -101,7 +98,7 @@ fn two_targets_with_identical_bytes_store_the_binary_once() {
     let view = PresetPackageView::open(bytes).expect("a package reads back");
     assert_eq!(view.package().blobs.len(), 1, "stored once");
     assert_eq!(view.package().binaries.len(), 2, "one entry per target");
-    for name in ["x86_64-pc-windows-msvc", "x86_64-apple-darwin"] {
+    for name in ["windows-x64", "windows-x86"] {
         assert_eq!(
             view.binary_for(&target(name)).expect("the binary"),
             shared,
@@ -126,7 +123,7 @@ fn a_file_that_is_not_a_package_is_refused() {
 
 #[test]
 fn a_truncated_package_is_refused() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let bytes = packed(&["windows-x64"]);
     let error = PresetPackageView::open(bytes[..bytes.len() - 1].to_vec())
         .expect_err("a package missing its last byte");
     assert!(matches!(
@@ -137,7 +134,7 @@ fn a_truncated_package_is_refused() {
 
 #[test]
 fn a_package_with_bytes_after_its_content_is_refused() {
-    let mut bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let mut bytes = packed(&["windows-x64"]);
     bytes.extend_from_slice(b"extra");
     let error = PresetPackageView::open(bytes).expect_err("a package with trailing bytes");
     assert!(matches!(
@@ -151,7 +148,7 @@ fn a_package_with_bytes_after_its_content_is_refused() {
 /// An unsupported schema is refused at the header, before anything is read.
 #[test]
 fn an_unsupported_schema_in_the_header_is_refused() {
-    let mut bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let mut bytes = packed(&["windows-x64"]);
     bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
     let error = PresetPackageView::open(bytes).expect_err("an unsupported schema");
     assert!(
@@ -167,7 +164,7 @@ fn an_unsupported_schema_in_the_header_is_refused() {
 /// that trusted either one of them would be trusting something nobody wrote.
 #[test]
 fn a_document_disagreeing_with_its_header_is_refused() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let bytes = packed(&["windows-x64"]);
     let mut package = decode_metadata(&metadata_of(&bytes)).expect("a document");
     package.schema = 9;
     let document = encode_metadata(&package).expect("the document encodes");
@@ -181,7 +178,7 @@ fn a_document_disagreeing_with_its_header_is_refused() {
 /// target and the digest it was supposed to be.
 #[test]
 fn a_corrupt_blob_is_refused() {
-    let mut bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let mut bytes = packed(&["windows-x64"]);
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
     let view = PresetPackageView::open(bytes).expect("the structure is intact");
@@ -189,7 +186,7 @@ fn a_corrupt_blob_is_refused() {
         .verify()
         .expect_err("a binary whose bytes changed does not verify");
     let message = error.to_string();
-    assert!(message.contains("x86_64-pc-windows-msvc"), "{message}");
+    assert!(message.contains("windows-x64"), "{message}");
     assert!(message.contains("damaged"), "{message}");
 }
 
@@ -198,7 +195,7 @@ fn a_corrupt_blob_is_refused() {
 /// becoming "does not verify".
 #[test]
 fn a_binary_of_the_wrong_size_is_refused() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let bytes = packed(&["windows-x64"]);
     let mut package = decode_metadata(&metadata_of(&bytes)).expect("a document");
     package.binaries[0].size += 1;
     let document = encode_metadata(&package).expect("the document encodes");
@@ -207,7 +204,7 @@ fn a_binary_of_the_wrong_size_is_refused() {
     let spliced = splice_metadata(&bytes, &document);
     let view = PresetPackageView::open(spliced).expect("the structure is intact");
     let error = view
-        .binary_for(&target("x86_64-pc-windows-msvc"))
+        .binary_for(&target("windows-x64"))
         .expect_err("a binary that is not the length the document claims");
     assert!(
         matches!(error, zup_artifact::ArtifactError::SizeMismatch { .. }),
@@ -221,7 +218,7 @@ fn a_binary_of_the_wrong_size_is_refused() {
 /// anything is decompressed, because there is nothing to decompress.
 #[test]
 fn a_document_claiming_an_absent_digest_is_refused() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let bytes = packed(&["windows-x64"]);
     let mut package = decode_metadata(&metadata_of(&bytes)).expect("a document");
     let absent = package.blobs[0].digest;
     package.blobs[0].digest = Sha256Digest::from_bytes([0u8; 32]);
@@ -235,8 +232,7 @@ fn a_document_claiming_an_absent_digest_is_refused() {
 
 #[test]
 fn a_document_naming_a_binary_it_does_not_store_is_refused() {
-    let mut package =
-        decode_metadata(&metadata_of(&packed(&["x86_64-pc-windows-msvc"]))).expect("a document");
+    let mut package = decode_metadata(&metadata_of(&packed(&["windows-x64"]))).expect("a document");
     package.blobs.clear();
     let document = encode_metadata(&package).expect("the document encodes");
     assert!(
@@ -250,7 +246,7 @@ fn a_document_naming_a_binary_it_does_not_store_is_refused() {
 
 #[test]
 fn a_document_with_two_entries_for_one_digest_is_refused() {
-    let bytes = packed(&["x86_64-pc-windows-msvc"]);
+    let bytes = packed(&["windows-x64"]);
     let mut package = decode_metadata(&metadata_of(&bytes)).expect("a document");
     let duplicate = package.blobs[0].clone();
     package.blobs.push(duplicate);
@@ -275,7 +271,7 @@ fn a_version_this_package_cannot_state_is_refused() {
     let description = PresetDescription::new("aurora", "not-a-version", serde_json::json!({}));
     let mut writer = PresetPackageWriter::new(description).expect("the description itself is fine");
     writer
-        .add_binary(target("x86_64-pc-windows-msvc"), b"bytes".to_vec())
+        .add_binary(target("windows-x64"), b"bytes".to_vec())
         .expect("a binary");
     assert!(
         writer.finish().is_err(),

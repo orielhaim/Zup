@@ -278,13 +278,12 @@ impl LinuxLedgerStore {
             }
             return Ok(InstallLedger::new(
                 record.app_id.clone(),
-                record.target.clone(),
+                record.target,
                 scope,
             ));
         }
-        let mut ledger = previous.unwrap_or_else(|| {
-            InstallLedger::new(record.app_id.clone(), record.target.clone(), scope)
-        });
+        let mut ledger = previous
+            .unwrap_or_else(|| InstallLedger::new(record.app_id.clone(), record.target, scope));
         if ledger.target != record.target {
             return Err(ExecError::Ownership("target identity".into()));
         }
@@ -489,7 +488,7 @@ fn valid_file_key(
     key: &ResourceKey,
     app_id: &AppId,
     app_version: &semver::Version,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> bool {
     match key {
         ResourceKey::File { .. } => true,

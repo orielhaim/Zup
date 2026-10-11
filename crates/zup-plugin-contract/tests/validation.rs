@@ -74,7 +74,7 @@ fn context() -> Context {
         app_version: "1.0.0".to_owned(),
         install_directory: "${location.user_data}/App".to_owned(),
         install_scope: InstallScope::User,
-        target: "x86_64-pc-windows-msvc".to_owned(),
+        target: "windows-x64".to_owned(),
         selected_components: Vec::new(),
     }
 }

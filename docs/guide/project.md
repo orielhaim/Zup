@@ -10,8 +10,7 @@ id = "com.acme.desktop"
 name = "Acme"
 version = "1.0.0"
 
-[build.targets.windows]
-target = "x86_64-pc-windows-msvc"
+[build.targets.windows-x64]
 source = { directory = "dist" }
 
 [install]

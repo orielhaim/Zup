@@ -117,7 +117,7 @@ fn artifact(app_id: &str, install_name: &str) -> CompiledPluginArtifact {
             plugin_id: zup_core::PluginId::new(PLUGIN).expect("a plugin id"),
             source_size,
             source_sha256,
-            target: zup_core::TargetTriple::parse(HOST_TARGET).expect("a target"),
+            target: zup_core::Target::parse(HOST_TARGET).expect("a target"),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),

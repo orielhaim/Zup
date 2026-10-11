@@ -168,7 +168,7 @@ fn observe_unit(
         return Ok(ObservedServiceState::Absent);
     };
     let executable = argv[0].clone();
-    let target = zup_platform::TargetPath::new(target_triple_for(&executable), &executable);
+    let target = zup_platform::TargetPath::new(target_for(&executable), &executable);
     let command = match target {
         Ok(executable) => zup_platform::CommandSpec::new(executable, argv[1..].to_vec()),
         Err(_) => return Ok(ObservedServiceState::Absent),
@@ -181,8 +181,8 @@ fn observe_unit(
     })
 }
 
-fn target_triple_for(_executable: &str) -> zup_core::TargetTriple {
-    zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a Linux target")
+fn target_for(_executable: &str) -> zup_core::Target {
+    zup_core::Target::parse("linux-x64").expect("a Linux target")
 }
 
 pub fn read_canonical_source(canonical: &Path) -> Result<Option<Vec<u8>>, ExecError> {
@@ -456,7 +456,7 @@ mod tests {
     }
 
     fn command_for(executable: &str) -> zup_platform::CommandSpec {
-        let target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target");
+        let target = zup_core::Target::parse("linux-x64").expect("a target");
         zup_platform::CommandSpec::new(
             zup_platform::TargetPath::new(target, executable).expect("a path"),
             Vec::new(),

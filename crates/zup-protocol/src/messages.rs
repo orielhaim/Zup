@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zup_core::TargetTriple;
+use zup_core::Target;
 
 use crate::SessionId;
 
@@ -74,7 +74,7 @@ pub enum Message {
 pub struct WorkerHello {
     pub protocol_version: u32,
     pub session_id: SessionId,
-    pub target: TargetTriple,
+    pub target: Target,
     pub worker_pid: u32,
     pub capabilities: Capabilities,
 }
@@ -83,7 +83,7 @@ pub struct WorkerHello {
 pub struct ParentHello {
     pub protocol_version: u32,
     pub session_id: SessionId,
-    pub target: TargetTriple,
+    pub target: Target,
     pub transaction_id: Uuid,
     pub expected_plan_hash: String,
 }
@@ -99,7 +99,7 @@ pub struct Capabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteTransaction {
-    pub target: TargetTriple,
+    pub target: Target,
     pub plan_json: String,
     pub plan_hash: String,
     pub app_id: String,
@@ -119,7 +119,7 @@ pub struct ExecuteTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteBootstrap {
-    pub target: TargetTriple,
+    pub target: Target,
     pub bootstrap_json: String,
     pub bootstrap_hash: String,
     pub bootstrap_id: uuid::Uuid,
@@ -165,7 +165,7 @@ pub struct PrepareOperation {
     pub app_id: String,
     pub app_version: String,
     pub scope: String,
-    pub target: TargetTriple,
+    pub target: Target,
     pub state_root: String,
 }
 
@@ -222,7 +222,7 @@ pub struct PreparedOperation {
     pub app_id: String,
     pub app_version: String,
     pub scope: String,
-    pub target: TargetTriple,
+    pub target: Target,
     pub file_count: u32,
 }
 

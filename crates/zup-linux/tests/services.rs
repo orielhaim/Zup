@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zup_bundle::DirectoryPayloadSource;
-use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, TargetTriple};
+use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, Target};
 use zup_exec::{HostSnapshot, InstallLedger, LifecycleAction, OwnedResource};
 use zup_linux::test_support::SharedFakeSystemd;
 use zup_linux::{
@@ -23,8 +23,8 @@ const APP_ID: &str = "com.example.tool";
 const SERVICE_ID: &str = "tool";
 const PAYLOAD_BYTES: &[u8] = b"fake-elf-bytes";
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-unknown-linux-gnu").expect("a target")
+fn target() -> Target {
+    Target::parse("linux-x64").expect("a target")
 }
 
 fn app(version: &str) -> zup_core::App {

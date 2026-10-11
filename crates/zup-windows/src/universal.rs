@@ -8,7 +8,7 @@ use zup_artifact::{
 #[cfg(windows)]
 use zup_artifact::{ContentSource, select_from_index};
 use zup_binary::{BinaryArchitecture, Executable, ProgramKind};
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_pe::{RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, ResourceDocument};
 #[cfg(windows)]
 use zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY;
@@ -51,7 +51,7 @@ pub enum UniversalError {
     )]
     DispatcherTooWide {
         found: BinaryArchitecture,
-        narrowest: TargetTriple,
+        narrowest: Target,
     },
     #[error("artifact `{id}` has no variant this host can run")]
     UnsupportedHost { id: String },
@@ -178,14 +178,14 @@ pub fn compose_universal_executable(
     Ok(layout)
 }
 
-fn narrowest_variant(graph: &ArtifactGraph) -> Option<(u8, TargetTriple)> {
+fn narrowest_variant(graph: &ArtifactGraph) -> Option<(u8, Target)> {
     graph
         .index()
         .variants
         .iter()
-        .filter_map(|variant| {
-            BinaryArchitecture::of_target(&variant.target)
-                .map(|machine| (machine_width(machine), variant.target.clone()))
+        .map(|variant| {
+            let machine = BinaryArchitecture::of_target(&variant.target);
+            (machine_width(machine), variant.target)
         })
         .min_by_key(|(width, _)| *width)
 }

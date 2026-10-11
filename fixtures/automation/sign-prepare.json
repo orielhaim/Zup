@@ -19,7 +19,7 @@
       "kind": "single",
       "mode": "offline",
       "id": "windows-x64",
-      "target": "x86_64-pc-windows-msvc",
+      "target": "windows-x64",
       "variants": null,
       "signing": null
     }

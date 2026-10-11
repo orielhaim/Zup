@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_platform::{CommandSpec, TargetPath};
 
 pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
@@ -107,14 +107,14 @@ pub fn commands_match(a: &CommandSpec, b: &CommandSpec) -> bool {
 
 pub fn command_spec_from_command_line(
     command_line: &str,
-    target: &TargetTriple,
+    target: &Target,
 ) -> Result<CommandSpec, String> {
     let (exe, arguments) = parse_command_line(command_line);
     let exe = exe.ok_or_else(|| "empty command line".to_owned())?;
     if exe.is_empty() {
         return Err("empty executable".to_owned());
     }
-    let executable = TargetPath::new(target.clone(), exe).map_err(|error| error.to_string())?;
+    let executable = TargetPath::new(*target, exe).map_err(|error| error.to_string())?;
     Ok(CommandSpec {
         executable,
         arguments,
@@ -134,13 +134,13 @@ mod tests {
 
     #[test]
     fn command_identity_uses_target_path_identity() {
-        let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+        let target = Target::parse("windows-x64").unwrap();
         let a = CommandSpec {
-            executable: TargetPath::new(&target, r"C:\Apps\Acme.exe").unwrap(),
+            executable: TargetPath::new(target, r"C:\Apps\Acme.exe").unwrap(),
             arguments: vec!["--run".to_owned()],
         };
         let b = CommandSpec {
-            executable: TargetPath::new(&target, r"c:/apps/acme.exe").unwrap(),
+            executable: TargetPath::new(target, r"c:/apps/acme.exe").unwrap(),
             arguments: vec!["--run".to_owned()],
         };
         let c = CommandSpec {

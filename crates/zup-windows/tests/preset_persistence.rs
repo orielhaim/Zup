@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use zup_core::{
     AppId, InstalledPreset, NonEmptyString, PresetAsset, PresetRuntime, ResourceKey, SelectedScope,
-    Sha256Digest, TargetTriple,
+    Sha256Digest, Target,
 };
 use zup_exec::InstallLedger;
 use zup_transaction::{
@@ -16,8 +16,8 @@ fn zup_core_preset_protocol_version() -> u32 {
     1
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").expect("a target")
+fn target() -> Target {
+    Target::parse("windows-x64").expect("a target")
 }
 
 fn app_id() -> AppId {
@@ -347,7 +347,7 @@ fn the_persisted_window_is_the_runtime_model() {
         "schema": 2,
         "app_id": "com.zup.test-ui",
         "scope": "user",
-        "target": "x86_64-pc-windows-msvc",
+        "target": "windows-x64",
         "version": "1.0.0",
         "selected_components": [],
         "install_directory": null,
@@ -384,7 +384,7 @@ fn a_ledger_of_a_superseded_format_is_refused() {
             "schema": 1,
             "app_id": "com.zup.test-ui",
             "scope": "user",
-            "target": "x86_64-pc-windows-msvc",
+            "target": "windows-x64",
             "version": "1.0.0",
             "selected_components": [],
             "install_directory": null,

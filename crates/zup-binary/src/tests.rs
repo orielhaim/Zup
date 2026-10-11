@@ -4,7 +4,7 @@
 //! can fail, not `object`'s parser. Building the bytes here means every field a
 //! test depends on is a named one in this file.
 
-use zup_core::TargetTriple;
+use zup_core::Target;
 
 use super::*;
 
@@ -170,8 +170,8 @@ fn put(bytes: &mut [u8], at: usize, value: &[u8]) {
     bytes[at..at + value.len()].copy_from_slice(value);
 }
 
-fn target(triple: &str) -> TargetTriple {
-    TargetTriple::parse(triple).expect("a well-known triple")
+fn target(triple: &str) -> Target {
+    Target::parse(triple).expect("a well-known triple")
 }
 
 fn inspect(bytes: &[u8]) -> Result<Executable, InspectError> {
@@ -382,8 +382,8 @@ fn a_machine_zup_cannot_name_is_refused_as_an_unsupported_architecture() {
     // A refusal rather than a placeholder: there is no machine value a caller
     // could mistake for something zup knows how to build for.
     assert!(
-        BinaryArchitecture::of_target(&target("sparc64-unknown-linux-gnu")).is_none(),
-        "a triple zup cannot spell has no machine"
+        Target::parse("sparc64-unknown-linux-gnu").is_err(),
+        "a target zup cannot spell names no target"
     );
 }
 
@@ -402,10 +402,9 @@ fn a_format_zup_reads_and_does_not_build_is_named_rather_than_guessed() {
 #[test]
 fn a_binary_matches_the_target_it_was_built_for() {
     let amd64 = inspect(&pe(MACHINE_AMD64, SUBSYSTEM_CUI)).expect("a PE");
+    assert!(amd64.matches_target(&target("windows-x64")));
     assert!(amd64.matches_target(&target("x86_64-pc-windows-msvc")));
-    // The ABI and the vendor are not in the file, so neither is compared.
-    assert!(amd64.matches_target(&target("x86_64-pc-windows-gnu")));
-    assert!(amd64.matches_target(&target("x86_64-unknown-windows-msvc")));
+    assert!(amd64.matches_target(&target("windows-x86_64")));
 }
 
 #[test]
@@ -413,7 +412,7 @@ fn a_target_mismatch_says_which_field_the_file_contradicted() {
     let amd64 = inspect(&pe(MACHINE_AMD64, SUBSYSTEM_CUI)).expect("a PE");
 
     let refusal = amd64
-        .refuse_target(&target("aarch64-pc-windows-msvc"))
+        .refuse_target(&target("windows-arm64"))
         .expect_err("machine");
     assert!(matches!(
         refusal,
@@ -429,7 +428,7 @@ fn a_target_mismatch_says_which_field_the_file_contradicted() {
     // A Linux target contradicts a PE's operating system, and the refusal names
     // that rather than the machine, which agreed.
     let refusal = amd64
-        .refuse_target(&target("x86_64-unknown-linux-gnu"))
+        .refuse_target(&target("linux-x64"))
         .expect_err("system");
     assert!(matches!(
         refusal,
@@ -440,42 +439,14 @@ fn a_target_mismatch_says_which_field_the_file_contradicted() {
 #[test]
 fn a_file_that_names_no_operating_system_constrains_nothing() {
     let elf = inspect(&elf64(EM_X86_64, 0, ElfKind::Fixed)).expect("an ELF");
-    assert!(elf.matches_target(&target("x86_64-unknown-linux-gnu")));
-    assert!(elf.matches_target(&target("x86_64-unknown-freebsd")));
-    assert!(!elf.matches_target(&target("aarch64-unknown-linux-gnu")));
+    assert!(elf.matches_target(&target("linux-x64")));
+    assert!(elf.matches_target(&target("windows-x64")));
+    assert!(!elf.matches_target(&target("linux-arm64")));
 
-    let macos =
+    let macho =
         inspect(&macho64(CPU_ARM64, Some(object::macho::PLATFORM_MACOS.0))).expect("a Mach-O");
-    assert!(macos.matches_target(&target("aarch64-apple-darwin")));
-    assert!(macos.matches_target(&target("aarch64-apple-macosx")));
-    assert!(!macos.matches_target(&target("aarch64-pc-windows-msvc")));
-}
-
-#[test]
-fn every_arm_profile_a_triple_may_name_is_the_same_machine() {
-    let arm = inspect(&elf64(EM_ARM, 0, ElfKind::Fixed)).expect("an ELF");
-    for triple in [
-        "arm-unknown-linux-gnueabi",
-        "armv7-unknown-linux-gnueabihf",
-        "thumbv7neon-unknown-linux-gnueabihf",
-    ] {
-        assert!(
-            arm.matches_target(&target(triple)),
-            "a 32-bit ARM image is the same machine as {triple}"
-        );
-    }
-}
-
-#[test]
-fn a_universal_binary_matches_every_target_it_contains() {
-    let universal = inspect(&fat_macho64(&[
-        macho64(CPU_X86_64, Some(object::macho::PLATFORM_MACOS.0)),
-        macho64(CPU_ARM64, Some(object::macho::PLATFORM_MACOS.0)),
-    ]))
-    .expect("a universal binary");
-    assert!(universal.matches_target(&target("x86_64-apple-darwin")));
-    assert!(universal.matches_target(&target("aarch64-apple-darwin")));
-    assert!(!universal.matches_target(&target("i686-apple-darwin")));
+    assert!(!macho.matches_target(&target("linux-arm64")));
+    assert!(!macho.matches_target(&target("windows-arm64")));
 }
 
 #[test]

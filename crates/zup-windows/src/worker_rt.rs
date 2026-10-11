@@ -8,7 +8,7 @@ use zup_bootstrap::{
 
 use crate::{AutoPayloadSource, EmbeddedBundle};
 use tokio_util::sync::CancellationToken;
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_protocol::{
     Capabilities, Message, PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport,
     SequenceTracker, SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
@@ -43,7 +43,7 @@ pub struct WorkerBootstrap {
     pub pipe_name: String,
     pub expected_parent_pid: u32,
     pub expected_parent_sid: String,
-    pub target: TargetTriple,
+    pub target: Target,
     pub expected_plan_hash: String,
 }
 
@@ -119,7 +119,7 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
     if !expected_parent_sid.starts_with("S-1-") {
         return Err(WorkerError::InvalidBootstrap("parent sid".into()));
     }
-    let target = TargetTriple::parse(parts[5])
+    let target = Target::parse(parts[5])
         .map_err(|error| WorkerError::InvalidBootstrap(error.to_string()))?;
     let expected_plan_hash = parts[6].to_owned();
     if expected_plan_hash.len() != 64 || !expected_plan_hash.chars().all(|c| c.is_ascii_hexdigit())
@@ -223,7 +223,7 @@ impl WorkerSession {
             message: Message::WorkerHello(WorkerHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: self.bootstrap.session_id,
-                target: self.bootstrap.target.clone(),
+                target: self.bootstrap.target,
                 worker_pid: std::process::id(),
                 capabilities: worker_capabilities(),
             }),
@@ -447,7 +447,7 @@ async fn run_worker_inner(
         message: Message::WorkerHello(WorkerHello {
             protocol_version: PROTOCOL_VERSION,
             session_id: bootstrap.session_id,
-            target: bootstrap.target.clone(),
+            target: bootstrap.target,
             worker_pid: std::process::id(),
             capabilities: worker_capabilities(),
         }),
@@ -1081,7 +1081,7 @@ fn validate_transaction_bundle_identity(
     app_id: &zup_core::AppId,
     app_version: &semver::Version,
     scope: zup_core::SelectedScope,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
     bundle: &EmbeddedBundle,
 ) -> Result<(), WorkerError> {
     validate_transaction_installer(&bundle.plan().installer, app_id, app_version, scope, target)
@@ -1092,7 +1092,7 @@ fn validate_transaction_installer(
     app_id: &zup_core::AppId,
     app_version: &semver::Version,
     scope: zup_core::SelectedScope,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
 ) -> Result<(), WorkerError> {
     if &installer.app.id != app_id
         || &installer.app.version != app_version
@@ -1586,7 +1586,7 @@ mod tests {
             version = "1.0.0"
             [build]
             [build.targets.default]
-            target = "x86_64-pc-windows-msvc"
+            target = "windows-x64"
             source = { directory = "dist" }
             [install]
             scope = "user"
@@ -1598,7 +1598,7 @@ mod tests {
         .unwrap();
         let app_id = installer.app.id.clone();
         let app_version = installer.app.version.clone();
-        let target = installer.target.clone();
+        let target = installer.target;
         assert!(
             validate_transaction_installer(
                 &installer,

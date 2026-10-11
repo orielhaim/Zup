@@ -33,7 +33,7 @@ Use `targets` for a real per-target difference:
 targets = ["windows-x64", "windows-arm64"]
 ```
 
-Values are target **profile IDs**, not target triples.
+Values are target **profile IDs**, not target names.
 
 Keep a resource unfiltered when it applies to every selected target.
 

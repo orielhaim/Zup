@@ -1,6 +1,6 @@
 use miette::Diagnostic;
 use thiserror::Error;
-use zup_core::{ComponentId, PluginId, TargetTriple, Variable};
+use zup_core::{ComponentId, PluginId, Target, Variable};
 
 use crate::plugins::PluginFailure;
 
@@ -10,7 +10,7 @@ pub use zup_core::SelectedScope;
 pub enum PlanError {
     #[error("build plan has no target `{target}`")]
     #[diagnostic(code(zup_plan::unknown_build_target))]
-    UnknownBuildTarget { target: zup_core::TargetTriple },
+    UnknownBuildTarget { target: zup_core::Target },
 
     #[error("scope `{requested}` is not allowed (manifest scope is `{allowed}`)")]
     #[diagnostic(code(zup_plan::scope_not_allowed))]
@@ -36,10 +36,7 @@ pub enum PlanError {
 
     #[error("plugin executor target `{found}` does not match plan target `{expected}`")]
     #[diagnostic(code(zup_plan::plugin_target_mismatch))]
-    PluginTargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    PluginTargetMismatch { expected: Target, found: Target },
 
     #[error("plugin `{plugin_id}` failed: {failure}")]
     #[diagnostic(code(zup_plan::plugin_execution_failed))]

@@ -368,7 +368,7 @@
           "type": "string"
         },
         "target": {
-          "description": "The canonical target triple the profile resolves to.",
+          "description": "The canonical Zup target the profile resolves to.",
           "type": "string"
         }
       },
@@ -409,7 +409,7 @@
           ]
         },
         "target": {
-          "description": "The target triple, for an artifact that serves exactly one machine.",
+          "description": "The Zup target, for an artifact that serves exactly one machine.",
           "type": [
             "string",
             "null"
@@ -829,7 +829,7 @@
           "type": "string"
         },
         "host": {
-          "description": "The build host's canonical target triple.",
+          "description": "The build host's Zup target.",
           "type": "string"
         },
         "ready": {
@@ -1218,7 +1218,7 @@
           "type": "string"
         },
         "host": {
-          "description": "The build host's canonical target triple.",
+          "description": "The build host's Zup target.",
           "type": "string"
         },
         "cache": {

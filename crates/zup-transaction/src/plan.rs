@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_core::{
-    ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey, Sha256Digest, TargetTriple,
+    ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey, Sha256Digest, Target,
 };
 use zup_platform::TargetPath;
 
@@ -144,7 +144,7 @@ pub struct TransactionAudit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionPlan {
     pub schema: u32,
-    pub target: TargetTriple,
+    pub target: Target,
     pub selected_components: Vec<ComponentId>,
     pub install_directory: Option<TargetPath>,
     pub uninstall: bool,
@@ -608,7 +608,7 @@ pub fn compile_transaction(
     let rollback_order = topological_ids(&nodes, &edges, true)?;
     let plan = TransactionPlan {
         schema: TRANSACTION_PLAN_SCHEMA,
-        target: input.target.clone(),
+        target: input.target,
         selected_components: input.selected_components.clone(),
         install_directory: input.install_directory.clone(),
         uninstall: input.uninstall,

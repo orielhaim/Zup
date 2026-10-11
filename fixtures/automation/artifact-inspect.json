@@ -10,7 +10,7 @@
   "targets": [
     {
       "profile": "windows-x64",
-      "target": "x86_64-pc-windows-msvc"
+      "target": "windows-x64"
     }
   ],
   "artifacts": [],
@@ -28,7 +28,7 @@
     "variants": [
       {
         "id": "windows-x64",
-        "target": "x86_64-pc-windows-msvc",
+        "target": "windows-x64",
         "frontend": "gui",
         "logical_size": 248512896,
         "file_count": 1,

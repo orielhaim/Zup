@@ -1,6 +1,6 @@
 use windows_service::service::{ServiceAccess, ServiceStartType, ServiceType};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-use zup_core::{ServiceStart, TargetTriple};
+use zup_core::{ServiceStart, Target};
 use zup_exec::ObservedServiceState;
 
 use crate::cmdline;
@@ -15,7 +15,7 @@ pub enum ScmError {
     Unreadable { name: String, reason: String },
 }
 
-pub fn query_service(name: &str, target: &TargetTriple) -> Result<ObservedServiceState, ScmError> {
+pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState, ScmError> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| ScmError::Unavailable(error.to_string()))?;
     let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {

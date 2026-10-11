@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use zup_acquire::{OnlineTrust, ReleasePin};
-use zup_core::{App, Sha256Digest, TargetTriple};
+use zup_core::{App, Sha256Digest, Target};
 
 use crate::compat::LauncherSubsystem;
 use crate::format::ArtifactError;
@@ -262,7 +262,7 @@ impl ArtifactIndex {
     fn validate_variant(&self, variant: &VariantDescriptor) -> Result<(), ArtifactError> {
         if variant.id.is_empty()
             || variant.manifest.media_type != MediaType::VARIANT_MANIFEST
-            || variant.platform != Platform::from_triple(&variant.target)
+            || variant.platform != Platform::from_target(&variant.target)
             || variant.subsystem() != self.artifact.subsystem
             || variant.content.blob_count > variant.content.unique_blob_count
             || variant.content.logical_size > variant.logical_size
@@ -378,11 +378,11 @@ pub fn savings(sets: &[VariantContentSet], table: &crate::table::BlobTable) -> A
     }
 }
 
-pub fn covered_targets(index: &ArtifactIndex) -> Vec<TargetTriple> {
+pub fn covered_targets(index: &ArtifactIndex) -> Vec<Target> {
     index
         .variants
         .iter()
-        .map(|variant| variant.target.clone())
+        .map(|variant| variant.target)
         .collect()
 }
 

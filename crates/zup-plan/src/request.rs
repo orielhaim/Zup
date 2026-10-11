@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-use zup_core::{ComponentId, TargetTriple, Template};
+use zup_core::{ComponentId, Target, Template};
 
 use crate::error::SelectedScope;
 
@@ -24,7 +24,7 @@ impl ComponentOverrides {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
-    pub target: TargetTriple,
+    pub target: Target,
     pub scope: SelectedScope,
     #[serde(default)]
     pub components: ComponentOverrides,
@@ -33,7 +33,7 @@ pub struct PlanRequest {
 }
 
 impl PlanRequest {
-    pub fn new(target: TargetTriple, scope: SelectedScope) -> Self {
+    pub fn new(target: Target, scope: SelectedScope) -> Self {
         Self {
             target,
             scope,

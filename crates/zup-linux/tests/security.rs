@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zup_core::{SelectedScope, TargetTriple};
+use zup_core::{SelectedScope, Target};
 use zup_linux::{Carrier, CarrierError, ExecError, LinuxAction, LinuxRunRequest, PathError, run};
 
 use zup_linux::test_support::{
@@ -97,7 +97,7 @@ fn an_unknown_carrier_version_is_refused() {
 fn a_windows_package_in_a_linux_runtime_is_refused() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let windows = TargetTriple::parse("x86_64-pc-windows-msvc").expect("a Windows target");
+    let windows = Target::parse("windows-x64").expect("a Windows target");
     let package = package_bytes_for(scratch.path(), &windows, "1.0.0", &v1_files());
     let output = scratch.path().join("mismatched");
     compose_installer(&genuine_template("console"), &output, &package);

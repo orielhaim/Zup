@@ -1,14 +1,14 @@
 //! before artifact composition on every host, so `check` never calls a project
 
-use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, TargetBuildPlan, TargetTriple};
+use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, Target, TargetBuildPlan};
 
-pub const SUPPORTED_LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
+pub const SUPPORTED_LINUX_TARGET: &str = "linux-x64";
 
-pub fn is_linux_target(target: &TargetTriple) -> bool {
+pub fn is_linux_target(target: &Target) -> bool {
     target.operating_system() == zup_core::TargetOperatingSystem::Linux
 }
 
-pub fn linux_selection_errors(target: &TargetTriple, frontend: Frontend) -> Vec<String> {
+pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String> {
     let mut errors = linux_target_errors(target);
     if is_linux_target(target) {
         errors.extend(linux_frontend_errors(target, frontend));
@@ -16,11 +16,11 @@ pub fn linux_selection_errors(target: &TargetTriple, frontend: Frontend) -> Vec<
     errors
 }
 
-pub fn is_supported_linux_target(target: &TargetTriple) -> bool {
+pub fn is_supported_linux_target(target: &Target) -> bool {
     target.as_str() == SUPPORTED_LINUX_TARGET
 }
 
-fn linux_target_errors(target: &TargetTriple) -> Vec<String> {
+fn linux_target_errors(target: &Target) -> Vec<String> {
     if is_supported_linux_target(target) {
         return Vec::new();
     }
@@ -35,7 +35,7 @@ fn linux_target_errors(target: &TargetTriple) -> Vec<String> {
     }]
 }
 
-fn linux_frontend_errors(target: &TargetTriple, frontend: Frontend) -> Vec<String> {
+fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
     match frontend {
         Frontend::Gui => vec![format!(
             "GUI installer runtime is not supported for `{target}`: the Linux backend ships \
@@ -237,7 +237,7 @@ mod tests {
     fn config(target: &str, frontend: Frontend, scope: InstallScope) -> ResolvedTargetConfig {
         ResolvedTargetConfig {
             profile: zup_core::TargetProfileId::new("linux").unwrap(),
-            target: TargetTriple::parse(target).unwrap(),
+            target: Target::parse(target).unwrap(),
             source: zup_core::Source::new(std::path::PathBuf::from("dist")).unwrap(),
             frontend,
             install: zup_core::Install {
@@ -263,7 +263,7 @@ mod tests {
                     main: None,
                     description: None,
                 },
-                target: TargetTriple::parse(SUPPORTED_LINUX_TARGET).unwrap(),
+                target: Target::parse(SUPPORTED_LINUX_TARGET).unwrap(),
                 frontend: Frontend::Console,
                 updates: None,
                 install: zup_core::Install {
@@ -464,11 +464,7 @@ mod tests {
     #[test]
     fn another_linux_architecture_names_the_supported_target() {
         let errors = linux_capability_errors(
-            &config(
-                "aarch64-unknown-linux-gnu",
-                Frontend::Console,
-                InstallScope::User,
-            ),
+            &config("linux-arm64", Frontend::Console, InstallScope::User),
             &plan(),
         );
         let text = errors.join("\n");
@@ -478,11 +474,7 @@ mod tests {
     #[test]
     fn a_non_linux_target_is_not_a_linux_target() {
         let errors = linux_capability_errors(
-            &config(
-                "x86_64-pc-windows-msvc",
-                Frontend::Console,
-                InstallScope::User,
-            ),
+            &config("windows-x64", Frontend::Console, InstallScope::User),
             &plan(),
         );
         let text = errors.join("\n");

@@ -12,13 +12,13 @@
 //! incompatibility.
 
 use serde::{Deserialize, Serialize};
-use zup_core::TargetTriple;
+use zup_core::Target;
 
 use crate::release::{ReleaseDescriptor, ReleaseVariant};
 
 /// The processor families a host may report.
 ///
-/// This is a closed set rather than a target triple, because a triple carries
+/// This is a closed set rather than a compiler triple, because a triple carries
 /// an ABI and a vendor that decide nothing about whether the machine can *run*
 /// the variant; a variant's own target carries those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub enum HostArchitecture {
 }
 
 impl HostArchitecture {
-    /// The spelling a target triple uses for this architecture.
+    /// The compiler spelling for this architecture.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::X86 => "i686",
@@ -58,9 +58,9 @@ impl HostArchitecture {
         }
     }
 
-    /// The architecture a triple names, if this build recognizes it.
-    pub fn of_triple(triple: &TargetTriple) -> Option<Self> {
-        Self::from_name(&triple.architecture().to_string())
+    /// The architecture a target names, if this build recognizes it.
+    pub fn of_target(target: &Target) -> Option<Self> {
+        Self::from_name(&target.architecture().to_string())
     }
 }
 
@@ -74,8 +74,7 @@ impl HostArchitecture {
 #[serde(deny_unknown_fields)]
 pub struct HostProfile {
     pub architecture: HostArchitecture,
-    /// The operating system, as the canonical triple spelling: `windows`,
-    /// `linux`, `macos`.
+    /// The operating system: `windows` or `linux`.
     pub os: String,
     /// Whether variants run natively, rather than through an emulation layer.
     pub native_execution: bool,
@@ -142,7 +141,7 @@ impl std::fmt::Display for Incompatible {
 
 /// Whether `host` can run `variant`.
 pub fn check_variant(host: &HostProfile, variant: &ReleaseVariant) -> Option<Incompatible> {
-    let Some(architecture) = HostArchitecture::of_triple(&variant.target) else {
+    let Some(architecture) = HostArchitecture::of_target(&variant.target) else {
         return Some(Incompatible {
             variant: variant.id.clone(),
             requirement: "a recognized target architecture".to_owned(),
@@ -253,11 +252,11 @@ mod tests {
     use crate::release::{DocumentRef, RELEASE_SCHEMA, ReleaseRequirements};
     use zup_core::Sha256Digest;
 
-    fn triple(architecture: &str) -> TargetTriple {
-        TargetTriple::parse(format!("{architecture}-pc-windows-msvc")).expect("valid triple")
+    fn triple(architecture: &str) -> Target {
+        Target::parse(format!("{architecture}-pc-windows-msvc")).expect("valid triple")
     }
 
-    fn variant(id: &str, target: TargetTriple, native: bool) -> ReleaseVariant {
+    fn variant(id: &str, target: Target, native: bool) -> ReleaseVariant {
         ReleaseVariant {
             id: id.to_owned(),
             target,
