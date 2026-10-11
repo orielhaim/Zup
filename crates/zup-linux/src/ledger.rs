@@ -688,34 +688,52 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> 
         let Some(receipt) = record.receipt(&node.id) else {
             continue;
         };
-        let OperationReceipt::RemoveFile {
-            backup_path,
-            sha256,
-            size,
-            ..
-        } = receipt
-        else {
+        let (backup, size, sha256) = match receipt {
+            OperationReceipt::RemoveFile {
+                backup_path,
+                sha256,
+                size,
+                ..
+            } => (
+                to_host_path(backup_path).map_err(|_| ExecError::LedgerInvalid)?,
+                *size,
+                *sha256,
+            ),
+            OperationReceipt::ReplaceFile {
+                backup_path,
+                previous_sha256,
+                previous_size,
+                ..
+            } => (
+                PathBuf::from(backup_path),
+                *previous_size,
+                previous_sha256
+                    .parse()
+                    .map_err(|_| ExecError::LedgerInvalid)?,
+            ),
+            _ => continue,
+        };
+        let Ok((directory, name)) = crate::fs::open_parent(&backup) else {
             continue;
         };
-        let backup = to_host_path(backup_path).map_err(|_| ExecError::LedgerInvalid)?;
-        match std::fs::symlink_metadata(&backup) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(PathError::io(&(backup.clone()), source).into());
-            }
-            Ok(metadata) if metadata.file_type().is_file() => {
-                let file = std::fs::File::open(&backup)
-                    .map_err(|source| PathError::io(&(backup.clone()), source))?;
-                if zup_core::hash_reader(file)
-                    .map_err(|source| PathError::io(&(backup.clone()), source))?
-                    != (*size, *sha256)
+        match directory.kind_or_absent(&name) {
+            Ok(None) => {}
+            Ok(Some(crate::fs::EntryKind::Regular)) => {
+                let bytes = directory
+                    .read_regular(&name)
+                    .map_err(|_| ExecError::LedgerInvalid)?;
+                if zup_core::hash_reader(bytes.as_slice()).map_err(|_| ExecError::LedgerInvalid)?
+                    != (size, sha256)
                 {
                     return Err(ExecError::LedgerInvalid);
                 }
-                std::fs::remove_file(&backup)
-                    .map_err(|source| PathError::io(&(backup.clone()), source))?;
+                directory
+                    .remove_file(&name)
+                    .map_err(|_| ExecError::LedgerInvalid)?;
+                let _ = directory.sync();
             }
-            Ok(_) => return Err(ExecError::LedgerInvalid),
+            Ok(Some(_)) => return Err(ExecError::LedgerInvalid),
+            Err(_) => return Err(ExecError::LedgerInvalid),
         }
     }
     Ok(())

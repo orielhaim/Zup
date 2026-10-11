@@ -100,7 +100,7 @@ fn run_user(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
     attach_maintenance_copy_for(&mut target, &request.installer, &state_root, request.scope)?;
 
     if let Ok(host) = crate::lowering::to_host_path(&target.install_directory) {
-        crate::fs::refuse_symlink_ancestors(&host).map_err(|error| match error {
+        crate::fs::anchor_reachable(&host).map_err(|error| match error {
             crate::error::PathError::UnexpectedKind { path, expected } => {
                 ExecError::from(PathError::Refused {
                     path,
@@ -239,7 +239,7 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecError> {
         path: path.display().to_string(),
         reason: format!("{what}; the state hierarchy must not pass through a link"),
     };
-    crate::fs::refuse_symlink_ancestors(state_root).map_err(|error| match error {
+    crate::fs::anchor_reachable(state_root).map_err(|error| match error {
         crate::error::PathError::UnexpectedKind { path, expected } => {
             ExecError::from(PathError::Refused {
                 path,
@@ -248,29 +248,25 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecError> {
         }
         other => ExecError::Executor(other.to_string()),
     })?;
-    let entries = match std::fs::read_dir(state_root) {
-        Ok(entries) => entries,
-
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::Io {
-                path: state_root.display().to_string(),
-                source,
-            }
-            .into());
+    let owned = match crate::fs::OwnedDirectory::open(state_root) {
+        Ok(owned) => owned,
+        Err(crate::error::PathError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(());
         }
+        Err(error) => return Err(ExecError::Executor(error.to_string())),
     };
-    for entry in entries {
-        let entry = entry.map_err(|source| PathError::Io {
-            path: state_root.display().to_string(),
-            source,
-        })?;
-        let file_type = entry.file_type().map_err(|source| PathError::Io {
-            path: entry.path().display().to_string(),
-            source,
-        })?;
-        if file_type.is_symlink() {
-            return Err(refused(entry.path(), "a state entry is a symbolic link").into());
+    for name in owned
+        .child_names()
+        .map_err(|error| ExecError::Executor(error.to_string()))?
+    {
+        if owned
+            .kind_or_absent(&name)
+            .map_err(|error| ExecError::Executor(error.to_string()))?
+            .is_some_and(|kind| kind == crate::fs::EntryKind::Symlink)
+        {
+            return Err(refused(state_root.join(&name), "a state entry is a symbolic link").into());
         }
     }
     Ok(())

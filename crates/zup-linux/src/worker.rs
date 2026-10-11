@@ -115,7 +115,7 @@ pub(crate) fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<()
     let directory = socket
         .parent()
         .ok_or_else(|| IpcError::WorkerAuth("the rendezvous has no directory".into()))?;
-    crate::fs::refuse_symlink_ancestors(directory).map_err(|error| {
+    crate::fs::anchor_reachable(directory).map_err(|error| {
         IpcError::WorkerAuth(format!(
             "the rendezvous must not pass through a link: {error}"
         ))
@@ -475,7 +475,7 @@ fn prepare_operation(
     if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
         authorize_machine_install_directory(&host, &roots)
             .map_err(|error| IpcError::Policy(error.to_string()))?;
-        crate::fs::refuse_symlink_ancestors(&host)
+        crate::fs::anchor_reachable(&host)
             .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
     }
 

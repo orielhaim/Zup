@@ -26,10 +26,6 @@ pub struct FileWork {
     pub intent: FileIntent,
 
     pub precondition: FilePrecondition,
-
-    pub staged: Option<PathBuf>,
-
-    pub created_directories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +47,7 @@ impl FileIntent {
 
 pub struct LinuxFileExecutor {
     files: BTreeMap<String, FileWork>,
+    staged_dirs: BTreeMap<String, Vec<String>>,
     payload: Option<Box<dyn PayloadSource>>,
     executable_mode: rustix::fs::Mode,
     services: Option<ServiceSupport>,
@@ -103,6 +100,7 @@ impl Default for LinuxFileExecutor {
     fn default() -> Self {
         Self {
             files: BTreeMap::new(),
+            staged_dirs: BTreeMap::new(),
             payload: None,
             executable_mode: EXECUTABLE_PAYLOAD_MODE,
             services: None,
@@ -206,8 +204,6 @@ impl LinuxFileExecutor {
                         .meta
                         .file_precondition
                         .unwrap_or(FilePrecondition::Absent),
-                    staged: None,
-                    created_directories: Vec::new(),
                 },
             );
         }
@@ -221,21 +217,43 @@ impl LinuxFileExecutor {
         })
     }
 
+    fn executable_mode_for(&self, intent: FileIntent) -> u32 {
+        (intent.mode_for(self.executable_mode)).bits() & 0o7777
+    }
+
     pub fn stage(&mut self, id: &OperationId, bytes: &[u8]) -> Result<OperationReceipt, ExecError> {
         let file = self.file(id.as_str())?.clone();
-        let name = staged_name(id);
-        let created_directories = create_parents(&file.host_path)?;
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        directory.write_durable(&name, bytes, STATE_FILE_MODE)?;
-        let staged = directory.path().join(&name);
-
-        let destination = file.destination.to_string();
-        for recorded in self.files.values_mut() {
-            if recorded.destination.to_string() == destination {
-                recorded.staged = Some(staged.clone());
-                recorded.created_directories = created_directories.clone();
-            }
+        let (found_size, found) = hash_reader(bytes).map_err(|error| PathError::Io {
+            path: file.host_path.display().to_string(),
+            source: error,
+        })?;
+        if found_size != file.intent.size || found != file.intent.sha256 {
+            return Err(ExecError::Verification {
+                path: file.host_path.display().to_string(),
+                reason: "the staged bytes do not match the payload identity".into(),
+            });
         }
+        let name = staged_name(id);
+        let created = crate::fs::create_parents(&file.host_path, STATE_DIRECTORY_MODE)?;
+        self.staged_dirs
+            .entry(file.host_path.display().to_string())
+            .or_default()
+            .extend(created);
+        let (directory, _) = crate::fs::open_parent(&file.host_path)?;
+        directory.write_durable(&name, bytes, STATE_FILE_MODE)?;
+        let (current_bytes, _, _) = read_current(&directory, &name, &file.host_path)?;
+        let (found_size, found) =
+            hash_reader(current_bytes.as_slice()).map_err(|error| PathError::Io {
+                path: file.host_path.display().to_string(),
+                source: error,
+            })?;
+        if found_size != file.intent.size || found != file.intent.sha256 {
+            return Err(ExecError::Verification {
+                path: file.host_path.display().to_string(),
+                reason: "the staged bytes do not match the payload identity".into(),
+            });
+        }
+        let staged = directory.path().join(&name);
         Ok(OperationReceipt::StageFile {
             staged_path: staged.display().to_string(),
             size: file.intent.size,
@@ -400,7 +418,11 @@ impl LinuxFileExecutor {
                     size: *installed_size,
                     executable: *executable,
                 };
-                verify_installed(Path::new(destination), expected)
+                verify_installed(
+                    Path::new(destination),
+                    expected,
+                    self.executable_mode_for(expected),
+                )
             }
             OperationReceipt::ReplaceFile {
                 destination,
@@ -417,7 +439,11 @@ impl LinuxFileExecutor {
                     size: *new_size,
                     executable: *executable,
                 };
-                verify_installed(Path::new(destination), expected)
+                verify_installed(
+                    Path::new(destination),
+                    expected,
+                    self.executable_mode_for(expected),
+                )
             }
             OperationReceipt::RemoveFile { destination, .. } => {
                 match observe(&PathBuf::from(destination.to_string()))? {
@@ -457,11 +483,17 @@ impl LinuxFileExecutor {
                 destination,
                 installed_sha256,
                 installed_size,
+                executable,
                 created_directories,
-                ..
             } => {
                 let path = PathBuf::from(destination);
-
+                let file = self.file(node.id.as_str())?.clone();
+                if path != file.host_path {
+                    return Err(ExecError::RollbackDrift {
+                        path: destination.clone(),
+                        reason: "the journal destination is not this operation's file".into(),
+                    });
+                }
                 let expected = FileIntent {
                     sha256: installed_sha256
                         .parse()
@@ -470,67 +502,235 @@ impl LinuxFileExecutor {
                             reason: "invalid journal digest".into(),
                         })?,
                     size: *installed_size,
-                    executable: false,
+                    executable: *executable,
                 };
-                verify_installed(&path, expected)?;
-                let directory = OwnedDirectory::open(&parent_of(&path)?)?;
-                directory.remove_file(&file_name(&path)?)?;
-                directory.sync()?;
+                let expected_mode = self.executable_mode_for(expected);
+                let (directory, name) = crate::fs::open_parent(&path)?;
+                match directory.kind_or_absent(&name)? {
+                    None => Ok(()),
+                    Some(EntryKind::Regular) => {
+                        let (bytes, mode) = read_stat(&directory, &name, &path)?;
+                        let (found_size, found) =
+                            hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
+                                path: path.display().to_string(),
+                                source: error,
+                            })?;
+                        if found_size != expected.size
+                            || found != expected.sha256
+                            || mode != expected_mode
+                        {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the file is no longer the one this transaction wrote"
+                                    .into(),
+                            });
+                        }
+                        directory.remove_file(&name)?;
+                        directory.sync()?;
 
-                for created in created_directories.iter().rev() {
-                    let created = Path::new(created);
-                    let Ok(name) = file_name(created) else {
-                        continue;
-                    };
-                    let Some(parent) = created.parent() else {
-                        continue;
-                    };
-                    if let Ok(parent) = OwnedDirectory::open(parent) {
-                        let _ = parent.remove_empty_directory(&name);
+                        for created in created_directories.iter().rev() {
+                            let created = Path::new(created);
+                            let Some(parent) = created.parent() else {
+                                continue;
+                            };
+                            let Some(leaf) = created
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .filter(|name| !name.is_empty())
+                            else {
+                                continue;
+                            };
+                            if leaf.contains('/') || leaf.contains('\0') {
+                                continue;
+                            }
+                            if let Ok(parent) = OwnedDirectory::open(parent) {
+                                let _ = parent.remove_empty_directory(&leaf);
+                            }
+                        }
+                        Ok(())
                     }
+                    Some(_) => Err(ExecError::RollbackDrift {
+                        path: path.display().to_string(),
+                        reason: "the destination is no longer a regular file".into(),
+                    }),
                 }
-                Ok(())
             }
             OperationReceipt::ReplaceFile {
                 destination,
+                previous_sha256,
+                previous_size,
+                previous_mode,
                 backup_path,
-                ..
+                new_sha256,
+                new_size,
+                executable,
             } => {
                 let path = PathBuf::from(destination);
-                let backup = backup_path.clone();
-                let directory = OwnedDirectory::open(&parent_of(&path)?)?;
-                let backup_name = file_name(&backup)?;
-                let previous = directory.read_regular(&backup_name)?;
+                let file = self.file(node.id.as_str())?.clone();
+                if path != file.host_path {
+                    return Err(ExecError::RollbackDrift {
+                        path: destination.clone(),
+                        reason: "the journal destination is not this operation's file".into(),
+                    });
+                }
+                let previous = FileIntent {
+                    sha256: previous_sha256
+                        .parse()
+                        .map_err(|_| ExecError::RollbackDrift {
+                            path: destination.clone(),
+                            reason: "invalid journal digest".into(),
+                        })?,
+                    size: *previous_size,
+                    executable: previous_mode & 0o111 != 0,
+                };
+                let new = FileIntent {
+                    sha256: new_sha256.parse().map_err(|_| ExecError::RollbackDrift {
+                        path: destination.clone(),
+                        reason: "invalid journal digest".into(),
+                    })?,
+                    size: *new_size,
+                    executable: *executable,
+                };
+                let (directory, name) = crate::fs::open_parent(&path)?;
+                let backup =
+                    check_backup(&directory, &path, backup_path, node.id.as_str(), "backup")?;
 
-                directory.write_durable(&file_name(&path)?, &previous, PAYLOAD_FILE_MODE)?;
-                let _ = directory.remove_file(&backup_name);
-                Ok(())
+                match current_state(
+                    &directory,
+                    &name,
+                    &path,
+                    previous.size,
+                    previous.sha256,
+                    new.size,
+                    new.sha256,
+                )? {
+                    Current::Absent => {
+                        let saved = read_verified_backup(
+                            &directory,
+                            &backup,
+                            &path,
+                            previous.size,
+                            previous.sha256,
+                            "the destination is gone and the backup cannot be read",
+                        )?;
+                        restore_exclusive(
+                            &directory,
+                            &name,
+                            &path,
+                            &saved,
+                            mode_from(*previous_mode),
+                        )?;
+                        let _ = directory.remove_file(&backup);
+                        let _ = directory.sync();
+                        verify_installed(&path, previous, *previous_mode)?;
+                        Ok(())
+                    }
+                    Current::MatchesPrevious => {
+                        directory.chmod_regular(&name, mode_from(*previous_mode))?;
+                        let _ = directory.sync();
+                        if backup_valid(&directory, &backup, previous.size, previous.sha256) {
+                            let _ = directory.remove_file(&backup);
+                            let _ = directory.sync();
+                        }
+                        verify_installed(&path, previous, *previous_mode)?;
+                        Ok(())
+                    }
+                    Current::MatchesNew => {
+                        let saved = read_verified_backup(
+                            &directory,
+                            &backup,
+                            &path,
+                            previous.size,
+                            previous.sha256,
+                            "the backup no longer holds the previous file",
+                        )?;
+                        directory.write_durable(&name, &saved, mode_from(*previous_mode))?;
+                        let _ = directory.remove_file(&backup);
+                        let _ = directory.sync();
+                        verify_installed(&path, previous, *previous_mode)?;
+                        Ok(())
+                    }
+                    Current::Foreign => Err(ExecError::RollbackDrift {
+                        path: path.display().to_string(),
+                        reason: "the destination was modified outside this transaction".into(),
+                    }),
+                }
             }
             OperationReceipt::RemoveFile {
+                destination,
                 backup_path,
                 sha256,
                 size,
-                ..
+                mode,
             } => {
-                let backup = PathBuf::from(backup_path.to_string());
-                let bytes = std::fs::read(&backup).map_err(|error| PathError::Io {
-                    path: backup.display().to_string(),
-                    source: error,
-                })?;
-                let (found_size, found) =
-                    hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
-                        path: backup.display().to_string(),
-                        source: error,
-                    })?;
-                if found != *sha256 || found_size != *size {
+                let file = self.file(node.id.as_str())?.clone();
+                if *destination != file.destination {
                     return Err(ExecError::RollbackDrift {
-                        path: backup.display().to_string(),
-                        reason: "the backup no longer holds the removed file".into(),
+                        path: destination.to_string(),
+                        reason: "the journal destination is not this operation's file".into(),
                     });
+                }
+                let path = to_host_path(destination).map_err(|error| ExecError::RollbackDrift {
+                    path: destination.to_string(),
+                    reason: error.to_string(),
+                })?;
+                if path != file.host_path {
+                    return Err(ExecError::RollbackDrift {
+                        path: path.display().to_string(),
+                        reason: "the journal destination is not this operation's file".into(),
+                    });
+                }
+                let backup_host =
+                    to_host_path(backup_path).map_err(|error| ExecError::RollbackDrift {
+                        path: backup_path.to_string(),
+                        reason: error.to_string(),
+                    })?;
+                let (directory, name) = crate::fs::open_parent(&path)?;
+                let backup = check_backup_host(
+                    &directory,
+                    &path,
+                    &backup_host,
+                    node.id.as_str(),
+                    "removed",
+                )?;
+
+                match removed_state(&directory, &name, &path, *size, *sha256)? {
+                    Restored::Already => {
+                        directory.chmod_regular(&name, mode_from(*mode))?;
+                        let _ = directory.sync();
+                        if backup_valid(&directory, &backup, *size, *sha256) {
+                            let _ = directory.remove_file(&backup);
+                            let _ = directory.sync();
+                        }
+                        Ok(())
+                    }
+                    Restored::Absent => {
+                        let saved = read_verified_backup(
+                            &directory,
+                            &backup,
+                            &path,
+                            *size,
+                            *sha256,
+                            "the backup no longer holds the removed file",
+                        )?;
+                        restore_exclusive(&directory, &name, &path, &saved, mode_from(*mode))?;
+                        verify_previous(&path, *size, *sha256, *mode)?;
+                        let _ = directory.remove_file(&backup);
+                        let _ = directory.sync();
+                        Ok(())
+                    }
+                    Restored::Foreign => Err(ExecError::RollbackDrift {
+                        path: path.display().to_string(),
+                        reason: "the destination was modified outside this transaction".into(),
+                    }),
+                }
+            }
+            OperationReceipt::Control | OperationReceipt::StageFile { .. } => {
+                if matches!(receipt, OperationReceipt::StageFile { .. }) {
+                    self.discard_staged(node);
                 }
                 Ok(())
             }
-            OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
             OperationReceipt::Backend { key, payload } => {
                 if is_service_key(key) {
                     return self.rollback_service(node, key, payload);
@@ -554,12 +754,14 @@ impl LinuxFileExecutor {
                 destination,
                 installed_sha256,
                 installed_size,
+                executable,
                 ..
             }
             | OperationReceipt::ReplaceFile {
                 destination,
                 new_sha256: installed_sha256,
                 new_size: installed_size,
+                executable,
                 ..
             } => {
                 let expected = FileIntent {
@@ -570,19 +772,36 @@ impl LinuxFileExecutor {
                             reason: "invalid journal digest".into(),
                         })?,
                     size: *installed_size,
-                    executable: false,
+                    executable: *executable,
                 };
+                let expected_mode = (expected.mode_for(self.executable_mode)).bits() & 0o7777;
                 match observe(Path::new(destination))? {
                     None => Ok(ReconcileResult::NotApplied),
-                    Some(_) if verify_installed(Path::new(destination), expected).is_ok() => {
+                    Some(_)
+                        if verify_installed(Path::new(destination), expected, expected_mode)
+                            .is_ok()
+                            && receipt_backup_valid(receipt) =>
+                    {
                         Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
                     }
                     Some(_) => Ok(ReconcileResult::Ambiguous),
                 }
             }
-            OperationReceipt::RemoveFile { destination, .. } => {
-                match observe(Path::new(&destination.to_string()))? {
-                    None => Ok(ReconcileResult::AppliedWithReceipt(receipt.clone())),
+            OperationReceipt::RemoveFile {
+                destination,
+                sha256,
+                size,
+                ..
+            } => {
+                let path = PathBuf::from(destination.to_string());
+                match observe(&path)? {
+                    None if receipt_backup_valid(receipt) => {
+                        Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
+                    }
+                    None => Ok(ReconcileResult::Ambiguous),
+                    Some((found_size, found)) if found_size == *size && found == *sha256 => {
+                        Ok(ReconcileResult::NotApplied)
+                    }
                     Some(_) => Ok(ReconcileResult::Ambiguous),
                 }
             }
@@ -639,9 +858,10 @@ impl LinuxFileExecutor {
         node: &TransactionNode,
     ) -> Result<ReconcileResult, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
+        let expected_mode = self.executable_mode_for(file.intent);
         match observe(&file.host_path)? {
             None => Ok(ReconcileResult::NotApplied),
-            Some((size, sha256)) if size == file.intent.size && sha256 == file.intent.sha256 => Ok(
+            Some(_) if verify_installed(&file.host_path, file.intent, expected_mode).is_ok() => Ok(
                 ReconcileResult::AppliedWithReceipt(OperationReceipt::CreateFile {
                     destination: file.host_path.display().to_string(),
                     installed_sha256: file.intent.sha256.to_hex(),
@@ -662,24 +882,27 @@ impl LinuxFileExecutor {
         let FilePrecondition::Exact { size, sha256 } = file.precondition else {
             return Ok(ReconcileResult::Ambiguous);
         };
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        let backup_name = format!("backup-{}.bin", short_digest(node.id.as_str()));
-        let backup_ok = match directory.read_regular(&backup_name) {
-            Ok(previous) => hash_reader(previous.as_slice())
-                .map(|(found_size, found)| found_size == size && found == sha256)
-                .unwrap_or(false),
-            Err(_) => false,
+        let (directory, _) = crate::fs::open_parent(&file.host_path)?;
+        let backup_name = backup_name(node.id.as_str(), "backup");
+        let backup_mode = match directory.read_regular_stat(&backup_name) {
+            Ok((previous, mode)) => hash_reader(previous.as_slice())
+                .map(|(found_size, found)| (found_size == size && found == sha256).then_some(mode))
+                .unwrap_or(None),
+            Err(_) => None,
         };
+        let new_mode = self.executable_mode_for(file.intent);
         match observe(&file.host_path)? {
             None => Ok(ReconcileResult::NotApplied),
-            Some((found_size, found))
-                if found_size == file.intent.size && found == file.intent.sha256 && backup_ok =>
-            {
+            Some(_) if verify_installed(&file.host_path, file.intent, new_mode).is_ok() => {
+                let Some(previous_mode) = backup_mode else {
+                    return Ok(ReconcileResult::Ambiguous);
+                };
                 Ok(ReconcileResult::AppliedWithReceipt(
                     OperationReceipt::ReplaceFile {
                         destination: file.host_path.display().to_string(),
                         previous_sha256: sha256.to_hex(),
                         previous_size: size,
+                        previous_mode,
                         backup_path: directory.path().join(&backup_name).display().to_string(),
                         new_sha256: file.intent.sha256.to_hex(),
                         new_size: file.intent.size,
@@ -699,27 +922,32 @@ impl LinuxFileExecutor {
             return Ok(ReconcileResult::Ambiguous);
         };
         let file = self.file(node.id.as_str())?.clone();
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        let backup_name = format!("removed-{}.bin", short_digest(node.id.as_str()));
-        let backup_ok = match directory.read_regular(&backup_name) {
-            Ok(saved) => hash_reader(saved.as_slice())
-                .map(|(found_size, found)| found_size == removal.size && found == removal.sha256)
-                .unwrap_or(false),
-            Err(_) => false,
+        let (directory, _) = crate::fs::open_parent(&file.host_path)?;
+        let backup_name = backup_name(node.id.as_str(), "removed");
+        let backup_mode = match directory.read_regular_stat(&backup_name) {
+            Ok((saved, mode)) => hash_reader(saved.as_slice())
+                .map(|(found_size, found)| {
+                    (found_size == removal.size && found == removal.sha256).then_some(mode)
+                })
+                .unwrap_or(None),
+            Err(_) => None,
         };
         match observe(&file.host_path)? {
-            None if backup_ok => Ok(ReconcileResult::AppliedWithReceipt(
-                OperationReceipt::RemoveFile {
-                    destination: removal.destination.clone(),
-                    backup_path: as_target(
-                        &removal.destination,
-                        &directory.path().join(&backup_name),
-                    )?,
-                    sha256: removal.sha256,
-                    size: removal.size,
-                },
-            )),
-            None => Ok(ReconcileResult::Ambiguous),
+            None => match backup_mode {
+                Some(mode) => Ok(ReconcileResult::AppliedWithReceipt(
+                    OperationReceipt::RemoveFile {
+                        destination: removal.destination.clone(),
+                        backup_path: as_target(
+                            &removal.destination,
+                            &directory.path().join(&backup_name),
+                        )?,
+                        sha256: removal.sha256,
+                        size: removal.size,
+                        mode,
+                    },
+                )),
+                None => Ok(ReconcileResult::Ambiguous),
+            },
             Some((found_size, found)) if found_size == removal.size && found == removal.sha256 => {
                 Ok(ReconcileResult::NotApplied)
             }
@@ -735,24 +963,36 @@ impl LinuxFileExecutor {
                 reason: "a create must require an absent destination".into(),
             });
         }
-        let staged = file.staged.clone().ok_or_else(|| ExecError::PlanDrift {
-            path: file.host_path.display().to_string(),
-            reason: "the file was never staged".into(),
-        })?;
+        let key = mutation_key(node)?;
+        let staged_name = staged_name(&OperationId::stage_file(&key));
+        let mode = file.intent.mode_for(self.executable_mode);
 
-        let created_directories = file.created_directories.clone();
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        let name = file_name(&file.host_path)?;
+        let mut created_directories = self
+            .staged_dirs
+            .remove(&file.host_path.display().to_string())
+            .unwrap_or_default();
+        created_directories.extend(crate::fs::create_parents(
+            &file.host_path,
+            STATE_DIRECTORY_MODE,
+        )?);
+        created_directories.sort();
+        created_directories.dedup();
+        let (directory, name) = crate::fs::open_parent(&file.host_path)?;
+        match directory.kind_or_absent(&name)? {
+            None => {}
+            Some(_) => {
+                return Err(PathError::AlreadyExists {
+                    path: file.host_path.display().to_string(),
+                }
+                .into());
+            }
+        }
+        self.ensure_staged(node, &key, &file, &directory, &staged_name)?;
+        directory.chmod_regular(&staged_name, mode)?;
+        directory.publish_exclusive(&name, &staged_name)?;
 
-        rustix::fs::chmod(&staged, file.intent.mode_for(self.executable_mode)).map_err(
-            |error| PathError::Io {
-                path: staged.display().to_string(),
-                source: std::io::Error::from(error),
-            },
-        )?;
-        directory.publish_exclusive(&name, &file_name(&staged)?)?;
-
-        verify_installed(&file.host_path, file.intent)?;
+        let expected_mode = (mode).bits() & 0o7777;
+        verify_installed(&file.host_path, file.intent, expected_mode)?;
         Ok(OperationReceipt::CreateFile {
             destination: file.host_path.display().to_string(),
             installed_sha256: file.intent.sha256.to_hex(),
@@ -770,34 +1010,47 @@ impl LinuxFileExecutor {
                 reason: "a replace must state the exact previous state".into(),
             });
         };
+        let key = mutation_key(node)?;
+        let staged_name = staged_name(&OperationId::stage_file(&key));
+        let mode = file.intent.mode_for(self.executable_mode);
 
-        verify_precondition(&file.host_path, size, sha256)?;
+        let (directory, name) = crate::fs::open_parent(&file.host_path)?;
+        let (previous_bytes, previous_mode) =
+            directory
+                .read_regular_stat(&name)
+                .map_err(|_| ExecError::PlanDrift {
+                    path: file.host_path.display().to_string(),
+                    reason: "the destination a replace requires is not a regular file".into(),
+                })?;
+        let (found_size, found) =
+            hash_reader(previous_bytes.as_slice()).map_err(|error| PathError::Io {
+                path: file.host_path.display().to_string(),
+                source: error,
+            })?;
+        if found_size != size || found != sha256 {
+            return Err(ExecError::PlanDrift {
+                path: file.host_path.display().to_string(),
+                reason: format!(
+                    "expected {size} bytes / {sha256}, found {found_size} bytes / {found}"
+                ),
+            });
+        }
 
-        let staged = file.staged.clone().ok_or_else(|| ExecError::PlanDrift {
-            path: file.host_path.display().to_string(),
-            reason: "the file was never staged".into(),
-        })?;
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        let name = file_name(&file.host_path)?;
-        let previous = directory.read_regular(&name)?;
-
-        let backup_name = format!("backup-{}.bin", short_digest(node.id.as_str()));
-        directory.write_durable(&backup_name, &previous, STATE_FILE_MODE)?;
+        let backup_name = backup_name(node.id.as_str(), "backup");
+        directory.write_durable(&backup_name, &previous_bytes, mode_from(previous_mode))?;
         let backup_path = directory.path().join(&backup_name);
 
-        rustix::fs::chmod(&staged, file.intent.mode_for(self.executable_mode)).map_err(
-            |error| PathError::Io {
-                path: staged.display().to_string(),
-                source: std::io::Error::from(error),
-            },
-        )?;
-        directory.publish_replacing(&name, &file_name(&staged)?)?;
-        verify_installed(&file.host_path, file.intent)?;
+        self.ensure_staged(node, &key, &file, &directory, &staged_name)?;
+        directory.chmod_regular(&staged_name, mode)?;
+        directory.publish_replacing(&name, &staged_name)?;
+        let expected_mode = (mode).bits() & 0o7777;
+        verify_installed(&file.host_path, file.intent, expected_mode)?;
 
         Ok(OperationReceipt::ReplaceFile {
             destination: file.host_path.display().to_string(),
             previous_sha256: sha256.to_hex(),
             previous_size: size,
+            previous_mode,
             backup_path: backup_path.display().to_string(),
             new_sha256: file.intent.sha256.to_hex(),
             new_size: file.intent.size,
@@ -807,17 +1060,20 @@ impl LinuxFileExecutor {
 
     fn remove(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
-        let Some((size, sha256)) = observe(&file.host_path)? else {
-            return Err(PathError::Missing {
+        let (directory, name) = crate::fs::open_parent(&file.host_path)?;
+        let (bytes, file_mode) = directory.read_regular_stat(&name).map_err(|_| {
+            ExecError::from(PathError::Missing {
                 path: file.host_path.display().to_string(),
-            }
-            .into());
-        };
-        let directory = OwnedDirectory::open(&parent_of(&file.host_path)?)?;
-        let bytes = directory.read_regular(&file_name(&file.host_path)?)?;
-        let backup_name = format!("removed-{}.bin", short_digest(node.id.as_str()));
-        directory.write_durable(&backup_name, &bytes, STATE_FILE_MODE)?;
-        directory.remove_file(&file_name(&file.host_path)?)?;
+            })
+        })?;
+        let (size, sha256) = hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
+            path: file.host_path.display().to_string(),
+            source: error,
+        })?;
+        let backup_name = backup_name(node.id.as_str(), "removed");
+        directory.write_durable(&backup_name, &bytes, mode_from(file_mode))?;
+        directory.remove_file(&name)?;
+        directory.sync()?;
 
         let backup_path = directory.path().join(&backup_name);
         Ok(OperationReceipt::RemoveFile {
@@ -826,7 +1082,121 @@ impl LinuxFileExecutor {
             backup_path: as_target(&file.destination, &backup_path)?,
             sha256,
             size,
+            mode: file_mode,
         })
+    }
+
+    fn ensure_staged(
+        &mut self,
+        node: &TransactionNode,
+        key: &ResourceKey,
+        file: &FileWork,
+        directory: &OwnedDirectory,
+        staged_name: &str,
+    ) -> Result<(), ExecError> {
+        let staged_ok = match directory.read_regular(staged_name) {
+            Ok(bytes) => hash_reader(bytes.as_slice())
+                .map(|(found_size, found)| {
+                    found_size == file.intent.size && found == file.intent.sha256
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if staged_ok {
+            return Ok(());
+        }
+        let _ = key;
+        let bytes = self.payload_bytes(node)?;
+        directory.write_durable(staged_name, &bytes, STATE_FILE_MODE)?;
+        let valid = match directory.read_regular(staged_name) {
+            Ok(bytes) => hash_reader(bytes.as_slice())
+                .map(|(found_size, found)| {
+                    found_size == file.intent.size && found == file.intent.sha256
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !valid {
+            return Err(ExecError::Verification {
+                path: file.host_path.display().to_string(),
+                reason: "the staged bytes do not match the payload identity".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn payload_bytes(&mut self, node: &TransactionNode) -> Result<Vec<u8>, ExecError> {
+        use std::io::Read as _;
+        let (source, sha256, size) = Self::payload_identity(node)?;
+        let file = self.file(node.id.as_str())?.clone();
+        let payload = self.payload.as_ref().ok_or_else(|| ExecError::PlanDrift {
+            path: node.id.to_string(),
+            reason: "no payload source is attached".into(),
+        })?;
+        let mut reader =
+            payload
+                .open(&source, &sha256, size)
+                .map_err(|error| ExecError::Payload {
+                    path: source.to_string(),
+                    source: error,
+                })?;
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|error| ExecError::Payload {
+                path: source.to_string(),
+                source: PayloadError::Read {
+                    path: source.to_string(),
+                    source: error,
+                },
+            })?;
+        let (found_size, found) =
+            hash_reader(bytes.as_slice()).map_err(|error| ExecError::Payload {
+                path: source.to_string(),
+                source: PayloadError::Read {
+                    path: source.to_string(),
+                    source: error,
+                },
+            })?;
+        if found_size != file.intent.size
+            || found != file.intent.sha256
+            || found_size != size
+            || found != sha256
+        {
+            return Err(ExecError::Payload {
+                path: source.to_string(),
+                source: PayloadError::DigestMismatch {
+                    path: source.to_string(),
+                },
+            });
+        }
+        Ok(bytes)
+    }
+
+    fn discard_staged(&mut self, node: &TransactionNode) {
+        let Ok(file) = self.file(node.id.as_str()).cloned() else {
+            return;
+        };
+        let key = match &node.kind {
+            NodeKind::StageFile { key } => key.clone(),
+            NodeKind::FileMutation { key, .. } => key.clone(),
+            _ => return,
+        };
+        let staged_name = staged_name(&OperationId::stage_file(&key));
+        let Ok((directory, _)) = crate::fs::open_parent(&file.host_path) else {
+            return;
+        };
+        if let Ok(bytes) = directory.read_regular(&staged_name) {
+            let valid = hash_reader(bytes.as_slice())
+                .map(|(found_size, found)| {
+                    found_size == file.intent.size && found == file.intent.sha256
+                })
+                .unwrap_or(false);
+            if valid {
+                let _ = directory.remove_file(&staged_name);
+                let _ = directory.sync();
+            }
+        }
     }
 }
 
@@ -907,7 +1277,11 @@ fn verify_precondition(
     Ok(())
 }
 
-fn verify_installed(destination: &Path, intent: FileIntent) -> Result<(), ExecError> {
+fn verify_installed(
+    destination: &Path,
+    intent: FileIntent,
+    expected_mode: u32,
+) -> Result<(), ExecError> {
     let Some((size, sha256)) = observe(destination)? else {
         return Err(ExecError::Verification {
             path: destination.display().to_string(),
@@ -923,23 +1297,35 @@ fn verify_installed(destination: &Path, intent: FileIntent) -> Result<(), ExecEr
             ),
         });
     }
-    if intent.executable {
-        let mode = file_mode(destination)?;
-        if mode & 0o111 == 0 {
-            return Err(ExecError::Verification {
-                path: destination.display().to_string(),
-                reason: format!("declared runnable but installed with mode {mode:o}"),
-            });
-        }
+    let mode = installed_mode(destination)?;
+    if mode != expected_mode & 0o7777 {
+        return Err(ExecError::Verification {
+            path: destination.display().to_string(),
+            reason: format!("expected mode {:o}, found {mode:o}", expected_mode & 0o7777),
+        });
     }
     Ok(())
 }
 
+fn verify_previous(
+    path: &Path,
+    size: u64,
+    sha256: Sha256Digest,
+    mode: u32,
+) -> Result<(), ExecError> {
+    verify_installed(
+        path,
+        FileIntent {
+            sha256,
+            size,
+            executable: mode & 0o111 != 0,
+        },
+        mode,
+    )
+}
+
 fn observe(destination: &Path) -> Result<Option<(u64, Sha256Digest)>, ExecError> {
-    let Ok(directory) = OwnedDirectory::open(&parent_of(destination)?) else {
-        return Ok(None);
-    };
-    let Ok(name) = file_name(destination) else {
+    let Ok((directory, name)) = crate::fs::open_parent(destination) else {
         return Ok(None);
     };
     match directory.kind_or_absent(&name)? {
@@ -966,60 +1352,293 @@ fn observe(destination: &Path) -> Result<Option<(u64, Sha256Digest)>, ExecError>
     }
 }
 
-fn file_mode(destination: &Path) -> Result<u32, ExecError> {
-    use std::os::fd::AsFd as _;
-    let directory = OwnedDirectory::open(&parent_of(destination)?)?;
-    let file = directory.open_regular_read(&file_name(destination)?)?;
-
-    let stat = rustix::fs::fstat(file.as_fd()).map_err(|error| PathError::Io {
-        path: destination.display().to_string(),
-        source: std::io::Error::from(error),
-    })?;
-    Ok(stat.st_mode & 0o777)
+fn installed_mode(destination: &Path) -> Result<u32, ExecError> {
+    let (directory, name) = crate::fs::open_parent(destination)?;
+    let (_, mode) = read_stat(&directory, &name, destination)?;
+    Ok(mode)
 }
 
-fn parent_of(destination: &Path) -> Result<PathBuf, ExecError> {
-    destination
+fn read_stat(
+    directory: &OwnedDirectory,
+    name: &str,
+    display: &Path,
+) -> Result<(Vec<u8>, u32), ExecError> {
+    directory
+        .read_regular_stat(name)
+        .map_err(|error| match error {
+            PathError::UnexpectedKind { .. } => ExecError::from(error),
+            _ => ExecError::Verification {
+                path: display.display().to_string(),
+                reason: "the file is not there".into(),
+            },
+        })
+}
+
+fn read_current(
+    directory: &OwnedDirectory,
+    name: &str,
+    display: &Path,
+) -> Result<(Vec<u8>, u64, Sha256Digest), ExecError> {
+    let (bytes, _) = read_stat(directory, name, display)?;
+    let (size, sha256) = hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
+        path: display.display().to_string(),
+        source: error,
+    })?;
+    Ok((bytes, size, sha256))
+}
+
+fn mode_from(mode: u32) -> rustix::fs::Mode {
+    rustix::fs::Mode::from_bits_truncate(mode & 0o7777)
+}
+
+fn backup_name(id: &str, prefix: &str) -> String {
+    format!("{prefix}-{}.bin", short_digest(id))
+}
+
+fn check_backup(
+    directory: &OwnedDirectory,
+    destination: &Path,
+    backup_path: &str,
+    node_id: &str,
+    prefix: &str,
+) -> Result<String, ExecError> {
+    check_backup_host(
+        directory,
+        destination,
+        Path::new(backup_path),
+        node_id,
+        prefix,
+    )
+}
+
+fn check_backup_host(
+    directory: &OwnedDirectory,
+    destination: &Path,
+    backup: &Path,
+    node_id: &str,
+    prefix: &str,
+) -> Result<String, ExecError> {
+    let expected = backup_name(node_id, prefix);
+    let drift = |reason: &str| ExecError::RollbackDrift {
+        path: backup.display().to_string(),
+        reason: reason.into(),
+    };
+    let Some(parent) = backup
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| ExecError::PlanDrift {
-            path: destination.display().to_string(),
-            reason: "destination has no parent directory".into(),
-        })
-}
-
-fn file_name(destination: impl AsRef<Path>) -> Result<String, ExecError> {
-    let destination = destination.as_ref();
-    destination
+    else {
+        return Err(drift("a journal backup names its directory"));
+    };
+    let Some(leaf) = backup
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| ExecError::PlanDrift {
-            path: destination.display().to_string(),
-            reason: "destination has no final component".into(),
+    else {
+        return Err(drift("a journal backup names its file"));
+    };
+    let Some(want) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(drift("a journal backup sits beside its file"));
+    };
+    if parent != want || leaf != expected {
+        return Err(drift("a journal backup is not this operation's backup"));
+    }
+    let _ = directory;
+    Ok(leaf)
+}
+
+enum Current {
+    Absent,
+    MatchesPrevious,
+    MatchesNew,
+    Foreign,
+}
+
+fn current_state(
+    directory: &OwnedDirectory,
+    name: &str,
+    display: &Path,
+    previous_size: u64,
+    previous_sha256: Sha256Digest,
+    new_size: u64,
+    new_sha256: Sha256Digest,
+) -> Result<Current, ExecError> {
+    match directory.kind_or_absent(name)? {
+        None => Ok(Current::Absent),
+        Some(EntryKind::Regular) => {
+            let (bytes, _) = read_stat(directory, name, display)?;
+            let (found_size, found) =
+                hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
+                    path: display.display().to_string(),
+                    source: error,
+                })?;
+            if found_size == previous_size && found == previous_sha256 {
+                Ok(Current::MatchesPrevious)
+            } else if found_size == new_size && found == new_sha256 {
+                Ok(Current::MatchesNew)
+            } else {
+                Ok(Current::Foreign)
+            }
+        }
+        Some(_) => Ok(Current::Foreign),
+    }
+}
+
+enum Restored {
+    Already,
+    Absent,
+    Foreign,
+}
+
+fn removed_state(
+    directory: &OwnedDirectory,
+    name: &str,
+    display: &Path,
+    size: u64,
+    sha256: Sha256Digest,
+) -> Result<Restored, ExecError> {
+    match directory.kind_or_absent(name)? {
+        None => Ok(Restored::Absent),
+        Some(EntryKind::Regular) => {
+            let (bytes, _) = read_stat(directory, name, display)?;
+            let (found_size, found) =
+                hash_reader(bytes.as_slice()).map_err(|error| PathError::Io {
+                    path: display.display().to_string(),
+                    source: error,
+                })?;
+            if found_size == size && found == sha256 {
+                Ok(Restored::Already)
+            } else {
+                Ok(Restored::Foreign)
+            }
+        }
+        Some(_) => Ok(Restored::Foreign),
+    }
+}
+
+fn backup_valid(directory: &OwnedDirectory, backup: &str, size: u64, sha256: Sha256Digest) -> bool {
+    read_verified_backup(directory, backup, directory.path(), size, sha256, "").is_ok()
+}
+
+fn read_verified_backup(
+    directory: &OwnedDirectory,
+    backup: &str,
+    display: &Path,
+    size: u64,
+    sha256: Sha256Digest,
+    missing: &str,
+) -> Result<Vec<u8>, ExecError> {
+    let saved = directory
+        .read_regular(backup)
+        .map_err(|_| ExecError::RollbackDrift {
+            path: display.display().to_string(),
+            reason: missing.into(),
+        })?;
+    let (found_size, found) = hash_reader(saved.as_slice()).map_err(|error| PathError::Io {
+        path: display.display().to_string(),
+        source: error,
+    })?;
+    if found_size != size || found != sha256 {
+        return Err(ExecError::RollbackDrift {
+            path: display.display().to_string(),
+            reason: "the backup no longer holds the previous file".into(),
+        });
+    }
+    Ok(saved)
+}
+
+fn restore_exclusive(
+    directory: &OwnedDirectory,
+    name: &str,
+    display: &Path,
+    saved: &[u8],
+    mode: rustix::fs::Mode,
+) -> Result<(), ExecError> {
+    directory
+        .create_durable_exclusive(name, saved, mode)
+        .map_err(|error| match error {
+            PathError::AlreadyExists { .. } => ExecError::RollbackDrift {
+                path: display.display().to_string(),
+                reason: "the destination was recreated outside this transaction".into(),
+            },
+            other => other.into(),
         })
 }
 
-fn create_parents(destination: &Path) -> Result<Vec<String>, ExecError> {
-    let mut missing = Vec::new();
-    let mut cursor = parent_of(destination)?;
-    while !cursor.as_os_str().is_empty() && !cursor.exists() {
-        missing.push(cursor.clone());
-        if !cursor.pop() {
-            break;
+fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
+    match receipt {
+        OperationReceipt::CreateFile { .. }
+        | OperationReceipt::Control
+        | OperationReceipt::StageFile { .. }
+        | OperationReceipt::Backend { .. } => true,
+        OperationReceipt::ReplaceFile {
+            destination,
+            backup_path,
+            previous_sha256,
+            previous_size,
+            ..
+        } => {
+            let Ok(previous) = previous_sha256.parse() else {
+                return false;
+            };
+            let path = PathBuf::from(destination);
+            let backup = PathBuf::from(backup_path);
+            let Some(parent) = backup
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return false;
+            };
+            let Ok(directory) = OwnedDirectory::open(parent) else {
+                return false;
+            };
+            let Some(leaf) = backup
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                return false;
+            };
+            let _ = path;
+            backup_valid(&directory, &leaf, *previous_size, previous)
+        }
+        OperationReceipt::RemoveFile {
+            backup_path,
+            sha256,
+            size,
+            ..
+        } => {
+            let Ok(backup) = to_host_path(backup_path) else {
+                return false;
+            };
+            let Some(parent) = backup
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return false;
+            };
+            let Ok(directory) = OwnedDirectory::open(parent) else {
+                return false;
+            };
+            let Some(leaf) = backup
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                return false;
+            };
+            backup_valid(&directory, &leaf, *size, *sha256)
         }
     }
-    missing.reverse();
-    let mut created = Vec::new();
-    for directory in missing {
-        rustix::fs::mkdir(&directory, STATE_DIRECTORY_MODE).map_err(|error| PathError::Io {
-            path: directory.display().to_string(),
-            source: std::io::Error::from(error),
-        })?;
-        created.push(directory.display().to_string());
+}
+
+fn mutation_key(node: &TransactionNode) -> Result<ResourceKey, ExecError> {
+    match &node.kind {
+        NodeKind::FileMutation { key, .. } => Ok(key.clone()),
+        _ => Err(ExecError::PlanDrift {
+            path: node.id.to_string(),
+            reason: "a file mutation without its resource".into(),
+        }),
     }
-    Ok(created)
 }
 
 fn as_target(

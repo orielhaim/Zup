@@ -201,6 +201,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 backup_path,
                 sha256,
                 size,
+                ..
             } => {
                 if file_identity(&host_path(destination))?.is_some()
                     || file_identity(&host_path(backup_path))? != Some((*size, *sha256))
@@ -309,6 +310,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                                 destination: destination.display().to_string(),
                                 previous_sha256: sha256.to_hex(),
                                 previous_size: size,
+                                previous_mode: 0o644,
                                 backup_path: backup.display().to_string(),
                                 new_sha256: expected.1.to_hex(),
                                 new_size: expected.0,
@@ -416,6 +418,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
             )?,
             sha256: removal.sha256,
             size: removal.size,
+            mode: 0o644,
         })
     }
 
@@ -443,6 +446,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                         })?,
                         sha256: removal.sha256,
                         size: removal.size,
+                        mode: 0o644,
                     },
                 ))
             }
@@ -890,6 +894,7 @@ pub fn transaction_receipt(receipt: OperationReceipt) -> zup_transaction::Operat
             destination: receipt.destination,
             previous_sha256: receipt.previous_sha256.to_hex(),
             previous_size: receipt.previous_size,
+            previous_mode: 0o644,
             backup_path: receipt.backup_path,
             new_sha256: receipt.new_sha256.to_hex(),
             new_size: receipt.new_size,
@@ -959,6 +964,7 @@ pub fn verify_installed_file(
             backup_path,
             sha256,
             size,
+            ..
         } => {
             let destination = host_path(destination);
             let backup_path = host_path(backup_path);

@@ -132,6 +132,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 destination: "destination".into(),
                 previous_sha256: digest.clone(),
                 previous_size: 1,
+                previous_mode: 0o644,
                 backup_path: "backup".into(),
                 new_sha256: digest,
                 new_size: 1,
@@ -149,6 +150,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 backup_path: removal.destination.clone(),
                 sha256: Sha256Digest::from_bytes([0; 32]),
                 size: 1,
+                mode: 0o644,
             }
         }
         NodeKind::BackendOperation { key, .. } | NodeKind::BackendRemoval { key } => {

@@ -282,7 +282,7 @@ pub fn check_collisions(unit: &str, canonical: &Path, dirs: &[PathBuf]) -> Resul
 
 pub fn refuse_source_symlink(unit: &str, canonical: &Path) -> Result<(), ExecError> {
     if let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) {
-        crate::fs::refuse_symlink_ancestors(parent).map_err(|error| {
+        crate::fs::anchor_reachable(parent).map_err(|error| {
             ExecError::refused(
                 unit,
                 format!("unit directory passes through a link: {error}"),
@@ -346,7 +346,7 @@ pub fn validate_executable(
             ));
         }
     }
-    crate::fs::refuse_symlink_ancestors(&host)
+    crate::fs::anchor_reachable(&host)
         .map_err(|error| ExecError::refused("", format!("service binary: {error}")))?;
     if !filesystem {
         return Ok(destination);

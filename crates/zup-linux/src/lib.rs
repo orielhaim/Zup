@@ -64,7 +64,7 @@ pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snap
 #[cfg(target_os = "linux")]
 pub use fs::{
     EXECUTABLE_PAYLOAD_MODE, EntryKind, OwnedDirectory, PAYLOAD_FILE_MODE, STATE_DIRECTORY_MODE,
-    STATE_FILE_MODE, refuse_symlink_ancestors, sync_directory,
+    STATE_FILE_MODE, anchor_reachable, create_parents, open_parent, sync_directory,
 };
 #[cfg(target_os = "linux")]
 pub use input::{
