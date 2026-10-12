@@ -84,11 +84,12 @@ pub use lowering::{linux_target_path, target_path_from_host, to_host_path};
 #[cfg(target_os = "linux")]
 pub use machine::{
     MACHINE_LOCK_FILE_MODE, MACHINE_PRIVATE_DIR_MODE, MACHINE_PRIVATE_FILE_MODE,
-    MACHINE_PUBLIC_FILE_MODE, MACHINE_STATE_DIR_MODE, MachineDestination, SYSTEMD_UNIT_FILE_MODE,
-    SystemdRoots, authorize_machine_destination, authorize_machine_install_directory,
-    authorize_systemd_unit, ensure_machine_state_root, normalize_state_modes,
-    resolve_machine_state_root, verify_ledger_trust, verify_machine_hierarchy,
-    verify_machine_install_roots, verify_machine_structure, verify_trusted_state_file,
+    MACHINE_PUBLIC_FILE_MODE, MACHINE_STATE_DIR_MODE, MachineDestination, MachineStateReadiness,
+    SYSTEMD_UNIT_FILE_MODE, SystemdRoots, assess_machine_state_root, authorize_machine_destination,
+    authorize_machine_install_directory, authorize_systemd_unit, ensure_machine_state_root,
+    normalize_state_modes, resolve_machine_state_root, verify_ledger_trust,
+    verify_machine_hierarchy, verify_machine_install_roots, verify_machine_structure,
+    verify_trusted_state_file,
 };
 #[cfg(target_os = "linux")]
 pub use paths::{

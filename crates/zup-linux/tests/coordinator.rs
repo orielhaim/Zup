@@ -72,6 +72,7 @@ fn run(
     let mut executor =
         LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(payload_root));
     executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
     let (_, outcome) = coordinator
         .execute(record, &mut executor)
         .expect("execution reaches a stable outcome");
@@ -257,6 +258,7 @@ fn recovery_replays_a_journal_without_the_original_executor() {
         let mut executor =
             LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
         executor.register_plan(&plan).expect("a plan registers");
+        executor.set_transaction_id(transaction_id);
         let mut staged = Vec::new();
         for node in plan
             .nodes
@@ -299,6 +301,7 @@ fn recovery_replays_a_journal_without_the_original_executor() {
     let record = store.load(&transaction_id).expect("the journal survives");
     let mut executor = LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
     executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
     let (_, outcome) = recover(record, &store, &mut executor).expect("recovery runs");
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert_eq!(
@@ -404,6 +407,7 @@ fn a_failed_transaction_restores_an_already_removed_file() {
         inner: {
             let mut inner = LinuxFileExecutor::new();
             inner.register_plan(&plan).expect("a plan registers");
+            inner.set_transaction_id(record.transaction_id);
             inner
         },
         fail,
@@ -465,6 +469,7 @@ fn recovery_commits_an_interrupted_removal() {
     {
         let mut executor = LinuxFileExecutor::new();
         executor.register_plan(&plan).expect("a plan registers");
+        executor.set_transaction_id(transaction_id);
         let removal = plan
             .nodes
             .iter()
@@ -490,6 +495,7 @@ fn recovery_commits_an_interrupted_removal() {
     let record = store.load(&transaction_id).expect("the journal survives");
     let mut executor = LinuxFileExecutor::new();
     executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
     let (_, outcome) = recover(record, &store, &mut executor).expect("recovery runs");
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert!(

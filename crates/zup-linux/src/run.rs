@@ -152,6 +152,7 @@ fn run_user(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
     let payload = RunnerPayload::open(&carrier, &request.installer, generated)?;
     let mut executor = LinuxFileExecutor::new().with_payload(payload);
     executor.register_plan(&plan)?;
+    executor.set_transaction_id(record.transaction_id);
     let (record, outcome) = coordinator.execute(record, &mut executor)?;
 
     match outcome {
@@ -215,6 +216,7 @@ pub fn recover_transaction(
     };
     let mut executor = LinuxFileExecutor::new().with_payload(payload);
     executor.register_plan(&record.plan)?;
+    executor.set_transaction_id(record.transaction_id);
     preflight_refresh(&record.plan)?;
     let (record, outcome) = zup_transaction::recover(record, &store, &mut executor)?;
     match outcome {

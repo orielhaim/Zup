@@ -688,31 +688,46 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> 
         let Some(receipt) = record.receipt(&node.id) else {
             continue;
         };
-        let (backup, size, sha256) = match receipt {
+        let (backup, destination, size, sha256, prefix) = match receipt {
             OperationReceipt::RemoveFile {
                 backup_path,
                 sha256,
                 size,
+                destination,
                 ..
             } => (
                 to_host_path(backup_path).map_err(|_| ExecError::LedgerInvalid)?,
+                to_host_path(destination).map_err(|_| ExecError::LedgerInvalid)?,
                 *size,
                 *sha256,
+                "removed",
             ),
             OperationReceipt::ReplaceFile {
                 backup_path,
                 previous_sha256,
                 previous_size,
+                destination,
                 ..
             } => (
                 PathBuf::from(backup_path),
+                PathBuf::from(destination),
                 *previous_size,
                 previous_sha256
                     .parse()
                     .map_err(|_| ExecError::LedgerInvalid)?,
+                "backup",
             ),
             _ => continue,
         };
+        if !backup_artifact_owned(
+            &record.transaction_id,
+            &node.id,
+            prefix,
+            &backup,
+            &destination,
+        ) {
+            return Err(ExecError::LedgerInvalid);
+        }
         let Ok((directory, name)) = crate::fs::open_parent(&backup) else {
             continue;
         };
@@ -737,6 +752,20 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> 
         }
     }
     Ok(())
+}
+
+fn backup_artifact_owned(
+    transaction: &zup_transaction::TransactionId,
+    node_id: &zup_transaction::OperationId,
+    prefix: &str,
+    backup: &Path,
+    destination: &Path,
+) -> bool {
+    let expected = crate::executor::backup_name(transaction, node_id.as_str(), prefix);
+    backup
+        .file_name()
+        .is_some_and(|leaf| leaf.to_string_lossy().into_owned() == expected)
+        && matches!((backup.parent(), destination.parent()), (Some(a), Some(b)) if !a.as_os_str().is_empty() && a == b)
 }
 
 fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), ExecError> {
@@ -826,4 +855,85 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transaction_id() -> zup_transaction::TransactionId {
+        zup_transaction::TransactionId::new_v7()
+    }
+
+    fn node(id: &str) -> zup_transaction::OperationId {
+        zup_transaction::OperationId::new(id)
+    }
+
+    #[test]
+    fn only_journal_bound_sibling_backups_clean_up() {
+        let transaction = transaction_id();
+        let install = PathBuf::from("/tmp/zup-ledger-test/install");
+        let owned = install.join(crate::executor::backup_name(
+            &transaction,
+            "op-replace",
+            "backup",
+        ));
+        assert!(backup_artifact_owned(
+            &transaction,
+            &node("op-replace"),
+            "backup",
+            &owned,
+            &install.join("app.dat"),
+        ));
+        assert!(
+            !backup_artifact_owned(
+                &transaction_id(),
+                &node("op-replace"),
+                "backup",
+                &owned,
+                &install.join("app.dat"),
+            ),
+            "another transaction owns nothing here"
+        );
+        assert!(
+            !backup_artifact_owned(
+                &transaction,
+                &node("op-other"),
+                "backup",
+                &owned,
+                &install.join("app.dat"),
+            ),
+            "another operation owns nothing here"
+        );
+        assert!(
+            !backup_artifact_owned(
+                &transaction,
+                &node("op-replace"),
+                "removed",
+                &owned,
+                &install.join("app.dat"),
+            ),
+            "the wrong artifact kind owns nothing here"
+        );
+        assert!(
+            !backup_artifact_owned(
+                &transaction,
+                &node("op-replace"),
+                "backup",
+                &owned,
+                &PathBuf::from("/tmp/zup-ledger-test/elsewhere/app.dat"),
+            ),
+            "a backup never cleans outside its own directory"
+        );
+        assert!(
+            !backup_artifact_owned(
+                &transaction,
+                &node("op-replace"),
+                "backup",
+                &install.join("backup-foreign.bin"),
+                &install.join("app.dat"),
+            ),
+            "an unknown file is never owned"
+        );
+    }
 }

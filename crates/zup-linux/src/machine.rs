@@ -146,13 +146,17 @@ pub fn resolve_machine_state_root(
 }
 
 pub fn ensure_machine_state_dir(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    if assess_machine_state_root(state_root, expected_uid, true)?
+        == MachineStateReadiness::Uninitialized
+    {
+        create_or_verify_dir(state_root, MACHINE_STATE_DIR_MODE, expected_uid)?;
+    }
+    verify_machine_hierarchy(state_root, expected_uid)?;
+
     let parent = state_root.parent().ok_or_else(|| PathError::StateRefused {
         path: state_root.display().to_string(),
         reason: "a machine state root has a parent".to_owned(),
     })?;
-    verify_trusted_parent(parent, expected_uid)?;
-    create_or_verify_dir(state_root, MACHINE_STATE_DIR_MODE, expected_uid)?;
-
     crate::fs::sync_directory(parent).map_err(|error| PathError::StateRefused {
         path: parent.display().to_string(),
         reason: format!("the state parent does not flush: {error}"),
@@ -167,11 +171,7 @@ pub fn ensure_transactions_dir(state_root: &Path, expected_uid: u32) -> Result<P
 }
 
 fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), PathError> {
-    let owned =
-        crate::fs::OwnedDirectory::open(parent).map_err(|error| PathError::StateRefused {
-            path: parent.display().to_string(),
-            reason: format!("the state parent is not a reachable directory: {error}"),
-        })?;
+    let owned = crate::fs::OwnedDirectory::open(parent)?;
     verify_owner_and_privacy_fd(&owned, parent, expected_uid)
 }
 
@@ -294,13 +294,17 @@ pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), P
 }
 
 pub fn verify_machine_hierarchy(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
-    verify_state_root(state_root, expected_uid, true)?;
-    verify_tree(state_root, expected_uid, 8, true)
+    require_initialized(
+        assess_machine_state_root(state_root, expected_uid, true)?,
+        state_root,
+    )
 }
 
 pub fn verify_machine_structure(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
-    verify_state_root(state_root, expected_uid, false)?;
-    verify_tree(state_root, expected_uid, 8, false)
+    require_initialized(
+        assess_machine_state_root(state_root, expected_uid, false)?,
+        state_root,
+    )
 }
 
 pub fn verify_machine_install_roots(
@@ -318,7 +322,17 @@ pub fn verify_machine_install_roots(
     Ok(())
 }
 
-fn verify_state_root(state_root: &Path, expected_uid: u32, privacy: bool) -> Result<(), PathError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineStateReadiness {
+    Uninitialized,
+    Initialized,
+}
+
+pub fn assess_machine_state_root(
+    state_root: &Path,
+    expected_uid: u32,
+    privacy: bool,
+) -> Result<MachineStateReadiness, PathError> {
     crate::fs::anchor_reachable(state_root).map_err(|error| PathError::StateRefused {
         path: state_root.display().to_string(),
         reason: format!("the machine state hierarchy must not pass through a link: {error}"),
@@ -326,10 +340,48 @@ fn verify_state_root(state_root: &Path, expected_uid: u32, privacy: bool) -> Res
     let owned = match crate::fs::OwnedDirectory::open(state_root) {
         Ok(owned) => owned,
         Err(PathError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(());
+            verify_creation_parent(state_root, expected_uid)?;
+            return Ok(MachineStateReadiness::Uninitialized);
         }
         Err(error) => return Err(error),
     };
+    verify_initialized_root(&owned, state_root, expected_uid, privacy)?;
+    verify_tree(state_root, expected_uid, 8, privacy)?;
+    Ok(MachineStateReadiness::Initialized)
+}
+
+fn require_initialized(
+    readiness: MachineStateReadiness,
+    state_root: &Path,
+) -> Result<(), PathError> {
+    match readiness {
+        MachineStateReadiness::Initialized => Ok(()),
+        MachineStateReadiness::Uninitialized => Err(PathError::StateRefused {
+            path: state_root.display().to_string(),
+            reason: "machine state is not initialized".to_owned(),
+        }),
+    }
+}
+
+fn verify_creation_parent(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    let Some(parent) = state_root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(PathError::StateRefused {
+            path: state_root.display().to_string(),
+            reason: "a machine state root has a parent".to_owned(),
+        });
+    };
+    verify_trusted_parent(parent, expected_uid)
+}
+
+fn verify_initialized_root(
+    owned: &crate::fs::OwnedDirectory,
+    state_root: &Path,
+    expected_uid: u32,
+    privacy: bool,
+) -> Result<(), PathError> {
     let stat = owned.stat_self()?;
     if stat.kind != crate::fs::EntryKind::Directory {
         return Err(PathError::StateRefused {
@@ -913,6 +965,84 @@ mod tests {
         assert!(
             crate::fs::verify_ancestor_trust(Path::new("opt/acme"), uid).is_err(),
             "a relative ancestry is refused without touching the filesystem"
+        );
+    }
+
+    #[test]
+    fn an_absent_state_root_is_uninitialized_not_valid() {
+        let (_base, roots) = isolated();
+        std::fs::create_dir_all(roots.state.parent().expect("a parent")).expect("a parent");
+        let uid = current_uid();
+        assert_eq!(
+            assess_machine_state_root(&roots.state, uid, true).expect("an assessment runs"),
+            MachineStateReadiness::Uninitialized,
+            "absence with a trusted parent is plannable, not initialized"
+        );
+        assert!(
+            verify_machine_hierarchy(&roots.state, uid).is_err(),
+            "absence never counts as a valid initialized state"
+        );
+        ensure_machine_state_dir(&roots.state, uid).expect("a first installation initializes");
+        assert_eq!(
+            assess_machine_state_root(&roots.state, uid, true).expect("an assessment runs"),
+            MachineStateReadiness::Initialized,
+        );
+        verify_machine_hierarchy(&roots.state, uid).expect("the initialized state verifies");
+    }
+
+    #[test]
+    fn an_absent_parent_is_an_error_not_an_absent_state() {
+        let (_base, roots) = isolated();
+        let uid = current_uid();
+        match assess_machine_state_root(&roots.state, uid, true) {
+            Err(PathError::Io { source, .. }) => assert_eq!(
+                source.kind(),
+                std::io::ErrorKind::NotFound,
+                "a missing parent stays a missing parent, never a plannable absence"
+            ),
+            other => panic!("a missing parent refuses distinctly: {other:?}"),
+        }
+        assert!(
+            verify_machine_hierarchy(&roots.state, uid).is_err(),
+            "and it is never a valid initialized state"
+        );
+    }
+
+    #[test]
+    fn a_sticky_world_writable_ancestor_stays_trusted() {
+        let base = tempfile::tempdir().expect("an isolated base");
+        let owned = crate::fs::OwnedDirectory::open(base.path()).expect("the base opens");
+        let uid = current_uid();
+        for (mode, trusted) in [
+            (0o755, true),
+            (0o775, false),
+            (0o1777, true),
+            (0o0777, false),
+        ] {
+            let child = base.path().join(format!("child-{mode:o}"));
+            std::fs::create_dir_all(&child).expect("a child");
+            let mut permissions = std::fs::metadata(&child).expect("stat").permissions();
+            permissions.set_mode(mode);
+            std::fs::set_permissions(&child, permissions).expect("chmod");
+            let name = child
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            let name = std::path::Path::new(&name);
+            assert_eq!(
+                owned.verify_descendants(name, uid).is_ok(),
+                trusted,
+                "mode {mode:o} without an owner change"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_owned_ancestry_verifies_for_root() {
+        assert!(
+            crate::fs::verify_ancestor_trust(Path::new("/"), 0).is_ok(),
+            "the filesystem root anchors privileged ancestry"
         );
     }
 

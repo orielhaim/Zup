@@ -130,7 +130,7 @@ pub(crate) fn plan_expected(
         SelectedScope::Machine,
     )?;
 
-    crate::machine::verify_machine_hierarchy(state_root, expected_uid).map_err(|error| {
+    crate::machine::assess_machine_state_root(state_root, expected_uid, true).map_err(|error| {
         PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),

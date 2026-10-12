@@ -45,6 +45,7 @@ fn executor_for(
     precondition: FilePrecondition,
 ) -> LinuxFileExecutor {
     let mut executor = LinuxFileExecutor::new();
+    executor.set_transaction_id(zup_transaction::TransactionId::new_v7());
     let work = FileWork {
         destination: zup_platform::TargetPath::new(
             zup_core::Target::parse("linux-x64").expect("a target"),

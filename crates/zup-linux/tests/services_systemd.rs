@@ -379,6 +379,7 @@ impl RealWorld {
         executor
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
+        executor.set_transaction_id(record.transaction_id);
         let (record, outcome) = coordinator
             .execute(record, &mut executor)
             .map_err(|error| format!("execute: {error}"))?;

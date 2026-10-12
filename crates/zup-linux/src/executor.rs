@@ -7,7 +7,8 @@ use zup_exec::{HostSnapshot, ObservedFile, ObservedFileState};
 use zup_platform::TargetPath;
 use zup_transaction::{
     FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, NodeKind, OperationExecutor,
-    OperationId, OperationReceipt, ReconcileResult, TransactionNode, TransactionPlan,
+    OperationId, OperationReceipt, ReconcileResult, TransactionId, TransactionNode,
+    TransactionPlan,
 };
 
 use crate::error::{ExecError, PathError};
@@ -51,6 +52,7 @@ pub struct LinuxFileExecutor {
     payload: Option<Box<dyn PayloadSource>>,
     executable_mode: rustix::fs::Mode,
     install_dir_mode: rustix::fs::Mode,
+    transaction: Option<TransactionId>,
     services: Option<ServiceSupport>,
 }
 
@@ -105,6 +107,7 @@ impl Default for LinuxFileExecutor {
             payload: None,
             executable_mode: EXECUTABLE_PAYLOAD_MODE,
             install_dir_mode: USER_INSTALL_DIRECTORY_MODE,
+            transaction: None,
             services: None,
         }
     }
@@ -140,6 +143,16 @@ impl LinuxFileExecutor {
     pub fn with_services(mut self, services: ServiceSupport) -> Self {
         self.services = Some(services);
         self
+    }
+
+    pub fn set_transaction_id(&mut self, id: TransactionId) {
+        self.transaction = Some(id);
+    }
+
+    fn transaction_id(&self) -> Result<TransactionId, ExecError> {
+        self.transaction.ok_or_else(|| {
+            ExecError::Executor("file operations need a transaction identity".into())
+        })
     }
 
     pub fn register(&mut self, id: &OperationId, file: FileWork) {
@@ -646,8 +659,15 @@ impl LinuxFileExecutor {
                     executable: *executable,
                 };
                 let (directory, name) = crate::fs::open_parent(&path)?;
-                let backup =
-                    check_backup(&directory, &path, backup_path, node.id.as_str(), "backup")?;
+                let transaction = self.transaction_id()?;
+                let backup = check_backup(
+                    &directory,
+                    &path,
+                    backup_path,
+                    &transaction,
+                    node.id.as_str(),
+                    "backup",
+                )?;
 
                 match current_state(
                     &directory,
@@ -746,9 +766,12 @@ impl LinuxFileExecutor {
                             let _ = directory.remove_file(&backup);
                             let _ = directory.sync();
                         } else {
-                            restore_backup_copy(&directory, &name, &backup, &path)?;
-                            let _ = directory.remove_file(&backup);
-                            let _ = directory.sync();
+                            let temporary = rollback_temp_name(&transaction, node.id.as_str());
+                            Quarantine {
+                                directory: &directory,
+                                display: &path,
+                            }
+                            .reverse_restore(&name, &backup, &temporary, new.size, new.sha256)?;
                         }
                         if saved.mode != *previous_mode {
                             directory.chmod_regular(&name, mode_from(*previous_mode))?;
@@ -793,10 +816,12 @@ impl LinuxFileExecutor {
                         reason: error.to_string(),
                     })?;
                 let (directory, name) = crate::fs::open_parent(&path)?;
+                let transaction = self.transaction_id()?;
                 let backup = check_backup_host(
                     &directory,
                     &path,
                     &backup_host,
+                    &transaction,
                     node.id.as_str(),
                     "removed",
                 )?;
@@ -1005,7 +1030,10 @@ impl LinuxFileExecutor {
         let FilePrecondition::Exact { size, sha256 } = file.precondition else {
             return Ok(ReconcileResult::Ambiguous);
         };
-        let (directory, _) =
+        let Ok(transaction) = self.transaction_id() else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
+        let (directory, name) =
             crate::fs::open_parent(&file.host_path).map_err(|error| match error {
                 PathError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
                     ExecError::from(PathError::Missing {
@@ -1014,18 +1042,68 @@ impl LinuxFileExecutor {
                 }
                 other => ExecError::from(other),
             })?;
-        let backup_name = backup_name(node.id.as_str(), "backup");
+        let backup_name = backup_name(&transaction, node.id.as_str(), "backup");
         let key = mutation_key(node)?;
         let staged_name = staged_name(&OperationId::stage_file(&key));
         let new_mode = self.executable_mode_for(file.intent);
-        let backup_state = match directory.stream_regular(&backup_name) {
+        let backup_old = match directory.stream_regular(&backup_name) {
             Ok(backup) if backup.size == size && backup.sha256 == sha256 => Some(backup.mode),
             _ => None,
         };
+        let staged = directory.stream_regular(&staged_name).ok();
+        let staged_old = staged
+            .as_ref()
+            .is_some_and(|staged| staged.size == size && staged.sha256 == sha256);
+        let staged_new = staged.as_ref().is_some_and(|staged| {
+            staged.size == file.intent.size && staged.sha256 == file.intent.sha256
+        });
         match observe(&file.host_path)? {
-            None => Ok(ReconcileResult::NotApplied),
+            None => match (backup_old, staged_new) {
+                (Some(previous_mode), true) => {
+                    if directory
+                        .chmod_regular(&staged_name, mode_from(new_mode))
+                        .is_err()
+                    {
+                        return Ok(ReconcileResult::Ambiguous);
+                    }
+                    match directory.rename_noreplace(&staged_name, &name) {
+                        Ok(()) => {}
+                        Err(_) => return Ok(ReconcileResult::Ambiguous),
+                    }
+                    match verify_installed(&file.host_path, file.intent, new_mode) {
+                        Ok(()) => Ok(ReconcileResult::AppliedWithReceipt(
+                            OperationReceipt::ReplaceFile {
+                                destination: file.host_path.display().to_string(),
+                                previous_sha256: sha256.to_hex(),
+                                previous_size: size,
+                                previous_mode,
+                                backup_path: directory
+                                    .path()
+                                    .join(&backup_name)
+                                    .display()
+                                    .to_string(),
+                                new_sha256: file.intent.sha256.to_hex(),
+                                new_size: file.intent.size,
+                                executable: file.intent.executable,
+                            },
+                        )),
+                        Err(_) => Ok(ReconcileResult::Ambiguous),
+                    }
+                }
+                (Some(previous_mode), false) => {
+                    match directory.rename_noreplace(&backup_name, &name) {
+                        Ok(()) => {}
+                        Err(_) => return Ok(ReconcileResult::Ambiguous),
+                    }
+                    match verify_previous(&file.host_path, size, sha256, previous_mode) {
+                        Ok(()) => Ok(ReconcileResult::NotApplied),
+                        Err(_) => Ok(ReconcileResult::Ambiguous),
+                    }
+                }
+                _ => Ok(ReconcileResult::NotApplied),
+            },
             Some(_) if verify_installed(&file.host_path, file.intent, new_mode).is_ok() => {
-                if let Some(previous_mode) = backup_state {
+                if let Some(previous_mode) = backup_old {
                     return Ok(ReconcileResult::AppliedWithReceipt(
                         OperationReceipt::ReplaceFile {
                             destination: file.host_path.display().to_string(),
@@ -1039,11 +1117,11 @@ impl LinuxFileExecutor {
                         },
                     ));
                 }
-                if let Ok(staged) = directory.stream_regular(&staged_name)
-                    && staged.size == size
-                    && staged.sha256 == sha256
-                {
-                    directory.rename_noreplace(&staged_name, &backup_name)?;
+                if staged_old {
+                    match directory.rename_noreplace(&staged_name, &backup_name) {
+                        Ok(()) => {}
+                        Err(_) => return Ok(ReconcileResult::Ambiguous),
+                    }
                     let backup = directory.stream_regular(&backup_name).map_err(|_| {
                         ExecError::RollbackDrift {
                             path: file.host_path.display().to_string(),
@@ -1076,6 +1154,9 @@ impl LinuxFileExecutor {
         let removal = removal_identity(node)?.clone();
         let file = self.file(node.id.as_str())?.clone();
         self.check_removal_target(&file, &removal)?;
+        let Ok(transaction) = self.transaction_id() else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
         let (directory, _) =
             crate::fs::open_parent(&file.host_path).map_err(|error| match error {
                 PathError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
@@ -1085,7 +1166,7 @@ impl LinuxFileExecutor {
                 }
                 other => ExecError::from(other),
             })?;
-        let backup_name = backup_name(node.id.as_str(), "removed");
+        let backup_name = backup_name(&transaction, node.id.as_str(), "removed");
         let backup_mode = match directory.stream_regular(&backup_name) {
             Ok(backup) if backup.size == removal.size && backup.sha256 == removal.sha256 => {
                 Some(backup.mode)
@@ -1171,11 +1252,12 @@ impl LinuxFileExecutor {
         let key = mutation_key(node)?;
         let staged_name = staged_name(&OperationId::stage_file(&key));
         let mode = file.intent.mode_for(self.executable_mode);
-        let backup_name = backup_name(node.id.as_str(), "backup");
+        let transaction = self.transaction_id()?;
+        let backup_name = backup_name(&transaction, node.id.as_str(), "backup");
 
         let (directory, name) = crate::fs::open_parent(&file.host_path)?;
         let previous = stream_expected(&directory, &name, &file.host_path, size, sha256)?;
-        discard_stale_backup(&directory, &backup_name, &file.host_path)?;
+        occupy_backup_slot(&directory, &backup_name, &file.host_path)?;
 
         self.ensure_staged(node, &file, &directory, &staged_name)?;
         directory.chmod_regular(&staged_name, mode)?;
@@ -1225,30 +1307,29 @@ impl LinuxFileExecutor {
             }
             match directory.rename_noreplace(&staged_name, &backup_name) {
                 Ok(()) => {}
-                Err(PathError::AlreadyExists { .. }) => {
-                    if backup_holds(&directory, &backup_name, size, sha256) {
-                        let _ = directory.remove_file(&staged_name);
-                        let _ = directory.sync();
-                    } else {
-                        return Err(ExecError::Verification {
+                Err(error) => {
+                    return Err(match error {
+                        PathError::AlreadyExists { .. } => ExecError::Verification {
                             path: file.host_path.display().to_string(),
-                            reason: "a foreign backup blocks the replacement".into(),
-                        });
-                    }
+                            reason: "the backup slot is occupied".into(),
+                        },
+                        other => other.into(),
+                    });
                 }
-                Err(error) => return Err(error.into()),
             }
         } else {
-            copy_previous_to_backup(
-                &directory,
+            Quarantine {
+                directory: &directory,
+                display: &file.host_path,
+            }
+            .forward_replace(
                 &name,
-                &file.host_path,
+                &staged_name,
                 &backup_name,
-                size,
-                sha256,
+                &previous,
+                file.intent,
+                mode.bits() & 0o7777,
             )?;
-            directory.publish_replacing(&name, &staged_name)?;
-            verify_installed(&file.host_path, file.intent, mode.bits() & 0o7777)?;
         }
 
         let backup_path = directory.path().join(&backup_name);
@@ -1277,7 +1358,8 @@ impl LinuxFileExecutor {
         let removal = removal_identity(node)?.clone();
         self.check_removal_target(&file, &removal)?;
         let (directory, name) = crate::fs::open_parent(&file.host_path)?;
-        let backup_name = backup_name(node.id.as_str(), "removed");
+        let transaction = self.transaction_id()?;
+        let backup_name = backup_name(&transaction, node.id.as_str(), "removed");
         match directory.kind_or_absent(&name)? {
             None => {
                 if backup_holds(&directory, &backup_name, removal.size, removal.sha256) {
@@ -1315,9 +1397,16 @@ impl LinuxFileExecutor {
             removal.size,
             removal.sha256,
         )?;
-        discard_stale_backup(&directory, &backup_name, &file.host_path)?;
 
-        directory.rename_noreplace(&name, &backup_name)?;
+        directory
+            .rename_noreplace(&name, &backup_name)
+            .map_err(|error| match error {
+                PathError::AlreadyExists { .. } => ExecError::Verification {
+                    path: file.host_path.display().to_string(),
+                    reason: "the backup slot is occupied".into(),
+                },
+                other => other.into(),
+            })?;
         let quarantined =
             directory
                 .stream_regular(&backup_name)
@@ -1659,7 +1748,7 @@ fn backup_holds(directory: &OwnedDirectory, backup: &str, size: u64, sha256: Sha
     }
 }
 
-fn discard_stale_backup(
+fn occupy_backup_slot(
     directory: &OwnedDirectory,
     backup: &str,
     display: &Path,
@@ -1667,126 +1756,155 @@ fn discard_stale_backup(
     match directory.stat_child(backup) {
         Err(error) if is_absent(&error) => Ok(()),
         Err(error) => Err(error.into()),
-        Ok(stat) => {
-            if stat.kind != EntryKind::Regular {
-                return Err(ExecError::PlanDrift {
-                    path: display.display().to_string(),
-                    reason: "a foreign entry blocks the transaction backup".into(),
-                });
+        Ok(_) => Err(ExecError::Verification {
+            path: display.display().to_string(),
+            reason: "the backup slot is occupied".into(),
+        }),
+    }
+}
+
+struct Quarantine<'a> {
+    directory: &'a OwnedDirectory,
+    display: &'a Path,
+}
+
+impl Quarantine<'_> {
+    fn forward_replace(
+        &self,
+        name: &str,
+        staged: &str,
+        backup: &str,
+        previous: &StreamedRegular,
+        new: FileIntent,
+        new_mode: u32,
+    ) -> Result<(), ExecError> {
+        let display = self.display.display().to_string();
+        let verification = |reason: &str| ExecError::Verification {
+            path: display.clone(),
+            reason: reason.into(),
+        };
+        self.directory
+            .rename_noreplace(name, backup)
+            .map_err(|error| match error {
+                PathError::AlreadyExists { .. } => verification("the backup slot is occupied"),
+                other => other.into(),
+            })?;
+        let moved = self
+            .directory
+            .stream_regular(backup)
+            .map_err(|_| verification("the replaced entry cannot be confirmed"))?;
+        if moved.dev != previous.dev
+            || moved.ino != previous.ino
+            || moved.size != previous.size
+            || moved.sha256 != previous.sha256
+        {
+            let _ = self.directory.rename_noreplace(backup, name);
+            return Err(verification(
+                "the destination changed while it was replaced",
+            ));
+        }
+        match self.directory.kind_or_absent(name)? {
+            None => {}
+            Some(_) => {
+                let _ = self.directory.rename_noreplace(backup, name);
+                return Err(verification(
+                    "the destination changed while it was replaced",
+                ));
             }
-            directory.remove_file(backup)?;
-            directory.sync()?;
-            Ok(())
         }
+        self.directory
+            .rename_noreplace(staged, name)
+            .map_err(|error| match error {
+                PathError::AlreadyExists { .. } => {
+                    verification("the destination reappeared while it was replaced")
+                }
+                other => other.into(),
+            })?;
+        verify_installed(self.display, new, new_mode)
     }
-}
 
-fn copy_previous_to_backup(
-    directory: &OwnedDirectory,
-    name: &str,
-    display: &Path,
-    backup: &str,
-    size: u64,
-    sha256: Sha256Digest,
-) -> Result<(), ExecError> {
-    let mut source = directory
-        .open_regular_read(name)
-        .map_err(|_| ExecError::PlanDrift {
-            path: display.display().to_string(),
-            reason: "the destination a replace requires is not a regular file".into(),
-        })?;
-    let backup_mode = previous_mode_of(directory, name, display)?;
-    let temporary = format!(".{backup}.zup-copy");
-    let _ = directory.remove_file(&temporary);
-    let (found_size, found) = directory
-        .stage_stream(&temporary, &mut source, size, backup_mode)
-        .map_err(ExecError::from)?;
-    if found_size != size || found != sha256 {
-        let _ = directory.remove_file(&temporary);
-        return Err(ExecError::PlanDrift {
-            path: display.display().to_string(),
-            reason: "the destination changed while it was backed up".into(),
-        });
-    }
-    match directory.rename_noreplace(&temporary, backup) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = directory.remove_file(&temporary);
-            Err(error.into())
+    fn reverse_restore(
+        &self,
+        name: &str,
+        backup: &str,
+        temporary: &str,
+        new_size: u64,
+        new_sha256: Sha256Digest,
+    ) -> Result<(), ExecError> {
+        let drift = |reason: &str| ExecError::RollbackDrift {
+            path: self.display.display().to_string(),
+            reason: reason.into(),
+        };
+        match self.directory.stat_child(temporary) {
+            Err(error) if is_absent(&error) => {}
+            Err(_) => return Err(drift("the rollback slot cannot be read")),
+            Ok(stat) if stat.kind == EntryKind::Regular => {
+                self.directory.remove_file(temporary)?;
+                self.directory.sync()?;
+            }
+            Ok(_) => return Err(drift("a foreign entry blocks rollback")),
         }
+        let dest_stat = self
+            .directory
+            .stat_child(name)
+            .map_err(|_| drift("the destination cannot be read"))?;
+        self.directory
+            .rename_noreplace(name, temporary)
+            .map_err(|error| match error {
+                PathError::AlreadyExists { .. } => drift("the rollback slot is occupied"),
+                _ => drift("the destination cannot be parked"),
+            })?;
+        let parked = self
+            .directory
+            .stream_regular(temporary)
+            .map_err(|_| drift("the parked entry cannot be confirmed"))?;
+        if parked.dev != dest_stat.dev
+            || parked.ino != dest_stat.ino
+            || parked.size != new_size
+            || parked.sha256 != new_sha256
+        {
+            let _ = self.directory.rename_noreplace(temporary, name);
+            return Err(drift("the destination changed during rollback"));
+        }
+        self.directory
+            .rename_noreplace(backup, name)
+            .map_err(|error| match error {
+                PathError::AlreadyExists { .. } => {
+                    drift("the destination reappeared during rollback")
+                }
+                _ => drift("the backup cannot be restored"),
+            })?;
+        let _ = self.directory.remove_file(temporary);
+        let _ = self.directory.sync();
+        Ok(())
     }
-}
-
-fn previous_mode_of(
-    directory: &OwnedDirectory,
-    name: &str,
-    display: &Path,
-) -> Result<rustix::fs::Mode, ExecError> {
-    directory
-        .stat_child(name)
-        .map(|stat| mode_from(stat.mode))
-        .map_err(|_| ExecError::PlanDrift {
-            path: display.display().to_string(),
-            reason: "the destination a replace requires is not there".into(),
-        })
-}
-
-fn restore_backup_copy(
-    directory: &OwnedDirectory,
-    name: &str,
-    backup: &str,
-    display: &Path,
-) -> Result<(), ExecError> {
-    let mut source = directory
-        .open_regular_read(backup)
-        .map_err(|_| ExecError::RollbackDrift {
-            path: display.display().to_string(),
-            reason: "the backup cannot be read".into(),
-        })?;
-    let stat = directory
-        .stat_child(backup)
-        .map_err(|_| ExecError::RollbackDrift {
-            path: display.display().to_string(),
-            reason: "the backup cannot be read".into(),
-        })?;
-    let temporary = format!(".{name}.zup-restore");
-    let _ = directory.remove_file(&temporary);
-    let _ = directory
-        .stage_stream(&temporary, &mut source, u64::MAX, mode_from(stat.mode))
-        .map_err(|_| ExecError::RollbackDrift {
-            path: display.display().to_string(),
-            reason: "the backup cannot be restored".into(),
-        })?;
-    if rustix::fs::renameat(
-        directory.as_fd(),
-        temporary.as_str(),
-        directory.as_fd(),
-        name,
-    )
-    .is_err()
-    {
-        let _ = directory.remove_file(&temporary);
-        return Err(ExecError::RollbackDrift {
-            path: display.display().to_string(),
-            reason: "the backup cannot be restored".into(),
-        });
-    }
-    directory.sync()?;
-    Ok(())
 }
 
 fn mode_from(mode: u32) -> rustix::fs::Mode {
     rustix::fs::Mode::from_bits_truncate(mode & 0o7777)
 }
 
-fn backup_name(id: &str, prefix: &str) -> String {
-    format!("{prefix}-{}.bin", short_digest(id))
+pub(crate) fn backup_name(transaction: &TransactionId, id: &str, prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{}.bin",
+        short_digest(&transaction.to_string()),
+        short_digest(id)
+    )
+}
+
+fn rollback_temp_name(transaction: &TransactionId, id: &str) -> String {
+    format!(
+        "rollback-{}-{}.tmp",
+        short_digest(&transaction.to_string()),
+        short_digest(id)
+    )
 }
 
 fn check_backup(
     directory: &OwnedDirectory,
     destination: &Path,
     backup_path: &str,
+    transaction: &TransactionId,
     node_id: &str,
     prefix: &str,
 ) -> Result<String, ExecError> {
@@ -1794,6 +1912,7 @@ fn check_backup(
         directory,
         destination,
         Path::new(backup_path),
+        transaction,
         node_id,
         prefix,
     )
@@ -1803,10 +1922,11 @@ fn check_backup_host(
     directory: &OwnedDirectory,
     destination: &Path,
     backup: &Path,
+    transaction: &TransactionId,
     node_id: &str,
     prefix: &str,
 ) -> Result<String, ExecError> {
-    let expected = backup_name(node_id, prefix);
+    let expected = backup_name(transaction, node_id, prefix);
     let drift = |reason: &str| ExecError::RollbackDrift {
         path: backup.display().to_string(),
         reason: reason.into(),
@@ -2334,64 +2454,310 @@ mod fallback_tests {
         hash_reader(bytes).expect("bytes hash").1
     }
 
+    fn transaction() -> TransactionId {
+        TransactionId::new_v7()
+    }
+
+    fn register_replace(
+        executor: &mut LinuxFileExecutor,
+        destination: &Path,
+        old: &[u8],
+        new: &[u8],
+    ) {
+        let target = zup_core::Target::parse("linux-x64").expect("a target");
+        let host = |path: &Path| {
+            zup_platform::TargetPath::new(target, path.to_string_lossy()).expect("a path")
+        };
+        executor.register(
+            &OperationId::new("op-replace"),
+            FileWork {
+                destination: host(destination),
+                host_path: destination.to_path_buf(),
+                intent: FileIntent {
+                    sha256: digest(new),
+                    size: new.len() as u64,
+                    executable: false,
+                },
+                precondition: FilePrecondition::Exact {
+                    size: old.len() as u64,
+                    sha256: digest(old),
+                },
+            },
+        );
+    }
+
+    fn replace_node() -> TransactionNode {
+        TransactionNode {
+            id: OperationId::new("op-replace"),
+            phase: zup_transaction::Phase::FileMutation,
+            kind: NodeKind::FileMutation {
+                key: ResourceKey::File {
+                    destination: String::from("/tmp/whatever"),
+                },
+                delta: FileDelta::Replace,
+            },
+            declaration_order: 0,
+            meta: Default::default(),
+        }
+    }
+
+    fn plant_staged(install: &Path, key: &ResourceKey, bytes: &[u8]) {
+        std::fs::write(install.join(staged_test_name(key)), bytes).expect("a staged file");
+    }
+
+    fn staged_test_name(key: &ResourceKey) -> String {
+        format!(
+            "staged-{}",
+            short_digest(OperationId::stage_file(key).as_str())
+        )
+    }
+
+    fn replace_key() -> ResourceKey {
+        ResourceKey::File {
+            destination: String::from("/tmp/whatever"),
+        }
+    }
+
+    fn quarantine_of<'a>(directory: &'a OwnedDirectory, display: &'a Path) -> Quarantine<'a> {
+        Quarantine { directory, display }
+    }
+
     #[test]
-    fn the_copy_leg_preserves_and_restores_without_an_exchange() {
+    fn quarantine_forward_preserves_and_publishes_without_an_exchange() {
         let root = tempfile::tempdir().expect("a temp directory");
         let install = root.path().join("install");
         std::fs::create_dir_all(&install).expect("install");
         let destination = install.join("app.dat");
         std::fs::write(&destination, b"v1").expect("write v1");
-        std::fs::write(install.join("staged-test"), b"v2").expect("stage v2");
+        plant_staged(&install, &replace_key(), b"v2");
 
         let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        copy_previous_to_backup(
-            &directory,
-            &name,
-            &destination,
-            "backup-test",
-            2,
-            digest(b"v1"),
-        )
-        .expect("the previous file copies");
-        directory
-            .publish_replacing(&name, "staged-test")
-            .expect("the staged file publishes");
+        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
+            .expect("the previous file verifies");
+        quarantine_of(&directory, &destination)
+            .forward_replace(
+                &name,
+                &staged_test_name(&replace_key()),
+                "backup-test",
+                &previous,
+                FileIntent {
+                    sha256: digest(b"v2"),
+                    size: 2,
+                    executable: false,
+                },
+                0o644,
+            )
+            .expect("the quarantine publishes");
         assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
         assert_eq!(
             std::fs::read(install.join("backup-test")).expect("read"),
             b"v1",
-            "the copy leg holds the previous contents for rollback"
+            "the quarantined entry holds the previous contents for rollback"
         );
-
-        restore_backup_copy(&directory, &name, "backup-test", &destination)
-            .expect("the backup restores");
-        assert_eq!(std::fs::read(&destination).expect("read"), b"v1");
     }
 
     #[test]
-    fn the_copy_leg_refuses_a_destination_that_changed() {
+    fn quarantine_forward_detects_a_swapped_destination() {
         let root = tempfile::tempdir().expect("a temp directory");
         let install = root.path().join("install");
         std::fs::create_dir_all(&install).expect("install");
         let destination = install.join("app.dat");
-        std::fs::write(&destination, b"someone else's file").expect("plant");
+        std::fs::write(&destination, b"v1").expect("write v1");
+        plant_staged(&install, &replace_key(), b"v2");
 
         let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        assert!(
-            copy_previous_to_backup(
-                &directory,
+        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
+            .expect("the previous file verifies");
+        std::fs::write(&destination, b"vX").expect("a concurrent swap");
+
+        let error = quarantine_of(&directory, &destination)
+            .forward_replace(
                 &name,
-                &destination,
+                &staged_test_name(&replace_key()),
                 "backup-test",
-                2,
-                digest(b"v1")
+                &previous,
+                FileIntent {
+                    sha256: digest(b"v2"),
+                    size: 2,
+                    executable: false,
+                },
+                0o644,
             )
-            .is_err(),
-            "a changed destination never becomes a backup"
+            .expect_err("a swapped destination never publishes");
+        assert!(
+            matches!(error, ExecError::Verification { .. }),
+            "the refusal names the race: {error}"
         );
         assert_eq!(
             std::fs::read(&destination).expect("read"),
-            b"someone else's file"
+            b"vX",
+            "the swapped file is restored, not overwritten"
+        );
+    }
+
+    #[test]
+    fn quarantine_forward_refuses_an_occupied_backup_slot() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v1").expect("write v1");
+        plant_staged(&install, &replace_key(), b"v2");
+        std::fs::write(install.join("backup-test"), b"planted").expect("a plant");
+
+        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
+        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
+            .expect("the previous file verifies");
+        assert!(
+            quarantine_of(&directory, &destination)
+                .forward_replace(
+                    &name,
+                    &staged_test_name(&replace_key()),
+                    "backup-test",
+                    &previous,
+                    FileIntent {
+                        sha256: digest(b"v2"),
+                        size: 2,
+                        executable: false,
+                    },
+                    0o644,
+                )
+                .is_err(),
+            "an occupied slot fails closed"
+        );
+        assert_eq!(
+            std::fs::read(install.join("backup-test")).expect("read"),
+            b"planted",
+            "the occupant is never deleted"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"v1",
+            "the destination is untouched"
+        );
+    }
+
+    #[test]
+    fn quarantine_reverse_restores_without_an_exchange() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v2").expect("write v2");
+        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
+
+        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
+        quarantine_of(&directory, &destination)
+            .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
+            .expect("the quarantine restores");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"v1");
+        assert!(
+            !install.join("rollback-test.tmp").exists(),
+            "the parking slot is cleaned"
+        );
+    }
+
+    #[test]
+    fn quarantine_reverse_refuses_a_foreign_parking_slot() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v2").expect("write v2");
+        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
+        std::fs::create_dir_all(install.join("rollback-test.tmp")).expect("a foreign dir");
+
+        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
+        assert!(
+            quarantine_of(&directory, &destination)
+                .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
+                .is_err(),
+            "a foreign parking slot fails closed"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"v2",
+            "the destination is untouched"
+        );
+        assert_eq!(
+            std::fs::read(install.join("backup-test")).expect("read"),
+            b"v1",
+            "the backup is untouched"
+        );
+    }
+
+    #[test]
+    fn a_foreign_backup_name_collision_is_refused_without_deletion() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v1").expect("write v1");
+
+        let transaction = transaction();
+        let planted = backup_name(&transaction, "op-replace", "backup");
+        std::fs::write(install.join(&planted), b"unrelated").expect("a plant");
+
+        let mut executor = LinuxFileExecutor::new();
+        executor.set_transaction_id(transaction);
+        register_replace(&mut executor, &destination, b"v1", b"v2");
+        plant_staged(&install, &replace_key(), b"v2");
+
+        let error = executor
+            .replace(&replace_node())
+            .expect_err("an occupied backup slot fails closed");
+        assert!(
+            matches!(
+                error,
+                ExecError::Verification { .. } | ExecError::PlanDrift { .. }
+            ),
+            "the refusal is explicit: {error}"
+        );
+        assert_eq!(
+            std::fs::read(install.join(&planted)).expect("read"),
+            b"unrelated",
+            "the unknown file is never deleted"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"v1",
+            "the destination is untouched"
+        );
+    }
+
+    #[test]
+    fn backups_from_another_transaction_are_never_touched() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v1").expect("write v1");
+
+        let first = transaction();
+        let mut executor = LinuxFileExecutor::new();
+        executor.set_transaction_id(first);
+        register_replace(&mut executor, &destination, b"v1", b"v2");
+        plant_staged(&install, &replace_key(), b"v2");
+        let receipt = executor.replace(&replace_node()).expect("replace");
+        let OperationReceipt::ReplaceFile {
+            ref backup_path, ..
+        } = receipt
+        else {
+            panic!("a replace reports its backup");
+        };
+        assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
+
+        let second = transaction();
+        assert_ne!(first, second);
+        executor.set_transaction_id(second);
+        executor
+            .rollback(&replace_node(), &receipt)
+            .expect_err("a receipt from another transaction binds nothing here");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
+        assert_eq!(
+            std::fs::read(Path::new(&backup_path)).expect("read"),
+            b"v1",
+            "the first transaction's backup survives a foreign rollback"
         );
     }
 }

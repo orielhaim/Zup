@@ -747,6 +747,7 @@ fn recover_one(
     executor
         .register_plan(&record.plan)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    executor.set_transaction_id(record.transaction_id);
     let (record, outcome) = zup_transaction::recover(record, &store, &mut executor)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     match outcome {
@@ -965,6 +966,7 @@ fn execute_prepared(
     executor
         .register_plan(&prepared.plan)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    executor.set_transaction_id(record.transaction_id);
 
     let (record, outcome) = coordinator
         .execute(record, &mut executor)

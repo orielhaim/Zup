@@ -38,6 +38,16 @@ fn refuse_or_io(path: &Path, error: rustix::io::Errno) -> PathError {
     }
 }
 
+fn exchange_unsupported(error: rustix::io::Errno) -> bool {
+    matches!(
+        error,
+        rustix::io::Errno::NOSYS
+            | rustix::io::Errno::INVAL
+            | rustix::io::Errno::OPNOTSUPP
+            | rustix::io::Errno::XDEV
+    )
+}
+
 fn check_child_name(name: &str) -> Result<(), PathError> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
         return Err(PathError::InvalidComponent {
@@ -231,13 +241,7 @@ impl OwnedDirectory {
             RenameFlags::EXCHANGE,
         ) {
             Ok(()) => Ok(true),
-            Err(
-                rustix::io::Errno::NOSYS
-                | rustix::io::Errno::INVAL
-                | rustix::io::Errno::OPNOTSUPP
-                | rustix::io::Errno::XDEV
-                | rustix::io::Errno::PERM,
-            ) => Ok(false),
+            Err(error) if exchange_unsupported(error) => Ok(false),
             Err(error) => Err(PathError::errno(&display, error)),
         }
     }
@@ -458,14 +462,6 @@ impl OwnedDirectory {
             }),
             Err(error) => Err(PathError::errno(&self.display_child(name), error)),
         }
-    }
-
-    pub fn publish_replacing(&self, name: &str, source: &str) -> Result<(), PathError> {
-        check_child_name(name)?;
-        check_child_name(source)?;
-        rustix::fs::renameat(self.as_fd(), source, self.as_fd(), name)
-            .map_err(|error| PathError::errno(&self.display_child(name), error))?;
-        self.sync()
     }
 
     pub fn chmod_regular(&self, name: &str, mode: Mode) -> Result<(), PathError> {
@@ -991,19 +987,20 @@ fn check_trusted_self(
             expected: "a directory",
         });
     }
-    if stat.st_uid != expected_uid {
+    if stat.st_uid != expected_uid && stat.st_uid != 0 {
         return Err(PathError::Refused {
             path: display.display().to_string(),
             reason: format!(
-                "a privileged ancestry is owned by uid {}, not {expected_uid}",
+                "a privileged ancestry is owned by uid {}, not {expected_uid} or root",
                 stat.st_uid
             ),
         });
     }
-    if stat.st_mode & 0o022 != 0 {
+    if stat.st_mode & 0o022 != 0 && stat.st_mode & 0o1000 == 0 {
         return Err(PathError::Refused {
             path: display.display().to_string(),
-            reason: "a privileged ancestry is never writable by group or other".to_owned(),
+            reason: "a privileged ancestry is writable by group or other without a sticky bit"
+                .to_owned(),
         });
     }
     Ok(())
@@ -1223,6 +1220,30 @@ mod tests {
     }
 
     use rstest::rstest;
+
+    #[test]
+    fn exchange_capability_failures_stay_distinct_from_real_failures() {
+        use rustix::io::Errno;
+        for unsupported in [Errno::NOSYS, Errno::INVAL, Errno::OPNOTSUPP, Errno::XDEV] {
+            assert!(
+                exchange_unsupported(unsupported),
+                "{unsupported:?} means no atomic exchange"
+            );
+        }
+        for genuine in [
+            Errno::PERM,
+            Errno::ACCESS,
+            Errno::IO,
+            Errno::EXIST,
+            Errno::NOENT,
+            Errno::NOTDIR,
+        ] {
+            assert!(
+                !exchange_unsupported(genuine),
+                "{genuine:?} is a real failure, not a missing capability"
+            );
+        }
+    }
 
     #[rstest]
     #[case::symlink(EntryKind::Symlink)]

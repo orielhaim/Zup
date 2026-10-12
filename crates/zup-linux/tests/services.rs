@@ -292,6 +292,7 @@ impl Fixture {
         executor
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
+        executor.set_transaction_id(record.transaction_id);
         let (record, outcome) = coordinator
             .execute(record, &mut executor)
             .map_err(|error| format!("execute: {error}"))?;
@@ -425,6 +426,7 @@ impl Fixture {
         executor
             .register_plan(&record.plan)
             .expect("a plan registers");
+        executor.set_transaction_id(record.transaction_id);
         zup_transaction::recover(record, &store, &mut executor).expect("recovery settles")
     }
 
@@ -919,6 +921,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
     executor
         .register_plan(&record.plan)
         .expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
     let (_, outcome) = coordinator
         .execute(record, &mut executor)
         .expect("execution reaches a stable outcome");
