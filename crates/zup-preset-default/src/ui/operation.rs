@@ -1,16 +1,11 @@
-//! An operation in flight, and what it left behind.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::progress::Progress;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::progress::Progress;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
     relative,
 };
@@ -19,11 +14,6 @@ use crate::model;
 use crate::theme::{size, space, text};
 use crate::ui::{AppMark, Callout, MarkBadge, Tone, caption, muted, title};
 
-/// The application's mark, what is happening, and how far along it is.
-///
-/// One bar and one sentence. The bar is determinate only when the engine can
-/// count its work, because a bar that sits at zero while work happens says
-/// something untrue.
 #[derive(IntoElement)]
 pub struct OperationProgress {
     product: SharedString,
@@ -119,7 +109,6 @@ impl RenderOnce for OperationProgress {
     }
 }
 
-/// A committed operation: what is true now, and what to do next.
 #[derive(IntoElement)]
 pub struct OutcomeView {
     product: SharedString,

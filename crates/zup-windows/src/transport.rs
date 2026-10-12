@@ -1,5 +1,3 @@
-//! Windows process, token, and elevation primitives for the worker transport.
-
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -9,7 +7,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use crate::transport_bindings as win;
+use crate::bindings as win;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -201,7 +199,6 @@ pub fn is_process_elevated() -> Result<bool, TransportError> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
-/// Wait until a process exits. A missing process means it has already exited.
 pub fn wait_for_process_exit(pid: u32) -> Result<(), TransportError> {
     let process = unsafe { win::OpenProcess(win::SYNCHRONIZE, 0, pid) };
     if process.is_null() {

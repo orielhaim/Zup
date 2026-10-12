@@ -1,12 +1,3 @@
-//! Desired-state installation planner for zup.
-//!
-//! ```text
-//! BuildPlan + PlanRequest → InstallPlan
-//! ```
-//!
-//! Answers: *what should this installation contain for this scope/component
-//! selection?* Execution delta planning lives in `zup-exec`.
-
 #![forbid(unsafe_code)]
 
 mod error;

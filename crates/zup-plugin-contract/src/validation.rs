@@ -16,9 +16,7 @@ use crate::runtime::{
     InvocationError, SandboxLimits, run_with_watchdog, sandbox_store, sanitize_error,
 };
 use crate::{Context, InstallationPlan, PluginError, ResourceItem};
-
-pub const PLANNER_EXPORT_NAME: &str = "zup:plugin/planner@1.0.0";
-pub const PLAN_FUNCTION_NAME: &str = "plan";
+use zup_plugin_abi::{PLAN_FUNCTION_NAME, PLANNER_EXPORT_NAME};
 
 #[derive(Clone)]
 pub struct ValidatedComponent {
@@ -196,15 +194,8 @@ impl PluginEngine {
         }
     }
 
-    /// Deserialize precompiled component bytes trusted to match this engine.
-    ///
     /// # Safety
-    ///
-    /// `component_aot` must be complete output produced by this exact Wasmtime
-    /// version, target, and engine configuration; it must come from an
-    /// authenticated bundle whose declared AOT size and SHA-256 digest have
-    /// already been verified. Arbitrary or cross-engine precompiled bytes may
-    /// violate Wasmtime's deserialization invariants.
+    /// `component_aot` is bytes the verified package authenticated.
     pub unsafe fn validate_trusted_aot(
         &self,
         component_aot: &[u8],
@@ -440,10 +431,6 @@ mod tests {
 
     use crate::{GeneratedFile, PluginError, ResourceItem};
 
-    /// A guest has two ways to make the host read an unbounded amount of its own memory:
-    /// a plan that declares a file larger than the limit, and a refusal whose code is.
-    /// Both are counted, and both are refused rather than truncated - a truncated plan is
-    /// a plan the host would act on.
     #[rstest]
     #[case::a_generated_file_larger_than_the_limit(
         Over::Plan(InstallationPlan {
@@ -473,7 +460,6 @@ mod tests {
         );
     }
 
-    /// Which of the two oversized shapes a case is, so one table can hold both.
     enum Over {
         Plan(InstallationPlan),
         Error(PluginError),

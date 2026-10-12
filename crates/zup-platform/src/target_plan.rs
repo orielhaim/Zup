@@ -5,7 +5,7 @@ use zup_core::{
     App, ComponentId, FileAssociationId, FileExtension, InstalledPreset, LauncherLocation,
     NonEmptyString, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
     PrerequisitePackage, PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, TargetTriple,
+    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target,
 };
 
 use crate::command::CommandSpec;
@@ -15,7 +15,7 @@ use crate::target_path::TargetPath;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPlan {
     pub app: App,
-    pub target: TargetTriple,
+    pub target: Target,
     pub scope: SelectedScope,
     pub install_directory: TargetPath,
     pub selected_components: Vec<ComponentId>,
@@ -58,6 +58,9 @@ pub struct TargetFile {
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// One desired application launcher with a concrete launcher path.

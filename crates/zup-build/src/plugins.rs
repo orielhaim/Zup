@@ -2,13 +2,12 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
 use zup_core::{Installer, MAX_PLUGIN_ARTIFACTS, RelativePath, hash_reader};
 use zup_manifest::Plugin;
 
 use crate::error::BuildError;
 use zup_core::ResolvedPlugin;
-
-pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn validate_plugin_declaration_count(
     manifest_count: usize,

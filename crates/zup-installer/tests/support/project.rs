@@ -19,8 +19,8 @@ use tempfile::TempDir;
 use zup_bundle::BundleWriter;
 use zup_core::{
     App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
-    NonEmptyString, RelativePath, ResolvedFile, ResolvedPlugin, TargetBuildPlan, TargetTriple,
-    Template, hash_reader,
+    NonEmptyString, RelativePath, ResolvedFile, ResolvedPlugin, Target, TargetBuildPlan, Template,
+    hash_reader,
 };
 
 /// One file the installer will place.
@@ -421,6 +421,7 @@ fn plan(
                 sha256,
                 component: component_of(entry),
                 condition: None,
+                executable: false,
             }
         })
         .collect::<Vec<_>>();
@@ -538,8 +539,8 @@ fn components(payload: &[Payload]) -> Vec<Component> {
 
 /// The machine this test host runs, which is the machine the staged templates are
 /// built for.
-pub fn host_target() -> TargetTriple {
-    TargetTriple::parse(HOST_TARGET).expect("the host target is a valid triple")
+pub fn host_target() -> Target {
+    Target::parse(HOST_TARGET).expect("the host target is a valid triple")
 }
 
 /// The runtime image for one frontend, from the staged toolchain.
@@ -612,5 +613,5 @@ const ZUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The suffix this machine writes executables with.
 const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 
-/// The canonical target triple of the build host.
+/// The build host's compiler target, for the plugin engine.
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;

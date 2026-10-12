@@ -1,8 +1,8 @@
-name: ci
+name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -10,140 +10,353 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
 
 jobs:
-  windows:
-    name: windows
-    runs-on: windows-latest
+  lint:
+    name: lint ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025
+            platform: windows
+          - name: Linux
+            runner: ubuntu-24.04
+            platform: linux
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-full
+          cache-on-failure: true
 
-      - uses: taiki-e/install-action@v2
+      - uses: rui314/setup-mold@v1
+        if: matrix.platform == 'linux'
         with:
-          tool: cargo-nextest@0.9.146,cargo-machete,cargo-deny@0.20.0
+          mold-version: 3.0.0
+          make-default: "true"
 
-      - name: Format
+      - name: Formatting
         run: cargo fmt --all --check
 
-      - name: Clippy
+      - name: Linux package selection
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
+          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
+          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
+
+      - name: Windows Clippy
+        if: matrix.platform == 'windows'
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      - name: Toolchain
-        run: cargo xtask toolchain build
+      - name: Linux Clippy
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
 
-      - name: Tests
-        run: cargo nextest run --workspace --all-features
-
-      # The generated projects are the first thing a new author compiles, and a
-      # template that does not build is found by them rather than by us. Ignored by
-      # the run above because they compile the whole GPUI stack and the bindings
-      # generator, which is minutes rather than seconds.
-      - name: Generated projects
-        run: cargo nextest run -p zup --all-features --run-ignored all -E 'test(compiles)'
-
-      - name: Doc tests
-        run: cargo test --workspace --all-features --doc
-
-      - name: Unused dependencies
-        run: cargo machete
-
-      - name: Supply chain policy
-        run: cargo deny check
-
-      - name: Dependency graph
-        run: cargo xtask verify-dependency-graph
-
-      - name: Whitespace
-        run: git diff --check
-
-      - name: Portable boundary
-        run: cargo xtask verify-portable-boundaries
-
-      - name: Published authoring surface
-        shell: pwsh
-        run: ./scripts/verify-public-crates.ps1
-
-      - name: Action refs
-        run: cargo xtask github-action-pins check
-
-      - name: Published schema
-        run: |
-          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
-          git diff --exit-code -- schema/zup.schema.json
-
-      - name: Automation contract
-        run: cargo xtask automation check
-
-      - name: Role boundaries
-        shell: pwsh
-        run: ./scripts/verify-frontend-features.ps1
-
-  clean-room:
-    name: clean room
-    runs-on: windows-latest
+  test:
+    name: test ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2025
+            platform: windows
+          - name: Linux
+            runner: ubuntu-24.04
+            platform: linux
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 1
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: clean-room
+          cache-on-failure: true
 
-      - name: Toolchain
-        run: cargo xtask toolchain build
-
-      - name: Package
-        run: cargo xtask toolchain package
-
-      - name: Clean room
-        run: cargo xtask release clean-room
-
-  release-size:
-    name: release size
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
+      - uses: rui314/setup-mold@v1
+        if: matrix.platform == 'linux'
         with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-size
+          mold-version: 3.0.0
+          make-default: "true"
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
 
-      - name: Toolchain (release)
-        run: cargo xtask toolchain build --profile release
+      - name: Linux package selection
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
+          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
+          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
-      - name: Bootstrapper budget
-        run: cargo nextest run -p zup-dispatch --all-features --run-ignored all -E 'test(a_thin_bootstrapper)'
+      - name: Linux dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils shared-mime-info
+          command -v update-mime-database
+          command -v update-desktop-database
+          command -v desktop-file-validate
+          mold --version
 
-  ubuntu-portable:
-    name: ubuntu (portable)
-    runs-on: ubuntu-latest
+      - name: Toolchain
+        run: cargo xtask toolchain build
+
+      - name: Windows tests
+        if: matrix.platform == 'windows'
+        run: cargo nextest run --workspace --all-features
+
+      - name: Linux tests
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo nextest run --all-features $PORTABLE $LINUX
+
+      - name: Windows doc tests
+        if: matrix.platform == 'windows'
+        run: cargo test --workspace --all-features --doc
+
+      - name: Linux doc tests
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: cargo test --doc --all-features $PORTABLE $LINUX
+
+      - name: Upload staged toolchain
+        uses: actions/upload-artifact@v7
+        with:
+          name: toolchain-${{ matrix.platform }}
+          path: target/debug/toolchain
+          if-no-files-found: error
+
+  cross-build-windows:
+    name: Build both targets on Windows
+    runs-on: windows-2025
+    timeout-minutes: 60
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-windows
+          path: tc-win
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux
+          path: tc-linux
+
+      - name: Build the developer CLI
+        run: cargo build -p zup --bin zup --profile dev
+
+      - name: Merge both toolchains
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force merged | Out-Null
+          Get-ChildItem tc-win, tc-linux -Recurse -File |
+            Copy-Item -Destination merged/ -Force
+          Get-ChildItem merged/ | Select-Object Name, Length
+
+      - name: Build every fixture target
+        shell: pwsh
+        run: |
+          $zup = 'target/debug/zup.exe'
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
+
+      - name: Verify every artifact
+        shell: pwsh
+        run: |
+          $zup = 'target/debug/zup.exe'
+          foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/uni.exe')) {
+            & $zup artifact inspect $artifact | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "inspect of $artifact failed" }
+          }
+
+      - name: Lifecycle of the native Windows installer
+        shell: pwsh
+        run: scripts/ci/e2e-windows.ps1 -Installer dist/win.exe
+
+      - name: Lifecycle of the Universal installer
+        shell: pwsh
+        run: scripts/ci/e2e-windows.ps1 -Installer dist/uni.exe
+
+      - name: Upload the cross-built Linux installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-linux-from-windows
+          path: dist/lnx.bin
+          if-no-files-found: error
+
+  cross-build-linux:
+    name: Build both targets on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: rui314/setup-mold@v1
+        with:
+          mold-version: 3.0.0
+          make-default: "true"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-windows
+          path: tc-win
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux
+          path: tc-linux
+
+      - name: Build the developer CLI
+        shell: bash
+        run: cargo build -p zup --bin zup --profile dev
+
+      - name: Merge both toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p merged dist
+          find tc-win tc-linux -type f -exec cp {} merged/ \;
+          ls -la merged/
+
+      - name: Build every fixture target
+        shell: bash
+        run: |
+          set -euo pipefail
+          zup=target/debug/zup
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
+
+      - name: Verify every artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          zup=target/debug/zup
+          for artifact in dist/win.exe dist/lnx.bin dist/uni.exe; do
+            $zup artifact inspect "$artifact" > /dev/null
+          done
+
+      - name: Lifecycle of the native Linux installer
+        shell: bash
+        run: sh scripts/ci/e2e-linux.sh dist/lnx.bin
+
+      - name: Upload the cross-built Universal installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-universal-from-linux
+          path: dist/uni.exe
+          if-no-files-found: error
+
+  cross-e2e-windows:
+    name: Run the Linux-built Universal installer
+    runs-on: windows-2025
+    timeout-minutes: 30
+    needs: [cross-build-linux]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-universal-from-linux
+          path: foreign
+
+      - name: Lifecycle of the foreign-built Universal installer
+        shell: pwsh
+        run: scripts/ci/e2e-windows.ps1 -Installer foreign/uni.exe
+
+  cross-e2e-linux:
+    name: Run the Windows-built Linux installer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [cross-build-windows]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-linux-from-windows
+          path: foreign
+
+      - name: Lifecycle of the foreign-built Linux installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x foreign/lnx.bin
+          sh scripts/ci/e2e-linux.sh foreign/lnx.bin
+
+  full:
+    name: full verification (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 180
+    needs: [test]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -151,41 +364,42 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ubuntu-portable
+          cache-on-failure: true
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.146,cargo-machete
+          tool: cargo-nextest@0.9.146
 
-      - name: Package matrices
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-windows
+          path: tc-win
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux
+          path: tc-linux
+
+      - name: Merge and package the multi-platform release
+        shell: pwsh
         run: |
-          cargo xtask emit-portable-matrix
-          core="$(cargo xtask emit-portable-matrix --matrix portable-core --format cargo-args)"
-          formats="$(cargo xtask emit-portable-matrix --matrix portable-file-format --format cargo-args)"
-          tests="$(cargo xtask emit-portable-matrix --matrix portable-tests --format cargo-args)"
-          printf 'PORTABLE=%s %s %s\n' "$core" "$formats" "$tests" >> "$GITHUB_ENV"
+          New-Item -ItemType Directory -Force target/debug/toolchain | Out-Null
+          Get-ChildItem tc-win, tc-linux -Recurse -File |
+            Copy-Item -Destination target/debug/toolchain/ -Force
+          cargo xtask toolchain package --profile dev
 
-      - name: Portable boundary
-        run: cargo xtask verify-portable-boundaries
+      - name: Release clean-room
+        shell: pwsh
+        run: |
+          cargo xtask release clean-room
 
-      - name: Check
-        run: cargo check --all-features $PORTABLE
-
-      - name: Tests
-        run: cargo nextest run --all-features $PORTABLE
-
-      - name: Doc tests
-        run: cargo test --doc --all-features $PORTABLE
-
-      - name: Clippy
-        run: cargo clippy --all-features --all-targets $PORTABLE -- -D warnings
-
-      - name: Unused dependencies
-        run: cargo machete
-
-      - name: Whitespace
-        run: git diff --check
+      - name: Published schema
+        shell: pwsh
+        run: |
+          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
+          git diff --exit-code -- schema/zup.schema.json

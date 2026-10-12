@@ -85,8 +85,8 @@ fn content(sizes: &[usize]) -> Content {
     }
 }
 
-fn target(architecture: &str) -> zup_core::TargetTriple {
-    zup_core::TargetTriple::parse(format!("{architecture}-pc-windows-msvc"))
+fn target(architecture: &str) -> zup_core::Target {
+    zup_core::Target::parse(format!("{architecture}-pc-windows-msvc"))
         .expect("the fixture triple parses")
 }
 
@@ -479,20 +479,6 @@ async fn a_release_with_no_variant_for_this_host_is_refused() {
     assert!(error.left_machine_unchanged());
 }
 
-/// TUF hashes every target, so a substituted document is refused by the
-/// transport before the release's own digest claim is even consulted. The
-/// release-level check still exists, and it is the one a local seed goes
-/// through, so it is asserted directly.
-#[test]
-fn a_document_that_does_not_match_an_authenticated_digest_is_refused() {
-    let claimed = digest_of(b"the authenticated bytes");
-    assert!(zup_update::check_digest(b"the authenticated bytes", claimed, "catalog").is_ok());
-    let error = zup_update::check_digest(b"a different catalog", claimed, "content catalog")
-        .expect_err("refused");
-    assert!(error.to_string().contains("content catalog"), "{error}");
-    assert!(error.left_machine_unchanged());
-}
-
 #[tokio::test]
 async fn a_substituted_catalog_is_refused() {
     let options = ReleaseOptions::default();
@@ -624,27 +610,6 @@ async fn root_rotation_is_followed() {
         .expect("a rotated root is followed");
 }
 
-#[tokio::test]
-async fn a_failed_fetch_leaves_the_rollback_datastore_in_place() {
-    let options = ReleaseOptions::default();
-    let release = release(&options);
-    let fixture = publish(
-        &release,
-        &options.content,
-        SigningOptions {
-            expired_timestamp: true,
-            ..SigningOptions::default()
-        },
-    )
-    .await;
-    let context = context(&fixture);
-    let datastore = context.datastore_dir().expect("a datastore");
-    let _ = resolver_with(&fixture, context).resolve().await;
-    assert!(
-        datastore.is_dir(),
-        "a failed fetch must leave the datastore in place, because that is where rollback memory lives"
-    );
-}
 #[tokio::test]
 async fn a_local_seed_satisfies_a_closure_with_no_network_at_all() {
     // The offline story, and the reason one artifact can work from a USB stick

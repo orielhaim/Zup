@@ -381,6 +381,7 @@ fn plan_files(
             expected_sha256: desired.sha256,
             expected_size: desired.size,
             privilege: desired.privilege,
+            executable: desired.executable,
             conflict,
         });
     }

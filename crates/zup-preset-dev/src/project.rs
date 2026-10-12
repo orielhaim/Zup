@@ -1,33 +1,14 @@
-//! What a preset project is.
-//!
-//! A preset is a normal Cargo project, so this is Cargo's own answer rather than
-//! one Zup keeps beside it: the root package, the binary, and the workspace's
-//! target directory. A preset that needed a Zup-specific manifest to be found by
-//! the tool that develops it would not be the normal Rust project the SDK's whole
-//! argument claims a preset is.
-//!
-//! The only thing Zup adds is where the session's own state goes, and that is not
-//! this file's business: the runtime it runs in decides that, because two
-//! previews of two different things cannot share one directory.
-
 use std::path::{Path, PathBuf};
 
-/// The preset project `zup preset dev` is developing.
 #[derive(Debug, Clone)]
 pub struct Project {
-    /// The directory holding this package's `Cargo.toml`.
     pub root: PathBuf,
-    /// The package name, which is the preset's name.
     pub name: String,
-    /// The version, which is the preset's version.
     pub version: String,
-    /// The binary Cargo builds for this host.
     pub binary: String,
-    /// The target's own target directory, which is where Cargo writes.
     pub target: PathBuf,
 }
 
-/// Why a directory is not a preset project.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
     #[error("could not read Cargo metadata for `{0}`: {1}")]
@@ -41,7 +22,6 @@ pub enum ProjectError {
 }
 
 impl Project {
-    /// Read the preset project rooted at `root`.
     pub fn read(root: &Path) -> Result<Self, ProjectError> {
         let canonical = std::fs::canonicalize(root)
             .map_err(|error| ProjectError::Metadata(root.to_path_buf(), error.to_string()))?;

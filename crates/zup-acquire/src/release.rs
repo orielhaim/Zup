@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zup_core::{AppId, Sha256Digest, TargetTriple};
+use zup_core::{AppId, Sha256Digest, Target};
 
 use crate::descriptor::{ContentDescriptor, ContentKind, RelativeContentPath};
 use crate::layout::{check_channel, check_segment};
@@ -121,7 +121,7 @@ fn is_false(value: &bool) -> bool {
 pub struct ReleaseVariant {
     /// Stable identifier within the release.
     pub id: String,
-    pub target: TargetTriple,
+    pub target: Target,
     /// The platform the variant runs on, in the artifact graph's vocabulary.
     pub platform: String,
     /// `gui` or `console`, which decides what the user sees.
@@ -305,7 +305,7 @@ impl ReleaseDescriptor {
                     "a release variant names no frontend",
                 ));
             }
-            if !targets.insert(variant.target.clone()) {
+            if !targets.insert(variant.target) {
                 return Err(crate::AcquireError::Descriptor(
                     "two release variants name the same target",
                 ));
@@ -382,8 +382,8 @@ impl ReleaseDescriptor {
             .map(|index| &self.variants[index])
     }
 
-    /// One variant by target triple.
-    pub fn variant_for_target(&self, target: &TargetTriple) -> Option<&ReleaseVariant> {
+    /// One variant by Zup target.
+    pub fn variant_for_target(&self, target: &Target) -> Option<&ReleaseVariant> {
         self.variants
             .iter()
             .find(|variant| &variant.target == target)

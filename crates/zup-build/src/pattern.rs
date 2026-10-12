@@ -1,23 +1,15 @@
-//! Glob pattern compilation and static-root extraction.
-
 use globset::GlobMatcher;
 
 use crate::error::BuildError;
 
-/// A compiled `[[files]]` pattern and its static directory root.
 #[derive(Debug, Clone)]
 pub struct FilePattern {
-    /// Original pattern text from the manifest.
     pub pattern: String,
-    /// Compiled matcher over `/`-separated source-relative paths.
     pub matcher: GlobMatcher,
-    /// Non-pattern directory prefix that is stripped before appending to destination.
-    /// `None` means the entire source-relative path is preserved.
     pub static_root: Option<String>,
 }
 
 impl FilePattern {
-    /// Compile a glob and extract its static root.
     pub fn compile(pattern: &str) -> Result<Self, BuildError> {
         validate_pattern_shape(pattern)?;
 
@@ -40,12 +32,10 @@ impl FilePattern {
         })
     }
 
-    /// True when `relative` (already `/`-separated) matches this pattern.
     pub fn is_match(&self, relative: &str) -> bool {
         self.matcher.is_match(relative)
     }
 
-    /// Map a matched source-relative path to the path appended to the destination.
     pub fn destination_suffix(&self, source_relative: &str) -> Result<String, BuildError> {
         match &self.static_root {
             None => Ok(source_relative.to_owned()),
@@ -98,18 +88,6 @@ fn validate_pattern_shape(pattern: &str) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// Longest leading directory prefix with no glob metacharacters.
-///
-/// If the pattern has no metacharacters at all, the parent directory is the
-/// static root so a literal file keeps its filename in the destination.
-///
-/// ```text
-/// **/*             -> ""            (preserve entire relative path)
-/// bin/**/*         -> "bin"
-/// assets/icons/*.png -> "assets/icons"
-/// a/foo.dll        -> "a"
-/// foo.exe          -> ""
-/// ```
 fn static_root_of(pattern: &str) -> Option<String> {
     let parts: Vec<&str> = pattern.split('/').collect();
     if parts.is_empty() {
@@ -119,7 +97,6 @@ fn static_root_of(pattern: &str) -> Option<String> {
     let first_pattern = parts.iter().position(|part| is_pattern_component(part));
 
     let static_len = match first_pattern {
-        // Fully static path: strip only the final filename component.
         None => parts.len().saturating_sub(1),
         Some(index) => index,
     };
@@ -141,10 +118,6 @@ fn is_pattern_component(component: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// `static_root_of` is private, so it is pinned through the suffix it produces:
-    /// a root the caller cannot see is a destination that silently keeps a prefix
-    /// the manifest never asked for. `tests/materialize.rs` asserts the same
-    /// mapping end to end, against a real destination.
     #[test]
     fn destination_suffix_strips_the_static_root() {
         for (pattern, matched, suffix) in [

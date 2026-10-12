@@ -1,5 +1,3 @@
-//! Session identity, capabilities, and the handshake.
-
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -8,7 +6,6 @@ use uuid::Uuid;
 
 use crate::{PRESET_PROTOCOL_VERSION, ProductIdentity};
 
-/// Identity of one host ↔ preset relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(pub Uuid);
@@ -19,11 +16,6 @@ impl SessionId {
     }
 }
 
-/// A transport's session identity is this one.
-///
-/// The transport learns the id when it collects its endpoint and both peers then
-/// frame with it, so converting rather than inventing one is what keeps a preset
-/// and the host that launched it talking about the same connection.
 impl From<Uuid> for SessionId {
     fn from(id: Uuid) -> Self {
         Self(id)
@@ -36,32 +28,19 @@ impl fmt::Display for SessionId {
     }
 }
 
-/// One independently evolvable piece of the contract.
-///
-/// A capability marks something a host can add or withdraw on its own
-/// schedule. What a preset cannot render without is not a capability; that is
-/// the protocol version, which a preset states in its hello.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Capability {
-    /// The application has components a person may choose between.
     Components,
-    /// The host can reveal the session log and produce a diagnostic summary.
     Diagnostics,
-    /// The application allows choosing an install location.
     InstallDirectory,
-    /// The host can start the application it installed.
     Launch,
-    /// The host can modify, repair, and uninstall an existing installation.
     Maintenance,
-    /// The host keeps a plan of what the current choices would change.
     PlanPreview,
-    /// The application is configured for updates.
     Updates,
 }
 
 impl Capability {
-    /// Every capability, in a stable order.
     pub const ALL: &'static [Self] = &[
         Self::Components,
         Self::Diagnostics,
@@ -84,7 +63,6 @@ impl Capability {
         }
     }
 
-    /// Parse a capability name, or `None` for one this version does not define.
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
             .iter()
@@ -107,12 +85,10 @@ impl std::str::FromStr for Capability {
     }
 }
 
-/// A capability name this protocol version does not define.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("`{0}` is not a UI capability this protocol defines")]
 pub struct UnknownCapability(pub String);
 
-/// The capabilities one side has.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Capabilities(BTreeSet<Capability>);
@@ -122,13 +98,11 @@ impl Capabilities {
         Self(capabilities.into_iter().collect())
     }
 
-    /// Add one capability, returning the set.
     pub fn with(mut self, capability: Capability) -> Self {
         self.0.insert(capability);
         self
     }
 
-    /// Remove one capability, returning the set.
     pub fn without(mut self, capability: Capability) -> Self {
         self.0.remove(&capability);
         self
@@ -142,7 +116,6 @@ impl Capabilities {
         self.0.is_empty()
     }
 
-    /// The capability names, in the order [`Capability::ALL`] declares them.
     pub fn names(&self) -> Vec<&'static str> {
         Capability::ALL
             .iter()
@@ -151,7 +124,6 @@ impl Capabilities {
             .collect()
     }
 
-    /// The required capabilities this set does not provide.
     pub fn missing(&self, required: &Capabilities) -> Vec<&'static str> {
         Capability::ALL
             .iter()
@@ -167,25 +139,21 @@ impl FromIterator<Capability> for Capabilities {
     }
 }
 
-/// The preset's first message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetHello {
     pub protocol_version: u32,
     pub session: SessionId,
-    /// The preset's own name, so a host log says which preset it was driving.
     pub preset: String,
     pub preset_version: String,
     pub required_capabilities: Capabilities,
 }
 
-/// The host's answer, and the identity the preset is presenting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostHello {
     pub protocol_version: u32,
     pub session: SessionId,
     pub capabilities: Capabilities,
     pub product: ProductIdentity,
-    /// The engine version, for a preset that reports it in a diagnostics summary.
     pub host_version: String,
 }
 

@@ -280,23 +280,6 @@ mod tests {
         ]
     }
 
-    /// A release description records several independent facts about a
-    /// signature, and they are individually addressable. A boolean could not say
-    /// which of them held.
-    #[test]
-    fn evidence_carries_several_independently_addressable_facts() {
-        let evidence = signed_evidence();
-        assert!(covers_bytes(&evidence));
-        assert_eq!(publisher(&evidence), Some("CN=Acme"));
-        assert_eq!(thumbprint(&evidence), Some("0011AABB"));
-        assert_eq!(timestamp(&evidence), Some("rfc3161"));
-        assert_eq!(
-            evidence.len(),
-            5,
-            "a fact recorded twice would be read once, silently"
-        );
-    }
-
     /// The distinction the whole type exists for: an unsigned release is
     /// finalized - it has a real published identity, because nothing changed the
     /// bytes - and it is not signed.

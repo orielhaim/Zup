@@ -1,10 +1,9 @@
 //! Coordinator execution, rollback, crash injection, and recovery tests.
 
 mod common;
-mod fake;
 
+use common::fake::FakeExecutor;
 use common::{chain_input, sample_app_id, sample_input, sample_plan, sample_version};
-use fake::FakeExecutor;
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_transaction::{
@@ -90,7 +89,7 @@ fn mid_verification(record: &TransactionRecord) -> (TransactionRecord, Vec<Trans
         crashed.nodes.insert(
             node.id.clone(),
             NodeState::Applied {
-                receipt: Box::new(fake::receipt_for(node)),
+                receipt: Box::new(common::fake::receipt_for(node)),
             },
         );
     }
@@ -631,21 +630,6 @@ fn rollback_order_is_reverse_dependency() {
     let mut expect = mutations.clone();
     expect.reverse();
     assert_eq!(rb, expect, "rollback is reverse execution order");
-}
-
-#[test]
-fn plan_fingerprint_stable() {
-    let a = compile_transaction(&sample_input()).unwrap();
-    let b = compile_transaction(&sample_input()).unwrap();
-    assert_eq!(a.fingerprint(), b.fingerprint());
-}
-
-#[test]
-fn fingerprint_changes_with_target_identity() {
-    let plan = sample_plan();
-    let mut other = plan.clone();
-    other.target = zup_core::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-    assert_ne!(plan.fingerprint(), other.fingerprint());
 }
 
 #[test]

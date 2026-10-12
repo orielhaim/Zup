@@ -1,8 +1,9 @@
 #![allow(dead_code)]
+pub mod fake;
 
 use zup_core::{
-    BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest,
-    TargetTriple, hash_reader,
+    BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target,
+    hash_reader,
 };
 use zup_platform::TargetPath;
 use zup_transaction::{
@@ -10,8 +11,8 @@ use zup_transaction::{
     TransactionInput, TransactionPlan, compile_transaction,
 };
 
-pub fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+pub fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 pub fn tpath(value: &str) -> TargetPath {
@@ -22,7 +23,19 @@ pub fn digest(bytes: &[u8]) -> Sha256Digest {
     hash_reader(bytes).unwrap().1
 }
 
-fn file(name: &str, contents: &[u8]) -> FileWork {
+/// A file work item whose executable intent is explicit.
+///
+/// The flag is a parameter rather than hard-coded so a test can ask for the
+/// truth it wants to assert: an executor that reported `true` for every file
+/// would pass every test that only ever builds a non-executable payload.
+pub fn file_with(name: &str, contents: &[u8], executable: bool) -> FileWork {
+    FileWork {
+        executable,
+        ..file(name, contents)
+    }
+}
+
+pub fn file(name: &str, contents: &[u8]) -> FileWork {
     FileWork {
         key: ResourceKey::File {
             destination: format!(r"C:\PF\Acme\{name}"),
@@ -34,6 +47,7 @@ fn file(name: &str, contents: &[u8]) -> FileWork {
         expected_size: contents.len() as u64,
         privilege: Privilege::User,
         delta: FileDelta::Create,
+        executable: false,
     }
 }
 

@@ -1,0 +1,505 @@
+#![cfg(target_os = "linux")]
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
+
+use zup_bundle::DirectoryPayloadSource;
+use zup_core::{
+    AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target, hash_reader,
+};
+use zup_linux::{ExecError, LinuxFileExecutor};
+use zup_platform::TargetPath;
+use zup_transaction::{
+    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
+    FilesystemTransactionStore, OperationExecutor, OperationId, OperationReceipt, ReconcileResult,
+    TransactionCoordinator, TransactionInput, TransactionNode, TransactionOutcome,
+    compile_transaction, recover,
+};
+
+fn target() -> Target {
+    Target::parse("linux-x64").expect("a Linux target")
+}
+
+fn digest(bytes: &[u8]) -> Sha256Digest {
+    hash_reader(bytes).expect("bytes hash").1
+}
+
+fn destination(root: &Path, name: &str) -> TargetPath {
+    TargetPath::new(target(), root.join(name).to_string_lossy()).expect("a target path")
+}
+
+fn work(
+    name: &str,
+    bytes: &[u8],
+    destination: TargetPath,
+    precondition: FilePrecondition,
+    executable: bool,
+) -> FileWork {
+    FileWork {
+        key: ResourceKey::File {
+            destination: destination.to_string(),
+        },
+        source_relative: RelativePath::new(name).expect("a relative path"),
+        destination,
+        precondition,
+        expected_sha256: digest(bytes),
+        expected_size: bytes.len() as u64,
+        privilege: Privilege::User,
+        executable,
+        delta: match precondition {
+            FilePrecondition::Absent => FileDelta::Create,
+            FilePrecondition::Exact { .. } => FileDelta::Replace,
+        },
+    }
+}
+
+fn run(
+    input: &TransactionInput,
+    payload_root: &Path,
+    state_root: &Path,
+) -> (TransactionOutcome, LinuxFileExecutor) {
+    let plan = compile_transaction(input).expect("a plan compiles");
+    let store = FilesystemTransactionStore::new(state_root);
+    let coordinator = TransactionCoordinator::new(store);
+    let record = coordinator
+        .begin(
+            AppId::new("com.example.tool").expect("an id"),
+            SelectedScope::User,
+            semver::Version::parse("1.0.0").expect("a version"),
+            plan.clone(),
+        )
+        .expect("a record begins");
+    let mut executor =
+        LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(payload_root));
+    executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
+    let (_, outcome) = coordinator
+        .execute(record, &mut executor)
+        .expect("execution reaches a stable outcome");
+    (outcome, executor)
+}
+
+#[test]
+fn the_coordinator_commits_a_linux_install() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let payload = root.path().join("payload");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&payload).expect("payload");
+    std::fs::write(payload.join("tool"), b"#!/bin/sh\n").expect("tool");
+    std::fs::write(payload.join("data.dat"), b"the data").expect("data");
+
+    let mut input = TransactionInput::new(target());
+    input.files.push(work(
+        "tool",
+        b"#!/bin/sh\n",
+        destination(&install, "tool"),
+        FilePrecondition::Absent,
+        true,
+    ));
+    input.files.push(work(
+        "data.dat",
+        b"the data",
+        destination(&install, "data.dat"),
+        FilePrecondition::Absent,
+        false,
+    ));
+
+    let (outcome, _) = run(&input, &payload, &state);
+    assert_eq!(outcome, TransactionOutcome::Committed);
+
+    assert_eq!(
+        std::fs::read(install.join("tool")).expect("tool installs"),
+        b"#!/bin/sh\n"
+    );
+    assert_eq!(
+        std::fs::read(install.join("data.dat")).expect("data installs"),
+        b"the data"
+    );
+    let mode = |name: &str| {
+        std::fs::symlink_metadata(install.join(name))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("tool"), 0o744, "declared runnable means runnable");
+    assert_eq!(mode("data.dat"), 0o644, "data stays data");
+    assert!(
+        state.join("transactions").exists(),
+        "the journal lives in the state root, not beside the payload"
+    );
+}
+
+#[test]
+fn a_contested_destination_fails_the_transaction_without_publishing_anything() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let payload = root.path().join("payload");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&payload).expect("payload");
+    std::fs::create_dir_all(&install).expect("install");
+    std::fs::write(payload.join("tool"), b"v2").expect("tool");
+    std::fs::write(payload.join("other"), b"other").expect("other");
+    std::fs::write(install.join("tool"), b"someone else's file").expect("plant");
+
+    let mut input = TransactionInput::new(target());
+    input.files.push(work(
+        "tool",
+        b"v2",
+        destination(&install, "tool"),
+        FilePrecondition::Absent,
+        false,
+    ));
+    input.files.push(work(
+        "other",
+        b"other",
+        destination(&install, "other"),
+        FilePrecondition::Absent,
+        false,
+    ));
+
+    let (outcome, _) = run(&input, &payload, &state);
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert_eq!(
+        std::fs::read(install.join("tool")).expect("read"),
+        b"someone else's file",
+        "the file that was already there is untouched"
+    );
+    assert!(
+        !install.join("other").exists(),
+        "the refused transaction publishes nothing, not even the uncontested file"
+    );
+}
+
+#[test]
+fn the_coordinator_applies_an_upgrade_as_a_replace() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let payload = root.path().join("payload");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&payload).expect("payload");
+    std::fs::write(payload.join("tool"), b"v1").expect("v1");
+
+    let mut v1 = TransactionInput::new(target());
+    v1.files.push(work(
+        "tool",
+        b"v1",
+        destination(&install, "tool"),
+        FilePrecondition::Absent,
+        true,
+    ));
+    let (outcome, _) = run(&v1, &payload, &state);
+    assert_eq!(outcome, TransactionOutcome::Committed);
+
+    std::fs::write(payload.join("tool"), b"v2").expect("v2");
+    let mut v2 = TransactionInput::new(target());
+    v2.files.push(work(
+        "tool",
+        b"v2",
+        destination(&install, "tool"),
+        FilePrecondition::Exact {
+            size: 2,
+            sha256: digest(b"v1"),
+        },
+        true,
+    ));
+    let (outcome, _) = run(&v2, &payload, &state);
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert_eq!(
+        std::fs::read(install.join("tool")).expect("read"),
+        b"v2",
+        "the upgrade lands"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(install.join("tool"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o111,
+        0o100,
+        "runnable stays runnable across the upgrade"
+    );
+}
+
+#[test]
+fn recovery_replays_a_journal_without_the_original_executor() {
+    use zup_transaction::{NodeState, TransactionPhase, TransactionStore as _};
+
+    let root = tempfile::tempdir().expect("a temp directory");
+    let payload = root.path().join("payload");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&payload).expect("payload");
+    std::fs::write(payload.join("tool"), b"the payload").expect("tool");
+
+    let mut input = TransactionInput::new(target());
+    input.files.push(work(
+        "tool",
+        b"the payload",
+        destination(&install, "tool"),
+        FilePrecondition::Absent,
+        false,
+    ));
+    let plan = compile_transaction(&input).expect("a plan compiles");
+
+    let store = FilesystemTransactionStore::new(&state);
+    let coordinator = TransactionCoordinator::new(store);
+    let record = coordinator
+        .begin(
+            AppId::new("com.example.tool").expect("an id"),
+            SelectedScope::User,
+            semver::Version::parse("1.0.0").expect("a version"),
+            plan.clone(),
+        )
+        .expect("a record begins");
+    let transaction_id = record.transaction_id;
+    {
+        let mut executor =
+            LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
+        executor.register_plan(&plan).expect("a plan registers");
+        executor.set_transaction_id(transaction_id);
+        let mut staged = Vec::new();
+        for node in plan
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, zup_transaction::NodeKind::StageFile { .. }))
+        {
+            let receipt = executor.apply(node).expect("a stage applies");
+            staged.push((node.id.clone(), receipt));
+        }
+        for node in plan
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, zup_transaction::NodeKind::FileMutation { .. }))
+        {
+            let _ = executor.apply(node).expect("a mutation applies");
+        }
+        let store = FilesystemTransactionStore::new(&state);
+        store
+            .update(&transaction_id, &mut |record| {
+                for (id, receipt) in staged.drain(..) {
+                    record.nodes.insert(
+                        id,
+                        NodeState::Applied {
+                            receipt: Box::new(receipt),
+                        },
+                    );
+                }
+                for node in plan.nodes.iter().filter(|node| {
+                    matches!(node.kind, zup_transaction::NodeKind::FileMutation { .. })
+                }) {
+                    record.nodes.insert(node.id.clone(), NodeState::Running);
+                }
+                record.phase = TransactionPhase::Applying;
+                Ok(())
+            })
+            .expect("the interrupted phase persists");
+    }
+
+    let store = FilesystemTransactionStore::new(&state);
+    let record = store.load(&transaction_id).expect("the journal survives");
+    let mut executor = LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
+    executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
+    let (_, outcome) = recover(record, &store, &mut executor).expect("recovery runs");
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert_eq!(
+        std::fs::read(install.join("tool")).expect("read"),
+        b"the payload"
+    );
+}
+
+fn removal(bytes: &[u8], destination: TargetPath) -> FileRemoval {
+    FileRemoval {
+        key: ResourceKey::File {
+            destination: destination.to_string(),
+        },
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: Privilege::User,
+        destination,
+        sha256: digest(bytes),
+        size: bytes.len() as u64,
+        created_directories: Vec::new(),
+    }
+}
+
+struct FailAfter<E> {
+    inner: E,
+    fail: OperationId,
+}
+
+impl<E: OperationExecutor<Error = ExecError>> OperationExecutor for FailAfter<E> {
+    type Error = ExecError;
+
+    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+        self.inner.prepare(operation)
+    }
+
+    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+        if operation.id == self.fail {
+            return Err(ExecError::Executor("a later operation fails".into()));
+        }
+        self.inner.apply(operation)
+    }
+
+    fn verify(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.verify(operation, receipt)
+    }
+
+    fn rollback(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.rollback(operation, receipt)
+    }
+
+    fn reconcile(
+        &mut self,
+        operation: &TransactionNode,
+        receipt: Option<&OperationReceipt>,
+    ) -> Result<ReconcileResult, Self::Error> {
+        self.inner.reconcile(operation, receipt)
+    }
+}
+
+#[test]
+fn a_failed_transaction_restores_an_already_removed_file() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&install).expect("install");
+    std::fs::write(install.join("doomed.dat"), b"doomed").expect("doomed");
+    std::fs::write(install.join("other.dat"), b"other").expect("other");
+    let mut permissions = std::fs::symlink_metadata(install.join("doomed.dat"))
+        .expect("stat")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(install.join("doomed.dat"), permissions).expect("chmod");
+
+    let first = removal(b"doomed", destination(&install, "doomed.dat"));
+    let second = removal(b"other", destination(&install, "other.dat"));
+    let mut input = TransactionInput::new(target());
+    input.retired_keys.push(first.key.clone());
+    input.retired_keys.push(second.key.clone());
+    input.removals.push(first);
+    input.removals.push(second);
+
+    let plan = compile_transaction(&input).expect("a plan compiles");
+    let fail = OperationId::resource("remove_file", &input.removals[1].key);
+    let store = FilesystemTransactionStore::new(&state);
+    let coordinator = TransactionCoordinator::new(store);
+    let record = coordinator
+        .begin(
+            AppId::new("com.example.tool").expect("an id"),
+            SelectedScope::User,
+            semver::Version::parse("1.0.0").expect("a version"),
+            plan.clone(),
+        )
+        .expect("a record begins");
+    let mut executor = FailAfter {
+        inner: {
+            let mut inner = LinuxFileExecutor::new();
+            inner.register_plan(&plan).expect("a plan registers");
+            inner.set_transaction_id(record.transaction_id);
+            inner
+        },
+        fail,
+    };
+    let (record, outcome) = coordinator
+        .execute(record, &mut executor)
+        .expect("execution reaches a stable outcome");
+    let _ = record;
+
+    assert_eq!(outcome, TransactionOutcome::RolledBack);
+    assert_eq!(
+        std::fs::read(install.join("doomed.dat")).expect("read"),
+        b"doomed",
+        "the removal that applied before the failure comes back"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(install.join("doomed.dat"))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755,
+        "the restored file keeps its mode"
+    );
+    assert_eq!(
+        std::fs::read(install.join("other.dat")).expect("read"),
+        b"other",
+        "the operation that failed never unlinked its file"
+    );
+}
+
+#[test]
+fn recovery_commits_an_interrupted_removal() {
+    use zup_transaction::{NodeState, TransactionPhase, TransactionStore as _};
+
+    let root = tempfile::tempdir().expect("a temp directory");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&install).expect("install");
+    std::fs::write(install.join("doomed.dat"), b"doomed").expect("doomed");
+
+    let removed = removal(b"doomed", destination(&install, "doomed.dat"));
+    let mut input = TransactionInput::new(target());
+    input.retired_keys.push(removed.key.clone());
+    input.removals.push(removed);
+    let plan = compile_transaction(&input).expect("a plan compiles");
+
+    let store = FilesystemTransactionStore::new(&state);
+    let coordinator = TransactionCoordinator::new(store);
+    let record = coordinator
+        .begin(
+            AppId::new("com.example.tool").expect("an id"),
+            SelectedScope::User,
+            semver::Version::parse("1.0.0").expect("a version"),
+            plan.clone(),
+        )
+        .expect("a record begins");
+    let transaction_id = record.transaction_id;
+    {
+        let mut executor = LinuxFileExecutor::new();
+        executor.register_plan(&plan).expect("a plan registers");
+        executor.set_transaction_id(transaction_id);
+        let removal = plan
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, zup_transaction::NodeKind::FileRemoval { .. }))
+            .expect("a removal node")
+            .clone();
+        let _ = executor.apply(&removal).expect("a removal applies");
+        assert!(
+            !install.join("doomed.dat").exists(),
+            "the interruption lands after the unlink"
+        );
+        let store = FilesystemTransactionStore::new(&state);
+        store
+            .update(&transaction_id, &mut |record| {
+                record.nodes.insert(removal.id.clone(), NodeState::Running);
+                record.phase = TransactionPhase::Applying;
+                Ok(())
+            })
+            .expect("the interrupted phase persists");
+    }
+
+    let store = FilesystemTransactionStore::new(&state);
+    let record = store.load(&transaction_id).expect("the journal survives");
+    let mut executor = LinuxFileExecutor::new();
+    executor.register_plan(&plan).expect("a plan registers");
+    executor.set_transaction_id(record.transaction_id);
+    let (_, outcome) = recover(record, &store, &mut executor).expect("recovery runs");
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert!(
+        !install.join("doomed.dat").exists(),
+        "recovery does not resurrect a removal that already unlinked"
+    );
+}

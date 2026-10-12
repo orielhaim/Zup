@@ -60,7 +60,7 @@ fn check_artifacts(data: &[u8]) {
     if let Ok(manifest) = VariantManifest::parse(data) {
         assert_eq!(
             manifest.platform,
-            zup_artifact::Platform::from_triple(&manifest.target),
+            zup_artifact::Platform::from_target(&manifest.target),
             "a parsed manifest's platform does not follow from its target"
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 # Components
 
-Components model choices that affect what the installer owns: optional documentation, language packs, toolchains, shell integration, or other independently selectable parts.
+Components model independently selectable parts: optional documentation, language packs, shell integration.
 
 ## Declare components
 
@@ -21,7 +21,7 @@ name = "Shell integration"
 default = true
 ```
 
-A required component cannot be deselected. An optional component uses `default` to define the initial selection.
+A required component cannot be deselected. `default` sets the initial selection of an optional one.
 
 Attach resources with `component`:
 
@@ -43,8 +43,6 @@ name = "Designer tools"
 requires = ["core"]
 ```
 
-Keep the dependency graph about ownership, not UI layout.
-
 ## Groups
 
 Groups tell a preset which choices belong together and how prominent the group is.
@@ -60,15 +58,3 @@ selection = "defaulted"
 Assign components with `group = "toolchains"`.
 
 `prominence` is `auto`, `primary`, or `secondary`. `selection = "explicit"` requires at least one optional component in the group to be selected before installation can proceed.
-
-Groups do not dictate a specific widget or screen. The selected [preset](/presets/) decides how to present them.
-
-## Conditions
-
-Use `when` for resources controlled by an expression over selected components:
-
-```toml
-when = 'component("shell") && !component("portable")'
-```
-
-Prefer a direct `component = "id"` when one component is enough.

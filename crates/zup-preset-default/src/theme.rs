@@ -1,18 +1,10 @@
-//! The preset's design tokens, and the palette it draws with.
-//!
-//! Every size here is in rems, so a larger text setting scales the whole
-//! window rather than only its type. Colours come from the GPUI Kit theme; the
-//! one colour this preset decides is the accent, and it decides it under a
-//! contrast rule rather than taking it on trust.
-
 use std::time::Duration;
 
-use zup_preset_sdk::gpui_kit::component::{Colorize, Theme, ThemeMode};
-use zup_preset_sdk::gpui_kit::{App, Hsla, Pixels, Rems, Rgba, Window, px};
+use zup_sdk::preset::gpui_kit::component::{Colorize, Theme, ThemeMode};
+use zup_sdk::preset::gpui_kit::{App, Hsla, Pixels, Rems, Rgba, Window, px};
 
 use crate::{Accent, Appearance, Settings};
 
-/// Space between things, from touching to unrelated.
 pub mod space {
     use super::Rems;
 
@@ -26,7 +18,6 @@ pub mod space {
     pub const XXXL: Rems = Rems(3.0);
 }
 
-/// Type sizes, from fine print to the product's name.
 pub mod text {
     use super::Rems;
 
@@ -38,42 +29,29 @@ pub mod text {
     pub const TITLE: Rems = Rems(1.5);
 }
 
-/// Sizes of the things that are not text.
 pub mod size {
     use super::Rems;
 
-    /// The widest a column of reading and choosing gets.
     pub const COLUMN: Rems = Rems(36.0);
-    /// The widest the result and progress screens get: they say one thing.
     pub const FOCUS_COLUMN: Rems = Rems(28.0);
-    /// The application's mark beside its name.
     pub const MARK: Rems = Rems(3.5);
-    /// The mark above a progress or result.
     pub const MARK_FOCUS: Rems = Rems(4.5);
-    /// The mark in the title bar.
     pub const MARK_TITLE: Rems = Rems(1.0);
     pub const ICON_SM: Rems = Rems(0.875);
     pub const ICON: Rems = Rems(1.0);
     pub const ICON_LG: Rems = Rems(1.25);
-    /// The tile an action's or fact's icon sits in.
     pub const ICON_TILE: Rems = Rems(2.0);
-    /// The widest a primary action is allowed to stretch on a narrow window.
     pub const ACTION_MIN: Rems = Rems(7.5);
-    /// How many changes a plan group lists before it summarizes the rest.
     pub const PLAN_ROWS: usize = 40;
 }
 
-/// How long things take to move.
 pub mod motion {
     use super::{Duration, Pixels, px};
 
-    /// A screen arriving.
     pub const ENTER: Duration = Duration::from_millis(220);
-    /// How far it travels while it does.
     pub const ENTER_DISTANCE: Pixels = px(6.);
 }
 
-/// The window's own proportions.
 pub mod window {
     use super::{Pixels, px};
 
@@ -81,17 +59,13 @@ pub mod window {
     pub const HEIGHT: Pixels = px(580.);
     pub const MIN_WIDTH: Pixels = px(440.);
     pub const MIN_HEIGHT: Pixels = px(440.);
-    /// How wide the plan sheet is, when the window has room for it.
     pub const SHEET: Pixels = px(460.);
 }
 
-/// How much room the window has, which decides how things are arranged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Layout {
-    /// Rows stack: there is not room for a label and its action side by side.
     Compact,
     Regular,
-    /// There is room to spare, so the column gets more air rather than more width.
     Wide,
 }
 
@@ -117,7 +91,6 @@ impl Layout {
         self == Self::Compact
     }
 
-    /// The air between the window's edge and its content.
     pub fn gutter(self) -> Rems {
         match self {
             Self::Compact => space::LG,
@@ -127,18 +100,11 @@ impl Layout {
     }
 }
 
-/// The accent a window uses when the application names none.
 const DEFAULT_ACCENT: [u8; 3] = [0x25, 0x63, 0xeb];
 
-/// The least contrast text must have against what it sits on.
 const TEXT_CONTRAST: f32 = 4.5;
-/// The least contrast a filled control must have against the window.
 const FILL_CONTRAST: f32 = 3.0;
 
-/// Put the window in the palette the settings and the system ask for.
-///
-/// Called whenever either changes: switching palettes reloads the theme's own
-/// colours, so the accent is laid over them again every time.
 pub fn apply(settings: &Settings, window: &mut Window, cx: &mut App) {
     let mode = match settings.appearance {
         Appearance::System => ThemeMode::from(window.appearance()),
@@ -173,16 +139,12 @@ pub fn apply(settings: &Settings, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// An accent, made safe to use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
-    /// Filled controls: the main button, a checked box, progress.
     pub fill: Hsla,
     pub hover: Hsla,
     pub pressed: Hsla,
-    /// Text drawn on a fill.
     pub on_fill: Hsla,
-    /// The accent used as text on the window's background.
     pub text: Hsla,
 }
 
@@ -206,7 +168,6 @@ impl Palette {
 
         let mut fill = wanted;
         if dark {
-            // Visible against the window first; text on it follows.
             while contrast(fill, background) < FILL_CONTRAST && fill.l < 0.95 {
                 fill.l += 0.02;
             }
@@ -243,7 +204,6 @@ impl Palette {
     }
 }
 
-/// The WCAG contrast ratio between two opaque colours.
 pub fn contrast(a: Hsla, b: Hsla) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     let (light, dark) = if a > b { (a, b) } else { (b, a) };
@@ -280,8 +240,6 @@ mod tests {
         }
     }
 
-    /// No accent an application can choose makes the main button unreadable,
-    /// in either palette.
     #[test]
     fn every_accent_keeps_its_text_readable() {
         for accent in [
@@ -311,7 +269,6 @@ mod tests {
         }
     }
 
-    /// A readable accent is left as the application chose it.
     #[test]
     fn a_readable_accent_is_not_changed() {
         let palette = Palette::new(DEFAULT_ACCENT, background(false), false);

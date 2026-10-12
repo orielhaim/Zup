@@ -1,46 +1,26 @@
-//! Machine identity used to select a variant.
-//!
-//! A [`Platform`] is the portable view of a target triple: the machine identity
-//! a selector matches on. `TargetTriple` remains the canonical identity of a
-//! build, and a variant descriptor carries both, with the reader requiring them
-//! to agree, so a platform can never drift from the target it came from.
-//!
-//! The platform's own components are the canonical spellings a target triple
-//! normalizes to, which is what makes the round trip exact without this module
-//! re-deriving a triple grammar. Selection itself is typed on the host side:
-//! [`HostArchitecture`] is a closed set, and a host is compared against it, not
-//! against a string.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use zup_core::TargetTriple;
+use zup_core::Target;
 
-use crate::error::ArtifactError;
+use crate::format::ArtifactError;
 
-/// The machine identity a variant is built for and a host is compared against.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Platform {
-    /// The operating system, as a canonical triple spells it.
     pub os: String,
-    /// The machine architecture, as a canonical triple spells it.
     pub architecture: String,
-    /// The vendor component, when the triple records one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
-    /// The ABI or environment component, where the triple names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi: Option<String>,
-    /// An architecture variant component, where the triple names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }
 
 impl Platform {
-    /// Derive the platform identity of a canonical target triple.
-    pub fn from_triple(target: &TargetTriple) -> Self {
-        let mut parts = target.as_str().split('-');
+    pub fn from_target(target: &Target) -> Self {
+        let mut parts = target.rust_triple().split('-');
         let architecture = parts.next().unwrap_or_default().to_owned();
         let vendor = parts.next().map(str::to_owned);
         let os = parts.next().unwrap_or_default().to_owned();
@@ -58,9 +38,7 @@ impl Platform {
         }
     }
 
-    /// Rebuild the canonical triple, or fail when the recorded components do not
-    /// form one this model accepts.
-    pub fn triple(&self) -> Result<TargetTriple, ArtifactError> {
+    pub fn target(&self) -> Result<Target, ArtifactError> {
         if self.os.is_empty() || self.architecture.is_empty() {
             return Err(ArtifactError::Invalid);
         }
@@ -77,20 +55,17 @@ impl Platform {
             canonical.push('-');
             canonical.push_str(variant);
         }
-        TargetTriple::parse(&canonical).map_err(|_| ArtifactError::Invalid)
+        Target::parse(&canonical).map_err(|_| ArtifactError::Invalid)
     }
 
-    /// Whether two platforms name the same operating system.
     pub fn same_os(&self, other: &Self) -> bool {
         self.os == other.os
     }
 
-    /// Whether two platforms name the same machine architecture.
     pub fn same_architecture(&self, other: &Self) -> bool {
         self.architecture == other.architecture
     }
 
-    /// Whether this platform names an architecture the host model knows.
     pub fn host_architecture(&self) -> Option<HostArchitecture> {
         HostArchitecture::from_name(&self.architecture)
     }
@@ -106,12 +81,7 @@ impl fmt::Display for Platform {
     }
 }
 
-/// The machine architecture a host reports about itself.
-///
-/// A host reports its own architecture; the architectures it can additionally
-/// execute through a compatibility or emulation layer are separate knowledge
 /// supplied by a platform backend, so a portable model never has to name a
-/// host-specific compatibility mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostArchitecture {
     X86,
@@ -121,7 +91,6 @@ pub enum HostArchitecture {
 }
 
 impl HostArchitecture {
-    /// The canonical triple spelling of this architecture.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::X86 => "x86",
@@ -131,8 +100,6 @@ impl HostArchitecture {
         }
     }
 
-    /// The architecture a canonical triple spelling names, if this model knows
-    /// it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "x86" | "i386" | "i586" | "i686" => Some(Self::X86),
@@ -143,8 +110,6 @@ impl HostArchitecture {
         }
     }
 
-    /// The machine width of this architecture, used only to break a tie between
-    /// two otherwise equal candidates.
     pub const fn width(self) -> u8 {
         match self {
             Self::X86 | Self::Arm => 1,
@@ -163,29 +128,26 @@ impl fmt::Display for HostArchitecture {
 mod tests {
     use super::*;
 
-    /// `Platform` is derived from a triple and is what an index records, so a
-    /// triple that cannot be rebuilt from the platform would make an index
-    /// unverifiable. A triple with no vendor field is the one that loses
-    /// information on the way through, and the abi is the field most likely to be
-    /// dropped in either direction.
     #[test]
     fn platform_round_trips_through_the_canonical_triple() {
         for text in [
-            "x86_64-pc-windows-msvc",
-            "aarch64-pc-windows-msvc",
-            "aarch64-apple-darwin",
+            "windows-x64",
+            "windows-arm64",
+            "windows-x86",
+            "linux-x64",
+            "linux-arm64",
         ] {
-            let target = TargetTriple::parse(text).unwrap();
+            let target = Target::parse(text).unwrap();
             assert_eq!(
-                Platform::from_triple(&target).triple().unwrap(),
+                Platform::from_target(&target).target().unwrap(),
                 target,
                 "{text}"
             );
         }
-        let linux = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-        let platform = Platform::from_triple(&linux);
+        let linux = Target::parse("linux-x64").unwrap();
+        let platform = Platform::from_target(&linux);
         assert_eq!(platform.vendor, None, "no vendor field, no vendor");
         assert_eq!(platform.abi.as_deref(), Some("gnu"), "the abi survives");
-        assert_eq!(platform.triple().unwrap(), linux);
+        assert_eq!(platform.target().unwrap(), linux);
     }
 }

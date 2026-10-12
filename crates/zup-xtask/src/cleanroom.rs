@@ -1,56 +1,16 @@
-//! The clean-room acceptance run.
-//!
-//! Everything else in this repository is tested from *inside* it: `cargo test`
-//! runs in a workspace with a populated `target/`, the tests resolve toolchain
-//! components from a staged directory, and the CLI is the one `cargo` just built.
-//! That is the right way to test code and the wrong way to test a *product*.
-//!
-//! The question this module answers is the one a developer actually asks:
-//!
-//! > I downloaded zup. I have no source checkout, no `target/`, and no idea what
-//! > `xtask` is. Does `zup build` work?
-//!
-//! So it does the whole thing from a directory it creates, using a copy of the
-//! release material and nothing else:
-//!
-//! ```text
-//! verify the release index
-//!   → create an empty project directory, outside the workspace
-//!   → zup init, zup check, zup doctor, zup build
-//!   → the artifact is a real PE carrying a real artifact index
-//!   → nothing in the output names the repository
-//! ```
-//!
-//! The environment is scrubbed rather than inherited. `ZUP_TOOLCHAIN` is the
-//! obvious one - it is exactly the variable that could make a broken release look
-//! like a working one - but `CARGO_HOME`, `RUSTUP_HOME`, and every `CARGO_*`
-//! variable go too, because a `cargo run` that works and a downloaded binary that
-//! does not are different problems and this has to be able to tell them apart.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// What the run proved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanRoom {
-    /// The release material the run used, in isolation from the workspace.
     pub material: PathBuf,
-    /// The directory the project was created in.
     pub work: PathBuf,
-    /// The artifact the build produced.
     pub artifact: PathBuf,
-    /// The release description the build wrote beside it.
     pub release: PathBuf,
-    /// The `zup doctor` readiness line, so a reader sees what it decided.
     pub readiness: String,
 }
 
-/// Run the whole clean-room sequence.
 pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
-    // The work directory first, because a run in a directory that already has
-    // something in it is not a clean room whatever the material turns out to be,
-    // and a material error reported on top of that would be the less important
-    // one.
     if work.exists() {
         return Err(format!(
             "`{}` already exists; the clean room has to start empty or it is not one",
@@ -87,9 +47,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         "init",
     )?;
     step(&zup, work, &["check"], "check")?;
-    // `zup doctor`'s report is its answer, on stdout; stderr carries what went
-    // wrong while producing it. A failure prints only the latter, which is why a
-    // failure below quotes both.
     let doctor = capture(&zup, work, &["doctor"])?;
     if !doctor.success {
         return Err(format!("`zup doctor` failed:\n{}", doctor.report()));
@@ -107,8 +64,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         .unwrap_or_default()
         .trim()
         .to_owned();
-    // Before the build, so a resolver that has learned to look somewhere else
-    // is caught by a report rather than by an artifact nobody expected.
     verify_components_come_from_the_release(&zup, work, material)?;
     step(&zup, work, &["build"], "build")?;
 
@@ -127,10 +82,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         ));
     }
 
-    // The artifact is a real image, not a file that happens to exist. `zup-binary`
-    // reads the DOS stub, follows the `e_lfanew` pointer, checks the PE signature
-    // through it, and names the machine - the three facts a downloader can
-    // establish without executing anything.
     let image = zup_binary::Executable::read(&artifact).map_err(|error| {
         format!(
             "`{}` is not an executable this build produced: {error}",
@@ -143,9 +94,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
             artifact.display()
         ));
     }
-    // And the machine it is for, which is the fact a dispatcher selects on. A
-    // build that produced an image for the wrong architecture would still be a
-    // valid PE and would still install on a machine that cannot run it.
     let host = zup_binary::BinaryArchitecture::host().ok_or_else(|| {
         format!(
             "`{}` cannot be checked: this build host runs on a machine zup has no target for",
@@ -161,9 +109,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
         ));
     }
 
-    // The one thing that must never survive into a release: the build machine's
-    // own directory. A description naming it is a description of a build, not of
-    // a release, and no downloader can use it.
     let text = std::fs::read_to_string(&release)
         .map_err(|error| format!("{}: {error}", release.display()))?;
     let repository = repository_root();
@@ -194,22 +139,6 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
     })
 }
 
-/// Where every component a build composes from has to come from.
-///
-/// A downloaded `zup` resolves its runtime templates and launchers out of the
-/// directory it was unpacked into. That is a strong claim and the one most
-/// likely to rot: a resolver that gained an ambient arm - a `%PATH%` entry, a
-/// component sitting beside the project, a machine-global directory - would
-/// still work in this repository, where `target/` is full of real components,
-/// and would compose a different installer on a user's machine.
-///
-/// So it is asked directly. Every component must resolve, every one must say
-/// `staged`, and every path must be inside the versioned toolchain directory of
-/// the release this run was handed. The material itself usually lives under
-/// `target/` in the checkout that built it, so "not inside the repository" would
-/// be a false alarm rather than a guarantee; being inside *this* directory is
-/// the guarantee, because the staged toolchain beside the test binary is a
-/// different path with the same file names.
 fn verify_components_come_from_the_release(
     zup: &Path,
     work: &Path,
@@ -224,8 +153,6 @@ fn verify_components_come_from_the_release(
     }
     let report: serde_json::Value = serde_json::from_str(&outcome.stdout)
         .map_err(|error| format!("`zup toolchain status` printed no report: {error}"))?;
-    // An operation's payload is under `details`, everywhere in the automation
-    // contract; the envelope's own fields are the ones every operation shares.
     let components = report["details"]["components"]
         .as_array()
         .ok_or("`zup toolchain status` reported no components")?;
@@ -256,9 +183,6 @@ fn verify_components_come_from_the_release(
         let Some(path) = component["path"].as_str() else {
             return Err(format!("{name} resolved without a path"));
         };
-        // The versioned directory, not just the release root: that is the one
-        // the resolver searches, and matching on it is what proves it used the
-        // layout rather than finding a file that happened to be nearby.
         if !Path::new(path).starts_with(&expected) {
             return Err(format!(
                 "{name} resolved to `{path}`, which is not inside the release's toolchain \
@@ -270,12 +194,6 @@ fn verify_components_come_from_the_release(
     Ok(())
 }
 
-/// A path without the Windows verbatim prefix.
-///
-/// `canonicalize` answers with `\\?\…` on Windows, and two spellings of one
-/// directory do not compare equal. This crate is portable, so it cannot ask the
-/// Windows crate to strip the prefix; it strips it here instead, and only for
-/// this comparison.
 fn plain(path: &Path) -> std::path::PathBuf {
     let text = path.to_string_lossy();
     let stripped = text
@@ -288,12 +206,6 @@ fn plain(path: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Whether a variable from this process may reach a clean-room subprocess.
-///
-/// A predicate rather than a literal list so the test can ask the same question
-/// the function does, without the test having to mutate the process's own
-/// environment to do it - which would be an `unsafe` block in a crate that
-/// forbids one, and a data race with every other test in the same binary.
 fn inherited(name: &str) -> bool {
     if name.starts_with("CARGO") || name.starts_with("RUST") {
         return false;
@@ -301,19 +213,11 @@ fn inherited(name: &str) -> bool {
     !matches!(name, "ZUP_TOOLCHAIN" | "ZUP_DRY_RUN")
 }
 
-/// The environment a clean-room subprocess sees.
-///
-/// A scrub rather than an extension, because an inherited `ZUP_TOOLCHAIN` or a
-/// `CARGO_MANIFEST_DIR` from the parent is exactly how a run that passed inside
-/// this repository fails outside it.
 fn environment() -> Vec<(String, Option<String>)> {
     let mut out: Vec<(String, Option<String>)> = std::env::vars()
         .filter(|(name, _)| inherited(name))
         .map(|(name, value)| (name, Some(value)))
         .collect();
-    // Present-but-absent, not merely scrubbed: an empty value and no value are
-    // different things to a program that reads one, and this needs the
-    // unambiguous one.
     out.push(("ZUP_TOOLCHAIN".to_owned(), None));
     out.push(("CARGO_MANIFEST_DIR".to_owned(), None));
     out.sort();
@@ -322,20 +226,11 @@ fn environment() -> Vec<(String, Option<String>)> {
 
 struct Outcome {
     success: bool,
-    /// What the command printed as its answer.
-    ///
-    /// Only stdout. A command asked for a machine-readable report prints it here
-    /// and its human-readable one to stderr, so joining the two before a caller
-    /// parses this hands it a report with prose appended to it.
     stdout: String,
-    /// What the command said to a person.
     stderr: String,
 }
 
 impl Outcome {
-    /// Both streams, for a message about a failure: a command that failed says
-    /// why on one stream or the other, and a diagnostic quoting only the quiet
-    /// one hides half of what it said.
     fn report(&self) -> String {
         let mut report = self.stdout.clone();
         report.push_str(&self.stderr);
@@ -387,9 +282,6 @@ mod tests {
 
     #[test]
     fn a_clean_room_never_inherits_the_variables_that_would_fake_one() {
-        // The variables a build could discover this repository through, and the
-        // reason each is absent. A clean room that inherits one of these is a
-        // clean room that proves nothing.
         for name in [
             "ZUP_TOOLCHAIN",
             "CARGO_MANIFEST_DIR",
@@ -399,13 +291,10 @@ mod tests {
         ] {
             assert!(!inherited(name), "{name} must not reach a clean room");
         }
-        // What a downloaded binary legitimately needs is still there.
         for name in ["PATH", "SystemRoot", "TEMP", "USERPROFILE", "APPDATA"] {
             assert!(inherited(name), "{name} is ordinary process context");
         }
 
-        // And the two that must be pinned are pinned *absent* rather than scrubbed,
-        // because an empty value reads differently from no value.
         let environment = environment();
         for name in ["ZUP_TOOLCHAIN", "CARGO_MANIFEST_DIR"] {
             let entry = environment
@@ -426,8 +315,6 @@ mod tests {
 
     #[test]
     fn a_clean_room_refuses_a_work_directory_that_already_has_things_in_it() {
-        // Otherwise a run could pass by finding a project somebody left behind,
-        // which is the opposite of what the test is for.
         let directory = tempfile::tempdir().expect("temp dir");
         let work = directory.path().join("work");
         std::fs::create_dir_all(&work).expect("create");

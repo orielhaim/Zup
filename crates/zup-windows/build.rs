@@ -1,7 +1,3 @@
-//! Generate a minimal set of Win32 bindings for Known Folder resolution.
-//!
-//! Generate only the Known Folder APIs this backend uses directly.
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 

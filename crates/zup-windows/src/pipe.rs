@@ -1,12 +1,3 @@
-//! Real Tokio named-pipe transport with explicit ACL.
-//!
-//! Parent: `ServerOptions` with `first_pipe_instance`, `reject_remote_clients`,
-//! `max_instances(1)`, and an explicit `SECURITY_ATTRIBUTES` DACL allowing
-//! only: initiating user SID, BUILTIN\Administrators, SYSTEM.
-//!
-//! Worker may be a *different* administrator account (over-the-shoulder UAC).
-//! Authentication is exact process binding, not SID equality.
-
 use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::time::Duration;
 
@@ -22,7 +13,6 @@ use zup_protocol::{
     MAX_FRAME_BYTES, PROTOCOL_VERSION, WireEnvelope, decode_payload, encode_payload,
 };
 
-/// Transport / connection errors.
 #[derive(Debug, Error)]
 pub enum PipeError {
     #[error("pipe creation failed: {0}")]
@@ -47,17 +37,14 @@ pub enum PipeError {
     ProtocolVersionMismatch,
 }
 
-/// Timeouts (no timeout on installation execution itself).
 pub const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-pub const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Build the DACL backing allocation. Must outlive `SECURITY_ATTRIBUTES`.
 pub struct PipeSecurity {
     descriptor: PipeSecurityDescriptor,
 }
 
 impl PipeSecurity {
-    /// Create a descriptor allowing: initiating user SID, Administrators, SYSTEM.
     pub fn for_initiating_user() -> Result<Self, PipeError> {
         let user =
             UserSid::current().map_err(|e| PipeError::SecurityDescriptorFailed(e.to_string()))?;
@@ -71,14 +58,12 @@ impl PipeSecurity {
     }
 }
 
-/// Parent-side secured named-pipe server.
 pub struct PipeServer {
     inner: NamedPipeServer,
     name: String,
 }
 
 impl PipeServer {
-    /// Create the pipe **before** launching the worker.
     pub fn create(name: &str) -> Result<Self, PipeError> {
         let security = PipeSecurity::for_initiating_user()?;
         let path = format!(r"\\.\pipe\{name}");
@@ -90,13 +75,13 @@ impl PipeServer {
 
         // SAFETY: `security` outlives this call; the descriptor is not used
         // after `create_with_security_attributes_raw` returns because Tokio
-        // copies what it needs into the pipe handle.
+
         let inner = unsafe {
             options
                 .create_with_security_attributes_raw(&path, security.raw())
                 .map_err(|e| PipeError::PipeCreationFailed(e.to_string()))?
         };
-        // Keep security alive until the pipe exists.
+
         drop(security);
         Ok(Self {
             inner,
@@ -104,7 +89,6 @@ impl PipeServer {
         })
     }
 
-    /// Wait for the worker client to connect.
     pub async fn connect(&mut self) -> Result<(), PipeError> {
         self.inner
             .connect()
@@ -130,7 +114,6 @@ impl PipeServer {
         }
     }
 
-    /// Raw handle for PID/session queries.
     pub fn as_raw(&self) -> RawHandle {
         self.inner.as_raw_handle()
     }
@@ -144,13 +127,11 @@ impl PipeServer {
     }
 }
 
-/// Worker-side client with bounded connect retries.
 pub struct PipeClient {
     inner: NamedPipeClient,
 }
 
 impl PipeClient {
-    /// Connect, retrying only transient pipe-not-ready errors.
     pub async fn connect(name: &str) -> Result<Self, PipeError> {
         let path = format!(r"\\.\pipe\{name}");
         let deadline = tokio::time::Instant::now() + WORKER_CONNECT_TIMEOUT;
@@ -182,7 +163,6 @@ impl PipeClient {
     }
 }
 
-/// Build framed halves from a connected server.
 pub fn frame_server(server: NamedPipeServer) -> (ServerReader, ServerWriter) {
     let (read, write) = tokio::io::split(server);
     (
@@ -205,7 +185,6 @@ pub fn frame_server(server: NamedPipeServer) -> (ServerReader, ServerWriter) {
     )
 }
 
-/// Build framed halves from a connected client.
 pub fn frame_client(client: NamedPipeClient) -> (ClientReader, ClientWriter) {
     let (read, write) = tokio::io::split(client);
     (
@@ -228,22 +207,18 @@ pub fn frame_client(client: NamedPipeClient) -> (ClientReader, ClientWriter) {
     )
 }
 
-/// Server-side framed reader.
 pub struct ServerReader {
     inner: FramedRead<tokio::io::ReadHalf<NamedPipeServer>, LengthDelimitedCodec>,
 }
 
-/// Server-side framed writer.
 pub struct ServerWriter {
     inner: FramedWrite<tokio::io::WriteHalf<NamedPipeServer>, LengthDelimitedCodec>,
 }
 
-/// Client-side framed reader.
 pub struct ClientReader {
     inner: FramedRead<tokio::io::ReadHalf<NamedPipeClient>, LengthDelimitedCodec>,
 }
 
-/// Client-side framed writer.
 pub struct ClientWriter {
     inner: FramedWrite<tokio::io::WriteHalf<NamedPipeClient>, LengthDelimitedCodec>,
 }
@@ -273,7 +248,7 @@ macro_rules! impl_recv_send {
                 let bytes = encode_payload(envelope)
                     .map_err(|e| PipeError::MalformedProtocol(e.to_string()))?;
                 self.inner
-                    .send(bytes.into())
+                    .send(bytes.as_slice())
                     .await
                     .map_err(|e| PipeError::Io(e.to_string()))
             }
@@ -284,7 +259,6 @@ macro_rules! impl_recv_send {
 impl_recv_send!(ServerReader, ServerWriter);
 impl_recv_send!(ClientReader, ClientWriter);
 
-/// Validate the protocol version of an envelope.
 pub fn check_version(envelope: &WireEnvelope) -> Result<(), PipeError> {
     if envelope.version != PROTOCOL_VERSION {
         return Err(PipeError::ProtocolVersionMismatch);

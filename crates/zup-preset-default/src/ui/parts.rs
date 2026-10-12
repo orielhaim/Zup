@@ -1,15 +1,10 @@
-//! Type, sections, callouts and the action bar.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
     Styled, Window, div, relative,
 };
@@ -19,7 +14,6 @@ use crate::theme::{Layout, size, space, text};
 
 pub use crate::model::Tone;
 
-/// The one line a screen is about.
 pub fn title(content: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(text::TITLE)
@@ -29,7 +23,6 @@ pub fn title(content: impl Into<SharedString>, cx: &App) -> Div {
         .child(content.into())
 }
 
-/// Text that explains rather than names.
 pub fn muted(content: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(text::BODY)
@@ -38,7 +31,6 @@ pub fn muted(content: impl Into<SharedString>, cx: &App) -> Div {
         .child(content.into())
 }
 
-/// Fine print.
 pub fn caption(content: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(text::CAPTION)
@@ -47,7 +39,6 @@ pub fn caption(content: impl Into<SharedString>, cx: &App) -> Div {
         .child(content.into())
 }
 
-/// The colour a tone draws its icon and emphasis in.
 pub fn tone_color(tone: Tone, cx: &App) -> Hsla {
     let theme = cx.theme();
     match tone {
@@ -58,7 +49,6 @@ pub fn tone_color(tone: Tone, cx: &App) -> Hsla {
     }
 }
 
-/// A labelled group of related things, separated by space rather than a box.
 #[derive(IntoElement)]
 pub struct Section {
     label: SharedString,
@@ -75,7 +65,6 @@ impl Section {
         }
     }
 
-    /// Something beside the label, such as a count.
     pub fn trailing(mut self, element: impl IntoElement) -> Self {
         self.trailing = Some(element.into_any_element());
         self
@@ -110,7 +99,6 @@ impl RenderOnce for Section {
     }
 }
 
-/// A message that belongs beside the content, tinted by how much it matters.
 #[derive(IntoElement)]
 pub struct Callout {
     tone: Tone,
@@ -143,7 +131,6 @@ impl Callout {
         self
     }
 
-    /// The control that acts on what the callout says.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.action = Some(action.into_any_element());
         self
@@ -201,7 +188,6 @@ impl RenderOnce for Callout {
     }
 }
 
-/// The facts a person should know before installing, in one wrapping line.
 #[derive(IntoElement)]
 pub struct InstallSummary {
     facts: Vec<Fact>,
@@ -225,10 +211,10 @@ impl RenderOnce for InstallSummary {
                 let (icon, color, emphasis) = match fact.kind {
                     FactKind::Size => (IconName::HardDrive, theme.muted_foreground, false),
                     FactKind::Download => (IconName::Download, theme.muted_foreground, false),
-                    FactKind::Scope(zup_preset_sdk::prelude::InstallScope::User) => {
+                    FactKind::Scope(zup_sdk::preset::prelude::InstallScope::User) => {
                         (IconName::User, theme.muted_foreground, false)
                     }
-                    FactKind::Scope(zup_preset_sdk::prelude::InstallScope::Machine) => {
+                    FactKind::Scope(zup_sdk::preset::prelude::InstallScope::Machine) => {
                         (IconName::Users, theme.muted_foreground, false)
                     }
                     FactKind::Approval { required: true } => {
@@ -257,11 +243,6 @@ impl RenderOnce for InstallSummary {
     }
 }
 
-/// The bar at the bottom of the window that holds what a screen can do.
-///
-/// The main action is always last and on the right, where the eye ends. When
-/// the window is narrow, the leading content moves above the buttons rather
-/// than squeezing them.
 #[derive(IntoElement)]
 pub struct ActionBar {
     layout: Layout,

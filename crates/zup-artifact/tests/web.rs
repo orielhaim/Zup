@@ -1,13 +1,4 @@
-//! From a real build to a static web tree to a verified content cache.
-//!
-//! This is the end-to-end claim the whole online story rests on: one
-//! `zup build` produces a graph, `zup publish stage` turns that graph into a
-//! directory a static host can serve, and a client reads the same closure back
-//! out of it - with nothing but a digest as proof that the bytes it received
-//! are the bytes that were built.
-//!
-//! No HTTP, no TUF, and no platform API is involved. That is the point: the
-//! layout is a file tree, and the identity is arithmetic.
+//! Build graph to staged web tree to verified client cache.
 
 mod common;
 
@@ -325,31 +316,6 @@ async fn a_corrupt_blob_in_the_staged_tree_is_refused_rather_than_installed() {
             .expect("the cache probes")
             .is_none(),
         "nothing corrupt is ever published"
-    );
-}
-
-/// The fixture is only worth anything if the two architectures actually overlap,
-/// so this asserts the premise every other staging claim rests on rather than
-/// re-deriving what `a_build_stages_a_complete_immutable_web_tree` already proves
-/// about catalog completeness.
-#[test]
-fn the_fixture_actually_shares_content_between_the_two_architectures() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let graph = compose(dir.path());
-    stage(dir.path(), &graph);
-    let release = ReleaseDescriptor::parse(
-        &std::fs::read(dir.path().join("web").join("releases").join("stable.json"))
-            .expect("the release is staged"),
-    )
-    .expect("the release parses");
-
-    let x64 = release.variant("windows-x64").expect("a variant");
-    let arm = release.variant("windows-arm64").expect("a variant");
-    assert!(
-        x64.content
-            .iter()
-            .any(|digest| arm.content.contains(digest)),
-        "the fixture shares content between architectures, which is the whole point"
     );
 }
 

@@ -6,7 +6,7 @@ use zup_sdk::preset::prelude::{gpui, *};
 /// What an application may configure about how this preset looks.
 ///
 /// `#[settings]` rather than naming the derives, so this project depends on the
-/// SDK alone. The schema `zup preset pack` puts in the package is generated
+/// SDKs alone. The schema `zup preset pack` puts in the package is generated
 /// from these same fields, by the same `schemars` this preset deserializes
 /// with.
 #[zup_sdk::preset::settings]

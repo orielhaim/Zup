@@ -23,7 +23,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use zup_windows::{ContentStoreIdentity, UniversalArtifact};
+use zup_transaction::ContentStoreIdentity;
+use zup_windows::UniversalArtifact;
 
 mod report;
 
@@ -82,16 +83,68 @@ impl Outcome {
 
 /// The arguments a launcher accepts.
 ///
-/// Two, and both are configuration rather than authority: where the machine
-/// keeps its state, and an optional local tree to satisfy a closure from. A
-/// hostile value for either produces content that fails its digest check, never
-/// content that passes one.
+/// A lifecycle verb plus configuration. Everything here is configuration
+/// rather than authority: where the machine keeps its state, which lifecycle
+/// step to run, and how to report. A hostile value for any of them produces
+/// content that fails its digest check, never content that passes one. Values
+/// the staged runtime needs travel verbatim; the runtime re-validates every
+/// one of them before acting.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     pub state_root: Option<PathBuf>,
     pub source: Option<PathBuf>,
     /// Report acquisition events on stdout as JSONL.
     pub machine_readable: bool,
+    pub verb: Verb,
+    pub scope: Option<zup_core::SelectedScope>,
+    pub non_interactive: bool,
+    pub yes: bool,
+    pub force_files: bool,
+    pub output: Option<String>,
+    pub enable: Vec<String>,
+    pub disable: Vec<String>,
+    pub install_directory: Option<PathBuf>,
+    pub update_check: bool,
+    pub help: bool,
+}
+
+/// The lifecycle step to run in the staged runtime.
+///
+/// These are the staged runtime's own verbs, so a universal installer answers
+/// the same operations as the installer it stages. There is no `upgrade`:
+/// installing a newer artifact upgrades, exactly like a self-contained
+/// installer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Verb {
+    #[default]
+    Install,
+    Modify,
+    Repair,
+    Update,
+    Uninstall,
+}
+
+impl Verb {
+    fn runtime_name(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Modify => "modify",
+            Self::Repair => "repair",
+            Self::Update => "update",
+            Self::Uninstall => "uninstall",
+        }
+    }
+
+    fn from_arg(arg: &str) -> Option<Self> {
+        match arg.to_ascii_lowercase().as_str() {
+            "install" => Some(Self::Install),
+            "modify" => Some(Self::Modify),
+            "repair" => Some(Self::Repair),
+            "update" => Some(Self::Update),
+            "uninstall" => Some(Self::Uninstall),
+            _ => None,
+        }
+    }
 }
 
 /// Dispatch the artifact at `executable`, using `options` for its state.
@@ -168,7 +221,12 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
             };
         }
     };
-    let scope = scope_of(&manifest);
+    let scope = match requested_scope(&manifest, options.scope) {
+        Ok(scope) => scope,
+        Err(detail) => {
+            return Outcome::Refused { detail };
+        }
+    };
     let state_root = match state_root(options.state_root.as_deref(), scope) {
         Ok(root) => root,
         Err(detail) => return Outcome::Refused { detail },
@@ -177,7 +235,7 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
         index.artifact.application.id.clone(),
         index.artifact.application.version.clone(),
         scope,
-        manifest.target.clone(),
+        manifest.target,
         artifact_digest(&artifact),
     );
     let base = match zup_windows::content_store_base(&state_root, identity.scope()) {
@@ -208,24 +266,81 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
         }
     };
 
-    let arguments = vec![
-        "install".to_owned(),
-        "--state-root".to_owned(),
-        state_root.display().to_string(),
-        "--scope".to_owned(),
-        match identity.scope() {
-            zup_core::SelectedScope::User => "user".to_owned(),
-            zup_core::SelectedScope::Machine => "machine".to_owned(),
-        },
-    ];
+    let arguments = staged_arguments(options, &state_root, scope);
     let handoff = if is_gui() {
         zup_windows::HandOff::Silent
     } else {
         zup_windows::HandOff::Console
     };
     match launch(&staged.runtime, &arguments, handoff) {
-        Ok(code) => Outcome::Completed { code },
-        Err(detail) => Outcome::Refused { detail },
+        Ok(code) => classify(code),
+        Err(detail) => Outcome::LaunchFailed { detail },
+    }
+}
+
+/// The arguments the staged runtime runs with.
+///
+/// The verb and every flag travel verbatim; the runtime parses and validates
+/// them exactly as if it had been started directly, so a dispatcher never
+/// accepts something the runtime would refuse.
+fn staged_arguments(
+    options: &Options,
+    state_root: &Path,
+    scope: zup_core::SelectedScope,
+) -> Vec<String> {
+    let mut arguments = vec![options.verb.runtime_name().to_owned()];
+    if options.verb == Verb::Update && options.update_check {
+        arguments.push("check".to_owned());
+    }
+    arguments.push("--state-root".to_owned());
+    arguments.push(state_root.display().to_string());
+    arguments.push("--scope".to_owned());
+    arguments.push(scope.to_string());
+    if options.non_interactive {
+        arguments.push("--non-interactive".to_owned());
+    }
+    if options.yes {
+        arguments.push("--yes".to_owned());
+    }
+    if let Some(output) = &options.output {
+        arguments.push("--output".to_owned());
+        arguments.push(output.clone());
+    }
+    match options.verb {
+        Verb::Install | Verb::Modify | Verb::Repair => {
+            for id in &options.enable {
+                arguments.push("--enable".to_owned());
+                arguments.push(id.clone());
+            }
+            for id in &options.disable {
+                arguments.push("--disable".to_owned());
+                arguments.push(id.clone());
+            }
+            if let Some(directory) = &options.install_directory {
+                arguments.push("--install-directory".to_owned());
+                arguments.push(directory.display().to_string());
+            }
+            if options.verb == Verb::Repair && options.force_files {
+                arguments.push("--force-files".to_owned());
+            }
+        }
+        Verb::Update | Verb::Uninstall => {}
+    }
+    arguments
+}
+
+/// Turn a native runtime's exit code into a typed outcome.
+///
+/// The codes are the ones `zup` already uses for machine output, so a script
+/// that reads them needs no second table. 255 is the reboot code 3010 clamped
+/// to a byte by the runtime's exit mapping; without this arm a reboot would
+/// come back as a generic failure.
+pub fn classify(code: i32) -> Outcome {
+    match code {
+        0 => Outcome::Completed { code: 0 },
+        3010 | 255 => Outcome::RebootRequired { code },
+        7 => Outcome::RecoveryRequired { code },
+        _ => Outcome::InstallerFailed { code },
     }
 }
 
@@ -237,6 +352,37 @@ fn scope_of(manifest: &zup_artifact::VariantManifest) -> zup_core::SelectedScope
             zup_core::SelectedScope::User
         }
     }
+}
+
+/// The scope the user asked for, checked against the manifest up front.
+///
+/// The staged runtime re-validates authoritatively; refusing here first keeps
+/// a mistyped scope from staging an artifact it cannot use.
+fn requested_scope(
+    manifest: &zup_artifact::VariantManifest,
+    requested: Option<zup_core::SelectedScope>,
+) -> Result<zup_core::SelectedScope, String> {
+    let declared = manifest.plan.installer.install.scope;
+    let compatible = matches!(
+        (declared, requested),
+        (_, None)
+            | (
+                zup_core::InstallScope::Machine,
+                Some(zup_core::SelectedScope::Machine)
+            )
+            | (
+                zup_core::InstallScope::User,
+                Some(zup_core::SelectedScope::User)
+            )
+            | (zup_core::InstallScope::Either, Some(_))
+    );
+    if !compatible {
+        return Err(format!(
+            "this installer does not serve the {} scope (manifest scope: {declared})",
+            requested.map(|scope| scope.to_string()).unwrap_or_default()
+        ));
+    }
+    Ok(requested.unwrap_or_else(|| scope_of(manifest)))
 }
 
 /// The digest that makes a content store belong to exactly one artifact.
@@ -296,8 +442,22 @@ fn own_program() -> Result<Option<zup_binary::ProgramKind>, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Report a command-line usage error.
+///
+/// Printed and, on Windows, shown, like every other dispatcher failure: a
+/// windowed launcher has no terminal to read stderr from.
+pub fn usage_error(error: &str) -> ExitCode {
+    report::error(error);
+    report::print_usage();
+    ExitCode::from(2)
+}
+
 /// The process entry point, shared by the windowed and console dispatchers.
 pub fn main_with(executable: Option<PathBuf>, options: Options) -> ExitCode {
+    if options.help {
+        report::print_usage();
+        return ExitCode::SUCCESS;
+    }
     let executable = match executable.or_else(|| std::env::current_exe().ok()) {
         Some(executable) => executable,
         None => {
@@ -349,14 +509,24 @@ impl Outcome {
 
 /// Read the launcher's own arguments.
 ///
-/// Deliberately hand-rolled and deliberately tiny: two flags, `--flag value` and
-/// `--flag=value`, both checked by name. A launcher that pulled in a parser to
-/// read two options would be larger than the options.
-pub fn options_from(args: impl Iterator<Item = std::ffi::OsString>) -> (Options, Option<PathBuf>) {
+/// Deliberately hand-rolled and deliberately tiny: a leading verb, `--flag
+/// value` and `--flag=value`, both checked by name. A launcher that pulled in
+/// a parser to read these options would be larger than the options. Only the
+/// flags below travel to the staged runtime; anything else is refused rather
+/// than silently dropped, so a mistyped invocation can never run an install
+/// the user did not ask for.
+pub fn options_from(
+    args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(Options, Option<PathBuf>), String> {
     let mut options = Options::default();
     let mut state_root = None;
+    let mut verb_seen = false;
+    let mut error = None;
     let mut iter = args.peekable();
     while let Some(argument) = iter.next() {
+        if error.is_some() {
+            break;
+        }
         let text = argument.to_string_lossy().into_owned();
         let (name, inline) = match text.split_once('=') {
             Some((name, value)) => (name.to_owned(), Some(value.to_owned())),
@@ -367,22 +537,93 @@ pub fn options_from(args: impl Iterator<Item = std::ffi::OsString>) -> (Options,
                 .clone()
                 .or_else(|| iter.next().map(|v| v.to_string_lossy().into_owned()))
         };
+        let mut flag = |present: &mut bool| {
+            if inline.is_some() {
+                error = Some(format!("{name} takes no value"));
+            } else {
+                *present = true;
+            }
+        };
         match name.as_str() {
-            "--state-root" => state_root = value().map(PathBuf::from),
-            "--source" => options.source = value().map(PathBuf::from),
-            "--output" => {
-                if value().as_deref() == Some("jsonl") {
+            "--state-root" => match value() {
+                Some(root) => state_root = Some(PathBuf::from(root)),
+                None => error = Some("--state-root needs a path".to_owned()),
+            },
+            "--source" => match value() {
+                Some(source) => options.source = Some(PathBuf::from(source)),
+                None => error = Some("--source needs a path".to_owned()),
+            },
+            "--output" => match value().as_deref() {
+                Some(output @ ("human" | "json" | "jsonl")) => {
+                    if output == "jsonl" {
+                        options.machine_readable = true;
+                    }
+                    options.output = Some(output.to_owned());
+                }
+                _ => error = Some("--output needs human, json, or jsonl".to_owned()),
+            },
+            "--jsonl" => {
+                if inline.is_some() {
+                    error = Some("--jsonl takes no value".to_owned());
+                } else {
                     options.machine_readable = true;
+                    options.output = Some("jsonl".to_owned());
                 }
             }
-            "--jsonl" => options.machine_readable = true,
-            "--help" | "-h" => {
-                report::print_usage();
+            "--scope" => match value().as_deref() {
+                Some("user") => options.scope = Some(zup_core::SelectedScope::User),
+                Some("machine") => options.scope = Some(zup_core::SelectedScope::Machine),
+                _ => error = Some("--scope needs user or machine".to_owned()),
+            },
+            "--non-interactive" => flag(&mut options.non_interactive),
+            "--yes" => flag(&mut options.yes),
+            "--force-files" => flag(&mut options.force_files),
+            "--enable" | "--component" => match value() {
+                Some(id) => options.enable.push(id),
+                None => error = Some(format!("{name} needs a component id")),
+            },
+            "--disable" => match value() {
+                Some(id) => options.disable.push(id),
+                None => error = Some(format!("{name} needs a component id")),
+            },
+            "--install-directory" | "--install-dir" => match value() {
+                Some(directory) => options.install_directory = Some(PathBuf::from(directory)),
+                None => error = Some(format!("{name} needs a path")),
+            },
+            "--help" | "-h" => options.help = true,
+            _ if name.starts_with("--") => {
+                error = Some(format!("unrecognised option {name}"));
             }
-            _ => {}
+            _ if !verb_seen => {
+                verb_seen = true;
+                match Verb::from_arg(&name) {
+                    Some(verb) => options.verb = verb,
+                    None if name.eq_ignore_ascii_case("upgrade") => {
+                        error = Some(
+                            "there is no upgrade verb: installing a newer artifact upgrades"
+                                .to_owned(),
+                        );
+                    }
+                    None => {
+                        error = Some(format!(
+                            "unrecognised verb `{name}`; expected install, modify, repair, \
+                             update, or uninstall"
+                        ));
+                    }
+                }
+            }
+            _ if options.verb == Verb::Update && name == "check" => {
+                options.update_check = true;
+            }
+            _ => {
+                error = Some(format!("unexpected argument `{name}`"));
+            }
         }
     }
-    (options, state_root)
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok((options, state_root))
 }
 
 #[cfg(test)]
@@ -396,28 +637,92 @@ mod tests {
     #[test]
     fn a_launcher_reads_two_options_in_either_spelling() {
         let (options, state_root) =
-            options_from(args(&["--state-root", r"C:\s", "--source", r"X:\M"]).into_iter());
+            options_from(args(&["--state-root", r"C:\s", "--source", r"X:\M"]).into_iter())
+                .expect("known options parse");
         assert_eq!(state_root, Some(PathBuf::from(r"C:\s")));
         assert_eq!(options.source, Some(PathBuf::from(r"X:\M")));
         assert!(!options.machine_readable);
 
         let (options, state_root) = options_from(
             args(&[r"--state-root=C:\s", r"--source=X:\M", "--output", "jsonl"]).into_iter(),
-        );
+        )
+        .expect("known options parse");
         assert_eq!(state_root, Some(PathBuf::from(r"C:\s")));
         assert_eq!(options.source, Some(PathBuf::from(r"X:\M")));
         assert!(options.machine_readable);
     }
 
     #[test]
-    fn an_unrecognised_argument_is_ignored_rather_than_fatal() {
-        // A launcher is started by a shell, a shortcut, or a service manager, and
-        // none of them know its flags. Refusing an argument it does not
-        // recognise would make it fragile for no security gain: every value it
-        // does read is a location, and a location cannot grant trust.
-        let (options, state_root) = options_from(args(&["--ui", "--nonsense"]).into_iter());
-        assert!(options.source.is_none());
-        assert!(state_root.is_none());
+    fn verbs_and_lifecycle_flags_travel_to_the_staged_runtime() {
+        let (options, _) = options_from(
+            args(&[
+                "repair",
+                "--scope",
+                "machine",
+                "--force-files",
+                "--yes",
+                "--enable",
+                "core",
+                "--disable=extras",
+                "--install-directory",
+                r"C:\Apps\Acme",
+            ])
+            .into_iter(),
+        )
+        .expect("a verb with flags parses");
+        assert_eq!(options.verb, Verb::Repair);
+        assert_eq!(options.scope, Some(zup_core::SelectedScope::Machine));
+        assert!(options.force_files);
+        assert!(options.yes);
+        assert_eq!(options.enable, vec!["core".to_owned()]);
+        assert_eq!(options.disable, vec!["extras".to_owned()]);
+        assert_eq!(
+            options.install_directory,
+            Some(PathBuf::from(r"C:\Apps\Acme"))
+        );
+
+        let (options, _) = options_from(args(&["uninstall", "--non-interactive"]).into_iter())
+            .expect("uninstall parses");
+        assert_eq!(options.verb, Verb::Uninstall);
+        assert!(options.non_interactive);
+
+        let (options, _) = options_from(args(&[]).into_iter()).expect("no verb parses");
+        assert_eq!(options.verb, Verb::Install);
+    }
+
+    #[test]
+    fn an_unrecognised_verb_or_option_is_fatal_rather_than_an_install() {
+        // A mistyped invocation must never run an install the user did not ask
+        // for. Every value the launcher forwards is re-validated by the staged
+        // runtime, but the verb itself is the launcher's decision alone.
+        for argv in [
+            vec!["--ui"],
+            vec!["--nonsense"],
+            vec!["remove"],
+            vec!["install", "--bogus"],
+            vec!["--scope"],
+            vec!["--scope", "everyone"],
+            vec!["--output", "xml"],
+            vec!["--state-root"],
+            vec!["repair", "--enable"],
+        ] {
+            assert!(
+                options_from(args(&argv).into_iter()).is_err(),
+                "{argv:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_runtime_is_never_reported_as_success() {
+        assert_eq!(classify(0), Outcome::Completed { code: 0 });
+        assert_eq!(classify(1), Outcome::InstallerFailed { code: 1 });
+        assert_eq!(classify(7), Outcome::RecoveryRequired { code: 7 });
+        assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });
+        assert_eq!(classify(255), Outcome::RebootRequired { code: 255 });
+        for outcome in [classify(1), classify(7), classify(255), classify(3010)] {
+            assert_ne!(outcome.exit_code(), 0, "{outcome:?}");
+        }
     }
 
     #[test]

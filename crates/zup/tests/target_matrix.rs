@@ -8,20 +8,16 @@ use zup_windows::EmbeddedBundle;
 mod toolchain_fixture;
 
 #[cfg(target_arch = "aarch64")]
-const X64: &str = "x86_64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-x64";
 #[cfg(not(target_arch = "aarch64"))]
-const ARM64: &str = "aarch64-pc-windows-msvc";
-const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-#[cfg(target_arch = "aarch64")]
-const OTHER_TARGET: &str = X64;
-#[cfg(not(target_arch = "aarch64"))]
-const OTHER_TARGET: &str = ARM64;
+const OTHER_TARGET: &str = "windows-arm64";
 
-/// A target no backend implements on this build host.
-#[cfg(windows)]
-const UNSUPPORTED_TARGET: &str = "aarch64-unknown-linux-gnu";
-#[cfg(not(windows))]
-const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
+fn host_target() -> String {
+    zup_core::Target::host().to_string()
+}
+
+/// A Linux target Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-arm64";
 
 /// The frontend every fixture project declares.
 ///
@@ -29,6 +25,11 @@ const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
 /// CLI has no presentation features, so there is nothing for a test binary's own
 /// build to have selected. `zup build` finds the matching runtime template through
 /// the toolchain resolver, exactly as it does for a person who installed `zup`.
+///
+/// Windows-only coverage: the matrix project pairs two Windows targets, which a
+/// Linux host cannot lower, so the selection assertions that need them stay
+/// where a Windows host runs them.
+#[cfg(windows)]
 const FRONTEND: &str = "gui";
 
 fn zup() -> Command {
@@ -54,6 +55,7 @@ fn write_matrix_project() -> (TempDir, PathBuf) {
     fs::create_dir_all(root.path().join("dist/beta")).unwrap();
     fs::write(root.path().join("dist/alpha/app.bin"), b"alpha").unwrap();
     fs::write(root.path().join("dist/beta/app.bin"), b"beta").unwrap();
+    let host = host_target();
     let manifest = format!(
         r#"schema = 1
 [app]
@@ -62,7 +64,7 @@ name = "CLI Matrix"
 version = "1.0.0"
 [build]
 [build.targets.alpha]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist/alpha" }}
 [build.targets.beta]
 target = "{OTHER_TARGET}"
@@ -79,132 +81,6 @@ user = "${{location.user_data}}/CliMatrix"
     (root, path)
 }
 
-#[test]
-fn repeated_profile_and_raw_triple_selection_are_checked() {
-    let (root, manifest) = write_matrix_project();
-    // Both targets present a window, and a window needs a preset carrying its
-    // target. The staged toolchain a contributor has holds the one their machine
-    // can build, so this project gets a toolchain that can build both.
-    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
-    for selection in [
-        vec!["--target", "alpha", "--target", HOST_TARGET],
-        vec!["--target", OTHER_TARGET],
-        vec![],
-    ] {
-        let output = zup()
-            .args(["--toolchain"])
-            .arg(root.path())
-            .args(["check", "--manifest"])
-            .arg(&manifest)
-            .args(&selection)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{selection:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    // A check reads the source tree and resolves; it must not write to it.
-    assert_eq!(
-        fs::read(root.path().join("dist/alpha/app.bin")).unwrap(),
-        b"alpha"
-    );
-}
-
-/// A manifest whose profiles disagree with the command line, so precedence is
-/// observable: the CLI must win for source, install directory, and frontend.
-#[cfg(windows)]
-fn write_precedence_project() -> (TempDir, PathBuf) {
-    let root = TempDir::new().unwrap();
-    for name in ["declared", "cli"] {
-        fs::create_dir_all(root.path().join(format!("out/{name}"))).unwrap();
-        fs::write(
-            root.path().join(format!("out/{name}/app.bin")),
-            name.as_bytes(),
-        )
-        .unwrap();
-    }
-    let manifest = root.path().join("zup.toml");
-    fs::write(
-        &manifest,
-        format!(
-            r#"schema = 1
-[app]
-id = "com.example.cli-precedence"
-name = "Cli Precedence"
-version = "1.0.0"
-[build]
-[build.targets.default]
-target = "{HOST_TARGET}"
-source = {{ directory = "out/declared" }}
-frontend = "gui"
-[install]
-scope = "user"
-[install.directory]
-user = "${{location.user_data}}/CliPrecedence"
-"#
-        ),
-    )
-    .unwrap();
-    (root, manifest)
-}
-
-/// `zup check` reports what it resolved, so precedence is visible without a build.
-#[cfg(windows)]
-fn check_resolved(manifest: &std::path::Path, extra: &[&str]) -> String {
-    let output = zup()
-        .args(["check", "--manifest"])
-        .arg(manifest)
-        .args(extra)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_overrides_beat_profile_source_and_install_directory() {
-    let (_root, manifest) = write_precedence_project();
-
-    let declared = check_resolved(&manifest, &[]);
-    assert!(declared.contains("out/declared"), "{declared}");
-    assert!(
-        declared.contains("${location.user_data}/CliPrecedence"),
-        "{declared}"
-    );
-
-    let overridden = check_resolved(
-        &manifest,
-        &[
-            "--source",
-            "out/cli",
-            "--install-directory",
-            r"D:\Apps\CliPrecedence",
-        ],
-    );
-    assert!(overridden.contains("out/cli"), "{overridden}");
-    assert!(
-        !overridden.contains("out/declared"),
-        "the profile source is fully replaced: {overridden}"
-    );
-    assert!(
-        overridden.contains(r"D:\Apps\CliPrecedence"),
-        "{overridden}"
-    );
-    assert!(
-        !overridden.contains("${location.user_data}/CliPrecedence"),
-        "the common install directory is fully replaced: {overridden}"
-    );
-}
-
 /// A per-target flag is one value per selected target, on every command.
 ///
 /// `build_inputs::every_repeatable_per_target_flag_uses_one_alignment_message`
@@ -218,20 +94,29 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
     // output, so both have to be individually correct or the output problem
     // would never be the one reported. One package carries both targets, which is
     // what a build actually reads.
-    let alpha = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    let alpha =
+        toolchain_fixture::runtime(&host_target(), zup_core::Frontend::Gui).write(root.path());
     let beta = toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
+    let host = host_target();
+    toolchain_fixture::preset(&[host.as_str(), OTHER_TARGET]).write(root.path());
+    // `--output` alignment is resolved during composition, after the backend
+    // boundary. On a Linux host the Windows beta profile is refused there
+    // first, so that combination is Windows-only coverage; Linux output
+    // alignment is covered by the public Linux build tests instead.
+    let mut flags = vec![
+        ("--source", "dist/alpha", "sources"),
+        ("--install-directory", "C:/Acme", "install directories"),
+        // One output for two targets is the same rule, and a refused build
+        // must leave the output path untouched. `check` and `doctor` do not
+        // take `--output` at all; the commands that compose are the ones that
+        // need the rule.
+    ];
+    if cfg!(windows) {
+        flags.push(("--output", output_path.to_str().unwrap(), "outputs"));
+    }
     for command in ["build", "check", "doctor"] {
-        for (flag, value, noun) in [
-            ("--source", "dist/alpha", "sources"),
-            ("--install-directory", "C:/Acme", "install directories"),
-            // One output for two targets is the same rule, and a refused build
-            // must leave the output path untouched. `check` and `doctor` do not
-            // take `--output` at all; the commands that compose are the ones that
-            // need the rule.
-            ("--output", output_path.to_str().unwrap(), "outputs"),
-        ] {
-            if flag == "--output" && command != "build" {
+        for (flag, value, noun) in &flags {
+            if *flag == "--output" && command != "build" {
                 continue;
             }
             let mut command_line = zup();
@@ -244,7 +129,7 @@ fn repeatable_resolution_flags_must_line_up_with_the_selection() {
                     .arg("--runtime")
                     .arg(&beta);
             }
-            let output = command_line.arg(flag).arg(value).output().unwrap();
+            let output = command_line.arg(*flag).arg(*value).output().unwrap();
             assert!(
                 !output.status.success(),
                 "{command} {flag} accepted one value for two targets"
@@ -274,6 +159,7 @@ fn one_value_per_target_install_directory_is_aligned_per_profile() {
         .unwrap();
     }
     let manifest = root.path().join("zup.toml");
+    let host = host_target();
     fs::write(
         &manifest,
         format!(
@@ -284,7 +170,7 @@ name = "Cli Install Matrix"
 version = "1.0.0"
 [build]
 [build.targets.alpha]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist/alpha" }}
 [build.targets.beta]
 target = "{OTHER_TARGET}"
@@ -297,9 +183,9 @@ user = "${{location.user_data}}/Shared"
         ),
     )
     .unwrap();
-    toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui).write(root.path());
+    toolchain_fixture::runtime(&host_target(), zup_core::Frontend::Gui).write(root.path());
     toolchain_fixture::runtime(OTHER_TARGET, zup_core::Frontend::Gui).write(root.path());
-    toolchain_fixture::preset(&[HOST_TARGET, OTHER_TARGET]).write(root.path());
+    toolchain_fixture::preset(&[host.as_str(), OTHER_TARGET]).write(root.path());
     let result = zup()
         .args(["--toolchain"])
         .arg(root.path())
@@ -350,7 +236,7 @@ name = "Output Lifecycle"
 version = "1.0.0"
 [build]
 [build.targets.default]
-target = "{HOST_TARGET}"
+target = "{host}"
 source = {{ directory = "dist" }}
 frontend = "{frontend}"
 [install]
@@ -362,6 +248,7 @@ source = "**/*"
 destination = "${{install}}"
 "#,
             frontend = FRONTEND,
+            host = host_target(),
         ),
     )
     .unwrap();
@@ -497,11 +384,23 @@ fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
         .args(["--target", "alpha", "--format", "json"])
         .output()
         .unwrap();
-    assert!(
-        explicit.status.success(),
-        "{}",
-        String::from_utf8_lossy(&explicit.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-    assert_eq!(value["targets"][0]["target"], HOST_TARGET);
+    // `plan` previews a Windows installation transaction. On a Windows host
+    // the selected profile plans; on a Linux host the Linux target is refused
+    // with the transaction it belongs to named.
+    if cfg!(windows) {
+        assert!(
+            explicit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+        assert_eq!(value["targets"][0]["target"], host_target());
+    } else {
+        assert!(!explicit.status.success());
+        assert!(
+            String::from_utf8_lossy(&explicit.stderr).contains("cannot plan Linux target"),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+    }
 }

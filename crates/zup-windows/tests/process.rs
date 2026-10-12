@@ -1,17 +1,3 @@
-//! Starting a real child, and refusing to start a wrong one.
-//!
-//! The handoff's security properties are properties of a *value* - which
-//! executable, which arguments, which inheritance - so they are tested against
-//! the value. The properties that are not properties of a value are that a child
-//! actually starts, that its exit code comes back, and that it is independent
-//! once `CreateProcessW` returns. Those are tested against real processes, on
-//! this machine, in this repository.
-//!
-//! The child here is this test executable. That is deliberate: it is a real
-//! x86_64 PE, it exists on every machine that can run this test, and its
-//! behaviour is under this test's control. A test that launched a system tool
-//! would be testing that tool.
-
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -22,19 +8,8 @@ fn this_executable() -> PathBuf {
     std::env::current_exe().expect("the test executable")
 }
 
-/// An argument the libtest harness rejects.
-///
-/// The harness refuses an unknown flag with a usage error, so this is a real
-/// process that exits nonzero without needing a helper binary or a shell. The
-/// code it chooses is the harness's business; the tests below only ever compare
-/// codes against each other.
 const USAGE_ERROR: &str = "--zup-not-a-flag";
 
-/// The same command run by the platform's own launcher.
-///
-/// The exit code `std::process` reports is the reference: if this module's
-/// `CreateProcessW` handoff reports the same number for the same program, then
-/// it is reporting what the program did and not something `wait` decided.
 fn reference_exit_code() -> i32 {
     std::process::Command::new(this_executable())
         .arg(USAGE_ERROR)
@@ -47,10 +22,6 @@ fn reference_exit_code() -> i32 {
 
 #[test]
 fn a_real_child_starts_and_reports_the_platforms_own_exit_code() {
-    // Two real processes, the same program, two launchers. If the codes agree,
-    // then the handoff is forwarding the child's outcome rather than inventing
-    // one, and the child is genuinely independent of this process - `std::process`
-    // waited for its own child in the same call, and this one finished anyway.
     let expected = reference_exit_code();
     assert_ne!(expected, 0, "the probe must fail, or it proves nothing");
 
@@ -71,11 +42,6 @@ fn a_real_child_starts_and_reports_the_platforms_own_exit_code() {
 
 #[test]
 fn a_silent_handoff_starts_no_window_and_still_runs() {
-    // The GUI handoff's claim is that the user sees one window: no console, no
-    // inherited handles, and the child still runs. A real child proves the third
-    // half, which is the half that would break if the empty handle list were
-    // wrong - `bInheritHandles` is set even with nothing to inherit, because the
-    // list is what constrains it.
     let child = launch(
         &this_executable(),
         &[USAGE_ERROR.to_owned()],
@@ -84,17 +50,12 @@ fn a_silent_handoff_starts_no_window_and_still_runs() {
     )
     .expect("a silent handoff starts a real child");
     assert_ne!(child.pid(), 0);
-    // A silent handoff does not wait, by design: a user who closes an installer
-    // window should not have a hidden process holding the bootstrapper's exit
-    // code. So `wait` returns immediately and the child is simply left running.
+
     assert_eq!(child.wait(), 0, "a silent handoff does not forward a code");
 }
 
 #[test]
 fn a_request_renders_the_command_line_the_child_will_parse() {
-    // The rendered line is the interface. If it is wrong the child receives
-    // something other than what was asked for, and a test that only counted
-    // arguments would not notice.
     let request = LaunchRequest::new(
         Path::new(r"C:\Program Files\Acme\Setup.exe"),
         vec![
@@ -108,13 +69,9 @@ fn a_request_renders_the_command_line_the_child_will_parse() {
     );
     assert_eq!(
         request.command_line(),
-        // A path with no space, quote, or trailing backslash is passed through
-        // unquoted: quoting more than the rules require is not a correctness
-        // problem, but it is a diff every release has to read.
         r#""C:\Program Files\Acme\Setup.exe" install --acquired C:\Users\o\AppData\Local\Acme\content --handoff "C:\a b\handoff.json""#
     );
-    // And the executable is the application name, so it can never become a
-    // `PATH` lookup however it is spelled.
+
     assert!(
         request
             .command_line()
@@ -125,12 +82,8 @@ fn a_request_renders_the_command_line_the_child_will_parse() {
 
 #[test]
 fn a_missing_executable_names_the_api_and_the_win32_code() {
-    // A bootstrapper that cannot start the runtime has to say which call failed
-    // and why. A bare "failed to launch" is not something a support engineer can
-    // act on.
     let directory = tempfile::tempdir().expect("a temporary directory");
 
-    // The file is missing from a directory that exists.
     let error = launch(
         &directory.path().join("Setup.exe"),
         &[],
@@ -142,9 +95,6 @@ fn a_missing_executable_names_the_api_and_the_win32_code() {
     assert_eq!(error.code, 2, "ERROR_FILE_NOT_FOUND");
     assert!(error.to_string().contains("CreateProcessW"), "{error}");
 
-    // A directory in the path is missing, which is a different problem with a
-    // different code: a half-finished install has both, and telling them apart is
-    // the difference between "the cache is stale" and "the release is wrong".
     let error = launch(
         &directory.path().join("nope").join("Setup.exe"),
         &[],
@@ -158,9 +108,6 @@ fn a_missing_executable_names_the_api_and_the_win32_code() {
 
 #[test]
 fn a_directory_is_not_an_executable() {
-    // A staged runtime that turned into a directory - a half-finished write, an
-    // interrupted unpack - must be refused rather than started, and the refusal
-    // has to be distinguishable from "no such file".
     let directory = tempfile::tempdir().expect("a temporary directory");
     let error = launch(directory.path(), &[], HandOff::Console, None)
         .expect_err("a directory does not start");

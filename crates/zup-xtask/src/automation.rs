@@ -1,30 +1,3 @@
-//! Generating and checking the artifacts derived from the automation contract.
-//!
-//! # What this owns
-//!
-//! ```text
-//! schema/automation-v1.schema.json     the language-neutral contract
-//! action/src/protocol.generated.ts     the Action's TypeScript declarations
-//! fixtures/automation/*.json|jsonl     the golden documents both sides read
-//! ```
-//!
-//! All three come from the Rust DTOs in `zup-automation`, through one command, and
-//! `check` is the same command without the writes. CI runs `check`, so a Rust type that
-//! changed without its artifacts being regenerated fails the build rather than
-//! producing an Action compiled against a shape zup stopped emitting.
-//!
-//! # Why the fixtures are generated and not hand-written
-//!
-//! A fixture hand-written in TypeScript proves that a TypeScript object satisfies a
-//! TypeScript interface, which is true of every fixture ever written and says nothing
-//! about whether Rust serializes that shape. These are serialized by the same code that
-//! writes a real result, so a change to a field name moves the fixture, the Action's
-//! decoder fails, and the failure names the field.
-//!
-//! Nothing in a fixture is derived from the environment. There are no timestamps, no
-//! absolute paths and no digests of files that only exist on the machine that wrote them,
-//! so the same commit produces the same bytes on every host.
-
 use std::path::Path;
 
 use zup_automation::{
@@ -36,24 +9,18 @@ use zup_automation::{
     StreamEvent, StreamVersion, Target, ToolchainComponentStatus, ToolchainStatusDetails,
 };
 
-/// The committed JSON Schema, relative to the repository root.
 pub const SCHEMA_PATH: &str = "schema/automation-v1.schema.json";
 
-/// The Action's generated declarations, relative to the repository root.
 pub const TYPESCRIPT_PATH: &str = "action/src/protocol.generated.ts";
 
-/// The golden fixtures, relative to the repository root.
 pub const FIXTURE_DIRECTORY: &str = "fixtures/automation";
 
-/// One generated file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Generated {
-    /// Repository-relative, `/`-separated.
     pub path: String,
     pub contents: String,
 }
 
-/// Every file the contract owns, in a stable order.
 pub fn generate() -> Vec<Generated> {
     let mut files = vec![
         Generated {
@@ -69,7 +36,6 @@ pub fn generate() -> Vec<Generated> {
     files
 }
 
-/// Write every file, creating parent directories.
 pub fn write(root: &Path, files: &[Generated]) -> Result<Vec<String>, String> {
     let mut written = Vec::new();
     for file in files {
@@ -85,10 +51,6 @@ pub fn write(root: &Path, files: &[Generated]) -> Result<Vec<String>, String> {
     Ok(written)
 }
 
-/// Which committed files do not match what the Rust types produce.
-///
-/// Paths only, with a byte count, because a generated file is large and a diff of one is
-/// unreadable in a CI log. The command to fix it is in every message.
 pub fn drift(root: &Path, files: &[Generated]) -> Vec<String> {
     let mut stale = Vec::new();
     for file in files {
@@ -106,12 +68,6 @@ pub fn drift(root: &Path, files: &[Generated]) -> Vec<String> {
     stale
 }
 
-/// The golden documents, produced by serializing the real types.
-///
-/// Each one is a case an integration has to get right, and none of them is a
-/// hypothetical: a build that succeeded, a build whose manifest was wrong, a
-/// publication, a publication refused over a conflicting asset, a signature check that
-/// failed, a toolchain report, a stream, and a diagnostic with a source span.
 fn fixtures() -> Vec<Generated> {
     vec![
         json("build-success.json", build_success()),
@@ -163,7 +119,7 @@ fn application() -> Application {
 }
 
 fn target() -> Target {
-    Target::new("windows-x64", "x86_64-pc-windows-msvc")
+    Target::new("windows-x64", "windows-x64")
 }
 
 fn digest(byte: char) -> Digest {
@@ -178,7 +134,7 @@ fn artifact(path: &str, kind: &'static str, mode: &'static str, size: u64) -> Ar
         kind: Identifier::fixed(kind),
         mode: Identifier::fixed(mode),
         id: Some("windows-x64".to_owned()),
-        target: Some("x86_64-pc-windows-msvc".to_owned()),
+        target: Some("windows-x64".to_owned()),
         variants: None,
         signing: None,
     }
@@ -217,17 +173,12 @@ fn build_failure() -> AutomationResult {
         .with_summary("Nothing was built")
 }
 
-/// A project that is valid but cannot produce one universal installer.
-///
-/// The case a warning exists for, and the reason the protocol's severity and status
-/// have to agree: an error diagnostic on a success would make a green project read as
-/// a broken one, and a consumer that failed on it would be wrong.
 fn check_not_composable() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_CHECK)
         .with_application(application())
         .with_targets(vec![
             target(),
-            Target::new("windows-arm64", "aarch64-pc-windows-msvc"),
+            Target::new("windows-arm64", "windows-arm64"),
         ])
         .with_diagnostic(
             Diagnostic::warning(
@@ -248,7 +199,6 @@ fn check_not_composable() -> AutomationResult {
         .with_summary("Acme is valid · 2 file(s) across 2 target(s)")
 }
 
-/// What an install would do, which is a plan rather than a change.
 fn plan() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_PLAN)
         .with_application(application())
@@ -262,8 +212,6 @@ fn plan() -> AutomationResult {
         .with_summary("3 change(s) · 237.0 MiB under ${location.user_data}/Acme")
 }
 
-/// A project that cannot be built, with the whole check table rather than only the
-/// failures: a skipped check is a question that was never answered.
 fn doctor() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_DOCTOR)
         .with_application(application())
@@ -273,18 +221,18 @@ fn doctor() -> AutomationResult {
         ))
         .with_details(Details::Doctor(DoctorDetails {
             manifest: "zup.toml".to_owned(),
-            host: "x86_64-pc-windows-msvc".to_owned(),
+            host: "windows-x64".to_owned(),
             ready: false,
             checks: 3,
             targets: vec![DoctorTarget::new(
                 "default",
-                "x86_64-pc-windows-msvc",
+                "windows-x64",
                 Identifier::fixed("fail"),
                 vec![
                     DoctorCheck::new(
                         Identifier::fixed("canonical_target"),
                         Identifier::fixed("pass"),
-                        "canonical target is `x86_64-pc-windows-msvc`",
+                        "canonical target is `windows-x64`",
                         None,
                     ),
                     DoctorCheck::new(
@@ -306,8 +254,6 @@ fn doctor() -> AutomationResult {
         .with_summary("not ready: 1 of 1 target(s) can be built")
 }
 
-/// A staged tree, which is the document a TUF repository signs and a static origin
-/// serves.
 fn publish_stage() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_PUBLISH_STAGE)
         .with_application(application())
@@ -392,8 +338,6 @@ fn publish_conflict() -> AutomationResult {
         .with_summary("v1.4.0 was not published")
 }
 
-/// The list an external signer has to work through, in the order it has to work
-/// through it: a runtime is signed before the artifact that embeds it.
 fn sign_prepare() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_SIGN_PREPARE)
         .with_application(application())
@@ -448,8 +392,6 @@ fn sign_verify_failure() -> AutomationResult {
         .with_summary("1 of 1 check failed; the release was not finalized")
 }
 
-/// An inspection, whole. This is the one operation whose product *is* the detail, so
-/// nothing is summarized away.
 fn artifact_inspect() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_ARTIFACT_INSPECT)
         .with_application(application())
@@ -462,7 +404,7 @@ fn artifact_inspect() -> AutomationResult {
             subsystem: "console".to_owned(),
             variants: vec![InspectedVariant {
                 id: "windows-x64".to_owned(),
-                target: "x86_64-pc-windows-msvc".to_owned(),
+                target: "windows-x64".to_owned(),
                 frontend: "gui".to_owned(),
                 logical_size: ByteCount::new(248_512_896),
                 file_count: 1,
@@ -494,16 +436,11 @@ fn toolchain_status() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_STATUS)
         .with_details(Details::ToolchainStatus(ToolchainStatusDetails {
             zup_version: "0.0.1".to_owned(),
-            host: "x86_64-pc-windows-msvc".to_owned(),
-            // Absolute, and display-only: it is the answer to "where would a build on
-            // this machine look", which is the question `toolchain status` exists to
-            // answer. Nothing reads it back, so it is the one path in the protocol that
-            // is not relative, and the fixture spells it with an environment variable so
-            // a committed document stays the same on every host.
+            host: "windows-x64".to_owned(),
             cache: "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1".to_owned(),
             complete: false,
             components: vec![ToolchainComponentStatus {
-                component: "runtime gui for x86_64-pc-windows-msvc".to_owned(),
+                component: "runtime gui for windows-x64".to_owned(),
                 found: false,
                 source: None,
                 path: None,
@@ -612,7 +549,6 @@ fn jsonl_progress() -> Vec<StreamEvent> {
     events
 }
 
-/// Where a generated file belongs, for a diagnostic.
 pub fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -624,13 +560,6 @@ pub fn relative(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// Every fixture is a document this build's own types accept, and every
-    /// *failed* one says why. A fixture that does not parse is worse than no
-    /// fixture, because a consumer test that reads it would be testing a document
-    /// zup cannot produce.
-    ///
-    /// Only the fixtures: the schema describes them rather than being one, and the
-    /// declarations are TypeScript.
     #[test]
     fn every_fixture_is_a_document_zup_can_produce() {
         for file in fixtures() {
@@ -651,9 +580,6 @@ mod tests {
         }
     }
 
-    /// Nothing in a fixture describes the machine that wrote it. A fixture with an
-    /// absolute path is a fixture that cannot be committed, and a fixture with a
-    /// timestamp is a fixture that produces a diff on every run.
     #[test]
     fn no_fixture_names_a_build_machine_or_a_clock() {
         for file in fixtures() {
@@ -664,9 +590,6 @@ mod tests {
                     file.path
                 );
             }
-            // Quoted, because a fixture is prose as well as data and `validated`
-            // contains `date`. A wall clock in a *field* is the thing that makes a
-            // document non-reproducible.
             for banned in [
                 "\"timestamp\"",
                 "\"time\"",

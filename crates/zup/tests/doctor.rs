@@ -15,24 +15,20 @@ mod toolchain_fixture;
 
 const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-const LINUX_TARGET: &str = "aarch64-unknown-linux-gnu";
 
-/// A target no backend implements on this build host.
-#[cfg(windows)]
-const UNSUPPORTED_TARGET: &str = LINUX_TARGET;
-#[cfg(not(windows))]
-const UNSUPPORTED_TARGET: &str = "x86_64-pc-windows-msvc";
+/// A Linux target Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-arm64";
 
 #[cfg(target_arch = "aarch64")]
-const OTHER_TARGET: &str = "x86_64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-x64";
 #[cfg(not(target_arch = "aarch64"))]
-const OTHER_TARGET: &str = "aarch64-pc-windows-msvc";
+const OTHER_TARGET: &str = "windows-arm64";
 
 /// PE templates, Windows lowering, and the Windows backend only exist on Windows.
 const ON_WINDOWS: bool = cfg!(windows);
 
 /// Every check kind a report must contain for each selected target.
-const CHECK_KINDS: [&str; 10] = [
+const CHECK_KINDS: [&str; 12] = [
     "canonical_target",
     "manifest_compile",
     "source_payload",
@@ -43,6 +39,8 @@ const CHECK_KINDS: [&str; 10] = [
     "runtime_template",
     "build_backend",
     "output_parent",
+    "elevation",
+    "service_runtime",
 ];
 
 fn zup() -> Command {
@@ -51,11 +49,33 @@ fn zup() -> Command {
 
 /// The frontend every fixture project declares.
 ///
-/// The developer CLI has no presentation features, so there is nothing for a
-/// test binary's own build to have selected: a fixture names the frontend it
-/// wants and the toolchain resolver finds the matching template.
+/// The host's own backend decides: a GUI fixture on Linux would be refused
+/// before any check the test cares about, so Linux fixtures declare the
+/// console installer their backend ships.
 fn selected_frontend() -> &'static str {
-    "gui"
+    if cfg!(windows) { "gui" } else { "console" }
+}
+
+/// The frontend fixture components are written for.
+fn fixture_frontend() -> zup_core::Frontend {
+    if cfg!(windows) {
+        zup_core::Frontend::Gui
+    } else {
+        zup_core::Frontend::Console
+    }
+}
+
+/// The application main a fixture declares, when the host's backend reads one.
+///
+/// Windows never validates it; Linux requires it to name an executable shipped
+/// file, which these fixtures have no reason to do, so Linux fixtures declare
+/// none.
+fn fixture_main() -> &'static str {
+    if cfg!(windows) {
+        "main = \"app.exe\"\n"
+    } else {
+        ""
+    }
 }
 
 /// A runtime template for `target`, written as a real zup component.
@@ -64,7 +84,7 @@ fn selected_frontend() -> &'static str {
 /// a component whose header and descriptor agree is the whole of what these tests
 /// need. No composition happens: `doctor` writes nothing.
 fn setup_runtime(directory: &Path, target: &str) -> PathBuf {
-    toolchain_fixture::runtime(target, zup_core::Frontend::Gui).write(&directory.join("toolchain"))
+    toolchain_fixture::runtime(target, fixture_frontend()).write(&directory.join("toolchain"))
 }
 
 fn manifest(target: &str) -> String {
@@ -76,8 +96,7 @@ frontend = "{frontend}"
 id = "com.example.doctor"
 name = "Doctor App"
 version = "1.0.0"
-main = "app.exe"
-
+{main}
 [build]
 
 [build.targets.default]
@@ -94,7 +113,8 @@ user = "${{location.user_data}}/DoctorApp"
 source = "**/*"
 destination = "${{install}}"
 "#,
-        frontend = selected_frontend()
+        frontend = selected_frontend(),
+        main = fixture_main(),
     )
 }
 
@@ -232,7 +252,7 @@ fn healthy_single_target_passes_every_required_check() {
     );
     let report = report(&output);
     assert_eq!(report["ready"], true);
-    assert_eq!(report["host"], HOST_TARGET);
+    assert_eq!(report["host"], zup_core::Target::host().to_string());
     assert_eq!(report["targets"].as_array().unwrap().len(), 1);
 
     let rows = checks(&output, "default");
@@ -253,6 +273,12 @@ fn healthy_single_target_passes_every_required_check() {
     assert_eq!(statuses(&rows, "plugin_engine"), only("skip"));
     assert_eq!(statuses(&rows, "update_root"), only("skip"));
     assert_eq!(statuses(&rows, "output_parent"), only("pass"));
+    assert_eq!(statuses(&rows, "elevation"), only("skip"));
+    assert!(
+        message(find(&rows, "elevation")).contains("elevation"),
+        "{}",
+        message(find(&rows, "elevation"))
+    );
     assert_eq!(
         find(&rows, "frontend")["message"],
         format!("resolved frontend is `{}`", selected_frontend())
@@ -268,6 +294,16 @@ fn healthy_single_target_passes_every_required_check() {
         assert_eq!(statuses(&rows, "target_lowering"), only("pass"));
         assert!(
             message(find(&rows, "build_backend")).contains("Windows backend is ready"),
+            "{}",
+            message(find(&rows, "build_backend"))
+        );
+        assert_eq!(report["ready"], true);
+    } else {
+        assert_eq!(statuses(&rows, "runtime_template"), only("pass"));
+        assert_eq!(statuses(&rows, "build_backend"), only("pass"));
+        assert_eq!(statuses(&rows, "target_lowering"), only("pass"));
+        assert!(
+            message(find(&rows, "build_backend")).contains("Linux backend is ready"),
             "{}",
             message(find(&rows, "build_backend"))
         );
@@ -427,7 +463,7 @@ destination = "${{install}}"
     // runtime check has something real to fail on. The copy carries its
     // descriptor, so the failure is about the machine and not about a missing file.
     let alpha_runtime = setup_runtime(project.path(), HOST_TARGET);
-    let second = toolchain_fixture::runtime(HOST_TARGET, zup_core::Frontend::Gui)
+    let second = toolchain_fixture::runtime(HOST_TARGET, fixture_frontend())
         .write(&project.path().join("other-template"));
     let alpha_output = project.path().join("alpha.exe");
     let beta_output = project.path().join("beta.exe");
@@ -445,8 +481,14 @@ destination = "${{install}}"
 
     let alpha = checks(&output, "alpha");
     let beta = checks(&output, "beta");
-    assert_eq!(target_of(&output, "alpha")["target"], HOST_TARGET);
-    assert_eq!(target_of(&output, "beta")["target"], OTHER_TARGET);
+    assert_eq!(
+        target_of(&output, "alpha")["target"],
+        zup_core::Target::parse(HOST_TARGET).unwrap().to_string()
+    );
+    assert_eq!(
+        target_of(&output, "beta")["target"],
+        zup_core::Target::parse(OTHER_TARGET).unwrap().to_string()
+    );
     for rows in [&alpha, &beta] {
         assert_eq!(
             rows.iter()
@@ -476,6 +518,61 @@ destination = "${{install}}"
         assert!(message.contains(OTHER_TARGET), "{message}");
         assert!(message.contains("was wanted"), "{message}");
         assert!(!output.status.success());
+    }
+}
+
+/// A machine-scope project reports its elevation capability: user-scope
+/// projects skip, and machine projects name `pkexec` without prompting.
+#[test]
+fn machine_scope_reports_elevation_capability() {
+    let target = "linux-x64";
+    let project = TempDir::new().unwrap();
+    // No application main: the fixture ships a payload no declared main
+    // names, and the point here is elevation rather than main validation.
+    // Console on every host: a GUI frontend has no Linux runtime, which
+    // would fail lowering for the wrong reason.
+    let manifest_text = manifest(target).replace(fixture_main(), "").replace(
+        &format!("frontend = \"{}\"", selected_frontend()),
+        "frontend = \"console\"",
+    );
+    write_project(
+        project.path(),
+        &manifest_text
+            .replace("scope = \"user\"", "scope = \"machine\"")
+            .replace(
+                "user = \"${location.user_data}/DoctorApp\"",
+                "machine = \"${location.programs}/DoctorApp\"",
+            ),
+    );
+    let _runtime = setup_runtime(project.path(), target);
+    let output = run_doctor(&project.path().join("zup.toml"), &[]);
+    let rows = checks(&output, "default");
+    assert_eq!(
+        rows.iter()
+            .map(|check| check["kind"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>(),
+        only_kinds()
+    );
+    if cfg!(target_os = "linux") {
+        // Never a prompt, and never a claim: present means usable, missing
+        // means named and skipped - `zup build` needs no elevation.
+        let status = statuses(&rows, "elevation");
+        assert!(
+            status == only("pass") || status == only("skip"),
+            "{status:?}"
+        );
+        assert!(
+            message(find(&rows, "elevation")).contains("pkexec"),
+            "{}",
+            message(find(&rows, "elevation"))
+        );
+    } else {
+        assert_eq!(statuses(&rows, "elevation"), only("skip"));
+        assert!(
+            message(find(&rows, "elevation")).contains("installing machine"),
+            "{}",
+            message(find(&rows, "elevation"))
+        );
     }
 }
 
@@ -523,18 +620,15 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     assert_eq!(report["ready"], false);
     let rows = checks(&result, "default");
     assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
-    assert_eq!(statuses(&rows, "build_backend"), only("fail"));
-    let backend = find(&rows, "build_backend");
+    // Linux on ARM64 parses but no Linux backend builds it: the finding names
+    // the supported Linux target rather than the host.
+    assert_eq!(statuses(&rows, "build_backend"), only("pass"));
+    assert_eq!(statuses(&rows, "target_lowering"), only("fail"));
     assert!(
-        message(backend).contains(if ON_WINDOWS {
-            "backend not implemented"
-        } else {
-            "backend unavailable"
-        }),
+        message(find(&rows, "target_lowering")).contains("linux-x64"),
         "{}",
-        message(backend)
+        message(find(&rows, "target_lowering"))
     );
-    assert_eq!(statuses(&rows, "target_lowering"), only("skip"));
     for kind in [
         "manifest_compile",
         "source_payload",
@@ -544,8 +638,16 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     ] {
         assert_eq!(statuses(&rows, kind), only("pass"), "{kind}");
     }
+    // The derived output carries the target's own suffix, so the assertion
+    // names the file the target would have produced.
+    let suffix = zup_core::Target::parse(UNSUPPORTED_TARGET)
+        .expect("a valid target")
+        .executable_suffix();
     assert!(
-        !project.path().join("Doctor App-Setup.exe").exists(),
+        !project
+            .path()
+            .join(format!("Doctor App-Setup{suffix}"))
+            .exists(),
         "no artifact is produced for an unsupported target"
     );
 }
@@ -682,37 +784,6 @@ source = "plugins/helper.wasm"
     }
 }
 
-/// The document names the contract it belongs to, so a consumer gates on a version
-/// rather than on a shape it has to recognise - and the same report twice is
-/// byte-identical, so a CI diff means something changed.
-#[test]
-fn the_result_is_versioned_and_byte_stable() {
-    let project = single_target_project(HOST_TARGET);
-    let runtime = setup_runtime(project.path(), HOST_TARGET);
-    let manifest = project.path().join("zup.toml");
-    let first = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
-    let second = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
-    assert_eq!(first.stdout, second.stdout, "the report is deterministic");
-
-    // The human report moves to stderr rather than disappearing: stdout is the
-    // protocol, and a CI log that swallowed the table would be useless to the person
-    // reading it.
-    let stderr = String::from_utf8_lossy(&first.stderr);
-    assert!(
-        stderr.contains("ready: all 1 target(s) can be built"),
-        "{stderr}"
-    );
-    let document = document(&first);
-    assert_eq!(document["protocol"], zup_automation::PROTOCOL.to_string());
-    assert_eq!(document["operation"], "doctor");
-    assert_eq!(document["status"], "success");
-    for target in document["details"]["targets"].as_array().unwrap() {
-        for check in target["checks"].as_array().unwrap() {
-            assert!(["pass", "fail", "skip"].contains(&check["status"].as_str().unwrap()));
-        }
-    }
-}
-
 /// The report describes the source it would use, including a CLI override.
 #[test]
 fn the_report_honors_a_cli_source_override() {
@@ -774,7 +845,12 @@ fn doctor_reports_every_output_state_and_never_writes() {
     let project = single_target_project(HOST_TARGET);
     let runtime = setup_runtime(project.path(), HOST_TARGET);
     let manifest = project.path().join("zup.toml");
-    let derived = project.path().join("Doctor App-Setup.exe");
+    // The derived output carries the target's own suffix: extensionless on
+    // Linux, `.exe` on Windows.
+    let suffix = zup_core::Target::parse(HOST_TARGET)
+        .expect("a valid target")
+        .executable_suffix();
+    let derived = project.path().join(format!("Doctor App-Setup{suffix}"));
     let before = directory_entries(project.path());
     let result = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     assert!(

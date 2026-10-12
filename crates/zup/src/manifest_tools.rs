@@ -1,13 +1,5 @@
-//! The manifest's own tools: schema, formatting, completions.
-//!
-//! Three small commands that need nothing from the build plane, grouped because
-//! they are three small commands. `schema` is the contract other tools read,
-//! `fmt` is the one that preserves a human's comments, and `completions` is the
-//! only command whose output is not about this project at all.
-
 use crate::cli::{CompletionsCommand, FmtCommand, SchemaCommand};
 
-/// Print the authoritative zup.toml JSON Schema.
 pub fn run_schema(args: SchemaCommand) -> miette::Result<()> {
     let json = zup_manifest::schema_json().map_err(|error| miette::miette!("schema: {error}"))?;
     match args.output {
@@ -18,11 +10,6 @@ pub fn run_schema(args: SchemaCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// Format a manifest, or say whether it is formatted.
-///
-/// `toml_edit` rather than a serializer, because a manifest is a document a person
-/// wrote: their ordering, their spacing, and their comments are content, and a
-/// formatter that drops them is a formatter people stop running.
 pub fn run_fmt(args: FmtCommand) -> miette::Result<()> {
     let path = args
         .manifest
@@ -53,7 +40,6 @@ pub fn run_fmt(args: FmtCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// Generate shell completions for zup.
 pub fn run_completions(args: CompletionsCommand) -> miette::Result<()> {
     let mut command = crate::command();
     clap_complete::generate(args.shell, &mut command, "zup", &mut std::io::stdout());

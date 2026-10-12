@@ -12,7 +12,7 @@ use zup_artifact::{DistributionVariant, MediaType};
 use zup_bundle::CompiledPluginArtifact;
 use zup_core::{
     App, AppId, Component, FileMapping, Frontend, Install, InstallDirectory, InstallScope,
-    NonEmptyString, PluginBinding, PluginId, TargetProfileId, TargetTriple, Template, UpdateConfig,
+    NonEmptyString, PluginBinding, PluginId, Target, TargetProfileId, Template, UpdateConfig,
 };
 use zup_plugin_contract::{AOT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
 
@@ -30,7 +30,7 @@ pub struct FixtureTarget {
 
 pub const X64: FixtureTarget = FixtureTarget {
     profile: "windows-x64",
-    target: "x86_64-pc-windows-msvc",
+    target: "windows-x64",
     frontend: Frontend::Gui,
     exclusive: &[
         ("bin/Acme.exe", "x64 machine code"),
@@ -42,7 +42,7 @@ pub const X64: FixtureTarget = FixtureTarget {
 
 pub const ARM64: FixtureTarget = FixtureTarget {
     profile: "windows-arm64",
-    target: "aarch64-pc-windows-msvc",
+    target: "windows-arm64",
     frontend: Frontend::Gui,
     exclusive: &[
         ("bin/Acme.exe", "arm64 machine code"),
@@ -114,6 +114,7 @@ fn filler(seed: &str, target: u64) -> String {
 }
 
 fn plugin_metadata(target: &str) -> zup_bundle::PluginArtifact {
+    let parsed = Target::parse(target).unwrap();
     let mut aot = Vec::new();
     aot.extend_from_slice(filler("plugin-aot", 7).as_bytes());
     aot.extend_from_slice(target.as_bytes());
@@ -122,13 +123,13 @@ fn plugin_metadata(target: &str) -> zup_bundle::PluginArtifact {
         plugin_id: PluginId::new("acme-plugins").unwrap(),
         source_size: 16,
         source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
-        target: TargetTriple::parse(target).unwrap(),
+        target: parsed,
         wasmtime_version: WASMTIME_VERSION.to_owned(),
         aot_format_version: AOT_FORMAT_VERSION,
         plugin_api_version: PLUGIN_API_VERSION.to_owned(),
         wit_digest: zup_core::Sha256Digest::from_bytes(zup_plugin_contract::wit_package_digest()),
         engine_fingerprint: zup_core::Sha256Digest::from_bytes(
-            *zup_plugin_contract::engine_fingerprint(target).as_bytes(),
+            *zup_plugin_contract::engine_fingerprint(parsed.rust_triple()).as_bytes(),
         ),
         aot_size: aot.len() as u64,
         aot_sha256: digest,
@@ -174,7 +175,7 @@ pub fn build_target_with_preset(
     std::fs::create_dir_all(root).unwrap();
     let resolved = zup_core::ResolvedTargetConfig {
         profile: TargetProfileId::new(target.profile).unwrap(),
-        target: TargetTriple::parse(target.target).unwrap(),
+        target: Target::parse(target.target).unwrap(),
         source: zup_core::Source::new(root.to_path_buf()).unwrap(),
         frontend: target.frontend,
         install: install(),
@@ -215,6 +216,7 @@ pub fn build_target_with_preset(
                 .component
                 .map(|component| zup_core::ComponentId::new(component).unwrap()),
             condition: None,
+            executable: false,
         });
     }
 
@@ -226,6 +228,7 @@ pub fn build_target_with_preset(
             component: file.component.clone(),
             when: None,
             allow_empty: false,
+            executable: false,
         })
         .collect();
     installer_files.sort_by(|left, right| {
@@ -284,7 +287,7 @@ pub fn build_target_with_preset(
 
     let installer = zup_core::Installer {
         app: app(),
-        target: resolved.target.clone(),
+        target: resolved.target,
         frontend: target.frontend,
         preset,
         updates: Some(updates()),

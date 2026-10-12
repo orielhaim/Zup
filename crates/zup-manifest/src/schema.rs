@@ -52,6 +52,7 @@ struct SchemaManifest {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
+/// Application identity and display metadata.
 struct SchemaApp {
     #[serde(flatten)]
     #[schemars(flatten)]
@@ -90,7 +91,6 @@ pub fn schema() -> schemars::Schema {
                 "build": {
                     "targets": {
                         "windows-x64": {
-                            "target": "x86_64-pc-windows-msvc",
                             "source": { "directory": "dist/windows-x64" },
                             "frontend": "console",
                             "install": {

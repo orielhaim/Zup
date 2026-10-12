@@ -12,12 +12,6 @@ name = "zup-preset-test"
 path = "src/main.rs"
 
 [dependencies]
-# The transport and the contract, rather than the preset SDK. This is the host's
-# own fixture: it drives the handshake directly so that a host can be tested
-# against a peer that is not also using the SDK's session layer, which is the
-# only way a test can catch a host and an SDK that disagree about the wire. A
-# third-party preset would depend on `zup-sdk` instead, as `zup preset init`
-# generates.
 zup-preset-ipc = { path = "../zup-preset-ipc", version = "0.1.0" }
 zup-preset-protocol = { path = "../zup-preset-protocol", version = "0.1.0" }
 serde = { workspace = true }

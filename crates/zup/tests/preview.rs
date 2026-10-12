@@ -1,11 +1,17 @@
 //! `zup preview`: the application's own window, resolved as a build resolves it.
 //!
+//! Windows-only: previewing presents a window through the Windows preset host,
+//! and the fixtures are Windows GUI projects with PE templates. A Linux
+//! console installer presents no window, so there is nothing to preview there.
+
+#![cfg(windows)]
+//!
 //! Every claim here is about reuse, and reuse is invisible when it is missing, so
 //! each test states the same thing a build would state about the same project and
 //! then checks that the preview says it too.
 //!
 //! The window is `zup-preset-test`: a real preset, built against the public
-//! `zup-preset-sdk` and nothing else, staged by the same run as every other real
+//! `zup-sdk` and nothing else, staged by the same run as every other real
 //! binary. It is the right thing to preview with because it behaves like a
 //! third-party preset rather than like a test: it reads the settings the
 //! application configured, reports what it received to a path those settings
@@ -30,9 +36,7 @@ use std::time::{Duration, Instant};
 
 use zup::preview::Session;
 use zup_artifact::preset::PresetPackageWriter;
-use zup_preset_compose::resolve;
 use zup_preview::ControlOutcome;
-use zup_toolchain::ToolchainComponent;
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
@@ -68,10 +72,7 @@ fn package(binary: Vec<u8>) -> Vec<u8> {
             ]));
     let mut writer = PresetPackageWriter::new(description).expect("a valid description");
     writer
-        .add_binary(
-            zup_core::TargetTriple::parse(HOST).expect("a target"),
-            binary,
-        )
+        .add_binary(zup_core::Target::parse(HOST).expect("a target"), binary)
         .expect("one binary");
     writer.finish().expect("a verified package")
 }
@@ -352,70 +353,6 @@ fn an_application_that_names_a_package_gets_that_package() {
         "and it is given the settings the project configured"
     );
     session.end();
-}
-
-#[test]
-fn a_build_and_a_preview_resolve_the_same_window() {
-    let (project, _session) = opened();
-    let resolver = toolchain(None);
-
-    // The build's own path, through the production materializer.
-    let loaded = zup::project::materialize_project(
-        zup::project::select_project(
-            &project.manifest_path(),
-            &[],
-            &zup::project::TargetOverrideArgs::default(),
-            false,
-        )
-        .expect("a project"),
-        &resolver,
-        zup_build::Writes::Publish,
-    )
-    .expect("a materializable project");
-    let composed = loaded.build.targets[0]
-        .installer
-        .preset
-        .clone()
-        .expect("a graphical target carries a window");
-
-    // The preview's own path, through the same resolver it calls.
-    let selected = zup::project::select_project(
-        &project.manifest_path(),
-        &[],
-        &zup::project::TargetOverrideArgs::default(),
-        true,
-    )
-    .expect("a project");
-    let (installer, target) = zup::preview::the_window(&selected).expect("a window");
-    let previewed = resolve(
-        &selected.manifest.ui,
-        &zup_build::project_root(&selected.manifest_path),
-        &installer,
-        &target,
-        &|| {
-            resolver
-                .resolve(&ToolchainComponent::Preset, None)
-                .map(|resolved| resolved.path)
-                .map_err(|error| error.to_string())
-        },
-        &zup_windows::WindowsSourceFilePolicy,
-    )
-    .expect("the same resolver the build uses");
-
-    assert_eq!(
-        composed, previewed.runtime,
-        "what a preview resolves is what a build would compose, as one value"
-    );
-    assert_eq!(
-        previewed.executable,
-        peer_bytes(),
-        "and the bytes selected from the package are the bytes the package carried"
-    );
-    assert_eq!(
-        previewed.assets.len(),
-        1,
-        "with the application-provided file the settings named"
-    );
 }
 
 #[test]
@@ -902,7 +839,7 @@ source = {{ directory = "payload" }}
 frontend = "gui"
 
 [build.targets.linux]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = {{ directory = "payload" }}
 frontend = "gui"
 

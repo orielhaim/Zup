@@ -1,35 +1,17 @@
-//! Typed runtime variant selection.
-//!
-//! Selection is a total function of an observed host and a set of candidates.
-//! It has no platform vocabulary: a host reports its own architecture, and a
-//! platform backend separately reports which other architectures it can execute
-//! and how. The generic model understands three outcomes, native, supported
-//! compatibility or emulation, and unsupported; a backend maps its own
-//! mechanism onto them.
-//!
-//! The result is deterministic. When two candidates are equally good and the
-//! model cannot prove which is correct, selection fails rather than picking one.
-
 use crate::compat::{requires_native, satisfies_minimum_host};
-use crate::error::ArtifactError;
+use crate::format::ArtifactError;
 use crate::index::ArtifactIndex;
 use crate::platform::{HostArchitecture, Platform};
 use crate::variant::{HostVersion, PlatformOs, VariantDescriptor, VariantRequirements};
 
-/// How a host can execute a candidate's machine architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Compatibility {
-    /// The host runs the candidate's own machine type.
     Native,
-    /// The host runs the candidate through a compatibility or emulation layer it
-    /// supports.
     Emulated,
-    /// The host cannot execute the candidate.
     Unsupported,
 }
 
 impl Compatibility {
-    /// Preference order for the same candidate set. Native always wins.
     const fn rank(self) -> u8 {
         match self {
             Self::Native => 2,
@@ -53,27 +35,17 @@ impl std::fmt::Display for Compatibility {
     }
 }
 
-/// What this host can execute, and how.
-///
-/// A platform backend builds this from its own observation. The generic model
 /// never asks *why* a host can execute a foreign architecture, only that it can,
 /// and never asks which mechanism provides it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecution {
-    /// The operating system this host runs, in canonical triple spelling.
     pub os: PlatformOs,
-    /// The architecture this host is.
     pub native: HostArchitecture,
-    /// Foreign architectures this host executes through a supported
-    /// compatibility or emulation layer, in the backend's own preference order.
     pub emulated: Vec<HostArchitecture>,
-    /// The host's own version, when the backend can report it. A variant with a
-    /// minimum host version is refused when this is absent.
     pub version: Option<HostVersion>,
 }
 
 impl HostExecution {
-    /// A host that executes only its own machine type.
     pub fn native_only(os: PlatformOs, native: HostArchitecture) -> Self {
         Self {
             os,
@@ -83,7 +55,6 @@ impl HostExecution {
         }
     }
 
-    /// How this host would execute `platform`.
     pub fn compatibility(&self, platform: &Platform) -> Compatibility {
         if PlatformOs::from_name(&platform.os) != self.os {
             return Compatibility::Unsupported;
@@ -101,7 +72,6 @@ impl HostExecution {
     }
 }
 
-/// One candidate a host may select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidateVariant<'a> {
     pub id: &'a str,
@@ -111,7 +81,6 @@ pub struct CandidateVariant<'a> {
 }
 
 impl<'a> CandidateVariant<'a> {
-    /// Borrow a candidate from an index variant.
     pub fn of(variant: &'a VariantDescriptor) -> Self {
         Self {
             id: variant.id.as_str(),
@@ -122,19 +91,14 @@ impl<'a> CandidateVariant<'a> {
     }
 }
 
-/// A candidate paired with what the host would do with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoredCandidate<'a> {
     pub candidate: CandidateVariant<'a>,
     pub compatibility: Compatibility,
-    /// The candidate's machine width, used only to break a tie between two
-    /// equally ranked candidates: the wider machine is preferred, which is a
-    /// stated rule rather than an accident of file order.
     pub width: u8,
 }
 
 impl<'a> ScoredCandidate<'a> {
-    /// Whether this candidate may be selected, given its own requirements.
     pub fn is_selectable(&self) -> bool {
         match self.compatibility {
             Compatibility::Unsupported => false,
@@ -146,7 +110,6 @@ impl<'a> ScoredCandidate<'a> {
         }
     }
 
-    /// Whether this host is new enough for the candidate.
     pub fn satisfies_host(&self, host: &HostExecution) -> bool {
         satisfies_minimum_host(
             self.candidate.requirements.minimum_host.as_ref(),
@@ -156,7 +119,6 @@ impl<'a> ScoredCandidate<'a> {
     }
 }
 
-/// Score one candidate against a host.
 pub fn score<'a>(host: &HostExecution, candidate: CandidateVariant<'a>) -> ScoredCandidate<'a> {
     ScoredCandidate {
         compatibility: host.compatibility(candidate.platform),
@@ -168,7 +130,6 @@ pub fn score<'a>(host: &HostExecution, candidate: CandidateVariant<'a>) -> Score
     }
 }
 
-/// Every candidate with its score, in the order supplied.
 pub fn rank_all<'a>(
     host: &HostExecution,
     candidates: &[CandidateVariant<'a>],
@@ -179,19 +140,12 @@ pub fn rank_all<'a>(
         .collect()
 }
 
-/// The selected variant and why it won.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection<'a> {
     pub candidate: CandidateVariant<'a>,
     pub compatibility: Compatibility,
 }
 
-/// Select the best variant this host can run.
-///
-/// Preference is a native exact match over an explicitly supported
-/// compatibility or emulation fallback. When two selectable candidates tie on
-/// both rank and width, and the model has no further evidence, this fails
-/// instead of choosing arbitrarily.
 pub fn select<'a>(
     host: &HostExecution,
     candidates: &[CandidateVariant<'a>],
@@ -199,7 +153,6 @@ pub fn select<'a>(
     select_in(host, candidates, None)
 }
 
-/// Select, naming the artifact in a refusal so a user sees which file they ran.
 pub fn select_in<'a>(
     host: &HostExecution,
     candidates: &[CandidateVariant<'a>],
@@ -275,7 +228,6 @@ fn refusal_detail(host: &HostExecution, candidates: &[CandidateVariant<'_>]) -> 
     detail
 }
 
-/// Select directly from a parsed index.
 pub fn select_from_index<'a>(
     host: &HostExecution,
     index: &'a ArtifactIndex,
@@ -328,9 +280,6 @@ mod tests {
         )
     }
 
-    /// The ARM64 host can run the x64 variant, so both are installable; native
-    /// still wins. `arm64_native_only` cannot be emulated at all, which is what
-    /// makes this a preference test rather than the only option.
     #[test]
     fn native_always_beats_a_supported_emulated_fallback() {
         let host = HostExecution {
@@ -344,11 +293,6 @@ mod tests {
         assert_eq!(selection.compatibility, Compatibility::Native);
     }
 
-    /// The host can start the ARM64 executable, but the variant declares
-    /// machine-wide components that an emulated execution cannot install, so
-    /// selection refuses it instead of installing something unusable. A variant
-    /// that declares `native_execution` outright is refused for the same reason,
-    /// and the refusal names the architecture rather than saying only "no".
     #[test]
     fn a_variant_that_cannot_run_emulated_is_refused() {
         let host = HostExecution {
@@ -417,9 +361,6 @@ mod tests {
         );
     }
 
-    /// A host whose version could not be read is not a host that satisfies a
-    /// minimum. Refusing is the safe answer: guessing "probably new enough" is how
-    /// a build gets an installer that fails on the machine it was meant to fix.
     #[test]
     fn an_unknown_host_version_refuses_a_variant_with_a_minimum() {
         let host = HostExecution::native_only(PlatformOs::Windows, HostArchitecture::X86_64);

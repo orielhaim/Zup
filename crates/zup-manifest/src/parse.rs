@@ -1,5 +1,3 @@
-//! Parse a `zup.toml` document into the authoring model.
-
 use serde::Deserialize;
 use serde_spanned::Spanned;
 use zup_core::Prerequisite;
@@ -12,10 +10,6 @@ use crate::error::{ManifestError, named_source_named, source_span};
 use crate::model::{Build, Manifest, SCHEMA_VERSION, Targeted};
 use crate::plugin::{Plugin, is_valid_source};
 
-/// Parse and field-validate a `zup.toml` manifest from source text.
-///
-/// Parsing is pure: it never touches the filesystem. Cross-reference and
-/// graph checks run later in [`crate::compile`].
 pub fn parse(source: &str) -> Result<Manifest, ManifestError> {
     parse_named(source, "zup.toml")
 }

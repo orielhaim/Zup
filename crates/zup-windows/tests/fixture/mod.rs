@@ -1,15 +1,12 @@
-//! A two-architecture fixture for the Windows artifact tests.
-
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use zup_artifact::{DistributionVariant, MediaType};
 use zup_core::{
     App, AppId, Component, FileMapping, Frontend, Install, InstallDirectory, InstallScope,
-    NonEmptyString, TargetProfileId, TargetTriple, Template, UpdateConfig,
+    NonEmptyString, Target, TargetProfileId, Template, UpdateConfig,
 };
 
-/// The application the fixture installs.
 pub fn app() -> App {
     App {
         id: AppId::new("com.acme.desktop").unwrap(),
@@ -65,44 +62,53 @@ const SHARED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Two resolved variants over one shared content set.
 pub struct Fixture {
-    /// The variants, in the order the composer receives them.
     pub variants: Vec<DistributionVariant>,
-    /// Kept alive so the materialized source files outlive the variants.
+
     #[allow(dead_code)]
     root: tempfile::TempDir,
 }
 
 impl Fixture {
-    /// Build every variant, materializing their bytes under a temporary root.
-    ///
-    /// The 32-bit one is here because it is the one that decides how wide a
-    /// dispatcher may be: an artifact that serves it must be startable on
-    /// 32-bit Windows.
     pub fn new() -> Self {
         let root = tempfile::tempdir().expect("fixture root");
+        // Staging embeds the variant runtime, which requires a real unsigned
+        // image; filler bytes would fail composition-time validation.
+        let runtime = std::fs::read(real_runtime()).expect("staged setup runtime");
         let variants = vec![
-            build(&root, "windows-x86", "i686-pc-windows-msvc", 3),
-            build(&root, "windows-x64", "x86_64-pc-windows-msvc", 1),
-            build(&root, "windows-arm64", "aarch64-pc-windows-msvc", 2),
+            build(&root, "windows-x86", "windows-x86", 3, &runtime),
+            build(&root, "windows-x64", "windows-x64", 1, &runtime),
+            build(&root, "windows-arm64", "windows-arm64", 2, &runtime),
         ];
         Self { variants, root }
     }
 
-    /// Keep the source root alive for as long as the fixture is.
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         self.root.path()
     }
 }
 
-fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> DistributionVariant {
+fn real_runtime() -> PathBuf {
+    zup_xtask::dispatcher::beside_test_executable(
+        &std::env::current_exe().expect("test executable path"),
+        "zup-setup-console-windows-x64",
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn build(
+    root: &tempfile::TempDir,
+    profile: &str,
+    target: &str,
+    tag: u64,
+    runtime: &[u8],
+) -> DistributionVariant {
     let root = root.path().join(profile);
     std::fs::create_dir_all(&root).expect("target root");
     let resolved = zup_core::ResolvedTargetConfig {
         profile: TargetProfileId::new(profile).unwrap(),
-        target: TargetTriple::parse(target).unwrap(),
+        target: Target::parse(target).unwrap(),
         source: zup_core::Source::new(root.clone()).unwrap(),
         frontend: Frontend::Console,
         install: install(),
@@ -143,6 +149,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
             component: None,
             condition: None,
+            executable: name.ends_with(".exe"),
         });
     }
 
@@ -154,6 +161,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
             component: None,
             when: None,
             allow_empty: false,
+            executable: file.executable,
         })
         .collect();
     installer_files.sort_by(|left, right| {
@@ -166,7 +174,7 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
         installer: zup_core::Installer {
             preset: None,
             app: app(),
-            target: resolved.target.clone(),
+            target: resolved.target,
             frontend: Frontend::Console,
             updates: Some(updates()),
             install: install(),
@@ -198,8 +206,6 @@ fn build(root: &tempfile::TempDir, profile: &str, target: &str, tag: u64) -> Dis
         icons: zup_core::TargetIcons::default(),
     };
 
-    let mut runtime = filler("runtime-image", 0).into_bytes();
-    runtime.extend_from_slice(target.as_bytes());
-    DistributionVariant::resolve(&resolved, &plan, &[], &[(MediaType::RUNTIME, runtime)])
-        .expect("the variant resolves")
+    let natives = vec![(MediaType::RUNTIME, runtime.to_vec())];
+    DistributionVariant::resolve(&resolved, &plan, &[], &natives).expect("the variant resolves")
 }

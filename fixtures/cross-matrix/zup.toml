@@ -1,0 +1,43 @@
+#:schema https://zup.dev/schema/zup.toml.json
+#
+# The cross-build matrix fixture: the smallest application that exercises
+# every supported host/target combination. CI builds all three targets on
+# both Windows and Linux, verifies each artifact, and runs the console
+# installers' full lifecycle on their target operating system.
+#
+# Nothing here is special: one payload file, user scope, no services, no
+# launchers, no preset settings beyond the shipped default for the GUI
+# target.
+
+schema = 1
+
+[app]
+id = "com.example.crossmatrix"
+name = "Cross Matrix"
+version = "1.0.0"
+publisher = "Example Software"
+description = "A minimal application for the cross-build matrix."
+
+[build]
+
+[build.targets.windows-x64]
+source = { directory = "payload" }
+frontend = "console"
+
+[build.targets.linux-x64]
+source = { directory = "payload" }
+frontend = "console"
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Cross Matrix"
+
+[[files]]
+source = "**/*"
+destination = "${install}"
+
+[ui]
+[ui.settings]
+hero = "Install Cross Matrix"

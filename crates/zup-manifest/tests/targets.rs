@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use miette::Diagnostic;
 use rstest::rstest;
 use zup_manifest::{
-    Frontend, InstallScope, Installer, Manifest, ManifestError, Source, TargetOverrideSet,
-    TargetOverrides, TargetProfileId, TargetTriple, Template, compile, parse, parse_and_compile,
-    select_targets, select_targets_with,
+    Frontend, InstallScope, Installer, Manifest, ManifestError, Source, Target, TargetOverrideSet,
+    TargetOverrides, TargetProfileId, Template, compile, parse, parse_and_compile, select_targets,
+    select_targets_with,
 };
 
 const MANIFEST: &str = r#"
@@ -18,17 +18,11 @@ version = "1.0.0"
 
 [build]
 
-[build.targets.z-linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+[build.targets.linux-arm64]
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
 source = { directory = "dist/windows-x64" }
-
-[build.targets.a-macos-arm64]
-target = "aarch64-apple-darwin"
-source = { directory = "dist/macos-arm64" }
 
 [install]
 scope = "user"
@@ -73,105 +67,126 @@ fn compile_parsed(manifest: &Manifest, profile: &str) -> Result<Installer, Manif
 }
 
 #[test]
-fn selects_targets_by_profile_name() {
+fn a_selector_may_be_a_profile_name_or_a_target() {
     let manifest = parse(MANIFEST).unwrap();
+    for selector in ["windows-x64", "x86_64-pc-windows-msvc", "windows-x86_64"] {
+        let selected = select_targets(&manifest, &[selector], &TargetOverrides::default()).unwrap();
+        assert_eq!(selected.len(), 1, "{selector}");
+        assert_eq!(selected[0].profile.as_str(), "windows-x64", "{selector}");
+        assert_eq!(selected[0].target, Target::WINDOWS_X64, "{selector}");
+    }
 
-    let selected =
-        select_targets(&manifest, &["windows-x64"], &TargetOverrides::default()).unwrap();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(
-        selected[0].profile,
-        TargetProfileId::new("windows-x64").unwrap()
-    );
-    assert_eq!(
-        selected[0].target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
-    assert_eq!(
-        selected[0].source,
-        Source::new(PathBuf::from("dist/windows-x64")).unwrap()
-    );
-    assert_eq!(selected[0].frontend, Frontend::Gui);
-
-    // An empty selector list resolves every profile, in name order.
-    let selected = select_targets(&manifest, &[], &TargetOverrides::default()).unwrap();
-    let names: Vec<_> = selected
-        .iter()
-        .map(|config| config.profile.as_str())
-        .collect();
-    assert_eq!(names, ["a-macos-arm64", "windows-x64", "z-linux-arm64"]);
-}
-
-#[test]
-fn a_selector_may_be_a_profile_name_or_a_raw_triple() {
-    // A raw triple resolves to the profile that declares it.
-    let manifest = parse(MANIFEST).unwrap();
-    let selected = select_targets(
-        &manifest,
-        &["x86_64-pc-windows-msvc"],
-        &TargetOverrides::default(),
-    )
-    .unwrap();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].profile.as_str(), "windows-x64");
-
-    // When a profile is *named* after a triple another profile also declares,
-    // the profile name wins over the triple lookup.
     let source = MANIFEST.replace(
-        "[build.targets.z-linux-arm64]",
-        r#"[build.targets."x86_64-pc-windows-msvc"]
-target = "x86_64-unknown-linux-gnu"
+        "[build.targets.linux-arm64]",
+        r#"[build.targets."windows-x64-alias"]
+target = "linux-x64"
 source = { directory = "dist/linux-x64" }
 
-[build.targets.z-linux-arm64]"#,
+[build.targets.linux-arm64]"#,
     );
     let manifest = parse(&source).unwrap();
     let selected = select_targets(
         &manifest,
-        &["x86_64-pc-windows-msvc"],
+        &["windows-x64-alias"],
         &TargetOverrides::default(),
     )
     .unwrap();
     assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].profile.as_str(), "x86_64-pc-windows-msvc");
-    assert_eq!(selected[0].target.as_str(), "x86_64-unknown-linux-gnu");
+    assert_eq!(selected[0].profile.as_str(), "windows-x64-alias");
+    assert_eq!(selected[0].target, Target::LINUX_X64);
+
+    let source = r#"
+schema = 1
+
+[app]
+id = "com.example.acme"
+name = "Acme"
+version = "1.0.0"
+
+[build]
+
+[build.targets.linux-x64]
+target = "windows-x64"
+source = { directory = "dist/linux-x64" }
+
+[install]
+scope = "user"
+
+[install.directory]
+user = "${location.user_data}/Acme"
+"#;
+    let manifest = parse(source).unwrap();
+    let selected = select_targets(&manifest, &["linux-x64"], &TargetOverrides::default()).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].profile.as_str(), "linux-x64");
+    assert_eq!(
+        selected[0].target,
+        Target::WINDOWS_X64,
+        "a profile name wins over a target spelling"
+    );
 }
 
 #[test]
 fn raw_target_aliases_are_canonicalized() {
-    let source = MANIFEST.replace("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc");
+    let source = MANIFEST.replace(
+        "[build.targets.windows-x64]",
+        "[build.targets.windows-x64]\ntarget = \"windows-arm64\"",
+    );
     let manifest = parse(&source).unwrap();
 
-    let selected = select_targets(
-        &manifest,
-        &["arm64-pc-windows-msvc"],
-        &TargetOverrides::default(),
-    )
-    .unwrap();
-
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].target.as_str(), "aarch64-pc-windows-msvc");
+    for selector in ["windows-arm64", "aarch64-pc-windows-msvc"] {
+        let selected = select_targets(&manifest, &[selector], &TargetOverrides::default()).unwrap();
+        assert_eq!(selected.len(), 1, "{selector}");
+        assert_eq!(selected[0].target, Target::WINDOWS_ARM64, "{selector}");
+    }
 }
 
 #[test]
-fn declared_frontend_resolves_and_compiles() {
-    // A `frontend` on the common manifest and a `frontend` on a target profile
-    // are the same claim: the innermost declaration reaches the installer.
-    let profile = with_windows_frontend("console");
-    let common = MANIFEST.replace("schema = 1\n", "schema = 1\nfrontend = \"console\"\n");
+fn a_profile_named_for_a_target_needs_no_target_field() {
+    let manifest = parse(MANIFEST).unwrap();
+    let selected = select_targets(&manifest, &[], &TargetOverrides::default()).unwrap();
+    let targets: Vec<Target> = selected.iter().map(|config| config.target).collect();
+    assert_eq!(targets, vec![Target::LINUX_ARM64, Target::WINDOWS_X64]);
+}
 
-    for source in [profile, common] {
-        let manifest = parse(&source).unwrap();
-        let overrides = TargetOverrides::default();
+#[test]
+fn a_custom_profile_states_its_target_explicitly() {
+    let source = MANIFEST.replace(
+        "[build.targets.windows-x64]",
+        "[build.targets.production]\ntarget = \"windows-x64\"",
+    );
+    let manifest = parse(&source).unwrap();
+    let selected = select_targets(&manifest, &["production"], &TargetOverrides::default()).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].target, Target::WINDOWS_X64);
+}
 
-        let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-        let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-        let convenience = parse_and_compile(&source, "windows-x64").unwrap();
+#[test]
+fn a_custom_profile_without_a_target_is_rejected() {
+    let source = MANIFEST.replace("[build.targets.windows-x64]", "[build.targets.production]");
+    let manifest = parse(&source).unwrap();
+    let error =
+        select_targets(&manifest, &["production"], &TargetOverrides::default()).unwrap_err();
+    assert_eq!(
+        error.code().map(|code| code.to_string()),
+        Some("zup_manifest::missing_target".to_owned())
+    );
+    assert!(
+        error
+            .help()
+            .is_some_and(|help| help.to_string().contains("target = \"windows-x64\"")),
+        "{error}"
+    );
+}
 
-        assert_eq!(selected[0].frontend, Frontend::Console);
-        assert_eq!(installer.frontend, Frontend::Console);
-        assert_eq!(convenience.frontend, Frontend::Console);
-    }
+#[test]
+fn a_bare_operating_system_is_not_a_target() {
+    let manifest = parse(MANIFEST).unwrap();
+    let error = select_targets(&manifest, &["windows"], &TargetOverrides::default()).unwrap_err();
+    assert!(matches!(
+        error,
+        ManifestError::UnknownTargetSelector { ref selector, .. } if selector == "windows"
+    ));
 }
 
 #[test]
@@ -194,53 +209,6 @@ fn caller_frontend_override_wins_over_profile() {
 }
 
 #[test]
-fn empty_and_missing_target_lists_apply_to_all_profiles() {
-    let source = with_resources(
-        r#"
-[[files]]
-source = "missing/**/*"
-destination = "${install}"
-
-[[files]]
-source = "empty/**/*"
-destination = "${install}"
-targets = []
-"#,
-    );
-
-    let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
-
-    assert_eq!(windows.files.len(), 2);
-    assert_eq!(linux.files.len(), 2);
-}
-
-#[test]
-fn target_filters_windows_and_linux_files() {
-    let source = with_resources(
-        r#"
-[[files]]
-source = "windows/**/*"
-destination = "${install}"
-targets = ["windows-x64"]
-
-[[files]]
-source = "linux/**/*"
-destination = "${install}"
-targets = ["z-linux-arm64"]
-"#,
-    );
-
-    let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
-
-    assert_eq!(windows.files.len(), 1);
-    assert_eq!(windows.files[0].source.as_str(), "windows/**/*");
-    assert_eq!(linux.files.len(), 1);
-    assert_eq!(linux.files[0].source.as_str(), "linux/**/*");
-}
-
-#[test]
 fn component_references_are_validated_per_target() {
     let source = with_resources(
         r#"
@@ -257,7 +225,7 @@ component = "windows-only"
     );
 
     let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux_error = compile_profile(&source, "z-linux-arm64").unwrap_err();
+    let linux_error = compile_profile(&source, "linux-arm64").unwrap_err();
 
     assert!(
         windows
@@ -283,7 +251,7 @@ targets = ["windows-x64"]
 
 [[path]]
 value = "${install}/bin"
-targets = ["z-linux-arm64"]
+targets = ["linux-arm64"]
 
 [[services]]
 id = "windows-service"
@@ -295,7 +263,7 @@ targets = ["windows-x64"]
 [[protocols]]
 scheme = "acme"
 executable = "${install}/Acme.exe"
-targets = ["z-linux-arm64"]
+targets = ["linux-arm64"]
 
 [[file_associations]]
 extension = ".acme"
@@ -318,7 +286,7 @@ targets = ["windows-x64"]
     );
 
     let windows = compile_profile(&source, "windows-x64").unwrap();
-    let linux = compile_profile(&source, "z-linux-arm64").unwrap();
+    let linux = compile_profile(&source, "linux-arm64").unwrap();
 
     assert_eq!(windows.launchers.len(), 1);
     assert!(windows.path.is_empty());
@@ -356,7 +324,7 @@ targets = ["windows-x64"]
 [[components]]
 id = "duplicate"
 name = "Linux"
-targets = ["z-linux-arm64"]
+targets = ["linux-arm64"]
 "#,
     );
 
@@ -364,7 +332,7 @@ targets = ["z-linux-arm64"]
         compile_profile(&source, "windows-x64"),
         Err(ManifestError::DuplicateComponent { ref id, .. }) if id == "duplicate"
     ));
-    assert!(compile_profile(&source, "z-linux-arm64").is_ok());
+    assert!(compile_profile(&source, "linux-arm64").is_ok());
 }
 
 #[rstest]
@@ -466,14 +434,12 @@ fn every_resource_kind_names_itself_in_the_diagnostic(#[case] kind: &str, #[case
 
 #[test]
 fn invalid_plugin_source_is_an_authoring_error_for_every_profile() {
-    // Parse checks the source of every plugin, not only the plugins the profile
-    // being compiled would select, so a bad source fails regardless of targets.
     let source = with_resources(
         r#"
 [[plugins]]
 id = "linux-only"
 source = "../helper.wasm"
-targets = ["z-linux-arm64"]
+targets = ["linux-arm64"]
 "#,
     );
 
@@ -494,18 +460,16 @@ fn compile_only_checks_the_source_of_a_plugin_the_profile_selects() {
 [[plugins]]
 id = "linux-only"
 source = "plugins/helper.wasm"
-targets = ["z-linux-arm64"]
+targets = ["linux-arm64"]
 "#,
     );
     let mut manifest = parse(&source).unwrap();
-    // A source that only parse could have caught, for a plugin the Windows
-    // profile never sees.
     manifest.plugins[0].value.source = "../helper.wasm".to_owned();
 
     let windows = compile_parsed(&manifest, "windows-x64").unwrap();
     assert!(windows.plugins.is_empty());
     assert!(matches!(
-        compile_parsed(&manifest, "z-linux-arm64"),
+        compile_parsed(&manifest, "linux-arm64"),
         Err(ManifestError::InvalidPluginSource { ref path, .. }) if path == "../helper.wasm"
     ));
 }
@@ -515,17 +479,11 @@ fn rejects_empty_target_matrix_at_parse_and_selection() {
     let source = MANIFEST.replace(
         r#"[build]
 
-[build.targets.z-linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+[build.targets.linux-arm64]
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "dist/windows-x64" }
-
-[build.targets.a-macos-arm64]
-target = "aarch64-apple-darwin"
-source = { directory = "dist/macos-arm64" }"#,
+source = { directory = "dist/windows-x64" }"#,
         "[build]\n[build.targets]",
     );
 
@@ -547,7 +505,7 @@ fn profile_install_replaces_common_install_in_resolution_and_compilation() {
     let manifest = parse(&source).unwrap();
     let overrides = TargetOverrides::default();
     let windows = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-    let linux = select_targets(&manifest, &["z-linux-arm64"], &overrides).unwrap();
+    let linux = select_targets(&manifest, &["linux-arm64"], &overrides).unwrap();
 
     assert_eq!(windows[0].install.scope, InstallScope::Machine);
     assert!(windows[0].install.allow_directory_override);
@@ -603,7 +561,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
     let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
     let installer = compile(&manifest, &selected[0], &overrides).unwrap();
 
-    // The target installs per machine, so only the machine template is replaced.
     assert_eq!(
         selected[0]
             .install
@@ -614,7 +571,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
         Some("D:/Apps/Acme".to_owned())
     );
     assert!(selected[0].install.directory.user.is_none());
-    // The override replaces a destination, not the scope or the policy.
     assert_eq!(selected[0].install.scope, InstallScope::Machine);
     assert!(selected[0].install.allow_directory_override);
     assert_eq!(installer.install, selected[0].install);
@@ -623,31 +579,6 @@ fn caller_install_directory_override_wins_over_profile_and_common_manifest() {
         Err(ManifestError::InvalidResolvedTargetConfig { ref reason, .. })
             if reason.contains("install directory")
     ));
-}
-
-#[test]
-fn caller_install_directory_override_covers_every_scope_a_target_installs_to() {
-    let source = MANIFEST.replace("scope = \"user\"\n", "scope = \"either\"\n");
-    let manifest = parse(&source).unwrap();
-    let overrides = TargetOverrides {
-        install_directory: Some(literal("C:/Program Files/Acme")),
-        ..TargetOverrides::default()
-    };
-
-    let selected = select_targets(&manifest, &["windows-x64"], &overrides).unwrap();
-    let installer = compile(&manifest, &selected[0], &overrides).unwrap();
-
-    assert_eq!(selected[0].install.scope, InstallScope::Either);
-    for template in [
-        &selected[0].install.directory.user,
-        &selected[0].install.directory.machine,
-    ] {
-        assert_eq!(
-            template.as_ref().map(ToString::to_string),
-            Some("C:/Program Files/Acme".to_owned())
-        );
-    }
-    assert_eq!(installer.install.directory, selected[0].install.directory);
 }
 
 #[test]
@@ -663,7 +594,7 @@ fn an_override_set_resolves_each_profile_independently() {
         },
     );
     overrides.apply(
-        TargetProfileId::new("z-linux-arm64").unwrap(),
+        TargetProfileId::new("linux-arm64").unwrap(),
         TargetOverrides {
             source: Some(Source::new(PathBuf::from("out/linux")).unwrap()),
             ..TargetOverrides::default()
@@ -671,11 +602,16 @@ fn an_override_set_resolves_each_profile_independently() {
     );
 
     let selected =
-        select_targets_with(&manifest, &["windows-x64", "z-linux-arm64"], &overrides).unwrap();
-    let windows = &selected[0];
-    let linux = &selected[1];
-    assert_eq!(windows.profile.as_str(), "windows-x64");
-    assert_eq!(linux.profile.as_str(), "z-linux-arm64");
+        select_targets_with(&manifest, &["windows-x64", "linux-arm64"], &overrides).unwrap();
+    assert_eq!(selected.len(), 2);
+    let by_profile = |profile: &str| {
+        selected
+            .iter()
+            .find(|config| config.profile.as_str() == profile)
+            .unwrap()
+    };
+    let windows = by_profile("windows-x64");
+    let linux = by_profile("linux-arm64");
     assert_eq!(windows.source.directory, PathBuf::from("out/windows"));
     assert_eq!(windows.frontend, Frontend::Console);
     assert_eq!(
@@ -704,7 +640,6 @@ fn an_override_set_resolves_each_profile_independently() {
         "a profile without an entry keeps the manifest value"
     );
 
-    // A uniform set reaches every selected profile through the same resolution.
     let uniform = TargetOverrideSet::uniform(TargetOverrides {
         source: Some(Source::new(PathBuf::from("out/all")).unwrap()),
         ..TargetOverrides::default()
@@ -727,7 +662,7 @@ fn rejects_forged_resolved_target_config() {
     let mut forged_profile = resolved.clone();
     forged_profile.profile = TargetProfileId::new("missing").unwrap();
     let mut forged_target = resolved.clone();
-    forged_target.target = TargetTriple::parse("aarch64-apple-darwin").unwrap();
+    forged_target.target = Target::LINUX_X64;
     let mut forged_source = resolved.clone();
     forged_source.source = Source::new(PathBuf::from("dist/forged")).unwrap();
     let mut forged_frontend = resolved.clone();
@@ -756,7 +691,6 @@ fn rejects_forged_resolved_target_config() {
         assert!(error.to_string().contains(field), "{error}");
     }
 
-    // The same source and install directory are legitimate once declared.
     let declared = TargetOverrides {
         source: Some(Source::new(PathBuf::from("dist/forged")).unwrap()),
         install_directory: Some(literal("C:/Forged")),
@@ -800,7 +734,7 @@ fn rejects_duplicate_canonical_targets() {
     let source = MANIFEST.replace(
         "[build.targets.windows-x64]",
         r#"[build.targets.zz-linux-alias]
-target = "arm64-unknown-linux-gnu"
+target = "aarch64-unknown-linux-gnu"
 source = { directory = "dist/linux-alias" }
 
 [build.targets.windows-x64]"#,
@@ -825,8 +759,8 @@ source = { directory = "dist/linux-alias" }
             src: Some(_),
             span: Some(_),
         } if profile == "zz-linux-alias"
-            && conflicts_with == "z-linux-arm64"
-            && target == "aarch64-unknown-linux-gnu"
+            && conflicts_with == "linux-arm64"
+            && target == "linux-arm64"
     ));
 }
 

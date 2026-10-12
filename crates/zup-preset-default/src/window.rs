@@ -1,28 +1,21 @@
-//! The window, and the screens it shows.
-//!
-//! One screen per lifecycle state, chosen by [`Screen::of`]. Nothing here
-//! decides what the installation is doing; it decides how that looks, and keeps
-//! the overlays - the plan sheet and the uninstall confirmation - in step with
-//! the state that owns them.
-
 use std::collections::BTreeSet;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::animation::EffectTransition;
-use zup_preset_sdk::gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use zup_preset_sdk::gpui_kit::component::scroll::ScrollableElement;
-use zup_preset_sdk::gpui_kit::component::spinner::Spinner;
-use zup_preset_sdk::gpui_kit::component::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::animation::EffectTransition;
+use zup_sdk::preset::gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use zup_sdk::preset::gpui_kit::component::scroll::ScrollableElement;
+use zup_sdk::preset::gpui_kit::component::spinner::Spinner;
+use zup_sdk::preset::gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Sizable, TitleBar, WindowExt, h_flex, v_flex,
 };
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
     Window, WindowBounds, WindowOptions, div, px, relative, size,
 };
-use zup_preset_sdk::prelude::*;
-use zup_preset_sdk::presentation::ResourceCategory;
+use zup_sdk::preset::prelude::*;
+use zup_sdk::preset::presentation::ResourceCategory;
 
 use crate::Settings;
 use crate::model::{self, Screen};
@@ -36,28 +29,23 @@ use crate::ui::{
     UpdateRow, caption, handler, muted,
 };
 
-/// The gallery renders many states in one process, so closing a shot must not
-/// end it. The real installer still quits when its window closes.
 static KEEP_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Keep the process alive when the window closes.
 pub fn keep_process_on_close() {
     KEEP_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Open the installer window for a session the SDK has already started.
 pub fn open(context: PresetContext<Settings>, cx: &mut App) {
     let session = context.session().clone();
     let settings: Entity<Settings> = (**context.settings()).clone();
     let capabilities = context.capabilities().clone();
     let options = window_options(cx);
-    zup_preset_sdk::gpui_kit::open_window(options, cx, move |window, cx| {
+    zup_sdk::preset::gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| Installer::new(session, settings, capabilities, window, cx))
     })
     .expect("open the installer window");
 }
 
-/// The window's size, place and chrome.
 pub fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -70,35 +58,24 @@ pub fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-/// Something the window can show beyond its resting layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reveal {
-    /// The install screen's customization.
     Customize,
-    /// The maintenance screen's component choices.
     Modify,
-    /// A problem's technical details.
     Technical,
-    /// The sheet of what will change, with every group open.
     Plan,
 }
 
-/// Presentation state: what is open, and nothing about the installation.
 #[derive(Default)]
 struct Local {
     customize_open: bool,
-    /// The maintenance screen is showing its component choices.
     modifying: bool,
     technical_open: bool,
     plan_groups: BTreeSet<ResourceCategory>,
-    /// The screen the window last showed, so leaving one resets what belonged
-    /// to it.
     screen: Option<Screen>,
-    /// The confirmation was answered and the host has not moved on yet.
     confirm_answered: bool,
 }
 
-/// The installer window.
 pub struct Installer {
     session: Session,
     settings: Entity<Settings>,
@@ -137,8 +114,6 @@ impl Installer {
                     .snapshot()
                     .is_some_and(|snapshot| snapshot.state.is_active());
                 if active {
-                    // Closing mid-operation is a request to stop, not a way to
-                    // walk away from a half-changed machine.
                     session.send(Action::Cancel);
                     return false;
                 }
@@ -169,7 +144,6 @@ impl Installer {
         }
     }
 
-    /// Open one part of the window, as a person pressing its control would.
     pub fn reveal(&mut self, reveal: Reveal, window: &mut Window, cx: &mut Context<Self>) {
         match reveal {
             Reveal::Customize => self.local.customize_open = true,
@@ -201,7 +175,6 @@ impl Installer {
             .map(|logo| SharedString::from(logo.as_str().to_owned()))
     }
 
-    /// Keep the overlays and the presentation state in step with the host.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(snapshot) = self.snapshot(cx) else {
             cx.notify();
@@ -230,13 +203,11 @@ impl Installer {
         cx.notify();
     }
 
-    /// A control that sends one action.
     fn send(&self, action: Action) -> Handler {
         let session = self.session.clone();
         handler(move |_, _| session.send(action.clone()))
     }
 
-    /// A control that changes this window's own state.
     fn local(
         &self,
         cx: &Context<Self>,
@@ -259,7 +230,6 @@ impl Installer {
         })
     }
 
-    /// Ask the system for a folder, and ask the host to install there.
     fn choose_location(&mut self, product: String, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -366,7 +336,6 @@ impl Installer {
         });
     }
 
-    /// Show what the current choices would change.
     fn open_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.entity();
         let width = theme::window::SHEET.min(window.viewport_size().width - px(24.));
@@ -428,8 +397,6 @@ impl Installer {
     fn plan_handler(&self, cx: &Context<Self>) -> Handler {
         self.local(cx, |this, window, cx| this.open_plan(window, cx))
     }
-
-    // -- Screens ------------------------------------------------------------
 
     fn install(
         &self,
@@ -590,7 +557,6 @@ impl Installer {
         )
     }
 
-    /// A message the host left on a screen that is waiting for a person.
     fn resting_notice(&self, snapshot: &Snapshot, _: &App) -> Option<AnyElement> {
         let diagnostic = snapshot.diagnostic.as_ref()?;
         Some(
@@ -987,8 +953,6 @@ impl Render for Installer {
                     .when(focused, |this| this.justify_center())
                     .child(entering),
             )
-            // A new screen starts at the top. The scroll id is the screen, so a
-            // long page cannot leave the next, shorter one scrolled past its content.
             .overflow_y_scrollbar()
             .id(SharedString::from(format!("screen-scroll-{screen:?}")));
 

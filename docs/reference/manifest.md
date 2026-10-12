@@ -46,7 +46,8 @@ Top-level `frontend` and per-target frontend values are:
 - `console`
 - `headless`
 
-The default is `gui`.
+The default is `gui`. A Linux target with `gui` is refused: the Linux backend
+ships `console` and `headless` runtimes only in this phase.
 
 ## `[build.targets.<profile>]`
 
@@ -54,10 +55,13 @@ Every project needs at least one target profile.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `target` | yes | canonical target triple |
+| `target` | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ... |
 | `source` | yes | `{ directory = "..." }` payload source |
 | `frontend` | no | target-specific frontend override |
 | `install` | no | target-specific install override |
+
+A profile named `windows-x64` needs no `target` field. A profile with any
+other name, such as `production`, sets `target = "windows-x64"`.
 
 ## `[build.artifacts.<id>]`
 
@@ -132,7 +136,12 @@ See [Presets](/presets/).
 
 ### `[[files]]`
 
-`source` and `destination` are required. Optional: `component`, `when`, `allow_empty` (default `false`), `targets`.
+`source` and `destination` are required. Optional: `component`, `when`, `allow_empty` (default `false`), `executable` (default `false`), `targets`.
+
+`executable` states that the shipped file is meant to be runnable. It is an
+intent, not a permission: the platform decides how to satisfy it. It is never
+inferred from the file's contents, and there is no way to author a raw mode —
+a build machine's mode bits are not portable truth.
 
 ### `[[launchers]]`
 

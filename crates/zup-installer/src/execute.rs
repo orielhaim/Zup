@@ -1,10 +1,3 @@
-//! Running a prepared lifecycle, and saying what happened.
-//!
-//! A prepared runtime is a plan plus a backend that can satisfy it. This module
-//! is the only place that hands one to the execution engine, and the only place
-//! that translates the engine's event stream into anything a person or a script
-//! reads.
-
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
@@ -12,13 +5,7 @@ use zup_runtime::{
     CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeEvent, RuntimeRequest,
 };
 
-/// A failure, and whether the machine-readable consumer has already been told.
-///
-/// A lifecycle that streams events writes its own terminal event, because only
-/// the code holding the stream knows whether the run actually reached one. The
 /// process-level failure writer must not then add a second, differently shaped
-/// failure for the same run. That used to be a process-wide `AtomicBool`; it is a
-/// property of the error now, which is the only place it can be correct.
 #[derive(Debug)]
 pub struct ExecutionError {
     error: miette::Report,
@@ -26,7 +13,6 @@ pub struct ExecutionError {
 }
 
 impl ExecutionError {
-    /// A failure whose machine-readable form was written.
     pub fn reported(error: miette::Report) -> Self {
         Self {
             error,
@@ -34,7 +20,6 @@ impl ExecutionError {
         }
     }
 
-    /// A failure raised before any machine output was produced.
     pub fn silent(error: miette::Report) -> Self {
         Self {
             error,
@@ -42,7 +27,6 @@ impl ExecutionError {
         }
     }
 
-    /// Whether the machine-readable consumer has already been told.
     pub fn was_reported(&self) -> bool {
         self.reported
     }
@@ -60,11 +44,6 @@ impl std::error::Error for ExecutionError {
     }
 }
 
-/// The wrapped report, rendered as if it had not been wrapped.
-///
-/// A wrapper that changed what a person reads would be a regression in the only
-/// output most people ever see, so every part of the diagnostic the run produced
-/// is forwarded and the wrapper contributes nothing of its own.
 impl miette::Diagnostic for ExecutionError {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         self.error.code()
@@ -99,32 +78,22 @@ impl miette::Diagnostic for ExecutionError {
     }
 }
 
-/// miette converts any `Diagnostic` into a `Report` by wrapping rather than
-/// unwrapping, which is what lets the flag survive the trip to
-/// [`already_reported`] through the blanket `From` rather than a hand-written
-/// one that could drop it again.
 impl From<miette::Report> for ExecutionError {
     fn from(error: miette::Report) -> Self {
         Self::silent(error)
     }
 }
 
-/// Whether this failure was already written to the machine-readable stream.
-///
-/// A downcast, because the flag belongs to the error rather than to the process:
-/// a global could be set by one command and read by another.
 pub fn already_reported(error: &miette::Report) -> bool {
     error
         .downcast_ref::<ExecutionError>()
         .is_some_and(ExecutionError::was_reported)
 }
 
-/// Run a prepared lifecycle to completion, in prose.
 pub fn execute(prepared: PreparedRuntime) -> miette::Result<()> {
     execute_with_policy(prepared, ExecutionPolicy::NonInteractive).map_err(Into::into)
 }
 
-/// Run a prepared lifecycle to completion, allowing or forbidding interaction.
 pub fn execute_with_policy(
     prepared: PreparedRuntime,
     policy: ExecutionPolicy,
@@ -146,7 +115,6 @@ pub fn execute_with_policy(
     }
 }
 
-/// Run a prepared lifecycle with a cancel handle a surface can drive.
 #[cfg(feature = "gui")]
 pub fn execute_with_control(
     prepared: PreparedRuntime,
@@ -156,12 +124,6 @@ pub fn execute_with_control(
     execute_with_control_signal(prepared, cancel, events, ExecutionPolicy::Interactive)
 }
 
-/// Run a prepared lifecycle, cancelling at a safe boundary on Ctrl-C.
-///
-/// A machine-scope install holds a transaction open, and a transaction the user
-/// abandoned mid-write is a transaction someone has to reconcile by hand. Ctrl-C
-/// therefore requests cancellation through the engine rather than killing the
-/// process, and the engine stops at its next safe boundary.
 pub fn execute_with_control_signal(
     prepared: PreparedRuntime,
     cancel: CancellationHandle,
@@ -203,11 +165,6 @@ pub fn execute_with_control_signal(
         .map_err(|error| miette::miette!("install session: {error}"))
 }
 
-/// The owned resources the plan declined to touch, as text.
-///
-/// A repair leaves drifted resources it was not asked to overwrite exactly as
-/// they are, and saying so is the difference between "repair finished" and
-/// "repair finished, and here is what it did not do".
 fn drifted_keys(request: &RuntimeRequest) -> Vec<String> {
     request
         .transaction_plan
@@ -217,7 +174,6 @@ fn drifted_keys(request: &RuntimeRequest) -> Vec<String> {
         .collect()
 }
 
-/// Run a prepared lifecycle and write the result in `output`.
 pub fn execute_frontend(
     prepared: PreparedRuntime,
     output: OutputFormat,
@@ -236,8 +192,11 @@ pub fn execute_frontend(
     let (events, _) = tokio::sync::broadcast::channel(256);
     let mut receiver = events.subscribe();
     if output == OutputFormat::Jsonl {
-        let started =
-            InstallerEvent::started(&application, &version, crate::state::action_name(action));
+        let started = InstallerEvent::started(
+            &application,
+            &version,
+            crate::maintenance::action_name(action),
+        );
         println!(
             "{}",
             serde_json::to_string(&started).map_err(|error| miette::miette!("output: {error}"))?
@@ -273,8 +232,6 @@ pub fn execute_frontend(
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            // This path has the stream in hand, so it reports the failure itself
-            // in whatever shape the caller asked for.
             return Err(ExecutionError::reported(report_failure(
                 output,
                 &application,
@@ -346,11 +303,6 @@ pub fn execute_frontend(
     }
 }
 
-/// Write one failure in the caller's format and return the error to exit with.
-///
-/// JSONL is a stream, so a failure that no terminal event covered is written as a
-/// terminal event and the stream stays well formed. JSON is a document, so it is
-/// rewritten in full. Prose is left to the binary's own error path.
 #[allow(clippy::too_many_arguments)]
 fn report_failure(
     output: OutputFormat,
@@ -398,7 +350,6 @@ fn report_failure(
     error
 }
 
-/// Whether an event ends the stream.
 pub fn is_terminal(event: &RuntimeEvent) -> bool {
     matches!(
         event,
@@ -406,7 +357,6 @@ pub fn is_terminal(event: &RuntimeEvent) -> bool {
     )
 }
 
-/// The process-level outcome an install outcome maps to.
 pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
     match outcome {
         InstallOutcome::RebootRequired { .. } => ProcessOutcome::RebootRequired,
@@ -419,7 +369,6 @@ pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
     }
 }
 
-/// The wire name of a runtime state.
 pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
     match state {
         zup_runtime::RuntimeState::Preparing => "preparing",
@@ -436,11 +385,6 @@ pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
     }
 }
 
-/// The machine-readable events one runtime event becomes.
-///
-/// A runtime event that carries no information a consumer can act on becomes no
-/// events: a log path is a place to look after the fact, not a phase, and a
-/// download's byte count is detail the `Progress` event already summarises.
 pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
     match event {
         RuntimeEvent::StateChanged { state } => {
@@ -526,11 +470,6 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
             vec![InstallerEvent::Completed { outcome }]
         }
         RuntimeEvent::Failed { kind, message } => {
-            // The event carries a typed `kind`, so the exit code is chosen from
-            // it rather than by reading an English sentence. Classifying prose is
-            // how "another operation is running" ends up reported as a failure
-            // with code 1, which a scheduler treats as a broken installation
-            // rather than as five seconds of waiting.
             let outcome = match kind.as_str() {
                 "installation_busy" => ProcessOutcome::InstallationBusy,
                 "recovery_required" => ProcessOutcome::RecoveryRequired,
@@ -557,14 +496,10 @@ mod tests {
 
     #[test]
     fn an_execution_error_says_whether_the_consumer_was_told() {
-        // The flag has to survive the conversion to the type the process reports
-        // through, because that conversion is where a process-wide flag used to be
-        // lost, and a lost flag is a consumer told about a failure twice.
         let reported: miette::Report =
             ExecutionError::reported(miette::miette!("the install failed")).into();
         assert!(already_reported(&reported));
         // The same conversion must not swallow the run's own message: the report is
-        // what a person reads, and a flagged report with no reason is a bare word.
         assert!(
             reported.to_string().contains("the install failed"),
             "{reported}"
@@ -572,15 +507,10 @@ mod tests {
 
         let silent: miette::Report = ExecutionError::silent(miette::miette!("boom")).into();
         assert!(!already_reported(&silent));
-        // A plain report is silent: nothing has been written for it, which is what
-        // every `?` on a miette error means.
         let plain: miette::Report = ExecutionError::from(miette::miette!("boom")).into();
         assert!(!already_reported(&plain));
     }
 
-    /// The path a run writes its log to is not progress. A consumer that counts phases
-    /// would otherwise have to know which events are phases and which are not, and a
-    /// log path is neither: nothing waits on it and nothing is a step.
     #[test]
     fn a_log_path_is_not_a_phase() {
         assert!(

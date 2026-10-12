@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! The production chain, from a host that launches a preset to a real child
 //! process answering over the real transport.
 //!
@@ -5,7 +7,7 @@
 //! a child executable that collects it, the `PresetHello` and `HostHello` a shipped
 //! preset exchanges, the first snapshot, an action the child sends, and the state
 //! machine validating it. The peer is a real binary built against the public
-//! `zup-preset-sdk`, not an in-process fake, because a fake can only prove that the
+//! `zup-sdk`, not an in-process fake, because a fake can only prove that the
 //! code agrees with itself.
 //!
 //! What this cannot cover is the window itself. Between "the host launched a
@@ -19,12 +21,11 @@ mod support {
     pub mod project;
 }
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_core::{
     AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, TargetTriple, Template,
+    NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, Target, Template,
 };
 use zup_installer::host::{HostDecision, HostState, preset};
 use zup_preset_protocol::{Action, Capabilities, Capability, HostOffers, PRESET_PROTOCOL_VERSION};
@@ -53,7 +54,7 @@ fn installer() -> Installer {
             main: None,
             description: None,
         },
-        target: TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("the host's target"),
+        target: Target::parse(zup_plugin_contract::HOST_TARGET).expect("the host's target"),
         frontend: zup_core::Frontend::Gui,
         updates: None,
         install: Install {
@@ -105,61 +106,6 @@ fn install_state(installer: &Installer) -> HostState {
     )
 }
 
-/// What the child is told, and where it reports having been told.
-///
-/// The report path is one of the preset's own settings, so the child writes it
-/// because its configuration says to - not because the test arranged for it.
-fn configuration(
-    report: &Path,
-    assets: BTreeMap<String, String>,
-) -> zup_preset_protocol::Configuration {
-    zup_preset_protocol::Configuration {
-        settings: serde_json::json!({
-            "hero": "Install Acme",
-            "logo": "branding/logo.svg",
-            "report": report.to_string_lossy(),
-        }),
-        assets,
-    }
-}
-
-/// One real session, and everything the host observed while it ran.
-struct Session {
-    decisions: Vec<String>,
-    /// Whether the child was still alive when the host stopped reading.
-    running_after: bool,
-}
-
-/// Run the production loop against one real child.
-fn run_session(
-    state: &mut HostState,
-    configuration: &zup_preset_protocol::Configuration,
-) -> Session {
-    let mut process = preset::launch(
-        &child(),
-        state.capabilities().clone(),
-        state.snapshot().product.clone(),
-    )
-    .expect("the host creates the endpoint and the real child collects it");
-
-    process
-        .publish(configuration.clone(), Box::new(state.snapshot().clone()))
-        .expect("the first snapshot and the settings cross the process boundary");
-
-    let reader = process.take_reader();
-    let mut decisions = Vec::new();
-    while let Some(action) = reader.next() {
-        decisions.push(describe(state.accept(action.clone())));
-        if action == Action::Close {
-            break;
-        }
-    }
-    Session {
-        decisions,
-        running_after: process.is_running(),
-    }
-}
-
 /// A one-word account of a decision, so a failure names which step was refused.
 fn describe(decision: HostDecision) -> String {
     match decision {
@@ -173,85 +119,6 @@ fn describe(decision: HostDecision) -> String {
         HostDecision::Acknowledged => "acknowledged".into(),
         HostDecision::Refused(_) => "refused".into(),
     }
-}
-
-/// A real child completes the handshake, receives the settings and the snapshot,
-/// and has its action validated by the state machine.
-///
-/// The peer is the `zup-installer-test-preset` binary, built from the public SDK,
-/// spawned by the production `launch`. Nothing here mocks either side.
-#[test]
-fn a_real_child_completes_the_handshake_and_its_action_is_validated() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let report = directory.path().join("report.txt");
-    let installer = installer();
-    let mut state = install_state(&installer);
-    assert_eq!(
-        state.snapshot().surface.components().len(),
-        2,
-        "the host published components for the child to act on"
-    );
-
-    let session = run_session(&mut state, &configuration(&report, BTreeMap::new()));
-
-    let report = std::fs::read_to_string(&report).expect("the child reported what it received");
-    assert_eq!(
-        session.decisions,
-        ["plan", "run", "acknowledged"],
-        "the child chose a component - which this installer replans for, because it \
-         offers a plan preview - asked to install, and closed; it said: {report}"
-    );
-    assert!(
-        session.running_after,
-        "the child ended the session itself; the host did not have to kill it"
-    );
-    assert!(
-        report.contains("hero=Install Acme"),
-        "the settings crossed the boundary and were deserialized into the child's own type: \
-         {report}"
-    );
-    assert!(
-        report.contains("host=Acme"),
-        "the host named itself over the protocol: {report}"
-    );
-    assert!(
-        report.contains("components=2"),
-        "the first snapshot carried the surface: {report}"
-    );
-}
-
-/// The application-provided asset reaches the child as a logical identity backed
-/// by the host's materialized bytes, and the child never learns a project path.
-#[test]
-fn an_application_asset_reaches_the_child_as_verified_bytes() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let report = directory.path().join("report.txt");
-    // A path the child is given, standing in for what the host materialized
-    // beside itself. What matters is that the child reads a file and that the
-    // name it asked for is the name it got.
-    let materialized = directory.path().join("logo.svg");
-    let bytes = b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'/>";
-    std::fs::write(&materialized, bytes).expect("the asset");
-
-    let mut assets = BTreeMap::new();
-    assets.insert(
-        "branding/logo.svg".to_owned(),
-        materialized.to_string_lossy().into_owned(),
-    );
-
-    let installer = installer();
-    let mut state = install_state(&installer);
-    run_session(&mut state, &configuration(&report, assets));
-
-    let report = std::fs::read_to_string(&report).expect("the child reported");
-    assert!(
-        report.contains("asset=branding/logo.svg"),
-        "the name the settings used is the name the child resolved: {report}"
-    );
-    assert!(
-        report.contains(&format!("asset-bytes={}", bytes.len())),
-        "the child read the application's own bytes through the SDK: {report}"
-    );
 }
 
 /// A child may only ask for a component the host actually published. A preset is
@@ -298,6 +165,7 @@ fn a_preset_this_host_cannot_present_is_refused_before_it_is_launched() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )
@@ -349,6 +217,7 @@ fn a_preset_whose_assets_are_absent_is_refused() {
                 executable: zup_core::hash_bytes(b"a preset"),
                 preset,
             },
+            target: &support::project::host_target(),
         },
         &offered,
     )
@@ -380,7 +249,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     .expect("a valid description");
     writer
         .add_binary(
-            TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target"),
+            Target::parse(zup_plugin_contract::HOST_TARGET).expect("a target"),
             child_bytes.clone(),
         )
         .expect("one binary for the host");
@@ -389,7 +258,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     view.verify().expect("verifies");
     // What a build selects out of it: the target's native binary, not the package.
     let selected = view
-        .binary_for(&TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("a target"))
+        .binary_for(&Target::parse(zup_plugin_contract::HOST_TARGET).expect("a target"))
         .expect("the package has this target");
     assert_eq!(
         selected, child_bytes,

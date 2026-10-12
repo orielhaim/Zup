@@ -1,9 +1,7 @@
 # Plugin constraints
 
-Plugins are planning extensions, not install scripts.
-
-They do not get a filesystem, network, process or host-command API. They receive
-planner context and return typed resources. That keeps their output inspectable
+Plugins are planning extensions, not install scripts. They receive
+planner context and return typed resources — no filesystem, network, process, or host-command API. That keeps their output inspectable
 with `zup plan` before the machine is changed.
 
 ## Failures
@@ -15,13 +13,7 @@ message a person reads:
 Err(Error::invalid("no shell component is selected"))
 ```
 
-A refused plugin rejects planning; Zup does not keep a partial set of resources.
-Returning an `Error` is the right way to say "not for this context" - it is an
-answer the host can show a person, where a trap is a fault.
-
-Runtime failures such as a trap, timeout, memory exhaustion or invalid output
-are reported as plugin failures rather than being converted into an incomplete
-plan.
+A refused plugin rejects planning; Zup does not keep a partial set of resources. Traps, timeouts, memory exhaustion and invalid output are reported as plugin failures rather than converted into an incomplete plan.
 
 ## Resource limits
 
@@ -35,10 +27,4 @@ plan.
 | Host calls | 0 |
 | Plugin error text | 512 bytes |
 
-`Plan::validate()` checks the first of these inside the plugin, so an oversized
-plan is caught at the point of the mistake.
-
-Treat these as guardrails, not targets. A plugin generating megabytes of
-configuration is usually the wrong abstraction.
-
-For the exact WIT types, use the [Plugin API reference](/reference/plugin-api).
+`Plan::validate()` checks the first of these inside the plugin.

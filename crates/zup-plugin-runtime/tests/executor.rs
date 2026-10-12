@@ -11,7 +11,7 @@ use zup_build::TargetBuildPlan;
 use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package, PluginArtifact};
 use zup_core::{
     App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, TargetTriple, Template,
+    NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target, Template,
 };
 use zup_plan::{NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource};
 use zup_plugin_contract::{
@@ -52,7 +52,6 @@ fn component_for_body(body: &str) -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", VALID_WIT).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = wat::parse_str(&wat).unwrap();
-    // `false` matches the encoder below, which leaves canonical names off.
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
@@ -95,8 +94,8 @@ fn empty_aot() -> Vec<u8> {
     fixture("empty")
 }
 
-fn host_target() -> TargetTriple {
-    TargetTriple::parse(HOST_TARGET).unwrap()
+fn host_target() -> Target {
+    Target::parse(HOST_TARGET).unwrap()
 }
 
 fn installer() -> Installer {
@@ -138,7 +137,7 @@ fn installer() -> Installer {
     }
 }
 
-fn plan(target: TargetTriple) -> TargetBuildPlan {
+fn plan(target: Target) -> TargetBuildPlan {
     let mut installer = installer();
     installer.target = target;
     TargetBuildPlan {
@@ -153,20 +152,20 @@ fn plan(target: TargetTriple) -> TargetBuildPlan {
     }
 }
 
-fn artifact(bytes: &[u8], target: &TargetTriple) -> CompiledPluginArtifact {
+fn artifact(bytes: &[u8], target: &Target) -> CompiledPluginArtifact {
     let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
     CompiledPluginArtifact::new(
         PluginArtifact {
             plugin_id: PluginId::new(PLUGIN_ID).unwrap(),
             source_size: bytes.len() as u64,
             source_sha256: digest,
-            target: target.clone(),
+            target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
             aot_format_version: AOT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
-                *engine_fingerprint(target.as_str()).as_bytes(),
+                *engine_fingerprint(target.rust_triple()).as_bytes(),
             ),
             aot_size: bytes.len() as u64,
             aot_sha256: digest,
@@ -177,8 +176,8 @@ fn artifact(bytes: &[u8], target: &TargetTriple) -> CompiledPluginArtifact {
     .unwrap()
 }
 
-fn build_package(bytes: &[u8], target: &TargetTriple) -> Package {
-    let package = BundleWriter::encode(&plan(target.clone()), &[artifact(bytes, target)]).unwrap();
+fn build_package(bytes: &[u8], target: &Target) -> Package {
+    let package = BundleWriter::encode(&plan(*target), &[artifact(bytes, target)]).unwrap();
     Package::parse(&package).unwrap()
 }
 
@@ -188,7 +187,7 @@ fn context(installer: &Installer) -> PluginPlanningContext {
         install_directory: installer.install.directory.user.clone().unwrap(),
         scope: SelectedScope::User,
         selected_components: Vec::new(),
-        target: installer.target.clone(),
+        target: installer.target,
     }
 }
 
@@ -271,23 +270,10 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     ));
 }
 
-/// Which kind of failure a plugin's misbehaviour has to arrive as. Named rather than
-/// constructed because the payload-carrying variants (`Trap`, `Rejected`) hold a message
-/// a fixture is not required to predict, and what matters is which failure it is: a
-/// caller that cannot tell a fuel exhaustion from a trap cannot decide whether to retry.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Expected {
     Cancelled,
     Trapped,
-    /// Stopped by one of the two bounds, whichever ran out first.
-    ///
-    /// A plugin that spins spends its fuel and its wall-clock at the same time, so a
-    /// machine fast enough to exhaust `MAX_FUEL_PER_CALL` inside
-    /// `INVOCATION_DEADLINE_MILLIS` reports fuel and a slower one reports the
-    /// deadline. Both are the plugin being contained, and which bound fired is a fact
-    /// about the machine rather than about the executor. That each bound is mapped
-    /// from its own trap is proved directly, over the traps, in
-    /// `zup_plugin_contract`'s `a_trap_is_reported_as_its_own_failure`.
     Bound,
     OutOfMemory,
     Rejected,
@@ -308,8 +294,6 @@ impl Expected {
     }
 }
 
-/// A misbehaving plugin is contained, and each way it can misbehave arrives at the
-/// caller as its own typed failure rather than as one generic "the plugin failed".
 #[rstest]
 #[case::cancelled("fuel", Expected::Cancelled, Cancellation::AfterFirstPoll)]
 #[case::trapped("trap", Expected::Trapped, Cancellation::Never)]
@@ -338,22 +322,19 @@ fn a_misbehaving_plugin_is_contained_and_named(
     );
 }
 
-/// Whether a cancellation query ever says yes. `NeverCancelled` is the crate's own "no",
-/// and the counting closure is the "yes, after the first poll" that proves the watchdog
-/// polls rather than checking once.
 enum Cancellation {
     Never,
     AfterFirstPoll,
 }
 
-fn other_target() -> TargetTriple {
+fn other_target() -> Target {
     let (architecture, suffix) = HOST_TARGET.split_once('-').unwrap();
     let other = if architecture == "aarch64" {
         "x86_64"
     } else {
         "aarch64"
     };
-    TargetTriple::parse(format!("{other}-{suffix}")).unwrap()
+    Target::parse(format!("{other}-{suffix}")).unwrap()
 }
 
 #[test]
@@ -362,7 +343,7 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
-    context.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+    context.target = Target::parse("arm64-pc-windows-msvc").unwrap();
     let error = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap_err();
@@ -372,9 +353,6 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     ));
 }
 
-/// Bytes that are not a trusted precompiled component are refused by name before the
-/// engine is asked to deserialize anything: a raw module is not a component, and a
-/// component that was never precompiled by this engine's cranelift is not trusted.
 #[rstest]
 #[case::raw_webassembly(b"\0asm\x01\0\0\0")]
 #[case::never_precompiled(b"not a precompiled component")]

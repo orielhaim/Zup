@@ -26,7 +26,7 @@ use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, Tar
 pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 use zup_core::{
     ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
-    RelativePath, Sha256Digest, TargetTriple, Template, hash_reader,
+    RelativePath, Sha256Digest, Target, Template, hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -87,10 +87,7 @@ pub enum PackageError {
         digest: String,
     },
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
-    TargetMismatch {
-        expected: TargetTriple,
-        found: TargetTriple,
-    },
+    TargetMismatch { expected: Target, found: Target },
     #[error("plugin artifact is invalid: {0}")]
     PluginArtifact(String),
 }
@@ -101,7 +98,7 @@ pub struct PluginArtifact {
     pub plugin_id: PluginId,
     pub source_size: u64,
     pub source_sha256: Sha256Digest,
-    pub target: TargetTriple,
+    pub target: Target,
     pub wasmtime_version: String,
     pub aot_format_version: u32,
     pub plugin_api_version: String,
@@ -152,10 +149,10 @@ impl PluginArtifact {
                 "WIT digest does not match the contract".to_owned(),
             ));
         }
-        zup_plugin_contract::PluginEngine::new(self.target.as_str())
+        zup_plugin_contract::PluginEngine::new(self.target.rust_triple())
             .map_err(|error| PackageError::PluginArtifact(error.to_string()))?;
         if self.engine_fingerprint
-            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.as_str()).as_bytes())
+            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.rust_triple()).as_bytes())
         {
             return Err(PackageError::PluginArtifact(
                 "engine fingerprint does not match the target".to_owned(),
@@ -231,6 +228,13 @@ pub struct PayloadEntry {
     pub blob: Sha256Digest,
     pub component: Option<ComponentId>,
     pub condition: Option<Condition>,
+    /// This file is intended to be executable. Portable intent, not a mode.
+    ///
+    /// Defaults to false so a package written before executable intent existed is
+    /// still readable: an absent key means "not executable", which is what every
+    /// file in an older package meant.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +491,7 @@ impl Package {
                     sha256: entry.sha256,
                     component: entry.component.clone(),
                     condition: entry.condition.clone(),
+                    executable: entry.executable,
                 })
             })
             .collect::<Result<Vec<_>, PackageError>>()?;
@@ -1068,13 +1073,13 @@ fn parse_metadata(
 }
 
 fn validate_plugin_target(
-    expected: &TargetTriple,
+    expected: &Target,
     artifact: &PluginArtifact,
 ) -> Result<(), PackageError> {
     if artifact.target != *expected {
         return Err(PackageError::TargetMismatch {
-            expected: expected.clone(),
-            found: artifact.target.clone(),
+            expected: *expected,
+            found: artifact.target,
         });
     }
     Ok(())
@@ -1364,6 +1369,7 @@ impl BundleWriter {
                 blob: file.sha256,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let prerequisite_artifacts = canonical_prerequisites(plan)?;
@@ -1492,6 +1498,7 @@ impl BundleWriter {
                 blob: digest,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let prerequisite_artifacts = canonical_prerequisites(plan)?;
@@ -1618,16 +1625,19 @@ impl BundleWriter {
         for artifact in &plan.plugins {
             required.push((artifact.blob, artifact.aot_size));
         }
+        for asset in &plan.ui_assets {
+            required.push((asset.sha256, asset.size));
+        }
         required.sort_unstable();
         required.dedup();
-        for (digest, size) in &required {
+        for (digest, _) in &required {
             let Some(bytes) = compressed.get(digest) else {
                 return Err(PackageError::Missing {
                     media_type: "content blob",
                     digest: digest.to_hex(),
                 });
             };
-            if *size == 0 || bytes.is_empty() || bytes.len() as u64 > *size {
+            if bytes.is_empty() {
                 return Err(PackageError::Invalid);
             }
         }
@@ -1715,6 +1725,7 @@ impl BundleWriter {
                 blob: file.sha256,
                 component: file.component.clone(),
                 condition: file.condition.clone(),
+                executable: file.executable,
             });
         }
         let ui_assets = canonical_ui_assets(plan)?;
@@ -1845,7 +1856,7 @@ mod tests {
                     main: None,
                     description: None,
                 },
-                target: TargetTriple::parse(HOST_TARGET).unwrap(),
+                target: Target::parse(HOST_TARGET).unwrap(),
                 frontend: Default::default(),
                 preset: None,
                 updates: None,
@@ -1891,7 +1902,7 @@ mod tests {
                 plugin_id: PluginId::new(id).unwrap(),
                 source_size: 1,
                 source_sha256: digest,
-                target: TargetTriple::parse(HOST_TARGET).unwrap(),
+                target: Target::parse(HOST_TARGET).unwrap(),
                 wasmtime_version: WASMTIME_VERSION.to_owned(),
                 aot_format_version: AOT_FORMAT_VERSION,
                 plugin_api_version: PLUGIN_API_VERSION.to_owned(),
@@ -1905,6 +1916,83 @@ mod tests {
             },
             bytes: Vec::new(),
         }
+    }
+
+    /// A staged package holds whatever the dispatcher recompressed, including
+    /// blobs zstd cannot shrink and empty files: both are legitimate content a
+    /// dispatcher must stage, and the writer that serves staging refuses
+    /// neither. Preset assets ride along as content blobs too, or a staged GUI
+    /// installer would open a package that fails its own reference check.
+    #[test]
+    fn a_staged_plan_with_tiny_and_empty_blobs_round_trips() {
+        let tiny = b"hello cross matrix".to_vec();
+        let empty = Vec::new();
+        let logo = b"fake png bytes".to_vec();
+        let tiny_digest = Sha256Digest::from_bytes(Sha256::digest(&tiny).into());
+        let empty_digest = Sha256Digest::from_bytes(Sha256::digest(&empty).into());
+        let logo_digest = Sha256Digest::from_bytes(Sha256::digest(&logo).into());
+        assert!(
+            zstd::stream::encode_all(tiny.as_slice(), 9).unwrap().len() > tiny.len(),
+            "the fixture only proves something if zstd expands it"
+        );
+        let entry = |name: &str, bytes: &[u8], digest: Sha256Digest| PayloadEntry {
+            path: zup_core::RelativePath::new(name).unwrap(),
+            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            size: bytes.len() as u64,
+            sha256: digest,
+            blob: digest,
+            component: None,
+            condition: None,
+            executable: false,
+        };
+        let plan = PortableBuildPlan {
+            installer: plan_with_plugins(0).installer,
+            entries: vec![
+                entry("empty.txt", &empty, empty_digest),
+                entry("tiny.txt", &tiny, tiny_digest),
+            ],
+            prerequisite_artifacts: Vec::new(),
+            ui_assets: vec![zup_core::PresetAsset {
+                name: zup_core::NonEmptyString::new("logo.png").unwrap(),
+                size: logo.len() as u64,
+                sha256: logo_digest,
+            }],
+            plugins: Vec::new(),
+            total_size: tiny.len() as u64,
+        };
+        let mut compressed = std::collections::BTreeMap::new();
+        for (bytes, digest) in [
+            (&tiny, tiny_digest),
+            (&empty, empty_digest),
+            (&logo, logo_digest),
+        ] {
+            compressed.insert(
+                digest,
+                zstd::stream::encode_all(bytes.as_slice(), 9).unwrap(),
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("staged.zup");
+        BundleWriter::write_plan(&plan, &compressed, &output).unwrap();
+        let package = Package::open(&output).unwrap();
+        assert_eq!(package.blob_count(), 3);
+        for (name, bytes, digest) in [
+            ("tiny.txt", tiny.clone(), tiny_digest),
+            ("empty.txt", empty, empty_digest),
+        ] {
+            let mut reader = crate::PayloadSource::open(
+                &package,
+                &zup_core::RelativePath::new(name).unwrap(),
+                &digest,
+                bytes.len() as u64,
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut out).unwrap();
+            assert_eq!(out, bytes);
+        }
+        let (_, asset) = package.ui_asset("logo.png").unwrap();
+        assert_eq!(asset, logo);
     }
 
     /// The aggregate is refused twice over: by the canonicalization the writer runs

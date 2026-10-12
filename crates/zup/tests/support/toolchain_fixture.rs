@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_toolchain::{ComponentDescriptor, DESCRIPTOR_SUFFIX, Subsystem, ToolchainComponent};
 
 /// The component a test asked for.
@@ -35,7 +35,11 @@ impl Staged {
     /// Write this component, and its descriptor, into `directory`.
     pub fn write(&self, directory: &Path) -> PathBuf {
         std::fs::create_dir_all(directory).expect("component directory");
-        let name = zup_toolchain::file_name(&self.component, EXECUTABLE_SUFFIX);
+        // The component's own target suffix, never the writing host's: a
+        // Linux fixture written on Windows is extensionless, exactly as the
+        // staged toolchain names it, because the resolver searches for that
+        // name.
+        let name = zup_toolchain::file_name(&self.component, component_suffix(&self.component));
         let path = directory.join(&name);
         let bytes = match &self.bytes {
             Some(bytes) => bytes.clone(),
@@ -58,18 +62,9 @@ pub fn runtime(target: &str, frontend: zup_core::Frontend) -> Staged {
     Staged {
         path: PathBuf::new(),
         component: ToolchainComponent::Runtime {
-            target: TargetTriple::parse(target).expect("a valid target triple"),
+            target: Target::parse(target).expect("a valid target"),
             frontend,
         },
-        bytes: None,
-    }
-}
-
-/// A launcher for one presentation experience.
-pub fn dispatcher(subsystem: Subsystem, online: bool) -> Staged {
-    Staged {
-        path: PathBuf::new(),
-        component: ToolchainComponent::Dispatcher { subsystem, online },
         bytes: None,
     }
 }
@@ -94,19 +89,37 @@ pub fn preset(targets: &[&str]) -> Staged {
 /// the refusal has a test for that.
 const ZUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The suffix this machine writes executables with.
-const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
+/// The suffix a fixture component is stored under: its own target's, never the
+/// writing host's.
+fn component_suffix(component: &ToolchainComponent) -> &'static str {
+    match component {
+        ToolchainComponent::Runtime { target, .. } => target.executable_suffix(),
+        ToolchainComponent::Dispatcher { .. } => ".exe",
+        ToolchainComponent::Preset => "",
+    }
+}
 
-/// A minimal PE header that agrees with what the descriptor claims.
+/// A minimal image header that agrees with what the descriptor claims.
 ///
 /// The header is the only independent statement a build host can make about a
 /// component it cannot run, so the fixture has to say the same thing the
 /// descriptor does - otherwise the two disagree and the resolver refuses the
 /// component for a reason the test never intended.
+///
+/// A Windows target gets a PE with the machine and subsystem the component
+/// names. A Linux target gets a header-only ELF with the machine the target
+/// names: enough for the architecture identity the resolver's header check
+/// reads from an ELF (an ELF records no subsystem, so the frontend comes from
+/// the descriptor alone, exactly as in production).
 fn image(component: &ToolchainComponent) -> Vec<u8> {
+    if let ToolchainComponent::Runtime { target, .. } = component
+        && target.operating_system() == zup_core::TargetOperatingSystem::Linux
+    {
+        return elf_image(target);
+    }
     let (machine, subsystem): (u16, u16) = match component {
         ToolchainComponent::Runtime { target, frontend } => (
-            machine_of(target.as_str()),
+            machine_of(target),
             match frontend {
                 zup_core::Frontend::Gui => 2,
                 zup_core::Frontend::Console | zup_core::Frontend::Headless => 3,
@@ -129,20 +142,37 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
     bytes
 }
 
-/// The COFF machine value a target triple's architecture names.
-fn machine_of(target: &str) -> u16 {
-    if target.starts_with("aarch64") {
-        0xaa64
-    } else if target.starts_with("i686") {
-        0x014c
-    } else {
-        0x8664
+/// The COFF machine value a target's architecture names.
+fn machine_of(target: &zup_core::Target) -> u16 {
+    match target.architecture() {
+        zup_core::TargetArchitecture::Aarch64(_) => 0xaa64,
+        zup_core::TargetArchitecture::X86_32(_) => 0x014c,
+        _ => 0x8664,
     }
 }
 
-/// A file that is not a PE image at all.
-pub fn not_an_image() -> Vec<u8> {
-    b"not a PE".to_vec()
+/// A header-only ELF image for a Linux target: magic, class, data, version,
+/// type, and machine. No program or section tables - there is no content to
+/// describe, and the resolver reads only the architecture identity.
+fn elf_image(target: &zup_core::Target) -> Vec<u8> {
+    let machine: u16 = if matches!(
+        target.architecture(),
+        zup_core::TargetArchitecture::Aarch64(_)
+    ) {
+        183
+    } else {
+        62
+    };
+    let mut bytes = vec![0u8; 64];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2; // 64-bit
+    bytes[5] = 1; // little-endian
+    bytes[6] = 1; // version
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes()); // executable
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes()); // header size
+    bytes
 }
 
 /// A real preset package carrying one binary per named target.
@@ -157,7 +187,7 @@ pub fn package(targets: &[&str]) -> Vec<u8> {
     for target in targets {
         writer
             .add_binary(
-                TargetTriple::parse(target).expect("a valid target triple"),
+                Target::parse(target).expect("a valid target"),
                 format!("native preset for {target}")
                     .repeat(64)
                     .into_bytes(),

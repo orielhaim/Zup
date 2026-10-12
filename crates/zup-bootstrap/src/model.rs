@@ -9,7 +9,7 @@ use uuid::Uuid;
 use zup_core::{
     AppId, Prerequisite, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
     PrerequisitePackage, PrerequisiteRequirement, RelativePath, SelectedScope, Sha256Digest,
-    TargetTriple,
+    Target,
 };
 
 pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 1;
@@ -65,7 +65,7 @@ pub struct BootstrapKey {
     pub app_id: AppId,
     pub app_version: Version,
     pub scope: SelectedScope,
-    pub target: TargetTriple,
+    pub target: Target,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ impl BootstrapPlan {
         Sha256Digest::from_bytes(Sha256::digest(bytes).into())
     }
 
-    pub fn target(&self) -> &TargetTriple {
+    pub fn target(&self) -> &Target {
         &self.key.target
     }
 

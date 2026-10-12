@@ -36,7 +36,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zup_core::{AppId, Sha256Digest, TargetTriple};
+use zup_core::{AppId, Sha256Digest, Target};
 
 /// Current handoff schema.
 pub const HANDOFF_SCHEMA: u32 = 1;
@@ -167,7 +167,7 @@ pub struct RuntimeHandoff {
     /// this digest and the release's fingerprint was verified before anything
     /// was downloaded.
     pub runtime: Sha256Digest,
-    pub target: TargetTriple,
+    pub target: Target,
     /// `gui` or `console`, which decides what the user sees.
     pub frontend: String,
     pub mode: HandoffMode,
@@ -274,7 +274,7 @@ impl RuntimeHandoff {
             manifest: self.manifest,
             runtime: Some(self.runtime),
             version: version.to_owned(),
-            target: self.target.clone(),
+            target: self.target,
             channel: channel.to_owned(),
             pinned,
             trust_anchor,
@@ -297,7 +297,7 @@ struct HandoffBody<'a> {
     variant: &'a str,
     manifest: Sha256Digest,
     runtime: Sha256Digest,
-    target: &'a TargetTriple,
+    target: &'a Target,
     frontend: &'a str,
     mode: HandoffMode,
     scope: &'a str,
@@ -316,10 +316,10 @@ mod tests {
             release: Sha256Digest::from_bytes([1; 32]),
             document: Sha256Digest::from_bytes([5; 32]),
             catalog: Sha256Digest::from_bytes([2; 32]),
-            variant: "x86_64-pc-windows-msvc".to_owned(),
+            variant: "windows-x64".to_owned(),
             manifest: Sha256Digest::from_bytes([3; 32]),
             runtime: Sha256Digest::from_bytes([4; 32]),
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").expect("valid triple"),
+            target: Target::parse("windows-x64").expect("valid triple"),
             frontend: "gui".to_owned(),
             mode: HandoffMode::Install,
             scope: "user".to_owned(),
@@ -345,10 +345,10 @@ mod tests {
         changed.document = Sha256Digest::from_bytes([9; 32]);
         assert_ne!(changed.digest(), baseline, "the cache key is bound too");
         let mut changed = one.clone();
-        changed.variant = "aarch64-pc-windows-msvc".to_owned();
+        changed.variant = "windows-arm64".to_owned();
         assert_ne!(changed.digest(), baseline, "variant is bound");
         let mut changed = one.clone();
-        changed.target = TargetTriple::parse("i686-pc-windows-msvc").expect("valid triple");
+        changed.target = Target::parse("windows-x86").expect("valid triple");
         assert_ne!(changed.digest(), baseline, "target is bound");
         let mut changed = one.clone();
         changed.mode = HandoffMode::Upgrade;

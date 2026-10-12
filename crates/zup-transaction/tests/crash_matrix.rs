@@ -25,10 +25,9 @@
 //! one, which is worse than either.
 
 mod common;
-mod fake;
 
+use common::fake::FakeExecutor;
 use common::{sample_app_id, sample_input, sample_version};
-use fake::FakeExecutor;
 use tempfile::TempDir;
 use zup_transaction::{
     FilesystemTransactionStore, NodeState, OperationExecutor, OperationReceipt,
@@ -69,7 +68,7 @@ impl OperationExecutor for CrashingExecutor {
         // A real receipt for the node, not a blanket `Control`: the record's own
         // validation refuses a control receipt on a file mutation, and a fake that
         // produced records the store would reject would test nothing.
-        Ok(fake::receipt_for(operation))
+        Ok(common::fake::receipt_for(operation))
     }
 
     fn verify(

@@ -13,18 +13,30 @@ use zup_platform::{
     TargetService, TemplateResolveError, resolve_template_path,
 };
 
+#[cfg(windows)]
 use crate::host_dirs::WindowsInstallLocationResolver;
+use crate::locations::CanonicalWindowsLocations;
 use crate::lowering::{
     TargetPathValidationError, validate_windows_target_path, windows_target_path_identity,
 };
 use crate::shortcut_name::validate_shortcut_filename;
 
 #[derive(Debug, Clone, Copy)]
-pub struct WindowsTargetContext<R = WindowsInstallLocationResolver> {
+pub struct WindowsTargetContext<R = CanonicalWindowsLocations> {
     pub locations: R,
     pub scope: SelectedScope,
 }
 
+impl WindowsTargetContext<CanonicalWindowsLocations> {
+    pub fn for_build(scope: SelectedScope) -> Self {
+        Self {
+            locations: CanonicalWindowsLocations,
+            scope,
+        }
+    }
+}
+
+#[cfg(windows)]
 impl WindowsTargetContext<WindowsInstallLocationResolver> {
     pub fn new(scope: SelectedScope) -> Self {
         Self {
@@ -130,6 +142,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             destination,
             size: file.size,
             sha256: file.sha256,
+            executable: file.executable,
             privilege: file.privilege,
         });
     }
@@ -139,7 +152,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         validate_shortcut_filename(launcher.name.as_str()).map_err(|reason| {
             TargetResolveError::InvalidLauncherName {
                 name: launcher.name.to_string(),
-                reason,
+                reason: reason.to_string(),
             }
         })?;
 
@@ -189,7 +202,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
                 value: value.to_string(),
             },
             value,
-            // The owning search path comes from the plan, not from privilege.
+
             scope: entry.scope,
             privilege: entry.privilege,
         });
@@ -222,7 +235,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             },
             scheme: protocol.scheme.clone(),
             command: CommandSpec::new(executable, protocol.args.clone()),
-            // The host store comes from the plan, not from privilege.
+
             scope: protocol.scope,
             privilege: protocol.privilege,
         });
@@ -243,7 +256,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             id: file_association.id.clone(),
             description: file_association.description.clone(),
             command: CommandSpec::new(executable, Vec::new()),
-            // The host store comes from the plan, not from privilege.
+
             scope: file_association.scope,
             privilege: file_association.privilege,
         });
@@ -279,12 +292,10 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     Ok(TargetPlan {
         app: plan.app.clone(),
-        target: plan.target.clone(),
+        target: plan.target,
         scope: plan.scope,
         install_directory,
-        // A build plan says which preset; it does not say which bytes. The
-        // executable is content, and content is resolved by whoever supplies the
-        // payload - the caller that attaches this installation's runtime copy.
+
         preset: None,
         selected_components: plan.selected_components.clone(),
         prerequisites,
@@ -440,12 +451,6 @@ fn insert_identity(
     Ok(())
 }
 
-/// Whether an installation cannot own both paths.
-///
-/// A directory and a path inside it cannot both be owned, because one is the
-/// container of the other. Two files at unrelated locations can, and so can two
-/// directories, because the installer owns directories as a set of parents
-/// rather than as a single entry.
 fn hierarchy_conflict(path: &TargetPath, kind: OwnedPathKind, existing: &OwnedPath) -> bool {
     match (
         matches!(kind, OwnedPathKind::Directory),

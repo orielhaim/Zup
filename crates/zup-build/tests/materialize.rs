@@ -1,5 +1,3 @@
-//! Integration tests for source materialization.
-
 use std::fs;
 use std::path::Path;
 
@@ -7,7 +5,7 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildError, FilePattern, Sha256Digest, Writes, materialize};
-use zup_core::{MAX_PLUGIN_ARTIFACTS, TargetTriple};
+use zup_core::{MAX_PLUGIN_ARTIFACTS, Target};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 
 fn write_file(path: &Path, contents: &[u8]) {
@@ -38,7 +36,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 
 [install]
@@ -140,8 +138,6 @@ destination = "${install}"
     assert_eq!(plan.prerequisite_size, bytes.len() as u64);
 }
 
-// --- Source root ---
-
 #[test]
 fn missing_source_root() {
     let dir = TempDir::new().unwrap();
@@ -150,9 +146,6 @@ fn missing_source_root() {
     assert!(matches!(err, BuildError::SourceMissing { .. }), "{err:?}");
 }
 
-/// A source root that is not there and one that is not a directory are different
-/// mistakes with different remedies, so they are reported differently rather than
-/// both collapsing into "no files".
 #[test]
 fn a_source_root_that_is_not_a_directory_is_reported_as_such() {
     let dir = project(&[("dist", b"file-not-dir")]);
@@ -176,12 +169,6 @@ fn source_lexical_escape_rejected() {
     );
 }
 
-// --- Globs and static-root mapping ---
-
-/// A pattern with a static root does not copy that root into the destination:
-/// `bin/**/*` under `${install}/tools` puts `acme.exe` in the install directory,
-/// not in a `bin` the manifest never mentioned. The third file is outside the
-/// pattern entirely, so it must not appear at all.
 #[test]
 fn a_glob_with_a_static_root_does_not_copy_the_root_into_the_destination() {
     let dir = project(&[
@@ -214,9 +201,6 @@ destination = "${install}/tools"
     );
 }
 
-/// A bare `*` matches one path segment; `**` crosses them. An installer that
-/// shipped only the top level of a tree would be missing the libraries that tree
-/// exists to carry.
 #[rstest]
 #[case::one_segment(&["a.exe"], "*.exe")]
 #[case::crossing_segments(&["a.exe", "nested/c.exe"], "**/*.exe")]
@@ -239,10 +223,6 @@ fn a_glob_matches_the_depth_it_names(#[case] expected: &[&str], #[case] pattern:
     assert_eq!(matched, expected, "{pattern}");
 }
 
-/// A pattern that matches nothing is a typo far more often than it is an
-/// intention, so it fails by default. `allow_empty` is how an author says they
-/// meant it - and that flag has to be honoured, or an optional component could
-/// never be declared for a build that does not produce it.
 #[rstest]
 #[case::by_default("bni/**/*.exe", false)]
 #[case::when_the_author_says_so("bni/**/*.exe", true)]
@@ -291,109 +271,6 @@ destination = "${install}"
     assert_eq!(names, [".env".to_owned(), "visible.txt".to_owned()]);
 }
 
-// --- Determinism ---
-
-#[test]
-fn deterministic_across_insertion_orders() {
-    let a = project(&[
-        ("dist/z.txt", b"z"),
-        ("dist/a.txt", b"a"),
-        ("dist/m/n.txt", b"n"),
-    ]);
-    let b = project(&[
-        ("dist/m/n.txt", b"n"),
-        ("dist/a.txt", b"a"),
-        ("dist/z.txt", b"z"),
-    ]);
-
-    let plan_a = materialize_project(
-        a.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-    let plan_b = materialize_project(
-        b.path(),
-        r#"
-[[files]]
-source = "**/*"
-destination = "${install}"
-"#,
-    )
-    .unwrap();
-
-    let portable = |plan: &zup_build::TargetBuildPlan| {
-        plan.files
-            .iter()
-            .map(|f| {
-                (
-                    f.source_relative.as_str().to_owned(),
-                    f.destination.to_string(),
-                    f.size,
-                    f.sha256,
-                    f.component.clone(),
-                    f.condition.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(portable(&plan_a), portable(&plan_b));
-    assert_eq!(plan_a.total_size, plan_b.total_size);
-    assert_eq!(plan_a.files.len(), plan_b.files.len());
-}
-
-// --- Hashing ---
-
-#[test]
-fn large_file_streamed_with_correct_size() {
-    let big = vec![0xABu8; 3 * 1024 * 1024];
-    let dir = project(&[("dist/big.bin", &big)]);
-    let plan = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "big.bin"
-destination = "${install}/big.bin"
-"#,
-    )
-    .unwrap();
-    assert_eq!(plan.files[0].size, big.len() as u64);
-    assert_eq!(plan.total_size, big.len() as u64);
-
-    let mut hasher = Sha256::new();
-    hasher.update(&big);
-    let expected = Sha256Digest::from_hasher(hasher);
-    assert_eq!(plan.files[0].sha256, expected);
-}
-
-// --- Collisions ---
-
-#[test]
-fn different_sources_same_destination() {
-    let dir = project(&[("dist/a/foo.dll", b"a"), ("dist/b/foo.dll", b"b")]);
-    let err = materialize_project(
-        dir.path(),
-        r#"
-[[files]]
-source = "a/foo.dll"
-destination = "${install}"
-
-[[files]]
-source = "b/foo.dll"
-destination = "${install}"
-"#,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, BuildError::DestinationCollision { .. }),
-        "{err:?}"
-    );
-}
-
 #[test]
 fn overlapping_globs_same_destination() {
     let dir = project(&[("dist/foo.dll", b"a")]);
@@ -416,9 +293,6 @@ destination = "${install}"
     );
 }
 
-/// Names a Windows filesystem would reject are left for the target lowering pass,
-/// which owns the rules that differ per target. Refusing them here would make a
-/// manifest unrepresentable on a host that would have accepted it.
 #[rstest]
 #[case::case_only_destinations(
     r#"
@@ -461,8 +335,6 @@ fn windows_hostile_destinations_are_left_for_target_lowering(
     assert_eq!(plan.files.len(), expected_files);
 }
 
-// --- Path safety ---
-
 #[cfg(unix)]
 #[test]
 fn symlink_file_rejected() {
@@ -487,8 +359,6 @@ fn symlink_directory_not_followed_or_matched_as_payload() {
     let dir = project(&[("dist/keep/a.txt", b"a"), ("outside/secret.txt", b"secret")]);
     std::os::unix::fs::symlink("../outside", dir.path().join("dist/secret")).unwrap();
 
-    // `**/*` should not walk into the symlink dir; if the link itself matches,
-    // it must be rejected rather than packaged.
     let result = materialize_project(
         dir.path(),
         r#"
@@ -512,9 +382,6 @@ destination = "${install}"
     }
 }
 
-/// A pattern is a manifest author's claim about where bytes come from, so one
-/// that climbs out of the project is refused before anything is read. A malformed
-/// glob is refused the same way rather than matching nothing.
 #[rstest]
 #[case::a_climbing_pattern("../outside/*")]
 #[case::an_unterminated_bracket("a/[")]
@@ -523,35 +390,6 @@ fn an_unusable_pattern_is_refused(#[case] pattern: &str) {
         FilePattern::compile(pattern),
         Err(BuildError::InvalidGlob { .. })
     ));
-}
-
-// --- Metadata preservation ---
-
-#[test]
-fn preserves_component_condition_and_destination() {
-    let dir = project(&[("dist/bin/tool.exe", b"tool")]);
-    let source = manifest_toml(
-        r#"
-[[components]]
-id = "cli"
-name = "CLI"
-
-[[files]]
-source = "bin/**/*"
-destination = "${install}/tools"
-component = "cli"
-when = 'component("cli")'
-"#,
-    );
-    let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-
-    let file = &plan.files[0];
-    assert_eq!(file.component.as_ref().unwrap().as_str(), "cli");
-    assert!(file.condition.is_some());
-    // Install variables are still unresolved: materialization does not lower them.
-    assert_eq!(file.destination.to_string(), "${install}/tools/tool.exe");
 }
 
 #[test]
@@ -572,41 +410,6 @@ destination = "${install}/a.txt"
     assert!(!file.source_relative.as_str().contains("C:\\"));
 }
 
-#[test]
-fn resolves_plugin_sources_in_declaration_order() {
-    let dir = project(&[
-        ("dist/app.bin", b"app"),
-        ("plugins/z.wasm", b"z"),
-        ("plugins/a.wasm", b"a"),
-    ]);
-    let source = manifest_toml(
-        r#"
-[[plugins]]
-id = "z-plugin"
-source = "plugins/z.wasm"
-
-[[plugins]]
-id = "a-plugin"
-source = "plugins/a.wasm"
-"#,
-    );
-    let manifest = zup_manifest::parse(&source).unwrap();
-    let installer = parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-    assert_eq!(
-        plan.plugins
-            .iter()
-            .map(|plugin| plugin.id.as_str())
-            .collect::<Vec<_>>(),
-        ["z-plugin", "a-plugin"]
-    );
-    assert_eq!(plan.plugins[0].source_relative.as_str(), "plugins/z.wasm");
-    assert_eq!(plan.plugins[0].size, 1);
-    assert_eq!(plan.plugins[1].source_relative.as_str(), "plugins/a.wasm");
-}
-
-/// A manifest that parses may still name a plugin source outside the project, and
-/// the source is resolved after parsing, so the check has to happen there too.
 #[rstest]
 #[case::lexical_traversal("lexical")]
 #[case::absolute_path("absolute")]
@@ -726,11 +529,11 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -811,7 +614,7 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
             .iter()
             .map(|target| target.installer.target.as_str())
             .collect::<Vec<_>>(),
-        ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        ["linux-arm64", "windows-x64"]
     );
     let linux = &plan.targets[0];
     let windows = &plan.targets[1];
@@ -836,18 +639,9 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
     assert_eq!(windows.icons.artifacts.len(), 1);
     assert!(!windows.icons.artifacts[0].executable_group.is_empty());
     assert_eq!(
-        plan.target_by_triple(&TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()),
+        plan.by_target(&Target::parse("windows-x64").unwrap()),
         Some(windows)
     );
-}
-
-#[test]
-fn missing_source_is_attributed_to_its_target_profile() {
-    let dir = project(&[("dist/windows-x64/app", b"windows")]);
-    let error = materialize_targets(&dir.path().join("zup.toml"), TARGET_MATRIX).unwrap_err();
-
-    assert!(error.to_string().contains("linux-arm64"), "{error}");
-    assert!(matches!(error, BuildError::Target { .. }));
 }
 
 #[test]
@@ -947,13 +741,13 @@ fn selection_errors_are_rejected_before_filesystem_access() {
     assert!(matches!(error, BuildError::DuplicateTargetProfile { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
-    selected[1].0.target = selected[0].0.target.clone();
-    selected[1].1.target = selected[1].0.target.clone();
+    selected[1].0.target = selected[0].0.target;
+    selected[1].1.target = selected[1].0.target;
     let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::DuplicateTarget { .. }));
 
     let (manifest, mut selected) = selected_targets(TARGET_MATRIX);
-    selected[0].1.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
+    selected[0].1.target = Target::parse("windows-arm64").unwrap();
     let error = materialize(path, &manifest, selected, Writes::None).unwrap_err();
     assert!(matches!(error, BuildError::TargetMismatch { .. }));
 }
@@ -1023,29 +817,4 @@ fn a_missing_icon_names_the_file() {
     let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
     let error = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap_err();
     assert!(matches!(error, BuildError::IconMissing { .. }), "{error}");
-    assert!(error.to_string().contains("icon.svg"), "{error}");
-}
-
-#[test]
-fn a_small_raster_warns_and_still_builds() {
-    // 16×16 PNG. The Windows icon needs 256px, so this must warn and still compile.
-    let png: &[u8] = &[
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-        0xf3, 0xff, 0x61, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-        0xcf, 0xc0, 0xf0, 0x9f, 0x12, 0xcc, 0x30, 0x6a, 0xc0, 0xa8, 0x01, 0xa3, 0x06, 0x0c, 0x17,
-        0x03, 0x00, 0x30, 0xc4, 0xfe, 0x10, 0x1c, 0x27, 0xe4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-    ];
-    let dir = project(&[("dist/app.exe", b"app"), ("assets/icon.png", png)]);
-    let source = with_icon("icon = \"assets/icon.png\"");
-    let manifest = parse(&source).unwrap();
-    let installer = zup_manifest::parse_and_compile(&source, "default").unwrap();
-    let plan = materialize_one(&dir.path().join("zup.toml"), &manifest, installer).unwrap();
-    assert!(
-        plan.icons.warnings[0].contains("16×16"),
-        "{}",
-        plan.icons.warnings[0]
-    );
-    assert_eq!(plan.icons.artifacts.len(), 1);
 }

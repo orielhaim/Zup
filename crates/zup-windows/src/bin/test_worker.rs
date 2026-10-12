@@ -1,3 +1,4 @@
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = std::env::args().nth(1).ok_or("missing bootstrap")?;
     let bootstrap = zup_windows::parse_bootstrap(&bootstrap)?;
@@ -9,4 +10,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio_util::sync::CancellationToken::new(),
     ))?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn main() {
+    panic!("zup-test-worker runs on Windows only");
 }

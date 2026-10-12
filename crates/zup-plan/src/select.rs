@@ -1,5 +1,3 @@
-//! Effective component selection.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use zup_core::{Component, ComponentId};
@@ -7,10 +5,6 @@ use zup_core::{Component, ComponentId};
 use crate::error::PlanError;
 use crate::request::ComponentOverrides;
 
-/// Compute the effective selected-component set in declaration order.
-///
-/// Starts from `required`/`default`, applies explicit overrides, and takes the
-/// transitive `requires` closure.
 pub fn select_components(
     components: &[Component],
     overrides: &ComponentOverrides,
@@ -73,7 +67,6 @@ pub fn select_components(
         }
     }
 
-    // Declaration order, not tree-set order.
     Ok(components
         .iter()
         .filter(|component| selected.contains(&component.id))

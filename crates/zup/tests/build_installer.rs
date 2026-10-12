@@ -33,8 +33,8 @@ mod toolchain_fixture;
 
 const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-const X64: &str = "x86_64-pc-windows-msvc";
-const ARM64: &str = "aarch64-pc-windows-msvc";
+const X64: &str = "windows-x64";
+const ARM64: &str = "windows-arm64";
 
 /// A project with one payload file and no plugins, which is the smallest thing a
 /// build can be asked to compose.
@@ -54,7 +54,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 [install]
 scope = "user"
@@ -359,7 +359,7 @@ source = "plugins/helper.wasm"
         .expect("the artifact is embedded");
     assert_eq!(
         metadata.target,
-        zup_core::TargetTriple::parse(HOST_TARGET).expect("a target")
+        zup_core::Target::parse(HOST_TARGET).expect("a target")
     );
     assert!(
         !package

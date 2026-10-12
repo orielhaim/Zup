@@ -295,7 +295,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     // The staged runtime is the maintenance runtime: the same native executable
     // an installation would persist, named for that role rather than for the
     // installer medium a person downloads.
-    let runtime_path = handoff_root.join(zup_windows::MAINTENANCE_EXECUTABLE_NAME);
+    let runtime_path = handoff_root.join(zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY);
     if let Err(detail) = write_runtime(&runtime_path, &verified) {
         return Outcome::AcquisitionFailed { detail };
     }
@@ -322,7 +322,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
         variant: resolved.variant.id.clone(),
         manifest: resolved.variant.manifest.digest,
         runtime: runtime_descriptor.digest,
-        target: resolved.variant.target.clone(),
+        target: resolved.variant.target,
         frontend: resolved.variant.frontend.clone(),
         mode: HandoffMode::Install,
         scope: scope.to_string(),
@@ -371,7 +371,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     // The runtime owns installation correctness from here. Waiting is a
     // presentation choice, so a killed bootstrapper cannot corrupt it.
     let code = child.wait();
-    classify(code)
+    super::classify(code)
 }
 
 fn handoff_arguments(
@@ -410,19 +410,6 @@ fn handoff_arguments(
     arguments
 }
 
-/// Turn a native runtime's exit code into a typed outcome.
-///
-/// The codes are the ones `zup` already uses for machine output, so a script
-/// that reads them needs no second table.
-pub fn classify(code: i32) -> Outcome {
-    match code {
-        0 => Outcome::Completed { code: 0 },
-        3010 => Outcome::RebootRequired { code },
-        7 => Outcome::RecoveryRequired { code },
-        _ => Outcome::InstallerFailed { code },
-    }
-}
-
 /// Append one line per source that was tried, which is the difference between a
 /// report a person can act on and one that says only that something failed.
 fn suffix(reasons: &[String]) -> String {
@@ -447,10 +434,14 @@ mod tests {
 
     #[test]
     fn the_native_runtime_outcome_is_forwarded_rather_than_collapsed() {
-        assert_eq!(classify(0), Outcome::Completed { code: 0 });
-        assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });
-        assert_eq!(classify(7), Outcome::RecoveryRequired { code: 7 });
-        assert_eq!(classify(1), Outcome::InstallerFailed { code: 1 });
+        assert_eq!(crate::classify(0), Outcome::Completed { code: 0 });
+        assert_eq!(
+            crate::classify(3010),
+            Outcome::RebootRequired { code: 3010 }
+        );
+        assert_eq!(crate::classify(255), Outcome::RebootRequired { code: 255 });
+        assert_eq!(crate::classify(7), Outcome::RecoveryRequired { code: 7 });
+        assert_eq!(crate::classify(1), Outcome::InstallerFailed { code: 1 });
         assert_eq!(
             Outcome::RebootRequired { code: 3010 }.describe(),
             "the installation needs a restart before it can finish (exit code 3010)"

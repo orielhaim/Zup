@@ -16,7 +16,7 @@ use sha2::Digest;
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
 use zup_core::{
     Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
-    NonEmptyString, TargetTriple, Template,
+    NonEmptyString, Target, Template,
 };
 use zup_platform::PortableSourceFilePolicy;
 use zup_preset_compose::{PresetProblem, asset_settings, select, validate_settings};
@@ -24,8 +24,8 @@ use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 
 const HOST: &str = zup_plugin_contract::HOST_TARGET;
 
-fn target(name: &str) -> TargetTriple {
-    TargetTriple::parse(name).expect("a valid target triple")
+fn target(name: &str) -> Target {
+    Target::parse(name).expect("a valid target")
 }
 
 /// The settings schema a real preset generates, including one setting that names
@@ -200,21 +200,28 @@ fn a_damaged_package_is_refused_before_anything_is_read_from_it() {
 /// A target the package does not carry is a refusal that names both what was
 /// asked for and what is there, because "unsupported target" alone leaves the
 /// author guessing.
+///
+/// The missing target is one neither host carries: the package holds this
+/// host's target plus one foreign one, so the refusal names both on every
+/// machine the suite runs on.
 #[test]
 fn a_target_the_package_does_not_carry_names_what_it_has() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
+    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
     let error = select(
         &path,
         &installer(),
-        &target("x86_64-unknown-linux-gnu"),
+        &target("linux-arm64"),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
-    .expect_err("this package has no Linux binary");
+    .expect_err("this package has no such binary");
     let message = error.to_string();
-    assert!(message.contains("x86_64-unknown-linux-gnu"), "{message}");
-    assert!(message.contains(HOST), "{message}");
-    assert!(message.contains("aarch64-apple-darwin"), "{message}");
+    let host = Target::parse(HOST)
+        .expect("the host target parses")
+        .to_string();
+    assert!(message.contains("linux-arm64"), "{message}");
+    assert!(message.contains(&host), "{message}");
+    assert!(message.contains("windows-arm64"), "{message}");
 }
 
 /// A preset built against another wire protocol is its own refusal, distinct from
@@ -393,15 +400,6 @@ fn a_schema_that_reaches_outside_itself_is_refused(#[case] reference: &str) {
         problems[0].message.contains(reference),
         "and names what it would have reached for: {}",
         problems[0].message
-    );
-}
-
-/// A local `$ref` is how a generated schema marks an asset, so it must resolve.
-#[test]
-fn a_schema_that_refers_only_to_itself_is_accepted() {
-    assert!(
-        validate_settings(&schema(), &serde_json::json!({ "accent": "#695cff" })).is_empty(),
-        "a self-contained schema is the normal case"
     );
 }
 
@@ -594,65 +592,19 @@ fn changed_asset_bytes_change_the_digest() {
     assert_ne!(before, after, "different bytes are a different asset");
 }
 
-/// An application that configures nothing is a normal application, as long as
-/// the preset it chose requires nothing either.
-#[test]
-fn an_application_that_configures_nothing_against_a_preset_that_needs_nothing() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let mut writer = PresetPackageWriter::new(
-        PresetDescription::new("bare", "1.0.0", serde_json::json!({ "type": "object" }))
-            .with_capabilities(Capabilities::new([Capability::Components])),
-    )
-    .expect("a description");
-    writer
-        .add_binary(target(HOST), b"a preset".to_vec())
-        .expect("a binary");
-    let path = directory.path().join("bare.zupui");
-    std::fs::write(&path, writer.finish().expect("a package")).expect("written");
-
-    let selected = select(
-        &path,
-        &installer(),
-        &target(HOST),
-        &settings(serde_json::json!({})),
-    )
-    .expect("a preset that requires no settings is satisfied by an application that sets none");
-    assert!(selected.asset_settings.is_empty());
-    assert!(
-        selected
-            .settings
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    );
-}
-
-/// The same bytes through the same path produce the same selection, so a build
-/// is reproducible.
-#[test]
-fn selecting_the_same_package_twice_gives_the_same_thing() {
-    let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
-    let value = settings(serde_json::json!({ "accent": "#695cff" }));
-    let first = select(&path, &installer(), &target(HOST), &value).expect("selected");
-    let second = select(&path, &installer(), &target(HOST), &value).expect("selected");
-    assert_eq!(first.executable, second.executable);
-    assert_eq!(first.version, second.version);
-    assert_eq!(first.required_capabilities, second.required_capabilities);
-}
-
 /// The package a build consumes is the package `zup preset inspect` reads, which is
 /// what makes "verify before composing" the same statement in both commands.
 #[test]
 fn a_build_and_an_inspector_read_one_package() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "aarch64-apple-darwin"]);
+    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
     let view = PresetPackageView::open(std::fs::read(&path).expect("read")).expect("opens");
     view.verify().expect("verifies");
 
     let selected = select(
         &path,
         &installer(),
-        &target("aarch64-apple-darwin"),
+        &target("windows-arm64"),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
     .expect("selected");

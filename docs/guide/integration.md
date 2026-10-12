@@ -1,6 +1,6 @@
 # System integration
 
-Zup declares system integration as resources. Add only the resources the application owns.
+Declare system integration as resources. Add only what the application owns.
 
 ## Launchers
 
@@ -17,7 +17,7 @@ target = "${install}/Acme.exe"
 component = "desktop-shortcut"
 ```
 
-Locations are `menu` and `desktop`. Optional arguments and a working directory are available in the manifest reference.
+Locations are `menu` and `desktop`. Optional arguments and a working directory are in the manifest reference.
 
 ## PATH
 
@@ -59,8 +59,10 @@ description = "Acme document"
 executable = "${install}/Acme.exe"
 ```
 
-File associations register an application capability; they do not force the application to become the user's default handler.
+File associations register a capability; they do not make the application the default handler.
 
-## Selection
+## Linux
 
-Integration resources use the common selection fields supported by their type. See [Selection and conditions](./selection), then use the [manifest reference](/reference/manifest#resources) for the exact fields on each resource.
+User-scope Linux targets lower the same resources into freedesktop integration (`menu` launchers, protocol handlers, MIME packages, icons). Protocol arguments must carry exactly one `%1` placeholder, and every protocol and file association must name the same handler command.
+
+`desktop` launchers and `[[path]]` entries are refused on Linux, as is `mimeapps.list` takeover: registration is capability, never a default. Installing integration needs `update-mime-database` and `update-desktop-database` on the target machine; a project with no integration resources needs neither.

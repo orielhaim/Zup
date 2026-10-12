@@ -1,6 +1,6 @@
 # CLI
 
-The developer CLI operates on projects and releases. Installed applications use the generated installer/maintenance executable instead.
+The developer CLI operates on projects and releases. Installed applications use the generated installer instead.
 
 ## Project authoring
 
@@ -17,7 +17,7 @@ The developer CLI operates on projects and releases. Installed applications use 
 | `zup schema` | print/write authoritative JSON Schema |
 | `zup completions <shell>` | emit shell completions |
 
-Common project selection flags include `--manifest` and repeatable `--target`. Commands that support machine output accept `--format` where documented by `--help`.
+Common project selection flags include `--manifest` and repeatable `--target`.
 
 ## Preset authoring
 
@@ -52,18 +52,8 @@ installs no Wasm tooling and vendors no WIT.
 
 ## Toolchain
 
-`zup toolchain` manages the Zup runtime/preset components used to compose installers. Normal application projects should not need to pass hidden runtime/dispatcher overrides.
+`zup toolchain` manages the components used to compose installers: `status`, `install`, `clean`. See [Build](/guide/build#toolchain).
 
 ## Exact flags
 
-Use command help as the authoritative flag reference for the installed Zup version:
-
-```bash
-zup --help
-zup build --help
-zup preset pack --help
-zup plugin build --help
-zup publish github --help
-```
-
-The guides document stable workflows rather than duplicating every parser flag.
+`zup --help` is authoritative for the installed version. The guides document stable workflows rather than duplicating every flag.

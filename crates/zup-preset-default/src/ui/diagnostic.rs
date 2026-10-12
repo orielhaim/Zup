@@ -1,25 +1,19 @@
-//! What went wrong, and what a person can do about it.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StatefulInteractiveElement, Styled, Window, div, relative,
 };
-use zup_preset_sdk::presentation::DiagnosticKind;
+use zup_sdk::preset::presentation::DiagnosticKind;
 
 use crate::model::{self, Severity};
 use crate::theme::{size, space, text};
 use crate::ui::{Callout, Disclosure, Handler, Tone, muted, title};
 
-/// The badge a problem's title sits beside.
 fn emblem(icon: IconName, color: Hsla, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
@@ -33,10 +27,6 @@ fn emblem(icon: IconName, color: Hsla, cx: &App) -> impl IntoElement {
         .child(Icon::new(icon).size(size::ICON_LG).text_color(color))
 }
 
-/// A failure, explained the way the host diagnosed it.
-///
-/// What it means and what to do come first; the engine's own words are behind
-/// a disclosure, for the person who will paste them into a support request.
 #[derive(IntoElement)]
 pub struct DiagnosticView {
     problem: model::Problem,
@@ -59,7 +49,6 @@ impl DiagnosticView {
         }
     }
 
-    /// A support action: copying the details, opening the log.
     pub fn support(mut self, action: impl IntoElement) -> Self {
         self.support.push(action.into_any_element());
         self
@@ -159,7 +148,6 @@ impl RenderOnce for DiagnosticView {
     }
 }
 
-/// Applications holding files the operation needs.
 #[derive(IntoElement)]
 pub struct BlockedView {
     blocked: model::Blocked,

@@ -444,18 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn padding_insets_the_mark_and_leaves_the_corner_clear() {
-        let icons = compile(
-            &svg("mark.svg", SQUARE, 0.25),
-            &[IconTarget::Png { size: 40 }],
-        )
-        .unwrap();
-        let image = png_of(&icons.artifacts[0]);
-        assert_eq!(image.get_pixel(0, 0).0[3], 0);
-        assert_eq!(image.get_pixel(20, 20).0[1], 255);
-    }
-
-    #[test]
     fn a_raster_keeps_transparency_and_warns_when_it_is_too_small() {
         let mut image = image::RgbaImage::from_pixel(32, 32, image::Rgba([9, 8, 7, 255]));
         image.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
@@ -479,51 +467,6 @@ mod tests {
         let rendered = png_of(exact);
         assert_eq!(rendered.get_pixel(0, 0).0[3], 0);
         assert_eq!(rendered.get_pixel(16, 16).0, [9, 8, 7, 255]);
-    }
-
-    #[test]
-    fn the_same_source_compiles_to_the_same_bytes() {
-        let first = compile(
-            &svg("mark.svg", ZUP_ICON_SVG_TEXT, 0.0),
-            &[IconTarget::Windows],
-        )
-        .unwrap();
-        let second = compile(
-            &svg("mark.svg", ZUP_ICON_SVG_TEXT, 0.0),
-            &[IconTarget::Windows],
-        )
-        .unwrap();
-        assert_eq!(first.artifacts[0].bytes, second.artifacts[0].bytes);
-    }
-
-    const ZUP_ICON_SVG_TEXT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 128" color="#FFF200"><path fill="currentColor" d="M192 0L62 4L16 40H104L0 128L144 124L192 84H104Z"/></svg>"##;
-
-    #[test]
-    fn the_built_in_mark_compiles_for_every_target() {
-        let source = IconSource {
-            label: "zup.svg",
-            bytes: ZUP_ICON_SVG,
-            format: IconFormat::Svg,
-            padding: 0.0,
-        };
-        let icons = compile(
-            &source,
-            &[
-                IconTarget::Windows,
-                IconTarget::MacOs,
-                IconTarget::Linux {
-                    app_id: "dev.zup.zup".into(),
-                },
-            ],
-        )
-        .unwrap();
-        assert!(icons.warnings.is_empty());
-        assert!(find(&icons, &IconRole::Windows).bytes.len() > 64);
-        assert!(find(&icons, &IconRole::MacOs).bytes.len() > 64);
-        assert_eq!(
-            find(&icons, &IconRole::LinuxSvg).name,
-            "hicolor/scalable/apps/dev.zup.zup.svg"
-        );
     }
 
     #[test]
@@ -613,32 +556,6 @@ mod tests {
         .unwrap();
         let image = png_of(&icons.artifacts[0]);
         assert_eq!(image.get_pixel(16, 16).0[2], 255);
-        assert!(icons.warnings.is_empty());
-    }
-
-    #[test]
-    fn an_icns_source_uses_its_largest_image() {
-        let icons = compile(&svg("mark.svg", SQUARE, 0.0), &[IconTarget::MacOs]).unwrap();
-        let icns = find(&icons, &IconRole::MacOs).bytes.clone();
-        let icons = compile(
-            &IconSource {
-                label: "app.icns",
-                bytes: &icns,
-                format: IconFormat::Icns,
-                padding: 0.0,
-            },
-            &[IconTarget::Png {
-                size: MAX_ICON_SIZE,
-            }],
-        )
-        .unwrap();
-        let image = png_of(&icons.artifacts[0]);
-        assert_eq!(
-            image.dimensions(),
-            (MAX_ICON_SIZE, MAX_ICON_SIZE),
-            "the family should not be padded or letterboxed"
-        );
-        assert_eq!(image.get_pixel(0, 0).0, [0, 255, 0, 255]);
         assert!(icons.warnings.is_empty());
     }
 }

@@ -59,7 +59,7 @@ pub struct PackageDescriptor {
     pub schema: u32,
     /// The variant this package carries.
     pub variant: String,
-    /// That variant's canonical target triple.
+    /// That variant's canonical Zup target.
     pub target: String,
     /// The application the release is for.
     pub application: String,

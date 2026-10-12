@@ -17,3 +17,8 @@ action/dist/** -text
 schema/automation-v1.schema.json -text
 action/src/protocol.generated.ts -text
 fixtures/automation/** -text
+
+# The cross-matrix payload installs byte for byte, so a checkout that rewrites
+# its line endings changes what Windows builds ship and breaks the lifecycle
+# check on bytes nothing changed. Git must not touch these bytes.
+fixtures/cross-matrix/payload/** -text

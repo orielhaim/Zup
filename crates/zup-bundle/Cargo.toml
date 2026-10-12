@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Portable content-addressed package and payload layer for zup"
 
 [dependencies]
+semver.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,5 +22,6 @@ zup-plugin-contract.workspace = true
 zup-build.workspace = true
 zup-manifest.workspace = true
 proptest.workspace = true
+rstest.workspace = true
 zstd.workspace = true
 sha2.workspace = true

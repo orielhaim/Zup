@@ -1,15 +1,3 @@
-//! Content sources: the platform-neutral read/write boundary.
-//!
-//! A selected variant needs bytes it does not own. Those bytes may sit in the
-//! executable that started it, in a universal artifact that has not chosen a
-//! variant yet, in a store the installation persisted, or somewhere a release
-//! publishes. Nothing above this module changes when that answer changes, which
-//! is the whole point: the lifecycle planner only ever asks for a portable path,
-//! a digest, and a length.
-//!
-//! Every read is verified against its descriptor. A source that cannot prove the
-//! bytes it returns does not return them.
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -18,23 +6,19 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use zup_core::Sha256Digest;
 
-use crate::descriptor::Descriptor;
-use crate::error::ArtifactError;
+use crate::format::ArtifactError;
+use crate::format::Descriptor;
+use crate::format::MediaType;
 use crate::index::ArtifactIndex;
-use crate::media_type::MediaType;
 use crate::table::{BlobEntry, BlobTable};
 use crate::variant::VariantManifest;
 
-/// Reads verified artifact content by descriptor.
 pub trait ContentSource {
-    /// Read the whole of `descriptor`, verifying its length and digest.
     fn read(&self, descriptor: &Descriptor) -> Result<Vec<u8>, ArtifactError>;
 
-    /// Whether this source can produce `descriptor` at all.
     fn contains(&self, descriptor: &Descriptor) -> bool;
 }
 
-/// A source backed by bytes already in memory.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySource {
     entries: BTreeMap<(u64, &'static str), Vec<u8>>,
@@ -45,7 +29,6 @@ impl MemorySource {
         Self::default()
     }
 
-    /// Add verified content. The bytes must match `descriptor`.
     pub fn insert(&mut self, descriptor: &Descriptor, bytes: Vec<u8>) -> Result<(), ArtifactError> {
         descriptor.verify(&bytes)?;
         self.entries
@@ -81,12 +64,7 @@ impl ContentSource for MemorySource {
     }
 }
 
-/// A source backed by one file per digest, named by the digest itself.
-///
 /// Composition writes into this shape so a multi-gigabyte store never has to
-/// exist in memory, and a thin fetch writes into the same shape, so the
-/// difference between "already here" and "just fetched" is not visible above
-/// this module.
 #[derive(Debug, Clone)]
 pub struct SpoolSource {
     root: PathBuf,
@@ -101,17 +79,14 @@ impl SpoolSource {
         }
     }
 
-    /// The directory holding the spooled files.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The file a digest is or would be spooled at.
     pub fn path(&self, digest: &Sha256Digest) -> PathBuf {
         self.root.join(digest.to_hex())
     }
 
-    /// Spool `bytes` at `digest`, verifying the content first.
     pub fn write(&mut self, digest: &Sha256Digest, bytes: &[u8]) -> Result<u64, ArtifactError> {
         let actual = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
         if actual != *digest {
@@ -130,7 +105,6 @@ impl SpoolSource {
         Ok(size)
     }
 
-    /// Spool a readable stream at `digest`, writing through a temporary file so
     /// a partial transfer is never visible under its own digest.
     pub fn write_from(
         &mut self,
@@ -175,13 +149,11 @@ impl SpoolSource {
         Ok(size)
     }
 
-    /// Forget a digest, for collection after a selection changes.
     pub fn forget(&mut self, digest: &Sha256Digest) {
         self.present.remove(digest);
         let _ = std::fs::remove_file(self.path(digest));
     }
 
-    /// Every digest this source currently carries.
     pub fn digests(&self) -> impl Iterator<Item = Sha256Digest> + '_ {
         self.present.keys().copied()
     }
@@ -194,7 +166,6 @@ impl SpoolSource {
         self.present.is_empty()
     }
 
-    /// Verify every spooled file against its digest.
     pub fn verify_all(&self) -> Result<(), ArtifactError> {
         for (digest, size) in &self.present {
             let path = self.path(digest);
@@ -248,17 +219,12 @@ impl ContentSource for SpoolSource {
     }
 }
 
-/// Reads a byte range of one segment of a composed store.
 pub trait SegmentReader: Send + Sync {
-    /// Read `len` bytes at `offset` within `segment`.
     fn read_range(&self, segment: u16, offset: u64, len: u64) -> Result<Vec<u8>, ArtifactError>;
 
-    /// How many segments this reader can address. A reader reports zero for a
-    /// store that carries no bytes, which is what a thin artifact is.
     fn segment_count(&self) -> u16;
 }
 
-/// Segment reader over a directory of segment files.
 #[derive(Debug, Clone)]
 pub struct FileSegments {
     root: PathBuf,
@@ -269,7 +235,6 @@ impl FileSegments {
         Self { root: root.into() }
     }
 
-    /// The file a segment lives at.
     pub fn path(&self, segment: u16) -> PathBuf {
         self.root.join(format!("segment-{segment:05}"))
     }
@@ -292,14 +257,13 @@ impl SegmentReader for FileSegments {
 
     fn segment_count(&self) -> u16 {
         let mut segments = 0u16;
-        while self.path(segments).exists() && segments < crate::media_type::MAX_SEGMENTS {
+        while self.path(segments).exists() && segments < crate::format::MAX_SEGMENTS {
             segments += 1;
         }
         segments
     }
 }
 
-/// Segment reader over segments held in memory.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySegments {
     segments: BTreeMap<u16, Vec<u8>>,
@@ -310,7 +274,6 @@ impl MemorySegments {
         Self::default()
     }
 
-    /// Store one segment's bytes.
     pub fn insert(&mut self, segment: u16, bytes: Vec<u8>) {
         self.segments.insert(segment, bytes);
     }
@@ -342,7 +305,6 @@ impl SegmentReader for MemorySegments {
     }
 }
 
-/// The segmented content store of a composed artifact, verified on read.
 pub struct SegmentSource<'a, S: SegmentReader> {
     table: &'a BlobTable,
     segments: &'a S,
@@ -353,7 +315,6 @@ impl<'a, S: SegmentReader> SegmentSource<'a, S> {
         Self { table, segments }
     }
 
-    /// Read one blob, decompressing and verifying it against its table entry.
     pub fn blob(&self, entry: &BlobEntry) -> Result<Vec<u8>, ArtifactError> {
         let compressed =
             self.segments
@@ -378,7 +339,6 @@ impl<'a, S: SegmentReader> SegmentSource<'a, S> {
         Ok(decoded)
     }
 
-    /// Verify every blob the table declares.
     pub fn verify_all(&self) -> Result<(), ArtifactError> {
         for entry in self.table.entries() {
             self.blob(entry)?;
@@ -387,7 +347,6 @@ impl<'a, S: SegmentReader> SegmentSource<'a, S> {
     }
 }
 
-/// The small documents a container carries beside the store.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataSet {
     documents: BTreeMap<(&'static str, Sha256Digest), Vec<u8>>,
@@ -398,7 +357,6 @@ impl MetadataSet {
         Self::default()
     }
 
-    /// Add a document, verifying it against the descriptor that names it.
     pub fn insert(&mut self, descriptor: &Descriptor, bytes: Vec<u8>) -> Result<(), ArtifactError> {
         descriptor.verify(&bytes)?;
         self.documents
@@ -421,11 +379,7 @@ impl MetadataSet {
     }
 }
 
-/// A parsed artifact: an index, a blob table, and the content behind them.
-///
-/// This is the one parser. The dispatcher, the runtime, and `zup artifact
 /// inspect` all read an artifact through it, so a format rule can never be
-/// implemented twice and drift.
 pub struct ArtifactView<S: SegmentReader> {
     index: ArtifactIndex,
     index_bytes: Vec<u8>,
@@ -436,7 +390,6 @@ pub struct ArtifactView<S: SegmentReader> {
 }
 
 impl<S: SegmentReader> ArtifactView<S> {
-    /// Parse an artifact from the bytes its container carries.
     pub fn open(
         index_bytes: &[u8],
         table_bytes: &[u8],
@@ -478,12 +431,10 @@ impl<S: SegmentReader> ArtifactView<S> {
         &self.segments
     }
 
-    /// The content store, verified on every read.
     pub fn store(&self) -> SegmentSource<'_, S> {
         SegmentSource::new(&self.table, &self.segments)
     }
 
-    /// Read one variant manifest and verify it against the index descriptor.
     pub fn variant_manifest(&self, id: &str) -> Result<VariantManifest, ArtifactError> {
         let variant = self
             .index
@@ -493,7 +444,6 @@ impl<S: SegmentReader> ArtifactView<S> {
         VariantManifest::parse(&bytes)
     }
 
-    /// Read one variant's native runtime image, if it carries one.
     pub fn variant_runtime(&self, id: &str) -> Result<Option<Vec<u8>>, ArtifactError> {
         let variant = self
             .index
@@ -505,7 +455,6 @@ impl<S: SegmentReader> ArtifactView<S> {
         self.read(&runtime).map(Some)
     }
 
-    /// Verify that every blob a variant needs is present before anything is
     /// materialized from it, so a selected runtime never sees another
     /// architecture's content and never starts with a half-present store.
     pub fn verify_variant(&self, id: &str) -> Result<VariantManifest, ArtifactError> {
@@ -585,7 +534,6 @@ impl<S: SegmentReader> ContentSource for ArtifactView<S> {
     }
 }
 
-/// The size bound a descriptor of each media type is checked against.
 pub fn limit_for(media_type: MediaType) -> u64 {
     media_type.limit()
 }
@@ -598,8 +546,6 @@ mod tests {
         Descriptor::of(MediaType::BLOB, bytes)
     }
 
-    /// A source that publishes bytes it has not matched against the digest they
-    /// are addressed by is a source that can serve anything at any address.
     #[test]
     fn a_memory_source_refuses_content_that_does_not_match_its_descriptor() {
         let descriptor = descriptor(b"content");
@@ -610,9 +556,6 @@ mod tests {
         assert!(source.contains(&descriptor));
     }
 
-    /// The spooled form is the one that reaches the filesystem, so a short write
-    /// must leave no file at all: a truncated blob at a valid path is a blob a
-    /// later reader would trust.
     #[test]
     fn a_spool_source_publishes_only_verified_content() {
         let root = tempfile::tempdir().unwrap();
@@ -634,9 +577,6 @@ mod tests {
         assert_eq!(read, b"payload");
     }
 
-    /// A digest nothing was ever written for is reported as missing, not as an
-    /// empty read. A zero-length blob is a valid blob, so "no bytes" and "these
-    /// bytes" must stay distinguishable all the way to the caller.
     #[test]
     fn a_spool_source_reports_a_missing_digest_rather_than_a_short_read() {
         let root = tempfile::tempdir().unwrap();
@@ -646,9 +586,6 @@ mod tests {
         assert!(!source.contains(&descriptor(b"absent")));
     }
 
-    /// The spool is a directory other processes can reach, so the file behind a
-    /// digest can be replaced between the write and the read. A reader that trusted
-    /// the path rather than the bytes would serve whatever is there now.
     #[test]
     fn a_spooled_file_replaced_behind_the_source_is_detected() {
         let root = tempfile::tempdir().unwrap();
@@ -662,8 +599,6 @@ mod tests {
         ));
     }
 
-    /// A blob entry addresses a byte range inside a segment. Reading one past the end
-    /// would splice the next blob's bytes into this one, and every digest check
     /// downstream would then be checking a blob that never existed.
     #[test]
     fn segments_read_exact_ranges_and_refuse_to_run_past_their_end() {

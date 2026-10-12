@@ -11,11 +11,18 @@ With no `[build.artifacts]`, Zup builds one offline installer per selected targe
 ## Declare an artifact
 
 ```toml
-[build.artifacts.desktop]
-kind = "universal"
-mode = "offline"
+[build.targets.windows-x64]
+source = { directory = "dist/x64" }
+
+[build.targets.windows-arm64]
+source = { directory = "dist/arm64" }
+
+[build.artifacts.windows]
 targets = ["windows-x64", "windows-arm64"]
 ```
+
+Here `windows` names the artifact, not a target. The artifact is one Windows
+installer covering both architectures; each target still builds on its own too.
 
 Fields:
 
@@ -40,5 +47,7 @@ Thin artifacts require update/repository configuration. They also require a fixe
 ## Universal
 
 A universal artifact can contain several target variants and select the matching one when launched. This is useful when one download should cover x64 and ARM64.
+
+Run it like the installer it stages: `install`, `repair`, `update`, `modify`, and `uninstall` (plus `--scope`, `--non-interactive`, `--yes`, and the install/modify/repair options) travel to the staged native runtime, which validates them exactly as if it had been started directly. Installing a newer artifact upgrades.
 
 Do not make every release universal by default. One file per target is easier to inspect and distribute when a single download is not a product requirement.

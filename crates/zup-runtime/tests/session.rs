@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use zup_bundle::DirectoryPayloadSource;
-use zup_core::{RelativePath, SelectedScope, TargetTriple, hash_reader};
+use zup_core::{RelativePath, SelectedScope, Target, hash_reader};
 use zup_runtime::{
     CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend, RuntimeControl,
     RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest, SessionError, run_install,
@@ -75,12 +75,12 @@ impl RuntimeBackend for FakeBackend {
 
 fn request() -> RuntimeRequest {
     RuntimeRequest {
-        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        target: Target::parse("windows-x64").unwrap(),
         app_id: zup_core::AppId::new("com.example.runtime").unwrap(),
         app_version: "1.0.0".parse().unwrap(),
         scope: SelectedScope::User,
         transaction_plan: compile_transaction(&TransactionInput::new(
-            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            Target::parse("windows-x64").unwrap(),
         ))
         .unwrap(),
         state_root: PathBuf::new(),
@@ -169,7 +169,7 @@ async fn runtime_preserves_cancellation_and_authorization_policy() {
 async fn runtime_rejects_request_target_mismatch_before_backend() {
     let (_root, backend) = backend();
     let mut request = request();
-    request.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+    request.target = Target::parse("arm64-pc-windows-msvc").unwrap();
     let (events, _) = tokio::sync::broadcast::channel(8);
     let error = run_install_control(&backend, request, CancellationHandle::new(), events)
         .await

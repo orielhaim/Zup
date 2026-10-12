@@ -24,20 +24,3 @@ source = "extras/**"
 destination = "${install}/extras"
 allow_empty = true
 ```
-
-## Components
-
-Bind files to a component when they should exist only when that component is selected:
-
-```toml
-[[files]]
-source = "docs/**"
-destination = "${install}/docs"
-component = "docs"
-```
-
-See [Components](./components) for dependencies and groups.
-
-## Selection
-
-Files support the common `component`, `when`, and `targets` selectors. Use [Selection and conditions](./selection) for their shared semantics.

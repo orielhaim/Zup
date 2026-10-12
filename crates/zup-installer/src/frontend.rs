@@ -1,10 +1,3 @@
-//! Choosing a presentation, without conditional compilation at the call site.
-//!
-//! A build of the runtime has one frontend. Which one is a compile-time fact, so
-//! the callers of a surface should not each carry a `cfg` to find out - they ask
-//! for a surface and get either the real one or a refusal that names what is
-//! missing.
-
 use std::path::Path;
 
 use zup_core::Frontend;
@@ -12,10 +5,9 @@ use zup_exec::LifecycleAction;
 use zup_windows::EmbeddedBundle;
 
 use crate::cli::LifecycleArgs;
-use crate::context::RuntimeContext;
 use crate::lifecycle::{PreparedRuntime, Verb};
+use crate::run::RuntimeContext;
 
-/// The graphical surface, for a launch that named no operation.
 pub fn graphical(
     context: RuntimeContext,
     executable: &Path,
@@ -36,12 +28,11 @@ pub fn graphical(
     }
 }
 
-/// The uninstall confirmation window, for Apps & Features on a GUI frontend.
 pub fn graphical_uninstall(
     context: RuntimeContext,
     executable: &Path,
     bundle: &EmbeddedBundle,
-    args: &crate::uninstall::UninstallArgs,
+    args: &crate::maintenance::UninstallArgs,
 ) -> miette::Result<()> {
     if context.frontend != Frontend::Gui {
         return Err(no_surface("graphical"));
@@ -58,7 +49,6 @@ pub fn graphical_uninstall(
     }
 }
 
-/// The graphical surface, for an invocation that named an operation.
 pub fn graphical_for(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     #[cfg(feature = "gui")]
     {
@@ -71,7 +61,6 @@ pub fn graphical_for(context: RuntimeContext, args: LifecycleArgs) -> miette::Re
     }
 }
 
-/// The interactive console, for an invocation that asked to apply this package.
 pub fn console_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     #[cfg(feature = "console")]
     {
@@ -84,7 +73,6 @@ pub fn console_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Re
     }
 }
 
-/// The interactive console, for an invocation that named a lifecycle.
 pub fn console_verb(
     context: RuntimeContext,
     verb: Verb,
@@ -101,7 +89,6 @@ pub fn console_verb(
     }
 }
 
-/// The interactive console, launched with no operation named.
 pub fn console_direct(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
     #[cfg(feature = "console")]
     {
@@ -114,7 +101,6 @@ pub fn console_direct(executable: &Path, bundle: &EmbeddedBundle) -> miette::Res
     }
 }
 
-/// Confirm an uninstall, where this build can ask.
 pub fn confirm_uninstall() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
@@ -126,7 +112,6 @@ pub fn confirm_uninstall() -> miette::Result<bool> {
     }
 }
 
-/// Confirm an update, where this build can ask.
 pub fn confirm_update() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
@@ -138,7 +123,6 @@ pub fn confirm_update() -> miette::Result<bool> {
     }
 }
 
-/// A cancelled question.
 pub fn cancelled() -> miette::Report {
     #[cfg(feature = "console")]
     {
@@ -150,7 +134,6 @@ pub fn cancelled() -> miette::Report {
     }
 }
 
-/// Run a prepared lifecycle with the console's progress bar and retry.
 pub fn execute_console(prepared: PreparedRuntime, action: LifecycleAction) -> miette::Result<()> {
     #[cfg(feature = "console")]
     {

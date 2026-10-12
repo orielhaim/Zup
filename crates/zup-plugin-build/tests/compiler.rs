@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
 use zup_build::{TargetBuildPlan, materialize};
-use zup_core::{Sha256Digest, TargetTriple};
+use zup_core::{Sha256Digest, Target};
 use zup_manifest::TargetOverrides;
 use zup_plugin_build::{PluginBuildError, compile_plugins};
 use zup_plugin_contract::{ContractError, HOST_TARGET, PluginEngine};
@@ -18,7 +18,6 @@ fn component_for_wit() -> Vec<u8> {
     let package = resolve.push_str("zup-plugin.wit", WIT).unwrap();
     let world = resolve.select_world(&[package], Some("plugin")).unwrap();
     let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    // `false` matches the encoder below, which leaves canonical names off.
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
@@ -144,7 +143,7 @@ fn rejects_core_modules() {
 #[test]
 fn compiles_for_the_plan_target() {
     let (_root, mut plan) = project();
-    plan.installer.target = TargetTriple::parse("aarch64-pc-windows-msvc").unwrap();
+    plan.installer.target = Target::parse("windows-arm64").unwrap();
     let artifacts = compile_plugins(&plan).unwrap();
     assert_eq!(artifacts[0].metadata().target, plan.installer.target);
 }

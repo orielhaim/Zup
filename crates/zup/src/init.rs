@@ -1,10 +1,3 @@
-//! `zup init`: a project a person can read.
-//!
-//! The generated manifest is the first thing a new user reads about this tool, so
-//! it is short, commented by example rather than by prose, and it names one
-//! profile. Everything a real project needs beyond that is a decision the author
-//! should make rather than accept.
-
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
@@ -77,7 +70,6 @@ pub fn run(args: InitCommand) -> miette::Result<()> {
     Ok(())
 }
 
-/// The answers `zup init` works from, whether it asked or was told.
 struct Answers {
     name: String,
     app_id: String,
@@ -88,11 +80,6 @@ struct Answers {
     frontend: zup_core::Frontend,
 }
 
-/// Ask for whatever was not supplied, then require the rest.
-///
-/// A non-interactive run is a script, and a script that did not say what the
-/// application is called cannot be answered for it. Guessing `app` would produce
-/// a project whose identity nobody chose.
 fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Result<Answers> {
     let directory_name = manifest_path
         .parent()
@@ -148,7 +135,7 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
         if main.is_none() {
             main = Some(
                 inquire::Text::new("Main executable")
-                    .with_default("app.exe")
+                    .with_default(default_main())
                     .prompt()
                     .map_err(|error| miette::miette!("prompt: {error}"))?,
             );
@@ -163,10 +150,25 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
         app_id,
         version: args.version,
         source: source.unwrap_or_else(|| "dist".into()),
-        main: main.unwrap_or_else(|| "app.exe".into()),
+        main: main.unwrap_or_else(|| default_main().to_owned()),
         scope: scope.unwrap_or(ScopeArg::User),
-        frontend: args.frontend.map(Into::into).unwrap_or_default(),
+        frontend: args
+            .frontend
+            .map(Into::into)
+            .unwrap_or_else(default_frontend),
     })
+}
+
+fn default_main() -> &'static str {
+    if cfg!(windows) { "app.exe" } else { "app" }
+}
+
+fn default_frontend() -> zup_core::Frontend {
+    if cfg!(target_os = "linux") {
+        zup_core::Frontend::Console
+    } else {
+        zup_core::Frontend::default()
+    }
 }
 
 fn absolute(manifest: &Path) -> PathBuf {

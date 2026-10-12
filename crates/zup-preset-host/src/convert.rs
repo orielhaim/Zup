@@ -1,11 +1,3 @@
-//! Internal engine model to public protocol model.
-//!
-//! Every crossing between the two is here, in one place, as an explicit
-//! conversion. The engine's types are not the protocol's types, deliberately:
-//! `zup_core::ComponentId` and the protocol's `ComponentId` will drift apart
-//! the moment the engine renames something, and that drift must cost a change
-//! here rather than every published preset at once.
-
 use zup_core::{ComponentId as EngineComponentId, SelectedScope};
 use zup_presentation::OperationPhase as EnginePhase;
 use zup_preset_protocol::{
@@ -14,7 +6,6 @@ use zup_preset_protocol::{
     RequirementPresentation, RequirementStatus, ResourceCategory, SelectionRequirement,
 };
 
-/// The protocol's scope for an engine scope.
 pub fn scope(value: SelectedScope) -> InstallScope {
     match value {
         SelectedScope::User => InstallScope::User,
@@ -22,7 +13,6 @@ pub fn scope(value: SelectedScope) -> InstallScope {
     }
 }
 
-/// The engine's scope for a protocol scope.
 pub fn engine_scope(value: InstallScope) -> SelectedScope {
     match value {
         InstallScope::User => SelectedScope::User,
@@ -126,11 +116,6 @@ fn group(value: &zup_presentation::ChangeGroup) -> ChangeGroup {
     }
 }
 
-/// What this machine would do, as a preset reads it.
-///
-/// The application's name and version are not repeated here: they are in the
-/// snapshot's product identity, and a preview that carried its own copy would
-/// let a preset render two names for one application.
 pub fn plan(value: &zup_presentation::PlanPreview) -> PlanPreview {
     PlanPreview {
         scope: scope(value.scope),

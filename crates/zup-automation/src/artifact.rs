@@ -202,7 +202,7 @@ pub struct Artifact {
     pub mode: Identifier,
     /// The declared artifact id, when the manifest named one.
     pub id: Option<String>,
-    /// The target triple, for an artifact that serves exactly one machine.
+    /// The Zup target, for an artifact that serves exactly one machine.
     pub target: Option<String>,
     /// The variant ids this artifact carries, for one that serves several.
     pub variants: Option<Vec<String>>,

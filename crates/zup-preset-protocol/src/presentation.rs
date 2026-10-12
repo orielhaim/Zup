@@ -1,14 +1,7 @@
-//! How an operation is going, what it would change, and what went wrong.
-
 use serde::{Deserialize, Serialize};
 
 use crate::{ComponentId, InstallScope};
 
-/// The stage an operation has reached.
-///
-/// A coarse position in the run rather than a step list: a preset draws a
-/// timeline from these, and a finer vocabulary would be a layout decision the
-/// protocol has no business making.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationPhase {
@@ -20,11 +13,6 @@ pub enum OperationPhase {
     Finish,
 }
 
-/// How far along the current operation is.
-///
-/// A `total` of zero means the work is not countable yet, which is a different
-/// thing from zero percent and is why the ratio is optional rather than
-/// defaulted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressPresentation {
     pub phase: OperationPhase,
@@ -48,14 +36,12 @@ impl ProgressPresentation {
         }
     }
 
-    /// Completion as a whole percentage, or `None` while the work is not countable.
     pub fn percent(&self) -> Option<u32> {
         (self.total > 0)
             .then(|| ((self.completed.min(self.total) as f64 / self.total as f64) * 100.0) as u32)
     }
 }
 
-/// What kind of machine state a change touches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceCategory {
@@ -71,7 +57,6 @@ pub enum ResourceCategory {
     Other,
 }
 
-/// What an operation would do to one resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
@@ -83,7 +68,6 @@ pub enum ChangeKind {
     Conflict,
 }
 
-/// One resource an operation would touch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedChange {
     pub category: ResourceCategory,
@@ -91,13 +75,11 @@ pub struct PlannedChange {
     pub label: String,
     pub location: Option<String>,
     pub scope: Option<InstallScope>,
-    /// True when this single change needs host-wide authority.
     pub requires_authorization: bool,
     pub estimated_bytes: u64,
     pub component: Option<ComponentId>,
 }
 
-/// The changes that touch one category, in the order they would happen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeGroup {
     pub category: ResourceCategory,
@@ -112,7 +94,6 @@ impl ChangeGroup {
     }
 }
 
-/// Whether a declared requirement is already satisfied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequirementStatus {
@@ -121,22 +102,15 @@ pub enum RequirementStatus {
     Unknown,
 }
 
-/// A system dependency the application declares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequirementPresentation {
     pub id: String,
     pub name: String,
     pub status: RequirementStatus,
     pub estimated_bytes: u64,
-    /// True when other applications may also depend on it.
     pub shared: bool,
 }
 
-/// What an operation would do to this machine.
-///
-/// The answer to "what will change", not a transaction: there is no node graph,
-/// no precondition, and nothing here is executable. It is the cost and the blast
-/// radius, which is what a person is deciding on when they look at it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPreview {
     pub scope: InstallScope,
@@ -144,34 +118,21 @@ pub struct PlanPreview {
     pub selected_components: Vec<ComponentId>,
     pub estimated_bytes: u64,
     pub download_bytes: u64,
-    /// True when any change in this preview needs host-wide authority.
     pub requires_authorization: bool,
     pub groups: Vec<ChangeGroup>,
     pub requirements: Vec<RequirementPresentation>,
 }
 
-/// The host's answer to "what would the current choices change".
-///
-/// The host keeps this current as the choices change, so a preset can show the
-/// cost of an installation before anyone asks for it. A preset never requests
-/// a plan: it reads whichever answer the host has.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum PlanStatus {
-    /// This host does not work out plans for this surface.
     Unsupported,
-    /// Being worked out for the current choices. `last` answers the previous
-    /// choices, so a preset can keep showing it rather than flashing empty.
     Computing { last: Option<Box<PlanPreview>> },
-    /// The answer for the current choices.
     Ready { preview: Box<PlanPreview> },
-    /// The plan could not be worked out. The operation can still be started;
-    /// the engine plans again and reports anything that stops it.
     Failed { reason: String },
 }
 
 impl PlanStatus {
-    /// The newest answer the host has, current or not.
     pub fn latest(&self) -> Option<&PlanPreview> {
         match self {
             Self::Ready { preview } => Some(preview),
@@ -180,7 +141,6 @@ impl PlanStatus {
         }
     }
 
-    /// The answer for the current choices, when there is one.
     pub fn current(&self) -> Option<&PlanPreview> {
         match self {
             Self::Ready { preview } => Some(preview),
@@ -193,7 +153,6 @@ impl PlanStatus {
     }
 }
 
-/// Why an operation stopped, in the shape a person can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticKind {
@@ -207,7 +166,6 @@ pub enum DiagnosticKind {
     Unknown,
 }
 
-/// An explanation of a failure, written for the person who has to resolve it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticPresentation {
     pub kind: DiagnosticKind,
@@ -217,37 +175,25 @@ pub struct DiagnosticPresentation {
     pub technical_details: Option<String>,
 }
 
-/// Whether a maintenance surface is up to date, and by how much it is not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "health")]
 pub enum InstallationHealth {
-    /// The installation has not been inspected yet.
     Unknown,
-    /// Every managed resource still matches what was installed.
     UpToDate,
-    /// These managed resources no longer match, and a repair would leave them alone.
     Drifted { resources: Vec<String> },
 }
 
-/// Where an update has got to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum UpdateState {
-    /// No check has run in this session.
     Idle,
-    /// A check is in flight, and this is what it is doing.
     Checking { detail: String },
-    /// A newer release has been found and is being installed.
     Installing { detail: String },
-    /// The installed version is the newest one on the channel.
     UpToDate { current: String },
-    /// A newer release exists.
     Available { current: String, available: String },
-    /// The check or the update itself failed.
     Failed { message: String },
 }
 
-/// The update situation, when the application is configured for updates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePresentation {
     pub channel: Option<String>,
@@ -256,20 +202,21 @@ pub struct UpdatePresentation {
 
 const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
-/// A byte count as a person reads it.
-///
-/// Every preset needs this and the number is the protocol's own, so the
-/// rendering belongs beside it rather than in each preset.
 pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < BYTE_UNITS.len() - 1 {
+    while value >= 1024.0 && unit + 1 < BYTE_UNITS.len() {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 {
-        format!("{bytes} B")
+    if value >= 100.0 {
+        format!("{:.0} {}", value, BYTE_UNITS[unit])
+    } else if value >= 10.0 {
+        format!("{:.1} {}", value, BYTE_UNITS[unit])
     } else {
-        format!("{value:.1} {}", BYTE_UNITS[unit])
+        format!("{:.2} {}", value, BYTE_UNITS[unit])
     }
 }

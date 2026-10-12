@@ -1,10 +1,10 @@
-#![cfg(feature = "test-launcher")]
+#![cfg(all(windows, feature = "test-launcher"))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tempfile::TempDir;
-use zup_core::{Privilege, RelativePath, ResourceKey, TargetTriple, hash_reader};
+use zup_core::{Privilege, RelativePath, ResourceKey, Target, hash_reader};
 use zup_platform::TargetPath;
 use zup_protocol::{
     ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SessionId, WireEnvelope,
@@ -22,8 +22,8 @@ fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
     hash_reader(bytes).unwrap().1
 }
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn target_path(path: &Path) -> TargetPath {
@@ -43,15 +43,11 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
         expected_size: bytes.len() as u64,
         privilege: Privilege::User,
         delta: FileDelta::Create,
+        executable: false,
     });
     input
 }
 
-/// The one worker invocation these tests share.
-///
-/// A struct rather than eight positional arguments, because a test helper whose
-/// arguments are four paths and two options is a test helper whose call sites
-/// cannot be read.
 struct Worker {
     plan: TransactionPlan,
     version: String,
@@ -61,6 +57,61 @@ struct Worker {
     recovery_id: Option<uuid::Uuid>,
     release: Option<zup_core::ReleaseIdentity>,
     payload_overlay_root: Option<PathBuf>,
+}
+
+fn worker_with_bundle(work_root: &Path, version: &str) -> PathBuf {
+    std::fs::create_dir_all(work_root.join("dist")).unwrap();
+    let manifest = format!(
+        r#"
+schema = 1
+[app]
+id = "com.acme.app"
+name = "Acme App"
+version = "{version}"
+[build]
+[build.targets.default]
+target = "windows-x64"
+source = {{ directory = "dist" }}
+[install]
+scope = "user"
+[install.directory]
+user = "${{location.user_data}}/AcmeApp"
+"#
+    );
+    let parsed = zup_manifest::parse(&manifest).unwrap();
+    let installer = zup_manifest::parse_and_compile(&manifest, "default").unwrap();
+    let config = zup_manifest::select_targets(
+        &parsed,
+        &["default"],
+        &zup_manifest::TargetOverrides::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .next()
+    .unwrap();
+    let mut build = zup_build::materialize(
+        &work_root.join("zup.toml"),
+        &parsed,
+        vec![(config, installer)],
+        zup_build::Writes::None,
+    )
+    .unwrap();
+    let plan = build.targets.pop().unwrap();
+    let package = work_root.join("worker.zup");
+    std::fs::write(
+        &package,
+        zup_bundle::BundleWriter::encode(&plan, &[]).unwrap(),
+    )
+    .unwrap();
+    let worker = work_root.join("worker.exe");
+    zup_windows::embed_bundle_file(
+        &PathBuf::from(env!("CARGO_BIN_EXE_zup-test-worker")),
+        &worker,
+        &package,
+        None,
+    )
+    .unwrap();
+    worker
 }
 
 async fn execute_with_test_worker(worker: &Worker) -> String {
@@ -100,11 +151,10 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
         pipe_name: pipe_name.clone(),
         expected_parent_pid: std::process::id(),
         expected_parent_sid: UserSid::current().unwrap().display().to_owned(),
-        target: plan.target.clone(),
+        target: plan.target,
         expected_plan_hash: plan_hash.clone(),
     };
-    let zup_bin = PathBuf::from(env!("CARGO_BIN_EXE_zup-test-worker"));
-    assert!(zup_bin.exists(), "zup binary not found at {zup_bin:?}");
+    let zup_bin = worker_with_bundle(work_root, &worker.version);
     let worker =
         launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap)).expect("spawn worker");
     tokio::time::timeout(Duration::from_secs(5), server.connect())
@@ -137,7 +187,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
             message: Message::ParentHello(ParentHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id,
-                target: plan.target.clone(),
+                target: plan.target,
                 transaction_id: uuid::Uuid::now_v7(),
                 expected_plan_hash: plan_hash.clone(),
             }),
@@ -150,7 +200,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
             session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-                target: plan.target.clone(),
+                target: plan.target,
                 plan_json,
                 plan_hash,
                 app_id: "com.acme.app".into(),

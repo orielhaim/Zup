@@ -8,7 +8,7 @@ use zup_bootstrap::{
     PrerequisiteProvider, PrerequisiteSatisfier, ProviderOutcome, ProviderRequest, Quarantine,
     QuarantineError, execute_operation, recover,
 };
-use zup_core::{PrerequisiteId, RelativePath, TargetTriple};
+use zup_core::{PrerequisiteId, RelativePath, Target};
 
 mod common;
 use common::{digest, embedded, plan};
@@ -236,7 +236,7 @@ fn state_store_checks_integrity_and_resume_identity() {
 fn state_from_another_target_is_neither_resumed_nor_recovered() {
     let first = plan(embedded(b"runtime"));
     let mut second = first.clone();
-    second.key.target = TargetTriple::parse("arm64-pc-windows-msvc").unwrap();
+    second.key.target = Target::parse("arm64-pc-windows-msvc").unwrap();
     assert_ne!(first.fingerprint(), second.fingerprint());
     assert_ne!(
         BootstrapId::for_plan(&first),

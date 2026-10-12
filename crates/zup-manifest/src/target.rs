@@ -2,14 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use zup_core::{
-    Frontend, Install, ResolvedTargetConfig, TargetOverrides, TargetProfile, TargetProfileId,
-    TargetTriple,
+    Frontend, Install, ResolvedTargetConfig, Target, TargetOverrides, TargetProfile,
+    TargetProfileId,
 };
 
 use crate::error::ManifestError;
 use crate::model::{ArtifactKind, Manifest, Targeted};
 
-/// A kind of declaration that can carry a `targets` filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Component,
@@ -25,7 +24,6 @@ pub enum ResourceKind {
 }
 
 impl ResourceKind {
-    /// How diagnostics name the kind, matching its manifest table.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Component => "component",
@@ -58,11 +56,6 @@ pub(crate) fn validate_target_matrix(manifest: &Manifest) -> Result<(), Manifest
     Ok(())
 }
 
-/// Reject an artifact declaration that could not be composed.
-///
-/// An artifact is refused here, at authoring time, rather than at build time,
-/// because a project that declares an impossible artifact is a mistake in the
-/// manifest and not a problem a user should meet on their first build.
 pub(crate) fn validate_artifacts(manifest: &Manifest) -> Result<(), ManifestError> {
     for (id, artifact) in &manifest.build.artifacts {
         if artifact.targets.is_empty() {
@@ -158,18 +151,13 @@ fn validate_resource_targets<T>(
     Ok(())
 }
 
-/// Resolve one profile against the common manifest and the caller's overrides.
-///
-/// This is the only place precedence is decided: caller override, then the
-/// profile's own declaration, then the common manifest. Every consumer reaches
-/// a [`ResolvedTargetConfig`] through here, so there is nothing to keep in sync.
 pub(crate) fn resolve_target_config(
     profile: &TargetProfileId,
     config: &TargetProfile,
     common_frontend: Frontend,
     common_install: &Install,
     overrides: &TargetOverrides,
-) -> ResolvedTargetConfig {
+) -> Result<ResolvedTargetConfig, ManifestError> {
     let mut install = config
         .install
         .clone()
@@ -182,9 +170,16 @@ pub(crate) fn resolve_target_config(
             install.directory.machine = Some(directory.clone());
         }
     }
-    ResolvedTargetConfig {
+    Ok(ResolvedTargetConfig {
         profile: profile.clone(),
-        target: config.target.clone(),
+        target: config
+            .target(profile)
+            .map_err(|error| ManifestError::MissingTarget {
+                profile: profile.to_string(),
+                reason: error.to_string(),
+                src: None,
+                span: None,
+            })?,
         source: overrides
             .source
             .clone()
@@ -194,15 +189,9 @@ pub(crate) fn resolve_target_config(
             .or(config.frontend)
             .unwrap_or(common_frontend),
         install,
-    }
+    })
 }
 
-/// Caller overrides for a whole selection of target profiles.
-///
-/// An entry is the complete override for that profile; a profile without an
-/// entry uses the shared overrides. This is only an index onto
-/// [`TargetOverrides`]: precedence is still decided by
-/// [`resolve_target_config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetOverrideSet {
     shared: TargetOverrides,
@@ -210,17 +199,14 @@ pub struct TargetOverrideSet {
 }
 
 impl TargetOverrideSet {
-    /// The overrides for one profile: its own entry, or the shared overrides.
     pub fn get(&self, profile: &TargetProfileId) -> &TargetOverrides {
         self.profiles.get(profile).unwrap_or(&self.shared)
     }
 
-    /// Apply one profile's complete overrides, replacing any entry for it.
     pub fn apply(&mut self, profile: TargetProfileId, overrides: TargetOverrides) {
         self.profiles.insert(profile, overrides);
     }
 
-    /// The same overrides for every profile.
     pub fn uniform(overrides: TargetOverrides) -> Self {
         Self {
             shared: overrides,
@@ -229,11 +215,6 @@ impl TargetOverrideSet {
     }
 }
 
-/// Select target profiles by friendly name or raw target triple.
-///
-/// Results are ordered by profile name. An empty selector list selects every
-/// profile. Profile names take precedence over target triples when both match.
-/// The same caller overrides apply to every selected profile.
 pub fn select_targets(
     manifest: &Manifest,
     selectors: &[&str],
@@ -246,10 +227,6 @@ pub fn select_targets(
     )
 }
 
-/// Select target profiles, resolving each with its own caller overrides.
-///
-/// Selection, ordering, and duplicate rejection are identical to
-/// [`select_targets`]; only the overrides differ per profile.
 pub fn select_targets_with(
     manifest: &Manifest,
     selectors: &[&str],
@@ -257,7 +234,7 @@ pub fn select_targets_with(
 ) -> Result<Vec<ResolvedTargetConfig>, ManifestError> {
     let selected = resolve_selection(manifest, selectors)?;
 
-    Ok(manifest
+    manifest
         .build
         .targets
         .iter()
@@ -271,10 +248,28 @@ pub fn select_targets_with(
                 overrides.get(profile),
             )
         })
-        .collect())
+        .collect()
 }
 
-/// The profiles a selector list names, after the manifest's own validation.
+fn resolved_targets(manifest: &Manifest) -> Result<Vec<(&TargetProfileId, Target)>, ManifestError> {
+    manifest
+        .build
+        .targets
+        .iter()
+        .map(|(profile, config)| {
+            config
+                .target(profile)
+                .map(|target| (profile, target))
+                .map_err(|error| ManifestError::MissingTarget {
+                    profile: profile.to_string(),
+                    reason: error.to_string(),
+                    src: None,
+                    span: None,
+                })
+        })
+        .collect()
+}
+
 fn resolve_selection(
     manifest: &Manifest,
     selectors: &[&str],
@@ -283,13 +278,13 @@ fn resolve_selection(
     validate_target_references(manifest)?;
     validate_artifacts(manifest)?;
 
-    let mut canonical_targets = BTreeMap::<TargetTriple, &TargetProfileId>::new();
-    for (profile, config) in &manifest.build.targets {
-        if let Some(conflicts_with) = canonical_targets.insert(config.target.clone(), profile) {
+    let mut canonical_targets = BTreeMap::<Target, &TargetProfileId>::new();
+    for (profile, target) in resolved_targets(manifest)? {
+        if let Some(conflicts_with) = canonical_targets.insert(target, profile) {
             return Err(ManifestError::DuplicateTarget {
                 profile: profile.to_string(),
                 conflicts_with: conflicts_with.to_string(),
-                target: config.target.to_string(),
+                target: target.to_string(),
                 src: None,
                 span: None,
             });
@@ -314,15 +309,14 @@ fn resolve_selection(
     if selectors.is_empty() {
         selected.extend(manifest.build.targets.keys().cloned());
     }
+    let resolved = resolved_targets(manifest)?;
     for selector in selectors {
         let profile = if let Some((profile, _)) = manifest.build.targets.get_key_value(*selector) {
             profile.clone()
-        } else if let Ok(target) = TargetTriple::parse(*selector) {
-            manifest
-                .build
-                .targets
+        } else if let Ok(target) = Target::parse(*selector) {
+            resolved
                 .iter()
-                .find_map(|(profile, config)| (config.target == target).then(|| profile.clone()))
+                .find_map(|(profile, resolved)| (*resolved == target).then(|| (*profile).clone()))
                 .ok_or_else(|| unknown(selector))?
         } else {
             return Err(unknown(selector));

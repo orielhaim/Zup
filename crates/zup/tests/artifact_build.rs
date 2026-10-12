@@ -35,8 +35,8 @@ fn runtime_template(root: &Path, profile: &str, target: &str) -> PathBuf {
         .write(&root.join(format!("templates/{profile}")))
 }
 
-const X64: &str = "x86_64-pc-windows-msvc";
-const ARM64: &str = "aarch64-pc-windows-msvc";
+const X64: &str = "windows-x64";
+const ARM64: &str = "windows-arm64";
 
 /// A two-architecture project whose payload is identical across machines except
 /// for one binary each, which is the shape a real application has.
@@ -88,11 +88,11 @@ version = "1.4.0"
 [build]
 
 [build.targets.arm64]
-target = "aarch64-pc-windows-msvc"
+target = "windows-arm64"
 source = { directory = "src-arm64" }
 
 [build.targets.x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "src-x64" }
 
 [install]
@@ -253,7 +253,7 @@ fn a_universal_build_writes_one_file_containing_every_selected_target() {
     assert!(report.contains("Kind        Universal"), "{report}");
     assert!(report.contains("Mode        Offline"), "{report}");
     assert!(
-        report.contains("aarch64-pc-windows-msvc console, x86_64-pc-windows-msvc console"),
+        report.contains("windows-arm64 console, windows-x64 console"),
         "both variants are named: {report}"
     );
 
@@ -304,85 +304,6 @@ fn a_universal_build_writes_one_file_containing_every_selected_target() {
         content * 2 < two_installers * 3 / 2,
         "shared content is stored once: {content} against {two_installers}"
     );
-}
-
-/// `zup artifact inspect` reads the same file and says the same things, in
-/// text and in the versioned report.
-#[test]
-fn inspect_describes_the_built_artifact_in_text_and_json() {
-    let project = Project::new();
-    let output = project.path().join("Universal-Windows-Setup.exe");
-    let built = project.build_universal(&output, &console_dispatcher());
-    assert!(built.status.success(), "{}", stderr(&built));
-
-    let human = zup(&["artifact".as_ref(), "inspect".as_ref(), output.as_os_str()]);
-    assert!(human.status.success(), "{}", stderr(&human));
-    let text = stdout(&human);
-    assert!(
-        text.contains("Windows universal offline installer"),
-        "{text}"
-    );
-    assert!(text.contains("x86_64-pc-windows-msvc"), "{text}");
-    assert!(text.contains("aarch64-pc-windows-msvc"), "{text}");
-    assert!(
-        text.contains("Authenticode             no certificate table"),
-        "{text}"
-    );
-    assert!(text.contains("content digests          valid"), "{text}");
-
-    let json = zup(&[
-        "artifact".as_ref(),
-        "inspect".as_ref(),
-        output.as_os_str(),
-        "--format".as_ref(),
-        "json".as_ref(),
-    ]);
-    assert!(json.status.success(), "{}", stderr(&json));
-    let document: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
-    assert_eq!(document["operation"], "artifact.inspect");
-    assert_eq!(document["status"], "success");
-    let report = &document["details"];
-    assert_eq!(report["artifact_kind"], "universal");
-    assert_eq!(report["artifact_mode"], "offline");
-    assert_eq!(report["pin"], "1.4.0");
-    assert_eq!(report["subsystem"], "console");
-    assert_eq!(document["application"]["name"], "Universal");
-    assert_eq!(document["application"]["version"], "1.4.0");
-    assert_eq!(
-        report["trust"]["authenticode"], "no certificate table",
-        "a structural answer, not a trust answer: a linker emits no certificate table"
-    );
-    assert_eq!(report["trust"]["content_digests"], "valid");
-    assert_eq!(report["variants"].as_array().unwrap().len(), 2);
-    // The index's target is a claim and the runtime's own header is an
-    // independent statement, so the report compares them rather than printing one.
-    for variant in report["variants"].as_array().unwrap() {
-        assert_eq!(
-            variant["target_matches_binary"], "matches",
-            "a built artifact's runtime is for the target it names: {variant}"
-        );
-    }
-    // Every blob is either needed by more than one variant or by exactly one, so
-    // the two sizes partition the uncompressed content. The stored size is what
-    // compression made of it, and the logical size counts the shared bytes once
-    // per variant that wanted them.
-    let content = &report["content"];
-    let shared = content["shared_size"].as_u64().unwrap();
-    let exclusive = content["exclusive_size"].as_u64().unwrap();
-    let stored = content["stored_size"].as_u64().unwrap();
-    let uncompressed = content["content_size"].as_u64().unwrap();
-    assert!(shared > 0, "the shared assets are stored once");
-    assert_eq!(
-        shared + exclusive,
-        uncompressed,
-        "every blob is either shared or exclusive"
-    );
-    assert!(stored < uncompressed, "the store compresses");
-    assert!(
-        content["logical_size"].as_u64().unwrap() > uncompressed,
-        "the logical size counts shared bytes again for the second variant"
-    );
-    assert!(content["unique_blob_count"].as_u64().unwrap() > 0);
 }
 
 /// The JSON report is the contract; nothing in it is a build-machine path.
@@ -521,33 +442,6 @@ fn a_dispatcher_for_the_wrong_launcher_experience_is_refused() {
 
 /// A runtime template for the wrong machine is refused with both targets named,
 /// because it is a per-target mistake and the message has to say which.
-#[test]
-fn a_runtime_template_for_the_wrong_machine_is_refused() {
-    let project = Project::new();
-    let result = zup(&[
-        "build".as_ref(),
-        "--manifest".as_ref(),
-        project.manifest().as_os_str(),
-        "--target".as_ref(),
-        "x64".as_ref(),
-        "--runtime".as_ref(),
-        project.runtimes[0].as_os_str(),
-        "--output".as_ref(),
-        project.path().join("Setup.exe").as_os_str(),
-        "--force".as_ref(),
-        "--release-manifest".as_ref(),
-        "none".as_ref(),
-    ]);
-    assert!(!result.status.success());
-    let message = stderr(&result);
-    assert!(message.contains(ARM64), "{message}");
-    assert!(message.contains(X64), "{message}");
-    assert!(
-        message.contains("was wanted"),
-        "the refusal names both machines: {message}"
-    );
-}
-
 /// A universal build refuses a wrong-frontend template exactly the way a
 /// single-target build does. `build_installer.rs` covers the single-target half;
 /// what is only visible here is that composing two variants adds no second

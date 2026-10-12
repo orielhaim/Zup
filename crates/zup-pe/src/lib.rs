@@ -1,12 +1,13 @@
-//! Portable Executable mutation, certificate tables, and Authenticode.
+//! Portable Executable headers, resources, certificate tables, and Authenticode.
 //!
 //! Two things live here, and a general object-file library must not be asked to
 //! do either:
 //!
 //! - **Composition** writes resources into an image that is about to be signed,
 //!   so it has to reproduce section alignment, the resource directory and the
-//!   certificate table exactly. The writing is four `kernel32` calls in
-//!   `zup-windows`; the *vocabulary* it writes against is here.
+//!   certificate table exactly. [`resources`] does that in plain file I/O, so a
+//!   build host composes a Windows installer for any target without calling a
+//!   native resource API.
 //! - **Authenticode** is a digest over the image's bytes by a rule the format
 //!   specifies, and the certificate table holds that rule's inputs. Both are
 //!   properties of the bytes, so [`authenticode`] reads them on every platform.
@@ -38,6 +39,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod authenticode;
+pub mod resources;
 
 pub use authenticode::{
     Certificate, DigestAlgorithm, EmbeddedSignature, SignatureDigest, SigningCertificate,
@@ -136,6 +138,8 @@ pub enum PeError {
     ResourceTooLarge { size: u64, limit: u64 },
     #[error("container would use {count} resources; the limit is {limit}")]
     TooManyResources { count: usize, limit: usize },
+    #[error("the image header has no room for another section")]
+    HeaderFull,
 }
 
 /// The smallest optional header this reader can work with: `SizeOfHeaders` ends

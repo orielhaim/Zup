@@ -30,7 +30,7 @@ pub enum TemplateResolveError {
 
 pub fn resolve_template_path<R: InstallLocationResolver + ?Sized>(
     template: &Template,
-    target: &zup_core::TargetTriple,
+    target: &zup_core::Target,
     resolver: &R,
     scope: zup_core::SelectedScope,
 ) -> Result<TargetPath, TemplateResolveError> {

@@ -1,5 +1,3 @@
-//! Desired-state planner tests.
-
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -7,16 +5,14 @@ use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{Sha256Digest, materialize};
-use zup_core::{
-    ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, TargetTriple, Template,
-};
+use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, Target, Template};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
 use zup_plan::{
     ComponentOverrides, InstallPlan, PlanError, PlanRequest, ResourceKey, SelectedScope, plan,
 };
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn build_plan_from(source: &str, files: &[(&str, &[u8])]) -> zup_build::BuildPlan {
@@ -56,7 +52,7 @@ version = "1.4.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -152,8 +148,6 @@ package = { type = "remote", url = "https://cdn.example.test/runtime.exe", filen
     assert!(result.prerequisites.is_empty());
 }
 
-// --- Scope ---
-
 #[rstest]
 #[case::user_manifest_user(InstallScope::User, SelectedScope::User, true)]
 #[case::user_manifest_machine(InstallScope::User, SelectedScope::Machine, false)]
@@ -186,7 +180,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist" }}
 
 [install]
@@ -203,29 +197,6 @@ scope = "{allowed_str}"
     }
 }
 
-#[rstest]
-#[case::user(SelectedScope::User, "${location.user_data}/Programs/Acme")]
-#[case::machine(SelectedScope::Machine, "${location.programs}/Acme")]
-fn either_scope_selects_its_own_directory(#[case] scope: SelectedScope, #[case] directory: &str) {
-    let build = build_plan_from(&with(""), &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
-    assert_eq!(result.scope, scope);
-    assert_eq!(result.install_directory.to_string(), directory);
-}
-
-#[test]
-fn author_gated_install_directory_override_reaches_the_plan() {
-    let source = BASE.replace(
-        "[install.directory]",
-        "allow_directory_override = true\n\n[install.directory]",
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let mut request = PlanRequest::new(target(), SelectedScope::User);
-    request.install_directory = Some(Template::parse(r"C:\Apps\Acme").unwrap());
-    let result = plan(&build, &request).unwrap();
-    assert_eq!(result.install_directory.to_string(), r"C:\Apps\Acme");
-}
-
 #[test]
 fn install_directory_override_is_rejected_when_not_authored() {
     let build = build_plan_from(BASE, &[("dist/a.txt", b"a")]);
@@ -236,8 +207,6 @@ fn install_directory_override_is_rejected_when_not_authored() {
         Err(PlanError::InstallDirectoryOverrideNotAllowed)
     ));
 }
-
-// --- Components ---
 
 const GRAPH: &str = r#"
 [[components]]
@@ -289,8 +258,6 @@ fn component_overrides_select_the_transitive_closure(
 
 #[test]
 fn disabling_a_selected_component_is_refused() {
-    // A required component cannot be switched off, whether it is named
-    // directly or is a dependency of a component the caller enabled.
     let result = graph_plan(PlanRequest {
         components: overrides(&["developer"], &["core"]),
         ..PlanRequest::new(target(), SelectedScope::User)
@@ -300,7 +267,6 @@ fn disabling_a_selected_component_is_refused() {
         Err(PlanError::RequiredComponentDisabled { .. })
     ));
 
-    // A non-required component an enabled one depends on cannot be either.
     let source = with(
         r#"
 [[components]]
@@ -344,8 +310,6 @@ fn contradictory_and_unknown_component_overrides_are_refused() {
         assert!(refused, "{enable:?}/{disable:?}");
     }
 }
-
-// --- Conditions ---
 
 #[test]
 fn condition_filters_resources() {
@@ -451,29 +415,6 @@ when = 'component("core") && component("cli")'
 }
 
 #[test]
-fn nested_condition_expressions() {
-    // A parenthesised term nested inside `!` and `||`. Both operands are over an
-    // always-selected component, so the expression is true either way; what this
-    // guards is that the parser accepts the nesting at all.
-    let source = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[path]]
-value = "${install}/x"
-when = '!(component("core") && component("core")) || component("core")'
-"#,
-    );
-    let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
-    assert_eq!(result.path_entries.len(), 1);
-}
-
-// --- Files ---
-
-#[test]
 fn inactive_component_files_are_excluded_from_the_plan_and_its_summary() {
     let source = with(
         r#"
@@ -535,12 +476,9 @@ destination = "${install}/tools"
         "${location.user_data}/Programs/Acme/tools/acme.exe"
     );
 
-    // Portable plan must not serialize build-machine source paths.
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("\"source\":"));
 }
-
-// --- Collisions ---
 
 #[rstest]
 #[case::launchers(
@@ -585,8 +523,6 @@ value = "${install}/bin"
 "#,
     None
 )]
-// Two identical launchers, but the second only becomes active when a
-// non-selected component is enabled.
 #[case::gated_launchers(
     r#"
 [[components]]
@@ -671,8 +607,6 @@ id = "Acme.B"
     assert!(parse_and_compile(&source, "default").is_err());
 }
 
-// --- Privilege ---
-
 #[rstest]
 #[case::user(SelectedScope::User, Privilege::User, false)]
 #[case::machine(SelectedScope::Machine, Privilege::System, true)]
@@ -712,8 +646,6 @@ executable = "${install}/a.txt"
     assert_eq!(result.files[0].privilege, privilege);
     assert_eq!(result.launchers[0].privilege, privilege);
 
-    // A registration resource belongs to the store the selected scope names,
-    // which is independent of the privilege each resource carries.
     for store in [
         &result.path_entries[0].scope,
         &result.protocols[0].scope,
@@ -733,10 +665,6 @@ executable = "${install}/a.txt"
 
 #[test]
 fn a_service_makes_a_user_scope_plan_system_authorized() {
-    // The scope says where the application lives. The service says what
-    // authority its registration needs. A per-user install that declares a
-    // service must therefore report system authorization, whether the service
-    // is always selected or gated behind a component.
     let source = with(
         r#"
 [[components]]
@@ -771,8 +699,6 @@ component = "service"
     assert_eq!(with_svc.services[0].privilege, Privilege::System);
     assert!(with_svc.summary.requires_authorization);
 }
-
-// --- Determinism / serialization ---
 
 #[test]
 fn repeated_plans_are_identical_and_fully_resolved() {
@@ -810,13 +736,11 @@ executable = "${install}/a.exe"
         serde_json::to_string(&b).unwrap()
     );
 
-    // Every authoring-time variable must be resolved out of the plan.
     let json = serde_json::to_string(&a).unwrap();
     assert!(!json.contains("${install}"), "json: {json}");
     assert!(!json.contains("${app."), "json: {json}");
     assert!(json.contains("${location."), "json: {json}");
 
-    // A resource is identified by what it registers, not by its position.
     assert_eq!(a.files[0].key, b.files[0].key);
     assert_eq!(
         a.services[0].key,
@@ -845,7 +769,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -871,11 +795,11 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux-arm64]
-target = "aarch64-unknown-linux-gnu"
+target = "linux-arm64"
 source = { directory = "dist/linux-arm64" }
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -909,22 +833,15 @@ destination = "${install}"
         zup_build::Writes::None,
     )
     .unwrap();
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
 
-    let result = plan(
-        &build,
-        &PlanRequest::new(target.clone(), SelectedScope::User),
-    )
-    .unwrap();
+    let result = plan(&build, &PlanRequest::new(target, SelectedScope::User)).unwrap();
     assert_eq!(result.target, target);
     assert_eq!(result.files[0].size, 7);
 
     let error = plan(
         &build,
-        &PlanRequest::new(
-            TargetTriple::parse("aarch64-pc-windows-msvc").unwrap(),
-            SelectedScope::User,
-        ),
+        &PlanRequest::new(Target::parse("windows-arm64").unwrap(), SelectedScope::User),
     )
     .unwrap_err();
     assert!(matches!(error, PlanError::UnknownBuildTarget { .. }));

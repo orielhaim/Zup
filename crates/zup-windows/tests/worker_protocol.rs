@@ -1,7 +1,8 @@
-//! Worker bootstrap, handshake, and security-negative tests.
+#![cfg(windows)]
 
+use rstest::rstest;
 use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
-use zup_core::TargetTriple;
+use zup_core::Target;
 use zup_protocol::{
     ExecuteBootstrap, ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker,
     SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
@@ -11,8 +12,8 @@ use zup_windows::{
     plan_hash_hex,
 };
 
-fn target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
 fn bootstrap() -> WorkerBootstrap {
@@ -27,10 +28,6 @@ fn bootstrap() -> WorkerBootstrap {
     }
 }
 
-/// The only message a worker will act on is an `ExecuteBootstrap` whose target
-/// matches the one it was started for. Everything else about the bootstrap
-/// string - the plan hash, the session, the pipe - is already bound by the
-/// handshake this replays.
 #[test]
 fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
     let plan = BootstrapPlan::new(
@@ -60,7 +57,7 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
                 message: Message::ParentHello(ParentHello {
                     protocol_version: PROTOCOL_VERSION,
                     session_id,
-                    target: worker_bootstrap.target.clone(),
+                    target: worker_bootstrap.target,
                     transaction_id: bound.id.as_uuid(),
                     expected_plan_hash: hash.clone(),
                 }),
@@ -69,7 +66,7 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
         (session, session_id)
     };
 
-    let execute = |target_in_message: TargetTriple| ExecuteBootstrap {
+    let execute = |target_in_message: Target| ExecuteBootstrap {
         target: target_in_message,
         bootstrap_json: bootstrap_json.clone(),
         bootstrap_hash: hash.clone(),
@@ -100,16 +97,12 @@ fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
     assert!(matches!(
         foreign.handle_message(envelope(
             session_id,
-            Message::ExecuteBootstrap(execute(
-                TargetTriple::parse("arm64-pc-windows-msvc").unwrap()
-            ))
+            Message::ExecuteBootstrap(execute(Target::parse("arm64-pc-windows-msvc").unwrap()))
         )),
         Err(WorkerError::TargetMismatch)
     ));
 }
 
-/// A well-formed bootstrap string with one field replaced, so each negative case
-/// below fails at the check it names rather than at the field-count gate.
 fn bootstrap_with(field: usize, value: &str) -> String {
     let good = format_bootstrap(&bootstrap());
     let mut parts: Vec<String> = good.split('|').map(str::to_owned).collect();
@@ -117,20 +110,23 @@ fn bootstrap_with(field: usize, value: &str) -> String {
     parts.join("|")
 }
 
-#[test]
-fn bootstrap_rejects_malformed() {
-    assert!(parse_bootstrap("").is_err());
-    assert!(parse_bootstrap("1|sess|pipe|1").is_err());
-    assert!(
-        parse_bootstrap("not-a-number|00000000-0000-0000-0000-000000000000|p|1|a|x|y").is_err()
-    );
-    assert!(parse_bootstrap(&bootstrap_with(1, "not-a-uuid")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(2, "")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(2, "bad\\pipe")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(3, "0")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(4, "not-a-sid")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(5, "zz")).is_err());
-    assert!(parse_bootstrap(&bootstrap_with(6, "tooshort")).is_err());
+#[rstest]
+#[case(None, "")]
+#[case(None, "1|sess|pipe|1")]
+#[case(None, "not-a-number|00000000-0000-0000-0000-000000000000|p|1|a|x|y")]
+#[case(Some(1), "not-a-uuid")]
+#[case(Some(2), "")]
+#[case(Some(2), "bad\\pipe")]
+#[case(Some(3), "0")]
+#[case(Some(4), "not-a-sid")]
+#[case(Some(5), "zz")]
+#[case(Some(6), "tooshort")]
+fn bootstrap_rejects_malformed(#[case] field: Option<usize>, #[case] value: &str) {
+    let input = match field {
+        Some(field) => bootstrap_with(field, value),
+        None => value.to_owned(),
+    };
+    assert!(parse_bootstrap(&input).is_err());
 }
 
 #[test]
@@ -151,9 +147,6 @@ fn pipe_name_has_no_secrets() {
     assert!(name.len() <= 48);
 }
 
-/// The three properties that make a wire channel safe to run a worker over: the
-/// envelope is the worker's own session, it is the protocol both sides speak,
-/// and no message is ever delivered twice.
 #[test]
 fn an_envelope_offers_a_channel_no_replay() {
     let b = bootstrap();
@@ -170,7 +163,7 @@ fn an_envelope_offers_a_channel_no_replay() {
             .handle_message(envelope(SessionId::new_v7(), PROTOCOL_VERSION))
             .is_err()
     );
-    // decode_payload rejects the version before the session ever sees it.
+
     assert!(
         decode_payload(
             &encode_payload(&envelope(b.session_id, PROTOCOL_VERSION + 1)).unwrap_or_default()
@@ -212,7 +205,7 @@ fn handshake_requires_valid_plan_hash() {
 #[test]
 fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
     let mut b = bootstrap();
-    b.target = TargetTriple::parse("x64-pc-windows-msvc").unwrap();
+    b.target = Target::parse("x64-pc-windows-msvc").unwrap();
     let mut session = WorkerSession::new(b.clone());
     let mismatch = WireEnvelope {
         version: PROTOCOL_VERSION,
@@ -221,7 +214,7 @@ fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
         message: Message::ParentHello(ParentHello {
             protocol_version: PROTOCOL_VERSION,
             session_id: b.session_id,
-            target: TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+            target: Target::parse("arm64-pc-windows-msvc").unwrap(),
             transaction_id: uuid::Uuid::nil(),
             expected_plan_hash: b.expected_plan_hash.clone(),
         }),
@@ -232,12 +225,9 @@ fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
     ));
 
     let mut canonical = bootstrap();
-    canonical.target = TargetTriple::parse("x64-pc-windows-msvc").unwrap();
+    canonical.target = Target::parse("x64-pc-windows-msvc").unwrap();
     let parsed = parse_bootstrap(&format_bootstrap(&canonical)).unwrap();
-    assert_eq!(
-        parsed.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
+    assert_eq!(parsed.target, Target::parse("windows-x64").unwrap());
 }
 
 #[test]
@@ -282,7 +272,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             message: Message::ParentHello(ParentHello {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: b.session_id,
-                target: b.target.clone(),
+                target: b.target,
                 transaction_id: uuid::Uuid::nil(),
                 expected_plan_hash: b.expected_plan_hash.clone(),
             }),
@@ -294,7 +284,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             session_id: b.session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-                target: TargetTriple::parse("arm64-pc-windows-msvc").unwrap(),
+                target: Target::parse("arm64-pc-windows-msvc").unwrap(),
                 plan_json: "not json".into(),
                 plan_hash: b.expected_plan_hash.clone(),
                 app_id: "com.acme.app".into(),

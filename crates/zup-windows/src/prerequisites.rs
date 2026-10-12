@@ -1,9 +1,3 @@
-//! Windows prerequisite detection and package execution.
-//!
-//! Portable requirements carry opaque ids. This module owns the stable ids it
-//! can answer, the registry and package queries behind them, and the command
-//! line used to install a verified artifact.
-
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,44 +12,38 @@ use zup_core::{
     FileVersion, InstalledPackage, PrerequisiteArchitecture, PrerequisiteRequirement, Runtime,
 };
 
-/// Stable runtime requirement ids understood by the Windows adapter.
 pub mod runtime_requirements {
-    /// Visual C++ 2015-2022 redistributable runtime (`14.x`).
+
     pub const VISUAL_CPP_V14: &str = "windows.vc.v14";
-    /// .NET Desktop Runtime.
+
     pub const DOTNET_DESKTOP: &str = "windows.dotnet.desktop";
-    /// .NET Runtime.
+
     pub const DOTNET_RUNTIME: &str = "windows.dotnet.runtime";
-    /// Microsoft Edge WebView2 Evergreen Runtime.
+
     pub const WEBVIEW2_EVERGREEN: &str = "windows.webview2.evergreen";
 }
 
-/// Stable installed-package ids understood by the Windows adapter.
 pub mod package_requirements {
-    /// Microsoft Edge WebView2 Evergreen Bootstrapper product code.
+
     pub const WEBVIEW2_BOOTSTRAPPER: &str = "{F3017226-FE2A-4295-8A7C-971BF3207148}";
 }
 
-/// WebView2 Evergreen Runtime client registry key.
 const WEBVIEW2_CLIENT_KEY: &str =
     "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
-/// WebView2 Evergreen Runtime client registry key as seen by 32-bit processes.
+
 const WEBVIEW2_CLIENT_KEY_WOW64: &str =
     "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
-/// The Visual C++ redistributable runtime reports its version per architecture.
+
 const VISUAL_CPP_V14_KEY: &str = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes";
-/// The .NET installer records installed shared frameworks per architecture.
+
 const DOTNET_INSTALLED_VERSIONS_KEY: &str = "SOFTWARE\\dotnet\\Setup\\InstalledVersions";
 
-/// Compound-file (CFB) header: the on-disk format of every Windows Installer package.
 const COMPOUND_FILE_MAGIC: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 
-/// How a verified prerequisite artifact is launched on Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactFormat {
-    /// Windows Installer package, installed through `msiexec`.
     WindowsInstaller,
-    /// Ordinary executable, launched directly.
+
     Executable,
 }
 
@@ -290,7 +278,6 @@ impl PrerequisiteProvider for WindowsPrerequisiteProvider {
     }
 }
 
-/// The command line used to install one verified artifact.
 struct Launch {
     program: PathBuf,
     arguments: Vec<String>,
@@ -345,7 +332,6 @@ fn plan_launch(
     Ok(launch)
 }
 
-/// Provider-owned silent arguments for runtimes with a known installer contract.
 fn default_arguments(requirement: &PrerequisiteRequirement) -> Vec<String> {
     let PrerequisiteRequirement::Runtime(runtime) = requirement else {
         return Vec::new();
@@ -362,7 +348,6 @@ fn default_arguments(requirement: &PrerequisiteRequirement) -> Vec<String> {
     }
 }
 
-/// Verify the artifact still matches its declared identity and classify its format.
 fn verify_artifact(
     path: &Path,
     expected_digest: zup_core::Sha256Digest,
@@ -667,11 +652,6 @@ mod tests {
         );
     }
 
-    /// A prerequisite is started, not obeyed: the plan has to name a real silent
-    /// contract for the artifact it verified, because a prerequisite that stops
-    /// and asks a question is a prerequisite an unattended install cannot finish.
-    /// Each vendor's flags are its own, and the msi path is the only one that
-    /// goes through a system program rather than running the artifact.
     #[test]
     fn a_launch_plan_carries_the_silent_contract_of_its_artifact() {
         let package = compound_file_bytes();
@@ -730,9 +710,6 @@ mod tests {
         }
     }
 
-    /// The detector has to distinguish "nobody has installed this" from "this
-    /// runtime is not one I know how to install", because only the first is
-    /// something an installer may act on by downloading the package.
     #[test]
     fn detection_separates_an_absent_requirement_from_an_unsupported_one() {
         let unknown_runtime = BootstrapOperation {

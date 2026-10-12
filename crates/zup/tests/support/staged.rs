@@ -68,8 +68,8 @@ pub fn host_runtime(executable: &Path, frontend: zup_core::Frontend) -> PathBuf 
     component(
         executable,
         &ToolchainComponent::Runtime {
-            target: zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET)
-                .expect("the host's own target triple is valid"),
+            target: zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
+                .expect("the host target is valid"),
             frontend,
         },
     )

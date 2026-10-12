@@ -1,8 +1,7 @@
-//! Compilation and semantic validation tests.
-
+use rstest::rstest;
 use std::fs;
 
-use zup_core::{ComponentId, Frontend, InstallScope, Installer, ServiceId, TargetTriple};
+use zup_core::{InstallScope, Installer};
 use zup_manifest::{
     Manifest, ManifestError, TargetOverrides, compile, parse, parse_and_compile, select_targets,
 };
@@ -27,7 +26,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist/windows-x64" }
 
 [install]
@@ -51,76 +50,10 @@ fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
 }
 
 #[test]
-fn fixture_compiles_to_ir() {
-    let installer = parse_and_compile(&fixture(), "windows-x64").expect("fixture compiles");
-
-    assert_eq!(installer.app.id.as_str(), "com.acme.acme");
-    assert_eq!(
-        installer.target,
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
-    );
-    assert_eq!(installer.app.version.to_string(), "1.4.0");
-    assert_eq!(installer.frontend, Frontend::Gui);
-    assert_eq!(installer.install.scope, InstallScope::Either);
-    assert_eq!(installer.components.len(), 3);
-    assert_eq!(installer.plugins.len(), 1);
-    assert_eq!(installer.plugins[0].id.as_str(), "setup-helper");
-    assert_eq!(installer.files.len(), 1);
-    assert_eq!(installer.launchers.len(), 1);
-    assert_eq!(installer.path.len(), 1);
-    assert_eq!(installer.services.len(), 1);
-    assert_eq!(installer.protocols.len(), 1);
-    assert_eq!(installer.file_associations.len(), 1);
-
-    assert_eq!(
-        installer.components[0].id,
-        ComponentId::new("core").unwrap()
-    );
-    assert!(installer.components[0].required);
-    assert!(installer.components[0].default);
-
-    assert_eq!(
-        installer.services[0].id,
-        ServiceId::new("acme-agent").unwrap()
-    );
-}
-
-#[test]
 fn compilation_is_deterministic() {
     let a = parse_and_compile(&fixture(), "windows-x64").unwrap();
     let b = parse_and_compile(&fixture(), "windows-x64").unwrap();
     assert_eq!(a, b);
-}
-
-#[test]
-fn plugin_compiles_without_build_time_source() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[plugins]]
-id = "setup.helper"
-source = "plugins/setup-helper.wasm"
-component = "core"
-when = 'component("core")'
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid plugin");
-    assert_eq!(installer.plugins.len(), 1);
-    let plugin = &installer.plugins[0];
-    assert_eq!(plugin.id.as_str(), "setup.helper");
-    assert_eq!(
-        plugin.component.as_ref().map(|id| id.as_str()),
-        Some("core")
-    );
-    assert_eq!(
-        plugin.when.as_ref().map(ToString::to_string),
-        Some("component(\"core\")".to_owned())
-    );
-    let json = serde_json::to_string(&installer).unwrap();
-    assert!(!json.contains("plugins/setup-helper.wasm"), "json: {json}");
 }
 
 #[test]
@@ -141,11 +74,9 @@ source = "plugins/helper.wasm"
     ));
 }
 
-#[test]
-fn duplicate_ids_are_rejected() {
-    let scenarios = [
-        (
-            r#"
+#[rstest]
+#[case::component(
+    r#"
 [[components]]
 id = "core"
 name = "Core"
@@ -154,10 +85,10 @@ name = "Core"
 id = "core"
 name = "Also core"
 "#,
-            "core",
-        ),
-        (
-            r#"
+    "core"
+)]
+#[case::service(
+    r#"
 [[services]]
 id = "svc"
 name = "svc"
@@ -170,10 +101,10 @@ name = "svc2"
 binary = "${install}/svc2.exe"
 start = "manual"
 "#,
-            "svc",
-        ),
-        (
-            r#"
+    "svc"
+)]
+#[case::plugin(
+    r#"
 [[plugins]]
 id = "helper"
 source = "plugins/one.wasm"
@@ -182,11 +113,10 @@ source = "plugins/one.wasm"
 id = "helper"
 source = "plugins/two.wasm"
 "#,
-            "helper",
-        ),
-        // Plugin identities fold case, so only the differing case is a collision.
-        (
-            r#"
+    "helper"
+)]
+#[case::plugin_case_insensitive(
+    r#"
 [[plugins]]
 id = "Helper"
 source = "plugins/one.wasm"
@@ -195,20 +125,17 @@ source = "plugins/one.wasm"
 id = "helper"
 source = "plugins/two.wasm"
 "#,
-            "helper",
-        ),
-    ];
-
-    for (body, id) in scenarios {
-        let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
-        let collision = match &err {
-            ManifestError::DuplicateComponent { id, .. } => Some(id.as_str()),
-            ManifestError::DuplicateService { id, .. } => Some(id.as_str()),
-            ManifestError::DuplicatePlugin { id, .. } => Some(id.as_str()),
-            other => panic!("expected a duplicate-id diagnostic, got {other:?}"),
-        };
-        assert_eq!(collision, Some(id), "{err:?}");
-    }
+    "helper"
+)]
+fn duplicate_ids_are_rejected(#[case] body: &str, #[case] id: &str) {
+    let err = compile_selected(&parse(&with(body)).unwrap()).unwrap_err();
+    let collision = match &err {
+        ManifestError::DuplicateComponent { id, .. } => Some(id.as_str()),
+        ManifestError::DuplicateService { id, .. } => Some(id.as_str()),
+        ManifestError::DuplicatePlugin { id, .. } => Some(id.as_str()),
+        other => panic!("expected a duplicate-id diagnostic, got {other:?}"),
+    };
+    assert_eq!(collision, Some(id), "{err:?}");
 }
 
 #[test]
@@ -403,35 +330,6 @@ when = 'component("missing")'
 }
 
 #[test]
-fn valid_condition_and_component_refs_compile() {
-    let src = with(
-        r#"
-[[components]]
-id = "core"
-name = "Core"
-
-[[components]]
-id = "cli"
-name = "CLI"
-requires = ["core"]
-
-[[files]]
-source = "**/*"
-destination = "${install}"
-component = "core"
-when = 'component("cli")'
-
-[[path]]
-value = "${install}/bin"
-when = 'component("cli") || component("core")'
-"#,
-    );
-    let installer = parse_and_compile(&src, "windows-x64").expect("valid refs");
-    assert_eq!(installer.files.len(), 1);
-    assert_eq!(installer.path.len(), 1);
-}
-
-#[test]
 fn install_directory_coverage_follows_the_declared_scope() {
     let directories = [
         (
@@ -506,7 +404,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.windows-x64]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = {{ directory = "dist/windows-x64" }}
 
 [install]

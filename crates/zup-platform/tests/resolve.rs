@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use rstest::rstest;
-use zup_core::{InstallLocation, SelectedScope, TargetTriple, Template, Variable, VariableValue};
+use zup_core::{InstallLocation, SelectedScope, Target, Template, Variable, VariableValue};
 use zup_platform::{
     InstallLocationError, InstallLocationResolver, TargetPath, TemplateResolveError,
     resolve_template_path,
@@ -17,7 +17,7 @@ impl FakeLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let path =
             self.paths
@@ -41,7 +41,7 @@ impl InstallLocationResolver for FakeLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         self.resolved(location, scope, target)
     }
@@ -57,13 +57,13 @@ impl InstallLocationResolver for DriftingTargetLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        _target: &TargetTriple,
+        _target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let (owning, path) = match location {
             InstallLocation::Programs => (windows_target(), r"C:\PF"),
             _ => (unix_target(), "/opt/pf"),
         };
-        TargetPath::new(&owning, path).map_err(|source| InstallLocationError::ResolutionFailed {
+        TargetPath::new(owning, path).map_err(|source| InstallLocationError::ResolutionFailed {
             location,
             scope,
             source: source.into(),
@@ -71,12 +71,12 @@ impl InstallLocationResolver for DriftingTargetLocations {
     }
 }
 
-fn windows_target() -> TargetTriple {
-    TargetTriple::parse("x86_64-pc-windows-msvc").unwrap()
+fn windows_target() -> Target {
+    Target::parse("windows-x64").unwrap()
 }
 
-fn unix_target() -> TargetTriple {
-    TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()
+fn unix_target() -> Target {
+    Target::parse("linux-x64").unwrap()
 }
 
 fn fake_locations() -> FakeLocations {
@@ -275,7 +275,7 @@ fn resolver_answering_for_two_targets_in_one_template_is_rejected() {
         matches!(
             error,
             TemplateResolveError::ResolverTargetMismatch { ref path, ref target }
-                if path == "/opt/pf" && target == "x86_64-unknown-linux-gnu"
+                if path == "/opt/pf" && target == "linux-x64"
         ),
         "error: {error:?}"
     );

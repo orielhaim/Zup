@@ -1,17 +1,22 @@
-use std::{fs, path::Path};
+use std::fs;
+#[cfg(windows)]
+use std::path::Path;
 
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_binary::{Executable, ProgramKind};
+#[cfg(windows)]
 use zup_build::TargetBuildPlan;
+#[cfg(windows)]
 use zup_bundle::{BundleWriter, PayloadSource};
 use zup_core::Frontend;
+#[cfg(windows)]
 use zup_manifest::TargetOverrides;
-use zup_windows::{
-    BundleError, EmbeddedBundle, build_self_contained_executable, embed_bundle_file, read_frontend,
-    validate_frontend,
-};
+use zup_windows::{BundleError, read_frontend, validate_frontend};
+#[cfg(windows)]
+use zup_windows::{EmbeddedBundle, build_self_contained_executable, embed_bundle_file};
 
+#[cfg(windows)]
 fn plan(root: &Path) -> TargetBuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
     fs::write(root.join("dist/a.bin"), b"payload").unwrap();
@@ -53,16 +58,10 @@ destination = "${{install}}"
     build.targets.pop().unwrap()
 }
 
-/// Reading an image and deciding whether it may be the installer is one decision
-/// at three levels: what the image declares, whether the bytes are an image at
-/// all, and whether what they declare is the frontend the build asked for.
 #[rstest]
 #[case(pe_bytes(3), Some(Frontend::Console), true)]
 #[case(pe_bytes(2), Some(Frontend::Gui), true)]
-/// A driver records a subsystem that is neither a window nor a console. Its
-/// machine type is still readable; its frontend is not guessed at.
 #[case(pe_bytes(9), None, true)]
-/// A file that is not an image at all.
 #[case(b"not a PE".to_vec(), None, false)]
 fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
     #[case] bytes: Vec<u8>,
@@ -72,13 +71,13 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
     let root = TempDir::new().unwrap();
     let runtime = root.path().join("runtime.exe");
     fs::write(&runtime, bytes).unwrap();
-    let target =
-        zup_core::TargetTriple::parse(zup_plugin_contract::HOST_TARGET).expect("the host target");
+    // The bytes are a Windows PE image on every host that runs this test, so
+    // they match a Windows triple rather than the host's own: on Linux the
+    // host target is an ELF triple a PE image must not claim to be.
+    let target = zup_core::Target::parse("windows-x64").expect("a Windows target");
 
     let Some(frontend) = declared else {
         if !readable_target {
-            // A file that is not an image at all: there is nothing to read, and
-            // every question about it is refused at the read rather than answered.
             let error = read_frontend(&runtime).expect_err("not an image at all");
             assert!(matches!(error, BundleError::Inspect(_)), "{error}");
             assert!(
@@ -87,8 +86,7 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
             );
             return;
         }
-        // An image whose subsystem is neither a window nor a console. Its machine
-        // type is still readable; its frontend is not guessed at.
+
         assert_eq!(
             read_frontend(&runtime).unwrap(),
             None,
@@ -121,8 +119,7 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
         validate_frontend(&runtime, other).is_err(),
         "a {frontend:?} image may not launch a {other:?} installer"
     );
-    // A headless frontend is a console program that also promises to speak a
-    // protocol, so a console image serves it and a windowed one does not.
+
     assert_eq!(
         validate_frontend(&runtime, Frontend::Headless).is_ok(),
         frontend == Frontend::Console
@@ -184,8 +181,7 @@ fn embedded_reader_reports_a_missing_index() {
 fn self_contained_build_round_trips_matching_target() {
     let root = TempDir::new().unwrap();
     let mut build = plan(root.path());
-    // Whatever this test binary happens to be, so the round trip exercises the
-    // matching case rather than a deliberate mismatch.
+
     build.installer.frontend = read_frontend(&std::env::current_exe().unwrap())
         .unwrap()
         .expect("a test binary on Windows records a subsystem");

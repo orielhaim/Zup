@@ -28,21 +28,25 @@ pub enum OperationReceipt {
         destination: String,
         installed_sha256: String,
         installed_size: u64,
+        executable: bool,
         created_directories: Vec<String>,
     },
     ReplaceFile {
         destination: String,
         previous_sha256: String,
         previous_size: u64,
+        previous_mode: u32,
         backup_path: String,
         new_sha256: String,
         new_size: u64,
+        executable: bool,
     },
     RemoveFile {
         destination: TargetPath,
         backup_path: TargetPath,
         sha256: Sha256Digest,
         size: u64,
+        mode: u32,
     },
     Backend {
         key: ResourceKey,
@@ -74,13 +78,22 @@ impl OperationReceipt {
             Self::ReplaceFile {
                 previous_sha256,
                 new_sha256,
+                previous_mode,
                 ..
             } => {
                 Sha256Digest::from_str(previous_sha256)
                     .and_then(|_| Sha256Digest::from_str(new_sha256))
                     .map_err(|_| "invalid replaced file digest".to_string())?;
+                if *previous_mode & !0o7777 != 0 {
+                    return Err("invalid replaced file mode".to_string());
+                }
             }
-            Self::RemoveFile { .. } | Self::Control => {}
+            Self::RemoveFile { mode, .. } => {
+                if *mode & !0o7777 != 0 {
+                    return Err("invalid removed file mode".to_string());
+                }
+            }
+            Self::Control => {}
         }
         Ok(())
     }
@@ -89,20 +102,10 @@ impl OperationReceipt {
 pub trait OperationExecutor {
     type Error;
 
-    /// Preflight one node before the transaction mutates anything.
-    ///
-    /// Called for the `Begin` and `Preflight` barriers, so it must observe
-    /// only: a prepare that changes state defeats the barrier it guards.
     fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error>;
 
     fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error>;
 
-    /// Confirm that an applied node's installed state matches its receipt.
-    ///
-    /// Called once per applied mutation, file removal, and backend operation
-    /// before the commit barrier. The receipt is the only durable record of
-    /// what the apply was supposed to install, so it is the comparison basis.
-    /// Must observe only.
     fn verify(
         &mut self,
         operation: &TransactionNode,

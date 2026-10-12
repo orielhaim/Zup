@@ -7,6 +7,20 @@ fn zup() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zup"))
 }
 
+/// The target fixtures check on this host, and a frontend its backend ships.
+///
+/// The diagnostics under test are host-independent; the target carrying them
+/// has to lower far enough to reach the compile errors they describe.
+#[cfg(windows)]
+const TARGET: &str = "windows-x64";
+#[cfg(not(windows))]
+const TARGET: &str = "linux-x64";
+
+#[cfg(windows)]
+const FRONTEND: &str = "gui";
+#[cfg(not(windows))]
+const FRONTEND: &str = "console";
+
 #[test]
 fn init_creates_a_small_editor_ready_manifest() {
     let root = TempDir::new().unwrap();
@@ -53,6 +67,7 @@ fn init_creates_a_small_editor_ready_manifest() {
 }
 
 #[test]
+#[cfg(windows)]
 fn plan_reports_the_resolved_installation_as_machine_output() {
     let root = TempDir::new().unwrap();
     let manifest = root.path().join("zup.toml");
@@ -67,7 +82,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 [install]
 scope = "user"
@@ -114,7 +129,7 @@ fn fmt_preserves_author_comments_and_check_detects_clean_manifests() {
     let manifest = root.path().join("zup.toml");
     fs::write(
         &manifest,
-        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget=\"x86_64-pc-windows-msvc\"\nsource={directory=\"dist\"}\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${location.user_data}/Fmt\"\n",
+        "# keep this comment\nschema=1\n[app]\nid=\"com.example.fmt\"\nname=\"Fmt\"\nversion=\"1.0.0\"\n[build]\n\n[build.targets.default]\ntarget=\"windows-x64\"\nsource={directory=\"dist\"}\n[install]\nscope=\"user\"\n[install.directory]\nuser=\"${location.user_data}/Fmt\"\n",
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
@@ -143,7 +158,9 @@ fn check_renders_source_aware_semantic_diagnostics() {
     let manifest = root.path().join("zup.toml");
     fs::write(
         &manifest,
-        r#"schema = 1
+        format!(
+            r#"schema = 1
+frontend = "{FRONTEND}"
 [app]
 id = "com.example.bad"
 name = "Bad"
@@ -151,17 +168,18 @@ version = "1.0.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
-source = { directory = "dist" }
+target = "{TARGET}"
+source = {{ directory = "dist" }}
 [install]
 scope = "user"
 [install.directory]
-user = "${location.user_data}/Bad"
+user = "${{location.user_data}}/Bad"
 [[files]]
 source = "x"
-destination = "${install}/x"
+destination = "${{install}}/x"
 component = "missing"
 "#,
+        ),
     )
     .unwrap();
     let output = zup()

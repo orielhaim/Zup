@@ -1,5 +1,3 @@
-//! The state a preset draws, and the only way it changes.
-
 use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
 use zup_preset_protocol::{
@@ -12,7 +10,6 @@ use zup_runtime::{InstallOutcome, RuntimeEvent};
 
 use crate::convert;
 
-/// The choice an engine request carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub scope: SelectedScope,
@@ -21,7 +18,6 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// The choices the surface currently shows, as an engine would read them.
     pub fn from_surface(surface: &Surface) -> Self {
         Self {
             scope: convert::engine_scope(surface.scope()),
@@ -37,43 +33,29 @@ impl Selection {
     }
 }
 
-/// One launcher the application declares, and the component that owns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launchable {
     pub target: LaunchTarget,
     pub component: Option<ComponentId>,
 }
 
-/// What the host decided an action means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDecision {
-    /// Apply a lifecycle with these choices.
     Run {
         action: LifecycleAction,
         selection: Selection,
-        /// The uninstall ran from the copy the operating system is about to
-        /// delete, so this process is the one that has to finish it.
         cleanup_lock: bool,
     },
-    /// The choices changed: work out what they would change.
     Plan(Selection),
-    /// Resolve the configured update channel.
     Update,
-    /// Ask the running operation to stop at a safe boundary.
     Cancel,
-    /// Reveal the session log.
     OpenLog,
-    /// Put a diagnostic summary on the clipboard.
     CopyDiagnostics,
-    /// Start the installed application through this launcher.
     Launch(LaunchTarget),
-    /// The action was absorbed into the snapshot and needs no engine work.
     Acknowledged,
-    /// The action does not apply here.
     Refused(ActionRefusal),
 }
 
-/// Why the host would not do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActionRefusal {
     #[error("this surface does not offer that operation")]
@@ -100,28 +82,16 @@ pub enum ActionRefusal {
     NothingToLaunch,
 }
 
-/// The installer's authoritative view of itself.
-///
-/// A preset renders `snapshot()` and sends actions; nothing else about this
-/// session's state is reachable from outside. Every mutation goes through here,
-/// whether the caller is an engine reporting a real install or a development
-/// environment pretending to be one, because a preset that could tell the
-/// difference would be a preset developed against a machine that does not exist.
 pub struct HostState {
     snapshot: Snapshot,
     capabilities: Capabilities,
-    /// The lifecycle a `Retry` re-runs.
     retry: Option<(LifecycleAction, Selection)>,
-    /// The session log, which a preset asks for rather than reads.
     log_path: Option<String>,
-    /// Whether the last operation is still owned by a running thread.
     running: bool,
-    /// What the application can be started through once it is installed.
     launchers: Vec<Launchable>,
 }
 
 impl HostState {
-    /// Open the install surface for a package that is not yet installed.
     pub fn install(
         product: ProductIdentity,
         options: zup_preset_protocol::InstallOptions,
@@ -130,7 +100,6 @@ impl HostState {
         Self::open(product, Surface::Install(options), capabilities)
     }
 
-    /// Open the maintenance surface for an installation that exists.
     pub fn maintenance(
         product: ProductIdentity,
         state: MaintenanceState,
@@ -170,7 +139,6 @@ impl HostState {
         }
     }
 
-    /// The launchers the application declares, in the order it declared them.
     pub fn with_launchers(mut self, launchers: Vec<Launchable>) -> Self {
         self.launchers = launchers;
         self
@@ -184,15 +152,10 @@ impl HostState {
         &self.capabilities
     }
 
-    /// Where the engine is writing this session's log.
-    ///
-    /// Not on the snapshot: a path to a local file is a fact about this machine
-    /// and not something a published preset can be shown.
     pub fn log_path(&self) -> Option<&str> {
         self.log_path.as_deref()
     }
 
-    /// The state an operation returns to when it ends without committing.
     fn resting_state(&self) -> InstallerState {
         match &self.snapshot.surface {
             Surface::Install(_) => InstallerState::Options,
@@ -200,9 +163,6 @@ impl HostState {
         }
     }
 
-    // -- Actions ----------------------------------------------------------
-
-    /// Decide what an action means, and record what it changed.
     pub fn accept(&mut self, action: Action) -> HostDecision {
         match action {
             Action::SetScope { scope } => self.set_scope(scope),
@@ -241,10 +201,6 @@ impl HostState {
         }
     }
 
-    /// Ask for a plan of the current choices, when this host works plans out.
-    ///
-    /// The session calls this once when it opens; every change of choice asks
-    /// again through [`HostDecision::Plan`].
     pub fn plan_request(&mut self) -> Option<Selection> {
         if !self.capabilities.contains(Capability::PlanPreview) {
             return None;
@@ -308,7 +264,6 @@ impl HostState {
         self.replan()
     }
 
-    /// Which lifecycle a person would recognize this action as.
     fn operation_kind(&self, action: LifecycleAction) -> OperationKind {
         match action {
             LifecycleAction::Uninstall => OperationKind::Uninstall,
@@ -323,7 +278,6 @@ impl HostState {
         }
     }
 
-    /// Start a lifecycle, recording the intent a `Retry` would repeat.
     fn start(&mut self, action: LifecycleAction, cleanup_lock: bool) -> HostDecision {
         if self.running {
             return HostDecision::Refused(ActionRefusal::Busy);
@@ -339,7 +293,6 @@ impl HostState {
         }
     }
 
-    /// A lifecycle that only an installation which already exists can run.
     fn maintenance_op(&mut self, action: LifecycleAction, cleanup_lock: bool) -> HostDecision {
         if !self.capabilities.contains(Capability::Maintenance) {
             return HostDecision::Refused(ActionRefusal::UnsupportedSurface);
@@ -410,9 +363,6 @@ impl HostState {
         }
     }
 
-    // -- Engine events ----------------------------------------------------
-
-    /// An operation has started. The host owns the state from here.
     pub fn begin(&mut self) {
         self.running = true;
         self.snapshot.state = InstallerState::Running;
@@ -427,10 +377,6 @@ impl HostState {
         self.snapshot.launch = None;
     }
 
-    /// Record the answer to "what will change".
-    ///
-    /// An answer for choices that have since changed is dropped: the request
-    /// for the current ones is already on its way.
     pub fn set_plan(&mut self, preview: zup_presentation::PlanPreview) {
         let preview = convert::plan(&preview);
         let selected: std::collections::BTreeSet<&ComponentId> = self
@@ -452,22 +398,18 @@ impl HostState {
         }
     }
 
-    /// The plan could not be worked out. The choices still stand.
     pub fn plan_failed(&mut self, reason: String) {
         self.snapshot.plan = PlanStatus::Failed { reason };
     }
 
-    /// Record where the engine is writing its log.
     pub fn set_log_path(&mut self, path: String) {
         self.log_path = Some(path);
     }
 
-    /// Record the update check's result.
     pub fn set_update(&mut self, channel: Option<String>, state: UpdateState) {
         self.snapshot.update = Some(UpdatePresentation { channel, state });
     }
 
-    /// Record the resources a repair left alone, because they had drifted.
     pub fn set_repair_drift(&mut self, resources: Vec<String>) {
         if resources.is_empty() {
             return;
@@ -480,7 +422,6 @@ impl HostState {
         self.snapshot.repair_drift = resources;
     }
 
-    /// Record a failure the engine reported before it started a transaction.
     pub fn fail(&mut self, message: String, recovery_required: bool) {
         let diagnostic = diagnostic_for(&message, recovery_required);
         self.snapshot.diagnostic = Some(convert::diagnostic(&diagnostic));
@@ -492,7 +433,6 @@ impl HostState {
         self.finish();
     }
 
-    /// Translate one engine event into presentation state.
     pub fn observe(&mut self, event: &RuntimeEvent) {
         match event {
             RuntimeEvent::WaitingForAuthorization => self.advance("Waiting for approval…"),
@@ -591,7 +531,6 @@ impl HostState {
         }
     }
 
-    /// Translate the outcome of a finished transaction.
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
         match outcome {
             InstallOutcome::Committed => {
@@ -612,9 +551,6 @@ impl HostState {
                 self.finish();
             }
             InstallOutcome::RecoveryRequired => self.fail("recovery required".into(), true),
-            // Not a failure: the installation is fine, another operation holds
-            // it, and the right answer is the surface it started from with an
-            // explanation rather than a red dialog.
             InstallOutcome::Busy { operation } => {
                 self.snapshot.diagnostic = Some(DiagnosticPresentation {
                     kind: DiagnosticKind::Busy,
@@ -630,9 +566,6 @@ impl HostState {
                 self.finish();
             }
             InstallOutcome::Failed(message) => {
-                // A blocked preflight already produced a `Blocked` state with
-                // the processes that hold the files. Reporting it again as a
-                // failure would throw away the only actionable part of it.
                 if matches!(self.snapshot.state, InstallerState::Blocked { .. }) {
                     self.snapshot.progress = None;
                     self.finish();
@@ -643,14 +576,12 @@ impl HostState {
         }
     }
 
-    /// The operation committed.
     fn succeed(&mut self) {
         self.snapshot.state = InstallerState::Succeeded;
         self.snapshot.launch = self.launch_target();
         self.finish();
     }
 
-    /// What the installation can be started through, now that it has committed.
     fn launch_target(&self) -> Option<LaunchTarget> {
         if !self.capabilities.contains(Capability::Launch)
             || self.snapshot.operation == Some(OperationKind::Uninstall)
@@ -670,7 +601,6 @@ impl HostState {
             .map(|launcher| launcher.target.clone())
     }
 
-    /// The operation is no longer owned by a thread.
     fn finish(&mut self) {
         self.running = false;
         if !self.snapshot.state.is_active() {
@@ -678,7 +608,6 @@ impl HostState {
         }
     }
 
-    /// Report a new position in the run without disturbing the counters.
     fn advance(&mut self, label: &str) {
         let waiting = self.snapshot.state == InstallerState::WaitingForSafeCancellation;
         let previous = self.snapshot.progress.take();
@@ -703,7 +632,6 @@ impl HostState {
     }
 }
 
-/// What the engine calls a node, as a person reads it.
 fn operation_label(id: &str) -> String {
     let id = id.to_ascii_lowercase();
     if id.contains("service") {
@@ -717,7 +645,6 @@ fn operation_label(id: &str) -> String {
     }
 }
 
-/// The explanation a failure gets, in the shape a person can act on.
 fn diagnostic_for(
     message: &str,
     recovery_required: bool,

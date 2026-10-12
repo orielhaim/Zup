@@ -8,13 +8,39 @@ zup build
 
 With one selected target and no explicit artifact profiles, this produces one installer for that target.
 
+## Toolchain
+
+`zup build` composes an installer from binaries built once and shipped beside the CLI: a runtime template per target and frontend, launchers, and the preset that draws the window. Zup looks for them in this order:
+
+1. `--toolchain <DIR>` or `ZUP_TOOLCHAIN`
+2. the per-machine cache (`zup toolchain install <release-dir>`)
+3. `toolchain/<version>/` beside the executable
+
+Each file carries a `.zup-toolchain.json` descriptor with its version, target, frontend and digest. A component from another Zup version is refused. `zup toolchain status` reports what is present and where.
+
+Building Zup from source also needs:
+
+```bash
+cargo xtask toolchain build
+```
+
+Without it, builds fail with `zup.toolchain.component_missing`.
+
 ## Select targets
 
 ```bash
 zup build --target windows-x64
 ```
 
-`--target` names target profiles or canonical triples. It chooses native variants to build; it does not name the final distribution artifact.
+`--target` names target profiles or Zup targets. It chooses native variants to build; it does not name the final distribution artifact.
+
+Linux targets build the same way, on either host:
+
+```bash
+zup build --target linux-x64
+```
+
+A Linux build writes one self-contained, extensionless installer per target (for example `Acme-Setup`). Universal and thin artifacts are Windows installers: a Linux target in an artifact composition is refused with the per-target alternative spelled out.
 
 ## Explicit artifacts
 

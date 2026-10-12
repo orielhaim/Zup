@@ -19,8 +19,6 @@ Credentials come from the environment or GitHub tooling; they are not stored in 
 
 GitHub publishing can derive a version tag or use project-specific tag/notes configuration under `[publish.github]`.
 
-Keep release policy in the manifest when it must be shared by local and CI release paths. Keep secrets outside it.
-
 ## GitHub as a content host
 
 A project can also configure clients to fetch release content from GitHub release assets:

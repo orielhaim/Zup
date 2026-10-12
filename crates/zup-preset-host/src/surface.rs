@@ -1,5 +1,3 @@
-//! Which surface a session opens, and what it says before anything happens.
-
 use zup_core::{InstallScope, Installer, SelectedScope};
 use zup_exec::InstallLedger;
 use zup_preset_protocol::{
@@ -9,7 +7,6 @@ use zup_preset_protocol::{
 
 use crate::convert;
 
-/// The product as a person sees it named.
 pub fn product(installer: &Installer) -> ProductIdentity {
     ProductIdentity {
         name: installer.app.name.to_string(),
@@ -19,7 +16,6 @@ pub fn product(installer: &Installer) -> ProductIdentity {
     }
 }
 
-/// Every scope this package installs into.
 pub fn scopes(installer: &Installer) -> Vec<zup_preset_protocol::InstallScope> {
     match installer.install.scope {
         InstallScope::User => vec![zup_preset_protocol::InstallScope::User],
@@ -31,7 +27,6 @@ pub fn scopes(installer: &Installer) -> Vec<zup_preset_protocol::InstallScope> {
     }
 }
 
-/// The scope a fresh session starts in when the caller named none.
 pub fn default_scope(installer: &Installer) -> SelectedScope {
     match installer.install.scope {
         InstallScope::Machine => SelectedScope::Machine,
@@ -39,10 +34,6 @@ pub fn default_scope(installer: &Installer) -> SelectedScope {
     }
 }
 
-/// The components a person may choose, with the selection this machine implies.
-///
-/// An existing installation's ledger is the authority on what it has; a fresh
-/// session falls back to what the application declares.
 pub fn components(
     installer: &Installer,
     preselected: Option<&[zup_core::ComponentId]>,
@@ -55,8 +46,6 @@ pub fn components(
             let has = installed.map(|ledger| ledger.selected_components.contains(&component.id));
             let selected = match (preselected, has) {
                 (Some(preselected), _) => preselected.contains(&component.id),
-                // An existing installation keeps what it has; a component it
-                // never had is something to add, not something already chosen.
                 (None, Some(has)) => has || component.required,
                 (None, None) => component.default || component.required,
             };
@@ -72,10 +61,6 @@ pub fn components(
         .collect()
 }
 
-/// The component groups a person chooses among, implicit group included.
-///
-/// Every component is in exactly one group. Components that name no group share
-/// one group, so a package that never declares groups still presents one set.
 pub fn component_groups(
     installer: &Installer,
     listed: &[ComponentOption],
@@ -121,7 +106,6 @@ pub fn component_groups(
     groups
 }
 
-/// The choices a fresh installation offers.
 pub fn install_options(
     installer: &Installer,
     scope: SelectedScope,
@@ -142,12 +126,6 @@ pub fn install_options(
     }
 }
 
-/// What a person can do to an installation that already exists.
-///
-/// A maintenance session applies to the installation that exists: it does not
-/// offer a choice of scope, because moving an installation between scopes is a
-/// different decision. The health is `Unknown` because nothing has inspected
-/// this machine yet - a repair is what turns it into an answer.
 pub fn maintenance_state(
     installer: &Installer,
     ledger: &InstallLedger,
@@ -166,10 +144,6 @@ pub fn maintenance_state(
     }
 }
 
-/// What the application can be started through, in the order it declared them.
-///
-/// Start-menu launchers first: they are the ones a person would reach for, and a
-/// desktop shortcut is usually a second copy of one of them.
 pub fn launchers(installer: &Installer) -> Vec<crate::Launchable> {
     let mut launchers: Vec<&zup_core::Launcher> = installer.launchers.iter().collect();
     launchers.sort_by_key(|launcher| launcher.location != zup_core::LauncherLocation::Menu);
@@ -184,15 +158,10 @@ pub fn launchers(installer: &Installer) -> Vec<crate::Launchable> {
         .collect()
 }
 
-/// What this installer can offer a preset.
 pub fn capabilities(installer: &Installer, maintenance: bool) -> Capabilities {
     zup_artifact::preset::offers_for(installer, maintenance)
 }
 
-/// The location an installation committed, as text.
-///
-/// Not on the snapshot: a path to a local directory is a fact about this machine
-/// and not something a published preset can be shown.
 pub fn persisted_location(ledger: Option<&InstallLedger>) -> Option<String> {
     ledger
         .and_then(|ledger| ledger.install_directory.as_ref())

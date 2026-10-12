@@ -230,7 +230,7 @@ mod tests {
         );
         let events = automation_events(&AcquisitionEvent::VariantSelected {
             variant: "x64".to_owned(),
-            target: "x86_64-pc-windows-msvc".to_owned(),
+            target: "windows-x64".to_owned(),
             compatibility: "native".to_owned(),
         });
         assert!(
@@ -309,7 +309,7 @@ mod tests {
             },
             AcquisitionEvent::VariantSelected {
                 variant: "x64".to_owned(),
-                target: "x86_64-pc-windows-msvc".to_owned(),
+                target: "windows-x64".to_owned(),
                 compatibility: "native".to_owned(),
             },
             AcquisitionEvent::AcquisitionStarted {

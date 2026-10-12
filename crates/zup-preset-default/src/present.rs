@@ -1,29 +1,17 @@
-//! Resolved component groups, decided before anything is drawn.
-//!
-//! A group is one decision. Every member of a group is presented with that
-//! group, and nowhere else. Prominence says how clearly the decision is
-//! exposed. Whether the defaults are enough to install is a separate question.
-
-use zup_preset_sdk::prelude::*;
-// `InstallOptions` is only named by the tests in this module, which build one by
-// hand to present; the resolution below reads it through `Surface`.
+use zup_sdk::preset::prelude::*;
 #[cfg(test)]
-use zup_preset_sdk::presentation::{InstallOptions, PlanStatus};
+use zup_sdk::preset::presentation::{InstallOptions, PlanStatus};
 
 use crate::model::{self, ComponentRow};
 
-/// A primary group larger than this is a summary that opens the full set,
-/// rather than a list. The set is still the whole group.
 const INLINE_LIMIT: usize = 6;
 
-/// Where a resolved group sits. `Auto` has already been decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     Primary,
     Secondary,
 }
 
-/// One group, with every member it contains.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedGroup {
     pub id: String,
@@ -35,13 +23,11 @@ pub struct ResolvedGroup {
 }
 
 impl ResolvedGroup {
-    /// A short reading of how much of the group is selected.
     pub fn count(&self) -> String {
         let selected = self.rows.iter().filter(|row| row_selected(row)).count();
         format!("{selected} of {} selected", self.rows.len())
     }
 
-    /// Names of a few selected components, for a large group's summary.
     pub fn selected_names(&self) -> String {
         let names: Vec<&str> = self
             .rows
@@ -59,7 +45,6 @@ impl ResolvedGroup {
         }
     }
 
-    /// Whether this group, if it demands an explicit choice, has one.
     pub fn satisfied(&self) -> bool {
         self.selection == SelectionRequirement::Defaulted
             || self
@@ -68,14 +53,11 @@ impl ResolvedGroup {
                 .any(|row| matches!(row.kind, model::ComponentKind::Optional { selected: true }))
     }
 
-    /// A primary group small enough to list in place.
     pub fn inline(&self) -> bool {
         self.placement != Placement::Primary || self.rows.len() <= INLINE_LIMIT
     }
 }
 
-/// The install surface's component decisions, plus the choices that are not
-/// components.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallSurface {
     pub primary: Vec<ResolvedGroup>,
@@ -103,7 +85,6 @@ impl InstallSurface {
         }
     }
 
-    /// Why Install cannot proceed, when a group still needs an explicit choice.
     pub fn blocked(&self) -> Option<String> {
         self.primary
             .iter()
@@ -112,7 +93,6 @@ impl InstallSurface {
             .map(|group| format!("Choose at least one item in {}", group.title))
     }
 
-    /// What the collapsed customization row should say.
     pub fn customize_summary(&self, scope: InstallScope) -> Option<String> {
         let groups = &self.secondary;
         if groups.is_empty() {
@@ -134,7 +114,6 @@ impl InstallSurface {
     }
 }
 
-/// Every group that should be shown, each with all of its members.
 pub fn resolve(snapshot: &Snapshot) -> Vec<ResolvedGroup> {
     let rows = model::component_rows(&snapshot.surface);
     let by_id: std::collections::BTreeMap<&ComponentId, &ComponentRow> =

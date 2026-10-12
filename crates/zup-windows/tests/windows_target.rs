@@ -1,25 +1,31 @@
-//! Windows target resolution and read-only inspection tests.
-
+#[cfg(windows)]
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zup_build::materialize;
-use zup_core::{INSTALL_LOCATIONS, InstallLocation, SelectedScope, TargetTriple};
-use zup_exec::{FileOperationKind, ObservedFileState, plan_execution};
+#[cfg(windows)]
+use zup_core::INSTALL_LOCATIONS;
+use zup_core::{InstallLocation, SelectedScope, Target};
+#[cfg(windows)]
+use zup_exec::ObservedFileState;
+#[cfg(all(windows, feature = "test-launcher"))]
+use zup_exec::{FileOperationKind, plan_execution};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{InstallPlan, PlanRequest, plan};
 use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
-use zup_windows::{
-    FakeServiceReader, FakeShortcutReader, TargetResolveError, WindowsInstallLocationResolver,
-    WindowsRegistryReader, WindowsTargetContext, inspect_files, inspect_target_with,
-    resolve_target,
-};
+#[cfg(all(windows, feature = "test-launcher"))]
+use zup_windows::{InspectReads, inspect_target_with};
+use zup_windows::{TargetResolveError, WindowsTargetContext, resolve_target};
+#[cfg(windows)]
+use zup_windows::{WindowsInstallLocationResolver, inspect_files};
 
 #[derive(Debug, Clone)]
 struct FakeInstallLocations {
-    root: PathBuf,
+    base: String,
 }
 
 impl InstallLocationResolver for FakeInstallLocations {
@@ -27,7 +33,7 @@ impl InstallLocationResolver for FakeInstallLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let name = match location {
             InstallLocation::Programs => "PF",
@@ -42,8 +48,7 @@ impl InstallLocationResolver for FakeInstallLocations {
                 SelectedScope::Machine => "PublicDesktop",
             },
         };
-        let path = self.root.join(name);
-        TargetPath::new(target, path.to_string_lossy().as_ref()).map_err(|source| {
+        TargetPath::new(target, format!("{}/{name}", self.base)).map_err(|source| {
             InstallLocationError::ResolutionFailed {
                 location,
                 scope,
@@ -61,7 +66,7 @@ impl InstallLocationResolver for FixedInstallLocations {
         &self,
         location: InstallLocation,
         scope: SelectedScope,
-        target: &TargetTriple,
+        target: &Target,
     ) -> Result<TargetPath, InstallLocationError> {
         let path = match location {
             InstallLocation::Programs => r"C:\Program Files",
@@ -101,7 +106,7 @@ version = "1.4.0"
 [build]
 
 [build.targets.default]
-target = "x86_64-pc-windows-msvc"
+target = "windows-x64"
 source = { directory = "dist" }
 
 [install]
@@ -186,7 +191,7 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan
     .expect("materialize");
     let install = plan(
         &build,
-        &PlanRequest::new(config.target.clone(), SelectedScope::User),
+        &PlanRequest::new(config.target, SelectedScope::User),
     )
     .expect("semantic plan");
     (dir, install)
@@ -201,7 +206,7 @@ fn resolve_fixed(
     )
 }
 
-fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::TargetPlan) {
+fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_platform::TargetPlan) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("project");
     write(&project.join("zup.toml"), b"");
@@ -225,12 +230,11 @@ fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::Target
         zup_build::Writes::None,
     )
     .expect("materialize");
-    let install =
-        plan(&build, &PlanRequest::new(config.target.clone(), scope)).expect("install plan");
+    let install = plan(&build, &PlanRequest::new(config.target, scope)).expect("install plan");
 
     let context = WindowsTargetContext::with_resolver(
         FakeInstallLocations {
-            root: root.to_path_buf(),
+            base: base.to_owned(),
         },
         scope,
     );
@@ -238,6 +242,7 @@ fn pipeline(root: &Path, scope: SelectedScope) -> (TempDir, zup_platform::Target
     (dir, target)
 }
 
+#[cfg(windows)]
 fn temp_root() -> TempDir {
     TempDir::new().unwrap()
 }
@@ -437,8 +442,7 @@ target = "${install}/Acme.exe"
 
 #[test]
 fn resolve_target_leaves_no_templates_and_sets_lnk() {
-    let root = temp_root();
-    let (_dir, target) = pipeline(root.path(), SelectedScope::User);
+    let (_dir, target) = pipeline("C:/fake", SelectedScope::User);
 
     let json = serde_json::to_string(&target).unwrap();
     assert!(!json.contains("${"), "unresolved vars: {json}");
@@ -451,18 +455,18 @@ fn resolve_target_leaves_no_templates_and_sets_lnk() {
 
 #[test]
 fn machine_shortcut_uses_common_programs() {
-    let root = temp_root();
-    let (_dir, target) = pipeline(root.path(), SelectedScope::Machine);
+    let (_dir, target) = pipeline("C:/fake", SelectedScope::Machine);
     let link = target.launchers[0].launcher_path.to_string();
     assert!(link.contains("CommonStartMenu\\Programs"), "{link}");
     assert_eq!(target.path_entries[0].scope, SelectedScope::Machine);
     assert_eq!(target.protocols[0].scope, SelectedScope::Machine);
 }
 
+#[cfg(windows)]
 #[test]
 fn inspect_files_absent_present_directory() {
     let root = temp_root();
-    let (_dir, target) = pipeline(root.path(), SelectedScope::User);
+    let (_dir, target) = pipeline(&root.path().to_string_lossy(), SelectedScope::User);
     let pf = root.path().join("LocalAppData/Programs/Acme");
     write(&pf.join("Acme.exe"), b"main-correct");
     write(&pf.join("acme-agent.exe"), b"agent-OLD");
@@ -486,23 +490,20 @@ fn inspect_files_absent_present_directory() {
     assert!(matches!(by_name["acme.exe"], ObservedFileState::NonFile));
 }
 
+#[cfg(all(windows, feature = "test-launcher"))]
 #[test]
 fn inspect_target_with_fakes_and_plan_execution() {
     let root = temp_root();
-    let (_dir, target) = pipeline(root.path(), SelectedScope::User);
+    let (_dir, target) = pipeline(&root.path().to_string_lossy(), SelectedScope::User);
     let pf = root.path().join("LocalAppData/Programs/Acme");
     write(&pf.join("Acme.exe"), b"main-correct");
     write(&pf.join("acme-agent.exe"), b"agent-OLD");
-    // bin/acme.exe intentionally absent → Create
 
-    let services = FakeServiceReader::default();
-    let shortcuts = FakeShortcutReader::default();
-    let registry = WindowsRegistryReader;
+    let reads = InspectReads::without_native_readers();
 
-    let snapshot = inspect_target_with(&target, &registry, &services, &shortcuts).unwrap();
+    let snapshot = inspect_target_with(&target, &reads).unwrap();
     let plan = plan_execution(&target, &snapshot, None).unwrap();
 
-    // An existing different file has no proven owner.
     let mut file_kinds = BTreeMap::new();
     for op in &plan.files {
         let name = op.destination.file_name().unwrap().to_owned();
@@ -517,7 +518,6 @@ fn inspect_target_with_fakes_and_plan_execution() {
         zup_exec::LauncherOperationKind::Create
     );
 
-    // Zero mutation: payload on disk unchanged.
     assert_eq!(fs::read(pf.join("acme-agent.exe")).unwrap(), b"agent-OLD");
 }
 
@@ -525,7 +525,7 @@ fn inspect_target_with_fakes_and_plan_execution() {
 #[cfg(windows)]
 fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
     let resolver = WindowsInstallLocationResolver;
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
     for location in INSTALL_LOCATIONS {
         for scope in [SelectedScope::User, SelectedScope::Machine] {
             let path = resolver.resolve(location, scope, &target).unwrap();
@@ -536,19 +536,16 @@ fn live_semantic_locations_resolve_to_absolute_lexical_paths() {
     }
 }
 
-/// The resolver and the state root are the same question asked two ways, so they
-/// are answered from the same place: a user install's state lives in the user
-/// data directory that `${location.user_data}` resolves to, whatever the machine
-/// happens to call that directory.
+#[cfg(windows)]
 #[test]
+#[ignore = "touches the real user profile"]
 fn the_user_state_root_and_the_user_data_location_are_one_directory() {
-    let target = TargetTriple::parse("x86_64-pc-windows-msvc").unwrap();
+    let target = Target::parse("windows-x64").unwrap();
     let user_data = WindowsInstallLocationResolver
         .resolve(InstallLocation::UserData, SelectedScope::User, &target)
         .unwrap();
     let state = zup_windows::default_state_root(SelectedScope::User).unwrap();
-    // A state root is canonicalized, because the ledger treats two spellings of
-    // one directory as two identities, so the location is compared the same way.
+
     let expected = PathBuf::from(user_data.as_str())
         .join("zup")
         .canonicalize()
@@ -559,6 +556,7 @@ fn the_user_state_root_and_the_user_data_location_are_one_directory() {
     );
 }
 
+#[cfg(windows)]
 mod transaction_fingerprint {
     use std::path::Path;
 
@@ -566,8 +564,8 @@ mod transaction_fingerprint {
     use zup_build::{BuildPlan, TargetBuildPlan};
     use zup_core::{
         App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
-        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest,
-        TargetTriple, Template,
+        Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target,
+        Template,
     };
     use zup_exec::LifecycleAction;
     use zup_plan::{
@@ -579,12 +577,12 @@ mod transaction_fingerprint {
     use super::FakeInstallLocations;
 
     struct GuestExecutor {
-        target: TargetTriple,
+        target: Target,
         resources: Vec<PluginResource>,
     }
 
     impl PluginExecutor for GuestExecutor {
-        fn target(&self) -> &TargetTriple {
+        fn target(&self) -> &Target {
             &self.target
         }
 
@@ -602,7 +600,7 @@ mod transaction_fingerprint {
         BuildPlan {
             targets: vec![TargetBuildPlan {
                 installer: Installer {
-                    target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+                    target: Target::parse("windows-x64").unwrap(),
                     frontend: Frontend::Gui,
                     preset: None,
                     app: App {
@@ -660,15 +658,12 @@ mod transaction_fingerprint {
 
     fn fingerprint(root: &Path, state: &Path, resources: Vec<PluginResource>) -> Sha256Digest {
         let mut executor = GuestExecutor {
-            target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            target: Target::parse("windows-x64").unwrap(),
             resources,
         };
         let planned = plan_with_plugins(
             &build_plan(),
-            &PlanRequest::new(
-                TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
-                SelectedScope::User,
-            ),
+            &PlanRequest::new(Target::parse("windows-x64").unwrap(), SelectedScope::User),
             &mut executor,
             &NeverCancelled,
         )
@@ -677,7 +672,7 @@ mod transaction_fingerprint {
             &planned.plan,
             &WindowsTargetContext::with_resolver(
                 FakeInstallLocations {
-                    root: root.to_path_buf(),
+                    base: root.to_string_lossy().into_owned(),
                 },
                 SelectedScope::User,
             ),

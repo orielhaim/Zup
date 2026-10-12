@@ -1,15 +1,3 @@
-//! Windows durable file primitives and installation lock.
-//!
-//! Guarantees used here:
-//! - **atomic namespace transition**: `MoveFileExW` publishes a fully-written
-//!   temp file in one rename
-//! - **power-loss durability**: `FlushFileBuffers` on the temp file, then
-//!   `MOVEFILE_WRITE_THROUGH` on publish
-//! - **process-crash recovery**: handled by the transaction journal on top
-//!
-//! If a durability barrier cannot be satisfied the operation returns
-//! `DurableError::Unavailable` rather than lying.
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +6,7 @@ use typed_path::{
     Utf8Component, Utf8WindowsPath, Utf8WindowsPrefix, constants::windows::SEPARATOR_STR,
 };
 
-use crate::fs_bindings::{
+use crate::bindings::{
     self, CREATE_NEW, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
     GetVolumePathNameW, HANDLE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -26,7 +14,6 @@ use crate::fs_bindings::{
 
 static DURABLE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Durability errors. `Unavailable` means the platform cannot meet the contract.
 #[derive(Debug, Error)]
 pub enum DurableError {
     #[error("durable operation unavailable: {0}")]
@@ -46,9 +33,6 @@ pub enum DurableError {
     InstallationBusy,
 }
 
-/// Write `contents` to `path` with power-loss durability.
-///
-/// Order: write temp → flush temp → durable publish → success.
 pub fn write_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     let tmp = temp_sibling(path);
     write_new_file(&tmp, contents)?;
@@ -59,7 +43,6 @@ pub fn write_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     Ok(())
 }
 
-/// Create `path` only if absent, with durable publication.
 pub fn create_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     let tmp = temp_sibling(path);
     write_new_file(&tmp, contents)?;
@@ -77,14 +60,10 @@ pub fn create_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> 
     Ok(())
 }
 
-/// Durably move `from` → `to` (same volume), replacing `to` if present.
 pub fn move_durable(from: &Path, to: &Path) -> Result<(), DurableError> {
     publish_replace(from, to)
 }
 
-/// Copy a file to a new path and durably publish it without replacing an
-/// existing artifact. The temporary file is a sibling so publication stays
-/// on the destination volume.
 pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), DurableError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DurableError::Io {
@@ -162,7 +141,7 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
             0,
             std::ptr::null_mut(),
             CREATE_NEW,
-            fs_bindings::FILE_ATTRIBUTE_NORMAL,
+            bindings::FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
         )
     };
@@ -240,7 +219,6 @@ fn publish_new(from: &Path, to: &Path) -> Result<(), DurableError> {
     Ok(())
 }
 
-/// Resolve the volume root backing `path` (same-volume staging).
 pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
     let wide_in = to_wide(&path.display().to_string());
     let mut wide_out = vec![0u16; 512];
@@ -263,187 +241,25 @@ pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
     Ok(PathBuf::from(s))
 }
 
-/// Single-writer installation lock (cooperating processes only).
-///
-/// Uses `std::fs::File::try_lock` so two sessions in one process also exclude
-/// each other. This is coordination, not a security boundary: it stops two
-/// lifecycle operations from mutating one installation's ledger and work
-/// directory at the same time, and it says nothing about an adversary.
-///
-/// # What the identity is, and what it deliberately is not
-///
-/// The key is `(application, scope)`. Two installs of different applications do
-/// not block each other, and a user-scope and a machine-scope install of the same
-/// application do not either - they are different installations with different
-/// ledgers, different install directories, and different uninstall entries, and
-/// serialising them would make an unrelated second install wait for no reason.
-///
-/// It is *not* keyed by target or by version. Those are properties of one
-/// operation, not of the installation, and a key that changed as a plan changed
-/// would let two operations hold "the" lock for the same installation at once.
-///
-/// A crash releases the lock through the OS's handle lifetime, so there is no
-/// stale-PID cleanup to get wrong and no window where a dead process's lock
-/// outlives it.
-#[derive(Debug)]
-pub struct InstallationLock {
-    file: std::fs::File,
-    key: String,
-}
-
-/// What one installation's lock is for.
-///
-/// A value rather than two format strings, because the key is written in four
-/// places - a parent session, an elevated worker, a bootstrap phase, and an
-/// uninstall - and four spellings of one lock key is four chances for a parent
-/// and its worker to disagree about which installation they are serializing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LockScope {
-    /// A lifecycle operation on an installed application.
-    Lifecycle,
-    /// A prerequisite bootstrap, which happens before an application exists.
-    Bootstrap,
-}
-
-impl LockScope {
-    /// The prefix that keeps a bootstrap lock from being mistaken for a
-    /// lifecycle one on the same installation.
-    const fn prefix(self) -> &'static str {
-        match self {
-            Self::Lifecycle => "zup-install",
-            Self::Bootstrap => "zup-bootstrap",
-        }
-    }
-}
-
-impl InstallationLock {
-    /// Lock identity for one installation.
-    pub fn lock_key(app_id: &str, scope: &str) -> String {
-        format!("zup-install-{}-{}", sanitize(app_id), sanitize(scope))
-    }
-
-    /// The lock for one installation and one kind of operation.
-    ///
-    /// This is the only place a lifecycle lock key is spelled, and the reason the
-    /// bootstrap and transaction paths can be checked against each other: a parent
-    /// and the worker it elevates call this with the same arguments and get the
-    /// same file, on the same volume, whether or not either of them knows the
-    /// other's existence.
-    pub fn key_for(app_id: &str, scope: &str, kind: LockScope) -> String {
-        match kind {
-            LockScope::Lifecycle => Self::lock_key(app_id, scope),
-            LockScope::Bootstrap => {
-                format!("{}-{}-{}", kind.prefix(), sanitize(app_id), sanitize(scope))
-            }
-        }
-    }
-
-    /// The scope token a `SelectedScope` contributes to the key.
-    pub fn scope_token(scope: &str) -> String {
-        sanitize(scope)
-    }
-
-    /// Try to acquire the named lock; `Ok(None)` means another session holds it.
-    ///
-    /// The error names the state root rather than the lock file. The root is a
-    /// directory a user can find; the file inside it is an implementation detail,
-    /// and a message about an implementation detail sends people looking in the
-    /// wrong place.
-    pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, DurableError> {
-        std::fs::create_dir_all(state_root).map_err(|source| DurableError::Io {
-            path: state_root.display().to_string(),
-            source,
-        })?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(state_root.join(format!("{key}.lock")))
-            .map_err(|source| DurableError::Io {
-                path: state_root.display().to_string(),
-                source,
-            })?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self {
-                file,
-                key: key.to_owned(),
-            })),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Remove the lock marker after uninstall when no cooperating process
-    /// currently holds it. The file is deleted while its byte-range lock is
-    /// held so a new installer cannot race the cleanup.
-    pub fn remove_if_unheld(state_root: &Path, key: &str) -> Result<(), DurableError> {
-        let Some(lock) = Self::try_acquire(state_root, key)? else {
-            return Ok(());
-        };
-        let path = state_root.join(format!("{key}.lock"));
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(DurableError::Io {
-                    path: path.display().to_string(),
-                    source,
-                });
-            }
-        }
-        drop(lock);
-        Ok(())
-    }
-
-    /// The key this lock was taken under.
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-}
-
-impl Drop for InstallationLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
-}
-
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The extended-length spelling a Win32 file API accepts.
-///
-/// `\\?\` lifts the `MAX_PATH` limit and the path normalization the API would
-/// otherwise apply, which is what durable writes need: a name the installer
-/// owns has to reach the same file the ledger recorded. A relative path has no
-/// root to lift, so it is passed through as it stands.
 fn to_wide_path(path: &Path) -> Vec<u16> {
     let text = path.to_string_lossy();
     let lexical = Utf8WindowsPath::new(&text);
     let verbatim = match lexical.components().prefix_kind() {
-        // Already extended-length, so the API has nothing left to lift.
         Some(prefix) if prefix.is_verbatim() => text.into_owned(),
         Some(prefix) => verbatim_prefix(prefix)
             .map(|prefix| verbatim_spelling(&prefix, lexical))
             .unwrap_or_else(|_| text.into_owned()),
-        // A rooted path with no drive names a location on whichever drive is
-        // current, so it has a root to lift.
+
         None if lexical.has_root() => verbatim_spelling("\\\\?\\", lexical),
         None => text.into_owned(),
     };
     to_wide(&verbatim)
 }
 
-/// The verbatim prefix naming the same root as `prefix`.
-///
-/// Only a drive and a network share have a place in the file namespace; a
-/// device namespace is not a file, so there is nothing to re-root it under.
 fn verbatim_prefix(prefix: Utf8WindowsPrefix<'_>) -> Result<String, &'static str> {
     match prefix {
         Utf8WindowsPrefix::Disk(drive) => Ok(format!("\\\\?\\{drive}:")),
@@ -452,9 +268,6 @@ fn verbatim_prefix(prefix: Utf8WindowsPrefix<'_>) -> Result<String, &'static str
     }
 }
 
-/// `prefix`, then every name `path` holds below its own root.
-///
-/// The prefix and the root are skipped because `prefix` already names the root.
 fn verbatim_spelling(prefix: &str, path: &Utf8WindowsPath) -> String {
     let mut text = prefix.to_owned();
     for component in path.components() {

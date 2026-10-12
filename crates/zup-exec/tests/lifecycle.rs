@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use zup_core::{
     App, AppId, ComponentId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope,
-    TargetTriple, hash_reader,
+    Target, hash_reader,
 };
 use zup_exec::{
     FileOperationKind, HostSnapshot, InstallLedger, LifecycleAction, LifecycleError, ObservedFile,
@@ -12,7 +12,7 @@ use zup_platform::{TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
 
 fn file(name: &str, contents: &[u8]) -> TargetFile {
     let destination = TargetPath::new(
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        Target::parse("windows-x64").unwrap(),
         format!(r"C:\ZupLifecycle\{name}"),
     )
     .unwrap();
@@ -25,6 +25,7 @@ fn file(name: &str, contents: &[u8]) -> TargetFile {
         size: contents.len() as u64,
         sha256: hash_reader(contents).unwrap().1,
         privilege: Privilege::User,
+        executable: false,
     }
 }
 
@@ -38,10 +39,10 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
             main: None,
             description: None,
         },
-        target: TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        target: Target::parse("windows-x64").unwrap(),
         scope: SelectedScope::User,
         install_directory: TargetPath::new(
-            TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+            Target::parse("windows-x64").unwrap(),
             r"C:\ZupLifecycle",
         )
         .unwrap(),
@@ -69,7 +70,7 @@ fn make_target(version: &str, files: Vec<TargetFile>) -> TargetPlan {
 fn ledger(files: &[TargetFile]) -> InstallLedger {
     let mut ledger = InstallLedger::new(
         AppId::new("com.zup.lifecycle").unwrap(),
-        TargetTriple::parse("x86_64-pc-windows-msvc").unwrap(),
+        Target::parse("windows-x64").unwrap(),
         SelectedScope::User,
     );
     ledger.version = "1.0.0".parse().unwrap();

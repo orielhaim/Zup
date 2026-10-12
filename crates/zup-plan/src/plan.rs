@@ -48,9 +48,9 @@ fn requested_target<'a>(
     request: &PlanRequest,
 ) -> Result<&'a TargetBuildPlan, PlanError> {
     build
-        .target_by_triple(&request.target)
-        .ok_or_else(|| PlanError::UnknownBuildTarget {
-            target: request.target.clone(),
+        .by_target(&request.target)
+        .ok_or(PlanError::UnknownBuildTarget {
+            target: request.target,
         })
 }
 
@@ -67,8 +67,8 @@ where
     let mut prepared = prepare_plan(target, request)?;
     if executor.target() != &prepared.plan.target {
         return Err(PlanError::PluginTargetMismatch {
-            expected: prepared.plan.target.clone(),
-            found: executor.target().clone(),
+            expected: prepared.plan.target,
+            found: *executor.target(),
         });
     }
     if prepared.active_plugins.is_empty() {
@@ -83,7 +83,7 @@ where
         install_directory: prepared.plan.install_directory.clone(),
         scope: prepared.plan.scope,
         selected_components: prepared.plan.selected_components.clone(),
-        target: prepared.plan.target.clone(),
+        target: prepared.plan.target,
     };
     let mut collisions = CollisionIndex::from_plan(&prepared.plan)?;
     let mut generated_files = Vec::new();
@@ -169,8 +169,6 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
     };
 
     let install_directory = resolve_install_directory(&raw_directory, &installer.app)?;
-    // Authoring default only: resources inherit their scope's authorization
-    // unless something later gives them a narrower requirement.
     let default_privilege = scope.authorization();
 
     let prerequisites = installer
@@ -205,6 +203,7 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             size: file.size,
             sha256: file.sha256,
             privilege: default_privilege,
+            executable: file.executable,
         });
     }
 
@@ -325,7 +324,7 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
 
     let mut plan = InstallPlan {
         app: installer.app.clone(),
-        target: installer.target.clone(),
+        target: installer.target,
         scope,
         install_directory,
         selected_components: selected,

@@ -1,30 +1,23 @@
-//! The application's mark and name.
-
-// GPUI's derive macros emit paths rooted at gpui_kit rather than at the crate
-// that re-exports it, so a module deriving one has to be able to name that
-// crate. Aliased through the SDK so it is the version this preset builds with.
 #[allow(unused_imports)]
-use zup_preset_sdk::gpui_kit;
+use zup_sdk::preset::gpui_kit;
 
-use zup_preset_sdk::gpui_kit::assets::IconName;
-use zup_preset_sdk::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use zup_preset_sdk::gpui_kit::prelude::FluentBuilder as _;
-use zup_preset_sdk::gpui_kit::{
+use zup_sdk::preset::gpui_kit::assets::IconName;
+use zup_sdk::preset::gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use zup_sdk::preset::gpui_kit::prelude::FluentBuilder as _;
+use zup_sdk::preset::gpui_kit::{
     App, FontWeight, IntoElement, ObjectFit, ParentElement, Rems, RenderOnce, SharedString, Styled,
     StyledImage, Window, div, img, relative,
 };
-use zup_preset_sdk::prelude::ProductIdentity;
+use zup_sdk::preset::prelude::ProductIdentity;
 
 use crate::theme::{size, space, text};
 use crate::ui::{caption, muted};
 
-/// A mark beside the application's mark, saying how the last operation went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkBadge {
     Done,
 }
 
-/// The application's logo, or its initials when it has none.
 #[derive(IntoElement)]
 pub struct AppMark {
     name: SharedString,
@@ -55,14 +48,12 @@ impl AppMark {
         self
     }
 
-    /// Drawn as something that is no longer here.
     pub fn faded(mut self, faded: bool) -> Self {
         self.faded = faded;
         self
     }
 }
 
-/// Up to two initials, from the words of a name.
 pub fn initials(name: &str) -> String {
     let mut words = name
         .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
@@ -141,7 +132,6 @@ impl RenderOnce for AppMark {
     }
 }
 
-/// Who the application is: its mark, its name, its publisher and version.
 #[derive(IntoElement)]
 pub struct AppIdentity {
     product: ProductIdentity,
@@ -162,13 +152,11 @@ impl AppIdentity {
         }
     }
 
-    /// Replace the publisher-and-version line.
     pub fn byline(mut self, byline: impl Into<SharedString>) -> Self {
         self.byline = byline.into();
         self
     }
 
-    /// A line under the byline, such as what an upgrade replaces.
     pub fn note(mut self, note: Option<String>) -> Self {
         self.note = note.map(Into::into);
         self
