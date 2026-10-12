@@ -63,8 +63,10 @@ pub use error::{ExecError, IpcError, PathError, PlanError};
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};
 #[cfg(target_os = "linux")]
 pub use fs::{
-    EXECUTABLE_PAYLOAD_MODE, EntryKind, OwnedDirectory, PAYLOAD_FILE_MODE, STATE_DIRECTORY_MODE,
-    STATE_FILE_MODE, anchor_reachable, create_parents, open_parent, sync_directory,
+    ChildStat, EXECUTABLE_PAYLOAD_MODE, EntryKind, MACHINE_INSTALL_DIRECTORY_MODE, OwnedDirectory,
+    PAYLOAD_FILE_MODE, STATE_DIRECTORY_MODE, STATE_FILE_MODE, StreamedRegular,
+    USER_INSTALL_DIRECTORY_MODE, anchor_reachable, create_parents, ensure_parent, open_parent,
+    sync_directory, verify_ancestor_trust,
 };
 #[cfg(target_os = "linux")]
 pub use input::{
@@ -86,7 +88,7 @@ pub use machine::{
     SystemdRoots, authorize_machine_destination, authorize_machine_install_directory,
     authorize_systemd_unit, ensure_machine_state_root, normalize_state_modes,
     resolve_machine_state_root, verify_ledger_trust, verify_machine_hierarchy,
-    verify_machine_structure, verify_trusted_state_file,
+    verify_machine_install_roots, verify_machine_structure, verify_trusted_state_file,
 };
 #[cfg(target_os = "linux")]
 pub use paths::{

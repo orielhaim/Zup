@@ -351,15 +351,14 @@ pub(crate) fn attach_maintenance_copy_for(
     state_root: &Path,
     scope: SelectedScope,
 ) -> Result<(), ExecError> {
-    let bytes = std::fs::read(installer).map_err(|source| PathError::Io {
+    let file = std::fs::File::open(installer).map_err(|source| PathError::Io {
         path: installer.display().to_string(),
         source,
     })?;
-    let (size, sha256) =
-        zup_core::hash_reader(bytes.as_slice()).map_err(|source| PathError::Io {
-            path: installer.display().to_string(),
-            source,
-        })?;
+    let (size, sha256) = zup_core::hash_reader(file).map_err(|source| PathError::Io {
+        path: installer.display().to_string(),
+        source,
+    })?;
     let destination = zup_platform::TargetPath::new(
         target.target,
         zup_transaction::maintenance_runtime_path(
@@ -432,14 +431,8 @@ pub(crate) fn inspect_owned_matches_for(
                             .unwrap_or_default();
                         match directory.kind_or_absent(&name) {
                             Ok(Some(crate::fs::EntryKind::Regular)) => directory
-                                .read_regular(&name)
-                                .map(|bytes| {
-                                    zup_core::hash_reader(bytes.as_slice()).is_ok_and(
-                                        |(found_size, found)| {
-                                            found_size == *size && found == *sha256
-                                        },
-                                    )
-                                })
+                                .stream_regular(&name)
+                                .map(|current| current.size == *size && current.sha256 == *sha256)
                                 .unwrap_or(false),
                             _ => false,
                         }
@@ -517,7 +510,7 @@ pub(crate) fn retire_old_generations_for(
 
 pub(crate) struct RunnerPayload {
     package: PackagePayloadSource,
-    maintenance: Vec<u8>,
+    installer: PathBuf,
     maintenance_sha256: Sha256Digest,
     maintenance_size: u64,
     generated: std::collections::BTreeMap<String, Vec<u8>>,
@@ -526,14 +519,14 @@ pub(crate) struct RunnerPayload {
 impl RunnerPayload {
     pub(crate) fn from_prepared(
         package: PackagePayloadSource,
-        maintenance: Vec<u8>,
+        installer: PathBuf,
         maintenance_sha256: Sha256Digest,
         maintenance_size: u64,
         generated: std::collections::BTreeMap<String, Vec<u8>>,
     ) -> Self {
         Self {
             package,
-            maintenance,
+            installer,
             maintenance_sha256,
             maintenance_size,
             generated,
@@ -545,23 +538,53 @@ impl RunnerPayload {
         installer: &Path,
         generated: std::collections::BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, ExecError> {
-        let maintenance = std::fs::read(installer).map_err(|source| PathError::Io {
-            path: installer.display().to_string(),
-            source,
-        })?;
-        let (size, sha256) =
-            zup_core::hash_reader(maintenance.as_slice()).map_err(|source| PathError::Io {
-                path: installer.display().to_string(),
-                source,
-            })?;
+        let (size, sha256) = hash_carrier(installer)?;
         Ok(Self {
             package: carrier.package().payload_source(),
-            maintenance,
+            installer: installer.to_path_buf(),
             maintenance_sha256: sha256,
             maintenance_size: size,
             generated,
         })
     }
+
+    fn open_maintenance(&self, path: &str) -> Result<PayloadReader, PayloadError> {
+        let mut file =
+            std::fs::File::open(&self.installer).map_err(|source| PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+        let (size, sha256) =
+            zup_core::hash_reader(&mut file).map_err(|source| PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+        if sha256 != self.maintenance_sha256 || size != self.maintenance_size {
+            return Err(PayloadError::DigestMismatch {
+                path: path.to_string(),
+            });
+        }
+        use std::io::Seek as _;
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|source| PayloadError::Read {
+                path: path.to_string(),
+                source,
+            })?;
+        Ok(Box::new(file))
+    }
+}
+
+pub(crate) fn hash_carrier(installer: &Path) -> Result<(u64, Sha256Digest), ExecError> {
+    let file = std::fs::File::open(installer).map_err(|source| PathError::Io {
+        path: installer.display().to_string(),
+        source,
+    })?;
+    zup_core::hash_reader(file)
+        .map_err(|source| PathError::Io {
+            path: installer.display().to_string(),
+            source,
+        })
+        .map_err(ExecError::from)
 }
 
 impl PayloadSource for RunnerPayload {
@@ -578,7 +601,7 @@ impl PayloadSource for RunnerPayload {
                     path: path.to_string(),
                 });
             }
-            return Ok(Box::new(std::io::Cursor::new(self.maintenance.clone())));
+            return self.open_maintenance(&path.to_string());
         }
         if let Some(bytes) = self.generated.get(path.as_str()) {
             let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).map_err(|_| {

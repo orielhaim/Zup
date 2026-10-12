@@ -45,12 +45,13 @@ pub struct FilePin {
 
 impl FilePin {
     pub fn pin(path: &Path) -> Result<Self, IpcError> {
-        let bytes = std::fs::read(path).map_err(|error| {
+        let file = std::fs::File::open(path).map_err(|error| {
             IpcError::WorkerAuth(format!("carrier at `{}`: {error}", path.display()))
         })?;
-        Ok(Self {
-            digest: zup_core::hash_bytes(&bytes),
-        })
+        let (_, digest) = zup_core::hash_reader(file).map_err(|error| {
+            IpcError::WorkerAuth(format!("carrier at `{}`: {error}", path.display()))
+        })?;
+        Ok(Self { digest })
     }
 
     pub fn verify(&self, path: &Path) -> Result<(), IpcError> {
@@ -318,7 +319,7 @@ struct PreparedPlan {
 }
 
 struct PreparedPayload {
-    maintenance: Vec<u8>,
+    installer: PathBuf,
     maintenance_sha256: zup_core::Sha256Digest,
     maintenance_size: u64,
     generated: BTreeMap<String, Vec<u8>>,
@@ -605,16 +606,12 @@ fn prepare_operation(
         ));
     }
 
-    let maintenance = std::fs::read(&carrier_path).map_err(|error| {
-        IpcError::Transaction(format!(
-            "carrier bytes at `{}`: {error}",
-            carrier_path.display()
-        ))
-    })?;
-    let (maintenance_size, maintenance_sha256) = zup_core::hash_reader(maintenance.as_slice())
+    let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(&carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
     let file_count = u32::try_from(target_plan.files.len())
         .map_err(|_| IpcError::Policy("too many files".into()))?;
+    crate::machine::verify_machine_install_roots(&roots, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::Policy(error.to_string()))?;
     Ok(PreparedPlan {
         plan_digest,
         operation: intent.operation.clone(),
@@ -624,7 +621,7 @@ fn prepare_operation(
         target,
         file_count,
         transaction_id: uuid::Uuid::now_v7(),
-        carrier_path,
+        carrier_path: carrier_path.clone(),
         carrier_pin,
         plan,
         target_plan,
@@ -645,7 +642,7 @@ fn prepare_operation(
         roots: roots.clone(),
         systemd: context.systemd.clone(),
         payload: PreparedPayload {
-            maintenance,
+            installer: carrier_path,
             maintenance_sha256,
             maintenance_size,
             generated: BTreeMap::new(),
@@ -716,17 +713,13 @@ fn recover_one(
         ));
     }
 
-    let maintenance = std::fs::read(carrier_path).map_err(|error| {
-        IpcError::Transaction(format!(
-            "carrier bytes at `{}`: {error}",
-            carrier_path.display()
-        ))
-    })?;
-    let (maintenance_size, maintenance_sha256) = zup_core::hash_reader(maintenance.as_slice())
+    crate::machine::verify_machine_install_roots(roots, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
     let payload = crate::run::RunnerPayload::from_prepared(
         carrier.package().payload_source(),
-        maintenance,
+        carrier_path.to_path_buf(),
         maintenance_sha256,
         maintenance_size,
         BTreeMap::new(),
@@ -943,7 +936,7 @@ fn execute_prepared(
 
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
-        prepared.payload.maintenance.clone(),
+        prepared.payload.installer.clone(),
         prepared.payload.maintenance_sha256,
         prepared.payload.maintenance_size,
         prepared.payload.generated.clone(),

@@ -1,11 +1,12 @@
 use std::ffi::OsStr;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::PathError;
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, renameat_with, statat};
+use zup_core::Sha256Digest;
 
 pub const STATE_DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o700);
 
@@ -14,6 +15,10 @@ pub const STATE_FILE_MODE: Mode = Mode::from_bits_truncate(0o600);
 pub const PAYLOAD_FILE_MODE: Mode = Mode::from_bits_truncate(0o644);
 
 pub const EXECUTABLE_PAYLOAD_MODE: Mode = Mode::from_bits_truncate(0o744);
+
+pub const USER_INSTALL_DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o700);
+
+pub const MACHINE_INSTALL_DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o755);
 
 const DIR_FLAGS: OFlags = OFlags::from_bits_truncate(
     OFlags::RDONLY.bits()
@@ -68,6 +73,25 @@ pub struct OwnedDirectory {
     file: std::fs::File,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildStat {
+    pub kind: EntryKind,
+    pub mode: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub uid: u32,
+}
+
+pub struct StreamedRegular {
+    pub file: std::fs::File,
+    pub size: u64,
+    pub sha256: Sha256Digest,
+    pub mode: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub uid: u32,
+}
+
 impl OwnedDirectory {
     pub fn open(path: &Path) -> Result<Self, PathError> {
         let (directory, _) = walk(path, Mode::empty(), false)?;
@@ -110,6 +134,267 @@ impl OwnedDirectory {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub fn stat_child(&self, name: &str) -> Result<ChildStat, PathError> {
+        check_child_name(name)?;
+        let display = self.display_child(name);
+        let stat = statat(self.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| PathError::errno(&display, error))?;
+        Ok(ChildStat {
+            kind: EntryKind::from_raw_mode(stat.st_mode),
+            mode: stat.st_mode & 0o7777,
+            dev: stat.st_dev,
+            ino: stat.st_ino,
+            uid: stat.st_uid,
+        })
+    }
+
+    pub fn stat_self(&self) -> Result<ChildStat, PathError> {
+        let stat =
+            rustix::fs::fstat(self.as_fd()).map_err(|error| PathError::errno(&self.path, error))?;
+        Ok(ChildStat {
+            kind: EntryKind::from_raw_mode(stat.st_mode),
+            mode: stat.st_mode & 0o7777,
+            dev: stat.st_dev,
+            ino: stat.st_ino,
+            uid: stat.st_uid,
+        })
+    }
+
+    pub fn chmod_self(&self, mode: Mode) -> Result<(), PathError> {
+        rustix::fs::fchmod(self.as_fd(), mode).map_err(|error| PathError::errno(&self.path, error))
+    }
+
+    pub fn chmod_child(&self, name: &str, mode: Mode) -> Result<(), PathError> {
+        check_child_name(name)?;
+        let display = self.display_child(name);
+        let file = rustix::fs::openat(
+            self.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| refuse_or_io(&display, error))?;
+        let stat =
+            rustix::fs::fstat(file.as_fd()).map_err(|error| PathError::errno(&display, error))?;
+        if EntryKind::from_raw_mode(stat.st_mode) == EntryKind::Symlink {
+            return Err(PathError::UnexpectedKind {
+                path: display.display().to_string(),
+                expected: "a real file or directory, not a symbolic link",
+            });
+        }
+        rustix::fs::fchmod(file.as_fd(), mode).map_err(|error| PathError::errno(&display, error))
+    }
+
+    pub fn stream_regular(&self, name: &str) -> Result<StreamedRegular, PathError> {
+        check_child_name(name)?;
+        let display = self.display_child(name);
+        let file = rustix::fs::openat(
+            self.as_fd(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| refuse_or_io(&display, error))?;
+        let mut file = std::fs::File::from(file);
+        let stat =
+            rustix::fs::fstat(file.as_fd()).map_err(|error| PathError::errno(&display, error))?;
+        if EntryKind::from_raw_mode(stat.st_mode) != EntryKind::Regular {
+            return Err(PathError::UnexpectedKind {
+                path: display.display().to_string(),
+                expected: "regular file",
+            });
+        }
+        let (size, sha256) =
+            zup_core::hash_reader(&mut file).map_err(|error| PathError::io(&display, error))?;
+        Ok(StreamedRegular {
+            file,
+            size,
+            sha256,
+            mode: stat.st_mode & 0o7777,
+            dev: stat.st_dev,
+            ino: stat.st_ino,
+            uid: stat.st_uid,
+        })
+    }
+
+    pub fn try_exchange(&self, first: &str, second: &str) -> Result<bool, PathError> {
+        check_child_name(first)?;
+        check_child_name(second)?;
+        let display = self.display_child(second);
+        match renameat_with(
+            self.as_fd(),
+            first,
+            self.as_fd(),
+            second,
+            RenameFlags::EXCHANGE,
+        ) {
+            Ok(()) => Ok(true),
+            Err(
+                rustix::io::Errno::NOSYS
+                | rustix::io::Errno::INVAL
+                | rustix::io::Errno::OPNOTSUPP
+                | rustix::io::Errno::XDEV
+                | rustix::io::Errno::PERM,
+            ) => Ok(false),
+            Err(error) => Err(PathError::errno(&display, error)),
+        }
+    }
+
+    pub fn rename_noreplace(&self, from: &str, to: &str) -> Result<(), PathError> {
+        check_child_name(from)?;
+        check_child_name(to)?;
+        match renameat_with(self.as_fd(), from, self.as_fd(), to, RenameFlags::NOREPLACE) {
+            Ok(()) => self.sync(),
+            Err(rustix::io::Errno::EXIST) => Err(PathError::AlreadyExists {
+                path: self.display_child(to).display().to_string(),
+            }),
+            Err(error) => Err(PathError::errno(&self.display_child(to), error)),
+        }
+    }
+
+    pub fn stage_stream(
+        &self,
+        temporary: &str,
+        reader: &mut dyn Read,
+        limit: u64,
+        mode: Mode,
+    ) -> Result<(u64, Sha256Digest), PathError> {
+        check_child_name(temporary)?;
+        let display = self.display_child(temporary);
+        let file = rustix::fs::openat(
+            self.as_fd(),
+            temporary,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            mode,
+        )
+        .map_err(|error| PathError::errno(&display, error))?;
+        let mut file = std::fs::File::from(file);
+        let outcome = copy_bounded(reader, &mut file, limit, &display);
+        let (size, sha256) = match outcome {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = self.remove_file(temporary);
+                return Err(error);
+            }
+        };
+        if let Err(error) = rustix::fs::fchmod(file.as_fd(), mode)
+            .map_err(|error| PathError::errno(&display, error))
+            .and_then(|()| {
+                file.sync_all()
+                    .map_err(|error| PathError::io(&display, error))
+            })
+        {
+            let _ = self.remove_file(temporary);
+            return Err(error);
+        }
+        Ok((size, sha256))
+    }
+
+    pub fn write_stream_durable(
+        &self,
+        name: &str,
+        reader: &mut dyn Read,
+        limit: u64,
+        mode: Mode,
+    ) -> Result<(u64, Sha256Digest), PathError> {
+        check_child_name(name)?;
+        let temporary = self.temporary_name(name);
+        let (size, sha256) = match self.stage_stream(&temporary, reader, limit, mode) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = self.remove_file(&temporary);
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            rustix::fs::renameat(self.as_fd(), temporary.as_str(), self.as_fd(), name)
+                .map_err(|error| PathError::errno(&self.display_child(name), error))
+        {
+            let _ = self.remove_file(&temporary);
+            return Err(error);
+        }
+        self.sync()?;
+        Ok((size, sha256))
+    }
+
+    pub fn open_child_verified(&self, name: &str) -> Result<(Self, u64, u64), PathError> {
+        check_child_name(name)?;
+        let display = self.display_child(name);
+        let before = statat(self.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| PathError::errno(&display, error))?;
+        if EntryKind::from_raw_mode(before.st_mode) != EntryKind::Directory {
+            return Err(PathError::UnexpectedKind {
+                path: display.display().to_string(),
+                expected: "a directory",
+            });
+        }
+        let file = rustix::fs::openat(self.as_fd(), name, DIR_FLAGS, Mode::empty())
+            .map_err(|error| PathError::errno(&display, error))?;
+        let after =
+            rustix::fs::fstat(file.as_fd()).map_err(|error| PathError::errno(&display, error))?;
+        if after.st_dev != before.st_dev || after.st_ino != before.st_ino {
+            return Err(PathError::Refused {
+                path: display.display().to_string(),
+                reason: "the directory was replaced while it was opened".to_owned(),
+            });
+        }
+        Ok((
+            Self {
+                path: display,
+                file: std::fs::File::from(file),
+            },
+            before.st_dev,
+            before.st_ino,
+        ))
+    }
+
+    pub fn verify_descendants(&self, relative: &Path, expected_uid: u32) -> Result<(), PathError> {
+        if relative.is_absolute() {
+            return Err(PathError::Refused {
+                path: relative.display().to_string(),
+                reason: "a descendant walk names a relative path".to_owned(),
+            });
+        }
+        let mut names = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Prefix(_) => {
+                    return Err(PathError::Refused {
+                        path: relative.display().to_string(),
+                        reason: "a descendant walk names no prefix".to_owned(),
+                    });
+                }
+                Component::RootDir | Component::ParentDir => {
+                    return Err(PathError::Refused {
+                        path: relative.display().to_string(),
+                        reason: "a descendant walk stays below its base".to_owned(),
+                    });
+                }
+                Component::Normal(name) => {
+                    let Some(text) = name.to_str() else {
+                        return Err(PathError::InvalidComponent {
+                            component: relative.display().to_string(),
+                            reason: "a descendant walk names text".to_owned(),
+                        });
+                    };
+                    check_child_name(text)?;
+                    names.push(text.to_owned());
+                }
+            }
+        }
+        check_trusted_self(self.as_fd(), &self.path, expected_uid)?;
+        let duplicate = rustix::fs::openat(self.as_fd(), ".", DIR_FLAGS, Mode::empty())
+            .map_err(|error| PathError::errno(&self.path, error))?;
+        walk_checked(
+            std::fs::File::from(duplicate),
+            self.path.clone(),
+            &names,
+            expected_uid,
+        )?;
+        Ok(())
     }
 
     pub fn write_durable(&self, name: &str, contents: &[u8], mode: Mode) -> Result<(), PathError> {
@@ -234,17 +519,6 @@ impl OwnedDirectory {
         file.read_to_end(&mut bytes)
             .map_err(|error| PathError::io(&self.display_child(name), error))?;
         Ok(bytes)
-    }
-
-    pub fn read_regular_stat(&self, name: &str) -> Result<(Vec<u8>, u32), PathError> {
-        use std::io::Read as _;
-        let mut file = self.open_regular_read(name)?;
-        let stat = rustix::fs::fstat(file.as_fd())
-            .map_err(|error| PathError::errno(&self.display_child(name), error))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| PathError::io(&self.display_child(name), error))?;
-        Ok((bytes, stat.st_mode & 0o7777))
     }
 
     pub fn remove_file(&self, name: &str) -> Result<(), PathError> {
@@ -396,43 +670,91 @@ impl OwnedDirectory {
     }
 }
 
+fn copy_bounded(
+    reader: &mut dyn Read,
+    writer: &mut std::fs::File,
+    limit: u64,
+    display: &Path,
+) -> Result<(u64, Sha256Digest), PathError> {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| PathError::io(display, error))?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        if size > limit {
+            return Err(PathError::Refused {
+                path: display.display().to_string(),
+                reason: format!("the stream holds more than the declared {limit} bytes"),
+            });
+        }
+        hasher.update(&buffer[..read]);
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| PathError::io(display, error))?;
+    }
+    Ok((size, Sha256Digest::from_hasher(hasher)))
+}
+
 fn remove_child_os(
     parent: BorrowedFd<'_>,
     parent_path: &Path,
     name: &OsStr,
 ) -> Result<(), PathError> {
     let display = parent_path.join(name);
-    let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+    let before = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|error| PathError::errno(&display, error))?;
-    if EntryKind::from_raw_mode(stat.st_mode) == EntryKind::Directory {
-        let child = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty())
-            .map_err(|error| PathError::errno(&display, error))?;
-        let entries =
-            rustix::fs::Dir::new(child).map_err(|error| PathError::errno(&display, error))?;
-        let mut names = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|error| PathError::errno(&display, error))?;
-            let nested = entry.file_name().to_bytes().to_vec();
-            if nested == b"." || nested == b".." {
-                continue;
-            }
-            names.push(nested);
-        }
-        for nested in &names {
-            let child_borrowed = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty())
-                .map_err(|error| PathError::errno(&display, error))?;
-            remove_child_os(
-                child_borrowed.as_fd(),
-                &display,
-                OsStr::from_bytes(nested.as_slice()),
-            )?;
-        }
-        rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)
-            .map_err(|error| PathError::errno(&display, error))
-    } else {
+    if EntryKind::from_raw_mode(before.st_mode) != EntryKind::Directory {
         rustix::fs::unlinkat(parent, name, AtFlags::empty())
-            .map_err(|error| PathError::errno(&display, error))
+            .map_err(|error| PathError::errno(&display, error))?;
+        return Ok(());
     }
+    let child = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty())
+        .map_err(|error| PathError::errno(&display, error))?;
+    let opened =
+        rustix::fs::fstat(child.as_fd()).map_err(|error| PathError::errno(&display, error))?;
+    if opened.st_dev != before.st_dev || opened.st_ino != before.st_ino {
+        return Err(PathError::Refused {
+            path: display.display().to_string(),
+            reason: "the directory was replaced while it was opened".to_owned(),
+        });
+    }
+    let listing = rustix::fs::openat(child.as_fd(), ".", DIR_FLAGS, Mode::empty())
+        .map_err(|error| PathError::errno(&display, error))?;
+    let entries =
+        rustix::fs::Dir::new(listing).map_err(|error| PathError::errno(&display, error))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| PathError::errno(&display, error))?;
+        let nested = entry.file_name().to_bytes().to_vec();
+        if nested == b"." || nested == b".." {
+            continue;
+        }
+        names.push(nested);
+    }
+    for nested in &names {
+        remove_child_os(
+            child.as_fd(),
+            &display,
+            OsStr::from_bytes(nested.as_slice()),
+        )?;
+    }
+    let after = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| PathError::errno(&display, error))?;
+    if after.st_dev != before.st_dev || after.st_ino != before.st_ino {
+        return Err(PathError::Refused {
+            path: display.display().to_string(),
+            reason: "the directory was replaced during removal".to_owned(),
+        });
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)
+        .map_err(|error| PathError::errno(&display, error))
 }
 
 fn walk(
@@ -565,6 +887,126 @@ pub fn open_parent(destination: &Path) -> Result<(OwnedDirectory, String), PathE
     };
     check_child_name(name)?;
     Ok((OwnedDirectory::open(parent)?, name.to_owned()))
+}
+
+pub fn ensure_parent(
+    destination: &Path,
+    mode: Mode,
+) -> Result<(OwnedDirectory, String, Vec<String>), PathError> {
+    let refused = |reason: &str| PathError::Refused {
+        path: destination.display().to_string(),
+        reason: reason.to_owned(),
+    };
+    let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(refused("a destination has a parent directory"));
+    };
+    let Some(name) = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    else {
+        return Err(refused("a destination names a text final component"));
+    };
+    check_child_name(name)?;
+    let (directory, created) = walk(parent, mode, true)?;
+    directory.sync()?;
+    Ok((directory, name.to_owned(), created))
+}
+
+pub fn verify_ancestor_trust(path: &Path, expected_uid: u32) -> Result<(), PathError> {
+    let names = ancestry_names(path)?;
+    let root = rustix::fs::open("/", DIR_FLAGS, Mode::empty())
+        .map_err(|error| PathError::errno(Path::new("/"), error))?;
+    let current = std::fs::File::from(root);
+    let built = PathBuf::from("/");
+    check_trusted_self(current.as_fd(), &built, expected_uid)?;
+    walk_checked(current, built, &names, expected_uid)?;
+    Ok(())
+}
+
+pub fn ancestry_names(path: &Path) -> Result<Vec<String>, PathError> {
+    let refused = |reason: &str| PathError::Refused {
+        path: path.display().to_string(),
+        reason: reason.to_owned(),
+    };
+    if !path.is_absolute() {
+        return Err(refused("a trusted ancestry starts at an absolute path"));
+    }
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Prefix(_) => return Err(refused("a trusted ancestry names no prefix")),
+            Component::ParentDir => {
+                return Err(refused("a trusted ancestry names no `..`"));
+            }
+            Component::Normal(name) => {
+                let Some(text) = name.to_str() else {
+                    return Err(PathError::InvalidComponent {
+                        component: path.display().to_string(),
+                        reason: "a trusted ancestry names text".to_owned(),
+                    });
+                };
+                check_child_name(text)?;
+                names.push(text.to_owned());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn walk_checked(
+    mut current: std::fs::File,
+    mut built: PathBuf,
+    names: &[String],
+    expected_uid: u32,
+) -> Result<std::fs::File, PathError> {
+    use std::os::fd::AsFd as _;
+    for name in names {
+        built.push(name);
+        match rustix::fs::openat(current.as_fd(), name.as_str(), DIR_FLAGS, Mode::empty()) {
+            Ok(next) => {
+                check_trusted_self(next.as_fd(), &built, expected_uid)?;
+                current = std::fs::File::from(next);
+            }
+            Err(rustix::io::Errno::NOENT) => return Ok(current),
+            Err(error) => return Err(traverse_refused(&built, error)),
+        }
+    }
+    Ok(current)
+}
+
+fn check_trusted_self(
+    directory: BorrowedFd<'_>,
+    display: &Path,
+    expected_uid: u32,
+) -> Result<(), PathError> {
+    let stat = rustix::fs::fstat(directory).map_err(|error| PathError::errno(display, error))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+        return Err(PathError::UnexpectedKind {
+            path: display.display().to_string(),
+            expected: "a directory",
+        });
+    }
+    if stat.st_uid != expected_uid {
+        return Err(PathError::Refused {
+            path: display.display().to_string(),
+            reason: format!(
+                "a privileged ancestry is owned by uid {}, not {expected_uid}",
+                stat.st_uid
+            ),
+        });
+    }
+    if stat.st_mode & 0o022 != 0 {
+        return Err(PathError::Refused {
+            path: display.display().to_string(),
+            reason: "a privileged ancestry is never writable by group or other".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub fn sync_directory(path: &Path) -> Result<(), PathError> {
@@ -887,6 +1329,41 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_past_its_declared_size_is_refused_without_writing_it() {
+        let root = directory();
+        let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
+        let mut reader = std::io::Cursor::new(vec![0xA5u8; 1024]);
+        let error = owned
+            .stage_stream("big.bin.zup-tmp", &mut reader, 16, STATE_FILE_MODE)
+            .expect_err("sixteen declared bytes cannot hold a kilobyte");
+        assert!(
+            matches!(error, PathError::Refused { .. }),
+            "the refusal names the dishonest size: {error}"
+        );
+        assert!(
+            owned
+                .kind_or_absent("big.bin.zup-tmp")
+                .expect("stat")
+                .is_none()
+                && std::fs::read_dir(root.path()).expect("read dir").count() == 0,
+            "the aborted stream leaves no temporary behind"
+        );
+    }
+
+    #[test]
+    fn a_stream_at_exactly_its_declared_size_is_kept() {
+        let root = directory();
+        let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
+        let bytes = vec![0xA5u8; 1024];
+        let mut reader = std::io::Cursor::new(bytes.clone());
+        let (size, sha256) = owned
+            .stage_stream("exact.bin.zup-tmp", &mut reader, 1024, STATE_FILE_MODE)
+            .expect("an exact stream stages");
+        assert_eq!(size, 1024);
+        assert_eq!(sha256, zup_core::hash_bytes(&bytes));
+    }
+
+    #[test]
     fn removing_a_child_tree_does_not_escape() {
         let root = directory();
         let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
@@ -902,5 +1379,104 @@ mod tests {
 
         assert!(victim.exists(), "the linked-to file survives");
         assert!(owned.kind_or_absent("nested").expect("stat").is_none());
+    }
+
+    #[test]
+    fn removing_a_tree_keeps_a_swapped_sibling_whole() {
+        use std::sync::{Arc, Barrier};
+
+        for _ in 0..30 {
+            let root = directory();
+            let owned = OwnedDirectory::create(root.path(), STATE_DIRECTORY_MODE).expect("create");
+            plant_tree(&owned, "first", b"one", true);
+            plant_tree(&owned, "second", b"two", false);
+
+            let barrier = Arc::new(Barrier::new(2));
+            let swapper_barrier = Arc::clone(&barrier);
+            let path = owned.path().to_path_buf();
+            let swapper = std::thread::spawn(move || {
+                let parent = OwnedDirectory::open(&path).expect("open");
+                swapper_barrier.wait();
+                for _ in 0..200 {
+                    let _ = parent.try_exchange("first", "second");
+                }
+            });
+            barrier.wait();
+            let outcome = owned.remove_child_tree("first");
+            swapper.join().expect("join");
+
+            match outcome {
+                Err(_) => {
+                    assert!(owned.kind_or_absent("first").expect("stat").is_some());
+                    assert!(owned.kind_or_absent("second").expect("stat").is_some());
+                    assert!(
+                        is_whole(&owned, "first") || is_whole(&owned, "second"),
+                        "a refused removal never touches the tree it did not select"
+                    );
+                }
+                Ok(()) => {
+                    let first = owned.kind_or_absent("first").expect("stat");
+                    let second = owned.kind_or_absent("second").expect("stat");
+                    assert!(
+                        first.is_none() != second.is_none(),
+                        "exactly one sibling is gone"
+                    );
+                    let survivor = if first.is_none() { "second" } else { "first" };
+                    assert!(
+                        is_whole(&owned, survivor) || is_empty(&owned, survivor),
+                        "the survivor is a whole tree or a fully removed one"
+                    );
+                }
+            }
+        }
+
+        fn plant_tree(parent: &OwnedDirectory, name: &str, sentinel: &[u8], nested: bool) {
+            let child = OwnedDirectory::create(&parent.path().join(name), STATE_DIRECTORY_MODE)
+                .expect("create");
+            child
+                .write_durable("sentinel", sentinel, STATE_FILE_MODE)
+                .expect("sentinel");
+            if nested {
+                let deep =
+                    OwnedDirectory::create(&child.path().join("nested"), STATE_DIRECTORY_MODE)
+                        .expect("nested");
+                deep.write_durable("deep", b"deep", STATE_FILE_MODE)
+                    .expect("deep");
+            }
+        }
+
+        fn is_whole(parent: &OwnedDirectory, name: &str) -> bool {
+            let Ok(Some(EntryKind::Directory)) = parent.kind_or_absent(name) else {
+                return false;
+            };
+            let Ok(child) = parent.open_child(name) else {
+                return false;
+            };
+            let Ok(sentinel) = child.read_regular("sentinel") else {
+                return false;
+            };
+            if sentinel == b"one" {
+                child
+                    .open_child("nested")
+                    .and_then(|deep| deep.read_regular("deep"))
+                    .is_ok_and(|deep| deep == b"deep")
+            } else if sentinel == b"two" {
+                child
+                    .kind_or_absent("nested")
+                    .is_ok_and(|absent| absent.is_none())
+            } else {
+                false
+            }
+        }
+
+        fn is_empty(parent: &OwnedDirectory, name: &str) -> bool {
+            let Ok(Some(EntryKind::Directory)) = parent.kind_or_absent(name) else {
+                return false;
+            };
+            let Ok(child) = parent.open_child(name) else {
+                return false;
+            };
+            child.child_names().is_ok_and(|names| names.is_empty())
+        }
     }
 }

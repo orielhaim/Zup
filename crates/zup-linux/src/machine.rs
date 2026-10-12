@@ -1,7 +1,6 @@
 use crate::error::PathError;
 use crate::locations::MachineRoots;
 use crate::services::SYSTEMD_UNIT_DIR;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub const SYSTEMD_UNIT_FILE_MODE: u32 = 0o644;
@@ -168,17 +167,12 @@ pub fn ensure_transactions_dir(state_root: &Path, expected_uid: u32) -> Result<P
 }
 
 fn verify_trusted_parent(parent: &Path, expected_uid: u32) -> Result<(), PathError> {
-    let metadata = std::fs::symlink_metadata(parent).map_err(|source| PathError::Io {
-        path: parent.display().to_string(),
-        source,
-    })?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(PathError::StateRefused {
+    let owned =
+        crate::fs::OwnedDirectory::open(parent).map_err(|error| PathError::StateRefused {
             path: parent.display().to_string(),
-            reason: "the state parent is a real directory, not a link or a special file".to_owned(),
-        });
-    }
-    verify_owner_and_privacy(parent, &metadata, expected_uid)
+            reason: format!("the state parent is not a reachable directory: {error}"),
+        })?;
+    verify_owner_and_privacy_fd(&owned, parent, expected_uid)
 }
 
 fn create_or_verify_dir(path: &Path, mode: u32, expected_uid: u32) -> Result<(), PathError> {
@@ -193,7 +187,12 @@ fn create_or_verify_dir(path: &Path, mode: u32, expected_uid: u32) -> Result<(),
                         .to_owned(),
                 });
             }
-            verify_owner_and_privacy(path, &metadata, expected_uid)
+            let owned =
+                crate::fs::OwnedDirectory::open(path).map_err(|error| PathError::StateRefused {
+                    path: path.display().to_string(),
+                    reason: format!("machine state is a reachable directory: {error}"),
+                })?;
+            verify_owner_and_privacy_fd(&owned, path, expected_uid)
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             std::fs::DirBuilder::new()
@@ -205,17 +204,7 @@ fn create_or_verify_dir(path: &Path, mode: u32, expected_uid: u32) -> Result<(),
                     source,
                 })?;
 
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(
-                |source| PathError::Io {
-                    path: path.display().to_string(),
-                    source,
-                },
-            )?;
-            let metadata = std::fs::symlink_metadata(path).map_err(|source| PathError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
-            verify_owner_and_privacy(path, &metadata, expected_uid)
+            verify_created(path, mode, expected_uid)
         }
         Err(source) => Err(PathError::Io {
             path: path.display().to_string(),
@@ -224,22 +213,37 @@ fn create_or_verify_dir(path: &Path, mode: u32, expected_uid: u32) -> Result<(),
     }
 }
 
-fn verify_owner_and_privacy(
+fn verify_created(path: &Path, mode: u32, expected_uid: u32) -> Result<(), PathError> {
+    let owned = crate::fs::OwnedDirectory::open(path).map_err(|error| PathError::StateRefused {
+        path: path.display().to_string(),
+        reason: format!("machine state is a reachable directory: {error}"),
+    })?;
+    let rustix_mode = rustix::fs::Mode::from_bits_truncate(mode);
+    owned
+        .chmod_self(rustix_mode)
+        .map_err(|error| PathError::StateRefused {
+            path: path.display().to_string(),
+            reason: format!("machine state keeps its mode: {error}"),
+        })?;
+    verify_owner_and_privacy_fd(&owned, path, expected_uid)
+}
+
+fn verify_owner_and_privacy_fd(
+    owned: &crate::fs::OwnedDirectory,
     path: &Path,
-    metadata: &std::fs::Metadata,
     expected_uid: u32,
 ) -> Result<(), PathError> {
-    if metadata.uid() != expected_uid {
+    let stat = owned.stat_self()?;
+    if stat.uid != expected_uid {
         return Err(PathError::StateRefused {
             path: path.display().to_string(),
             reason: format!(
                 "machine state is owned by uid {}, not {}",
-                metadata.uid(),
-                expected_uid
+                stat.uid, expected_uid
             ),
         });
     }
-    if metadata.mode() & 0o022 != 0 {
+    if stat.mode & 0o022 != 0 {
         return Err(PathError::StateRefused {
             path: path.display().to_string(),
             reason: "machine state is never writable by group or other".to_owned(),
@@ -249,81 +253,106 @@ fn verify_owner_and_privacy(
 }
 
 pub fn verify_trusted_state_file(path: &Path, expected_uid: u32) -> Result<(), PathError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|source| PathError::Io {
+    let refused = |reason: &str| PathError::StateRefused {
         path: path.display().to_string(),
-        source,
+        reason: reason.to_owned(),
+    };
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(refused("trusted machine state has a parent directory"));
+    };
+    let Some(name) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    else {
+        return Err(refused("trusted machine state names its file"));
+    };
+    let directory =
+        crate::fs::OwnedDirectory::open(parent).map_err(|error| PathError::StateRefused {
+            path: path.display().to_string(),
+            reason: format!("trusted machine state is reachable: {error}"),
+        })?;
+    let current = directory.stream_regular(name).map_err(|_| {
+        refused("trusted machine state is a regular file, not a link or a special file")
     })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if current.uid != expected_uid {
         return Err(PathError::StateRefused {
             path: path.display().to_string(),
-            reason: "trusted machine state is a regular file, not a link or a special file"
-                .to_owned(),
+            reason: format!(
+                "machine state is owned by uid {}, not {}",
+                current.uid, expected_uid
+            ),
         });
     }
-    verify_owner_and_privacy(path, &metadata, expected_uid)
+    if current.mode & 0o022 != 0 {
+        return Err(refused("machine state is never writable by group or other"));
+    }
+    Ok(())
 }
 
 pub fn verify_machine_hierarchy(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
-    crate::fs::anchor_reachable(state_root).map_err(|error| PathError::StateRefused {
-        path: state_root.display().to_string(),
-        reason: format!("the machine state hierarchy must not pass through a link: {error}"),
-    })?;
-    match std::fs::symlink_metadata(state_root) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::Io {
-                path: state_root.display().to_string(),
-                source,
-            });
-        }
-        Ok(metadata) => {
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(PathError::StateRefused {
-                    path: state_root.display().to_string(),
-                    reason: "machine state is a real directory, not a link or a special file"
-                        .to_owned(),
-                });
-            }
-            verify_owner_and_privacy(state_root, &metadata, expected_uid)?;
-        }
-    }
+    verify_state_root(state_root, expected_uid, true)?;
     verify_tree(state_root, expected_uid, 8, true)
 }
 
 pub fn verify_machine_structure(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
+    verify_state_root(state_root, expected_uid, false)?;
+    verify_tree(state_root, expected_uid, 8, false)
+}
+
+pub fn verify_machine_install_roots(
+    roots: &MachineRoots,
+    expected_uid: u32,
+) -> Result<(), PathError> {
+    for root in [&roots.programs, &roots.shared_data] {
+        crate::fs::verify_ancestor_trust(root, expected_uid).map_err(|error| {
+            PathError::StateRefused {
+                path: root.display().to_string(),
+                reason: format!("a machine install root is not trustworthy: {error}"),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn verify_state_root(state_root: &Path, expected_uid: u32, privacy: bool) -> Result<(), PathError> {
     crate::fs::anchor_reachable(state_root).map_err(|error| PathError::StateRefused {
         path: state_root.display().to_string(),
         reason: format!("the machine state hierarchy must not pass through a link: {error}"),
     })?;
-    match std::fs::symlink_metadata(state_root) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::Io {
-                path: state_root.display().to_string(),
-                source,
-            });
+    let owned = match crate::fs::OwnedDirectory::open(state_root) {
+        Ok(owned) => owned,
+        Err(PathError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
         }
-        Ok(metadata) => {
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(PathError::StateRefused {
-                    path: state_root.display().to_string(),
-                    reason: "machine state is a real directory, not a link or a special file"
-                        .to_owned(),
-                });
-            }
-            if metadata.uid() != expected_uid {
-                return Err(PathError::StateRefused {
-                    path: state_root.display().to_string(),
-                    reason: format!(
-                        "machine state is owned by uid {}, not {}",
-                        metadata.uid(),
-                        expected_uid
-                    ),
-                });
-            }
-        }
+        Err(error) => return Err(error),
+    };
+    let stat = owned.stat_self()?;
+    if stat.kind != crate::fs::EntryKind::Directory {
+        return Err(PathError::StateRefused {
+            path: state_root.display().to_string(),
+            reason: "machine state is a real directory, not a link or a special file".to_owned(),
+        });
     }
-    verify_tree(state_root, expected_uid, 8, false)
+    if stat.uid != expected_uid {
+        return Err(PathError::StateRefused {
+            path: state_root.display().to_string(),
+            reason: format!(
+                "machine state is owned by uid {}, not {}",
+                stat.uid, expected_uid
+            ),
+        });
+    }
+    if privacy && stat.mode & 0o022 != 0 {
+        return Err(PathError::StateRefused {
+            path: state_root.display().to_string(),
+            reason: "machine state is never writable by group or other".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn verify_tree(
@@ -397,7 +426,14 @@ fn verify_open(
             });
         }
         if kind == crate::fs::EntryKind::Directory {
-            let child = owned.open_child(&name)?;
+            let (child, dev, ino) =
+                owned
+                    .open_child_verified(&name)
+                    .map_err(|error| PathError::StateRefused {
+                        path: path.display().to_string(),
+                        reason: format!("machine state holds a stable directory: {error}"),
+                    })?;
+            let _ = (dev, ino);
             verify_open(&child, &path, expected_uid, depth - 1, privacy)?;
         }
     }
@@ -422,73 +458,84 @@ pub fn verify_ledger_trust(
 }
 
 pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(), PathError> {
-    let entries = match std::fs::read_dir(state_root) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::Io {
-                path: state_root.display().to_string(),
-                source,
-            });
+    let owned = match crate::fs::OwnedDirectory::open(state_root) {
+        Ok(owned) => owned,
+        Err(PathError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
         }
+        Err(error) => return Err(error),
     };
-    for entry in entries {
-        let entry = entry.map_err(|source| PathError::Io {
-            path: state_root.display().to_string(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|source| PathError::Io {
-            path: path.display().to_string(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+    for name in owned.child_names().map_err(|error| PathError::Io {
+        path: state_root.display().to_string(),
+        source: std::io::Error::other(error.to_string()),
+    })? {
+        let path = state_root.join(&name);
+        let stat = owned.stat_child(&name)?;
+        if stat.kind == crate::fs::EntryKind::Symlink
+            || (stat.kind != crate::fs::EntryKind::Directory
+                && stat.kind != crate::fs::EntryKind::Regular)
+        {
             return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "machine state holds only real files and directories".to_owned(),
             });
         }
-        if metadata.uid() != expected_uid {
+        if stat.uid != expected_uid {
             return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: format!(
                     "machine state is owned by uid {}, not {}",
-                    metadata.uid(),
-                    expected_uid
+                    stat.uid, expected_uid
                 ),
             });
         }
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "lock")
-        {
-            if !metadata.is_file() {
+        if name.ends_with(".lock") {
+            if stat.kind != crate::fs::EntryKind::Regular {
                 return Err(PathError::StateRefused {
                     path: path.display().to_string(),
                     reason: "a lock marker is a regular file".to_owned(),
                 });
             }
-            set_mode(&path, MACHINE_LOCK_FILE_MODE)?;
+            owned.chmod_child(
+                &name,
+                rustix::fs::Mode::from_bits_truncate(MACHINE_LOCK_FILE_MODE),
+            )?;
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        match (name, metadata.is_dir()) {
-            ("transactions", true) => {
-                set_mode(&path, MACHINE_PRIVATE_DIR_MODE)?;
-                normalize_tree(
-                    &path,
+        match (name.as_str(), stat.kind) {
+            ("transactions", crate::fs::EntryKind::Directory) => {
+                owned.chmod_child(
+                    &name,
+                    rustix::fs::Mode::from_bits_truncate(MACHINE_PRIVATE_DIR_MODE),
+                )?;
+                let (child, _, _) =
+                    owned
+                        .open_child_verified(&name)
+                        .map_err(|error| PathError::StateRefused {
+                            path: path.display().to_string(),
+                            reason: format!("machine state holds a stable directory: {error}"),
+                        })?;
+                normalize_open(
+                    &child,
                     MACHINE_PRIVATE_DIR_MODE,
                     MACHINE_PRIVATE_FILE_MODE,
                     expected_uid,
                 )?
             }
-            ("installations" | "generated", true) => {
-                set_mode(&path, MACHINE_STATE_DIR_MODE)?;
-                normalize_tree(
-                    &path,
+            ("installations" | "generated", crate::fs::EntryKind::Directory) => {
+                owned.chmod_child(
+                    &name,
+                    rustix::fs::Mode::from_bits_truncate(MACHINE_STATE_DIR_MODE),
+                )?;
+                let (child, _, _) =
+                    owned
+                        .open_child_verified(&name)
+                        .map_err(|error| PathError::StateRefused {
+                            path: path.display().to_string(),
+                            reason: format!("machine state holds a stable directory: {error}"),
+                        })?;
+                normalize_open(
+                    &child,
                     MACHINE_STATE_DIR_MODE,
                     MACHINE_PUBLIC_FILE_MODE,
                     expected_uid,
@@ -500,59 +547,76 @@ pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(),
     Ok(())
 }
 
-fn normalize_tree(
-    directory: &Path,
+fn normalize_open(
+    owned: &crate::fs::OwnedDirectory,
     dir_mode: u32,
     file_mode: u32,
     expected_uid: u32,
 ) -> Result<(), PathError> {
-    let entries = std::fs::read_dir(directory).map_err(|source| PathError::Io {
-        path: directory.display().to_string(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| PathError::Io {
-            path: directory.display().to_string(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|source| PathError::Io {
-            path: path.display().to_string(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+    let display = owned.path().to_path_buf();
+    for name in owned.child_names().map_err(|error| PathError::Io {
+        path: display.display().to_string(),
+        source: std::io::Error::other(error.to_string()),
+    })? {
+        let path = display.join(&name);
+        let stat = owned.stat_child(&name)?;
+        if stat.kind == crate::fs::EntryKind::Symlink
+            || (stat.kind != crate::fs::EntryKind::Directory
+                && stat.kind != crate::fs::EntryKind::Regular)
+        {
             return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: "machine state holds only real files and directories".to_owned(),
             });
         }
-        if metadata.uid() != expected_uid {
+        if stat.uid != expected_uid {
             return Err(PathError::StateRefused {
                 path: path.display().to_string(),
                 reason: format!(
                     "machine state is owned by uid {}, not {}",
-                    metadata.uid(),
-                    expected_uid
+                    stat.uid, expected_uid
                 ),
             });
         }
-        if metadata.is_dir() {
-            set_mode(&path, dir_mode)?;
-            normalize_tree(&path, dir_mode, file_mode, expected_uid)?;
+        if stat.kind == crate::fs::EntryKind::Directory {
+            owned.chmod_child(&name, rustix::fs::Mode::from_bits_truncate(dir_mode))?;
+            let (child, _, _) =
+                owned
+                    .open_child_verified(&name)
+                    .map_err(|error| PathError::StateRefused {
+                        path: path.display().to_string(),
+                        reason: format!("machine state holds a stable directory: {error}"),
+                    })?;
+            normalize_open(&child, dir_mode, file_mode, expected_uid)?;
         } else {
-            set_mode(&path, file_mode)?;
+            owned.chmod_child(&name, rustix::fs::Mode::from_bits_truncate(file_mode))?;
         }
     }
     Ok(())
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), PathError> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
-        PathError::Io {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(PathError::Refused {
             path: path.display().to_string(),
-            source,
-        }
-    })
+            reason: "a mode change names its parent directory".to_owned(),
+        });
+    };
+    let Some(name) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    else {
+        return Err(PathError::Refused {
+            path: path.display().to_string(),
+            reason: "a mode change names its file".to_owned(),
+        });
+    };
+    let owned = crate::fs::OwnedDirectory::open(parent)?;
+    owned.chmod_child(name, rustix::fs::Mode::from_bits_truncate(mode))
 }
 
 pub fn normalize_published_modes(
@@ -561,14 +625,7 @@ pub fn normalize_published_modes(
 ) -> Result<(), PathError> {
     let store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger_path = store.path_for(&ledger.app_id, ledger.scope);
-    std::fs::set_permissions(
-        &ledger_path,
-        std::fs::Permissions::from_mode(MACHINE_PUBLIC_FILE_MODE),
-    )
-    .map_err(|source| PathError::Io {
-        path: ledger_path.display().to_string(),
-        source,
-    })?;
+    set_mode(&ledger_path, MACHINE_PUBLIC_FILE_MODE)?;
     for owned in ledger.resources.values() {
         let zup_exec::OwnedResource::File { destination, .. } = owned else {
             continue;
@@ -578,12 +635,7 @@ pub fn normalize_published_modes(
         };
 
         if host.starts_with(state_root) {
-            std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).map_err(
-                |source| PathError::Io {
-                    path: host.display().to_string(),
-                    source,
-                },
-            )?;
+            set_mode(&host, 0o755)?;
         }
     }
     Ok(())
@@ -632,6 +684,7 @@ pub fn host_to_install_template(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
 
     fn isolated() -> (tempfile::TempDir, MachineRoots) {
         let base = tempfile::tempdir().expect("an isolated base");
@@ -816,6 +869,51 @@ mod tests {
             MACHINE_PUBLIC_FILE_MODE
         );
         assert_eq!(mode(&lock), MACHINE_LOCK_FILE_MODE);
+    }
+
+    #[test]
+    fn install_root_ancestry_is_trusted() {
+        let base = tempfile::tempdir().expect("an isolated base");
+        let roots = MachineRoots::new(
+            base.path().join("opt"),
+            base.path().join("var/lib/zup"),
+            base.path().join("var/opt"),
+        );
+        for root in [&roots.programs, &roots.shared_data] {
+            std::fs::create_dir_all(root).expect("a root");
+        }
+        let uid = current_uid();
+        let owned = crate::fs::OwnedDirectory::open(base.path()).expect("the base opens");
+        owned
+            .verify_descendants(Path::new("opt"), uid)
+            .expect("private owned ancestry verifies");
+        owned
+            .verify_descendants(Path::new("var/opt"), uid)
+            .expect("nested private owned ancestry verifies");
+
+        let writable = base.path().join("opt");
+        let mut permissions = std::fs::metadata(&writable).expect("stat").permissions();
+        permissions.set_mode(0o775);
+        std::fs::set_permissions(&writable, permissions).expect("chmod");
+        assert!(
+            owned.verify_descendants(Path::new("opt"), uid).is_err(),
+            "a group-writable ancestor refuses machine installation"
+        );
+
+        assert!(
+            owned
+                .verify_descendants(Path::new("opt"), uid.wrapping_add(1))
+                .is_err(),
+            "ancestry owned by someone else refuses"
+        );
+        assert!(
+            owned.verify_descendants(Path::new("../opt"), uid).is_err(),
+            "a walk never escapes its base"
+        );
+        assert!(
+            crate::fs::verify_ancestor_trust(Path::new("opt/acme"), uid).is_err(),
+            "a relative ancestry is refused without touching the filesystem"
+        );
     }
 
     fn current_uid() -> u32 {

@@ -1,12 +1,14 @@
 #![cfg(target_os = "linux")]
 
 use rstest::rstest;
-use zup_core::{Sha256Digest, hash_reader};
+use zup_core::{SelectedScope, Sha256Digest, hash_reader};
 use zup_linux::{
     EntryKind, ExecError, FileIntent, FileWork, LinuxFileExecutor, OwnedDirectory, PathError,
     STATE_DIRECTORY_MODE, STATE_FILE_MODE,
 };
-use zup_transaction::{FilePrecondition, OperationId, OperationReceipt};
+use zup_transaction::{
+    FilePrecondition, FileRemoval, FileRemovalKind, OperationId, OperationReceipt,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -71,13 +73,30 @@ fn node(delta: zup_transaction::FileDelta) -> zup_transaction::TransactionNode {
     }
 }
 
-fn removal_node() -> zup_transaction::TransactionNode {
+fn removal_node(destination: &Path, bytes: &[u8]) -> zup_transaction::TransactionNode {
+    let target = zup_core::Target::parse("linux-x64").expect("a target");
+    let destination = zup_platform::TargetPath::new(target, destination.to_string_lossy())
+        .expect("a target path");
+    let removal = FileRemoval {
+        key: file_key(),
+        kind: FileRemovalKind::RemoveOwned,
+        scope: SelectedScope::User,
+        privilege: zup_core::Privilege::User,
+        destination: destination.clone(),
+        sha256: digest(bytes),
+        size: bytes.len() as u64,
+        created_directories: Vec::new(),
+    };
     zup_transaction::TransactionNode {
         id: id(1),
         phase: zup_transaction::Phase::FileMutation,
         kind: zup_transaction::NodeKind::FileRemoval { key: file_key() },
         declaration_order: 0,
-        meta: Default::default(),
+        meta: zup_transaction::NodeMeta {
+            privilege: Some(zup_core::Privilege::User),
+            removal: Some(removal),
+            ..Default::default()
+        },
     }
 }
 
@@ -383,17 +402,7 @@ fn a_removal_unlinks_and_backs_up() {
     );
 
     let receipt = executor
-        .apply(&zup_transaction::TransactionNode {
-            id: id(1),
-            phase: zup_transaction::Phase::FileMutation,
-            kind: zup_transaction::NodeKind::FileRemoval {
-                key: zup_core::ResourceKey::File {
-                    destination: String::from("/tmp/whatever"),
-                },
-            },
-            declaration_order: 0,
-            meta: Default::default(),
-        })
+        .apply(&removal_node(&destination, b"the payload"))
         .expect("remove");
 
     assert!(!destination.exists(), "the file is unlinked");
@@ -587,11 +596,16 @@ fn rolling_back_a_removal_restores_bytes_and_mode() {
         },
     );
 
-    let receipt = executor.apply(&removal_node()).expect("remove");
+    let receipt = executor
+        .apply(&removal_node(&destination, b"#!/bin/sh\necho v1\n"))
+        .expect("remove");
     assert!(!destination.exists(), "the file is unlinked");
 
     executor
-        .rollback(&removal_node(), &receipt)
+        .rollback(
+            &removal_node(&destination, b"#!/bin/sh\necho v1\n"),
+            &receipt,
+        )
         .expect("rollback");
 
     assert_eq!(
@@ -716,11 +730,15 @@ fn a_removal_rollback_refuses_a_recreated_foreign_file() {
             sha256: digest(b"the payload"),
         },
     );
-    let receipt = executor.apply(&removal_node()).expect("remove");
+    let receipt = executor
+        .apply(&removal_node(&destination, b"the payload"))
+        .expect("remove");
     std::fs::write(&destination, b"someone else's file").expect("write");
 
     assert!(
-        executor.rollback(&removal_node(), &receipt).is_err(),
+        executor
+            .rollback(&removal_node(&destination, b"the payload"), &receipt)
+            .is_err(),
         "restoring over a foreign file would destroy user data"
     );
     assert_eq!(
@@ -797,4 +815,317 @@ fn reconcile_refuses_a_receipt_whose_backup_is_gone() {
         zup_transaction::ReconcileResult::Ambiguous,
         "an applied file without its backup cannot roll back, so recovery stays ambiguous"
     );
+}
+
+#[test]
+fn removal_refuses_a_file_modified_after_planning() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let destination = root.path().join("app.dat");
+    std::fs::write(&destination, b"v1").expect("write v1");
+    let mut executor = executor_for(
+        &destination,
+        b"v1",
+        false,
+        FilePrecondition::Exact {
+            size: 2,
+            sha256: digest(b"v1"),
+        },
+    );
+    let planned = removal_node(&destination, b"v1");
+
+    std::fs::write(&destination, b"v2-external").expect("an outside edit");
+
+    let error = executor
+        .prepare(&planned)
+        .expect_err("preparation sees the outside edit");
+    assert!(
+        matches!(error, ExecError::PlanDrift { .. }),
+        "a changed file is drift, not absence: {error}"
+    );
+    let error = executor
+        .apply(&planned)
+        .expect_err("the unlink refuses a file it was not authorized to remove");
+    assert!(
+        matches!(error, ExecError::PlanDrift { .. }),
+        "the mutation boundary enforces the removal identity: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&destination).expect("read"),
+        b"v2-external",
+        "the outside edit survives"
+    );
+}
+
+#[test]
+fn removal_without_identity_is_refused() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let destination = root.path().join("app.dat");
+    std::fs::write(&destination, b"the payload").expect("write");
+    let mut executor = executor_for(
+        &destination,
+        b"the payload",
+        false,
+        FilePrecondition::Exact {
+            size: 11,
+            sha256: digest(b"the payload"),
+        },
+    );
+    let bare = zup_transaction::TransactionNode {
+        id: id(1),
+        phase: zup_transaction::Phase::Backend,
+        kind: zup_transaction::NodeKind::FileRemoval { key: file_key() },
+        declaration_order: 0,
+        meta: Default::default(),
+    };
+
+    assert!(
+        matches!(executor.prepare(&bare), Err(ExecError::PlanDrift { .. })),
+        "existence alone never authorizes a removal"
+    );
+    assert!(
+        matches!(executor.apply(&bare), Err(ExecError::PlanDrift { .. })),
+        "the mutation boundary requires the removal identity"
+    );
+    assert!(
+        destination.exists(),
+        "nothing is unlinked without an identity"
+    );
+}
+
+#[test]
+fn removal_apply_is_idempotent_after_a_crash() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let destination = root.path().join("app.dat");
+    std::fs::write(&destination, b"the payload").expect("write");
+    let mut executor = executor_for(
+        &destination,
+        b"the payload",
+        false,
+        FilePrecondition::Exact {
+            size: 11,
+            sha256: digest(b"the payload"),
+        },
+    );
+    let planned = removal_node(&destination, b"the payload");
+
+    let first = executor.apply(&planned).expect("remove");
+    let second = executor.apply(&planned).expect("a replay after a crash");
+
+    assert!(
+        matches!(
+            (&first, &second),
+            (
+                OperationReceipt::RemoveFile { .. },
+                OperationReceipt::RemoveFile { .. }
+            )
+        ),
+        "the replay reports the same removal"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn replace_completes_an_interrupted_exchange() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let install = root.path().join("install");
+    std::fs::create_dir_all(&install).expect("install");
+    let destination = install.join("app.dat");
+    std::fs::write(&destination, b"v1").expect("write v1");
+    let mut executor = executor_for(
+        &destination,
+        b"v2",
+        false,
+        FilePrecondition::Exact {
+            size: 2,
+            sha256: digest(b"v1"),
+        },
+    );
+    executor.stage(&stage_id(), b"v2").expect("stage");
+    let staged = std::fs::read_dir(&install)
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .find(|name| name.to_string_lossy().starts_with("staged-"))
+        .expect("a staged file beside the destination");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            install.join(&staged),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("the crash lands after the staged file takes its published mode");
+    }
+
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        install.join(staged),
+        rustix::fs::CWD,
+        &destination,
+        rustix::fs::RenameFlags::EXCHANGE,
+    )
+    .expect("the crash lands between the exchange and the backup rename");
+
+    let outcome = executor
+        .reconcile(&node(zup_transaction::FileDelta::Replace), None)
+        .expect("reconcile");
+    let OperationReceipt::ReplaceFile { backup_path, .. } = (match outcome {
+        zup_transaction::ReconcileResult::AppliedWithReceipt(receipt) => receipt,
+        other => panic!("an interrupted exchange completes, not {other:?}"),
+    }) else {
+        panic!("a completed exchange reports a replace receipt");
+    };
+    assert_eq!(
+        std::fs::read(&destination).expect("read"),
+        b"v2",
+        "the published file stays published"
+    );
+    assert_eq!(
+        std::fs::read(&backup_path).expect("the backup is reconstructed"),
+        b"v1",
+        "the displaced entry becomes the durable backup"
+    );
+}
+
+#[test]
+fn machine_install_directories_stay_traversable() {
+    let root = tempfile::tempdir().expect("a temp directory");
+    let destination = root.path().join("install").join("tool");
+    let mut executor =
+        executor_for(&destination, b"#!/bin/sh\n", true, FilePrecondition::Absent).for_machine();
+    executor.stage(&stage_id(), b"#!/bin/sh\n").expect("stage");
+    executor
+        .apply(&node(zup_transaction::FileDelta::Create))
+        .expect("create");
+
+    assert_eq!(
+        mode_of(&root.path().join("install")),
+        0o755,
+        "a machine install directory is traversable by regular users"
+    );
+    assert_eq!(mode_of(&destination), 0o755);
+
+    let user_destination = root.path().join("user-install").join("tool");
+    let mut user = executor_for(
+        &user_destination,
+        b"#!/bin/sh\n",
+        true,
+        FilePrecondition::Absent,
+    );
+    user.stage(&stage_id(), b"#!/bin/sh\n").expect("stage");
+    user.apply(&node(zup_transaction::FileDelta::Create))
+        .expect("create");
+    assert_eq!(
+        mode_of(&root.path().join("user-install")),
+        0o700,
+        "a user install directory stays private"
+    );
+}
+
+#[test]
+fn denied_ancestry_is_an_error_not_absence() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if rustix::process::geteuid().as_raw() == 0 {
+        return;
+    }
+    let root = tempfile::tempdir().expect("a temp directory");
+    let install = root.path().join("install");
+    std::fs::create_dir_all(&install).expect("install");
+    let destination = install.join("app.dat");
+    let mut executor = executor_for(
+        &destination,
+        b"the payload",
+        false,
+        FilePrecondition::Absent,
+    );
+
+    std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o000)).expect("deny");
+    let outcome = executor.prepare(&node(zup_transaction::FileDelta::Create));
+    std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).expect("restore");
+
+    assert!(
+        outcome.is_err(),
+        "a directory that cannot be observed is not reported as absent"
+    );
+}
+
+#[test]
+fn large_payload_streams_with_bounded_memory() {
+    use zup_bundle::DirectoryPayloadSource;
+
+    const PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
+    const PEAK_KB: u64 = 200 * 1024;
+
+    let root = tempfile::tempdir().expect("a temp directory");
+    let payload_root = root.path().join("payload");
+    let install = root.path().join("install");
+    std::fs::create_dir_all(&payload_root).expect("payload");
+    let chunk = vec![0xA5u8; 1024 * 1024];
+    let source_file = payload_root.join("big.bin");
+    {
+        let mut out = std::fs::File::create(&source_file).expect("create");
+        use std::io::Write as _;
+        for _ in 0..256 {
+            out.write_all(&chunk).expect("write");
+        }
+        out.sync_all().expect("sync");
+    }
+    let digest = {
+        let file = std::fs::File::open(&source_file).expect("open");
+        hash_reader(file).expect("bytes hash").1
+    };
+    let destination = install.join("big.bin");
+    let target = zup_core::Target::parse("linux-x64").expect("a target");
+    let host_destination =
+        zup_platform::TargetPath::new(target, destination.to_string_lossy()).expect("a path");
+    let stage_key = zup_core::ResourceKey::File {
+        destination: host_destination.to_string(),
+    };
+    let stage_operation = OperationId::stage_file(&stage_key);
+    let mut executor =
+        LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload_root));
+    executor.register(
+        &stage_operation,
+        FileWork {
+            destination: host_destination,
+            host_path: destination.clone(),
+            intent: FileIntent {
+                sha256: digest,
+                size: PAYLOAD_BYTES,
+                executable: false,
+            },
+            precondition: FilePrecondition::Absent,
+        },
+    );
+    let stage = zup_transaction::TransactionNode {
+        id: stage_operation,
+        phase: zup_transaction::Phase::Stage,
+        kind: zup_transaction::NodeKind::StageFile { key: stage_key },
+        declaration_order: 0,
+        meta: zup_transaction::NodeMeta {
+            source_relative: Some(zup_core::RelativePath::new("big.bin").expect("a relative path")),
+            file_precondition: Some(FilePrecondition::Absent),
+            expected_sha256: Some(digest),
+            expected_size: Some(PAYLOAD_BYTES),
+            privilege: Some(zup_core::Privilege::User),
+            executable: Some(false),
+            ..Default::default()
+        },
+    };
+
+    let receipt = executor.apply(&stage).expect("a large stage applies");
+    assert!(matches!(receipt, OperationReceipt::StageFile { size, .. } if size == PAYLOAD_BYTES));
+
+    let peak = peak_kb().expect("a peak measurement");
+    assert!(
+        peak < PEAK_KB,
+        "staging 256 MiB peaks at {peak} KiB, below {PEAK_KB} KiB"
+    );
+}
+
+fn peak_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.split_whitespace().next()?.parse().ok())
 }

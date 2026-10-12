@@ -451,18 +451,6 @@ fn check_no_full_override(unit: &str) -> Result<(), crate::error::ExecError> {
     crate::service_ops::check_no_full_override(unit, &crate::service_ops::admin_override_dir())
 }
 
-#[cfg(test)]
-mod override_tests {
-    #[test]
-    fn an_override_shadows_and_absence_passes() {
-        let dir = tempfile::tempdir().expect("an isolated admin layer");
-        let unit = "zup-tool-override.service";
-        assert!(crate::service_ops::check_no_full_override(unit, dir.path()).is_ok());
-        std::fs::write(dir.path().join(unit), b"[Unit]\n").expect("an override");
-        assert!(crate::service_ops::check_no_full_override(unit, dir.path()).is_err());
-    }
-}
-
 fn validate_service_binary(
     op: &zup_exec::ServiceOperation,
     target_files: &std::collections::BTreeMap<String, bool>,
@@ -963,5 +951,17 @@ mod tests {
                 .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
             "a typed service removal, never a generic call"
         );
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    #[test]
+    fn an_override_shadows_and_absence_passes() {
+        let dir = tempfile::tempdir().expect("an isolated admin layer");
+        let unit = "zup-tool-override.service";
+        assert!(crate::service_ops::check_no_full_override(unit, dir.path()).is_ok());
+        std::fs::write(dir.path().join(unit), b"[Unit]\n").expect("an override");
+        assert!(crate::service_ops::check_no_full_override(unit, dir.path()).is_err());
     }
 }
