@@ -728,27 +728,29 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> 
         ) {
             return Err(ExecError::LedgerInvalid);
         }
-        let Ok((directory, name)) = crate::fs::open_parent(&backup) else {
-            continue;
+        let (directory, name) = match crate::fs::open_parent(&backup) {
+            Ok(opened) => opened,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
         };
         match directory.kind_or_absent(&name) {
             Ok(None) => {}
             Ok(Some(crate::fs::EntryKind::Regular)) => {
-                let bytes = directory
-                    .read_regular(&name)
-                    .map_err(|_| ExecError::LedgerInvalid)?;
-                if zup_core::hash_reader(bytes.as_slice()).map_err(|_| ExecError::LedgerInvalid)?
-                    != (size, sha256)
-                {
+                let current = match directory.stream_regular(&name) {
+                    Ok(current) => current,
+                    Err(error) if error.is_not_found() => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if current.size != size || current.sha256 != sha256 {
                     return Err(ExecError::LedgerInvalid);
                 }
                 directory
                     .remove_file(&name)
                     .map_err(|_| ExecError::LedgerInvalid)?;
-                let _ = directory.sync();
+                directory.sync()?;
             }
             Ok(Some(_)) => return Err(ExecError::LedgerInvalid),
-            Err(_) => return Err(ExecError::LedgerInvalid),
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -935,5 +937,182 @@ mod tests {
             ),
             "an unknown file is never owned"
         );
+    }
+
+    fn cleanup_record(
+        transaction: &zup_transaction::TransactionId,
+        install: &Path,
+        old: &[u8],
+        new: &[u8],
+    ) -> TransactionRecord {
+        let (_, old_digest) = zup_core::hash_reader(old).expect("old bytes hash");
+        let (_, new_digest) = zup_core::hash_reader(new).expect("new bytes hash");
+        let destination = install.join("app.dat").display().to_string();
+        let backup = install
+            .join(crate::executor::backup_name(
+                transaction,
+                "op-replace",
+                "backup",
+            ))
+            .display()
+            .to_string();
+        let node = TransactionNode {
+            id: node("op-replace"),
+            phase: zup_transaction::Phase::FileMutation,
+            kind: NodeKind::FileMutation {
+                key: ResourceKey::File {
+                    destination: String::from("/tmp/whatever"),
+                },
+                delta: FileDelta::Replace,
+            },
+            declaration_order: 0,
+            meta: Default::default(),
+        };
+        let plan = TransactionPlan {
+            schema: zup_transaction::TRANSACTION_PLAN_SCHEMA,
+            target: zup_core::Target::parse("linux-x64").expect("a target"),
+            selected_components: Vec::new(),
+            install_directory: None,
+            uninstall: false,
+            retired_keys: Vec::new(),
+            nodes: vec![node.clone()],
+            dependencies: Vec::new(),
+            audit: Default::default(),
+            execution_order: vec![node.id.clone()],
+            rollback_order: vec![node.id.clone()],
+            preset: None,
+        };
+        let mut record = TransactionRecord::new(
+            *transaction,
+            AppId::new("com.example.tool").expect("an id"),
+            SelectedScope::User,
+            semver::Version::parse("1.0.0").expect("a version"),
+            plan,
+        );
+        record.phase = TransactionPhase::Committed;
+        record.nodes.insert(
+            node.id,
+            zup_transaction::NodeState::Applied {
+                receipt: Box::new(OperationReceipt::ReplaceFile {
+                    destination,
+                    previous_sha256: old_digest.to_hex(),
+                    previous_size: old.len() as u64,
+                    previous_mode: 0o644,
+                    backup_path: backup,
+                    new_sha256: new_digest.to_hex(),
+                    new_size: new.len() as u64,
+                    executable: false,
+                }),
+            },
+        );
+        record
+    }
+
+    #[test]
+    fn committed_cleanup_verifies_and_removes_a_journal_bound_backup() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
+        let transaction = transaction_id();
+        let backup = install.join(crate::executor::backup_name(
+            &transaction,
+            "op-replace",
+            "backup",
+        ));
+        std::fs::write(&backup, b"v1").expect("the backup");
+
+        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
+        cleanup_committed_files(&record).expect("cleanup removes a verified backup");
+        assert!(!backup.exists(), "the backup is gone");
+        assert_eq!(
+            std::fs::read(install.join("app.dat")).expect("read"),
+            b"v2",
+            "the installed file is untouched"
+        );
+        cleanup_committed_files(&record).expect("repeated cleanup is idempotent");
+    }
+
+    #[test]
+    fn committed_cleanup_refuses_a_backup_with_unexpected_bytes() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
+        let transaction = transaction_id();
+        let backup = install.join(crate::executor::backup_name(
+            &transaction,
+            "op-replace",
+            "backup",
+        ));
+        std::fs::write(&backup, b"tampered").expect("the backup");
+
+        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
+        assert!(
+            matches!(
+                cleanup_committed_files(&record),
+                Err(ExecError::LedgerInvalid)
+            ),
+            "a content mismatch fails the journal, not the filesystem"
+        );
+        assert_eq!(
+            std::fs::read(&backup).expect("read"),
+            b"tampered",
+            "the unexpected file is preserved"
+        );
+    }
+
+    #[test]
+    fn committed_cleanup_skips_genuinely_absent_artifacts() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let transaction = transaction_id();
+        let missing = root.path().join("gone").join("install");
+        let record = cleanup_record(&transaction, &missing, b"v1", b"v2");
+        cleanup_committed_files(&record).expect("a missing hierarchy cleans to nothing");
+
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
+        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
+        cleanup_committed_files(&record).expect("an already-removed backup cleans to nothing");
+    }
+
+    #[test]
+    fn committed_cleanup_reports_an_uninspectable_parent() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let dir_as_file = root.path().join("dir-as-file");
+        std::fs::write(&dir_as_file, b"not a directory").expect("a blocking file");
+        let transaction = transaction_id();
+        let record = cleanup_record(&transaction, &dir_as_file, b"v1", b"v2");
+        let error = cleanup_committed_files(&record).expect_err("a blocked parent is never silent");
+        assert!(
+            matches!(error, ExecError::Path(_)),
+            "the filesystem failure propagates, not journal corruption: {error}"
+        );
+    }
+
+    #[test]
+    fn committed_cleanup_refuses_a_non_regular_backup_occupant() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
+        let transaction = transaction_id();
+        let backup = install.join(crate::executor::backup_name(
+            &transaction,
+            "op-replace",
+            "backup",
+        ));
+        std::fs::create_dir_all(&backup).expect("a blocking directory");
+
+        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
+        assert!(
+            matches!(
+                cleanup_committed_files(&record),
+                Err(ExecError::LedgerInvalid)
+            ),
+            "a non-regular occupant fails the journal"
+        );
+        assert!(backup.is_dir(), "the occupant is preserved");
     }
 }

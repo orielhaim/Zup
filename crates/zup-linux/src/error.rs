@@ -55,6 +55,11 @@ pub enum PathError {
 
 impl PathError {
     #[cfg(target_os = "linux")]
+    pub(crate) fn is_not_found(&self) -> bool {
+        matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn errno(path: &std::path::Path, error: rustix::io::Errno) -> Self {
         Self::Io {
             path: path.display().to_string(),

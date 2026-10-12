@@ -1675,7 +1675,7 @@ fn verify_previous(
 }
 
 fn is_absent(error: &PathError) -> bool {
-    matches!(error, PathError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+    error.is_not_found()
 }
 
 fn observe(destination: &Path) -> Result<Option<(u64, Sha256Digest)>, ExecError> {
@@ -1835,14 +1835,12 @@ impl Quarantine<'_> {
             path: self.display.display().to_string(),
             reason: reason.into(),
         };
-        match self.directory.stat_child(temporary) {
-            Err(error) if is_absent(&error) => {}
-            Err(_) => return Err(drift("the rollback slot cannot be read")),
-            Ok(stat) if stat.kind == EntryKind::Regular => {
-                self.directory.remove_file(temporary)?;
-                self.directory.sync()?;
-            }
-            Ok(_) => return Err(drift("a foreign entry blocks rollback")),
+        // A name and a file type never prove a previous attempt parked this
+        // slot, so any occupant fails closed. The NOREPLACE rename below is
+        // the atomic backstop for a squat racing this check.
+        match self.directory.kind_or_absent(temporary)? {
+            None => {}
+            Some(_) => return Err(drift("the rollback slot is occupied")),
         }
         let dest_stat = self
             .directory
@@ -1874,6 +1872,9 @@ impl Quarantine<'_> {
                 }
                 _ => drift("the backup cannot be restored"),
             })?;
+        // The parked entry was created by the NOREPLACE rename above and its
+        // identity re-verified; unlinkat cannot condition on identity, so this
+        // trusts the pinned directory like every other mutation does.
         let _ = self.directory.remove_file(temporary);
         let _ = self.directory.sync();
         Ok(())
@@ -2654,6 +2655,72 @@ mod fallback_tests {
         assert!(
             !install.join("rollback-test.tmp").exists(),
             "the parking slot is cleaned"
+        );
+    }
+
+    #[test]
+    fn quarantine_reverse_refuses_a_regular_file_in_the_parking_slot() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v2").expect("write v2");
+        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
+        std::fs::write(install.join("rollback-test.tmp"), b"squat").expect("a plant");
+
+        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
+        assert!(
+            quarantine_of(&directory, &destination)
+                .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
+                .is_err(),
+            "an occupied parking slot fails closed"
+        );
+        assert_eq!(
+            std::fs::read(install.join("rollback-test.tmp")).expect("read"),
+            b"squat",
+            "the occupant is never deleted"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"v2",
+            "the destination is untouched"
+        );
+        assert_eq!(
+            std::fs::read(install.join("backup-test")).expect("read"),
+            b"v1",
+            "the backup is untouched"
+        );
+    }
+
+    #[test]
+    fn a_retry_after_parking_preserves_the_parked_entry() {
+        let root = tempfile::tempdir().expect("a temp directory");
+        let install = root.path().join("install");
+        std::fs::create_dir_all(&install).expect("install");
+        let destination = install.join("app.dat");
+        std::fs::write(&destination, b"v1").expect("write v1");
+
+        let transaction = transaction();
+        let mut executor = LinuxFileExecutor::new();
+        executor.set_transaction_id(transaction);
+        register_replace(&mut executor, &destination, b"v1", b"v2");
+        plant_staged(&install, &replace_key(), b"v2");
+        let receipt = executor.replace(&replace_node()).expect("replace");
+        let temporary = rollback_temp_name(&transaction, "op-replace");
+        std::fs::rename(&destination, install.join(&temporary)).expect("a crash after parking");
+
+        executor
+            .rollback(&replace_node(), &receipt)
+            .expect("recovery completes from the backup");
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"v1",
+            "the backup restores the destination"
+        );
+        assert_eq!(
+            std::fs::read(install.join(&temporary)).expect("read"),
+            b"v2",
+            "the parked entry is preserved, never cleaned blindly"
         );
     }
 
