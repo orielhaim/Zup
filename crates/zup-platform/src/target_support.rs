@@ -14,11 +14,8 @@ pub fn is_supported_target(target: &Target) -> bool {
     }
 }
 
-pub fn supported_frontends(target: &Target) -> Vec<Frontend> {
-    match target.operating_system() {
-        TargetOperatingSystem::Linux => vec![Frontend::Console, Frontend::Headless],
-        _ => vec![Frontend::Gui, Frontend::Console, Frontend::Headless],
-    }
+pub fn supported_frontends(_target: &Target) -> Vec<Frontend> {
+    vec![Frontend::Gui, Frontend::Console, Frontend::Headless]
 }
 
 pub fn supports_frontend(target: &Target, frontend: Frontend) -> bool {
@@ -26,7 +23,11 @@ pub fn supports_frontend(target: &Target, frontend: Frontend) -> bool {
 }
 
 pub fn supports_preset(target: &Target, frontend: Frontend) -> bool {
-    target.operating_system() == TargetOperatingSystem::Windows && frontend == Frontend::Gui
+    frontend == Frontend::Gui
+        && matches!(
+            target.operating_system(),
+            TargetOperatingSystem::Windows | TargetOperatingSystem::Linux
+        )
 }
 
 pub fn supports_universal_artifact(target: &Target) -> bool {
@@ -46,7 +47,7 @@ mod tests {
     #[case("windows-x64", Frontend::Gui, true)]
     #[case("windows-x64", Frontend::Console, true)]
     #[case("windows-x64", Frontend::Headless, true)]
-    #[case("linux-x64", Frontend::Gui, false)]
+    #[case("linux-x64", Frontend::Gui, true)]
     #[case("linux-x64", Frontend::Console, true)]
     #[case("linux-x64", Frontend::Headless, true)]
     fn frontend_support_is_target_selected(
@@ -62,7 +63,7 @@ mod tests {
     #[case("windows-x64", Frontend::Gui, true)]
     #[case("windows-x64", Frontend::Console, false)]
     #[case("linux-x64", Frontend::Console, false)]
-    #[case("linux-x64", Frontend::Gui, false)]
+    #[case("linux-x64", Frontend::Gui, true)]
     fn preset_support_is_target_selected(
         #[case] target: &str,
         #[case] frontend: Frontend,

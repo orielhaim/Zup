@@ -13,6 +13,7 @@ use zup_sdk::preset::gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window, div, radians, relative,
 };
+use zup_sdk::preset::prelude::format_bytes;
 use zup_sdk::preset::presentation::{
     ChangeGroup, ChangeKind, PlanStatus, PlannedChange, RequirementPresentation, RequirementStatus,
     ResourceCategory,
@@ -243,7 +244,7 @@ fn requirements(requirements: &[RequirementPresentation], cx: &App) -> AnyElemen
                                         this.child(caption(
                                             format!(
                                                 "{} download",
-                                                model::size(requirement.estimated_bytes)
+                                                format_bytes(requirement.estimated_bytes)
                                             ),
                                             cx,
                                         ))

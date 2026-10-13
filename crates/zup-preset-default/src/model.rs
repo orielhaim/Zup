@@ -39,24 +39,6 @@ pub fn operation(snapshot: &Snapshot) -> OperationKind {
         })
 }
 
-pub fn size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} bytes");
-    }
-    let mut value = bytes as f64 / 1024.;
-    let mut unit = 0;
-    while value >= 1024. && unit < UNITS.len() - 1 {
-        value /= 1024.;
-        unit += 1;
-    }
-    if value < 10. {
-        format!("{value:.1} {}", UNITS[unit])
-    } else {
-        format!("{value:.0} {}", UNITS[unit])
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactKind {
     Size,
@@ -83,7 +65,7 @@ pub fn summary(snapshot: &Snapshot) -> Vec<Fact> {
     match snapshot.plan.latest() {
         Some(plan) if plan.estimated_bytes > 0 => facts.push(Fact {
             kind: FactKind::Size,
-            text: size(plan.estimated_bytes),
+            text: format_bytes(plan.estimated_bytes),
         }),
         None if snapshot.plan.is_computing() => facts.push(Fact {
             kind: FactKind::Size,
@@ -96,7 +78,7 @@ pub fn summary(snapshot: &Snapshot) -> Vec<Fact> {
     {
         facts.push(Fact {
             kind: FactKind::Download,
-            text: format!("{} to download", size(plan.download_bytes)),
+            text: format!("{} to download", format_bytes(plan.download_bytes)),
         });
     }
     let scope = snapshot.surface.scope();
@@ -337,7 +319,13 @@ pub fn progress(snapshot: &Snapshot) -> Progress {
         .map(|progress| progress.completed.min(progress.total) as f32 / progress.total as f32);
     let amount = report
         .filter(|progress| progress.phase == OperationPhase::Download && progress.total > 0)
-        .map(|progress| format!("{} of {}", size(progress.completed), size(progress.total)));
+        .map(|progress| {
+            format!(
+                "{} of {}",
+                format_bytes(progress.completed),
+                format_bytes(progress.total)
+            )
+        });
     Progress {
         title: if stopping {
             "Stopping…".into()
@@ -563,6 +551,13 @@ pub fn audience(scope: InstallScope) -> &'static str {
     }
 }
 
+pub fn app_list_reference(operating_system: OperatingSystem) -> &'static str {
+    match operating_system {
+        OperatingSystem::Linux => "its entry in your system's list of installed applications",
+        _ => "its entry in Settings › Apps",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Failure,
@@ -784,5 +779,25 @@ pub fn requirement_status(status: RequirementStatus) -> &'static str {
         RequirementStatus::Satisfied => "Already installed",
         RequirementStatus::Missing => "Will be installed",
         RequirementStatus::Unknown => "Checked during install",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(OperatingSystem::Windows, "its entry in Settings › Apps")]
+    #[case(
+        OperatingSystem::Linux,
+        "its entry in your system's list of installed applications"
+    )]
+    #[case(OperatingSystem::Unknown, "its entry in Settings › Apps")]
+    fn the_uninstall_dialog_names_the_platforms_application_list(
+        #[case] operating_system: OperatingSystem,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(app_list_reference(operating_system), expected);
     }
 }

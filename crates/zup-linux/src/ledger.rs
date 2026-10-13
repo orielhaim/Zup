@@ -193,10 +193,8 @@ impl LinuxLedgerStore {
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}
             }
         }
-        if plan.preset.is_some() {
-            return Err(ExecError::Ownership(
-                "a Linux console or headless transaction presents no window".into(),
-            ));
+        if let Some(preset) = &plan.preset {
+            validate_preset_plan(preset)?;
         }
         Ok(())
     }
@@ -290,7 +288,7 @@ impl LinuxLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
-        ledger.preset = None;
+        ledger.preset = record.plan.preset.clone();
 
         ledger.release = None;
         for node in &record.plan.nodes {
@@ -543,6 +541,22 @@ fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
     }
     let payload = crate::service_ops::decode_payload(&backend.payload).ok()?;
     Some(crate::service_ops::ledger_key_for_payload(&payload))
+}
+
+fn validate_preset_plan(preset: &zup_core::InstalledPreset) -> Result<(), ExecError> {
+    if preset.preset.protocol != zup_preset_protocol::PRESET_PROTOCOL_VERSION {
+        return Err(ExecError::Ownership(format!(
+            "preset protocol {} is not this build's {}",
+            preset.preset.protocol,
+            zup_preset_protocol::PRESET_PROTOCOL_VERSION
+        )));
+    }
+    for name in &preset.preset.required_capabilities {
+        zup_preset_protocol::Capability::parse(name).ok_or_else(|| {
+            ExecError::Ownership(format!("preset requires unknown capability `{name}`"))
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_service_apply(

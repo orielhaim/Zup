@@ -19,7 +19,7 @@ pub struct Envelope {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Message {
     PresetHello(PresetHello),
-    HostHello(HostHello),
+    HostHello(Box<HostHello>),
     Configuration(Box<Configuration>),
     Snapshot(Box<Snapshot>),
     Action(Action),

@@ -71,8 +71,11 @@ fn compile_files_only(
     input.selected_components = execution.selected_components.clone();
     input.install_directory = Some(target.install_directory.clone());
     input.uninstall = execution.uninstall;
-
-    input.preset = None;
+    input.preset = if execution.uninstall {
+        None
+    } else {
+        target.preset.clone()
+    };
 
     let mut mime_directory: Option<String> = None;
     let mut desktop_directory: Option<String> = None;

@@ -341,6 +341,52 @@ impl RunnerPayload {
         })
     }
 
+    fn open_preset(
+        &self,
+        path: &str,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<PayloadReader, PayloadError> {
+        let carrier = Carrier::open(&self.installer).map_err(|error| PayloadError::Read {
+            path: path.to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
+        let bytes = carrier.preset().ok_or(PayloadError::NotFound {
+            path: path.to_string(),
+        })?;
+        if bytes.len() as u64 != expected_size || zup_core::hash_bytes(bytes) != *expected_sha256 {
+            return Err(PayloadError::DigestMismatch {
+                path: path.to_string(),
+            });
+        }
+        Ok(Box::new(std::io::Cursor::new(bytes.to_vec())))
+    }
+
+    fn open_preset_asset(
+        &self,
+        path: &str,
+        name: &str,
+        expected_sha256: &Sha256Digest,
+        expected_size: u64,
+    ) -> Result<PayloadReader, PayloadError> {
+        let carrier = Carrier::open(&self.installer).map_err(|error| PayloadError::Read {
+            path: path.to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
+        let (_, bytes) = carrier
+            .package()
+            .ui_asset(name)
+            .map_err(|_| PayloadError::NotFound {
+                path: path.to_string(),
+            })?;
+        if bytes.len() as u64 != expected_size || zup_core::hash_bytes(&bytes) != *expected_sha256 {
+            return Err(PayloadError::DigestMismatch {
+                path: path.to_string(),
+            });
+        }
+        Ok(Box::new(std::io::Cursor::new(bytes)))
+    }
+
     fn open_maintenance(&self, path: &str) -> Result<PayloadReader, PayloadError> {
         let mut file =
             std::fs::File::open(&self.installer).map_err(|source| PayloadError::Read {
@@ -395,6 +441,16 @@ impl PayloadSource for RunnerPayload {
                 });
             }
             return self.open_maintenance(&path.to_string());
+        }
+        if path.as_str() == zup_bundle::PRESET_SOURCE {
+            return self.open_preset(&path.to_string(), expected_sha256, expected_size);
+        }
+        if let Some(name) = path
+            .as_str()
+            .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return self.open_preset_asset(&path.to_string(), name, expected_sha256, expected_size);
         }
         if let Some(bytes) = self.generated.get(path.as_str()) {
             let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).map_err(|_| {

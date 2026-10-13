@@ -361,6 +361,7 @@ impl SessionHost for WindowsSessionHost {
             configuration: composed.configuration,
             capabilities,
             product: zup_preset_host::surface::product(installer),
+            environment: zup_preset_protocol::environment::current(installer.target.as_str()),
         })
     }
 

@@ -176,6 +176,17 @@ fn the_handshake_names_the_protocol_and_the_session_on_both_sides() {
             .collect(),
         product(),
         "0.8.4",
+        zup_preset_protocol::HostEnvironment {
+            operating_system: zup_preset_protocol::OperatingSystem::Windows,
+            architecture: "x86_64".into(),
+            target: "windows-x64".into(),
+            desktop: zup_preset_protocol::DesktopEnvironment {
+                session: zup_preset_protocol::GraphicalSession::Native,
+                desktop_id: None,
+                desktop_name: None,
+            },
+            machine_authorization: zup_preset_protocol::MachineAuthorization::Available,
+        },
     );
     assert_eq!(host.session, hello.session);
     assert!(negotiate(&host.capabilities, &hello.required_capabilities).is_ok());

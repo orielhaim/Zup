@@ -119,6 +119,7 @@ pub fn launch(
     executable: &Path,
     capabilities: Capabilities,
     product: zup_preset_protocol::ProductIdentity,
+    environment: zup_preset_protocol::HostEnvironment,
 ) -> Result<PresetProcess, SessionError> {
     let endpoint =
         Endpoint::create().map_err(|error| SessionError::Handshake(error.to_string()))?;
@@ -147,6 +148,7 @@ pub fn launch(
             SessionId(channel.session()),
             capabilities,
             product,
+            environment,
         ))),
         reading: Some(channel),
     };

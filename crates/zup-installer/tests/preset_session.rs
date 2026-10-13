@@ -363,6 +363,7 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
         &composed.executable,
         state.capabilities().clone(),
         state.snapshot().product.clone(),
+        zup_preset_protocol::environment::current(plan.installer.target.as_str()),
     )
     .expect("the preset the installer carried collects the endpoint");
     process

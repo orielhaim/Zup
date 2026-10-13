@@ -72,12 +72,14 @@ where
         configuration,
         capabilities,
         product,
+        environment,
     } = host
         .materialize_preset(&discovery)
         .map_err(|error| miette::miette!("{error}"))?;
 
-    let mut preset = zup_preset_host::process::launch(&preset_exe, capabilities, product)
-        .map_err(|error| miette::miette!("{error}"))?;
+    let mut preset =
+        zup_preset_host::process::launch(&preset_exe, capabilities, product, environment)
+            .map_err(|error| miette::miette!("{error}"))?;
 
     let (asked, mut questions) = tokio::sync::mpsc::unbounded_channel();
     {

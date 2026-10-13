@@ -198,6 +198,8 @@ pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponen
                 out.push(ToolchainComponent::Dispatcher { subsystem, online });
             }
         }
+    }
+    if zup_platform::supports_preset(target, zup_core::Frontend::Gui) {
         out.push(ToolchainComponent::Preset);
     }
     out
@@ -984,18 +986,24 @@ mod tests {
     }
 
     #[test]
-    fn a_linux_target_needs_only_its_two_runtimes() {
+    fn a_linux_target_needs_its_three_runtimes_and_a_preset() {
         let target = zup_core::Target::parse("linux-x64").expect("valid");
         let components = components_for_target(&target);
-        assert_eq!(components.len(), 2, "{components:?}");
+        assert_eq!(components.len(), 4, "{components:?}");
+        let mut runtimes = 0;
+        let mut presets = 0;
         for component in &components {
             match component {
                 ToolchainComponent::Runtime { target: found, .. } => {
                     assert_eq!(found, &target, "{component:?}");
+                    runtimes += 1;
                 }
+                ToolchainComponent::Preset => presets += 1,
                 other => panic!("a Linux target stages no {other:?}"),
             }
         }
+        assert_eq!(runtimes, 3, "{components:?}");
+        assert_eq!(presets, 1, "{components:?}");
         assert_eq!(components, supported_components(&target));
         assert_eq!(components, host_components(&target));
     }

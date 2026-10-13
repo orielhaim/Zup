@@ -88,9 +88,7 @@ pub fn command() -> clap::Command {
 
 pub fn run(frontend: Frontend) -> miette::Result<()> {
     if frontend == Frontend::Gui {
-        return Err(miette::miette!(
-            "the graphical installer is not supported on Linux; use the console or headless installer"
-        ));
+        return run_gui();
     }
     // package: it authenticates and serves one session, never a lifecycle.
     if let Some((session, client_pid, socket_path)) = worker_session_args() {
@@ -214,6 +212,61 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
         Ok(zup_runtime::InstallOutcome::Failed(message)) => Err(miette::miette!("{message}")),
         Err(error) => Err(miette::miette!("{error}")),
     }
+}
+
+fn run_gui() -> miette::Result<()> {
+    if let Some((session, client_pid, socket_path)) = worker_session_args() {
+        return run_worker(session, client_pid, socket_path);
+    }
+    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    let graphical = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("DISPLAY").is_some()
+        || session_type.eq_ignore_ascii_case("wayland")
+        || session_type.eq_ignore_ascii_case("x11");
+    if !graphical {
+        return Err(miette::miette!(
+            "the graphical installer needs a Wayland or X11 session, and none is available \
+             (no WAYLAND_DISPLAY or DISPLAY). Run the console installer instead, or start a \
+             graphical session first"
+        ));
+    }
+    let cli = Cli::parse();
+    match &cli.verb {
+        Some(Verb::__PrivilegedWorker(args)) => {
+            return run_worker(
+                args.session.clone(),
+                args.client_pid,
+                args.socket_path.clone(),
+            );
+        }
+        Some(Verb::Recover(_)) => {
+            return Err(miette::miette!(
+                "recovery runs without a window; use the console installer"
+            ));
+        }
+        _ => {}
+    }
+    if cli.verb.is_some() || cli.install_dir.is_some() || cli.state_root.is_some() {
+        return Err(miette::miette!(
+            "the graphical installer takes no operation arguments; choose the operation in the window"
+        ));
+    }
+    let executable =
+        std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
+    let scope = cli.scope.map(ScopeFlag::selected);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| miette::miette!("session runtime: {error}"))?
+        .block_on(zup_session::run(
+            zup_linux::LinuxSessionHost::open(executable.clone()),
+            &executable,
+            zup_session::SessionLaunch {
+                scope,
+                state_root: None,
+                ..Default::default()
+            },
+        ))
 }
 
 fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {

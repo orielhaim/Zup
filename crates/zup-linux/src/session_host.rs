@@ -133,9 +133,7 @@ impl SessionHost for LinuxSessionHost {
         };
         let mut priors = Vec::new();
         for candidate in [SelectedScope::User, SelectedScope::Machine] {
-            let root = if candidate == scope {
-                state_root.clone()
-            } else if launch.state_root.is_some() {
+            let root = if candidate == scope || launch.state_root.is_some() {
                 state_root.clone()
             } else {
                 crate::paths::state_root(candidate).map_err(|error| error.to_string())?
@@ -193,8 +191,147 @@ impl SessionHost for LinuxSessionHost {
 
     fn materialize_preset(
         &self,
-        _discovery: &SessionDiscovery,
+        discovery: &SessionDiscovery,
     ) -> Result<zup_session::PresetLaunch, String> {
-        Err("the graphical installer is not supported on Linux".into())
+        let installer = discovery.installer();
+        let installed = discovery.prior().is_some();
+        let capabilities = zup_preset_host::surface::capabilities(installer, installed);
+        let runtime = match discovery.prior() {
+            Some(ledger) => ledger
+                .preset()
+                .map(|recorded| recorded.preset.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "{} is installed with no recorded window, and its maintenance runtime \
+                         cannot present one.\n\nReinstall it to restore the window it was \
+                         installed with.",
+                        installer.app.name
+                    )
+                })?,
+            None => installer
+                .preset
+                .clone()
+                .ok_or_else(|| "this installer was composed without a preset".to_owned())?,
+        };
+        zup_preset_host::process::check_presentable(&runtime, &capabilities)
+            .map_err(|error| error.to_string())?;
+        let (executable, assets) = match discovery.prior() {
+            Some(ledger) => {
+                let recorded = ledger.preset().ok_or_else(|| {
+                    format!(
+                        "{} is installed with no recorded window.",
+                        installer.app.name
+                    )
+                })?;
+                let directory = zup_transaction::maintenance_directory(
+                    &discovery.state_root,
+                    &installer.app.id,
+                    discovery.scope,
+                    &ledger.version,
+                );
+                let resolved = zup_bundle::resolve_preset_content(
+                    &directory,
+                    recorded,
+                    installer.target.executable_suffix(),
+                    |path| path.to_string_lossy().into_owned(),
+                )
+                .map_err(|error| error.to_string())?;
+                (resolved.executable, resolved.assets)
+            }
+            None => {
+                let carrier = crate::carrier::Carrier::open(&self.installer)
+                    .map_err(|error| error.to_string())?;
+                let staged = self
+                    .installer
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(format!("preset{}", installer.target.executable_suffix()));
+                write_staged(
+                    &staged,
+                    carrier
+                        .preset()
+                        .ok_or_else(|| "this installer was composed without a preset".to_owned())?,
+                )?;
+                let assets = self
+                    .installer
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("preset-assets");
+                let mut staged_assets = std::collections::BTreeMap::new();
+                for asset in &runtime.assets {
+                    let (_, bytes) = carrier
+                        .package()
+                        .ui_asset(asset.name.as_str())
+                        .map_err(|error| format!("the asset `{}`: {error}", asset.name))?;
+                    let path = assets.join(asset.name.as_str());
+                    write_staged(&path, &bytes)?;
+                    staged_assets
+                        .insert(asset.name.to_string(), path.to_string_lossy().into_owned());
+                }
+                (staged, staged_assets)
+            }
+        };
+        Ok(zup_session::PresetLaunch {
+            executable,
+            configuration: zup_preset_protocol::Configuration {
+                settings: runtime.settings.clone(),
+                assets,
+            },
+            capabilities,
+            product: zup_preset_host::surface::product(installer),
+            environment: zup_preset_protocol::environment::current(installer.target.as_str()),
+        })
     }
+
+    fn copy_diagnostics(&self, text: &str) {
+        for (program, args) in [
+            ("wl-copy", vec![] as Vec<&str>),
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ] {
+            if std::process::Command::new(program)
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write as _;
+                    child
+                        .stdin
+                        .as_mut()
+                        .ok_or_else(|| std::io::Error::other("no stdin"))?
+                        .write_all(text.as_bytes())?;
+                    child.wait()
+                })
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+}
+
+fn write_staged(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_extension("zup-tmp");
+    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755));
+    }
+    std::fs::rename(&temporary, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        error.to_string()
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }

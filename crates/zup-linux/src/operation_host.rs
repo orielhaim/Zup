@@ -157,9 +157,99 @@ impl OperationHost for LinuxOperationHost {
                 other => other.to_string(),
             })?;
         }
-        if preset.is_some() {
-            return Err("a preset window is not supported by the Linux backend".to_owned());
+        if let Some(preset) = preset {
+            let carrier = crate::carrier::Carrier::open(content.installer)
+                .map_err(|error| error.to_string())?;
+            let executable = carrier
+                .preset()
+                .ok_or_else(|| "this installer was composed without a preset".to_owned())?
+                .to_vec();
+            let assets = preset
+                .assets
+                .iter()
+                .map(|asset| {
+                    let (_, bytes) = carrier
+                        .package()
+                        .ui_asset(asset.name.as_str())
+                        .map_err(|error| format!("the asset `{}`: {error}", asset.name))?;
+                    if bytes.len() as u64 != asset.size
+                        || zup_core::hash_bytes(&bytes) != asset.sha256
+                    {
+                        return Err(format!(
+                            "the asset `{}` is not the content this application configured",
+                            asset.name
+                        ));
+                    }
+                    Ok(bytes)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let runtime_directory = zup_transaction::maintenance_directory(
+                content.state_root,
+                &target.app.id,
+                content.scope,
+                &target.app.version,
+            );
+            let executable_digest = zup_core::hash_bytes(&executable);
+            let mut files = vec![(
+                zup_bundle::preset_path(
+                    &runtime_directory,
+                    &executable_digest,
+                    target.target.executable_suffix(),
+                ),
+                executable_digest,
+                executable.len() as u64,
+                zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
+                    .expect("a reserved source name is always relative"),
+                true,
+            )];
+            for (asset, _) in preset.assets.iter().zip(&assets) {
+                files.push((
+                    zup_bundle::asset_path(&runtime_directory, asset.name.as_str(), &asset.sha256),
+                    asset.sha256,
+                    asset.size,
+                    zup_bundle::asset_source_name(asset.name.as_str()),
+                    false,
+                ));
+            }
+            attach_ui_runtime(target, content.scope, preset, executable_digest, files)?;
         }
         Ok(())
     }
+}
+
+fn attach_ui_runtime(
+    target: &mut TargetPlan,
+    scope: SelectedScope,
+    preset: &zup_core::PresetRuntime,
+    executable_digest: zup_core::Sha256Digest,
+    files: Vec<(
+        std::path::PathBuf,
+        zup_core::Sha256Digest,
+        u64,
+        zup_core::RelativePath,
+        bool,
+    )>,
+) -> Result<(), String> {
+    for (path, digest, size, source, executable) in files {
+        let destination = zup_platform::TargetPath::new(target.target, path.to_string_lossy())
+            .map_err(|error| format!("preset runtime destination: {error}"))?;
+        let text = destination.to_string();
+        target.files.push(zup_platform::TargetFile {
+            key: zup_core::ResourceKey::File { destination: text },
+            source_relative: source,
+            destination,
+            size,
+            sha256: digest,
+            privilege: scope.authorization(),
+            executable,
+        });
+        target.summary.file_count += 1;
+        target.summary.resource_count += 1;
+        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
+    }
+    target.preset = Some(zup_core::InstalledPreset {
+        preset: preset.clone(),
+        executable: executable_digest,
+    });
+    Ok(())
 }

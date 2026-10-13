@@ -40,15 +40,9 @@ fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
     if zup_platform::supports_frontend(target, frontend) {
         return Vec::new();
     }
-    match frontend {
-        Frontend::Gui => vec![format!(
-            "GUI installer runtime is not supported for `{target}`: the Linux backend ships \
-             console and headless runtimes in this phase"
-        )],
-        Frontend::Console | Frontend::Headless => vec![format!(
-            "frontend `{frontend}` is not supported for `{target}`"
-        )],
-    }
+    vec![format!(
+        "frontend `{frontend}` is not supported for `{target}`"
+    )]
 }
 
 /// when the installer runs, never at build time - and either-scope
@@ -196,13 +190,6 @@ fn resource_errors(
     }
     errors.extend(protocol_errors(&installer.protocols));
     errors.extend(association_errors(&installer.file_associations));
-    if installer.preset.is_some() {
-        errors.push(
-            "a preset window is not supported by the Linux backend yet: console and headless \
-             installers present no window"
-                .to_owned(),
-        );
-    }
     errors.extend(main_executable_errors(name, plan));
     errors
 }
@@ -365,6 +352,25 @@ mod tests {
     }
 
     #[test]
+    fn a_gui_plan_with_a_preset_is_accepted() {
+        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
+        let mut plan = plan();
+        plan.installer.frontend = Frontend::Gui;
+        plan.installer.preset = Some(zup_core::PresetRuntime {
+            name: zup_core::NonEmptyString::new("aurora").unwrap(),
+            version: semver::Version::parse("1.4.2").unwrap(),
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+            required_capabilities: Vec::new(),
+            settings: serde_json::json!({}),
+            assets: Vec::new(),
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = operation_capability_errors(&plan, SelectedScope::User);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn protocols_without_one_placeholder_are_refused() {
         let config = config(
             SUPPORTED_LINUX_TARGET,
@@ -416,7 +422,11 @@ mod tests {
     }
     #[test]
     fn every_unsupported_dimension_is_named() {
-        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::User,
+        );
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
             id: zup_core::ServiceId::new("tool").unwrap(),
@@ -430,7 +440,6 @@ mod tests {
         });
         let errors = linux_capability_errors(&config, &plan);
         let text = errors.join("\n");
-        assert!(text.contains("GUI"), "{text}");
         assert!(text.contains("service"), "{text}");
         assert!(
             !text.contains("zup-linux"),

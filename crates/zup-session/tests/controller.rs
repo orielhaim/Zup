@@ -248,6 +248,9 @@ impl SessionHost for FakeHost {
             },
             capabilities: zup_preset_host::surface::capabilities(discovery.installer(), false),
             product: zup_preset_host::surface::product(discovery.installer()),
+            environment: zup_preset_protocol::environment::current(
+                discovery.installer().target.as_str(),
+            ),
         })
     }
 }

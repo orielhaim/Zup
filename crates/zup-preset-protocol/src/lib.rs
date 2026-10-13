@@ -4,6 +4,7 @@ mod action;
 mod compatibility;
 mod configuration;
 mod description;
+pub mod environment;
 mod error;
 mod identifiers;
 mod presentation;
@@ -19,6 +20,9 @@ pub use configuration::{
 };
 pub use description::{
     DESCRIBE_FLAG, DescribeError, MAX_DESCRIBE_BYTES, MAX_TARGETS, PresetDescription,
+};
+pub use environment::{
+    DesktopEnvironment, GraphicalSession, HostEnvironment, MachineAuthorization, OperatingSystem,
 };
 pub use error::WireError;
 pub use identifiers::{ComponentId, ComponentIdError, InstallScope};

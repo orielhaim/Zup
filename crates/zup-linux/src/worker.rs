@@ -716,6 +716,14 @@ fn is_expected_backend(node: &zup_transaction::TransactionNode) -> bool {
         || backend.id.as_str() == crate::refresh::REFRESH_DESKTOP_ID
 }
 
+fn is_preset_source(source: &zup_core::RelativePath) -> bool {
+    source.as_str() == zup_bundle::PRESET_SOURCE
+        || source
+            .as_str()
+            .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn enforce_machine_policy(
     target: &zup_platform::TargetPlan,
     roots: &MachineRoots,
@@ -737,6 +745,13 @@ fn enforce_machine_policy(
                 if destination != crate::machine::MachineDestination::MachineState {
                     return Err(IpcError::Policy(
                         "maintenance belongs to machine state".into(),
+                    ));
+                }
+            }
+            ResourceKey::File { .. } if is_preset_source(&file.source_relative) => {
+                if destination != crate::machine::MachineDestination::MachineState {
+                    return Err(IpcError::Policy(
+                        "preset content belongs to machine state".into(),
                     ));
                 }
             }
@@ -894,14 +909,21 @@ fn execute_prepared(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     executor.set_transaction_id(record.transaction_id);
 
+    let total_files = prepared.file_count as u64;
+    channel.send(Message::Progress(ProgressReport {
+        kind: ProgressKind::OperationStarted,
+        detail: prepared.operation.clone(),
+        completed: None,
+        total: None,
+    }))?;
     let (record, outcome) = coordinator
         .execute(record, &mut executor)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     channel.send(Message::Progress(ProgressReport {
         kind: ProgressKind::OperationProgress,
-        detail: "finishing".into(),
-        completed: None,
-        total: None,
+        detail: prepared.operation.clone(),
+        completed: Some(total_files),
+        total: Some(total_files),
     }))?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
     match outcome {

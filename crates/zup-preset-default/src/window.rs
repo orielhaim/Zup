@@ -39,9 +39,10 @@ pub fn open(context: PresetContext<Settings>, cx: &mut App) {
     let session = context.session().clone();
     let settings: Entity<Settings> = (**context.settings()).clone();
     let capabilities = context.capabilities().clone();
+    let environment = context.environment().clone();
     let options = window_options(cx);
     zup_sdk::preset::gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| Installer::new(session, settings, capabilities, window, cx))
+        cx.new(|cx| Installer::new(session, settings, capabilities, environment, window, cx))
     })
     .expect("open the installer window");
 }
@@ -80,6 +81,7 @@ pub struct Installer {
     session: Session,
     settings: Entity<Settings>,
     capabilities: Capabilities,
+    environment: HostEnvironment,
     local: Local,
     _subscriptions: Vec<Subscription>,
 }
@@ -89,6 +91,7 @@ impl Installer {
         session: Session,
         settings: Entity<Settings>,
         capabilities: Capabilities,
+        environment: HostEnvironment,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -139,6 +142,7 @@ impl Installer {
             session,
             settings,
             capabilities,
+            environment,
             local: Local::default(),
             _subscriptions: subscriptions,
         }
@@ -258,6 +262,7 @@ impl Installer {
     ) {
         let name = snapshot.product.name.clone();
         let location = snapshot.surface.install_directory().map(str::to_owned);
+        let app_list = model::app_list_reference(self.environment.operating_system);
         let session = self.session.clone();
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -286,7 +291,7 @@ impl Installer {
                 .title(format!("Uninstall {name}?"))
                 .description(format!(
                     "{name} and everything setup added to this computer will be removed, \
-                     including its shortcuts and its entry in Settings › Apps."
+                     including its shortcuts and {app_list}."
                 ))
                 .child(
                     v_flex()

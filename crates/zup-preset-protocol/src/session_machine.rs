@@ -1,6 +1,7 @@
 use crate::{
-    Capabilities, Configuration, Envelope, HostHello, Message, PRESET_PROTOCOL_VERSION, PeerRole,
-    PresetHello, ProductIdentity, SessionId, Snapshot, WireError, negotiate, sender_is_allowed,
+    Capabilities, Configuration, Envelope, HostEnvironment, HostHello, Message,
+    PRESET_PROTOCOL_VERSION, PeerRole, PresetHello, ProductIdentity, SessionId, Snapshot,
+    WireError, negotiate, sender_is_allowed,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub struct Session {
     declared: Capabilities,
     identity: Identity,
     configuration: Configuration,
+    environment: Option<HostEnvironment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,13 +39,20 @@ pub enum Identity {
 }
 
 impl Session {
-    pub fn host(id: SessionId, capabilities: Capabilities, product: ProductIdentity) -> Self {
-        Self::new(
+    pub fn host(
+        id: SessionId,
+        capabilities: Capabilities,
+        product: ProductIdentity,
+        environment: HostEnvironment,
+    ) -> Self {
+        let mut session = Self::new(
             id,
             PeerRole::Host,
             capabilities,
             Identity::Host(Box::new(product)),
-        )
+        );
+        session.environment = Some(environment);
+        session
     }
 
     pub fn preset(
@@ -70,6 +79,7 @@ impl Session {
             declared,
             identity,
             configuration: Configuration::empty(),
+            environment: None,
         }
     }
 
@@ -100,9 +110,16 @@ impl Session {
                 self.declared.clone(),
                 (**product).clone(),
                 env!("CARGO_PKG_VERSION"),
+                self.environment
+                    .clone()
+                    .expect("a host session carries its environment"),
             ),
             Identity::Preset { .. } => panic!("a preset session has no host hello to build"),
         }
+    }
+
+    pub fn environment(&self) -> Option<&HostEnvironment> {
+        self.environment.as_ref()
     }
 
     pub fn opening(&mut self) -> Result<Envelope, WireError> {
@@ -114,7 +131,7 @@ impl Session {
                 preset_version: version.clone(),
                 required_capabilities: self.declared.clone(),
             }),
-            Identity::Host(_) => Message::HostHello(self.host_hello()),
+            Identity::Host(_) => Message::HostHello(Box::new(self.host_hello())),
         };
         self.state = Handshake::Awaiting { role: self.peer() };
         self.frame(message)
@@ -154,7 +171,7 @@ impl Session {
                 Ok(SessionProgress::Done)
             }
             Message::PresetHello(hello) => self.greet(hello),
-            Message::HostHello(hello) => self.greet_host(hello),
+            Message::HostHello(hello) => self.greet_host(*hello),
             Message::Configuration(configuration) => {
                 configuration.validate().map_err(WireError::Configuration)?;
                 self.configuration = *configuration;
@@ -181,7 +198,7 @@ impl Session {
         }
         negotiate(&self.declared, &hello.required_capabilities)?;
         self.state = Handshake::Completed;
-        let answer = self.frame(Message::HostHello(self.host_hello()))?;
+        let answer = self.frame(Message::HostHello(Box::new(self.host_hello())))?;
         Ok(SessionProgress::Send(answer))
     }
 
@@ -197,6 +214,7 @@ impl Session {
             return Err(WireError::SessionMismatch);
         }
         negotiate(&hello.capabilities, &self.declared)?;
+        self.environment = Some(hello.environment.clone());
         self.state = Handshake::Completed;
         Ok(SessionProgress::Done)
     }

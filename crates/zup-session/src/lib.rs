@@ -1,4 +1,5 @@
 mod controller;
+pub mod driver;
 mod host;
 mod runner;
 

@@ -125,7 +125,7 @@ fn greet(transport: &Transport, session: &mut Session) -> Result<HostHello, Tran
     transport.sender().send(&opening)?;
     let answer = transport.recv()?;
     let host = match &answer.message {
-        Message::HostHello(host) => host.clone(),
+        Message::HostHello(host) => (**host).clone(),
         found => return Err(unexpected("a host hello", found)),
     };
     match session.receive(answer)? {

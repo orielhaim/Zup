@@ -51,6 +51,7 @@ pub struct PresetLaunch {
     pub configuration: zup_preset_protocol::Configuration,
     pub capabilities: zup_preset_protocol::Capabilities,
     pub product: zup_preset_protocol::ProductIdentity,
+    pub environment: zup_preset_protocol::HostEnvironment,
 }
 
 pub trait SessionHost: OperationHost {

@@ -232,13 +232,6 @@ pub fn materialize_project(
     let mut executables = Vec::with_capacity(selected_targets.len());
     let policy = source_policy_for_selection(&selected_targets);
     for config in &selected_targets {
-        // A Linux GUI target never reaches preset resolution: there is no Linux
-        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
-            && config.frontend == Frontend::Gui
-        {
-            let errors = zup_linux::linux_selection_errors(&config.target, config.frontend);
-            return Err(miette::miette!("{}", errors.join("\n")));
-        }
         let mut installer =
             zup_manifest::compile(&manifest, config, overrides.get(&config.profile)).map_err(
                 |error| miette::Report::new(error.with_source_named(&source, &manifest_name)),

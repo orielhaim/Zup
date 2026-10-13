@@ -2,7 +2,7 @@ use futures_channel::mpsc::UnboundedReceiver;
 use futures_util::StreamExt;
 use gpui_kit::{App, AppContext, AssetSource};
 use serde::de::DeserializeOwned;
-use zup_preset_protocol::{Capabilities, Message};
+use zup_preset_protocol::{Capabilities, HostEnvironment, Message};
 
 use super::asset::{ApplicationAssets, PresetAssets};
 use super::session::Session;
@@ -35,6 +35,7 @@ pub struct PresetContext<TSettings> {
     settings: PresetSettings<TSettings>,
     assets: ApplicationAssets,
     capabilities: Capabilities,
+    environment: HostEnvironment,
 }
 
 impl<TSettings> PresetContext<TSettings> {
@@ -52,6 +53,10 @@ impl<TSettings> PresetContext<TSettings> {
 
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    pub fn environment(&self) -> &HostEnvironment {
+        &self.environment
     }
 }
 
@@ -149,6 +154,7 @@ pub fn serve<P: Preset>(bootstrap: Bootstrap) -> Result<(), PresetError> {
             let session = Session::open(cx, requester);
             let settings = PresetSettings::new(cx.new(|_| settings));
             session.publish(cx, first);
+            session.publish_environment(cx, host.environment.clone());
             let pumped = session.clone();
             let pumped_assets = assets.clone();
             let pumped_settings = settings.clone();
@@ -162,6 +168,7 @@ pub fn serve<P: Preset>(bootstrap: Bootstrap) -> Result<(), PresetError> {
                     settings,
                     assets,
                     capabilities: host.capabilities,
+                    environment: host.environment,
                 },
                 cx,
             );

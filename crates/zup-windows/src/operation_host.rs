@@ -97,6 +97,12 @@ impl OperationHost for WindowsOperationHost<'_> {
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
+        let state_root = PathBuf::from(crate::plain_path_text(content.state_root));
+        let content = ContentAccess {
+            installer: content.installer,
+            state_root: &state_root,
+            scope: content.scope,
+        };
         attach_maintenance_copy(
             target,
             content.installer,

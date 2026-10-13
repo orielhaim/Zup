@@ -64,7 +64,7 @@ A Windows build embeds the package into the runtime template as PE resources —
 | Capability | Status |
 | --- | --- |
 | Target | `linux-x64` |
-| Frontends | `console`, `headless` (`gui` is refused) |
+| Frontends | `gui`, `console`, `headless` (`gui` needs a Wayland or X11 session) |
 | Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
 | Artifact | one self-contained installer per target (no universal) |
 | Signing | no platform signature; authenticity is the artifact digest and release identity |

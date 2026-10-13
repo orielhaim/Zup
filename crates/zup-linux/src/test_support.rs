@@ -853,7 +853,41 @@ pub fn package_bytes_for(
     version: &str,
     files: &[FixtureFile],
 ) -> Vec<u8> {
-    package_bytes_full(scratch, target, version, files, &[], &[], &[], &[])
+    package_bytes_full(
+        scratch,
+        target,
+        version,
+        files,
+        Frontend::Console,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+}
+
+pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
+    let target = Target::parse("linux-x64").expect("a Linux target");
+    package_bytes_full(
+        scratch,
+        &target,
+        version,
+        files,
+        Frontend::Gui,
+        Some(zup_core::PresetRuntime {
+            name: zup_core::NonEmptyString::new("tool-preset").expect("a name"),
+            version: semver::Version::parse(version).expect("a version"),
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+            required_capabilities: Vec::new(),
+            settings: serde_json::json!({}),
+            assets: Vec::new(),
+        }),
+        &[],
+        &[],
+        &[],
+        &[],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -862,6 +896,8 @@ pub fn package_bytes_full(
     target: &Target,
     version: &str,
     files: &[FixtureFile],
+    frontend: Frontend,
+    preset: Option<zup_core::PresetRuntime>,
     launchers: &[Launcher],
     protocols: &[Protocol],
     associations: &[FileAssociation],
@@ -910,7 +946,7 @@ pub fn package_bytes_full(
     let total_size = resolved.iter().map(|file| file.size).sum();
     let plan = TargetBuildPlan {
         installer: Installer {
-            preset: None,
+            preset,
             app: App {
                 id: AppId::new("com.example.tool").expect("an id"),
                 name: NonEmptyString::new("Tool").expect("a name"),
@@ -920,7 +956,7 @@ pub fn package_bytes_full(
                 description: None,
             },
             target,
-            frontend: Frontend::Console,
+            frontend,
             updates: None,
             install: Install {
                 scope: InstallScope::User,
@@ -989,6 +1025,8 @@ pub fn compose_integration_fixture(
         &target,
         version,
         files,
+        Frontend::Console,
+        None,
         launchers,
         protocols,
         associations,
@@ -1131,6 +1169,27 @@ pub fn run_installer_process(
     command.env_clear();
     for (name, value) in user.child_env() {
         command.env(name, value);
+    }
+
+    command.env("PATH", "/usr/bin:/bin");
+    command.output().expect("the installer process runs")
+}
+
+pub fn run_gui_installer_process(
+    installer: &Path,
+    user: &IsolatedUser,
+    args: &[&str],
+    with_display: bool,
+) -> std::process::Output {
+    let mut command = Command::new(installer);
+    command.args(args);
+
+    command.env_clear();
+    for (name, value) in user.child_env() {
+        command.env(name, value);
+    }
+    if with_display {
+        command.env("DISPLAY", "test-display");
     }
 
     command.env("PATH", "/usr/bin:/bin");
