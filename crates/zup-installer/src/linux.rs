@@ -55,6 +55,10 @@ struct WorkerArgs {
     socket_path: PathBuf,
 }
 
+pub fn command() -> clap::Command {
+    Cli::command()
+}
+
 pub fn run(frontend: Frontend) -> miette::Result<()> {
     // console flow instead would report a window that never opened.
     if frontend == Frontend::Gui {

@@ -16,18 +16,16 @@ pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
 
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
-#[cfg(windows)]
-pub const FRONTENDS: &[(&str, &str)] = &[
-    ("gui", "zup-setup-gui"),
-    ("console", "zup-setup-console"),
-    ("headless", "zup-setup-headless"),
-];
-
-#[cfg(not(windows))]
-pub const FRONTENDS: &[(&str, &str)] = &[
-    ("console", "zup-setup-console"),
-    ("headless", "zup-setup-headless"),
-];
+pub fn frontends_for(target: &zup_core::Target) -> Vec<(&'static str, &'static str)> {
+    zup_platform::supported_frontends(target)
+        .iter()
+        .map(|frontend| match frontend {
+            zup_core::Frontend::Gui => ("gui", "zup-setup-gui"),
+            zup_core::Frontend::Console => ("console", "zup-setup-console"),
+            zup_core::Frontend::Headless => ("headless", "zup-setup-headless"),
+        })
+        .collect()
+}
 
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
@@ -73,7 +71,7 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
 
-    for (feature, binary) in FRONTENDS {
+    for (feature, binary) in frontends_for(&zup_core::Target::host()) {
         cargo(
             root,
             &[
@@ -725,7 +723,7 @@ mod tests {
             .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
             .collect();
 
-        let mut staged: Vec<String> = FRONTENDS
+        let mut staged: Vec<String> = frontends_for(&target)
             .iter()
             .map(|(feature, _)| {
                 zup_toolchain::file_name(&runtime_component(feature), EXECUTABLE_SUFFIX)

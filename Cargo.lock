@@ -11741,6 +11741,7 @@ dependencies = [
  "zup-binary",
  "zup-build",
  "zup-bundle",
+ "zup-compose",
  "zup-core",
  "zup-distribute-github",
  "zup-exec",
@@ -11917,6 +11918,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zup-compose"
+version = "0.0.1"
+dependencies = [
+ "rstest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zup-binary",
+ "zup-build",
+ "zup-bundle",
+ "zup-core",
+ "zup-manifest",
+ "zup-pe",
+ "zup-platform",
+ "zup-plugin-contract",
+]
+
+[[package]]
 name = "zup-core"
 version = "0.0.1"
 dependencies = [
@@ -12052,12 +12070,14 @@ dependencies = [
  "zup-binary",
  "zup-build",
  "zup-bundle",
+ "zup-compose",
  "zup-core",
  "zup-exec",
  "zup-manifest",
  "zup-plan",
  "zup-platform",
  "zup-protocol",
+ "zup-runtime",
  "zup-toolchain",
  "zup-transaction",
 ]
@@ -12430,6 +12450,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "zup-core",
+ "zup-platform",
 ]
 
 [[package]]
@@ -12505,6 +12526,7 @@ dependencies = [
  "zup-bootstrap",
  "zup-build",
  "zup-bundle",
+ "zup-compose",
  "zup-core",
  "zup-exec",
  "zup-manifest",
@@ -12532,6 +12554,7 @@ dependencies = [
  "zup-automation",
  "zup-binary",
  "zup-core",
+ "zup-platform",
  "zup-publish-github",
  "zup-toolchain",
 ]

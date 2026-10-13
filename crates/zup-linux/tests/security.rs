@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use zup_core::{SelectedScope, Target};
-use zup_linux::{Carrier, CarrierError, ExecError, LinuxAction, LinuxRunRequest, PathError, run};
+use zup_linux::{
+    Carrier, CarrierError, ExecError, FOOTER_LEN, LinuxAction, LinuxRunRequest, PathError, run,
+};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_installer, genuine_template, package_bytes, package_bytes_for, v1_files,
@@ -24,12 +26,12 @@ const LENGTH_AT: usize = 33;
 const DIGEST_AT: usize = 41;
 
 fn poke_u64(bytes: &mut [u8], field: usize, value: u64) {
-    let start = bytes.len() - 81 + field;
+    let start = bytes.len() - FOOTER_LEN as usize + field;
     bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 fn poke_u32(bytes: &mut [u8], field: usize, value: u32) {
-    let start = bytes.len() - 81 + field;
+    let start = bytes.len() - FOOTER_LEN as usize + field;
     bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -43,7 +45,7 @@ fn write_copy(scratch: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 fn a_footer_digest_that_disagrees_is_refused() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let (_, mut bytes) = genuine_installer(scratch.path(), "setup");
-    let digest_at = bytes.len() - 81 + DIGEST_AT;
+    let digest_at = bytes.len() - FOOTER_LEN as usize + DIGEST_AT;
     bytes[digest_at] ^= 0x01;
     let path = write_copy(scratch.path(), "bad-digest", &bytes);
 

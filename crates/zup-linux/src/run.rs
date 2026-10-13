@@ -16,30 +16,11 @@ use crate::executor::{LinuxFileExecutor, snapshot_target};
 use crate::input::compile_execution_plan;
 use crate::integration::{load_generated, save_generated};
 use crate::ledger::LinuxLedgerStore;
+use crate::lifecycle::{LinuxAction, LinuxOutcome, resolve_action};
 use crate::paths::state_root;
 use crate::resolve::resolve_target;
 
 const MAINTENANCE_SOURCE: &str = "__zup_maintenance__";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinuxAction {
-    Install,
-    Upgrade,
-
-    Repair { force_files: bool },
-    Uninstall,
-
-    Apply,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinuxOutcome {
-    Committed { version: semver::Version },
-    RolledBack,
-    RecoveryRequired { transaction: String },
-
-    Busy,
-}
 
 #[derive(Debug, Clone)]
 pub struct LinuxRunRequest {
@@ -316,35 +297,6 @@ fn scope_token(scope: SelectedScope) -> &'static str {
         SelectedScope::User => "user",
         SelectedScope::Machine => "machine",
     }
-}
-
-pub(crate) fn resolve_action(
-    action: LinuxAction,
-    ledger: Option<&InstallLedger>,
-    version: &semver::Version,
-) -> Result<LifecycleAction, ExecError> {
-    let explicit = match action {
-        LinuxAction::Install => LifecycleAction::Install,
-        LinuxAction::Upgrade => LifecycleAction::Upgrade,
-        LinuxAction::Repair { force_files } => LifecycleAction::Repair { force_files },
-        LinuxAction::Uninstall => LifecycleAction::Uninstall,
-        LinuxAction::Apply => {
-            let Some(ledger) = ledger else {
-                return Ok(LifecycleAction::Install);
-            };
-            match ledger.version.cmp(version) {
-                std::cmp::Ordering::Less => LifecycleAction::Upgrade,
-                std::cmp::Ordering::Equal => LifecycleAction::Repair { force_files: false },
-                std::cmp::Ordering::Greater => {
-                    return Err(ExecError::Downgrade {
-                        installed: ledger.version.clone(),
-                        requested: version.clone(),
-                    });
-                }
-            }
-        }
-    };
-    Ok(explicit)
 }
 
 pub(crate) fn attach_maintenance_copy_for(

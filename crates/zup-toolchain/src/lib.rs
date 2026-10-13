@@ -19,8 +19,8 @@
 //! answers "will this work" without executing anything.
 //!
 //! This crate is deliberately portable and dependency-light. It is read by the
-//! developer CLI, which is Windows-only, and written by the repository's
-//! contributor tooling, which is not.
+//! developer CLI on any host, and written by the repository's contributor
+//! tooling. Component identity never depends on the build host.
 
 use std::path::{Path, PathBuf};
 
@@ -173,52 +173,44 @@ pub fn test_preset_file_name(executable_suffix: &str) -> String {
 /// matters for a file that is downloaded before any of it has been needed.
 pub const DISPATCHER_TARGET: zup_core::Target = zup_core::Target::WINDOWS_X86;
 
-/// Every component a build host needs, in one order.
+/// Every component a target's build needs, in one order.
 ///
-/// One function rather than a list spelled at each use. Three callers would
-/// otherwise keep three lists - the staging step that produces them, a readiness
-/// report that names them, and a cache that has to hold all of them - and the
-/// moment one of the three gains a component the other two quietly stop covering
-/// it. The order is presentation: runtimes first, then launchers, because that is
-/// the order a reader cares about them in.
-pub fn host_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
-    let mut out = Vec::with_capacity(8);
-    for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
+/// One function rather than a list spelled at each use. The staging step that
+/// produces them, the readiness report that names them, and the cache that has
+/// to hold all of them all read this, so adding a component in one place
+/// covers all three. The order is presentation: runtimes first, then
+/// launchers, because that is the order a reader cares about them in.
+///
+/// Which components a target needs follows from the target's own
+/// capabilities: a target without a GUI presenter needs no GUI runtime, no
+/// launcher to dispatch through, and no preset package to present with.
+pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponent> {
+    let mut out = Vec::new();
+    for frontend in zup_platform::supported_frontends(target) {
         out.push(ToolchainComponent::Runtime {
             target: *target,
             frontend,
         });
     }
-    for subsystem in [Subsystem::Gui, Subsystem::Console] {
-        for online in [false, true] {
-            out.push(ToolchainComponent::Dispatcher { subsystem, online });
+    if zup_platform::supports_dispatcher(target) {
+        for subsystem in [Subsystem::Gui, Subsystem::Console] {
+            for online in [false, true] {
+                out.push(ToolchainComponent::Dispatcher { subsystem, online });
+            }
         }
+        out.push(ToolchainComponent::Preset);
     }
-    out.push(ToolchainComponent::Preset);
     out
 }
 
+/// Every component a build host needs, in one order.
+pub fn host_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
+    components_for_target(target)
+}
+
 /// The components a target's toolchain actually stages.
-///
-/// Windows stages everything: runtimes for every frontend, dispatchers, and
-/// the preset host. Linux stages console and headless runtimes only - no GUI
-/// presenter, nothing to dispatch through, and no preset host exist there, so
-/// staging them would resolve components no build may use.
 pub fn supported_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
-    if target.operating_system() == zup_core::TargetOperatingSystem::Linux {
-        vec![
-            ToolchainComponent::Runtime {
-                target: *target,
-                frontend: Frontend::Console,
-            },
-            ToolchainComponent::Runtime {
-                target: *target,
-                frontend: Frontend::Headless,
-            },
-        ]
-    } else {
-        host_components(target)
-    }
+    components_for_target(target)
 }
 
 /// The descriptor written beside a component.
@@ -947,9 +939,9 @@ mod tests {
         assert!(error.to_string().contains("describes itself"), "{error}");
     }
 
-    /// The set a build host needs, checked against what actually exists.
+    /// The set a Windows build needs, checked against what actually exists.
     ///
-    /// Seven: three presentations of the runtime, and each launcher's
+    /// Eight: three presentations of the runtime, and each launcher's
     /// presentation crossed with whether it can reach a release over the network,
     /// plus the one preset package every graphical build resolves.
     /// A host missing any of them cannot build something, and a host that
@@ -989,5 +981,22 @@ mod tests {
                 ToolchainComponent::Dispatcher { .. } | ToolchainComponent::Preset => {}
             }
         }
+    }
+
+    #[test]
+    fn a_linux_target_needs_only_its_two_runtimes() {
+        let target = zup_core::Target::parse("linux-x64").expect("valid");
+        let components = components_for_target(&target);
+        assert_eq!(components.len(), 2, "{components:?}");
+        for component in &components {
+            match component {
+                ToolchainComponent::Runtime { target: found, .. } => {
+                    assert_eq!(found, &target, "{component:?}");
+                }
+                other => panic!("a Linux target stages no {other:?}"),
+            }
+        }
+        assert_eq!(components, supported_components(&target));
+        assert_eq!(components, host_components(&target));
     }
 }

@@ -26,6 +26,7 @@ tempfile.workspace = true
 zup-artifact.workspace = true
 zup-binary.workspace = true
 zup-bundle.workspace = true
+zup-compose.workspace = true
 zup-core.workspace = true
 zup-pe.workspace = true
 zup-plan.workspace = true

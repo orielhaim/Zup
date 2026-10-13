@@ -2,10 +2,10 @@
 
 use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, Target, TargetBuildPlan};
 
-pub const SUPPORTED_LINUX_TARGET: &str = "linux-x64";
+pub use zup_platform::{SUPPORTED_LINUX_TARGET, is_linux_target};
 
-pub fn is_linux_target(target: &Target) -> bool {
-    target.operating_system() == zup_core::TargetOperatingSystem::Linux
+pub fn is_supported_linux_target(target: &Target) -> bool {
+    is_linux_target(target) && zup_platform::is_supported_target(target)
 }
 
 pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String> {
@@ -14,10 +14,6 @@ pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String
         errors.extend(linux_frontend_errors(target, frontend));
     }
     errors
-}
-
-pub fn is_supported_linux_target(target: &Target) -> bool {
-    target.as_str() == SUPPORTED_LINUX_TARGET
 }
 
 fn linux_target_errors(target: &Target) -> Vec<String> {
@@ -36,12 +32,17 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
 }
 
 fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
+    if zup_platform::supports_frontend(target, frontend) {
+        return Vec::new();
+    }
     match frontend {
         Frontend::Gui => vec![format!(
             "GUI installer runtime is not supported for `{target}`: the Linux backend ships \
              console and headless runtimes in this phase"
         )],
-        Frontend::Console | Frontend::Headless => Vec::new(),
+        Frontend::Console | Frontend::Headless => vec![format!(
+            "frontend `{frontend}` is not supported for `{target}`"
+        )],
     }
 }
 

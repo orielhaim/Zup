@@ -6,11 +6,13 @@
 //! compiles:
 //!
 //! - **Composition** turns a runtime template and a portable package into an
-//!   installer for a Linux target by appending the package and a footer. It is
-//!   plain file I/O, so it runs on any host. The target plan is validated with
-//!   [`resolve_target`], which answers user roots from fixed build roots
-//!   instead of the build host's environment. These modules have no `cfg`
-//!   gate.
+//!   installer for a Linux target by appending the package, the preset, and a
+//!   footer. It is plain file I/O, so it runs on any host. [`compose`] and
+//!   [`compose_with_preset`] are thin adapters over the portable
+//!   [`zup_compose`] pipeline, which owns the target-driven composition both
+//!   hosts share. The target plan is validated with [`resolve_target`], which
+//!   answers user roots from fixed build roots instead of the build host's
+//!   environment. These modules have no `cfg` gate.
 //! - **The native runtime** installs, repairs, and removes software through
 //!   filesystem ownership, systemd, D-Bus, and a privileged worker. It
 //!   executes only on Linux, and every module it needs is gated on
@@ -29,6 +31,7 @@ mod input;
 mod integration;
 #[cfg(target_os = "linux")]
 mod ledger;
+mod lifecycle;
 mod locations;
 mod lowering;
 #[cfg(target_os = "linux")]
@@ -57,7 +60,10 @@ pub mod test_support;
 #[cfg(target_os = "linux")]
 mod worker;
 
-pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
+pub use carrier::{
+    CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, FOOTER_LEN, compose,
+    compose_with_preset,
+};
 pub use error::{ExecError, IpcError, PathError, PlanError};
 #[cfg(target_os = "linux")]
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};
@@ -75,6 +81,7 @@ pub use input::{
 };
 #[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
+pub use lifecycle::{LinuxAction, LinuxOutcome, resolve_action};
 pub use locations::{
     LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
     MACHINE_STATE_ROOT, MachineRoots, user_data_home, user_data_home_in, user_programs_root,
@@ -100,7 +107,7 @@ pub use paths::{
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
 pub use resolve::{resolve_target, validate_target_plan};
 #[cfg(target_os = "linux")]
-pub use run::{LinuxAction, LinuxOutcome, LinuxRunRequest, recover_transaction, run};
+pub use run::{LinuxRunRequest, recover_transaction, run};
 #[cfg(target_os = "linux")]
 pub use service_ops::{
     MAX_UNIT_BYTES, SERVICE_BACKEND_PREFIX, ServicePayload, ServiceReceipt, admin_override_dir,

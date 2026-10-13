@@ -60,6 +60,7 @@ zup-signing = { path = "crates/zup-signing" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
+zup-compose = { path = "crates/zup-compose" }
 zup-acquire = { path = "crates/zup-acquire" }
 zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }

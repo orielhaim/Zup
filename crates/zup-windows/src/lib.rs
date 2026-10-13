@@ -13,7 +13,9 @@
 //! The build engine depends on the first and never on the second: bundles are
 //! embedded with [`build_self_contained_executable`], universal artifacts with
 //! [`compose_universal_executable`], and target plans are validated with
-//! [`resolve_target`] against [`CanonicalWindowsLocations`]. The live machine
+//! [`resolve_target`] against [`CanonicalWindowsLocations`]. Both embedders are
+//! thin adapters over the portable [`zup_compose`] pipeline, which owns the
+//! target-driven composition both hosts share. The live machine
 //! resolver behind [`WindowsInstallLocationResolver`] stays a runtime detail.
 
 #[cfg(windows)]

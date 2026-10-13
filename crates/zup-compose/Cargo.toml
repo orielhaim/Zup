@@ -1,0 +1,22 @@
+[package]
+name = "zup-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable target-driven installer composition for zup"
+
+[dependencies]
+thiserror.workspace = true
+zup-binary.workspace = true
+zup-bundle.workspace = true
+zup-core.workspace = true
+zup-pe.workspace = true
+zup-platform.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true
+zup-build.workspace = true
+zup-manifest.workspace = true
+zup-plugin-contract.workspace = true

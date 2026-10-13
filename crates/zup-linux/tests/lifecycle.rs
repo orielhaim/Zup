@@ -2,7 +2,7 @@
 #![cfg(feature = "test-support")]
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
+use zup_linux::{FOOTER_LEN, LinuxAction, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_fixture, mode_of, run_installer, run_tool, tool_script, v1_files,
@@ -260,7 +260,7 @@ fn a_tampered_package_is_refused_before_mutation() {
     let template_len = std::fs::metadata("/bin/true").expect("a template").len() as usize;
     let tamper_at = template_len + 100;
     assert!(
-        tamper_at < bytes.len() - 81,
+        tamper_at < bytes.len() - FOOTER_LEN as usize,
         "the fixture package is larger than the tamper offset"
     );
     bytes[tamper_at] ^= 0x40;

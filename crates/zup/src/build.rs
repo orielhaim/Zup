@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_automation::{AutomationResult, BuildDetails, Details, LogLevel};
-use zup_core::{ResolvedTargetConfig, TargetOperatingSystem};
+use zup_core::ResolvedTargetConfig;
 
 use crate::artifacts::ArtifactProfile;
 use crate::build_inputs::{self, Overwrite};
@@ -240,47 +240,21 @@ fn compose_target_installer(
     plugin_artifacts: &[zup_bundle::CompiledPluginArtifact],
     preset: Option<&[u8]>,
 ) -> miette::Result<u64> {
-    match config.target.operating_system() {
-        TargetOperatingSystem::Linux => {
-            let package =
-                zup_bundle::BundleWriter::encode(plan, plugin_artifacts).map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.compose_failed",
-                        format!("installer package for `{}`: {error}", config.profile),
-                    )
-                })?;
-            zup_linux::compose(runtime, output, &package).map_err(|error| {
-                crate::failure::error(
-                    "zup.build.compose_failed",
-                    format!("installer output: {error}"),
-                )
-            })?;
-            std::fs::metadata(output)
-                .map(|meta| meta.len())
-                .map_err(|error| {
-                    crate::failure::error(
-                        "zup.build.output_unreadable",
-                        format!("installer output: {error}"),
-                    )
-                })
-        }
-        _ => {
-            let (size, _) = zup_windows::build_self_contained_executable(
-                runtime,
-                output,
-                plan,
-                plugin_artifacts,
-                preset,
+    let package = zup_bundle::BundleWriter::encode(plan, plugin_artifacts).map_err(|error| {
+        crate::failure::error(
+            "zup.build.compose_failed",
+            format!("installer package for `{}`: {error}", config.profile),
+        )
+    })?;
+    let report = zup_compose::compose(&config.target, runtime, output, &package, preset).map_err(
+        |error| {
+            crate::failure::error(
+                "zup.build.compose_failed",
+                format!("installer output: {error}"),
             )
-            .map_err(|error| {
-                crate::failure::error(
-                    "zup.build.compose_failed",
-                    format!("installer output: {error}"),
-                )
-            })?;
-            Ok(size)
-        }
-    }
+        },
+    )?;
+    Ok(report.output_size)
 }
 
 fn report_single(
@@ -350,7 +324,7 @@ fn build_artifacts(
     if let Some(config) = loaded
         .selected_targets
         .iter()
-        .find(|config| config.target.operating_system() == TargetOperatingSystem::Linux)
+        .find(|config| !zup_platform::supports_universal_artifact(&config.target))
     {
         return Err(crate::failure::error_with_help(
             "zup.build.linux_composed_artifact",

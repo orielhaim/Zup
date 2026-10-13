@@ -7,56 +7,17 @@ use crate::toolchain::ToolchainResolver;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
 use zup_platform::SourceFilePolicy;
 
-#[cfg(windows)]
-static WINDOWS_SOURCE_POLICY: zup_windows::WindowsSourceFilePolicy =
-    zup_windows::WindowsSourceFilePolicy;
-#[cfg(target_os = "linux")]
-static LINUX_SOURCE_POLICY: zup_linux::LinuxSourceFilePolicy = zup_linux::LinuxSourceFilePolicy;
 static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
     zup_platform::PortableSourceFilePolicy;
 
-pub fn source_policy_for(target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
-    match target.operating_system() {
-        zup_core::TargetOperatingSystem::Linux => {
-            #[cfg(target_os = "linux")]
-            {
-                &LINUX_SOURCE_POLICY
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                &PORTABLE_SOURCE_POLICY
-            }
-        }
-        _ => {
-            #[cfg(windows)]
-            {
-                &WINDOWS_SOURCE_POLICY
-            }
-            #[cfg(not(windows))]
-            {
-                &PORTABLE_SOURCE_POLICY
-            }
-        }
-    }
+pub fn source_policy_for(_target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
+    &PORTABLE_SOURCE_POLICY
 }
 
 pub fn source_policy_for_selection(
-    targets: &[ResolvedTargetConfig],
+    _targets: &[ResolvedTargetConfig],
 ) -> &'static dyn SourceFilePolicy {
-    let all_linux = targets
-        .iter()
-        .all(|target| target.target.operating_system() == zup_core::TargetOperatingSystem::Linux);
-    if all_linux && !targets.is_empty() {
-        return source_policy_for(&targets[0].target);
-    }
-    #[cfg(windows)]
-    {
-        &WINDOWS_SOURCE_POLICY
-    }
-    #[cfg(not(windows))]
-    {
-        &PORTABLE_SOURCE_POLICY
-    }
+    &PORTABLE_SOURCE_POLICY
 }
 
 use zup_core::Frontend;
