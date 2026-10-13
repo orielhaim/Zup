@@ -9,35 +9,18 @@ use zup_protocol::{
 };
 
 use crate::error::{ExecError, PathError};
+use crate::lifecycle::LinuxOutcome;
 use crate::locations::MachineRoots;
-use crate::pkexec::{PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
-use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest};
+use crate::pkexec::{PkexecLauncher, WorkerChild, map_launch};
+use crate::run::LinuxRunRequest;
 use crate::socket::{
     HANDSHAKE_TIMEOUT, Rendezvous, peer_identity, pin_peer, recv_envelope, send_envelope,
 };
+use zup_protocol::ProgressKind;
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(3600);
-
-pub fn run_machine(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
-    if request.scope != SelectedScope::Machine {
-        return Err(PathError::Refused {
-            path: "<scope>".into(),
-            reason: "the machine runner serves machine scope only".into(),
-        }
-        .into());
-    }
-    crate::machine::resolve_machine_state_root(
-        request.state_root.as_deref(),
-        &MachineRoots::production(),
-    )?;
-    if rustix::process::geteuid().as_raw() == 0 {
-        return run_machine_loopback(request, &MachineRoots::production());
-    }
-    let launcher = SystemPkexec::resolve().map_err(ExecError::Elevation)?;
-    run_machine_elevated(request, &launcher)
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExpectedPlan {
@@ -70,20 +53,6 @@ pub(crate) fn plan_expected(
         }
         .into());
     }
-    if !build.installer.plugins.is_empty() {
-        return Err(PathError::Refused {
-            path: build.installer.app.id.to_string(),
-            reason: "machine scope refuses projects that need plugin execution".into(),
-        }
-        .into());
-    }
-    if !build.installer.prerequisites.is_empty() {
-        return Err(PathError::Refused {
-            path: build.installer.app.id.to_string(),
-            reason: "machine scope runs no prerequisite installers".into(),
-        }
-        .into());
-    }
     let target = build.installer.target;
     if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(PathError::Refused {
@@ -93,123 +62,62 @@ pub(crate) fn plan_expected(
         .into());
     }
 
-    let mut plan_request = zup_plan::PlanRequest::new(target, SelectedScope::Machine);
-    let mut override_text: Option<String> = None;
-    if let Some(directory) = &request.install_dir_override {
-        crate::machine::authorize_machine_install_directory(directory, roots).map_err(|error| {
-            PathError::Refused {
-                path: directory.display().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-        plan_request.install_directory = Some(
-            crate::machine::host_to_install_template(directory, roots, &target).map_err(
-                |error| PathError::Refused {
-                    path: directory.display().to_string(),
-                    reason: error.to_string(),
-                },
-            )?,
-        );
-        override_text = Some(directory.display().to_string());
-    }
-
-    let install = zup_plan::plan(
-        &zup_plan::BuildPlan {
-            targets: vec![build],
-        },
-        &plan_request,
-    )?;
-    let mut target_plan = crate::resolve::resolve_target(
-        &install,
-        &crate::locations::LinuxInstallLocationResolver::with_machine_roots(roots.clone()),
-    )?;
-    crate::run::attach_maintenance_copy_for(
-        &mut target_plan,
-        &request.installer,
-        state_root,
-        SelectedScope::Machine,
-    )?;
-
     crate::machine::assess_machine_state_root(state_root, expected_uid, true).map_err(|error| {
         PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),
         }
     })?;
-    crate::machine::verify_ledger_trust(state_root, &target_plan.app.id, expected_uid).map_err(
-        |error| PathError::Refused {
+    crate::machine::verify_ledger_trust(state_root, &build.installer.app.id, expected_uid)
+        .map_err(|error| PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),
-        },
-    )?;
-    let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
-    let ledger = ledger_store.load(&target_plan.app.id, SelectedScope::Machine)?;
-    let action =
-        crate::run::resolve_action(request.action, ledger.as_ref(), &target_plan.app.version)?;
-    let mut snapshot = crate::executor::snapshot_target(&target_plan);
-
-    let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
-    let mut manager = if needs_manager {
-        Some(
-            crate::systemd::RealSystemd::connect()
-                .map_err(|error| ExecError::Executor(format!("systemd is unavailable: {error}")))?,
-        )
-    } else {
-        None
-    };
-    if let Some(manager) = manager.as_mut() {
-        snapshot.services = crate::input::snapshot_services(&target_plan, manager, systemd)
-            .map_err(|error| ExecError::Executor(format!("service snapshot: {error}")))?;
-    }
-    let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
-    let execution = zup_exec::plan_lifecycle(
-        action,
-        (action != zup_exec::LifecycleAction::Uninstall).then_some(&target_plan),
-        Some(&snapshot),
-        ledger.as_ref(),
-        &owned_matches,
-    )?;
-    let force_services = matches!(request.action, LinuxAction::Repair { force_files: true });
-    let input = if !needs_manager {
-        crate::input::compile_execution_plan(&execution, &target_plan)?
-    } else {
-        let manager = manager.as_mut().ok_or_else(|| {
-            ExecError::Executor("a service transaction without a systemd manager".into())
         })?;
-        crate::input::compile_machine_execution_plan(
-            &execution,
-            &target_plan,
-            crate::input::ServiceCompilation {
-                roots,
-                systemd,
-                manager,
-                force_services,
-            },
-        )?
+    let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
+    let ledger = ledger_store.load(&build.installer.app.id, SelectedScope::Machine)?;
+    let mut selection = request.selection.clone();
+    if selection.install_directory.is_none() {
+        selection.install_directory = request.install_dir_override.clone();
+    }
+    let host = crate::operation_host::LinuxOperationHost {
+        machine: Some(crate::operation_host::MachineHost {
+            roots: roots.clone(),
+            systemd: systemd.clone(),
+        }),
     };
-    let plan = zup_transaction::compile_transaction(&input)?;
+    let input = zup_runtime::OperationInput {
+        build: &build,
+        installer: &request.installer,
+        scope: SelectedScope::Machine,
+        operation: request.action,
+        selection,
+        prior: ledger.as_ref(),
+        state_root,
+        cancellation: &zup_plan::NeverCancelled,
+    };
+    let prepared = zup_runtime::prepare_operation(&input, &host)?;
     ledger_store.validate_plan(
-        &target_plan.app.id,
+        &build.installer.app.id,
         SelectedScope::Machine,
-        &target_plan.app.version,
-        &plan,
+        &build.installer.app.version,
+        &prepared.transaction_plan,
     )?;
-    let digest = plan.fingerprint().to_hex();
-    let operation = match request.action {
-        LinuxAction::Install => zup_protocol::privileged_operation::INSTALL,
-        LinuxAction::Upgrade => zup_protocol::privileged_operation::UPGRADE,
-        LinuxAction::Repair { .. } => zup_protocol::privileged_operation::REPAIR,
-        LinuxAction::Uninstall => zup_protocol::privileged_operation::UNINSTALL,
-        LinuxAction::Apply => zup_protocol::privileged_operation::APPLY,
-    };
+    let digest = prepared.transaction_plan.fingerprint().to_hex();
     let intent = PrepareOperation {
-        operation: operation.to_owned(),
-        force_files: matches!(request.action, LinuxAction::Repair { force_files } if force_files),
-        install_dir_override: override_text,
-        selected_components: Vec::new(),
+        operation: request.action.name().to_owned(),
+        force_files: matches!(
+            request.action,
+            zup_runtime::Operation::Repair { force_files } if force_files
+        ),
+        install_dir_override: request
+            .install_dir_override
+            .as_ref()
+            .map(|directory| directory.display().to_string()),
+        selected_components: request.selection.enable.clone(),
+        disabled_components: request.selection.disable.clone(),
         expected_plan_digest: Some(digest.clone()),
-        app_id: target_plan.app.id.to_string(),
-        app_version: target_plan.app.version.to_string(),
+        app_id: build.installer.app.id.to_string(),
+        app_version: build.installer.app.version.to_string(),
         scope: "machine".to_owned(),
         target,
         state_root: state_root.display().to_string(),
@@ -220,11 +128,12 @@ pub(crate) fn plan_expected(
             digest,
             target,
             #[cfg(feature = "test-support")]
-            plan,
+            plan: prepared.transaction_plan,
         },
     ))
 }
 
+#[cfg(feature = "test-support")]
 pub(crate) fn run_machine_elevated(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
@@ -235,6 +144,7 @@ pub(crate) fn run_machine_elevated(
     }
 }
 
+#[cfg(feature = "test-support")]
 pub(crate) fn run_machine_elevated_once(
     request: &LinuxRunRequest,
     launcher: &impl PkexecLauncher,
@@ -244,6 +154,16 @@ pub(crate) fn run_machine_elevated_once(
         crate::machine::resolve_machine_state_root(request.state_root.as_deref(), &roots)?;
     let systemd = crate::machine::SystemdRoots::production();
     let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
+    drive_elevated(&intent, &expected.digest, &expected.target, launcher, None)
+}
+
+pub(crate) fn drive_elevated(
+    intent: &PrepareOperation,
+    expected_digest: &str,
+    target: &zup_core::Target,
+    launcher: &impl PkexecLauncher,
+    events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
+) -> Result<LinuxOutcome, ExecError> {
     let session = SessionId::new_v7();
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
@@ -298,13 +218,17 @@ pub(crate) fn run_machine_elevated_once(
 
     let peer = peer_identity(&stream).map_err(into_run_error)?;
     let _pin = pin_peer(peer.pid, peer.uid).map_err(into_run_error)?;
+    if let Some(events) = events {
+        let _ = events.send(zup_runtime::RuntimeEvent::WorkerConnected);
+    }
 
     let outcome = drive_client(
         &mut stream,
         session,
-        &intent,
-        &expected.digest,
-        &expected.target,
+        intent,
+        expected_digest,
+        target,
+        events,
     );
 
     let launch_result = spawned
@@ -324,6 +248,7 @@ pub(crate) fn drive_client(
     intent: &PrepareOperation,
     expected_digest: &str,
     expected_target: &zup_core::Target,
+    events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
 ) -> Result<LinuxOutcome, ExecError> {
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
@@ -351,7 +276,7 @@ pub(crate) fn drive_client(
         match recv_msg(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?.message {
             Message::Prepared(prepared) => break prepared,
             Message::Progress(report) => {
-                println!("{} ", report.detail);
+                emit_progress(&report, events);
                 continue;
             }
             Message::Failed(failed) if failed.kind == zup_protocol::failure::STALE_PLAN => {
@@ -415,12 +340,54 @@ pub(crate) fn drive_client(
                 )));
             }
             Message::Progress(report) => {
-                println!("{} ", report.detail);
+                emit_progress(&report, events);
                 continue;
             }
             _ => {}
         }
     }
+}
+
+fn emit_progress(
+    report: &zup_protocol::ProgressReport,
+    events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
+) {
+    let Some(events) = events else { return };
+    let event = match report.kind {
+        ProgressKind::OperationProgress => match (report.completed, report.total) {
+            (Some(completed), Some(total)) => zup_runtime::RuntimeEvent::Progress {
+                completed,
+                total,
+                action: report.detail.clone(),
+            },
+            _ => zup_runtime::RuntimeEvent::StagingProgress {
+                id: "operation".into(),
+                detail: report.detail.clone(),
+            },
+        },
+        ProgressKind::OperationStarted => zup_runtime::RuntimeEvent::OperationStarted {
+            id: report.detail.clone(),
+        },
+        ProgressKind::PreflightStarted => zup_runtime::RuntimeEvent::PreflightStarted,
+        ProgressKind::ResourceBlocked => zup_runtime::RuntimeEvent::ResourceBlocked {
+            detail: report.detail.clone(),
+            pids: Vec::new(),
+        },
+        ProgressKind::StagingStarted => zup_runtime::RuntimeEvent::StagingStarted {
+            id: report.detail.clone(),
+        },
+        ProgressKind::StagingProgress | ProgressKind::Verifying => {
+            zup_runtime::RuntimeEvent::StagingProgress {
+                id: "staging".into(),
+                detail: report.detail.clone(),
+            }
+        }
+        ProgressKind::RollingBack => zup_runtime::RuntimeEvent::RollingBack,
+        ProgressKind::Committed => zup_runtime::RuntimeEvent::Completed {
+            outcome: "committed".into(),
+        },
+    };
+    let _ = events.send(event);
 }
 
 fn send_msg(
@@ -468,7 +435,7 @@ fn check_capabilities(capabilities: &Capabilities) -> Result<(), ExecError> {
     Ok(())
 }
 
-fn run_machine_loopback(
+pub(crate) fn run_machine_loopback(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
 ) -> Result<LinuxOutcome, ExecError> {
@@ -579,7 +546,14 @@ fn drive_client_loopback(
     if peer.uid != rustix::process::geteuid().as_raw() {
         return Err(ExecError::Worker("loopback peer mismatch".into()));
     }
-    drive_client(stream, session, intent, expected_digest, expected_target)
+    drive_client(
+        stream,
+        session,
+        intent,
+        expected_digest,
+        expected_target,
+        None,
+    )
 }
 
 fn into_run_error(error: crate::error::IpcError) -> ExecError {

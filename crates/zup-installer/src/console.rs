@@ -9,7 +9,7 @@ use zup_windows::EmbeddedBundle;
 
 use crate::cli::{LifecycleArgs, ScopeArg};
 use crate::execute;
-use crate::lifecycle::{self, PreparedRuntime, Request};
+use crate::lifecycle::{self, PreparedRuntime};
 use crate::maintenance as state;
 use crate::package;
 use crate::run::RuntimeContext;
@@ -36,7 +36,7 @@ impl cliclack::Theme for SetupTheme {
 }
 
 pub fn run_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
-    ask(context, Request::Apply, args)
+    ask(context, zup_runtime::Operation::Apply, args)
 }
 
 pub fn run(
@@ -44,7 +44,7 @@ pub fn run(
     verb: lifecycle::Verb,
     args: LifecycleArgs,
 ) -> miette::Result<()> {
-    ask(context, Request::Named(verb.action()), args)
+    ask(context, verb.action(), args)
 }
 
 pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
@@ -52,7 +52,8 @@ pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Resu
     let build = package::target_plan(bundle)?;
     let installer = &build.installer;
     let installed = find_installation(installer, None, ScopeArg::Either)?;
-    let action = state::resolve_applied_action(
+    let action = crate::lifecycle::resolve_request_operation(
+        zup_runtime::Operation::Apply,
         installed.as_ref().map(|(_, ledger)| &ledger.version),
         &installer.app.version.to_string(),
     )?;
@@ -98,13 +99,17 @@ pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Resu
     };
     lifecycle::transition(
         RuntimeContext::new(Frontend::Console).with_output(zup_presentation::OutputFormat::Human),
-        Request::Named(action),
+        zup_runtime::Operation::from(action),
         &args,
         ExecutionPolicy::Interactive,
     )
 }
 
-fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> miette::Result<()> {
+fn ask(
+    context: RuntimeContext,
+    request: zup_runtime::Operation,
+    mut args: LifecycleArgs,
+) -> miette::Result<()> {
     cliclack::set_theme(SetupTheme);
     let executable = package::current_executable()?;
     let bundle = package::open_bundle(&executable)?;
@@ -112,11 +117,12 @@ fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> mi
     let installer = &build.installer;
     let installed = find_installation(installer, args.state_root.as_deref(), args.scope)?;
     let action = match request {
-        Request::Named(action) => action,
-        Request::Apply => state::resolve_applied_action(
+        zup_runtime::Operation::Apply => crate::lifecycle::resolve_request_operation(
+            zup_runtime::Operation::Apply,
             installed.as_ref().map(|(_, ledger)| &ledger.version),
             &installer.app.version.to_string(),
         )?,
+        named => crate::lifecycle::named_action(named).expect("named operations resolve directly"),
     };
     let scope = choose_scope(installer, args.scope, installed.as_ref().map(|(s, _)| *s))?;
     let repair = matches!(action, LifecycleAction::Repair { .. });
@@ -176,7 +182,7 @@ fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> mi
     let _ = context;
     lifecycle::transition(
         context,
-        Request::Named(action),
+        zup_runtime::Operation::from(action),
         &args,
         ExecutionPolicy::Interactive,
     )

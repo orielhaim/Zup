@@ -58,8 +58,12 @@ zup-acquire.workspace = true
 zup-bootstrap.workspace = true
 zup-exec.workspace = true
 zup-protocol.workspace = true
+zup-plugin-runtime.workspace = true
 zup-runtime.workspace = true
+zup-preset-host.workspace = true
+zup-preset-protocol.workspace = true
 zup-signing.workspace = true
+zup-update.workspace = true
 zstd.workspace = true
 semver.workspace = true
 windows = { version = "0.62", features = [

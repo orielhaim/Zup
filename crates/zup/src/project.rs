@@ -236,8 +236,7 @@ pub fn materialize_project(
         if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
             && config.frontend == Frontend::Gui
         {
-            let errors =
-                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            let errors = zup_linux::linux_selection_errors(&config.target, config.frontend);
             return Err(miette::miette!("{}", errors.join("\n")));
         }
         let mut installer =
@@ -326,8 +325,7 @@ pub fn load_for_build(
     let selected = select_project(path, selectors, args, false)?;
     for config in &selected.selected_targets {
         if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
-            let errors =
-                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            let errors = zup_linux::linux_selection_errors(&config.target, config.frontend);
             if !errors.is_empty() {
                 return Err(miette::miette!("{}", errors.join("\n")));
             }

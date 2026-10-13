@@ -228,8 +228,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let app_id_text = app_id.as_str().to_owned();
     let version = semver::Version::parse("1.0.0").unwrap();
     let target_triple = target();
-    let maintenance_target =
-        TargetPath::new(target_triple, maintenance.to_string_lossy().as_ref()).unwrap();
+    let maintenance_target = TargetPath::new(target_triple, maintenance.to_string_lossy()).unwrap();
     let target_plan = TargetPlan {
         app: App {
             id: app_id.clone(),

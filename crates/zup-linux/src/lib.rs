@@ -18,6 +18,9 @@
 //!   executes only on Linux, and every module it needs is gated on
 //!   `cfg(target_os = "linux")`.
 
+#[cfg(target_os = "linux")]
+mod backend;
+mod capabilities;
 mod carrier;
 #[cfg(target_os = "linux")]
 mod elevate;
@@ -37,6 +40,8 @@ mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
 #[cfg(target_os = "linux")]
+mod operation_host;
+#[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
 mod pkexec;
@@ -51,6 +56,8 @@ mod service_exec;
 mod service_ops;
 mod services;
 #[cfg(target_os = "linux")]
+mod session_host;
+#[cfg(target_os = "linux")]
 mod socket;
 #[cfg(target_os = "linux")]
 mod systemd;
@@ -60,6 +67,12 @@ pub mod test_support;
 #[cfg(target_os = "linux")]
 mod worker;
 
+#[cfg(target_os = "linux")]
+pub use backend::{ExecutionReport, LinuxRuntimeBackend};
+pub use capabilities::{
+    is_supported_linux_target, linux_capability_errors, linux_selection_errors,
+    operation_capability_errors,
+};
 pub use carrier::{
     CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, FOOTER_LEN, compose,
     compose_with_preset,
@@ -81,7 +94,7 @@ pub use input::{
 };
 #[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
-pub use lifecycle::{LinuxAction, LinuxOutcome, resolve_action};
+pub use lifecycle::{LinuxOutcome, resolve_action};
 pub use locations::{
     LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
     MACHINE_STATE_ROOT, MachineRoots, user_data_home, user_data_home_in, user_programs_root,
@@ -107,7 +120,7 @@ pub use paths::{
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
 pub use resolve::{resolve_target, validate_target_plan};
 #[cfg(target_os = "linux")]
-pub use run::{LinuxRunRequest, recover_transaction, run};
+pub use run::{LinuxRunRequest, run};
 #[cfg(target_os = "linux")]
 pub use service_ops::{
     MAX_UNIT_BYTES, SERVICE_BACKEND_PREFIX, ServicePayload, ServiceReceipt, admin_override_dir,
@@ -120,6 +133,8 @@ pub use services::{
     DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, UNIT_PREFIX,
     WANTED_BY, parse_manager_version,
 };
+#[cfg(target_os = "linux")]
+pub use session_host::LinuxSessionHost;
 #[cfg(target_os = "linux")]
 pub use socket::{
     FRAME_TIMEOUT, HANDSHAKE_TIMEOUT, PeerIdentity, PeerPin, Rendezvous, peer_alive, peer_identity,

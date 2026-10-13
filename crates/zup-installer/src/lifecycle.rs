@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_acquire::CachePolicy;
-use zup_core::{AppId, ComponentId, RelativePath, ResourceKey, SelectedScope, hash_reader};
+use zup_core::SelectedScope;
 use zup_exec::LifecycleAction;
-use zup_plan::{CancellationQuery, PluginExecutor, TargetBuildPlan};
 use zup_presentation::OutputFormat;
-use zup_runtime::{ExecutionPolicy, RuntimeRequest};
-use zup_windows::WindowsRuntimeBackend;
+use zup_runtime::{
+    ExecutionPolicy, Operation, OperationInput, OperationSelection, RuntimeRequest,
+    prepare_operation, resolve_operation, runtime_request,
+};
+use zup_windows::{WindowsContent, WindowsOperationHost, WindowsRuntimeBackend};
 
 use crate::acquire;
 use crate::cli::LifecycleArgs;
@@ -17,25 +19,6 @@ use crate::frontend;
 use crate::maintenance as state;
 use crate::package;
 use crate::run::RuntimeContext;
-
-#[derive(Debug, Clone, Copy)]
-pub enum Request {
-    Named(LifecycleAction),
-    Apply,
-}
-
-impl Request {
-    fn resolve(
-        self,
-        installed: Option<&semver::Version>,
-        package_version: &str,
-    ) -> miette::Result<LifecycleAction> {
-        match self {
-            Self::Named(action) => Ok(action),
-            Self::Apply => state::resolve_applied_action(installed, package_version),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct PreparedRuntime {
@@ -67,7 +50,7 @@ pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()>
     if args.may_prompt(context) {
         return frontend::console_apply(context, args);
     }
-    transition(context, Request::Apply, &args, policy_for(&args))
+    transition(context, Operation::Apply, &args, policy_for(&args))
 }
 
 pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::Result<()> {
@@ -82,12 +65,7 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
     if args.may_prompt(context) {
         return frontend::console_verb(context, verb, args);
     }
-    transition(
-        context,
-        Request::Named(verb.action()),
-        &args,
-        policy_for(&args),
-    )
+    transition(context, verb.action(), &args, policy_for(&args))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,11 +76,11 @@ pub enum Verb {
 }
 
 impl Verb {
-    pub fn action(self) -> LifecycleAction {
+    pub fn action(self) -> Operation {
         match self {
-            Self::Modify => LifecycleAction::Modify,
-            Self::Repair { force_files } => LifecycleAction::Repair { force_files },
-            Self::Upgrade => LifecycleAction::Upgrade,
+            Self::Modify => Operation::Modify,
+            Self::Repair { force_files } => Operation::Repair { force_files },
+            Self::Upgrade => Operation::Upgrade,
         }
     }
 }
@@ -132,7 +110,7 @@ pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
 
 pub fn transition(
     context: RuntimeContext,
-    request: Request,
+    request: Operation,
     args: &LifecycleArgs,
     policy: ExecutionPolicy,
 ) -> miette::Result<()> {
@@ -169,7 +147,7 @@ pub fn transition(
 }
 
 pub fn run_embedded(
-    request: Request,
+    request: Operation,
     context: RuntimeContext,
     scope: SelectedScope,
     args: &LifecycleArgs,
@@ -198,7 +176,7 @@ pub fn run_embedded(
 
 fn run_handoff(
     executable: &Path,
-    request: Request,
+    request: Operation,
     args: &LifecycleArgs,
     policy: ExecutionPolicy,
     handoff_path: &Path,
@@ -228,7 +206,7 @@ fn run_handoff(
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair { force_files: false },
     };
-    if let Request::Named(action) = request
+    if let Some(action) = named_action(request)
         && expected != action
     {
         return Err(miette::miette!(
@@ -251,8 +229,30 @@ fn run_handoff(
     )
 }
 
+pub(crate) fn named_action(operation: Operation) -> Option<LifecycleAction> {
+    match operation {
+        Operation::Install => Some(LifecycleAction::Install),
+        Operation::Upgrade => Some(LifecycleAction::Upgrade),
+        Operation::Modify => Some(LifecycleAction::Modify),
+        Operation::Repair { force_files } => Some(LifecycleAction::Repair { force_files }),
+        Operation::Uninstall => Some(LifecycleAction::Uninstall),
+        Operation::Apply => None,
+    }
+}
+
+pub(crate) fn resolve_request_operation(
+    operation: Operation,
+    installed: Option<&semver::Version>,
+    package: &str,
+) -> miette::Result<LifecycleAction> {
+    let package = semver::Version::parse(package).map_err(|error| {
+        miette::miette!("this package's version `{package}` is not a version: {error}")
+    })?;
+    resolve_operation(operation, installed, &package).map_err(|error| miette::miette!("{error}"))
+}
+
 fn run_graph_transition(
-    request: Request,
+    request: Operation,
     args: &LifecycleArgs,
     bundle: &zup_windows::EmbeddedBundle,
     policy: ExecutionPolicy,
@@ -286,7 +286,7 @@ fn run_graph_transition(
                 installer.app.id
             ));
         }
-    } else if matches!(request, Request::Named(LifecycleAction::Repair { .. })) {
+    } else if matches!(request, Operation::Repair { .. }) {
         return Err(miette::miette!(
             "this installation has no release identity, so there is no authenticated source \
              to repair it from; re-run it from its installer"
@@ -328,7 +328,7 @@ fn run_graph_transition(
         miette::miette!("release acquisition: {error}")
     })?;
 
-    if let Request::Named(LifecycleAction::Repair { force_files }) = request {
+    if let Operation::Repair { force_files } = request {
         let drifted = drifted_digests(&state_root, &build.installer, scope, force_files)?;
         if drifted.is_empty() {
             return Ok(());
@@ -350,9 +350,9 @@ fn run_graph_transition(
     }
 
     let action = match request {
-        Request::Named(action) => action,
-        Request::Apply => {
-            let action = state::resolve_applied_action(
+        Operation::Apply => {
+            let action = resolve_request_operation(
+                Operation::Apply,
                 ledger.as_ref().map(|ledger| &ledger.version),
                 &acquired.resolved.descriptor.version,
             )?;
@@ -362,6 +362,7 @@ fn run_graph_transition(
                 action
             }
         }
+        named => named_action(named).expect("named operations resolve directly"),
     };
 
     if let Some(installed) = ledger
@@ -497,56 +498,53 @@ pub fn run_acquired_transition(
         ));
     }
 
-    let install = plan_from_graph(
-        &build,
-        action,
-        &enable,
-        &disable,
-        install_directory.as_deref(),
-        &prior,
-        scope,
-    )?;
     let identity = acquired.identity();
     let payload = acquire::payload_source(acquired).map_err(|error| {
         debug_assert!(error.left_machine_unchanged());
         miette::miette!("content source: {error}")
     })?;
-    let work_root = state_root.join("work");
-    let mut target =
-        zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
-            .map_err(|error| miette::miette!("target: {error}"))?;
-    if let Some(preset) = installer.preset.as_ref() {
-        let runtime_directory = zup_transaction::maintenance_directory(
-            &state_root,
-            &installer.app.id,
-            scope,
-            &target.app.version,
-        );
-        let source = acquired_ui_source(&acquired.manifest, &payload);
-        attach_ui_runtime(&mut target, &runtime_directory, scope, preset, &source)?;
-    }
-    let execution = zup_windows::plan_target_lifecycle_with_frontend(
-        action,
-        &installer.app.id,
-        scope,
-        Some(&target),
-        &state_root,
-        installer.frontend,
-    )
-    .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
-    let bootstrap = crate::bootstrap::prepare(&install, &state_root, scope, None)?;
-    let request = RuntimeRequest {
-        target: target.target,
+    let executable = package::current_executable()?;
+    let host = WindowsOperationHost {
         app_id: installer.app.id.clone(),
-        app_version: target.app.version.clone(),
         scope,
-        transaction_plan: execution,
-        state_root,
-        work_root,
-        recovery_id: None,
-        bootstrap,
-        release: Some(identity.clone()),
+        frontend: installer.frontend,
+        state_root: state_root.clone(),
+        content: WindowsContent::Acquired(&acquired.manifest, &payload),
+        acquire_prerequisites: true,
     };
+    let input = OperationInput {
+        build: &build,
+        installer: &executable,
+        scope,
+        operation: Operation::from(action),
+        selection: OperationSelection {
+            enable,
+            disable,
+            install_directory,
+        },
+        prior: prior.as_ref(),
+        state_root: &state_root,
+        cancellation: &zup_plan::NeverCancelled,
+    };
+    let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
+    let app_version = prepared
+        .target_plan
+        .as_ref()
+        .map(|target| target.app.version.clone())
+        .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
+        .ok_or_else(|| miette::miette!("installation not found"))?;
+    let request = runtime_request(
+        &prepared,
+        installer.app.id.clone(),
+        app_version,
+        scope,
+        state_root,
+        zup_runtime::RequestOptions {
+            bootstrap: prepared.bootstrap.clone(),
+            release: Some(identity.clone()),
+            recovery_id: None,
+        },
+    );
     let backend = zup_windows::WindowsRuntimeBackend::from_acquired(
         Arc::new(payload),
         acquired.cache.root().to_path_buf(),
@@ -576,91 +574,13 @@ pub fn run_acquired_transition(
     result
 }
 
-fn plan_from_graph(
-    build: &TargetBuildPlan,
-    action: LifecycleAction,
-    enable: &[String],
-    disable: &[String],
-    install_directory: Option<&Path>,
-    prior: &Option<zup_exec::InstallLedger>,
-    scope: SelectedScope,
-) -> miette::Result<zup_plan::InstallPlan> {
-    let installer = &build.installer;
-    let allow_directory_override = installer.install.allow_directory_override;
-    if matches!(action, LifecycleAction::Repair { .. })
-        && (install_directory.is_some() || !enable.is_empty() || !disable.is_empty())
-    {
-        return Err(miette::miette!(
-            "repair uses the committed component selection and install location"
-        ));
-    }
-    let mut request = zup_plan::PlanRequest::new(installer.target, scope);
-    request.install_directory = if matches!(action, LifecycleAction::Repair { .. }) {
-        allow_directory_override
-            .then(|| state::persisted_install_directory(prior.as_ref()))
-            .flatten()
-    } else {
-        state::choose_install_directory(
-            install_directory,
-            prior.as_ref(),
-            allow_directory_override,
-        )?
-    };
-    if matches!(
-        action,
-        LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
-    ) {
-        let previous = prior
-            .as_ref()
-            .ok_or_else(|| miette::miette!("installation not found"))?;
-        for component in &installer.components {
-            if previous.selected_components.contains(&component.id) {
-                request.components.enable.insert(component.id.clone());
-            } else if !component.required {
-                request.components.disable.insert(component.id.clone());
-            }
-        }
-    }
-    for raw in enable {
-        let id =
-            ComponentId::new(raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
-        request.components.disable.remove(&id);
-        request.components.enable.insert(id);
-    }
-    for raw in disable {
-        let id =
-            ComponentId::new(raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
-        request.components.enable.remove(&id);
-        request.components.disable.insert(id);
-    }
-    zup_plan::plan(
-        &zup_plan::BuildPlan {
-            targets: vec![build.clone()],
-        },
-        &request,
-    )
-    .map_err(|error| miette::miette!("plan: {error}"))
-}
-
 pub struct EmbeddedPreparationMode<'a> {
     pub cancellation: &'a dyn zup_plan::CancellationQuery,
     pub acquire_prerequisites: bool,
 }
 
-pub struct EmbeddedPreparation<'a> {
-    pub request: Request,
-    pub scope: SelectedScope,
-    pub build: &'a TargetBuildPlan,
-    pub prior: Option<zup_exec::InstallLedger>,
-    pub state_root: PathBuf,
-    pub payload_root: PathBuf,
-    pub enable: Vec<String>,
-    pub disable: Vec<String>,
-    pub install_directory: Option<PathBuf>,
-}
-
 pub fn prepare_embedded_transition(
-    request: Request,
+    request: Operation,
     scope: SelectedScope,
     state: Option<PathBuf>,
     enable: Vec<String>,
@@ -682,7 +602,7 @@ pub fn prepare_embedded_transition(
 }
 
 pub fn prepare_embedded_transition_with_cancellation(
-    request: Request,
+    request: Operation,
     scope: SelectedScope,
     state: Option<PathBuf>,
     enable: Vec<String>,
@@ -694,401 +614,72 @@ pub fn prepare_embedded_transition_with_cancellation(
     let bundle = package::open_bundle(&executable)?;
     let build = package::target_plan(&bundle)?;
     let app_id = build.installer.app.id.clone();
-    let plugin_target = build.installer.target;
     let state_root = state::resolve_state_root(state, scope)?;
     let prior = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&app_id, scope)
         .map_err(|error| miette::miette!("ledger: {error}"))?;
-    prepare_embedded_request(
-        EmbeddedPreparation {
-            request,
-            scope,
-            build: &build,
-            prior,
-            state_root,
-            payload_root: executable,
+    let host = WindowsOperationHost {
+        app_id: app_id.clone(),
+        scope,
+        frontend: build.installer.frontend,
+        state_root: state_root.clone(),
+        content: WindowsContent::Embedded(&bundle),
+        acquire_prerequisites: mode.acquire_prerequisites,
+    };
+    let input = OperationInput {
+        build: &build,
+        installer: &executable,
+        scope,
+        operation: request,
+        selection: OperationSelection {
             enable,
             disable,
             install_directory,
         },
-        Some(&bundle),
-        mode.acquire_prerequisites,
-        mode.cancellation,
-        || {
-            zup_plugin_runtime::WasmtimePluginExecutor::load(
-                bundle.package().clone(),
-                &plugin_target,
-            )
-            .map_err(|error| miette::miette!("plugin runtime: {error}"))
-        },
-    )
-}
-
-/// lifecycle which never plans a plugin - an uninstall, which removes files by
-/// ownership rather than by re-planning - never loads the component engine at
-pub fn prepare_embedded_request<E>(
-    preparation: EmbeddedPreparation<'_>,
-    embedded_bundle: Option<&zup_windows::EmbeddedBundle>,
-    acquire_prerequisites: bool,
-    cancellation: &dyn CancellationQuery,
-    load_executor: impl FnOnce() -> Result<E, miette::Report>,
-) -> miette::Result<PreparedRuntime>
-where
-    E: PluginExecutor,
-{
-    let EmbeddedPreparation {
-        request,
-        scope,
-        build,
-        prior,
-        state_root,
-        payload_root,
-        enable,
-        disable,
-        install_directory,
-    } = preparation;
-    let app_id = build.installer.app.id.clone();
-    let repair = matches!(request, Request::Named(LifecycleAction::Repair { .. }));
-    if repair {
-        if !enable.is_empty() || !disable.is_empty() {
-            return Err(miette::miette!(
-                "repair uses the committed component selection"
-            ));
-        }
-        if install_directory.is_some() {
-            return Err(miette::miette!(
-                "repair uses the committed install location"
-            ));
-        }
-    }
-    let action = request.resolve(
-        prior.as_ref().map(|ledger| &ledger.version),
-        &build.installer.app.version.to_string(),
-    )?;
-    let selected_install_directory = if action == LifecycleAction::Uninstall {
-        None
-    } else if repair {
-        build
-            .installer
-            .install
-            .allow_directory_override
-            .then(|| state::persisted_install_directory(prior.as_ref()))
-            .flatten()
-    } else {
-        state::choose_install_directory(
-            install_directory.as_deref(),
-            prior.as_ref(),
-            build.installer.install.allow_directory_override,
-        )?
+        prior: prior.as_ref(),
+        state_root: &state_root,
+        cancellation: mode.cancellation,
     };
-    if action == LifecycleAction::Uninstall {
-        let ledger = prior.ok_or_else(|| miette::miette!("installation not found"))?;
-        if ledger.target != build.installer.target {
-            return Err(miette::miette!(
-                "ledger target `{}` does not match this package's target `{}`",
-                ledger.target,
-                build.installer.target
-            ));
-        }
-        let execution = zup_windows::plan_target_lifecycle_with_frontend(
-            action,
-            &app_id,
-            scope,
-            None,
-            &state_root,
-            build.installer.frontend,
-        )
-        .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
-        let request = RuntimeRequest {
-            target: build.installer.target,
-            app_id,
-            app_version: ledger.version,
-            scope,
-            transaction_plan: execution,
-            work_root: state_root.join("work"),
-            state_root,
-            recovery_id: None,
-            release: None,
-            bootstrap: None,
-        };
-        let backend = WindowsRuntimeBackend::from_path(payload_root, None)
-            .map_err(|error| miette::miette!("payload source: {error}"))?;
-        return Ok(PreparedRuntime {
-            request,
-            backend: Arc::new(backend),
-            action,
-        });
-    }
-
-    let mut plan_request = zup_plan::PlanRequest::new(build.installer.target, scope);
-    plan_request.install_directory = selected_install_directory;
-    if matches!(
-        action,
-        LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
-    ) {
-        let previous = prior
-            .as_ref()
-            .ok_or_else(|| miette::miette!("installation not found"))?;
-        for component in &build.installer.components {
-            if previous.selected_components.contains(&component.id) {
-                plan_request.components.enable.insert(component.id.clone());
-            } else if !component.required {
-                plan_request.components.disable.insert(component.id.clone());
-            }
-        }
-    }
-    for raw in enable {
-        let id =
-            ComponentId::new(&raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
-        plan_request.components.disable.remove(&id);
-        plan_request.components.enable.insert(id);
-    }
-    for raw in disable {
-        let id =
-            ComponentId::new(&raw).map_err(|error| miette::miette!("component {raw}: {error}"))?;
-        plan_request.components.enable.remove(&id);
-        plan_request.components.disable.insert(id);
-    }
-
-    let mut executor = load_executor()?;
-    let planning = zup_plan::BuildPlan {
-        targets: vec![build.clone()],
-    };
-    let planned =
-        zup_plan::plan_with_plugins(&planning, &plan_request, &mut executor, cancellation)
-            .map_err(|error| miette::miette!("plan: {error}"))?;
-    let install = &planned.plan;
-    let mut target =
-        zup_windows::resolve_target(install, &zup_windows::WindowsTargetContext::new(scope))
-            .map_err(|error| miette::miette!("target: {error}"))?;
-    attach_maintenance_copy(&mut target, &state_root, &app_id, scope, &payload_root)?;
-    if let Some(preset) = build.installer.preset.as_ref() {
-        let runtime_directory = zup_transaction::maintenance_directory(
-            &state_root,
-            &app_id,
-            scope,
-            &target.app.version,
-        );
-        let source = embedded_ui_source(&payload_root);
-        attach_ui_runtime(&mut target, &runtime_directory, scope, preset, &source)?;
-    }
-    let execution = zup_windows::plan_target_lifecycle_with_frontend(
-        action,
-        &app_id,
-        scope,
-        Some(&target),
-        &state_root,
-        build.installer.frontend,
-    )
-    .map_err(|error| miette::miette!("lifecycle plan: {error}"))?;
-    let bootstrap = if acquire_prerequisites {
-        crate::bootstrap::prepare(install, &state_root, scope, embedded_bundle)?
-    } else {
-        None
-    };
-    let backend = WindowsRuntimeBackend::from_path_with_generated_files(
-        payload_root.clone(),
-        &state_root,
-        scope,
-        install,
-        &planned.generated_files,
-        &execution,
-    )
-    .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?;
-    let work_root = state_root.join("work");
-    let request = RuntimeRequest {
-        target: target.target,
+    let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
+    let app_version = prepared
+        .target_plan
+        .as_ref()
+        .map(|target| target.app.version.clone())
+        .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
+        .ok_or_else(|| miette::miette!("installation not found"))?;
+    let request = runtime_request(
+        &prepared,
         app_id,
-        app_version: target.app.version.clone(),
+        app_version,
         scope,
-        transaction_plan: execution,
-        state_root,
-        work_root,
-        recovery_id: None,
-        release: None,
-        bootstrap,
+        state_root.clone(),
+        zup_runtime::RequestOptions {
+            bootstrap: prepared.bootstrap.clone(),
+            release: None,
+            recovery_id: None,
+        },
+    );
+    let backend = if prepared.action == LifecycleAction::Uninstall {
+        WindowsRuntimeBackend::from_path(executable, None)
+            .map_err(|error| miette::miette!("payload source: {error}"))?
+    } else {
+        let install = prepared
+            .install_plan
+            .as_ref()
+            .ok_or_else(|| miette::miette!("the operation planned no installation to execute"))?;
+        WindowsRuntimeBackend::from_path_with_generated_files(
+            executable,
+            &state_root,
+            scope,
+            install,
+            &prepared.generated_files,
+            &prepared.transaction_plan,
+        )
+        .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?
     };
     Ok(PreparedRuntime {
         request,
         backend: Arc::new(backend),
-        action,
+        action: prepared.action,
     })
 }
-
-fn attach_maintenance_copy(
-    target: &mut zup_platform::TargetPlan,
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    payload_root: &Path,
-) -> miette::Result<()> {
-    let (size, sha256) = hash_reader(
-        std::fs::File::open(payload_root)
-            .map_err(|error| miette::miette!("installer executable: {error}"))?,
-    )
-    .map_err(|error| miette::miette!("installer executable: {error}"))?;
-    let destination = package::maintenance_destination(
-        state_root,
-        app_id,
-        scope,
-        &target.app.version,
-        &target.target,
-    )?;
-    target.files.push(zup_platform::TargetFile {
-        key: ResourceKey::Maintenance {
-            app_id: app_id.to_string(),
-            version: target.app.version.to_string(),
-            destination: destination.to_string(),
-        },
-        source_relative: RelativePath::new("__zup_maintenance__.exe").expect("valid relative path"),
-        destination,
-        size,
-        sha256,
-        privilege: scope.authorization(),
-        executable: true,
-    });
-    target.summary.file_count += 1;
-    target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
-    target.summary.resource_count += 1;
-    Ok(())
-}
-
-fn embedded_ui_source(payload_root: &Path) -> impl Fn(&str) -> miette::Result<Vec<u8>> {
-    let executable = payload_root.to_path_buf();
-    move |name| {
-        let bundle = zup_windows::EmbeddedBundle::open(&executable).map_err(|error| {
-            miette::miette!("installer package {}: {error}", executable.display())
-        })?;
-        if name == zup_bundle::PRESET_SOURCE {
-            return bundle
-                .preset()
-                .map(<[u8]>::to_vec)
-                .ok_or_else(|| miette::miette!("this installer was composed without a preset"));
-        }
-        let asset = ui_asset_name(name)
-            .ok_or_else(|| miette::miette!("`{name}` is not preset runtime content"))?;
-        bundle
-            .ui_asset(asset)
-            .map(|(_, bytes)| bytes)
-            .map_err(|error| miette::miette!("the asset `{asset}`: {error}"))
-    }
-}
-
-fn ui_asset_name(source: &str) -> Option<&str> {
-    source
-        .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
-        .and_then(|rest| rest.strip_prefix('/'))
-}
-
-fn acquired_ui_source(
-    manifest: &zup_artifact::VariantManifest,
-    payload: &zup_bundle::AcquiredPayloadSource,
-) -> impl Fn(&str) -> miette::Result<Vec<u8>> {
-    let executable = manifest
-        .preset
-        .as_ref()
-        .map(|preset| preset.digest)
-        .ok_or_else(|| {
-            miette::miette!("this release presents a window but carries no native image for it")
-        });
-    move |name| {
-        if name == zup_bundle::PRESET_SOURCE {
-            let digest = executable
-                .as_ref()
-                .map_err(|error| miette::miette!("{error}"))?;
-            return payload
-                .read_blob(digest)
-                .map_err(|error| miette::miette!("the preset executable {digest}: {error}"));
-        }
-        let asset = ui_asset_name(name)
-            .ok_or_else(|| miette::miette!("`{name}` is not preset runtime content"))?;
-        payload
-            .ui_asset(asset)
-            .map_err(|error| miette::miette!("the asset `{asset}`: {error}"))
-    }
-}
-
-fn attach_ui_runtime(
-    target: &mut zup_platform::TargetPlan,
-    runtime_directory: &Path,
-    scope: SelectedScope,
-    preset: &zup_core::PresetRuntime,
-    bytes: &impl Fn(&str) -> miette::Result<Vec<u8>>,
-) -> miette::Result<()> {
-    let executable = bytes(zup_bundle::PRESET_SOURCE).map_err(|error| {
-        miette::miette!(
-            "this application presents the preset `{}`, and its executable could not be read: \
-             {error}",
-            preset.name
-        )
-    })?;
-    let executable_digest = zup_core::hash_bytes(&executable);
-    let mut files = vec![(
-        zup_bundle::preset_path(
-            runtime_directory,
-            &executable_digest,
-            target.target.executable_suffix(),
-        ),
-        executable_digest,
-        executable.len() as u64,
-        zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
-            .expect("a reserved source name is always relative"),
-        true,
-    )];
-    for asset in &preset.assets {
-        let content = bytes(zup_bundle::asset_source_name(asset.name.as_str()).as_str()).map_err(
-            |error| miette::miette!("the asset `{}` could not be read: {error}", asset.name),
-        )?;
-        if content.len() as u64 != asset.size || zup_core::hash_bytes(&content) != asset.sha256 {
-            return Err(miette::miette!(
-                "the asset `{}` is not the content this application configured",
-                asset.name
-            ));
-        }
-        files.push((
-            zup_bundle::asset_path(runtime_directory, asset.name.as_str(), &asset.sha256),
-            asset.sha256,
-            asset.size,
-            zup_bundle::asset_source_name(asset.name.as_str()),
-            false,
-        ));
-    }
-
-    let triple = target.target;
-    for (path, digest, size, source, executable) in files {
-        let destination =
-            zup_platform::TargetPath::new(triple, zup_windows::plain_path_text(&path))
-                .map_err(|error| miette::miette!("preset runtime destination: {error}"))?;
-        let text = destination.to_string();
-        target.files.push(zup_platform::TargetFile {
-            key: ResourceKey::File { destination: text },
-            source_relative: source,
-            destination,
-            size,
-            sha256: digest,
-            privilege: scope.authorization(),
-            executable,
-        });
-        target.summary.file_count += 1;
-        target.summary.resource_count += 1;
-        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
-    }
-    target.preset = Some(zup_core::InstalledPreset {
-        preset: preset.clone(),
-        executable: executable_digest,
-    });
-    Ok(())
-}
-
-#[cfg(any(feature = "gui", test))]
-pub struct RuntimeCancellationQuery<'a>(pub &'a zup_runtime::CancellationHandle);
-
-#[cfg(any(feature = "gui", test))]
-impl CancellationQuery for RuntimeCancellationQuery<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-}
-
-#[cfg(test)]
-mod tests;

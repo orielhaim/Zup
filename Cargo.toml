@@ -74,6 +74,7 @@ zup-publish-github = { path = "crates/zup-publish-github" }
 zup-distribute-github = { path = "crates/zup-distribute-github" }
 zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
+zup-session = { path = "crates/zup-session" }
 zup-presentation = { path = "crates/zup-presentation" }
 zup-preset-protocol = { path = "crates/zup-preset-protocol", version = "0.1.0" }
 zup-preset-host = { path = "crates/zup-preset-host" }

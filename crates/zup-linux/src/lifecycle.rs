@@ -1,16 +1,5 @@
 use zup_exec::{InstallLedger, LifecycleAction};
-use zup_runtime::InstallOutcome;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinuxAction {
-    Install,
-    Upgrade,
-
-    Repair { force_files: bool },
-    Uninstall,
-
-    Apply,
-}
+use zup_runtime::{InstallOutcome, Operation, OperationError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxOutcome {
@@ -35,32 +24,11 @@ impl LinuxOutcome {
 }
 
 pub fn resolve_action(
-    action: LinuxAction,
+    operation: Operation,
     ledger: Option<&InstallLedger>,
     version: &semver::Version,
-) -> Result<LifecycleAction, crate::error::ExecError> {
-    let explicit = match action {
-        LinuxAction::Install => LifecycleAction::Install,
-        LinuxAction::Upgrade => LifecycleAction::Upgrade,
-        LinuxAction::Repair { force_files } => LifecycleAction::Repair { force_files },
-        LinuxAction::Uninstall => LifecycleAction::Uninstall,
-        LinuxAction::Apply => {
-            let Some(ledger) = ledger else {
-                return Ok(LifecycleAction::Install);
-            };
-            match ledger.version.cmp(version) {
-                std::cmp::Ordering::Less => LifecycleAction::Upgrade,
-                std::cmp::Ordering::Equal => LifecycleAction::Repair { force_files: false },
-                std::cmp::Ordering::Greater => {
-                    return Err(crate::error::ExecError::Downgrade {
-                        installed: ledger.version.clone(),
-                        requested: version.clone(),
-                    });
-                }
-            }
-        }
-    };
-    Ok(explicit)
+) -> Result<LifecycleAction, OperationError> {
+    zup_runtime::resolve_operation(operation, ledger.map(|ledger| &ledger.version), version)
 }
 
 #[cfg(test)]
@@ -80,7 +48,7 @@ mod tests {
     #[test]
     fn apply_without_a_ledger_is_an_install() {
         assert_eq!(
-            resolve_action(LinuxAction::Apply, None, &semver::Version::new(1, 0, 0)).unwrap(),
+            resolve_action(Operation::Apply, None, &semver::Version::new(1, 0, 0)).unwrap(),
             LifecycleAction::Install,
         );
     }
@@ -90,7 +58,7 @@ mod tests {
         let installed = ledger("1.0.0");
         assert_eq!(
             resolve_action(
-                LinuxAction::Apply,
+                Operation::Apply,
                 Some(&installed),
                 &semver::Version::new(2, 0, 0)
             )
@@ -99,16 +67,16 @@ mod tests {
         );
         assert_eq!(
             resolve_action(
-                LinuxAction::Apply,
+                Operation::Apply,
                 Some(&installed),
                 &semver::Version::new(1, 0, 0)
             )
             .unwrap(),
-            LifecycleAction::Repair { force_files: false },
+            LifecycleAction::Modify,
         );
         assert!(
             resolve_action(
-                LinuxAction::Apply,
+                Operation::Apply,
                 Some(&installed),
                 &semver::Version::new(0, 9, 0)
             )

@@ -4,13 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use zup_core::{SelectedScope, Target};
-use zup_linux::{
-    Carrier, CarrierError, ExecError, FOOTER_LEN, LinuxAction, LinuxRunRequest, PathError, run,
-};
+use zup_linux::{Carrier, CarrierError, ExecError, FOOTER_LEN, LinuxRunRequest, PathError, run};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_installer, genuine_template, package_bytes, package_bytes_for, v1_files,
 };
+use zup_runtime::Operation;
 
 fn genuine_installer(scratch: &Path, name: &str) -> (PathBuf, Vec<u8>) {
     let package = package_bytes(scratch, "1.0.0", &v1_files());
@@ -113,8 +112,9 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
         installer: output,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     }) {
         Err(ExecError::Carrier(CarrierError::TargetMismatch { .. })) => {}
         other => panic!("a mismatched run is refused: {other:?}"),
@@ -141,8 +141,9 @@ fn a_redirected_state_hierarchy_is_refused() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     }) {
         Err(ExecError::Path(PathError::Refused { .. })) => {}
         other => panic!("a redirected state hierarchy is refused: {other:?}"),
@@ -174,8 +175,9 @@ fn a_redirected_install_destination_is_refused() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     }) {
         Err(ExecError::Path(PathError::Refused { .. })) => {}
         other => panic!("a redirected destination is refused: {other:?}"),

@@ -76,13 +76,21 @@ zup-plugin-runtime.workspace = true
 zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-preset-host.workspace = true
+zup-session.workspace = true
 zup-preset-protocol.workspace = true
 zup-update.workspace = true
 zup-windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+tokio = { version = "1", features = ["rt", "sync"] }
+uuid.workspace = true
 zup-linux.workspace = true
+zup-plan.workspace = true
+zup-presentation.workspace = true
 zup-protocol.workspace = true
+zup-runtime.workspace = true
+zup-session.workspace = true
+zup-transaction.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

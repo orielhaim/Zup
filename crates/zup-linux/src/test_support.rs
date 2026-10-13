@@ -16,9 +16,11 @@ use zup_core::{
 use zup_protocol::{SessionId, WireEnvelope};
 
 use crate::error::{ExecError, IpcError};
+use crate::lifecycle::LinuxOutcome;
 use crate::locations::MachineRoots;
-use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest, run};
+use crate::run::{LinuxRunRequest, run};
 use crate::systemd::{SystemdManager, UnitChange, UnitInfo};
+use zup_runtime::Operation;
 
 #[derive(Debug, Clone)]
 pub struct MachineTestRoots {
@@ -56,7 +58,7 @@ impl MachineTestRoots {
 pub fn run_machine_isolated(
     installer: &Path,
     test_roots: &MachineTestRoots,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
 ) -> Result<LinuxOutcome, ExecError> {
     crate::elevate::run_machine_loopback_for_test(
@@ -66,6 +68,7 @@ pub fn run_machine_isolated(
             state_root: Some(test_roots.state.clone()),
             action,
             install_dir_override,
+            selection: Default::default(),
         },
         &test_roots.roots,
         &test_roots.systemd,
@@ -100,14 +103,21 @@ pub fn drive_client_isolated(
     intent: &zup_protocol::PrepareOperation,
     expected_digest: &str,
     expected_target: &zup_core::Target,
-) -> Result<crate::run::LinuxOutcome, crate::error::ExecError> {
-    crate::elevate::drive_client(stream, session, intent, expected_digest, expected_target)
+) -> Result<crate::lifecycle::LinuxOutcome, crate::error::ExecError> {
+    crate::elevate::drive_client(
+        stream,
+        session,
+        intent,
+        expected_digest,
+        expected_target,
+        None,
+    )
 }
 
 pub fn plan_for_test(
     installer: &Path,
     test_roots: &MachineTestRoots,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
 ) -> (
     zup_protocol::PrepareOperation,
@@ -119,6 +129,7 @@ pub fn plan_for_test(
         state_root: Some(test_roots.state.clone()),
         action,
         install_dir_override,
+        selection: Default::default(),
     };
     let (intent, expected) = crate::elevate::plan_expected(
         &request,
@@ -141,7 +152,7 @@ pub fn validate_rendezvous_for_test(
 pub fn run_machine_elevated_for_test(
     installer: &Path,
     state: &Path,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
     launcher: &impl crate::pkexec::PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
@@ -152,6 +163,7 @@ pub fn run_machine_elevated_for_test(
             state_root: Some(state.to_path_buf()),
             action,
             install_dir_override,
+            selection: Default::default(),
         },
         launcher,
     )
@@ -1095,13 +1107,14 @@ pub fn genuine_template(frontend: &str) -> PathBuf {
     found.pop().expect("a template")
 }
 
-pub fn run_installer(installer: &Path, state: &Path, action: LinuxAction) -> LinuxOutcome {
+pub fn run_installer(installer: &Path, state: &Path, action: Operation) -> LinuxOutcome {
     run(&LinuxRunRequest {
         installer: installer.to_path_buf(),
         scope: SelectedScope::User,
         state_root: Some(state.to_path_buf()),
         action,
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("the run reaches a stable outcome")
 }

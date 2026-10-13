@@ -24,6 +24,8 @@ mod acquired;
 mod bindings;
 #[cfg(windows)]
 mod bootstrap_fs;
+#[cfg(windows)]
+mod bootstrap_plan;
 mod bundle_packager;
 mod cmdline;
 #[cfg(windows)]
@@ -46,6 +48,8 @@ mod locations;
 mod lowering;
 #[cfg(windows)]
 mod machine_state;
+#[cfg(windows)]
+mod operation_host;
 #[cfg(windows)]
 mod path_safety;
 #[cfg(windows)]
@@ -96,6 +100,8 @@ pub use acquired::{
 };
 #[cfg(windows)]
 pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
+#[cfg(windows)]
+pub use bootstrap_plan::{BootstrapPlanError, peer_user_state_root};
 pub use bundle_packager::{
     AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
     build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
@@ -148,6 +154,8 @@ pub use lowering::{
 pub use machine_state::{
     MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,
 };
+#[cfg(windows)]
+pub use operation_host::{WindowsContent, WindowsOperationHost};
 #[cfg(windows)]
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,

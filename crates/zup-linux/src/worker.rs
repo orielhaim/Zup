@@ -309,7 +309,7 @@ struct PreparedPlan {
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
     target_plan: zup_platform::TargetPlan,
-    action: crate::run::LinuxAction,
+    action: zup_exec::LifecycleAction,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -424,13 +424,14 @@ fn prepare_operation(
     }
 
     let requested = match intent.operation.as_str() {
-        zup_protocol::privileged_operation::INSTALL => crate::run::LinuxAction::Install,
-        zup_protocol::privileged_operation::UPGRADE => crate::run::LinuxAction::Upgrade,
-        zup_protocol::privileged_operation::REPAIR => crate::run::LinuxAction::Repair {
+        zup_protocol::privileged_operation::INSTALL => zup_runtime::Operation::Install,
+        zup_protocol::privileged_operation::UPGRADE => zup_runtime::Operation::Upgrade,
+        zup_protocol::privileged_operation::MODIFY => zup_runtime::Operation::Modify,
+        zup_protocol::privileged_operation::REPAIR => zup_runtime::Operation::Repair {
             force_files: intent.force_files,
         },
-        zup_protocol::privileged_operation::UNINSTALL => crate::run::LinuxAction::Uninstall,
-        zup_protocol::privileged_operation::APPLY => crate::run::LinuxAction::Apply,
+        zup_protocol::privileged_operation::UNINSTALL => zup_runtime::Operation::Uninstall,
+        zup_protocol::privileged_operation::APPLY => zup_runtime::Operation::Apply,
         _ => {
             return Err(IpcError::WorkerProtocol(
                 "unknown privileged operation".into(),
@@ -438,49 +439,10 @@ fn prepare_operation(
         }
     };
 
-    let mut plan_request = zup_plan::PlanRequest::new(target, SelectedScope::Machine);
-    for name in &intent.selected_components {
-        let id = zup_core::ComponentId::new(name)
-            .map_err(|error| IpcError::Policy(format!("component: {error}")))?;
-        plan_request.components.enable.insert(id);
-    }
-    if let Some(directory) = &intent.install_dir_override {
-        let host = PathBuf::from(directory);
-        authorize_machine_install_directory(&host, &roots)
-            .map_err(|error| IpcError::Policy(error.to_string()))?;
-        let template = crate::machine::host_to_install_template(&host, &roots, &target)
-            .map_err(|error| IpcError::Policy(format!("install directory override: {error}")))?;
-        plan_request.install_directory = Some(template);
-    }
-
-    let install = zup_plan::plan(
-        &zup_plan::BuildPlan {
-            targets: vec![build],
-        },
-        &plan_request,
-    )
-    .map_err(|error| IpcError::Policy(format!("plan: {error}")))?;
-    let mut target_plan = crate::resolve::resolve_target(
-        &install,
-        &crate::locations::LinuxInstallLocationResolver::with_machine_roots(roots.clone()),
-    )
-    .map_err(|error| IpcError::Policy(format!("target plan: {error}")))?;
-    crate::run::attach_maintenance_copy_for(
-        &mut target_plan,
-        &carrier_path,
-        &state_root,
-        SelectedScope::Machine,
-    )
-    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    enforce_machine_policy(&target_plan, &roots)?;
-    if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
-        authorize_machine_install_directory(&host, &roots)
-            .map_err(|error| IpcError::Policy(error.to_string()))?;
-        crate::fs::anchor_reachable(&host)
-            .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
-    }
-
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&state_root);
+    let seed = ledger_store
+        .load(&app_id, SelectedScope::Machine)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let lock_key = zup_transaction::InstallationLock::lock_key(app_id.as_str(), "machine");
     let lock = match zup_transaction::InstallationLock::try_acquire(&state_root, &lock_key)
         .map_err(|error| IpcError::Transaction(error.to_string()))?
@@ -491,9 +453,8 @@ fn prepare_operation(
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
 
-    let settled_before = ledger_store
-        .load(&app_id, SelectedScope::Machine)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?
+    let settled_before = seed
+        .as_ref()
         .map(|ledger| ledger.committed_transaction.clone());
     recover_pending(
         &state_root,
@@ -505,71 +466,48 @@ fn prepare_operation(
     )?;
 
     ledger_store
-        .repair_committed(&target_plan.app.id, SelectedScope::Machine)
+        .repair_committed(&app_id, SelectedScope::Machine)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    crate::machine::verify_ledger_trust(
-        &state_root,
-        &target_plan.app.id,
-        rustix::process::geteuid().as_raw(),
-    )
-    .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::verify_ledger_trust(&state_root, &app_id, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     let ledger = ledger_store
-        .load(&target_plan.app.id, SelectedScope::Machine)
+        .load(&app_id, SelectedScope::Machine)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    let action = crate::run::resolve_action(requested, ledger.as_ref(), &target_plan.app.version)
+    let selection = zup_runtime::OperationSelection {
+        enable: intent.selected_components.clone(),
+        disable: intent.disabled_components.clone(),
+        install_directory: intent.install_dir_override.as_ref().map(PathBuf::from),
+    };
+    let host = crate::operation_host::LinuxOperationHost {
+        machine: Some(crate::operation_host::MachineHost {
+            roots: roots.clone(),
+            systemd: context.systemd.clone(),
+        }),
+    };
+    let input = zup_runtime::OperationInput {
+        build: &build,
+        installer: &carrier_path,
+        scope: SelectedScope::Machine,
+        operation: requested,
+        selection,
+        prior: ledger.as_ref(),
+        state_root: &state_root,
+        cancellation: &zup_plan::NeverCancelled,
+    };
+    let prepared = zup_runtime::prepare_operation(&input, &host)
         .map_err(|error| IpcError::Policy(error.to_string()))?;
-
-    let mut snapshot = crate::executor::snapshot_target(&target_plan);
-
-    let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
-    let mut manager = if needs_manager {
-        Some(
-            crate::systemd::RealSystemd::connect()
-                .map_err(|error| IpcError::Policy(format!("systemd is unavailable: {error}")))?,
-        )
-    } else {
-        None
-    };
-    if let Some(manager) = manager.as_mut() {
-        snapshot.services =
-            crate::input::snapshot_services(&target_plan, manager, &context.systemd)
-                .map_err(|error| IpcError::Policy(format!("service snapshot: {error}")))?;
+    let target_plan = prepared
+        .target_plan
+        .ok_or_else(|| IpcError::Policy("a machine transaction resolves its target".into()))?;
+    enforce_machine_policy(&target_plan, &roots)?;
+    if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
+        authorize_machine_install_directory(&host, &roots)
+            .map_err(|error| IpcError::Policy(error.to_string()))?;
+        crate::fs::anchor_reachable(&host)
+            .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
     }
-    let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
-    let execution = zup_exec::plan_lifecycle(
-        action,
-        (action != zup_exec::LifecycleAction::Uninstall).then_some(&target_plan),
-        Some(&snapshot),
-        ledger.as_ref(),
-        &owned_matches,
-    )
-    .map_err(|error| IpcError::Policy(format!("lifecycle: {error}")))?;
-    let force_services = matches!(
-        requested,
-        crate::run::LinuxAction::Repair { force_files: true }
-    );
-    let input = if needs_manager {
-        let manager = manager.as_mut().ok_or_else(|| {
-            IpcError::Policy("a service transaction without a systemd manager".into())
-        })?;
-        crate::input::compile_machine_execution_plan(
-            &execution,
-            &target_plan,
-            crate::input::ServiceCompilation {
-                roots: &roots,
-                systemd: &context.systemd,
-                manager,
-                force_services,
-            },
-        )
-        .map_err(|error| IpcError::Policy(format!("transaction input: {error}")))?
-    } else {
-        crate::input::compile_execution_plan(&execution, &target_plan)
-            .map_err(|error| IpcError::Policy(format!("transaction input: {error}")))?
-    };
-    let plan = zup_transaction::compile_transaction(&input)
-        .map_err(|error| IpcError::Policy(format!("transaction plan: {error}")))?;
 
+    let plan = prepared.transaction_plan;
     if plan.nodes.iter().any(|node| {
         matches!(
             &node.kind,
@@ -625,19 +563,7 @@ fn prepare_operation(
         carrier_pin,
         plan,
         target_plan,
-        action: match action {
-            zup_exec::LifecycleAction::Install => crate::run::LinuxAction::Install,
-            zup_exec::LifecycleAction::Upgrade => crate::run::LinuxAction::Upgrade,
-            zup_exec::LifecycleAction::Repair { force_files } => {
-                crate::run::LinuxAction::Repair { force_files }
-            }
-            zup_exec::LifecycleAction::Uninstall => crate::run::LinuxAction::Uninstall,
-            zup_exec::LifecycleAction::Modify => {
-                return Err(IpcError::Policy(
-                    "a machine transaction modifies nothing outside its lifecycle".into(),
-                ));
-            }
-        },
+        action: prepared.action,
         state_root,
         roots: roots.clone(),
         systemd: context.systemd.clone(),
@@ -984,7 +910,7 @@ fn execute_prepared(
                 .publish_committed(&record, SelectedScope::Machine)
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
 
-            if prepared.action != crate::run::LinuxAction::Uninstall {
+            if prepared.action != zup_exec::LifecycleAction::Uninstall {
                 crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
                     .map_err(|error| IpcError::Transaction(error.to_string()))?;
             }
@@ -993,7 +919,7 @@ fn execute_prepared(
                 rustix::process::geteuid().as_raw(),
             )
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            if prepared.action == crate::run::LinuxAction::Upgrade {
+            if prepared.action == zup_exec::LifecycleAction::Upgrade {
                 crate::run::retire_old_generations_for(
                     &prepared.state_root,
                     &prepared.target_plan.app.id,
@@ -1002,7 +928,7 @@ fn execute_prepared(
                 )
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
             }
-            if prepared.action == crate::run::LinuxAction::Uninstall {
+            if prepared.action == zup_exec::LifecycleAction::Uninstall {
                 let _ = zup_transaction::InstallationLock::remove_if_unheld(
                     &prepared.state_root,
                     &lock_key,

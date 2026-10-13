@@ -30,6 +30,7 @@ zup-plan.workspace = true
 zup-platform.workspace = true
 zup-protocol.workspace = true
 zup-runtime.workspace = true
+zup-session.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
@@ -42,6 +43,7 @@ zup-core.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true
 zup-platform.workspace = true
+zup-runtime.workspace = true
 zup-toolchain.workspace = true
 zup-transaction.workspace = true
 

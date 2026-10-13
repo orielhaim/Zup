@@ -9,7 +9,8 @@ use zup_linux::test_support::{
     fixture_protocol, menu_launcher, run_installer, run_tool, v1_files, v1_icons, v1_integration,
     v2_files, v2_icons,
 };
-use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, run};
+use zup_linux::{LinuxLedgerStore, LinuxOutcome, run};
+use zup_runtime::Operation;
 
 fn applications() -> PathBuf {
     data_home().join("applications")
@@ -39,7 +40,7 @@ fn install_v1(user: &IsolatedUser, scratch: &Path) -> PathBuf {
         &associations,
         &v1_icons(),
     );
-    let outcome = run_installer(&installer, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&installer, &user.state, Operation::Apply);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a fresh install commits: {outcome:?}"
@@ -189,7 +190,7 @@ fn upgrade_updates_and_retires_integration() {
         &[fixture_association(".bar", "acme.bar", "Bar document")],
         &v2_icons(),
     );
-    let outcome = run_installer(&installer, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&installer, &user.state, Operation::Apply);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "an upgrade commits: {outcome:?}"
@@ -259,8 +260,9 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Repair { force_files: false },
+        action: Operation::Repair { force_files: false },
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("repair reaches a stable outcome");
     assert!(
@@ -275,8 +277,9 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Repair { force_files: false },
+        action: Operation::Repair { force_files: false },
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(
         outcome.is_err(),
@@ -288,8 +291,9 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Repair { force_files: true },
+        action: Operation::Repair { force_files: true },
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("forced repair reaches a stable outcome");
     assert!(
@@ -338,8 +342,9 @@ fn uninstall_removes_only_owned_integration() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Uninstall,
+        action: Operation::Uninstall,
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
@@ -407,8 +412,9 @@ fn failed_refresh_rolls_back_and_recovers() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("a failed refresh still reaches a stable outcome");
     assert!(
@@ -435,7 +441,7 @@ fn failed_refresh_rolls_back_and_recovers() {
     );
 
     std::fs::write(&flag, b"ok").expect("repair the tool");
-    let outcome = run_installer(&installer, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&installer, &user.state, Operation::Apply);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "the retry commits: {outcome:?}"
@@ -467,8 +473,9 @@ fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("a failed refresh still reaches a stable outcome");
     assert!(
@@ -513,8 +520,9 @@ fn missing_tools_fail_before_mutation() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     });
     let error = outcome.expect_err("a missing tool refuses the run");
     assert!(
@@ -567,8 +575,9 @@ fn planted_symlinks_are_refused() {
         installer,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(outcome.is_err(), "a planted link refuses: {outcome:?}");
     assert_eq!(

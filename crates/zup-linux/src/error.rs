@@ -170,6 +170,8 @@ pub enum ExecError {
     Ownership(String),
     #[error("unfinished transaction {0} requires recovery")]
     RecoveryRequired(String),
+    #[error("cancelled")]
+    Cancelled,
     #[error("cannot refresh derived integration state: `{tool}` is not available: {reason}")]
     RefreshUnavailable { tool: String, reason: String },
     #[error("`{tool}` failed for `{directory}`: {reason}")]
@@ -180,8 +182,6 @@ pub enum ExecError {
     },
     #[error("refusing to refresh: {0}")]
     RefreshRefused(String),
-    #[error("machine scope runs through the privileged worker, not in this process")]
-    MachineScope,
     #[error("machine worker: {0}")]
     Worker(String),
     #[error("the confirmed plan went stale while the worker repaired state")]
@@ -213,10 +213,27 @@ pub enum ExecError {
         installed: semver::Version,
         requested: semver::Version,
     },
+    #[error("operation: {0}")]
+    Operation(String),
     #[error("an installer package holds exactly one target; this one holds {count}")]
     MultipleTargets { count: usize },
     #[error(transparent)]
     Path(#[from] PathError),
+}
+
+impl From<zup_runtime::OperationError> for ExecError {
+    fn from(error: zup_runtime::OperationError) -> Self {
+        match error {
+            zup_runtime::OperationError::Downgrade {
+                installed,
+                requested,
+            } => Self::Downgrade {
+                installed,
+                requested,
+            },
+            zup_runtime::OperationError::Refused { message, .. } => Self::Ownership(message),
+        }
+    }
 }
 
 impl ExecError {

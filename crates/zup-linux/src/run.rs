@@ -2,25 +2,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_bundle::{PackagePayloadSource, PayloadError, PayloadReader, PayloadSource};
-use zup_core::{AppId, RelativePath, ResourceKey, SelectedScope, Sha256Digest};
-use zup_exec::{InstallLedger, LifecycleAction, OwnedResource, plan_lifecycle};
-use zup_platform::{TargetFile, TargetPlan};
-use zup_transaction::{
-    FilesystemTransactionStore, InstallationLock, TransactionCoordinator, TransactionOutcome,
-    TransactionStore,
-};
+use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
+use zup_exec::{InstallLedger, OwnedResource};
 
 use crate::carrier::Carrier;
 use crate::error::{ExecError, PathError};
-use crate::executor::{LinuxFileExecutor, snapshot_target};
-use crate::input::compile_execution_plan;
-use crate::integration::{load_generated, save_generated};
-use crate::ledger::LinuxLedgerStore;
-use crate::lifecycle::{LinuxAction, LinuxOutcome, resolve_action};
-use crate::paths::state_root;
-use crate::resolve::resolve_target;
+use crate::lifecycle::LinuxOutcome;
+use zup_session::SessionHost;
 
-const MAINTENANCE_SOURCE: &str = "__zup_maintenance__";
+pub(crate) const MAINTENANCE_SOURCE: &str = "__zup_maintenance__";
 
 #[derive(Debug, Clone)]
 pub struct LinuxRunRequest {
@@ -28,196 +18,104 @@ pub struct LinuxRunRequest {
     pub scope: SelectedScope,
 
     pub state_root: Option<PathBuf>,
-    pub action: LinuxAction,
+    pub action: zup_runtime::Operation,
 
     pub install_dir_override: Option<PathBuf>,
+
+    pub selection: zup_runtime::OperationSelection,
 }
 
 pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
-    match request.scope {
-        SelectedScope::User => run_user(request),
-        SelectedScope::Machine => crate::elevate::run_machine(request),
+    crate::carrier::Carrier::open(&request.installer)?;
+    let mut host = crate::session_host::LinuxSessionHost::open(request.installer.clone());
+    let discovery = host
+        .discover(
+            &request.installer,
+            &zup_session::SessionLaunch {
+                scope: Some(request.scope),
+                state_root: request.state_root.clone(),
+                ..Default::default()
+            },
+        )
+        .map_err(ExecError::Ownership)?;
+    if request.scope == SelectedScope::Machine {
+        crate::machine::resolve_machine_state_root(
+            request.state_root.as_deref(),
+            &crate::locations::MachineRoots::production(),
+        )?;
+    } else {
+        refuse_redirected_hierarchy(&discovery.state_root)?;
     }
-}
-
-fn run_user(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
-    if request.scope != SelectedScope::User {
-        return Err(ExecError::MachineScope);
+    let mut selection = request.selection.clone();
+    if selection.install_directory.is_none() {
+        selection.install_directory = request.install_dir_override.clone();
     }
-
-    let carrier = Carrier::open(&request.installer)?;
-    let mut targets = carrier.package().build_plan()?.targets;
-    if targets.len() != 1 {
-        return Err(ExecError::MultipleTargets {
-            count: targets.len(),
-        });
-    }
-    let build = targets.remove(0);
-
-    let state_root = match &request.state_root {
-        Some(root) => root.clone(),
-        None => state_root(request.scope).map_err(|error| PathError::Io {
-            path: "<state root>".into(),
-            source: std::io::Error::other(error.to_string()),
-        })?,
+    let input = zup_runtime::OperationInput {
+        build: &discovery.build,
+        installer: &request.installer,
+        scope: discovery.scope,
+        operation: request.action,
+        selection,
+        prior: discovery.prior(),
+        state_root: &discovery.state_root,
+        cancellation: &zup_plan::NeverCancelled,
     };
-    let ledger_store = LinuxLedgerStore::new(&state_root);
-
-    refuse_redirected_hierarchy(&state_root)?;
-
-    ledger_store.repair_committed(&build.installer.app.id, request.scope)?;
-
-    let plan_request = zup_plan::PlanRequest::new(build.installer.target, request.scope);
-    let install = zup_plan::plan(
-        &zup_plan::BuildPlan {
-            targets: vec![build],
-        },
-        &plan_request,
-    )?;
-    let mut target = resolve_target(
-        &install,
-        &crate::locations::LinuxInstallLocationResolver::default(),
-    )?;
-    attach_maintenance_copy_for(&mut target, &request.installer, &state_root, request.scope)?;
-
-    if let Ok(host) = crate::lowering::to_host_path(&target.install_directory) {
-        crate::fs::anchor_reachable(&host).map_err(|error| match error {
-            crate::error::PathError::UnexpectedKind { path, expected } => {
-                ExecError::from(PathError::Refused {
-                    path,
-                    reason: format!(
-                        "{expected}; the install destination must not pass through a link"
-                    ),
-                })
-            }
-            other => ExecError::Executor(other.to_string()),
-        })?;
-    }
-
-    let ledger = ledger_store.load(&target.app.id, request.scope)?;
-    let action = resolve_action(request.action, ledger.as_ref(), &target.app.version)?;
-
-    let lock_key = InstallationLock::lock_key(target.app.id.as_str(), scope_token(request.scope));
-    let _lock = match InstallationLock::try_acquire(&state_root, &lock_key)? {
-        Some(lock) => lock,
-        None => return Ok(LinuxOutcome::Busy),
-    };
-
-    let snapshot = snapshot_target(&target);
-    let owned_matches = inspect_owned_matches_for(ledger.as_ref());
-    let execution = plan_lifecycle(
-        action,
-        (action != LifecycleAction::Uninstall).then_some(&target),
-        Some(&snapshot),
-        ledger.as_ref(),
-        &owned_matches,
-    )?;
-    let input = compile_execution_plan(&execution, &target)?;
-    let plan = zup_transaction::compile_transaction(&input)?;
-    ledger_store.validate_plan(&target.app.id, request.scope, &target.app.version, &plan)?;
-
-    preflight_refresh(&plan)?;
-
-    let generated = crate::integration::generated_map(&install)?;
-    save_generated(&state_root, &target.app.id, request.scope, &generated)?;
-    let generated = load_generated(&state_root, &target.app.id, request.scope)?;
-
-    let store = FilesystemTransactionStore::new(&state_root);
-    let coordinator = TransactionCoordinator::new(store);
-    let record = coordinator.begin(
-        target.app.id.clone(),
-        request.scope,
-        target.app.version.clone(),
-        plan.clone(),
-    )?;
-    let payload = RunnerPayload::open(&carrier, &request.installer, generated)?;
-    let mut executor = LinuxFileExecutor::new().with_payload(payload);
-    executor.register_plan(&plan)?;
-    executor.set_transaction_id(record.transaction_id);
-    let (record, outcome) = coordinator.execute(record, &mut executor)?;
-
-    match outcome {
-        TransactionOutcome::Committed => {
-            let ledger = ledger_store.publish_committed(&record, request.scope)?;
-            if action == LifecycleAction::Upgrade {
-                retire_old_generations_for(
-                    &state_root,
-                    &target.app.id,
-                    request.scope,
-                    &ledger.version,
-                )?;
-            }
-            if action == LifecycleAction::Uninstall {
-                let _ = InstallationLock::remove_if_unheld(&state_root, &lock_key);
-            }
-            Ok(LinuxOutcome::Committed {
-                version: ledger.version,
+    let prepared = zup_runtime::prepare_operation(&input, &host).map_err(|error| {
+        let message = error.to_string();
+        if message.contains("pass through a link") || message.contains("symbolic link") {
+            ExecError::Path(PathError::Refused {
+                path: discovery.state_root.display().to_string(),
+                reason: message,
             })
+        } else {
+            ExecError::from(error)
         }
-        TransactionOutcome::RolledBack => {
-            sweep_refresh(&record)?;
-            Ok(LinuxOutcome::RolledBack)
-        }
-        TransactionOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
-            transaction: record.transaction_id.to_string(),
-        }),
-    }
-}
-
-pub fn recover_transaction(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    transaction: &zup_transaction::TransactionId,
-) -> Result<LinuxOutcome, ExecError> {
-    if scope != SelectedScope::User {
-        return Err(ExecError::MachineScope);
-    }
-
-    refuse_redirected_hierarchy(state_root)?;
-    let store = FilesystemTransactionStore::new(state_root);
-    let record = store.load(transaction)?;
-    if record.app_id != *app_id || record.scope != scope {
-        return Err(ExecError::Ownership("transaction identity".into()));
-    }
-    let maintenance = zup_transaction::maintenance_runtime_path(
-        state_root,
-        app_id,
-        scope,
-        &record.app_version,
-        record.target.executable_suffix(),
+    })?;
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let control = zup_runtime::RuntimeControl::new(
+        zup_runtime::CancellationHandle::new(),
+        events,
+        zup_runtime::ExecutionPolicy::Interactive,
     );
-    let carrier = Carrier::open(&maintenance)?;
-    let generated = load_generated(state_root, app_id, scope)?;
-    let payload = RunnerPayload::open(&carrier, carrier.executable(), generated)?;
-    let lock_key = InstallationLock::lock_key(app_id.as_str(), scope_token(scope));
-    let _lock = match InstallationLock::try_acquire(state_root, &lock_key)? {
-        Some(lock) => lock,
-        None => return Ok(LinuxOutcome::Busy),
-    };
-    let mut executor = LinuxFileExecutor::new().with_payload(payload);
-    executor.register_plan(&record.plan)?;
-    executor.set_transaction_id(record.transaction_id);
-    preflight_refresh(&record.plan)?;
-    let (record, outcome) = zup_transaction::recover(record, &store, &mut executor)?;
+    let outcome = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| ExecError::Executor(error.to_string()))?
+        .block_on(zup_session::run_operation(
+            &host, &discovery, &prepared, control,
+        ))
+        .map_err(|error| ExecError::Executor(error.to_string()))?;
+    let app_version = prepared
+        .target_plan
+        .as_ref()
+        .map(|target| target.app.version.clone())
+        .unwrap_or_else(|| discovery.build.installer.app.version.clone());
     match outcome {
-        TransactionOutcome::Committed => {
-            LinuxLedgerStore::new(state_root).publish_committed(&record, scope)?;
-            Ok(LinuxOutcome::Committed {
-                version: record.app_version.clone(),
-            })
-        }
-        TransactionOutcome::RolledBack => {
-            sweep_refresh(&record)?;
-            Ok(LinuxOutcome::RolledBack)
-        }
-        TransactionOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
-            transaction: record.transaction_id.to_string(),
+        zup_runtime::InstallOutcome::Committed => Ok(LinuxOutcome::Committed {
+            version: app_version,
         }),
+        zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+        zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
+            transaction: zup_runtime::discover_recovery(&discovery.state_root)
+                .into_iter()
+                .find_map(|status| match status {
+                    zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {
+                        Some(transaction_id)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| ExecError::Ownership("recovery transaction unknown".into()))?,
+        }),
+        zup_runtime::InstallOutcome::Busy { .. } => Ok(LinuxOutcome::Busy),
+        zup_runtime::InstallOutcome::Cancelled => Err(ExecError::Ownership("cancelled".into())),
+        zup_runtime::InstallOutcome::RebootRequired { .. }
+        | zup_runtime::InstallOutcome::Failed(_) => Err(ExecError::Ownership(
+            "the operation did not complete".into(),
+        )),
     }
 }
 
-fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecError> {
+pub(crate) fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecError> {
     let refused = |path: PathBuf, what: &str| PathError::Refused {
         path: path.display().to_string(),
         reason: format!("{what}; the state hierarchy must not pass through a link"),
@@ -255,7 +153,7 @@ fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecError> {
     Ok(())
 }
 
-fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), ExecError> {
+pub(crate) fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), ExecError> {
     for node in &record.plan.nodes {
         let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
             continue;
@@ -274,7 +172,7 @@ fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), Exec
     Ok(())
 }
 
-fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), ExecError> {
+pub(crate) fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), ExecError> {
     for node in &plan.nodes {
         let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
             continue;
@@ -289,65 +187,6 @@ fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), Exec
             .map_err(|error| ExecError::Executor(format!("invalid refresh payload: {error}")))?;
         crate::refresh::preflight(&request)?;
     }
-    Ok(())
-}
-
-fn scope_token(scope: SelectedScope) -> &'static str {
-    match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    }
-}
-
-pub(crate) fn attach_maintenance_copy_for(
-    target: &mut TargetPlan,
-    installer: &Path,
-    state_root: &Path,
-    scope: SelectedScope,
-) -> Result<(), ExecError> {
-    let file = std::fs::File::open(installer).map_err(|source| PathError::Io {
-        path: installer.display().to_string(),
-        source,
-    })?;
-    let (size, sha256) = zup_core::hash_reader(file).map_err(|source| PathError::Io {
-        path: installer.display().to_string(),
-        source,
-    })?;
-    let destination = zup_platform::TargetPath::new(
-        target.target,
-        zup_transaction::maintenance_runtime_path(
-            state_root,
-            &target.app.id,
-            scope,
-            &target.app.version,
-            target.target.executable_suffix(),
-        )
-        .to_string_lossy(),
-    )
-    .map_err(|error| {
-        ExecError::PlanFailure(
-            PathError::Invalid {
-                kind: "maintenance destination",
-                path: state_root.display().to_string(),
-                reason: error.to_string(),
-            }
-            .into(),
-        )
-    })?;
-    target.files.push(TargetFile {
-        key: ResourceKey::Maintenance {
-            app_id: target.app.id.to_string(),
-            version: target.app.version.to_string(),
-            destination: destination.to_string(),
-        },
-        source_relative: RelativePath::new(MAINTENANCE_SOURCE).expect("a reserved source name"),
-        destination,
-        size,
-        sha256,
-        privilege: scope.authorization(),
-        executable: true,
-    });
-    target.summary.file_count += 1;
     Ok(())
 }
 
@@ -487,7 +326,7 @@ impl RunnerPayload {
         }
     }
 
-    fn open(
+    pub(crate) fn open(
         carrier: &Carrier,
         installer: &Path,
         generated: std::collections::BTreeMap<String, Vec<u8>>,

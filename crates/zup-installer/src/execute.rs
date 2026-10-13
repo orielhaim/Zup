@@ -115,15 +115,6 @@ pub fn execute_with_policy(
     }
 }
 
-#[cfg(feature = "gui")]
-pub fn execute_with_control(
-    prepared: PreparedRuntime,
-    cancel: CancellationHandle,
-    events: tokio::sync::broadcast::Sender<RuntimeEvent>,
-) -> miette::Result<InstallOutcome> {
-    execute_with_control_signal(prepared, cancel, events, ExecutionPolicy::Interactive)
-}
-
 pub fn execute_with_control_signal(
     prepared: PreparedRuntime,
     cancel: CancellationHandle,
@@ -351,143 +342,15 @@ fn report_failure(
 }
 
 pub fn is_terminal(event: &RuntimeEvent) -> bool {
-    matches!(
-        event,
-        RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
-    )
+    zup_session::is_terminal(event)
 }
 
 pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
-    match outcome {
-        InstallOutcome::RebootRequired { .. } => ProcessOutcome::RebootRequired,
-        InstallOutcome::Committed => ProcessOutcome::Success,
-        InstallOutcome::Cancelled => ProcessOutcome::Cancelled,
-        InstallOutcome::RecoveryRequired => ProcessOutcome::RecoveryRequired,
-        InstallOutcome::Busy { .. } => ProcessOutcome::InstallationBusy,
-        InstallOutcome::RolledBack => ProcessOutcome::Failure,
-        InstallOutcome::Failed(message) => ProcessOutcome::from_message(message),
-    }
-}
-
-pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
-    match state {
-        zup_runtime::RuntimeState::Preparing => "preparing",
-        zup_runtime::RuntimeState::CheckingPrerequisites => "checking_prerequisites",
-        zup_runtime::RuntimeState::InstallingPrerequisites => "installing_prerequisites",
-        zup_runtime::RuntimeState::RebootRequired => "reboot_required",
-        zup_runtime::RuntimeState::WaitingForAuthorization => "waiting_for_authorization",
-        zup_runtime::RuntimeState::ConnectingWorker => "connecting_worker",
-        zup_runtime::RuntimeState::Executing => "executing",
-        zup_runtime::RuntimeState::RollingBack => "rolling_back",
-        zup_runtime::RuntimeState::Completed => "completed",
-        zup_runtime::RuntimeState::Cancelled => "cancelling",
-        zup_runtime::RuntimeState::Failed => "failed",
-    }
+    zup_session::process_outcome(outcome)
 }
 
 pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
-    match event {
-        RuntimeEvent::StateChanged { state } => {
-            if *state == zup_runtime::RuntimeState::Cancelled {
-                vec![InstallerEvent::Cancelling {
-                    state: "safe_boundary".into(),
-                }]
-            } else {
-                vec![InstallerEvent::Phase {
-                    state: state_name(*state).into(),
-                }]
-            }
-        }
-        RuntimeEvent::WaitingForAuthorization => vec![InstallerEvent::Phase {
-            state: "waiting_for_authorization".into(),
-        }],
-        RuntimeEvent::WorkerConnected => vec![InstallerEvent::Phase {
-            state: "worker_connected".into(),
-        }],
-        RuntimeEvent::PreflightStarted => vec![InstallerEvent::Phase {
-            state: "preflight".into(),
-        }],
-        RuntimeEvent::ResourceBlocked { detail, pids } => {
-            vec![InstallerEvent::blocked_with_processes(detail, pids.clone())]
-        }
-        RuntimeEvent::StagingStarted { id } => vec![InstallerEvent::Phase {
-            state: format!("staging:{id}"),
-        }],
-        RuntimeEvent::StagingProgress { id, detail } => vec![InstallerEvent::Phase {
-            state: format!("staging:{id}:{detail}"),
-        }],
-        RuntimeEvent::OperationStarted { id } => vec![InstallerEvent::Phase {
-            state: format!("operation:{id}"),
-        }],
-        RuntimeEvent::Progress {
-            completed,
-            total,
-            action,
-        } => vec![InstallerEvent::progress(
-            &zup_presentation::ProgressPresentation::new(*completed, *total, action),
-        )],
-        RuntimeEvent::PrerequisiteCheck {
-            id,
-            name,
-            satisfied,
-            version,
-        } => vec![InstallerEvent::PrerequisiteCheck {
-            id: id.clone(),
-            name: name.clone(),
-            satisfied: *satisfied,
-            version: version.clone(),
-        }],
-        RuntimeEvent::PrerequisiteDownload {
-            id,
-            completed,
-            total,
-        } => vec![InstallerEvent::PrerequisiteDownload {
-            id: id.clone(),
-            completed: *completed,
-            total: *total,
-        }],
-        RuntimeEvent::PrerequisiteInstall { id, name } => {
-            vec![InstallerEvent::PrerequisiteInstall {
-                id: id.clone(),
-                name: name.clone(),
-            }]
-        }
-        RuntimeEvent::RebootRequired { id, exit_code } => {
-            vec![InstallerEvent::RebootRequired {
-                id: id.clone(),
-                exit_code: *exit_code,
-            }]
-        }
-        RuntimeEvent::RollingBack => vec![InstallerEvent::Phase {
-            state: "rolling_back".into(),
-        }],
-        RuntimeEvent::Completed { outcome } => {
-            let outcome = if outcome == "committed" {
-                ProcessOutcome::Success
-            } else {
-                ProcessOutcome::from_message(outcome)
-            };
-            vec![InstallerEvent::Completed { outcome }]
-        }
-        RuntimeEvent::Failed { kind, message } => {
-            let outcome = match kind.as_str() {
-                "installation_busy" => ProcessOutcome::InstallationBusy,
-                "recovery_required" => ProcessOutcome::RecoveryRequired,
-                "authorization_required" => ProcessOutcome::AuthorizationRequired,
-                _ => ProcessOutcome::from_message(message),
-            };
-            vec![InstallerEvent::Failed {
-                outcome,
-                code: outcome.code(),
-                message: message.clone(),
-                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                    message,
-                    *kind == "recovery_required",
-                )),
-            }]
-        }
-        RuntimeEvent::LogPath { .. } => Vec::new(),
-    }
+    zup_session::automation_events(event)
 }
 
 #[cfg(test)]

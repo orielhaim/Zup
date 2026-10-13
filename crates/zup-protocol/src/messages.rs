@@ -139,6 +139,7 @@ pub const MAX_INTENT_COMPONENTS: usize = 64;
 pub mod privileged_operation {
     pub const INSTALL: &str = "install";
     pub const UPGRADE: &str = "upgrade";
+    pub const MODIFY: &str = "modify";
     pub const REPAIR: &str = "repair";
     pub const UNINSTALL: &str = "uninstall";
     pub const APPLY: &str = "apply";
@@ -147,6 +148,7 @@ pub mod privileged_operation {
 pub const PRIVILEGED_OPERATIONS: &[&str] = &[
     privileged_operation::INSTALL,
     privileged_operation::UPGRADE,
+    privileged_operation::MODIFY,
     privileged_operation::REPAIR,
     privileged_operation::UNINSTALL,
     privileged_operation::APPLY,
@@ -160,6 +162,8 @@ pub struct PrepareOperation {
     pub install_dir_override: Option<String>,
     #[serde(default)]
     pub selected_components: Vec<String>,
+    #[serde(default)]
+    pub disabled_components: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_plan_digest: Option<String>,
     pub app_id: String,
@@ -206,7 +210,17 @@ impl PrepareOperation {
                 max: MAX_INTENT_COMPONENTS,
             });
         }
+        if self.disabled_components.len() > MAX_INTENT_COMPONENTS {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_COMPONENTS,
+            });
+        }
         if self.selected_components.iter().any(|name| !bounded(name)) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if self.disabled_components.iter().any(|name| !bounded(name)) {
             return Err(crate::WireError::FrameTooLarge {
                 max: MAX_INTENT_STRING_BYTES,
             });

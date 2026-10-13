@@ -1,6 +1,11 @@
-//! before artifact composition on every host, so `check` never calls a project
+//! Target capability rules for the Linux backend, evaluated on any host.
+//!
+//! Build tooling calls these before artifact composition; the installer calls
+//! them again through operation preparation when it runs.
 
-use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, Target, TargetBuildPlan};
+use zup_core::{
+    Frontend, InstallScope, ResolvedTargetConfig, SelectedScope, Target, TargetBuildPlan,
+};
 
 pub use zup_platform::{SUPPORTED_LINUX_TARGET, is_linux_target};
 
@@ -54,13 +59,56 @@ pub fn linux_capability_errors(
     let mut errors = Vec::new();
     let target = &config.target;
     errors.extend(linux_selection_errors(target, config.frontend));
-    let machine_leg = matches!(
-        config.install.scope,
-        InstallScope::Machine | InstallScope::Either
-    );
-    let installer = &plan.installer;
+    errors.extend(resource_errors(
+        &plan.installer,
+        matches!(
+            config.install.scope,
+            InstallScope::Machine | InstallScope::Either
+        ),
+        !matches!(config.install.scope, InstallScope::Machine),
+        config.profile.as_str(),
+        plan,
+    ));
+    errors
+}
+
+pub fn operation_capability_errors(build: &TargetBuildPlan, scope: SelectedScope) -> Vec<String> {
+    let installer = &build.installer;
+    let mut errors = Vec::new();
+    errors.extend(linux_selection_errors(
+        &installer.target,
+        installer.frontend,
+    ));
+    errors.extend(resource_errors(
+        installer,
+        scope == SelectedScope::Machine,
+        scope == SelectedScope::User,
+        installer.app.name.as_str(),
+        build,
+    ));
+    if scope == SelectedScope::Machine && !installer.plugins.is_empty() {
+        errors.push(
+            "machine scope refuses projects that need plugin execution: the privileged worker \
+             never executes plugins as root"
+                .to_owned(),
+        );
+    }
+    if scope == SelectedScope::Machine && !installer.prerequisites.is_empty() {
+        errors.push("machine scope runs no prerequisite installers".to_owned());
+    }
+    errors
+}
+
+fn resource_errors(
+    installer: &zup_core::Installer,
+    machine_leg: bool,
+    user_scope: bool,
+    name: &str,
+    plan: &TargetBuildPlan,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     // privileged worker never executes plugins as root.
-    if !matches!(config.install.scope, InstallScope::Machine) && !installer.services.is_empty() {
+    if user_scope && !installer.services.is_empty() {
         errors.push(format!(
             "{} service resource{} {} not supported by the Linux backend yet: system services \
              need machine scope (systemd system units); user services are deferred past this \
@@ -155,7 +203,7 @@ pub fn linux_capability_errors(
                 .to_owned(),
         );
     }
-    errors.extend(main_executable_errors(config, plan));
+    errors.extend(main_executable_errors(name, plan));
     errors
 }
 
@@ -201,7 +249,7 @@ fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String>
     Vec::new()
 }
 
-fn main_executable_errors(config: &ResolvedTargetConfig, plan: &TargetBuildPlan) -> Vec<String> {
+fn main_executable_errors(name: &str, plan: &TargetBuildPlan) -> Vec<String> {
     if plan.files.is_empty() {
         return Vec::new();
     }
@@ -216,16 +264,14 @@ fn main_executable_errors(config: &ResolvedTargetConfig, plan: &TargetBuildPlan)
         .collect::<Vec<_>>();
     if matches.is_empty() {
         return vec![format!(
-            "the declared application main `{main}` for `{}` matches no shipped file: name a \
+            "the declared application main `{main}` for `{name}` matches no shipped file: name a \
              `[[files]]` destination, or remove `app.main`",
-            config.profile,
         )];
     }
     if matches.iter().all(|file| !file.executable) {
         return vec![format!(
-            "the declared application main `{main}` for `{}` is not executable: mark the shipped \
+            "the declared application main `{main}` for `{name}` is not executable: mark the shipped \
              file `executable = true`",
-            config.profile,
         )];
     }
     Vec::new()

@@ -1,8 +1,6 @@
 #[cfg(windows)]
 mod acquire;
 #[cfg(windows)]
-mod bootstrap;
-#[cfg(windows)]
 mod cli;
 #[cfg(all(windows, feature = "console"))]
 mod console;
@@ -78,6 +76,7 @@ pub fn command() -> clap::Command {
     }
 }
 
+#[cfg(windows)]
 fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) {
     use zup_presentation::{DiagnosticPresentation, InstallerEvent, InstallerResult};
 

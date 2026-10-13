@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use zup_core::AppId;
 use zup_plan::TargetBuildPlan;
 
 pub fn current_executable() -> miette::Result<PathBuf> {
@@ -36,22 +35,4 @@ pub fn target_plan(bundle: &zup_windows::EmbeddedBundle) -> miette::Result<Targe
         ));
     }
     Ok(targets.remove(0))
-}
-
-pub fn maintenance_destination(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: zup_core::SelectedScope,
-    version: &semver::Version,
-    target: &zup_core::Target,
-) -> miette::Result<zup_platform::TargetPath> {
-    let path = zup_transaction::maintenance_runtime_path(
-        state_root,
-        app_id,
-        scope,
-        version,
-        target.executable_suffix(),
-    );
-    zup_platform::TargetPath::new(*target, zup_windows::plain_path_text(&path))
-        .map_err(|error| miette::miette!("maintenance destination: {error}"))
 }

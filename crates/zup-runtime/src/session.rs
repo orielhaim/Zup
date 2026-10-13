@@ -68,7 +68,7 @@ pub struct RuntimeRequest {
     pub release: Option<ReleaseIdentity>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BootstrapRequest {
     pub plan: BoundBootstrapPlan,
     pub state_root: PathBuf,
