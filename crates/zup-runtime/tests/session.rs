@@ -1,13 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rstest::rstest;
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{RelativePath, SelectedScope, Target, hash_reader};
 use zup_runtime::{
-    CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend, RuntimeControl,
-    RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest, SessionError, run_install,
-    run_install_control, run_install_control_with_policy,
+    ExecutionPolicy, InstallOutcome, OperationControl, RuntimeBackend, RuntimeControl,
+    RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest, SessionError, execute,
 };
 use zup_transaction::{TransactionInput, compile_transaction};
 
@@ -34,12 +33,10 @@ impl Drop for TestDir {
 
 struct FakeBackend {
     source: RuntimePayloadSource,
-    calls: Arc<AtomicUsize>,
 }
 
 impl RuntimeBackend for FakeBackend {
     fn payload_source(&self, _request: &RuntimeRequest) -> RuntimePayloadSource {
-        self.calls.fetch_add(1, Ordering::SeqCst);
         self.source.clone()
     }
 
@@ -48,12 +45,10 @@ impl RuntimeBackend for FakeBackend {
         _request: RuntimeRequest,
         control: RuntimeControl,
     ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
-        let calls = self.calls.clone();
         let cancellation = control.cancellation;
         let events = control.events;
         let policy = control.policy;
         Box::pin(async move {
-            calls.fetch_add(1, Ordering::SeqCst);
             let _ = events.send(RuntimeEvent::StateChanged {
                 state: zup_runtime::RuntimeState::Preparing,
             });
@@ -83,120 +78,92 @@ fn request() -> RuntimeRequest {
             Target::parse("windows-x64").unwrap(),
         ))
         .unwrap(),
-        state_root: PathBuf::new(),
-        work_root: PathBuf::new(),
+        state_root: PathBuf::from("state"),
+        work_root: PathBuf::from("work"),
         recovery_id: None,
-        release: None,
         bootstrap: None,
+        release: None,
     }
 }
 
-fn backend() -> (TestDir, FakeBackend) {
+fn backend(root: &TestDir) -> FakeBackend {
+    FakeBackend {
+        source: Arc::new(DirectoryPayloadSource::new(root.path())),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Expectation {
+    Committed,
+    Cancelled,
+    AuthorizationRequired,
+    PlanInvalid,
+}
+
+#[rstest]
+#[case::committed(ExecutionPolicy::Interactive, false, false, Expectation::Committed)]
+#[case::cancelled_before_the_backend(
+    ExecutionPolicy::Interactive,
+    true,
+    false,
+    Expectation::Cancelled
+)]
+#[case::noninteractive_authorization(
+    ExecutionPolicy::NonInteractive,
+    false,
+    false,
+    Expectation::AuthorizationRequired
+)]
+#[case::target_mismatch(ExecutionPolicy::Interactive, false, true, Expectation::PlanInvalid)]
+#[tokio::test]
+async fn the_operation_outcome_is_independent_of_progress_delivery(
+    #[case] policy: ExecutionPolicy,
+    #[case] cancel: bool,
+    #[case] mismatch: bool,
+    #[case] expected: Expectation,
+) {
     let root = TestDir::new();
-    let source = DirectoryPayloadSource::new(root.path());
-    (
-        root,
-        FakeBackend {
-            source: Arc::new(source),
-            calls: Arc::new(AtomicUsize::new(0)),
-        },
-    )
-}
-
-#[tokio::test]
-async fn runtime_forwards_control_and_reports_local_outcome() {
-    let (_root, backend) = backend();
-    let (events, _) = tokio::sync::broadcast::channel(32);
-    let mut receiver = events.subscribe();
-    let outcome = run_install_control(&backend, request(), CancellationHandle::new(), events)
-        .await
-        .unwrap();
-    assert_eq!(outcome, InstallOutcome::Committed);
-    let forwarded = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
-    assert!(forwarded.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::Progress {
-            completed: 1,
-            total: 1,
-            ..
+    let backend = backend(&root);
+    let mut request = request();
+    if mismatch {
+        request.target = Target::parse("arm64-pc-windows-msvc").unwrap();
+    }
+    let control = if cancel {
+        let cancellation = zup_runtime::CancellationHandle::new();
+        cancellation.cancel();
+        OperationControl::with_cancellation(cancellation, policy)
+    } else {
+        OperationControl::new(policy)
+    };
+    let _ignored = control.subscribe();
+    let result = execute(&backend, request, &control).await;
+    match expected {
+        Expectation::Committed => {
+            assert_eq!(result.unwrap(), InstallOutcome::Committed);
+            assert_eq!(control.progress().completed, 1);
+            assert!(control.progress().state.is_some());
         }
-    )));
-    assert!(
-        forwarded.iter().all(|event| !matches!(
-            event,
-            RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
-        )),
-        "execution progress is not a terminal result"
-    );
-}
-
-#[tokio::test]
-async fn runtime_preserves_cancellation_and_authorization_policy() {
-    let (_root, backend) = backend();
-    let cancellation = CancellationHandle::new();
-    cancellation.cancel();
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let mut receiver = events.subscribe();
-    let result = run_install_control_with_policy(
-        &backend,
-        request(),
-        cancellation,
-        events,
-        ExecutionPolicy::Interactive,
-    )
-    .await;
-    assert!(matches!(result, Ok(InstallOutcome::Cancelled)));
-    assert!(
-        std::iter::from_fn(|| receiver.try_recv().ok()).all(|event| !matches!(
-            event,
-            RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
-        ))
-    );
-
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let error = run_install_control_with_policy(
-        &backend,
-        request(),
-        CancellationHandle::new(),
-        events,
-        ExecutionPolicy::NonInteractive,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, SessionError::AuthorizationRequired));
+        Expectation::Cancelled => assert!(matches!(result, Ok(InstallOutcome::Cancelled))),
+        Expectation::AuthorizationRequired => {
+            assert!(matches!(result, Err(SessionError::AuthorizationRequired)))
+        }
+        Expectation::PlanInvalid => assert!(matches!(result, Err(SessionError::PlanInvalid(_)))),
+    }
     assert!(!ExecutionPolicy::NonInteractive.allows_authorization());
     assert!(ExecutionPolicy::Interactive.allows_authorization());
 }
 
 #[tokio::test]
-async fn runtime_rejects_request_target_mismatch_before_backend() {
-    let (_root, backend) = backend();
-    let mut request = request();
-    request.target = Target::parse("arm64-pc-windows-msvc").unwrap();
-    let (events, _) = tokio::sync::broadcast::channel(8);
-    let error = run_install_control(&backend, request, CancellationHandle::new(), events)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, SessionError::PlanInvalid(_)));
-}
-
-#[tokio::test]
-async fn runtime_creates_a_session_and_exposes_a_verified_payload_source() {
+async fn execution_opens_the_verified_payload() {
     let root = TestDir::new();
     std::fs::write(root.path().join("payload.bin"), b"payload").unwrap();
-    let source = DirectoryPayloadSource::new(root.path());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let backend = FakeBackend {
-        source: Arc::new(source),
-        calls: calls.clone(),
-    };
+    let backend = backend(&root);
     let mut request = request();
     request.state_root = root.path().join("state");
     request.work_root = root.path().join("work");
-    let (outcome, session) = run_install(&backend, request.clone()).await.unwrap();
+    let control = OperationControl::new(ExecutionPolicy::Interactive);
+    let outcome = execute(&backend, request.clone(), &control).await.unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
-    assert!(!session.session_id.to_string().is_empty());
-    assert!(calls.load(Ordering::SeqCst) >= 2);
     let relative = RelativePath::new("payload.bin").unwrap();
     let (size, digest) = hash_reader(&b"payload"[..]).unwrap();
     let mut bytes = Vec::new();

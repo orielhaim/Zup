@@ -134,68 +134,33 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     if selection.install_directory.is_none() {
         selection.install_directory = cli.install_dir.clone();
     }
+    let launch = zup_session::SessionLaunch {
+        scope: cli.scope.map(ScopeFlag::selected),
+        state_root: cli.state_root.clone(),
+        ..Default::default()
+    };
     let mut host = zup_linux::LinuxSessionHost::open(executable.clone());
     let discovery = host
-        .discover(
-            &executable,
-            &zup_session::SessionLaunch {
-                scope: cli.scope.map(ScopeFlag::selected),
-                state_root: cli.state_root.clone(),
-                ..Default::default()
-            },
-        )
+        .discover(&executable, &launch)
         .map_err(|error| miette::miette!("{error}"))?;
     let scope = zup_session::select_scope(
         discovery.installer().install.scope,
-        &zup_session::SessionLaunch {
-            scope: cli.scope.map(ScopeFlag::selected),
-            state_root: cli.state_root.clone(),
-            ..Default::default()
-        },
+        &launch,
         &discovery.installations,
     )
     .map_err(|error| miette::miette!("{error}"))?;
-    let context = discovery
+    let state_root = discovery
         .context(scope)
-        .map_err(|error| miette::miette!("{error}"))?;
-    let state_root = context.state_root.clone();
-    let bound = host
-        .bind(&context)
-        .map_err(|error| miette::miette!("{error}"))?;
-    let input = zup_runtime::OperationInput {
-        build: &discovery.build,
-        installer: &executable,
-        scope: context.scope,
-        operation,
+        .map_err(|error| miette::miette!("{error}"))?
+        .state_root;
+    let outcome = zup_linux::run_outcome(&zup_linux::LinuxRunRequest {
+        installer: executable,
+        scope,
+        state_root: Some(state_root.clone()),
+        action: operation,
+        install_dir_override: cli.install_dir,
         selection,
-        prior: context.ledger.as_ref(),
-        state_root: &context.state_root,
-        cancellation: &zup_plan::NeverCancelled,
-    };
-    let prepared = zup_runtime::prepare_operation(&input, &bound)
-        .map_err(|error| miette::miette!("{error}"))?;
-    let (events, receiver) = tokio::sync::broadcast::channel(256);
-    let pump = std::thread::spawn(move || {
-        let mut receiver = receiver;
-        while let Ok(event) = receiver.blocking_recv() {
-            if zup_session::is_terminal(&event) {
-                break;
-            }
-        }
     });
-    let control = zup_runtime::RuntimeControl::new(
-        zup_runtime::CancellationHandle::new(),
-        events,
-        zup_runtime::ExecutionPolicy::Interactive,
-    );
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| miette::miette!("session runtime: {error}"))?
-        .block_on(zup_session::run_operation(
-            &host, &context, &discovery, &prepared, control,
-        ));
-    let _ = pump.join();
     match outcome {
         Ok(zup_runtime::InstallOutcome::Committed) => {
             println!("committed");
@@ -226,6 +191,13 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             Err(miette::miette!("a reboot is required"))
         }
         Ok(zup_runtime::InstallOutcome::Failed(message)) => Err(miette::miette!("{message}")),
+        Ok(
+            zup_runtime::InstallOutcome::AuthorizationRequired
+            | zup_runtime::InstallOutcome::AuthorizationCancelled,
+        ) => Err(miette::miette!("authorization required")),
+        Ok(zup_runtime::InstallOutcome::CommittedPendingReconciliation { detail }) => {
+            Err(miette::miette!("{detail}"))
+        }
         Err(error) => Err(miette::miette!("{error}")),
     }
 }
@@ -323,20 +295,12 @@ fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {
         bootstrap: None,
         release: None,
     };
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let control = zup_runtime::RuntimeControl::new(
-        zup_runtime::CancellationHandle::new(),
-        events,
-        zup_runtime::ExecutionPolicy::Interactive,
-    );
+    let control = zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| miette::miette!("session runtime: {error}"))?
-        .block_on(async {
-            use zup_runtime::RuntimeBackend;
-            backend.execute(request, control).await
-        });
+        .block_on(zup_runtime::execute(&backend, request, &control));
     let _ = state_root;
     match outcome {
         Ok(zup_runtime::InstallOutcome::Committed) => {

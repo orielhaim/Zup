@@ -94,7 +94,7 @@ pub use input::{
 };
 #[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
-pub use lifecycle::{LinuxOutcome, resolve_action};
+pub use lifecycle::LinuxOutcome;
 pub use locations::{
     LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
     MACHINE_STATE_ROOT, MachineRoots, user_data_home, user_data_home_in, user_programs_root,
@@ -120,7 +120,7 @@ pub use paths::{
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
 pub use resolve::{resolve_target, validate_target_plan};
 #[cfg(target_os = "linux")]
-pub use run::{LinuxRunRequest, run};
+pub use run::{LinuxRunRequest, run, run_outcome};
 #[cfg(target_os = "linux")]
 pub use service_ops::{
     MAX_UNIT_BYTES, SERVICE_BACKEND_PREFIX, ServicePayload, ServiceReceipt, admin_override_dir,

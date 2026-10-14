@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use zup_exec::LifecycleAction;
 use zup_presentation::OutputFormat;
-use zup_runtime::{InstallOutcome, PreparedOperation, RuntimeControl, runtime_request};
+use zup_runtime::{InstallOutcome, OperationControl, PreparedOperation, runtime_request};
 
 use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of};
 
@@ -17,8 +17,7 @@ pub struct OperationLaunch<'a> {
     pub action: LifecycleAction,
     pub selection: &'a zup_preset_host::Selection,
     pub cleanup_lock: bool,
-    pub cancel: zup_runtime::CancellationHandle,
-    pub events: tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>,
+    pub control: OperationControl,
 }
 
 pub async fn complete_operation<H: SessionHost>(
@@ -47,8 +46,7 @@ async fn drive_operation<H: SessionHost>(
         action,
         selection,
         cleanup_lock,
-        cancel,
-        events,
+        control,
         ..
     } = launch;
     let context = match discovery.context(selection.scope) {
@@ -56,28 +54,31 @@ async fn drive_operation<H: SessionHost>(
         Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
     };
     let (enable, disable) = selection_of(discovery.installer(), selection);
+    let cancel = control.cancellation();
     let query = CancelQuery(&cancel);
-    let bound = match host.bind(&context) {
-        Ok(bound) => bound,
-        Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
-    };
-    let input = zup_runtime::OperationInput {
-        build: &discovery.build,
-        installer: executable,
-        scope: context.scope,
-        operation: zup_runtime::Operation::from(action),
-        selection: zup_runtime::OperationSelection {
-            enable,
-            disable,
-            install_directory: selection.install_directory.as_deref().map(PathBuf::from),
-        },
-        prior: context.ledger.as_ref(),
-        state_root: &context.state_root,
-        cancellation: &query,
-    };
-    let prepared = match zup_runtime::prepare_operation(&input, &bound) {
-        Ok(prepared) => prepared,
-        Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
+    let prepared = {
+        let bound = match host.bind(&context) {
+            Ok(bound) => bound,
+            Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
+        };
+        let input = zup_runtime::OperationInput {
+            build: &discovery.build,
+            installer: executable,
+            scope: context.scope,
+            operation: zup_runtime::Operation::from(action),
+            selection: zup_runtime::OperationSelection {
+                enable,
+                disable,
+                install_directory: selection.install_directory.as_deref().map(PathBuf::from),
+            },
+            prior: context.ledger.as_ref(),
+            state_root: &context.state_root,
+            cancellation: &query,
+        };
+        match zup_runtime::prepare_operation(&input, &bound) {
+            Ok(prepared) => prepared,
+            Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
+        }
     };
     let drifted = prepared
         .transaction_plan
@@ -85,8 +86,7 @@ async fn drive_operation<H: SessionHost>(
         .iter()
         .map(|key| format!("{key:?}"))
         .collect::<Vec<_>>();
-    let control = RuntimeControl::new(cancel, events, zup_runtime::ExecutionPolicy::Interactive);
-    let executed = run_operation(host, &context, discovery, &prepared, control).await;
+    let executed = run_operation(host, &context, discovery, &prepared, &control).await;
     let mut outcome = zup_runtime::outcome_of(executed);
     if cleanup_lock
         && matches!(outcome, InstallOutcome::Committed)
@@ -117,7 +117,7 @@ pub async fn run_operation<H: SessionHost>(
     context: &OperationContext,
     discovery: &SessionDiscovery,
     prepared: &PreparedOperation,
-    control: RuntimeControl,
+    control: &OperationControl,
 ) -> Result<InstallOutcome, zup_runtime::SessionError> {
     let backend = host.backend(context, prepared).map_err(session_error)?;
     let runtime = runtime_request(
@@ -136,14 +136,7 @@ pub async fn run_operation<H: SessionHost>(
             recovery_id: None,
         },
     );
-    zup_runtime::run_install_control_with_policy(
-        &*backend,
-        runtime,
-        control.cancellation.clone(),
-        control.events.clone(),
-        control.policy,
-    )
-    .await
+    zup_runtime::execute(&*backend, runtime, control).await
 }
 
 fn session_error(message: String) -> zup_runtime::SessionError {

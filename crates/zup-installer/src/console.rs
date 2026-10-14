@@ -421,8 +421,8 @@ fn execute_once(
         indicatif::ProgressStyle::with_template("  {msg:.<28} {bar:30.cyan/blue} {percent:>3}%")
             .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()),
     );
-    let (events, _) = tokio::sync::broadcast::channel(256);
-    let mut receiver = events.subscribe();
+    let control = zup_runtime::OperationControl::new(ExecutionPolicy::Interactive);
+    let mut receiver = control.subscribe();
     let pump_progress = progress.clone();
     let pump = std::thread::spawn(move || {
         loop {
@@ -462,14 +462,8 @@ fn execute_once(
             }
         }
     });
-    let cancel = zup_runtime::CancellationHandle::new();
     let prepared = prepared.retaining_overlay();
-    let result = execute::execute_with_control_signal(
-        prepared,
-        cancel,
-        events,
-        ExecutionPolicy::Interactive,
-    );
+    let result = execute::execute_with_control_signal(prepared, &control);
     progress.finish_and_clear();
     let _ = pump.join();
     result

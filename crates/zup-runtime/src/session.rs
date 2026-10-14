@@ -186,28 +186,6 @@ pub fn discover_recovery(state_root: &Path) -> Vec<RecoveryStatus> {
     out
 }
 
-#[derive(Debug)]
-pub struct RuntimeSession {
-    pub session_id: zup_protocol::SessionId,
-    pub state: RuntimeState,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-}
-
-impl RuntimeSession {
-    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
-        self.events.subscribe()
-    }
-
-    pub fn cancellation(&self) -> CancellationHandle {
-        self.cancel.clone()
-    }
-
-    pub async fn cancel(&self) {
-        self.cancel.cancel();
-    }
-}
-
 pub type RuntimePayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
 pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -232,6 +210,85 @@ impl RuntimeControl {
     }
 }
 
+/// Coalesced execution progress. A slow consumer observes the latest snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OperationProgress {
+    pub state: Option<RuntimeState>,
+    pub completed: u64,
+    pub total: u64,
+    pub action: String,
+    pub log_path: Option<String>,
+}
+
+impl OperationProgress {
+    fn observe(&mut self, event: &RuntimeEvent) {
+        match event {
+            RuntimeEvent::StateChanged { state } => self.state = Some(*state),
+            RuntimeEvent::Progress {
+                completed,
+                total,
+                action,
+            } => {
+                self.completed = *completed;
+                self.total = *total;
+                self.action.clone_from(action);
+            }
+            RuntimeEvent::LogPath { path } => self.log_path = Some(path.clone()),
+            _ => {}
+        }
+    }
+}
+
+/// Cancellation, progress, and policy for one operation.
+///
+/// The broadcast carries diagnostics and may drop events. [`crate::execute`]
+/// returns the outcome directly, so a lagged receiver cannot change it.
+pub struct OperationControl {
+    cancellation: CancellationHandle,
+    events: broadcast::Sender<RuntimeEvent>,
+    progress: tokio::sync::watch::Sender<OperationProgress>,
+    view: tokio::sync::watch::Receiver<OperationProgress>,
+    policy: ExecutionPolicy,
+}
+
+impl OperationControl {
+    pub fn new(policy: ExecutionPolicy) -> Self {
+        Self::with_cancellation(CancellationHandle::new(), policy)
+    }
+
+    pub fn with_cancellation(cancellation: CancellationHandle, policy: ExecutionPolicy) -> Self {
+        let (events, _) = broadcast::channel(256);
+        let (progress, view) = tokio::sync::watch::channel(OperationProgress::default());
+        Self {
+            cancellation,
+            events,
+            progress,
+            view,
+            policy,
+        }
+    }
+
+    pub fn cancellation(&self) -> CancellationHandle {
+        self.cancellation.clone()
+    }
+
+    pub fn events(&self) -> broadcast::Sender<RuntimeEvent> {
+        self.events.clone()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn progress(&self) -> OperationProgress {
+        self.view.borrow().clone()
+    }
+
+    pub fn policy(&self) -> ExecutionPolicy {
+        self.policy
+    }
+}
+
 pub trait RuntimeBackend: Send + Sync {
     fn payload_source(&self, request: &RuntimeRequest) -> RuntimePayloadSource;
 
@@ -242,53 +299,10 @@ pub trait RuntimeBackend: Send + Sync {
     ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>>;
 }
 
-pub async fn run_install(
+pub async fn execute(
     backend: &dyn RuntimeBackend,
     request: RuntimeRequest,
-) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
-    let session_id = zup_protocol::SessionId::new_v7();
-    let (events, _) = broadcast::channel(256);
-    let cancel = CancellationHandle::new();
-    let outcome =
-        run_install_control(backend, request.clone(), cancel.clone(), events.clone()).await?;
-    let state = if request.scope == SelectedScope::Machine {
-        RuntimeState::WaitingForAuthorization
-    } else {
-        RuntimeState::Preparing
-    };
-    Ok((
-        outcome,
-        RuntimeSession {
-            session_id,
-            state,
-            cancel,
-            events,
-        },
-    ))
-}
-
-pub async fn run_install_control(
-    backend: &dyn RuntimeBackend,
-    request: RuntimeRequest,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-) -> Result<InstallOutcome, SessionError> {
-    run_install_control_with_policy(
-        backend,
-        request,
-        cancel,
-        events,
-        ExecutionPolicy::Interactive,
-    )
-    .await
-}
-
-pub async fn run_install_control_with_policy(
-    backend: &dyn RuntimeBackend,
-    request: RuntimeRequest,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-    policy: ExecutionPolicy,
+    control: &OperationControl,
 ) -> Result<InstallOutcome, SessionError> {
     if request.target != request.transaction_plan.target {
         return Err(SessionError::PlanInvalid(
@@ -304,9 +318,11 @@ pub async fn run_install_control_with_policy(
             "runtime target does not match the bootstrap plan".into(),
         ));
     }
+    let mut incoming = control.subscribe();
+    let progress = control.progress.clone();
     let session_log = SessionLog::start(&request, "lifecycle");
     if let Some(log) = &session_log {
-        let _ = events.send(RuntimeEvent::LogPath {
+        let _ = control.events.send(RuntimeEvent::LogPath {
             path: log.path().display().to_string(),
         });
         log.event(
@@ -317,13 +333,36 @@ pub async fn run_install_control_with_policy(
             }),
         );
     }
-    let result = if cancel.is_cancelled() {
+    let result = if control.cancellation.is_cancelled() {
         Ok(InstallOutcome::Cancelled)
     } else {
         let _ = backend.payload_source(&request);
-        let control = RuntimeControl::new(cancel, events.clone(), policy);
-        backend.execute(request, control).await
+        let runtime = RuntimeControl::new(
+            control.cancellation.clone(),
+            control.events.clone(),
+            control.policy,
+        );
+        let execution = backend.execute(request, runtime);
+        tokio::pin!(execution);
+        loop {
+            tokio::select! {
+                biased;
+                event = incoming.recv() => {
+                    match event {
+                        Ok(event) => progress.send_modify(|current| current.observe(&event)),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break execution.await;
+                        }
+                    }
+                }
+                result = &mut execution => break result,
+            }
+        }
     };
+    while let Ok(event) = incoming.try_recv() {
+        progress.send_modify(|current| current.observe(&event));
+    }
     match &result {
         Ok(outcome) => {
             if let Some(log) = &session_log {
@@ -340,13 +379,6 @@ pub async fn run_install_control_with_policy(
         }
     }
     result
-}
-
-pub async fn run_local_install(
-    backend: &dyn RuntimeBackend,
-    request: RuntimeRequest,
-) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
-    run_install(backend, request).await
 }
 
 pub fn outcome_of(result: Result<InstallOutcome, SessionError>) -> InstallOutcome {

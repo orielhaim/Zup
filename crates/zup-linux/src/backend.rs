@@ -178,9 +178,12 @@ impl LinuxRuntimeBackend {
         let ledger = ledger_store
             .load(&request.app_id, request.scope)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let action =
-            crate::lifecycle::resolve_action(self.operation, ledger.as_ref(), &request.app_version)
-                .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let action = zup_runtime::resolve_operation(
+            self.operation,
+            ledger.as_ref().map(|ledger| &ledger.version),
+            &request.app_version,
+        )
+        .map_err(|error| SessionError::Transaction(error.to_string()))?;
         ledger_store
             .validate_plan(
                 &request.app_id,

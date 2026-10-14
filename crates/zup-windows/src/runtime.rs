@@ -209,39 +209,6 @@ impl RuntimeBackend for WindowsRuntimeBackend {
     }
 }
 
-pub async fn run_install(
-    backend: &WindowsRuntimeBackend,
-    request: RuntimeRequest,
-) -> Result<(InstallOutcome, zup_runtime::RuntimeSession), SessionError> {
-    zup_runtime::run_install(backend, request).await
-}
-
-pub async fn run_install_control(
-    backend: &WindowsRuntimeBackend,
-    request: RuntimeRequest,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-) -> Result<InstallOutcome, SessionError> {
-    zup_runtime::run_install_control(backend, request, cancel, events).await
-}
-
-pub async fn run_install_control_with_policy(
-    backend: &WindowsRuntimeBackend,
-    request: RuntimeRequest,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-    policy: ExecutionPolicy,
-) -> Result<InstallOutcome, SessionError> {
-    zup_runtime::run_install_control_with_policy(backend, request, cancel, events, policy).await
-}
-
-pub async fn run_local_install(
-    backend: &WindowsRuntimeBackend,
-    request: RuntimeRequest,
-) -> Result<(InstallOutcome, zup_runtime::RuntimeSession), SessionError> {
-    zup_runtime::run_local_install(backend, request).await
-}
-
 struct OverlayCleanup {
     base: Option<PathBuf>,
     root: Option<PathBuf>,

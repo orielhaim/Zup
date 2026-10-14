@@ -56,6 +56,15 @@ fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
     input
 }
 
+async fn run(
+    backend: &WindowsRuntimeBackend,
+    request: RuntimeRequest,
+    policy: ExecutionPolicy,
+) -> Result<InstallOutcome, SessionError> {
+    let control = zup_runtime::OperationControl::new(policy);
+    zup_runtime::execute(backend, request, &control).await
+}
+
 fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRuntimeBackend) {
     let state_root = root.path().join("state");
     let payload_root = root.path().join("payload");
@@ -83,7 +92,7 @@ async fn local_backend_commits_files_and_publishes_ledger() {
     let root = TempDir::new().unwrap();
     let (request, backend) = request(&root, SelectedScope::User);
     let destination = root.path().join("install").join("app.exe");
-    let (outcome, _) = zup_windows::run_install(&backend, request.clone())
+    let outcome = run(&backend, request.clone(), ExecutionPolicy::Interactive)
         .await
         .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
@@ -121,7 +130,9 @@ async fn generated_overlay_is_consumed_and_cleaned_by_adapter() {
     std::fs::write(overlay.join("__zup_plugins__/generated.exe"), b"installed").unwrap();
     let payload_root = root.path().join("payload");
     let backend = WindowsRuntimeBackend::from_path(payload_root, Some(overlay.clone())).unwrap();
-    let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     assert!(!overlay.exists());
 }
@@ -133,16 +144,9 @@ async fn noninteractive_machine_scope_reports_authorization_required() {
     }
     let root = TempDir::new().unwrap();
     let (request, backend) = request(&root, SelectedScope::Machine);
-    let (events, _) = tokio::sync::broadcast::channel(32);
-    let error = zup_windows::run_install_control_with_policy(
-        &backend,
-        request,
-        zup_runtime::CancellationHandle::new(),
-        events,
-        ExecutionPolicy::NonInteractive,
-    )
-    .await
-    .unwrap_err();
+    let error = run(&backend, request, ExecutionPolicy::NonInteractive)
+        .await
+        .unwrap_err();
     assert!(matches!(error, SessionError::AuthorizationRequired));
 }
 
@@ -155,7 +159,9 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
     let state_root = request.state_root.clone();
     let destination = root.path().join("install").join("app.exe");
     let payload_root = root.path().join("payload");
-    let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     let ledger = InstallLedgerStore::new(&state_root)
         .load(&app_id, SelectedScope::User)
@@ -199,7 +205,9 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
-    let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     assert!(!destination.exists());
     assert!(
@@ -301,7 +309,9 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         release: None,
         bootstrap: None,
     };
-    let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     let registration =
         zup_windows::inspect_uninstall_registration(SelectedScope::User, app_id.as_str())
@@ -331,7 +341,9 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         release: None,
         bootstrap: None,
     };
-    let (outcome, _) = zup_windows::run_install(&backend, request).await.unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     assert!(
         zup_windows::inspect_uninstall_registration(SelectedScope::User, &app_id_text)

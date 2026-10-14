@@ -366,8 +366,7 @@ pub fn prepare_operation<H: OperationHost>(
             },
         });
     }
-    let mut plan_request = PlanRequest::new(installer.target, input.scope);
-    plan_request.install_directory = host
+    let install_directory = host
         .install_directory(
             input.selection.install_directory.as_deref(),
             input.prior,
@@ -375,22 +374,14 @@ pub fn prepare_operation<H: OperationHost>(
             matches!(action, LifecycleAction::Repair { .. }),
         )
         .map_err(|message| OperationError::refused("selection", message))?;
-    if matches!(
+    let plan_request = plan_request(
+        installer,
+        input.scope,
+        input.prior,
+        &input.selection,
         action,
-        LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
-    ) {
-        let previous = input
-            .prior
-            .ok_or_else(|| OperationError::refused("resolve", "installation not found"))?;
-        for component in &installer.components {
-            if previous.selected_components.contains(&component.id) {
-                plan_request.components.enable.insert(component.id.clone());
-            } else if !component.required {
-                plan_request.components.disable.insert(component.id.clone());
-            }
-        }
-    }
-    apply_selection(&mut plan_request, &input.selection)?;
+        install_directory,
+    )?;
     let planned = host
         .plan_build(input.build, &plan_request, input.cancellation)
         .map_err(|message| OperationError::refused("plan", message))?;
@@ -495,6 +486,34 @@ pub fn install_directory_template(path: &Path) -> Result<Template, OperationErro
         ));
     }
     Template::parse(&value).map_err(|error| OperationError::refused("selection", error))
+}
+
+pub fn plan_request(
+    installer: &zup_core::Installer,
+    scope: SelectedScope,
+    prior: Option<&InstallLedger>,
+    selection: &OperationSelection,
+    action: LifecycleAction,
+    install_directory: Option<Template>,
+) -> Result<PlanRequest, OperationError> {
+    let mut request = PlanRequest::new(installer.target, scope);
+    request.install_directory = install_directory;
+    if matches!(
+        action,
+        LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }
+    ) {
+        let previous =
+            prior.ok_or_else(|| OperationError::refused("resolve", "installation not found"))?;
+        for component in &installer.components {
+            if previous.selected_components.contains(&component.id) {
+                request.components.enable.insert(component.id.clone());
+            } else if !component.required {
+                request.components.disable.insert(component.id.clone());
+            }
+        }
+    }
+    apply_selection(&mut request, selection)?;
+    Ok(request)
 }
 
 fn apply_selection(

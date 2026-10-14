@@ -193,10 +193,7 @@ pub use restart_manager::{
     BlockingProcess, FilePreflight, blocked_reason, mutating_paths, plan_mutating_paths, preflight,
 };
 #[cfg(windows)]
-pub use runtime::{
-    OverlayPolicy, WindowsRuntimeBackend, run_install, run_install_control,
-    run_install_control_with_policy, run_local_install,
-};
+pub use runtime::{OverlayPolicy, WindowsRuntimeBackend};
 #[cfg(windows)]
 pub use scm::ScmError;
 #[cfg(windows)]

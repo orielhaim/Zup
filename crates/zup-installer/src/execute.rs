@@ -2,7 +2,7 @@ use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{
-    CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeEvent, RuntimeRequest,
+    ExecutionPolicy, InstallOutcome, OperationControl, RuntimeEvent, RuntimeRequest,
 };
 
 /// process-level failure writer must not then add a second, differently shaped
@@ -99,9 +99,8 @@ pub fn execute_with_policy(
     policy: ExecutionPolicy,
 ) -> Result<(), ExecutionError> {
     let drifted = drifted_keys(&prepared.request);
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let cancel = CancellationHandle::new();
-    match execute_with_control_signal(prepared, cancel, events, policy)? {
+    let control = OperationControl::new(policy);
+    match execute_with_control_signal(prepared, &control)? {
         InstallOutcome::Committed => {
             println!("committed");
             for key in drifted {
@@ -117,9 +116,7 @@ pub fn execute_with_policy(
 
 pub fn execute_with_control_signal(
     prepared: PreparedRuntime,
-    cancel: CancellationHandle,
-    events: tokio::sync::broadcast::Sender<RuntimeEvent>,
-    policy: ExecutionPolicy,
+    control: &OperationControl,
 ) -> miette::Result<InstallOutcome> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -128,25 +125,20 @@ pub fn execute_with_control_signal(
             prepared.backend.cleanup_overlay(&prepared.request);
             miette::miette!("runtime: {error}")
         })?;
+    let cancel = control.cancellation();
     runtime
-        .block_on(async move {
+        .block_on(async {
             let PreparedRuntime {
                 request, backend, ..
             } = prepared;
-            let operation = zup_windows::run_install_control_with_policy(
-                &backend,
-                request,
-                cancel.clone(),
-                events.clone(),
-                policy,
-            );
+            let operation = zup_runtime::execute(&*backend, request, control);
             tokio::pin!(operation);
             tokio::select! {
                 result = &mut operation => result,
                 signal = tokio::signal::ctrl_c() => {
                     signal.map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?;
                     cancel.cancel();
-                    let _ = events.send(RuntimeEvent::StateChanged {
+                    let _ = control.events().send(RuntimeEvent::StateChanged {
                         state: zup_runtime::RuntimeState::Cancelled,
                     });
                     operation.await
@@ -180,8 +172,8 @@ pub fn execute_frontend(
         .as_ref()
         .map(ToString::to_string);
     let drifted = drifted_keys(&request);
-    let (events, _) = tokio::sync::broadcast::channel(256);
-    let mut receiver = events.subscribe();
+    let control = OperationControl::new(ExecutionPolicy::NonInteractive);
+    let mut receiver = control.subscribe();
     if output == OutputFormat::Jsonl {
         let started = InstallerEvent::started(
             &application,
@@ -216,9 +208,7 @@ pub fn execute_frontend(
             }
         }
     });
-    let cancel = CancellationHandle::new();
-    let outcome =
-        execute_with_control_signal(prepared, cancel, events, ExecutionPolicy::NonInteractive);
+    let outcome = execute_with_control_signal(prepared, &control);
     let terminal_seen = pump.join().unwrap_or(false);
     let outcome = match outcome {
         Ok(outcome) => outcome,

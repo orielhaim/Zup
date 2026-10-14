@@ -25,7 +25,21 @@ pub struct LinuxRunRequest {
     pub selection: zup_runtime::OperationSelection,
 }
 
+struct ExecutedRun {
+    outcome: zup_runtime::InstallOutcome,
+    version: semver::Version,
+    state_root: PathBuf,
+}
+
 pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
+    linux_outcome(&execute_request(request)?)
+}
+
+pub fn run_outcome(request: &LinuxRunRequest) -> Result<zup_runtime::InstallOutcome, ExecError> {
+    Ok(execute_request(request)?.outcome)
+}
+
+fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> {
     crate::carrier::Carrier::open(&request.installer)?;
     let mut host = crate::session_host::LinuxSessionHost::open(request.installer.clone());
     let discovery = host
@@ -84,32 +98,40 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
             ExecError::from(error)
         }
     })?;
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let control = zup_runtime::RuntimeControl::new(
-        zup_runtime::CancellationHandle::new(),
-        events,
-        zup_runtime::ExecutionPolicy::Interactive,
-    );
+    let control = zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| ExecError::Executor(error.to_string()))?
         .block_on(zup_session::run_operation(
-            &host, &context, &discovery, &prepared, control,
+            &host, &context, &discovery, &prepared, &control,
         ))
         .map_err(|error| ExecError::Executor(error.to_string()))?;
-    let app_version = prepared
+    let version = prepared
         .target_plan()
         .map(|target| target.app.version.clone())
         .unwrap_or_else(|| discovery.build.installer.app.version.clone());
+    Ok(ExecutedRun {
+        outcome,
+        version,
+        state_root: context.state_root,
+    })
+}
+
+fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
+    let ExecutedRun {
+        outcome,
+        version,
+        state_root,
+    } = executed;
     match outcome {
         zup_runtime::InstallOutcome::Committed => Ok(LinuxOutcome::Committed {
-            version: app_version,
+            version: version.clone(),
         }),
         zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
         zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. } => {
             Ok(LinuxOutcome::CommittedPendingReconciliation {
-                transaction: zup_runtime::discover_recovery(&context.state_root)
+                transaction: zup_runtime::discover_recovery(state_root)
                     .into_iter()
                     .find_map(|status| match status {
                         zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
@@ -123,7 +145,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
             })
         }
         zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
-            transaction: zup_runtime::discover_recovery(&context.state_root)
+            transaction: zup_runtime::discover_recovery(state_root)
                 .into_iter()
                 .find_map(|status| match status {
                     zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {

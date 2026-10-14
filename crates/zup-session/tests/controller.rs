@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -13,7 +13,7 @@ use zup_session::{OperationContext, SessionDiscovery, SessionHost, SessionLaunch
 struct Hold {
     started: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
-    release: Arc<(Mutex<bool>, Condvar)>,
+    release: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -52,10 +52,8 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 hold.cancelled.store(true, Ordering::SeqCst);
-                let (lock, cv) = &*hold.release;
-                let mut released = lock.lock().expect("hold");
-                while !*released {
-                    released = cv.wait(released).expect("hold");
+                while !hold.release.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
             self.ran.store(true, Ordering::SeqCst);
@@ -378,11 +376,7 @@ async fn closing_during_an_operation_waits_for_settlement() {
         !session.is_finished(),
         "closing the preset must not finish the session while the operation is held"
     );
-    {
-        let (lock, cv) = &*release;
-        *lock.lock().expect("release") = true;
-        cv.notify_all();
-    }
+    release.store(true, Ordering::SeqCst);
     session
         .await
         .expect("session task")
@@ -418,8 +412,8 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
     let discovery = session_host
         .discover(fake_exe(), &SessionLaunch::default())
         .expect("discovery");
-    let (events, _) = tokio::sync::broadcast::channel(8);
-    let mut received = events.subscribe();
+    let control = zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
+    let mut received = control.subscribe();
     let selection = zup_session::Selection {
         scope: SelectedScope::User,
         components: Vec::new(),
@@ -434,8 +428,7 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
             action: zup_exec::LifecycleAction::Uninstall,
             selection: &selection,
             cleanup_lock: true,
-            cancel: zup_runtime::CancellationHandle::new(),
-            events,
+            control,
         },
     )
     .await;
