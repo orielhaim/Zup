@@ -111,6 +111,7 @@ pub fn drive_client_isolated(
         expected_digest,
         expected_target,
         None,
+        None,
     )
 }
 

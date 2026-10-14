@@ -6,7 +6,6 @@ pub use zup_preset_host::{
 };
 
 pub mod preset {
-    use std::collections::BTreeMap;
     use std::io;
     use std::path::{Path, PathBuf};
 

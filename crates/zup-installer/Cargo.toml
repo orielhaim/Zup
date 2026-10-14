@@ -101,7 +101,7 @@ uuid.workspace = true
 zup-plugin-abi = { workspace = true }
 wat = "1"
 windows-registry.workspace = true
-wit-component = { version = "=0.261", features = ["dummy-module"] }
-wit-parser = "=0.261"
+wit-component = { version = "0.262", features = ["dummy-module"] }
+wit-parser = "0.262"
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 zup-toolchain.workspace = true
