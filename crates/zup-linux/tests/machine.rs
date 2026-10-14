@@ -1038,10 +1038,10 @@ fn machine_interrupted_transaction_recovers_first() {
     );
     let app = app_id();
     let version = semver::Version::parse("1.0.0").expect("a version");
-    let record = coordinator
+    coordinator
         .begin(app.clone(), SelectedScope::Machine, version, plan)
-        .expect("a journal begins");
-    drop(record);
+        .expect("a journal begins")
+        .preserve();
     assert!(
         zup_linux::LinuxLedgerStore::new(&roots.state)
             .load(&app, SelectedScope::Machine)

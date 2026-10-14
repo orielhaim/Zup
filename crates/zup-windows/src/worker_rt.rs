@@ -635,12 +635,19 @@ async fn run_worker_inner(
 
     let store = FilesystemTransactionStore::new(&state_root);
     let coordinator = TransactionCoordinator::new(store);
-    let record = if let Some(record) = existing_record {
-        record
+    let fresh = if existing_record.is_none() {
+        Some(
+            coordinator
+                .begin(app_id, scope, app_version, plan)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?,
+        )
     } else {
-        coordinator
-            .begin(app_id, scope, app_version, plan)
-            .map_err(|e| WorkerError::Transaction(e.to_string()))?
+        drop(coordinator);
+        None
+    };
+    let record = match &fresh {
+        Some(open) => open.record().clone(),
+        None => existing_record.expect("recovery loads its journal"),
     };
 
     let total_work = transaction_work_total(&record.plan);
@@ -697,6 +704,7 @@ async fn run_worker_inner(
 
     let cancel_token = cancel.clone();
     let reader_task = split_reader(reader, cancel_token, incoming);
+    let journal_id = record.transaction_id;
 
     let recovering = exec.recovery_id.is_some();
     let recovery_root = state_root.clone();
@@ -708,25 +716,22 @@ async fn run_worker_inner(
                 &mut executor,
             )
         } else {
-            coordinator.execute(record, &mut executor)
+            fresh
+                .expect("a fresh transaction")
+                .execute(&mut executor)
+                .map(|settled| (settled.record, settled.outcome))
         }
     })
-    .await
-    .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-
-    if matches!(&result, Ok((_, TransactionOutcome::Committed))) {
-        let _ = progress_tx.send(ProgressReport {
-            kind: ProgressKind::OperationProgress,
-            detail: "Finishing…".into(),
-            completed: Some(total_work),
-            total: Some(total_work),
-        });
-    }
+    .await;
+    let result = match result {
+        Ok(inner) => inner,
+        Err(_) => Err(zup_transaction::TransactionError::InvalidState(
+            journal_id.to_string(),
+        )),
+    };
 
     drop(progress_tx);
-    let (writer, outgoing) = progress_task
-        .await
-        .map_err(|error| WorkerError::Protocol(error.to_string()))??;
+    let progress_ended = progress_task.await;
 
     let (transaction_id, outcome) = match result {
         Ok((r, TransactionOutcome::Committed)) => {
@@ -742,13 +747,14 @@ async fn run_worker_inner(
                     .publish_committed(&r, scope, release_record(&exec.release))
                     .map(|_| ())
             };
-            publication.map_err(|e| {
-                WorkerError::Transaction(format!(
-                    "transaction committed but ledger publication failed: {e}"
-                ))
-            })?;
-            crate::integration::notify_committed_path_change(&r);
-            (r.transaction_id.as_uuid(), "committed".to_owned())
+            let outcome = match publication {
+                Ok(()) => {
+                    crate::integration::notify_committed_path_change(&r);
+                    "committed"
+                }
+                Err(_) => "committed_pending_reconciliation",
+            };
+            (r.transaction_id.as_uuid(), outcome.to_owned())
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
             drop_overlay(
@@ -760,36 +766,24 @@ async fn run_worker_inner(
         Ok((r, TransactionOutcome::RecoveryRequired)) => {
             (r.transaction_id.as_uuid(), "recovery_required".to_owned())
         }
-        Err(e) => {
-            let message = e.to_string();
-            let _ = send_and_close(
-                writer,
-                bootstrap.session_id,
-                outgoing,
-                Message::Failed(zup_protocol::Failed {
-                    kind: failure::TRANSACTION.to_owned(),
-                    message: message.clone(),
-                }),
-            )
-            .await;
-            let _ = reader_task.await;
-            return Err(WorkerError::Transaction(message));
-        }
+        Err(_) => (journal_id.as_uuid(), "recovery_required".to_owned()),
     };
     drop(_lock);
 
-    let _ = send_and_close(
-        writer,
-        bootstrap.session_id,
-        outgoing,
-        Message::Completed(zup_protocol::Completed {
-            transaction_id,
-            outcome: outcome.clone(),
-            prerequisite_id: None,
-            exit_code: None,
-        }),
-    )
-    .await;
+    if let Ok(Ok((writer, outgoing))) = progress_ended {
+        let _ = send_and_close(
+            writer,
+            bootstrap.session_id,
+            outgoing,
+            Message::Completed(zup_protocol::Completed {
+                transaction_id,
+                outcome: outcome.clone(),
+                prerequisite_id: None,
+                exit_code: None,
+            }),
+        )
+        .await;
+    }
     let _ = reader_task.await;
     Ok(outcome)
 }

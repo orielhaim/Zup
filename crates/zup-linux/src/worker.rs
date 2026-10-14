@@ -21,6 +21,18 @@ pub const EXECUTE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkerFault {
+    #[default]
+    None,
+    IpcBeforeBegin,
+    IpcAfterBegin,
+    CancelAfterBegin,
+    ProgressDuringExecute,
+    DisconnectAfterCommit,
+    FailLedgerPublish,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerContext {
     pub roots: MachineRoots,
@@ -36,6 +48,8 @@ pub struct WorkerContext {
     pub worker_exe: PathBuf,
 
     pub carrier_pin: Option<FilePin>,
+
+    pub fault: WorkerFault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +112,7 @@ pub fn run_worker_mode(
         session,
         worker_exe,
         carrier_pin: None,
+        fault: WorkerFault::None,
     };
     serve_session(&mut stream, context)
 }
@@ -149,6 +164,7 @@ pub fn serve_session(stream: &mut UnixStream, context: WorkerContext) -> Result<
         session: context.session,
         incoming: SequenceTracker::new(),
         outgoing: 0,
+        fail_next_send: false,
     };
     match serve_inner(&mut channel, &context) {
         Ok(outcome) => Ok(outcome),
@@ -167,10 +183,21 @@ struct SessionChannel<'a> {
     session: SessionId,
     incoming: SequenceTracker,
     outgoing: u64,
+    fail_next_send: bool,
 }
 
 impl SessionChannel<'_> {
     fn send(&mut self, message: Message) -> Result<(), IpcError> {
+        if self.fail_next_send {
+            self.fail_next_send = false;
+            return Err(IpcError::Io {
+                path: "<telemetry>".into(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "progress delivery failed",
+                ),
+            });
+        }
         let envelope = WireEnvelope {
             version: PROTOCOL_VERSION,
             session_id: self.session,
@@ -202,13 +229,15 @@ impl SessionChannel<'_> {
         if !crate::socket::inbound_frame_ready(self.stream)? {
             return Ok(false);
         }
-        let envelope = recv_envelope(self.stream, Duration::from_secs(1))
-            .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
+        let envelope = recv_envelope(self.stream, Duration::from_secs(1))?;
         self.incoming
             .accept(envelope.sequence)
             .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
         if envelope.session_id != self.session {
             return Err(IpcError::WorkerAuth("session mismatch".into()));
+        }
+        if envelope.version != PROTOCOL_VERSION {
+            return Err(IpcError::WorkerProtocol("protocol version mismatch".into()));
         }
         match envelope.message {
             Message::Cancel => Ok(true),
@@ -217,6 +246,29 @@ impl SessionChannel<'_> {
             )),
         }
     }
+}
+
+enum ControlGate {
+    Continue,
+    Cancel,
+    Disconnected,
+    FailClosed(IpcError),
+}
+
+fn control_gate(polled: Result<bool, IpcError>) -> ControlGate {
+    match polled {
+        Ok(false) => ControlGate::Continue,
+        Ok(true) => ControlGate::Cancel,
+        Err(error) if fail_closed(&error) => ControlGate::FailClosed(error),
+        Err(_) => ControlGate::Disconnected,
+    }
+}
+
+fn fail_closed(error: &IpcError) -> bool {
+    matches!(
+        error,
+        IpcError::WorkerAuth(_) | IpcError::WorkerProtocol(_) | IpcError::Framing(_)
+    )
 }
 
 fn serve_inner(
@@ -291,14 +343,14 @@ fn serve_inner(
         pin.verify(&prepared.carrier_path)?;
     }
 
-    let outcome = execute_prepared(channel, &prepared)?;
-    channel.send(Message::Completed(zup_protocol::Completed {
-        transaction_id: prepared.transaction_id,
-        outcome: outcome.clone(),
+    let verdict = execute_prepared(channel, &prepared, context.fault)?;
+    let _ = channel.send(Message::Completed(zup_protocol::Completed {
+        transaction_id: verdict.transaction_id,
+        outcome: verdict.outcome.clone(),
         prerequisite_id: None,
         exit_code: None,
-    }))?;
-    Ok(outcome)
+    }));
+    Ok(verdict.outcome)
 }
 
 fn worker_capabilities() -> Capabilities {
@@ -324,7 +376,6 @@ struct PreparedPlan {
     scope: String,
     target: zup_core::Target,
     file_count: u32,
-    transaction_id: uuid::Uuid,
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
@@ -579,7 +630,6 @@ fn prepare_operation(
         scope: intent.scope.clone(),
         target,
         file_count,
-        transaction_id: uuid::Uuid::now_v7(),
         carrier_path: carrier_path.clone(),
         carrier_pin,
         plan,
@@ -881,10 +931,37 @@ fn verify_carrier_declares(
     Ok(())
 }
 
+struct ExecutionVerdict {
+    transaction_id: uuid::Uuid,
+    outcome: String,
+}
+
+fn verdict(transaction_id: uuid::Uuid, outcome: &str) -> ExecutionVerdict {
+    ExecutionVerdict {
+        transaction_id,
+        outcome: outcome.to_owned(),
+    }
+}
+
+fn settled_name(
+    settled: &zup_transaction::SettledTransaction,
+    cancelled: bool,
+) -> ExecutionVerdict {
+    let transaction_id = settled.record.transaction_id.as_uuid();
+    let outcome = match settled.outcome {
+        zup_transaction::TransactionOutcome::Committed => "committed",
+        zup_transaction::TransactionOutcome::RolledBack if cancelled => "cancelled",
+        zup_transaction::TransactionOutcome::RolledBack => "rolled_back",
+        zup_transaction::TransactionOutcome::RecoveryRequired => "recovery_required",
+    };
+    verdict(transaction_id, outcome)
+}
+
 fn execute_prepared(
     channel: &mut SessionChannel<'_>,
     prepared: &PreparedPlan,
-) -> Result<String, IpcError> {
+    fault: WorkerFault,
+) -> Result<ExecutionVerdict, IpcError> {
     let lock_key = zup_transaction::InstallationLock::lock_key(&prepared.app_id, "machine");
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
@@ -917,9 +994,20 @@ fn execute_prepared(
     executor
         .register_plan(&prepared.plan)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    if fault == WorkerFault::IpcBeforeBegin {
+        return Err(IpcError::Io {
+            path: "<telemetry>".into(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "injected disconnect"),
+        });
+    }
+    match control_gate(channel.poll_cancel()) {
+        ControlGate::Continue => {}
+        ControlGate::Cancel | ControlGate::Disconnected => return Err(IpcError::Cancelled),
+        ControlGate::FailClosed(error) => return Err(error),
+    }
+
     let store = zup_transaction::FilesystemTransactionStore::new(&prepared.state_root);
-    let coordinator = zup_transaction::TransactionCoordinator::new(store);
-    let record = coordinator
+    let open = zup_transaction::TransactionCoordinator::new(store)
         .begin(
             prepared.target_plan.app.id.clone(),
             SelectedScope::Machine,
@@ -927,83 +1015,115 @@ fn execute_prepared(
             prepared.plan.clone(),
         )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    executor.set_transaction_id(record.transaction_id);
-    if channel.poll_cancel()? {
-        return match coordinator
-            .release(record, &mut executor)
-            .map_err(|error| IpcError::Transaction(error.to_string()))?
-        {
-            (_, zup_transaction::TransactionOutcome::RolledBack) => Ok("cancelled".to_owned()),
-            (_, zup_transaction::TransactionOutcome::RecoveryRequired) => {
-                Ok("recovery_required".to_owned())
-            }
-            (_, zup_transaction::TransactionOutcome::Committed) => Err(IpcError::Transaction(
-                "a cancelled transaction cannot commit".into(),
-            )),
-        };
-    }
-
-    let total_files = prepared.file_count as u64;
-    channel.send(Message::Progress(ProgressReport {
-        kind: ProgressKind::OperationStarted,
-        detail: prepared.operation.clone(),
-        completed: None,
-        total: None,
-    }))?;
-    let mut cancelled = false;
-    let (record, outcome) = {
-        let mut gated = GatedExecutor {
-            inner: executor,
-            channel,
-            cancelled: &mut cancelled,
-        };
-        coordinator
-            .execute(record, &mut gated)
-            .map_err(|error| IpcError::Transaction(error.to_string()))?
+    executor.set_transaction_id(open.record().transaction_id);
+    let transaction_id = open.record().transaction_id.as_uuid();
+    let gate = match fault {
+        WorkerFault::CancelAfterBegin => ControlGate::Cancel,
+        WorkerFault::IpcAfterBegin => ControlGate::Disconnected,
+        _ => control_gate(channel.poll_cancel()),
     };
-    channel.send(Message::Progress(ProgressReport {
+    let total_files = prepared.file_count as u64;
+    let mut cancelled = matches!(gate, ControlGate::Cancel | ControlGate::Disconnected);
+    let settled = match gate {
+        ControlGate::FailClosed(error) => {
+            return match open.release(&mut executor) {
+                Ok(_) => Err(error),
+                Err(_) => Ok(verdict(transaction_id, "recovery_required")),
+            };
+        }
+        ControlGate::Cancel | ControlGate::Disconnected => match open.release(&mut executor) {
+            Ok(settled) => settled,
+            Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+        },
+        ControlGate::Continue => {
+            let _ = channel.send(Message::Progress(ProgressReport {
+                kind: ProgressKind::OperationStarted,
+                detail: prepared.operation.clone(),
+                completed: None,
+                total: None,
+            }));
+            if fault == WorkerFault::ProgressDuringExecute {
+                channel.fail_next_send = true;
+                let _ = channel.send(Message::Progress(ProgressReport {
+                    kind: ProgressKind::OperationProgress,
+                    detail: prepared.operation.clone(),
+                    completed: Some(0),
+                    total: Some(total_files),
+                }));
+            }
+            let mut gated = GatedExecutor {
+                inner: executor,
+                channel,
+                cancelled: &mut cancelled,
+            };
+            match open.execute(&mut gated) {
+                Ok(settled) => settled,
+                Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+            }
+        }
+    };
+    if settled.outcome != zup_transaction::TransactionOutcome::Committed {
+        return Ok(settled_name(&settled, cancelled));
+    }
+    if fault == WorkerFault::DisconnectAfterCommit {
+        channel.fail_next_send = true;
+        let _ = channel.send(Message::Progress(ProgressReport {
+            kind: ProgressKind::OperationProgress,
+            detail: prepared.operation.clone(),
+            completed: Some(total_files),
+            total: Some(total_files),
+        }));
+    }
+    if fault == WorkerFault::FailLedgerPublish {
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
+    let record = settled.record;
+    let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
+    let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
+        Ok(ledger) => ledger,
+        Err(_) => {
+            return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+        }
+    };
+    if finalize_committed(prepared, &ledger, &lock_key).is_err() {
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
+    let _ = channel.send(Message::Progress(ProgressReport {
         kind: ProgressKind::OperationProgress,
         detail: prepared.operation.clone(),
         completed: Some(total_files),
         total: Some(total_files),
-    }))?;
-    let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
-    match outcome {
-        zup_transaction::TransactionOutcome::Committed => {
-            let ledger = ledger_store
-                .publish_committed(&record, SelectedScope::Machine)
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    }));
+    Ok(verdict(transaction_id, "committed"))
+}
 
-            if prepared.action != zup_exec::LifecycleAction::Uninstall {
-                crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
-                    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            }
-            crate::machine::normalize_state_modes(
-                &prepared.state_root,
-                rustix::process::geteuid().as_raw(),
-            )
+fn finalize_committed(
+    prepared: &PreparedPlan,
+    ledger: &zup_exec::InstallLedger,
+    lock_key: &str,
+) -> Result<(), IpcError> {
+    if prepared.action != zup_exec::LifecycleAction::Uninstall {
+        crate::machine::normalize_published_modes(&prepared.state_root, ledger)
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            if prepared.action == zup_exec::LifecycleAction::Upgrade {
-                crate::run::retire_old_generations_for(
-                    &prepared.state_root,
-                    &prepared.target_plan.app.id,
-                    SelectedScope::Machine,
-                    &ledger.version,
-                )
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            }
-            if prepared.action == zup_exec::LifecycleAction::Uninstall {
-                let _ = zup_transaction::InstallationLock::remove_if_unheld(
-                    &prepared.state_root,
-                    &lock_key,
-                );
-            }
-            Ok("committed".to_owned())
-        }
-        zup_transaction::TransactionOutcome::RolledBack if cancelled => Ok("cancelled".to_owned()),
-        zup_transaction::TransactionOutcome::RolledBack => Ok("rolled_back".to_owned()),
-        zup_transaction::TransactionOutcome::RecoveryRequired => Ok("recovery_required".to_owned()),
     }
+    crate::machine::normalize_state_modes(
+        &prepared.state_root,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    if prepared.action == zup_exec::LifecycleAction::Upgrade {
+        crate::run::retire_old_generations_for(
+            &prepared.state_root,
+            &prepared.target_plan.app.id,
+            SelectedScope::Machine,
+            &ledger.version,
+        )
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    }
+    if prepared.action == zup_exec::LifecycleAction::Uninstall {
+        let _ = zup_transaction::InstallationLock::remove_if_unheld(&prepared.state_root, lock_key);
+    }
+    Ok(())
 }
 
 struct GatedExecutor<'a, 'b> {
@@ -1014,13 +1134,15 @@ struct GatedExecutor<'a, 'b> {
 
 impl GatedExecutor<'_, '_> {
     fn note(&mut self) -> Result<(), crate::error::ExecError> {
-        match self.channel.poll_cancel() {
-            Ok(true) => {
+        match control_gate(self.channel.poll_cancel()) {
+            ControlGate::Continue => Ok(()),
+            ControlGate::Cancel | ControlGate::Disconnected => {
                 *self.cancelled = true;
                 Err(crate::error::ExecError::Cancelled)
             }
-            Ok(false) => Ok(()),
-            Err(error) => Err(crate::error::ExecError::Worker(error.to_string())),
+            ControlGate::FailClosed(error) => {
+                Err(crate::error::ExecError::Worker(error.to_string()))
+            }
         }
     }
 }
@@ -1089,6 +1211,7 @@ mod tests {
             session,
             incoming: SequenceTracker::new(),
             outgoing: 0,
+            fail_next_send: false,
         };
         assert!(channel.poll_cancel().expect("poll"));
         assert!(!channel.poll_cancel().expect("quiet"));

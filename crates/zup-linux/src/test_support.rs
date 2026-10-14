@@ -20,6 +20,7 @@ use crate::lifecycle::LinuxOutcome;
 use crate::locations::MachineRoots;
 use crate::run::{LinuxRunRequest, run};
 use crate::systemd::{SystemdManager, UnitChange, UnitInfo};
+pub use crate::worker::WorkerFault;
 use zup_runtime::Operation;
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,27 @@ impl MachineTestRoots {
             systemd,
         }
     }
+}
+
+pub fn run_machine_faulted(
+    installer: &Path,
+    test_roots: &MachineTestRoots,
+    action: Operation,
+    fault: crate::worker::WorkerFault,
+) -> Result<LinuxOutcome, ExecError> {
+    crate::elevate::run_machine_loopback_faulted(
+        &LinuxRunRequest {
+            installer: installer.to_path_buf(),
+            scope: zup_core::SelectedScope::Machine,
+            state_root: Some(test_roots.state.clone()),
+            action,
+            install_dir_override: None,
+            selection: Default::default(),
+        },
+        &test_roots.roots,
+        &test_roots.systemd,
+        fault,
+    )
 }
 
 pub fn run_machine_isolated(
@@ -93,6 +115,7 @@ pub fn serve_worker_isolated(
             session,
             worker_exe: worker_exe.to_path_buf(),
             carrier_pin: None,
+            fault: crate::worker::WorkerFault::None,
         },
     )
 }

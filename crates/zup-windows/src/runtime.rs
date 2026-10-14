@@ -726,7 +726,8 @@ impl WindowsRuntimeBackend {
             let _ = std::fs::remove_dir_all(&bootstrap.quarantine_root);
         }
         match &result {
-            Ok(InstallOutcome::RecoveryRequired) => cleanup.retain(),
+            Ok(InstallOutcome::RecoveryRequired)
+            | Ok(InstallOutcome::CommittedPendingReconciliation { .. }) => cleanup.retain(),
             Ok(InstallOutcome::Failed(message))
                 if self.retain_on_blocked
                     && message.starts_with(BLOCKED_BY_RUNNING_APPLICATIONS) =>
@@ -1123,7 +1124,14 @@ async fn run_elevated_worker(
                     let outcome = match completed.outcome.as_str() {
                         "committed" => InstallOutcome::Committed,
                         "rolled_back" => InstallOutcome::RolledBack,
+                        "cancelled" => InstallOutcome::Cancelled,
                         "recovery_required" => InstallOutcome::RecoveryRequired,
+                        "committed_pending_reconciliation" => {
+                            InstallOutcome::CommittedPendingReconciliation {
+                                detail: "the transaction committed and ledger reconciliation is still required"
+                                    .into(),
+                            }
+                        }
                         other => return Err(SessionError::Protocol(format!("unknown worker outcome {other}"))),
                     };
                     return Ok(outcome);
@@ -1393,23 +1401,26 @@ fn execute_local_blocking_with_events_inner(
     ) {
         return InstallOutcome::Failed(e.to_string());
     }
-    let record = match coordinator.begin(
+    let open = match coordinator.begin(
         request.app_id.clone(),
         request.scope,
         request.app_version.clone(),
         plan,
     ) {
-        Ok(r) => r,
+        Ok(open) => open,
         Err(e) => return InstallOutcome::Failed(e.to_string()),
     };
+    let transaction_id = open.record().transaction_id;
+    let plan_for_executor = open.record().plan.clone();
+    let target_suffix = open.record().target.executable_suffix();
 
     if cancel.is_cancelled() {
         let mut executor = ProductionExecutor {
             inner: WindowsFileExecutor::new(
                 payload,
                 request.work_root.clone(),
-                record.transaction_id.to_string(),
-                record.target.executable_suffix(),
+                transaction_id.to_string(),
+                target_suffix,
                 Box::new(NullProgress),
             ),
             cancel,
@@ -1418,13 +1429,20 @@ fn execute_local_blocking_with_events_inner(
             total_work: 0,
             blocked_paths: Vec::new(),
         };
-        return match coordinator.release(record, &mut executor) {
-            Ok((_, TransactionOutcome::RolledBack)) => InstallOutcome::Cancelled,
-            Ok((_, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
-            Ok((_, TransactionOutcome::Committed)) => {
-                InstallOutcome::Failed("a cancelled transaction cannot commit".into())
-            }
-            Err(error) => InstallOutcome::Failed(error.to_string()),
+        return match open.release(&mut executor) {
+            Ok(zup_transaction::SettledTransaction {
+                outcome: TransactionOutcome::RolledBack,
+                ..
+            }) => InstallOutcome::Cancelled,
+            Ok(zup_transaction::SettledTransaction {
+                outcome: TransactionOutcome::RecoveryRequired,
+                ..
+            })
+            | Err(_) => InstallOutcome::RecoveryRequired,
+            Ok(zup_transaction::SettledTransaction {
+                outcome: TransactionOutcome::Committed,
+                ..
+            }) => InstallOutcome::Failed("a cancelled transaction cannot commit".into()),
         };
     }
 
@@ -1432,21 +1450,24 @@ fn execute_local_blocking_with_events_inner(
         inner: WindowsFileExecutor::new(
             payload,
             request.work_root.clone(),
-            record.transaction_id.to_string(),
-            record.target.executable_suffix(),
+            transaction_id.to_string(),
+            target_suffix,
             Box::new(NullProgress),
         ),
         cancel,
         events,
         completed_work: 0,
-        total_work: transaction_work_total(&record.plan),
-        blocked_paths: crate::plan_mutating_paths(&record.plan, &request.target),
+        total_work: transaction_work_total(&plan_for_executor),
+        blocked_paths: crate::plan_mutating_paths(&plan_for_executor, &request.target),
     };
 
-    note_plan_files(&mut executor.inner, &record.plan);
+    note_plan_files(&mut executor.inner, &plan_for_executor);
 
-    match coordinator.execute(record, &mut executor) {
-        Ok((record, TransactionOutcome::Committed)) => {
+    match open.execute(&mut executor) {
+        Ok(zup_transaction::SettledTransaction {
+            record,
+            outcome: TransactionOutcome::Committed,
+        }) => {
             match InstallLedgerStore::new(&request.state_root).publish_committed(
                 &record,
                 request.scope,
@@ -1456,20 +1477,26 @@ fn execute_local_blocking_with_events_inner(
                     crate::notify_committed_path_change(&record);
                     InstallOutcome::Committed
                 }
-                Err(e) => InstallOutcome::Failed(format!(
-                    "transaction committed but ledger publication failed: {e}"
-                )),
+                Err(e) => InstallOutcome::CommittedPendingReconciliation {
+                    detail: format!("transaction committed but ledger publication failed: {e}"),
+                },
             }
         }
-        Ok((_record, TransactionOutcome::RolledBack)) => {
+        Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::RolledBack,
+            ..
+        }) => {
             if executor.cancel.is_cancelled() {
                 InstallOutcome::Cancelled
             } else {
                 InstallOutcome::RolledBack
             }
         }
-        Ok((_record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
-        Err(error) => InstallOutcome::Failed(error.to_string()),
+        Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::RecoveryRequired,
+            ..
+        })
+        | Err(_) => InstallOutcome::RecoveryRequired,
     }
 }
 

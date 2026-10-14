@@ -224,7 +224,13 @@ pub fn process_outcome(outcome: &InstallOutcome) -> zup_presentation::ProcessOut
         InstallOutcome::RebootRequired { .. } => zup_presentation::ProcessOutcome::RebootRequired,
         InstallOutcome::Committed => zup_presentation::ProcessOutcome::Success,
         InstallOutcome::Cancelled => zup_presentation::ProcessOutcome::Cancelled,
-        InstallOutcome::RecoveryRequired => zup_presentation::ProcessOutcome::RecoveryRequired,
+        InstallOutcome::RecoveryRequired
+        | InstallOutcome::CommittedPendingReconciliation { .. } => {
+            zup_presentation::ProcessOutcome::RecoveryRequired
+        }
+        InstallOutcome::AuthorizationRequired | InstallOutcome::AuthorizationCancelled => {
+            zup_presentation::ProcessOutcome::AuthorizationRequired
+        }
         InstallOutcome::Busy { .. } => zup_presentation::ProcessOutcome::InstallationBusy,
         InstallOutcome::RolledBack => zup_presentation::ProcessOutcome::Failure,
         InstallOutcome::Failed(message) => zup_presentation::ProcessOutcome::from_message(message),
@@ -333,8 +339,12 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::Installe
         RuntimeEvent::Failed { kind, message } => {
             let outcome = match kind.as_str() {
                 "installation_busy" => zup_presentation::ProcessOutcome::InstallationBusy,
-                "recovery_required" => zup_presentation::ProcessOutcome::RecoveryRequired,
-                "authorization_required" => zup_presentation::ProcessOutcome::AuthorizationRequired,
+                "recovery_required" | "committed_pending_reconciliation" => {
+                    zup_presentation::ProcessOutcome::RecoveryRequired
+                }
+                "authorization_required" | "authorization_cancelled" => {
+                    zup_presentation::ProcessOutcome::AuthorizationRequired
+                }
                 _ => zup_presentation::ProcessOutcome::from_message(message),
             };
             vec![InstallerEvent::Failed {

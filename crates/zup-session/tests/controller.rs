@@ -1,16 +1,25 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use zup_core::{SelectedScope, Target};
 use zup_session::{OperationContext, SessionDiscovery, SessionHost, SessionLaunch};
 
+#[derive(Clone, Default)]
+struct Hold {
+    started: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
 #[derive(Clone)]
 struct FakeBackend {
     ran: Arc<AtomicBool>,
+    hold: Option<Hold>,
 }
 
 impl zup_runtime::RuntimeBackend for FakeBackend {
@@ -26,12 +35,29 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
     fn execute<'a>(
         &'a self,
         _request: zup_runtime::RuntimeRequest,
-        _control: zup_runtime::RuntimeControl,
+        control: zup_runtime::RuntimeControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,
         Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
     > {
         Box::pin(async move {
+            if let Some(hold) = &self.hold {
+                let _ = control.events.send(zup_runtime::RuntimeEvent::Progress {
+                    completed: 0,
+                    total: 1,
+                    action: "holding".into(),
+                });
+                hold.started.store(true, Ordering::SeqCst);
+                while !control.cancellation.is_cancelled() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                hold.cancelled.store(true, Ordering::SeqCst);
+                let (lock, cv) = &*hold.release;
+                let mut released = lock.lock().expect("hold");
+                while !*released {
+                    released = cv.wait(released).expect("hold");
+                }
+            }
             self.ran.store(true, Ordering::SeqCst);
             Ok(zup_runtime::InstallOutcome::Committed)
         })
@@ -50,6 +76,8 @@ struct FakeHost {
     preset: PathBuf,
     installations: Vec<zup_session::ScopedInstallation>,
     seen: Seen,
+    refuse_backend: bool,
+    after_commit_error: Option<String>,
 }
 
 fn fixture_build() -> zup_core::TargetBuildPlan {
@@ -269,7 +297,21 @@ impl SessionHost for FakeHost {
             prepared.action == zup_exec::LifecycleAction::Uninstall,
             prepared.install_plan().is_some()
         ));
+        if self.refuse_backend {
+            return Err("backend initialization failed".into());
+        }
         Ok(Arc::new(self.backend.clone()))
+    }
+
+    fn after_commit(
+        &self,
+        _context: &OperationContext,
+        _prepared: &zup_runtime::PreparedOperation,
+    ) -> Result<(), String> {
+        match &self.after_commit_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     fn materialize_preset(
@@ -300,15 +342,116 @@ fn host(preset: &str) -> FakeHost {
         build: fixture_build(),
         backend: FakeBackend {
             ran: Arc::new(AtomicBool::new(false)),
+            hold: None,
         },
         preset: stub,
         installations: Vec::new(),
         seen: Seen::default(),
+        refuse_backend: false,
+        after_commit_error: None,
     }
 }
 
 fn fake_exe() -> &'static Path {
     Path::new("session-test")
+}
+
+#[tokio::test]
+async fn closing_during_an_operation_waits_for_settlement() {
+    let hold = Hold::default();
+    let mut session_host = host("install_close_preset");
+    session_host.backend.hold = Some(hold.clone());
+    let cancelled = Arc::clone(&hold.cancelled);
+    let release = Arc::clone(&hold.release);
+    let session = tokio::spawn(zup_session::run(
+        session_host.clone(),
+        fake_exe(),
+        SessionLaunch::default(),
+    ));
+    let wait = tokio::time::timeout(Duration::from_secs(10), async {
+        while !cancelled.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    wait.await.expect("close reaches the running operation");
+    assert!(
+        !session.is_finished(),
+        "closing the preset must not finish the session while the operation is held"
+    );
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().expect("release") = true;
+        cv.notify_all();
+    }
+    session
+        .await
+        .expect("session task")
+        .expect("the session settles");
+    assert!(session_host.backend.ran.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn backend_initialization_failure_settles_the_operation() {
+    let mut session_host = host("install_preset");
+    session_host.refuse_backend = true;
+    zup_session::run(session_host, fake_exe(), SessionLaunch::default())
+        .await
+        .expect("a failed operation still settles the session");
+}
+
+#[tokio::test]
+async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
+    let root = tempfile::tempdir().expect("state root");
+    let mut session_host = host("close_preset");
+    session_host.after_commit_error = Some("cleanup failed".into());
+    let mut ledger = zup_exec::InstallLedger::new(
+        session_host.build.installer.app.id.clone(),
+        session_host.build.installer.target,
+        SelectedScope::User,
+    );
+    ledger.version = session_host.build.installer.app.version.clone();
+    session_host.installations = vec![zup_session::ScopedInstallation {
+        scope: SelectedScope::User,
+        state_root: root.path().to_path_buf(),
+        ledger: Some(ledger),
+    }];
+    let discovery = session_host
+        .discover(fake_exe(), &SessionLaunch::default())
+        .expect("discovery");
+    let (events, _) = tokio::sync::broadcast::channel(8);
+    let mut received = events.subscribe();
+    let selection = zup_session::Selection {
+        scope: SelectedScope::User,
+        components: Vec::new(),
+        install_directory: None,
+    };
+    let completion = zup_session::complete_operation(
+        &session_host,
+        fake_exe(),
+        &discovery,
+        zup_session::OperationLaunch {
+            id: zup_runtime::Uuid::now_v7(),
+            action: zup_exec::LifecycleAction::Uninstall,
+            selection: &selection,
+            cleanup_lock: true,
+            cancel: zup_runtime::CancellationHandle::new(),
+            events,
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            completion.outcome,
+            zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+        ),
+        "cleanup after commit stays a committed reconciliation: {:?}",
+        completion.outcome
+    );
+    assert!(
+        std::iter::from_fn(|| received.try_recv().ok())
+            .all(|event| !zup_session::is_terminal(&event)),
+        "the operation result is not also a progress event"
+    );
 }
 
 #[tokio::test]

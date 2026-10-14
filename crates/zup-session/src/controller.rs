@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use zup_exec::LifecycleAction;
 use zup_preset_host::{HostDecision, HostState, Selection};
 use zup_preset_protocol::{Action, UpdateState};
-use zup_runtime::{CancellationHandle, InstallOutcome, OperationHost, RuntimeEvent};
+use zup_runtime::{CancellationHandle, OperationHost, RuntimeEvent};
 
 use crate::host::{
     OperationContext, PresetLaunch, SessionDiscovery, SessionHost, SessionLaunch, initial_state,
@@ -15,7 +15,6 @@ enum Report {
     Engine(RuntimeEvent),
     Plan(u64, Result<zup_presentation::PlanPreview, String>),
     Update(UpdateReport),
-    RepairDrift(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -27,20 +26,14 @@ enum UpdateReport {
 type Reports = tokio::sync::broadcast::Sender<Report>;
 type Inbox = tokio::sync::broadcast::Receiver<Report>;
 
-#[derive(Default)]
-struct Active {
-    cancel: Option<CancellationHandle>,
+struct ActiveOperation {
+    id: zup_runtime::Uuid,
+    cancel: CancellationHandle,
 }
 
-impl Active {
-    fn set(&mut self, cancel: CancellationHandle) {
-        self.cancel = Some(cancel);
-    }
-
-    fn cancel(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            cancel.cancel();
-        }
+impl ActiveOperation {
+    fn cancel(&self) {
+        self.cancel.cancel();
     }
 }
 
@@ -50,7 +43,7 @@ struct Control<H: SessionHost> {
     state: HostState,
     discovery: SessionDiscovery,
     presented: zup_core::SelectedScope,
-    active: Arc<Mutex<Active>>,
+    active: Arc<Mutex<Option<ActiveOperation>>>,
     reports: Reports,
     inbox: Inbox,
     plans: Plans,
@@ -108,8 +101,10 @@ where
             .map_err(|error| miette::miette!("start the preset reader: {error}"))?;
     }
 
-    let active = Arc::new(Mutex::new(Active::default()));
+    let active = Arc::new(Mutex::new(None));
     let (reports, inbox) = tokio::sync::broadcast::channel::<Report>(256);
+    let (settled_tx, mut settled_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::runner::OperationCompletion>();
     let mut control = Control {
         host,
         executable: executable.to_path_buf(),
@@ -153,7 +148,6 @@ where
                     Report::Update(UpdateReport::Finished(Err(message))) => {
                         control.state.fail(message, false);
                     }
-                    Report::RepairDrift(resources) => control.state.set_repair_drift(resources),
                 }
                 if deliverable {
                     deliverable = publish(&mut preset, &control.state, &configuration)?;
@@ -164,7 +158,14 @@ where
                 if action == Action::Close {
                     break;
                 }
-                act(&mut control, action);
+                act(&mut control, action, &settled_tx);
+                if deliverable {
+                    deliverable = publish(&mut preset, &control.state, &configuration)?;
+                }
+            }
+            completion = settled_rx.recv() => {
+                let Some(completion) = completion else { break };
+                apply_completion(&mut control, completion);
                 if deliverable {
                     deliverable = publish(&mut preset, &control.state, &configuration)?;
                 }
@@ -172,13 +173,44 @@ where
         }
     }
 
-    control
-        .active
-        .lock()
-        .expect("the running operation")
-        .cancel();
+    let pending = control.active.lock().expect("the running operation").take();
+    if let Some(operation) = &pending {
+        operation.cancel();
+    }
     drop(preset);
+    if let Some(operation) = pending {
+        loop {
+            let Some(completion) = settled_rx.recv().await else {
+                return Err(miette::miette!(
+                    "the operation ended without a settlement result"
+                ));
+            };
+            if completion.id == operation.id {
+                apply_completion(&mut control, completion);
+                break;
+            }
+        }
+    }
     Ok(())
+}
+
+fn apply_completion<H: SessionHost>(
+    control: &mut Control<H>,
+    completion: crate::runner::OperationCompletion,
+) {
+    {
+        let mut active = control.active.lock().expect("the running operation");
+        if active
+            .as_ref()
+            .is_some_and(|operation| operation.id == completion.id)
+        {
+            *active = None;
+        }
+    }
+    if !completion.repair_drift.is_empty() {
+        control.state.set_repair_drift(completion.repair_drift);
+    }
+    control.state.finish_with(&completion.outcome);
 }
 
 fn lagged(error: tokio::sync::broadcast::error::RecvError) -> miette::Report {
@@ -211,14 +243,17 @@ where
     let reports = control.reports.clone();
     let host = control.host.clone();
     let discovery = control.discovery.clone();
-    spawn("setup-plan", move || {
+    let _ = spawn("setup-plan", move || {
         let plan = preview(&host, &discovery, &selection);
         let _ = reports.send(Report::Plan(generation, plan));
     });
 }
 
-fn act<H>(control: &mut Control<H>, action: Action)
-where
+fn act<H>(
+    control: &mut Control<H>,
+    action: Action,
+    settled: &tokio::sync::mpsc::UnboundedSender<crate::runner::OperationCompletion>,
+) where
     H: SessionHost + Clone + Send + 'static,
 {
     match control.state.accept(action) {
@@ -229,12 +264,13 @@ where
         } => {
             control.inbox = control.reports.subscribe();
             let cancel = CancellationHandle::new();
-            control
-                .active
-                .lock()
-                .expect("the running operation")
-                .set(cancel.clone());
+            let id = zup_runtime::Uuid::now_v7();
+            *control.active.lock().expect("the running operation") = Some(ActiveOperation {
+                id,
+                cancel: cancel.clone(),
+            });
             let operation = OperationRequest {
+                id,
                 action,
                 selection,
                 cleanup_lock,
@@ -243,9 +279,21 @@ where
             let executable = control.executable.clone();
             let discovery = control.discovery.clone();
             let reports = control.reports.clone();
-            spawn("setup-lifecycle", move || {
-                run_lifecycle(host, executable, discovery, operation, cancel, reports);
-            });
+            let completion = settled.clone();
+            match spawn("setup-lifecycle", move || {
+                run_lifecycle(
+                    host, executable, discovery, operation, cancel, reports, completion,
+                );
+            }) {
+                Ok(()) => {}
+                Err(error) => {
+                    let _ = settled.send(crate::runner::OperationCompletion {
+                        id,
+                        outcome: zup_runtime::InstallOutcome::Failed(error),
+                        repair_drift: Vec::new(),
+                    });
+                }
+            }
         }
         HostDecision::Plan(selection) => {
             if selection.scope != control.presented {
@@ -258,7 +306,7 @@ where
             let scope = zup_preset_host::engine_scope(control.state.snapshot().surface.scope());
             let sender = control.reports.clone();
             let host = control.host.clone();
-            spawn("setup-update", move || {
+            let _ = spawn("setup-update", move || {
                 let mut status = |progress| {
                     let _ = sender.send(Report::Update(UpdateReport::Status(progress)));
                 };
@@ -270,18 +318,23 @@ where
             let selection = Selection::from_surface(&control.state.snapshot().surface);
             let host = control.host.clone();
             let discovery = control.discovery.clone();
-            spawn("setup-launch", move || {
+            let _ = spawn("setup-launch", move || {
                 let started = launch_target(&host, &discovery, &selection, &target.name);
                 if let Err(error) = started {
                     eprintln!("{} did not start: {error}", target.name);
                 }
             });
         }
-        HostDecision::Cancel => control
-            .active
-            .lock()
-            .expect("the running operation")
-            .cancel(),
+        HostDecision::Cancel => {
+            if let Some(operation) = control
+                .active
+                .lock()
+                .expect("the running operation")
+                .as_ref()
+            {
+                operation.cancel();
+            }
+        }
         HostDecision::OpenLog => {
             if let Some(path) = control.state.log_path()
                 && let Err(error) = control.host.open_log(path)
@@ -301,17 +354,10 @@ where
 }
 
 struct OperationRequest {
+    id: zup_runtime::Uuid,
     action: LifecycleAction,
     selection: Selection,
     cleanup_lock: bool,
-}
-
-struct CancelQuery<'a>(&'a CancellationHandle);
-
-impl zup_plan::CancellationQuery for CancelQuery<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
 }
 
 fn rebind<H: SessionHost + Clone + Send + 'static>(
@@ -344,114 +390,74 @@ fn run_lifecycle<H>(
     operation: OperationRequest,
     cancel: CancellationHandle,
     reports: Reports,
+    settled: tokio::sync::mpsc::UnboundedSender<crate::runner::OperationCompletion>,
 ) where
     H: SessionHost,
 {
-    let context = match discovery.context(operation.selection.scope) {
-        Ok(context) => context,
-        Err(message) => {
-            let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
-                kind: "prepare_failed".into(),
-                message,
-            }));
-            return;
-        }
-    };
-    let (enable, disable) =
-        crate::host::selection_of(&discovery.build.installer, &operation.selection);
-    let query = CancelQuery(&cancel);
-    let bound = match host.bind(&context) {
-        Ok(bound) => bound,
-        Err(message) => {
-            let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
-                kind: "prepare_failed".into(),
-                message,
-            }));
-            return;
-        }
-    };
-    let input = zup_runtime::OperationInput {
-        build: &discovery.build,
-        installer: &executable,
-        scope: context.scope,
-        operation: zup_runtime::Operation::from(operation.action),
-        selection: zup_runtime::OperationSelection {
-            enable,
-            disable,
-            install_directory: operation
-                .selection
-                .install_directory
-                .as_deref()
-                .map(PathBuf::from),
-        },
-        prior: context.ledger.as_ref(),
-        state_root: &context.state_root,
-        cancellation: &query,
-    };
-    let prepared = match zup_runtime::prepare_operation(&input, &bound) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
-                kind: "prepare_failed".into(),
-                message: error.to_string(),
-            }));
-            return;
-        }
-    };
-    let drifted = prepared
-        .transaction_plan
-        .retired_keys
-        .iter()
-        .map(|key| format!("{key:?}"))
-        .collect::<Vec<_>>();
+    let id = operation.id;
     let (engine, _) = tokio::sync::broadcast::channel(256);
     let mut received = engine.subscribe();
     let pump = {
         let reports = reports.clone();
         std::thread::spawn(move || {
-            while let Ok(event) = received.blocking_recv() {
-                let terminal = is_terminal(&event);
-                if reports.send(Report::Engine(event)).is_err() || terminal {
-                    break;
+            loop {
+                match received.blocking_recv() {
+                    Ok(event) if !is_terminal(&event) => {
+                        if reports.send(Report::Engine(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         })
     };
-    let control =
-        zup_runtime::RuntimeControl::new(cancel, engine, zup_runtime::ExecutionPolicy::Interactive);
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())
-        .and_then(|runtime| {
-            runtime
-                .block_on(crate::runner::run_operation(
-                    &host, &context, &discovery, &prepared, control,
+    let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(crate::runner::complete_operation(
+                    &host,
+                    &executable,
+                    &discovery,
+                    crate::runner::OperationLaunch {
+                        id: operation.id,
+                        action: operation.action,
+                        selection: &operation.selection,
+                        cleanup_lock: operation.cleanup_lock,
+                        cancel,
+                        events: engine.clone(),
+                    },
                 ))
-                .map_err(|error| error.to_string())
-        });
+            })
+            .unwrap_or_else(|error| crate::runner::OperationCompletion {
+                id,
+                outcome: zup_runtime::InstallOutcome::Failed(error.to_string()),
+                repair_drift: Vec::new(),
+            })
+    }));
+    drop(engine);
     let _ = pump.join();
-
-    let outcome: Result<InstallOutcome, String> = outcome;
-    if matches!(operation.action, LifecycleAction::Repair { .. })
-        && matches!(outcome, Ok(InstallOutcome::Committed))
-        && !drifted.is_empty()
-    {
-        let _ = reports.send(Report::RepairDrift(drifted));
-    }
-    if operation.cleanup_lock
-        && matches!(outcome, Ok(InstallOutcome::Committed))
-        && let Err(error) = host.after_commit(&context, &prepared)
-    {
-        let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
-            kind: "commit_failed".into(),
-            message: error,
-        }));
-    }
+    let completion = match completion {
+        Ok(completion) => completion,
+        Err(_) => crate::runner::OperationCompletion {
+            id,
+            outcome: zup_runtime::InstallOutcome::RecoveryRequired,
+            repair_drift: Vec::new(),
+        },
+    };
+    let _ = settled.send(completion);
 }
 
-fn spawn(name: &str, body: impl FnOnce() + Send + 'static) {
-    let _ = std::thread::Builder::new().name(name.into()).spawn(body);
+fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(body)
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 fn preview<H: SessionHost>(

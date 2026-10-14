@@ -380,9 +380,10 @@ impl RealWorld {
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
-        let (record, outcome) = coordinator
-            .execute(record, &mut executor)
+        let settled = record
+            .execute(&mut executor)
             .map_err(|error| format!("execute: {error}"))?;
+        let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
             TransactionOutcome::Committed => {
                 ledgers

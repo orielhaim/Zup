@@ -6,7 +6,7 @@ pub enum LinuxOutcome {
     Committed { version: semver::Version },
     RolledBack,
     RecoveryRequired { transaction: String },
-
+    CommittedPendingReconciliation { transaction: String },
     Busy,
 }
 
@@ -16,6 +16,12 @@ impl LinuxOutcome {
             Self::Committed { .. } => InstallOutcome::Committed,
             Self::RolledBack => InstallOutcome::RolledBack,
             Self::RecoveryRequired { .. } => InstallOutcome::RecoveryRequired,
+            Self::CommittedPendingReconciliation { .. } => {
+                InstallOutcome::CommittedPendingReconciliation {
+                    detail: "the transaction committed and ledger reconciliation is still required"
+                        .into(),
+                }
+            }
             Self::Busy => InstallOutcome::Busy {
                 operation: "linux install",
             },

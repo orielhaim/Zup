@@ -97,6 +97,12 @@ pub enum InstallOutcome {
     RolledBack,
     Cancelled,
     RecoveryRequired,
+    /// The journal is committed. Ledger publication or required post-commit work is not.
+    CommittedPendingReconciliation {
+        detail: String,
+    },
+    AuthorizationRequired,
+    AuthorizationCancelled,
     /// It carries what was running, never where the lock lives: the lock file is
     Busy {
         operation: &'static str,
@@ -333,7 +339,6 @@ pub async fn run_install_control_with_policy(
             }
         }
     }
-    emit_terminal(&events, &result);
     result
 }
 
@@ -342,6 +347,20 @@ pub async fn run_local_install(
     request: RuntimeRequest,
 ) -> Result<(InstallOutcome, RuntimeSession), SessionError> {
     run_install(backend, request).await
+}
+
+pub fn outcome_of(result: Result<InstallOutcome, SessionError>) -> InstallOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(SessionError::Cancelled) => InstallOutcome::Cancelled,
+        Err(SessionError::AuthorizationRequired) => InstallOutcome::AuthorizationRequired,
+        Err(SessionError::AuthorizationCancelled) => InstallOutcome::AuthorizationCancelled,
+        Err(SessionError::InstallationBusy) => InstallOutcome::Busy {
+            operation: "maintenance",
+        },
+        Err(SessionError::RecoveryRequired) => InstallOutcome::RecoveryRequired,
+        Err(error) => InstallOutcome::Failed(error.to_string()),
+    }
 }
 
 pub(crate) fn emit_terminal(
@@ -384,6 +403,24 @@ pub(crate) fn emit_terminal(
             let _ = events.send(RuntimeEvent::Failed {
                 kind: "recovery_required".into(),
                 message: "recovery required".into(),
+            });
+        }
+        Ok(InstallOutcome::CommittedPendingReconciliation { detail }) => {
+            let _ = events.send(RuntimeEvent::Failed {
+                kind: "committed_pending_reconciliation".into(),
+                message: detail.clone(),
+            });
+        }
+        Ok(InstallOutcome::AuthorizationRequired) => {
+            let _ = events.send(RuntimeEvent::Failed {
+                kind: "authorization_required".into(),
+                message: "authorization required".into(),
+            });
+        }
+        Ok(InstallOutcome::AuthorizationCancelled) => {
+            let _ = events.send(RuntimeEvent::Failed {
+                kind: "authorization_cancelled".into(),
+                message: "authorization cancelled by user".into(),
             });
         }
         Ok(InstallOutcome::Busy { operation }) => {

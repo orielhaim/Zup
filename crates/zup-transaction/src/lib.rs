@@ -9,7 +9,10 @@ mod plan;
 mod record;
 mod storage;
 
-pub use coordinator::{TransactionCoordinator, TransactionError, TransactionOutcome, recover};
+pub use coordinator::{
+    OpenTransaction, SettledTransaction, TransactionCoordinator, TransactionError,
+    TransactionOutcome, recover,
+};
 pub use executor::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
 pub use id::{OperationId, TransactionId};
 pub use input::{

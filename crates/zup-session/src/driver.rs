@@ -60,6 +60,29 @@ pub fn install() {
     wait_until_succeeded(channel);
 }
 
+pub fn install_then_close() {
+    let (channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::Install);
+    let mut channel = channel;
+    loop {
+        let (next, incoming) = channel
+            .recv_within(std::time::Duration::from_secs(30))
+            .expect("the host publishes while the operation is running");
+        channel = next;
+        let Message::Snapshot(snapshot) = &incoming.message else {
+            continue;
+        };
+        if snapshot
+            .progress
+            .as_ref()
+            .is_some_and(|progress| progress.label == "holding")
+        {
+            send(&channel, &mut peer, Action::Close);
+            return;
+        }
+    }
+}
+
 fn wait_until_succeeded(channel: Channel) {
     let mut channel = channel;
     let mut succeeded = false;

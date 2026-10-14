@@ -36,25 +36,87 @@ pub struct TransactionCoordinator<S: TransactionStore> {
     store: S,
 }
 
+/// Journal owner from `begin` until execute, release, or an explicit preserve.
+///
+/// Dropping it leaves the journal on disk. It does not roll the transaction back.
+#[must_use = "an open transaction must be executed, released, or explicitly preserved for recovery"]
+pub struct OpenTransaction<S: TransactionStore> {
+    store: S,
+    record: TransactionRecord,
+}
+
+pub struct SettledTransaction {
+    pub record: TransactionRecord,
+    pub outcome: TransactionOutcome,
+}
+
 impl<S: TransactionStore> TransactionCoordinator<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
 
     pub fn begin(
-        &self,
+        self,
         app_id: AppId,
         scope: SelectedScope,
         app_version: Version,
         plan: TransactionPlan,
-    ) -> Result<TransactionRecord, TransactionError> {
+    ) -> Result<OpenTransaction<S>, TransactionError> {
         let id = TransactionId::new_v7();
         let record = TransactionRecord::new(id, app_id, scope, app_version, plan);
         self.store.create(&record)?;
         info!(transaction_id = %id, plan_hash = %record.plan_hash, "transaction created");
-        Ok(record)
+        Ok(OpenTransaction {
+            store: self.store,
+            record,
+        })
+    }
+}
+
+impl<S: TransactionStore> std::ops::Deref for OpenTransaction<S> {
+    type Target = TransactionRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+impl<S: TransactionStore> OpenTransaction<S> {
+    pub fn record(&self) -> &TransactionRecord {
+        &self.record
     }
 
+    /// Keeps the journal for recovery without settling it.
+    pub fn preserve(self) -> TransactionRecord {
+        self.record
+    }
+
+    pub fn release<E: OperationExecutor>(
+        self,
+        executor: &mut E,
+    ) -> Result<SettledTransaction, TransactionError>
+    where
+        E::Error: std::fmt::Display,
+    {
+        let (record, outcome) =
+            TransactionCoordinator { store: self.store }.release(self.record, executor)?;
+        Ok(SettledTransaction { record, outcome })
+    }
+
+    pub fn execute<E: OperationExecutor>(
+        self,
+        executor: &mut E,
+    ) -> Result<SettledTransaction, TransactionError>
+    where
+        E::Error: std::fmt::Display,
+    {
+        let (record, outcome) =
+            TransactionCoordinator { store: self.store }.execute(self.record, executor)?;
+        Ok(SettledTransaction { record, outcome })
+    }
+}
+
+impl<S: TransactionStore> TransactionCoordinator<S> {
     pub fn release<E: OperationExecutor>(
         &self,
         mut record: TransactionRecord,

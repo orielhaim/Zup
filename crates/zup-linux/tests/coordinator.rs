@@ -73,9 +73,10 @@ fn run(
         LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(payload_root));
     executor.register_plan(&plan).expect("a plan registers");
     executor.set_transaction_id(record.transaction_id);
-    let (_, outcome) = coordinator
-        .execute(record, &mut executor)
-        .expect("execution reaches a stable outcome");
+    let outcome = record
+        .execute(&mut executor)
+        .expect("execution reaches a stable outcome")
+        .outcome;
     (outcome, executor)
 }
 
@@ -412,9 +413,10 @@ fn a_failed_transaction_restores_an_already_removed_file() {
         },
         fail,
     };
-    let (record, outcome) = coordinator
-        .execute(record, &mut executor)
+    let settled = record
+        .execute(&mut executor)
         .expect("execution reaches a stable outcome");
+    let (record, outcome) = (settled.record, settled.outcome);
     let _ = record;
 
     assert_eq!(outcome, TransactionOutcome::RolledBack);

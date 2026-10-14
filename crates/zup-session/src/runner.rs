@@ -1,7 +1,116 @@
+use std::path::{Path, PathBuf};
+
+use zup_exec::LifecycleAction;
 use zup_presentation::OutputFormat;
 use zup_runtime::{InstallOutcome, PreparedOperation, RuntimeControl, runtime_request};
 
-use crate::host::{OperationContext, SessionDiscovery, SessionHost};
+use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of};
+
+pub struct OperationCompletion {
+    pub id: zup_runtime::Uuid,
+    pub outcome: InstallOutcome,
+    pub repair_drift: Vec<String>,
+}
+
+pub struct OperationLaunch<'a> {
+    pub id: zup_runtime::Uuid,
+    pub action: LifecycleAction,
+    pub selection: &'a zup_preset_host::Selection,
+    pub cleanup_lock: bool,
+    pub cancel: zup_runtime::CancellationHandle,
+    pub events: tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>,
+}
+
+pub async fn complete_operation<H: SessionHost>(
+    host: &H,
+    executable: &Path,
+    discovery: &SessionDiscovery,
+    launch: OperationLaunch<'_>,
+) -> OperationCompletion {
+    let id = launch.id;
+    let outcome = drive_operation(host, executable, discovery, launch).await;
+    let repair_drift = outcome.1;
+    OperationCompletion {
+        id,
+        outcome: outcome.0,
+        repair_drift,
+    }
+}
+
+async fn drive_operation<H: SessionHost>(
+    host: &H,
+    executable: &Path,
+    discovery: &SessionDiscovery,
+    launch: OperationLaunch<'_>,
+) -> (InstallOutcome, Vec<String>) {
+    let OperationLaunch {
+        action,
+        selection,
+        cleanup_lock,
+        cancel,
+        events,
+        ..
+    } = launch;
+    let context = match discovery.context(selection.scope) {
+        Ok(context) => context,
+        Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
+    };
+    let (enable, disable) = selection_of(discovery.installer(), selection);
+    let query = CancelQuery(&cancel);
+    let bound = match host.bind(&context) {
+        Ok(bound) => bound,
+        Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
+    };
+    let input = zup_runtime::OperationInput {
+        build: &discovery.build,
+        installer: executable,
+        scope: context.scope,
+        operation: zup_runtime::Operation::from(action),
+        selection: zup_runtime::OperationSelection {
+            enable,
+            disable,
+            install_directory: selection.install_directory.as_deref().map(PathBuf::from),
+        },
+        prior: context.ledger.as_ref(),
+        state_root: &context.state_root,
+        cancellation: &query,
+    };
+    let prepared = match zup_runtime::prepare_operation(&input, &bound) {
+        Ok(prepared) => prepared,
+        Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
+    };
+    let drifted = prepared
+        .transaction_plan
+        .retired_keys
+        .iter()
+        .map(|key| format!("{key:?}"))
+        .collect::<Vec<_>>();
+    let control = RuntimeControl::new(cancel, events, zup_runtime::ExecutionPolicy::Interactive);
+    let executed = run_operation(host, &context, discovery, &prepared, control).await;
+    let mut outcome = zup_runtime::outcome_of(executed);
+    if cleanup_lock
+        && matches!(outcome, InstallOutcome::Committed)
+        && let Err(error) = host.after_commit(&context, &prepared)
+    {
+        outcome = InstallOutcome::CommittedPendingReconciliation { detail: error };
+    }
+    let drift = if matches!(action, LifecycleAction::Repair { .. })
+        && matches!(outcome, InstallOutcome::Committed)
+    {
+        drifted
+    } else {
+        Vec::new()
+    };
+    (outcome, drift)
+}
+
+struct CancelQuery<'a>(&'a zup_runtime::CancellationHandle);
+
+impl zup_plan::CancellationQuery for CancelQuery<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
 
 pub async fn run_operation<H: SessionHost>(
     host: &H,
@@ -83,6 +192,11 @@ fn process_human(outcome: &InstallOutcome) -> &'static str {
         InstallOutcome::Committed => "committed",
         InstallOutcome::RolledBack => "rolled back",
         InstallOutcome::RecoveryRequired => "requires recovery",
+        InstallOutcome::CommittedPendingReconciliation { .. } => {
+            "committed, reconciliation required"
+        }
+        InstallOutcome::AuthorizationRequired => "authorization required",
+        InstallOutcome::AuthorizationCancelled => "authorization cancelled",
         InstallOutcome::Busy { .. } => "busy",
         InstallOutcome::Cancelled => "cancelled",
         InstallOutcome::RebootRequired { .. } => "reboot required",

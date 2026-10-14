@@ -16,8 +16,8 @@ pub use session::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RecoveryStatus,
     RuntimeBackend, RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimePayloadSource,
     RuntimeRequest, RuntimeSession, RuntimeState, SessionError, SessionLog, TokenProbe,
-    discover_recovery, run_install, run_install_control, run_install_control_with_policy,
-    run_local_install,
+    discover_recovery, outcome_of, run_install, run_install_control,
+    run_install_control_with_policy, run_local_install,
 };
 pub use simulate::{SimulatedJob, SimulatedLifecycle, run_simulated};
 pub use telemetry::{EventingExecutor, operation_action, operation_work};

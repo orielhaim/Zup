@@ -130,7 +130,12 @@ impl LinuxRuntimeBackend {
                         outcome: InstallOutcome::Committed,
                         recovery_transaction: None,
                     }),
-                    Err(error) => Err(SessionError::Transaction(error.to_string())),
+                    Err(error) => Ok(ExecutionReport {
+                        outcome: InstallOutcome::CommittedPendingReconciliation {
+                            detail: error.to_string(),
+                        },
+                        recovery_transaction: Some(record.transaction_id.to_string()),
+                    }),
                 }
             }
             Ok((record, TransactionOutcome::RolledBack)) => {
@@ -208,8 +213,7 @@ impl LinuxRuntimeBackend {
             .register_plan(&request.transaction_plan)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let store = FilesystemTransactionStore::new(&request.state_root);
-        let coordinator = TransactionCoordinator::new(store);
-        let record = coordinator
+        let open = TransactionCoordinator::new(store)
             .begin(
                 request.app_id.clone(),
                 request.scope,
@@ -217,9 +221,9 @@ impl LinuxRuntimeBackend {
                 request.transaction_plan.clone(),
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        executor.set_transaction_id(record.transaction_id);
+        executor.set_transaction_id(open.record().transaction_id);
         if control.cancellation.is_cancelled() {
-            return release_cancelled(&coordinator, record, &mut executor);
+            return release_cancelled(open, &mut executor);
         }
         let total_work = request.transaction_plan.total_work();
         let mut executor = EventingExecutor::new(
@@ -231,34 +235,48 @@ impl LinuxRuntimeBackend {
             },
             || ExecError::Cancelled,
         );
-        match coordinator.execute(record, &mut executor) {
-            Ok((record, TransactionOutcome::Committed)) => {
-                match ledger_store.publish_committed(&record, request.scope) {
-                    Ok(ledger) => {
-                        if action == zup_exec::LifecycleAction::Uninstall {
-                            let _ =
-                                InstallationLock::remove_if_unheld(&request.state_root, &lock_key);
-                        } else {
-                            if action == zup_exec::LifecycleAction::Upgrade {
-                                crate::run::retire_old_generations_for(
-                                    &request.state_root,
-                                    &request.app_id,
-                                    request.scope,
-                                    &ledger.version,
-                                )
-                                .map_err(|error| SessionError::Transaction(error.to_string()))?;
-                            }
-                            let _ = ledger;
+        match open.execute(&mut executor) {
+            Ok(zup_transaction::SettledTransaction {
+                record,
+                outcome: TransactionOutcome::Committed,
+            }) => match ledger_store.publish_committed(&record, request.scope) {
+                Ok(ledger) => {
+                    if action == zup_exec::LifecycleAction::Uninstall {
+                        let _ = InstallationLock::remove_if_unheld(&request.state_root, &lock_key);
+                    } else {
+                        if action == zup_exec::LifecycleAction::Upgrade
+                            && let Err(error) = crate::run::retire_old_generations_for(
+                                &request.state_root,
+                                &request.app_id,
+                                request.scope,
+                                &ledger.version,
+                            )
+                        {
+                            return Ok(ExecutionReport {
+                                outcome: InstallOutcome::CommittedPendingReconciliation {
+                                    detail: error.to_string(),
+                                },
+                                recovery_transaction: Some(record.transaction_id.to_string()),
+                            });
                         }
-                        Ok(ExecutionReport {
-                            outcome: InstallOutcome::Committed,
-                            recovery_transaction: None,
-                        })
+                        let _ = ledger;
                     }
-                    Err(error) => Err(SessionError::Transaction(error.to_string())),
+                    Ok(ExecutionReport {
+                        outcome: InstallOutcome::Committed,
+                        recovery_transaction: None,
+                    })
                 }
-            }
-            Ok((record, TransactionOutcome::RolledBack)) => {
+                Err(error) => Ok(ExecutionReport {
+                    outcome: InstallOutcome::CommittedPendingReconciliation {
+                        detail: error.to_string(),
+                    },
+                    recovery_transaction: Some(record.transaction_id.to_string()),
+                }),
+            },
+            Ok(zup_transaction::SettledTransaction {
+                record,
+                outcome: TransactionOutcome::RolledBack,
+            }) => {
                 let _ = crate::run::sweep_refresh(&record);
                 if control.cancellation.is_cancelled() {
                     return Ok(ExecutionReport {
@@ -271,11 +289,17 @@ impl LinuxRuntimeBackend {
                     recovery_transaction: None,
                 })
             }
-            Ok((record, TransactionOutcome::RecoveryRequired)) => Ok(ExecutionReport {
+            Ok(zup_transaction::SettledTransaction {
+                record,
+                outcome: TransactionOutcome::RecoveryRequired,
+            }) => Ok(ExecutionReport {
                 outcome: InstallOutcome::RecoveryRequired,
                 recovery_transaction: Some(record.transaction_id.to_string()),
             }),
-            Err(error) => Err(SessionError::Transaction(error.to_string())),
+            Err(_) => Ok(ExecutionReport {
+                outcome: InstallOutcome::RecoveryRequired,
+                recovery_transaction: None,
+            }),
         }
     }
 
@@ -321,6 +345,14 @@ impl LinuxRuntimeBackend {
                 LinuxOutcome::RolledBack => ExecutionReport {
                     outcome: InstallOutcome::RolledBack,
                     recovery_transaction: None,
+                },
+                LinuxOutcome::CommittedPendingReconciliation { transaction } => ExecutionReport {
+                    outcome: InstallOutcome::CommittedPendingReconciliation {
+                        detail:
+                            "the transaction committed and ledger reconciliation is still required"
+                                .into(),
+                    },
+                    recovery_transaction: Some(transaction),
                 },
                 LinuxOutcome::RecoveryRequired { transaction } => ExecutionReport {
                     outcome: InstallOutcome::RecoveryRequired,
@@ -435,6 +467,13 @@ impl LinuxRuntimeBackend {
                 outcome: InstallOutcome::RecoveryRequired,
                 recovery_transaction: Some(transaction),
             }),
+            LinuxOutcome::CommittedPendingReconciliation { transaction } => Ok(ExecutionReport {
+                outcome: InstallOutcome::CommittedPendingReconciliation {
+                    detail: "the transaction committed and ledger reconciliation is still required"
+                        .into(),
+                },
+                recovery_transaction: Some(transaction),
+            }),
             LinuxOutcome::Busy => Ok(ExecutionReport {
                 outcome: InstallOutcome::Busy {
                     operation: "linux install",
@@ -493,22 +532,33 @@ impl RuntimeBackend for LinuxRuntimeBackend {
 }
 
 fn release_cancelled(
-    coordinator: &TransactionCoordinator<FilesystemTransactionStore>,
-    record: zup_transaction::TransactionRecord,
+    open: zup_transaction::OpenTransaction<FilesystemTransactionStore>,
     executor: &mut LinuxFileExecutor,
 ) -> Result<ExecutionReport, SessionError> {
-    match coordinator.release(record, executor) {
-        Ok((_record, TransactionOutcome::RolledBack)) => Ok(ExecutionReport {
+    match open.release(executor) {
+        Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::RolledBack,
+            ..
+        }) => Ok(ExecutionReport {
             outcome: InstallOutcome::Cancelled,
             recovery_transaction: None,
         }),
-        Ok((record, TransactionOutcome::RecoveryRequired)) => Ok(ExecutionReport {
+        Ok(zup_transaction::SettledTransaction {
+            record,
+            outcome: TransactionOutcome::RecoveryRequired,
+        }) => Ok(ExecutionReport {
             outcome: InstallOutcome::RecoveryRequired,
             recovery_transaction: Some(record.transaction_id.to_string()),
         }),
-        Ok((_, TransactionOutcome::Committed)) => Err(SessionError::Transaction(
+        Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::Committed,
+            ..
+        }) => Err(SessionError::Transaction(
             "a cancelled transaction cannot commit".into(),
         )),
-        Err(error) => Err(SessionError::Transaction(error.to_string())),
+        Err(_) => Ok(ExecutionReport {
+            outcome: InstallOutcome::RecoveryRequired,
+            recovery_transaction: None,
+        }),
     }
 }

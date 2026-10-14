@@ -368,6 +368,11 @@ pub(crate) fn drive_client(
                     "recovery_required" => Ok(LinuxOutcome::RecoveryRequired {
                         transaction: completed.transaction_id.to_string(),
                     }),
+                    "committed_pending_reconciliation" => {
+                        Ok(LinuxOutcome::CommittedPendingReconciliation {
+                            transaction: completed.transaction_id.to_string(),
+                        })
+                    }
                     _ => Err(ExecError::Worker(format!(
                         "unknown outcome {}",
                         completed.outcome
@@ -439,8 +444,9 @@ fn emit_progress(
             }
         }
         ProgressKind::RollingBack => zup_runtime::RuntimeEvent::RollingBack,
-        ProgressKind::Committed => zup_runtime::RuntimeEvent::Completed {
-            outcome: "committed".into(),
+        ProgressKind::Committed => zup_runtime::RuntimeEvent::StagingProgress {
+            id: "commit".into(),
+            detail: report.detail.clone(),
         },
     };
     let _ = events.send(event);
@@ -519,7 +525,17 @@ pub(crate) fn run_machine_loopback_for_test(
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
 ) -> Result<LinuxOutcome, ExecError> {
-    run_machine_loopback_with(request, roots, systemd)
+    run_machine_loopback_with(request, roots, systemd, crate::worker::WorkerFault::None)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn run_machine_loopback_faulted(
+    request: &LinuxRunRequest,
+    roots: &MachineRoots,
+    systemd: &crate::machine::SystemdRoots,
+    fault: crate::worker::WorkerFault,
+) -> Result<LinuxOutcome, ExecError> {
+    run_machine_loopback_with(request, roots, systemd, fault)
 }
 
 fn run_machine_loopback_on(
@@ -532,6 +548,7 @@ fn run_machine_loopback_on(
         state_root,
         roots,
         &crate::machine::SystemdRoots::production(),
+        crate::worker::WorkerFault::None,
     )
 }
 
@@ -540,10 +557,11 @@ fn run_machine_loopback_with(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
+    fault: crate::worker::WorkerFault,
 ) -> Result<LinuxOutcome, ExecError> {
     let state_root =
         crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
-    run_machine_loopback_with_on(request, &state_root, roots, systemd)
+    run_machine_loopback_with_on(request, &state_root, roots, systemd, fault)
 }
 
 fn run_machine_loopback_with_on(
@@ -551,10 +569,11 @@ fn run_machine_loopback_with_on(
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
+    fault: crate::worker::WorkerFault,
 ) -> Result<LinuxOutcome, ExecError> {
-    match run_machine_loopback_with_once(request, state_root, roots, systemd) {
+    match run_machine_loopback_with_once(request, state_root, roots, systemd, fault) {
         Err(ExecError::StalePlan) => {
-            run_machine_loopback_with_once(request, state_root, roots, systemd)
+            run_machine_loopback_with_once(request, state_root, roots, systemd, fault)
         }
         outcome => outcome,
     }
@@ -565,6 +584,7 @@ fn run_machine_loopback_with_once(
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
+    fault: crate::worker::WorkerFault,
 ) -> Result<LinuxOutcome, ExecError> {
     let (intent, expected) = plan_expected(
         request,
@@ -587,6 +607,7 @@ fn run_machine_loopback_with_once(
         session,
         worker_exe: request.installer.clone(),
         carrier_pin: None,
+        fault,
     };
     let worker_thread =
         std::thread::spawn(move || crate::worker::serve_session(&mut worker, context));

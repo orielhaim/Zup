@@ -121,10 +121,13 @@ async fn runtime_forwards_control_and_reports_local_outcome() {
             ..
         }
     )));
-    assert!(forwarded.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::Completed { outcome } if outcome == "committed"
-    )));
+    assert!(
+        forwarded.iter().all(|event| !matches!(
+            event,
+            RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
+        )),
+        "execution progress is not a terminal result"
+    );
 }
 
 #[tokio::test]
@@ -144,9 +147,9 @@ async fn runtime_preserves_cancellation_and_authorization_policy() {
     .await;
     assert!(matches!(result, Ok(InstallOutcome::Cancelled)));
     assert!(
-        std::iter::from_fn(|| receiver.try_recv().ok()).any(|event| matches!(
+        std::iter::from_fn(|| receiver.try_recv().ok()).all(|event| !matches!(
             event,
-            RuntimeEvent::Completed { outcome } if outcome == "cancelled"
+            RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
         ))
     );
 

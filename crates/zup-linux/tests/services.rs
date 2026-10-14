@@ -293,9 +293,10 @@ impl Fixture {
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
-        let (record, outcome) = coordinator
-            .execute(record, &mut executor)
+        let settled = record
+            .execute(&mut executor)
             .map_err(|error| format!("execute: {error}"))?;
+        let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
             TransactionOutcome::Committed => {
                 let ledger = ledgers
@@ -363,6 +364,7 @@ impl Fixture {
                 compiled,
             )
             .expect("a journal begins")
+            .preserve()
     }
 
     fn begin_uninstall(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
@@ -407,6 +409,7 @@ impl Fixture {
                 compiled,
             )
             .expect("a journal begins")
+            .preserve()
     }
 
     fn recover(
@@ -922,9 +925,10 @@ fn tampered_unit_bytes_refuse_at_apply() {
         .register_plan(&record.plan)
         .expect("a plan registers");
     executor.set_transaction_id(record.transaction_id);
-    let (_, outcome) = coordinator
-        .execute(record, &mut executor)
-        .expect("execution reaches a stable outcome");
+    let outcome = record
+        .execute(&mut executor)
+        .expect("execution reaches a stable outcome")
+        .outcome;
     assert!(
         !matches!(outcome, TransactionOutcome::Committed),
         "a substituted payload never commits"

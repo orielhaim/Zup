@@ -107,6 +107,21 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
             version: app_version,
         }),
         zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+        zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. } => {
+            Ok(LinuxOutcome::CommittedPendingReconciliation {
+                transaction: zup_runtime::discover_recovery(&context.state_root)
+                    .into_iter()
+                    .find_map(|status| match status {
+                        zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
+                        | zup_runtime::RecoveryStatus::PreparedTransaction { transaction_id }
+                        | zup_runtime::RecoveryStatus::InterruptedApplyingTransaction {
+                            transaction_id,
+                        } => Some(transaction_id),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "committed".into()),
+            })
+        }
         zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
             transaction: zup_runtime::discover_recovery(&context.state_root)
                 .into_iter()
@@ -120,7 +135,9 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
         }),
         zup_runtime::InstallOutcome::Busy { .. } => Ok(LinuxOutcome::Busy),
         zup_runtime::InstallOutcome::Cancelled => Err(ExecError::Ownership("cancelled".into())),
-        zup_runtime::InstallOutcome::RebootRequired { .. }
+        zup_runtime::InstallOutcome::AuthorizationRequired
+        | zup_runtime::InstallOutcome::AuthorizationCancelled
+        | zup_runtime::InstallOutcome::RebootRequired { .. }
         | zup_runtime::InstallOutcome::Failed(_) => Err(ExecError::Ownership(
             "the operation did not complete".into(),
         )),
