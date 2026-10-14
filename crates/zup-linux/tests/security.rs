@@ -6,17 +6,26 @@ use std::path::{Path, PathBuf};
 use zup_core::{SelectedScope, Target};
 use zup_linux::{Carrier, CarrierError, ExecError, FOOTER_LEN, LinuxRunRequest, PathError, run};
 
+use rstest::rstest;
 use zup_linux::test_support::{
-    IsolatedUser, compose_installer, genuine_template, package_bytes, package_bytes_for, v1_files,
+    IsolatedUser, compose_installer, inert_template, package_bytes, package_bytes_for, v1_files,
 };
 use zup_runtime::Operation;
 
-fn genuine_installer(scratch: &Path, name: &str) -> (PathBuf, Vec<u8>) {
+fn installer(scratch: &Path, name: &str) -> (PathBuf, Vec<u8>) {
     let package = package_bytes(scratch, "1.0.0", &v1_files());
     let output = scratch.join(name);
-    compose_installer(&genuine_template("console"), &output, &package);
+    compose_installer(Path::new(inert_template()), &output, &package);
     let bytes = std::fs::read(&output).expect("the installer reads");
     (output, bytes)
+}
+
+#[derive(Clone, Copy)]
+enum FooterFault {
+    Digest,
+    Length,
+    Offset,
+    Version,
 }
 
 const VERSION_AT: usize = 17;
@@ -40,57 +49,37 @@ fn write_copy(scratch: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-#[test]
-fn a_footer_digest_that_disagrees_is_refused() {
+#[rstest]
+#[case::digest(FooterFault::Digest)]
+#[case::length(FooterFault::Length)]
+#[case::offset(FooterFault::Offset)]
+#[case::version(FooterFault::Version)]
+fn a_corrupt_footer_is_refused_before_any_install(#[case] fault: FooterFault) {
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (_, mut bytes) = genuine_installer(scratch.path(), "setup");
-    let digest_at = bytes.len() - FOOTER_LEN as usize + DIGEST_AT;
-    bytes[digest_at] ^= 0x01;
-    let path = write_copy(scratch.path(), "bad-digest", &bytes);
-
-    match Carrier::open(&path) {
-        Err(CarrierError::PackageDigestMismatch { .. }) => {}
-        other => panic!("a bad footer digest is refused as mismatch: {other:?}"),
+    let (_, mut bytes) = installer(scratch.path(), "setup");
+    match fault {
+        FooterFault::Digest => {
+            let digest_at = bytes.len() - FOOTER_LEN as usize + DIGEST_AT;
+            bytes[digest_at] ^= 0x01;
+        }
+        FooterFault::Length => poke_u64(&mut bytes, LENGTH_AT, u64::MAX),
+        FooterFault::Offset => {
+            let far = bytes.len() as u64 + 4096;
+            poke_u64(&mut bytes, OFFSET_AT, far);
+        }
+        FooterFault::Version => poke_u32(&mut bytes, VERSION_AT, 0xFFFF),
     }
-}
+    let path = write_copy(scratch.path(), "corrupt", &bytes);
 
-#[test]
-fn an_overflowing_package_length_is_refused_without_allocation() {
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (_, mut bytes) = genuine_installer(scratch.path(), "setup");
-    poke_u64(&mut bytes, LENGTH_AT, u64::MAX);
-    let path = write_copy(scratch.path(), "huge-length", &bytes);
-
-    match Carrier::open(&path) {
-        Err(CarrierError::PackageOutsideFile { .. } | CarrierError::ImplausibleLength { .. }) => {}
-        other => panic!("an overflowing length is refused before allocation: {other:?}"),
-    }
-}
-
-#[test]
-fn an_offset_outside_the_file_is_refused() {
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (_, mut bytes) = genuine_installer(scratch.path(), "setup");
-    let far = bytes.len() as u64 + 4096;
-    poke_u64(&mut bytes, OFFSET_AT, far);
-    let path = write_copy(scratch.path(), "far-offset", &bytes);
-
-    match Carrier::open(&path) {
-        Err(CarrierError::PackageOutsideFile { .. }) => {}
-        other => panic!("an outside offset is refused: {other:?}"),
-    }
-}
-
-#[test]
-fn an_unknown_carrier_version_is_refused() {
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (_, mut bytes) = genuine_installer(scratch.path(), "setup");
-    poke_u32(&mut bytes, VERSION_AT, 0xFFFF);
-    let path = write_copy(scratch.path(), "future-version", &bytes);
-
-    match Carrier::open(&path) {
-        Err(CarrierError::UnsupportedVersion { found: 0xFFFF, .. }) => {}
-        other => panic!("a future version is refused explicitly: {other:?}"),
+    match (fault, Carrier::open(&path)) {
+        (FooterFault::Digest, Err(CarrierError::PackageDigestMismatch { .. }))
+        | (
+            FooterFault::Length,
+            Err(CarrierError::PackageOutsideFile { .. } | CarrierError::ImplausibleLength { .. }),
+        )
+        | (FooterFault::Offset, Err(CarrierError::PackageOutsideFile { .. }))
+        | (FooterFault::Version, Err(CarrierError::UnsupportedVersion { found: 0xFFFF, .. })) => {}
+        (_, other) => panic!("a corrupt footer is refused: {other:?}"),
     }
 }
 
@@ -101,7 +90,7 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
     let windows = Target::parse("windows-x64").expect("a Windows target");
     let package = package_bytes_for(scratch.path(), &windows, "1.0.0", &v1_files());
     let output = scratch.path().join("mismatched");
-    compose_installer(&genuine_template("console"), &output, &package);
+    compose_installer(Path::new(inert_template()), &output, &package);
 
     match Carrier::open(&output) {
         Err(CarrierError::TargetMismatch { .. }) => {}
@@ -129,7 +118,7 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
 fn a_redirected_state_hierarchy_is_refused() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (installer, _) = genuine_installer(scratch.path(), "setup");
+    let (installer, _) = installer(scratch.path(), "setup");
 
     let elsewhere = tempfile::tempdir().expect("an unrelated tree");
     let redirected = user.state.join("transactions");
@@ -163,7 +152,7 @@ fn a_redirected_state_hierarchy_is_refused() {
 fn a_redirected_install_destination_is_refused() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let (installer, _) = genuine_installer(scratch.path(), "setup");
+    let (installer, _) = installer(scratch.path(), "setup");
 
     let programs = user.programs();
     std::fs::create_dir_all(&programs).expect("a programs root");
