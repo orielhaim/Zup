@@ -127,7 +127,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y desktop-file-utils shared-mime-info
+          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
           command -v update-mime-database
           command -v update-desktop-database
           command -v desktop-file-validate

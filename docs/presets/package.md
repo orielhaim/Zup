@@ -62,11 +62,11 @@ diagnostic; it never silently falls back to headless. It needs Wayland
 ## Native dependencies for Linux GUI builds
 
 Cross-compiling a GPUI preset is not supported: building a Linux GUI preset
-needs a Linux host with the GUI system libraries installed (Wayland, X11,
-xkbcommon). On Debian/Ubuntu:
+needs a Linux host with the GUI system libraries installed (fontconfig,
+freetype, Wayland, X11, xkbcommon). On Debian/Ubuntu:
 
 ```bash
-sudo apt install libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
+sudo apt install pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 ```
 
 Packing a preset for a target whose binary cannot run here needs
