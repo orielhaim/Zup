@@ -93,6 +93,8 @@ pub use input::{
     ledger_has_services, requires_service_manager, snapshot_services,
 };
 #[cfg(target_os = "linux")]
+pub use integration::{generated_for_plan, reap_generated, stage_generated};
+#[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
 pub use lifecycle::LinuxOutcome;
 pub use locations::{

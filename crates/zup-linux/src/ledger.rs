@@ -76,6 +76,16 @@ impl LinuxLedgerStore {
         {
             return Err(ExecError::Ownership("target identity".into()));
         }
+        match (
+            ledger
+                .as_ref()
+                .map(|ledger| ledger.committed_transaction.as_str()),
+            plan.observed_transaction.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(current), Some(observed)) if current == observed => {}
+            _ => return Err(ExecError::Ownership("installation generation".into())),
+        }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
 
         let retired_ledger = retired_ledger_keys(plan)?;
@@ -995,6 +1005,7 @@ mod tests {
             execution_order: vec![node.id.clone()],
             rollback_order: vec![node.id.clone()],
             preset: None,
+            observed_transaction: None,
         };
         let mut record = TransactionRecord::new(
             *transaction,

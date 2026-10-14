@@ -714,12 +714,14 @@ fn recover_one(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
+    let generated = crate::integration::generated_for_plan(state_root, &record.plan)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let payload = crate::run::RunnerPayload::from_prepared(
         carrier.package().payload_source(),
         carrier_path.to_path_buf(),
         maintenance_sha256,
         maintenance_size,
-        BTreeMap::new(),
+        generated,
     );
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)

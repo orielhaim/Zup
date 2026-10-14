@@ -88,31 +88,17 @@ impl SessionHost for LinuxSessionHost {
 
     fn backend(
         &self,
-        context: &zup_session::OperationContext,
+        _context: &zup_session::OperationContext,
         prepared: &PreparedOperation,
     ) -> Result<Arc<dyn RuntimeBackend>, String> {
-        let target = prepared
+        let _target = prepared
             .target_plan()
             .ok_or_else(|| "a Linux transaction resolves its target".to_owned())?;
         let generated = match prepared.install_plan() {
             Some(install) => {
-                let generated = crate::integration::generated_map(install)
-                    .map_err(|error| error.to_string())?;
-                crate::integration::save_generated(
-                    &context.state_root,
-                    &install.app.id,
-                    context.scope,
-                    &generated,
-                )
-                .map_err(|error| error.to_string())?;
-                generated
+                crate::integration::generated_map(install).map_err(|error| error.to_string())?
             }
-            None => crate::integration::load_generated(
-                &context.state_root,
-                &target.app.id,
-                context.scope,
-            )
-            .map_err(|error| error.to_string())?,
+            None => std::collections::BTreeMap::new(),
         };
         Ok(Arc::new(crate::backend::LinuxRuntimeBackend {
             installer: self.installer.clone(),

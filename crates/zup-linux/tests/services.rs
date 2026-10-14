@@ -249,7 +249,7 @@ impl Fixture {
         )
         .map_err(|error| format!("lifecycle: {error}"))?;
         let mut manager = self.manager.clone();
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -260,6 +260,9 @@ impl Fixture {
             },
         )
         .map_err(|error| format!("input: {error}"))?;
+        input.observed_transaction = ledger
+            .as_ref()
+            .map(|ledger| ledger.committed_transaction.clone());
         let plan_compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
@@ -380,7 +383,7 @@ impl Fixture {
         )
         .expect("lifecycle plans");
         let mut manager = self.manager.clone();
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -391,6 +394,7 @@ impl Fixture {
             },
         )
         .expect("an input compiles");
+        input.observed_transaction = Some(ledger.committed_transaction.clone());
         let compiled = compile_transaction(&input).expect("a transaction compiles");
         self.ledgers()
             .validate_plan(

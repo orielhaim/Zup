@@ -187,6 +187,9 @@ pub struct TransactionInput {
     pub removals: Vec<FileRemoval>,
     pub backend_operations: Vec<BackendOperation>,
     pub preset: Option<InstalledPreset>,
+    /// Committed transaction this plan was prepared against.
+    /// `None` means no installation existed.
+    pub observed_transaction: Option<String>,
 }
 
 impl TransactionInput {
@@ -201,6 +204,7 @@ impl TransactionInput {
             removals: Vec::new(),
             backend_operations: Vec::new(),
             preset: None,
+            observed_transaction: None,
         }
     }
 

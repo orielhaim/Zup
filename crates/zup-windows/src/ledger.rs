@@ -182,6 +182,16 @@ impl InstallLedgerStore {
         {
             return Err(LedgerError::Ownership("target identity".into()));
         }
+        match (
+            ledger
+                .as_ref()
+                .map(|ledger| ledger.committed_transaction.as_str()),
+            plan.observed_transaction.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(current), Some(observed)) if current == observed => {}
+            _ => return Err(LedgerError::Ownership("installation generation".into())),
+        }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         if retired.len() != plan.retired_keys.len()

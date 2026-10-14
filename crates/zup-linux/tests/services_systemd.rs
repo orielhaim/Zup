@@ -339,7 +339,7 @@ impl RealWorld {
             &owned_matches,
         )
         .map_err(|error| format!("lifecycle: {error}"))?;
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -350,6 +350,9 @@ impl RealWorld {
             },
         )
         .map_err(|error| format!("input: {error}"))?;
+        input.observed_transaction = ledger
+            .as_ref()
+            .map(|ledger| ledger.committed_transaction.clone());
         let compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers

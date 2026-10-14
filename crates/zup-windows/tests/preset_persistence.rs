@@ -103,7 +103,12 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -
     compile_transaction(&input).expect("the plan compiles")
 }
 
-fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
+fn retire_plan_against(
+    state_root: &Path,
+    scope: SelectedScope,
+    ui: &InstalledPreset,
+    observed: Option<String>,
+) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
         let key = ResourceKey::File {
@@ -121,6 +126,7 @@ fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) ->
             created_directories: Vec::new(),
         });
     }
+    input.observed_transaction = observed;
     compile_transaction(&input).expect("the plan compiles")
 }
 
@@ -237,6 +243,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
         });
     }
     input.preset = Some(second.clone());
+    input.observed_transaction = Some(ledger.committed_transaction.clone());
     let replacing = compile_transaction(&input).expect("the plan compiles");
     validate(
         state_root.path(),
@@ -275,7 +282,9 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
             },
         );
     }
-    let empty = compile_transaction(&TransactionInput::new(target())).expect("an empty plan");
+    let mut input = TransactionInput::new(target());
+    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    let empty = compile_transaction(&input).expect("an empty plan");
     let error = validate(
         state_root.path(),
         SelectedScope::User,
@@ -288,7 +297,12 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
     validate(
         state_root.path(),
         SelectedScope::User,
-        &retire_plan(state_root.path(), SelectedScope::User, &ui),
+        &retire_plan_against(
+            state_root.path(),
+            SelectedScope::User,
+            &ui,
+            Some(ledger.committed_transaction.clone()),
+        ),
         Some(ledger),
     )
     .expect("and a plan that retires it is accepted");

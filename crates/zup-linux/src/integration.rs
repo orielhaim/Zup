@@ -263,79 +263,175 @@ pub fn generated_map(
 }
 
 #[cfg(target_os = "linux")]
-fn generated_store_path(
-    state_root: &std::path::Path,
-    app_id: &zup_core::AppId,
-    scope: SelectedScope,
-) -> std::path::PathBuf {
-    let (size, digest) = zup_core::hash_reader(app_id.as_str().as_bytes()).expect("an id hashes");
-    debug_assert_eq!(size, app_id.as_str().len() as u64);
-    let scope_token = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    state_root
-        .join("generated")
-        .join(format!("{}-{scope_token}.json", digest.to_hex()))
+fn objects_dir(state_root: &std::path::Path) -> std::path::PathBuf {
+    state_root.join("generated").join("objects")
 }
 
 #[cfg(target_os = "linux")]
-pub fn save_generated(
+fn object_path(
     state_root: &std::path::Path,
-    app_id: &zup_core::AppId,
-    scope: SelectedScope,
+    digest: &zup_core::Sha256Digest,
+) -> std::path::PathBuf {
+    objects_dir(state_root).join(digest.to_hex())
+}
+
+#[cfg(target_os = "linux")]
+fn io_path(path: &std::path::Path, error: std::io::Error) -> PlanError {
+    PlanError::InvalidTargetPath {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    }
+}
+
+/// Writes each blob under its own digest. An existing matching object is left
+/// in place. A different object never shares that name.
+#[cfg(target_os = "linux")]
+pub fn stage_generated(
+    state_root: &std::path::Path,
     generated: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PlanError> {
-    let path = generated_store_path(state_root, app_id, scope);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| PlanError::InvalidTargetPath {
-            path: parent.display().to_string(),
-            reason: error.to_string(),
-        })?;
+    for (name, bytes) in generated {
+        let (size, digest) =
+            zup_core::hash_reader(bytes.as_slice()).map_err(|_| PlanError::InvalidTargetPath {
+                path: name.clone(),
+                reason: "generated content does not hash".into(),
+            })?;
+        let path = object_path(state_root, &digest);
+        if path.is_file() {
+            let existing = std::fs::read(&path).map_err(|error| io_path(&path, error))?;
+            if existing.len() as u64 == size && zup_core::hash_bytes(&existing) == digest {
+                continue;
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_path(parent, error))?;
+        }
+        let temporary = path.with_extension("tmp");
+        {
+            let mut file =
+                std::fs::File::create(&temporary).map_err(|error| io_path(&temporary, error))?;
+            use std::io::Write as _;
+            file.write_all(bytes)
+                .map_err(|error| io_path(&temporary, error))?;
+            file.sync_all()
+                .map_err(|error| io_path(&temporary, error))?;
+        }
+        std::fs::rename(&temporary, &path).map_err(|error| io_path(&path, error))?;
+        if let Some(parent) = path.parent() {
+            let directory = std::fs::File::open(parent).map_err(|error| io_path(parent, error))?;
+            directory
+                .sync_all()
+                .map_err(|error| io_path(parent, error))?;
+        }
     }
-
-    let text: std::collections::BTreeMap<&str, &str> = generated
-        .iter()
-        .map(|(name, bytes)| {
-            std::str::from_utf8(bytes)
-                .map(|text| (name.as_str(), text))
-                .map_err(|_| PlanError::InvalidTargetPath {
-                    path: name.clone(),
-                    reason: "generated content is not UTF-8".into(),
-                })
-        })
-        .collect::<Result<_, _>>()?;
-    let serialized = serde_json::to_vec(&text).map_err(|error| PlanError::InvalidTargetPath {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    std::fs::write(&path, &serialized).map_err(|error| PlanError::InvalidTargetPath {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-pub fn load_generated(
+pub fn generated_for_plan(
     state_root: &std::path::Path,
-    app_id: &zup_core::AppId,
-    scope: SelectedScope,
+    plan: &zup_transaction::TransactionPlan,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
-    let path = generated_store_path(state_root, app_id, scope);
-    let serialized = std::fs::read(&path).map_err(|error| PlanError::InvalidTargetPath {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    let text: std::collections::BTreeMap<String, String> = serde_json::from_slice(&serialized)
-        .map_err(|error| PlanError::InvalidTargetPath {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })?;
-    Ok(text
-        .into_iter()
-        .map(|(name, content)| (name, content.into_bytes()))
-        .collect())
+    let mut generated = std::collections::BTreeMap::new();
+    for node in &plan.nodes {
+        let Some(source) = node.meta.source_relative.as_ref() else {
+            continue;
+        };
+        if !source.as_str().starts_with(GENERATED_PREFIX) {
+            continue;
+        }
+        let Some(digest) = node.meta.expected_sha256 else {
+            return Err(PlanError::InvalidTargetPath {
+                path: source.to_string(),
+                reason: "generated content has no digest".into(),
+            });
+        };
+        let Some(size) = node.meta.expected_size else {
+            return Err(PlanError::InvalidTargetPath {
+                path: source.to_string(),
+                reason: "generated content has no size".into(),
+            });
+        };
+        let path = object_path(state_root, &digest);
+        let bytes = std::fs::read(&path).map_err(|error| io_path(&path, error))?;
+        if bytes.len() as u64 != size || zup_core::hash_bytes(&bytes) != digest {
+            return Err(PlanError::InvalidTargetPath {
+                path: path.display().to_string(),
+                reason: "generated content does not match the transaction".into(),
+            });
+        }
+        generated.insert(source.to_string(), bytes);
+    }
+    Ok(generated)
+}
+
+/// Drops objects no unsettled journal still names.
+#[cfg(target_os = "linux")]
+pub fn reap_generated(state_root: &std::path::Path) -> Result<(), PlanError> {
+    let retained = retained_objects(state_root)?;
+    let directory = objects_dir(state_root);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_path(&directory, error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| io_path(&directory, error))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".tmp") || retained.contains(name) {
+            continue;
+        }
+        std::fs::remove_file(entry.path()).map_err(|error| io_path(&entry.path(), error))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retained_objects(
+    state_root: &std::path::Path,
+) -> Result<std::collections::BTreeSet<String>, PlanError> {
+    let mut retained = std::collections::BTreeSet::new();
+    let transactions = state_root.join("transactions");
+    let entries = match std::fs::read_dir(&transactions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(retained),
+        Err(error) => return Err(io_path(&transactions, error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| io_path(&transactions, error))?;
+        let path = entry.path().join("transaction.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_path(&path, error)),
+        };
+        let record: zup_transaction::TransactionRecord =
+            serde_json::from_slice(&bytes).map_err(|error| PlanError::InvalidTargetPath {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        if matches!(
+            record.phase,
+            zup_transaction::TransactionPhase::Committed
+                | zup_transaction::TransactionPhase::RolledBack
+        ) {
+            continue;
+        }
+        for node in &record.plan.nodes {
+            let generated = node
+                .meta
+                .source_relative
+                .as_ref()
+                .is_some_and(|source| source.as_str().starts_with(GENERATED_PREFIX));
+            if generated && let Some(digest) = node.meta.expected_sha256 {
+                retained.insert(digest.to_hex());
+            }
+        }
+    }
+    Ok(retained)
 }
 
 fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgument>, PlanError> {

@@ -86,9 +86,8 @@ impl LinuxRuntimeBackend {
         );
         let carrier = Carrier::open(&maintenance)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let generated =
-            crate::integration::load_generated(&request.state_root, &request.app_id, request.scope)
-                .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let generated = crate::integration::generated_for_plan(&request.state_root, &record.plan)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let payload = crate::run::RunnerPayload::open(&carrier, carrier.executable(), generated)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let lock_key =
@@ -126,10 +125,13 @@ impl LinuxRuntimeBackend {
         match zup_transaction::recover(record, &store, &mut executor) {
             Ok((record, TransactionOutcome::Committed)) => {
                 match ledger_store.publish_committed(&record, request.scope) {
-                    Ok(_) => Ok(ExecutionReport {
-                        outcome: InstallOutcome::Committed,
-                        recovery_transaction: None,
-                    }),
+                    Ok(_) => {
+                        let _ = crate::integration::reap_generated(&request.state_root);
+                        Ok(ExecutionReport {
+                            outcome: InstallOutcome::Committed,
+                            recovery_transaction: None,
+                        })
+                    }
                     Err(error) => Ok(ExecutionReport {
                         outcome: InstallOutcome::CommittedPendingReconciliation {
                             detail: error.to_string(),
@@ -139,6 +141,7 @@ impl LinuxRuntimeBackend {
                 }
             }
             Ok((record, TransactionOutcome::RolledBack)) => {
+                let _ = crate::integration::reap_generated(&request.state_root);
                 let _ = crate::run::sweep_refresh(&record);
                 Ok(ExecutionReport {
                     outcome: InstallOutcome::RolledBack,
@@ -214,11 +217,13 @@ impl LinuxRuntimeBackend {
                 &request.transaction_plan,
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let generated = generated_inputs(&request.transaction_plan, &self.generated)?;
+        crate::integration::stage_generated(&request.state_root, &generated)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         crate::run::preflight_refresh(&request.transaction_plan)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let payload =
-            crate::run::RunnerPayload::open(&carrier, &self.installer, self.generated.clone())
-                .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let payload = crate::run::RunnerPayload::open(&carrier, &self.installer, generated)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let mut executor = LinuxFileExecutor::new().with_payload(payload);
         executor
             .register_plan(&request.transaction_plan)
@@ -272,6 +277,7 @@ impl LinuxRuntimeBackend {
                         }
                         let _ = ledger;
                     }
+                    let _ = crate::integration::reap_generated(&request.state_root);
                     Ok(ExecutionReport {
                         outcome: InstallOutcome::Committed,
                         recovery_transaction: None,
@@ -288,6 +294,7 @@ impl LinuxRuntimeBackend {
                 record,
                 outcome: TransactionOutcome::RolledBack,
             }) => {
+                let _ = crate::integration::reap_generated(&request.state_root);
                 let _ = crate::run::sweep_refresh(&record);
                 if control.cancellation.is_cancelled() {
                     return Ok(ExecutionReport {
@@ -540,6 +547,36 @@ impl RuntimeBackend for LinuxRuntimeBackend {
             }
         })
     }
+}
+
+fn generated_inputs(
+    plan: &zup_transaction::TransactionPlan,
+    generated: &BTreeMap<String, Vec<u8>>,
+) -> Result<BTreeMap<String, Vec<u8>>, SessionError> {
+    let mut bound = BTreeMap::new();
+    for node in &plan.nodes {
+        let Some(source) = node.meta.source_relative.as_ref() else {
+            continue;
+        };
+        if !source
+            .as_str()
+            .starts_with(crate::integration::GENERATED_PREFIX)
+        {
+            continue;
+        }
+        let bytes = generated.get(source.as_str()).ok_or_else(|| {
+            SessionError::Transaction(format!("generated content missing for {source}"))
+        })?;
+        let (size, digest) = zup_core::hash_reader(bytes.as_slice())
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        if Some(digest) != node.meta.expected_sha256 || Some(size) != node.meta.expected_size {
+            return Err(SessionError::Transaction(
+                "generated content does not match the plan".into(),
+            ));
+        }
+        bound.insert(source.to_string(), bytes.clone());
+    }
+    Ok(bound)
 }
 
 fn release_cancelled(

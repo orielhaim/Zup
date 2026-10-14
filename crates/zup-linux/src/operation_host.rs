@@ -131,6 +131,10 @@ impl OperationHost for LinuxOperationHost {
             None => crate::input::compile_execution_plan(execution, target),
         }
         .map_err(|error| error.to_string())
+        .map(|mut input| {
+            input.observed_transaction = _ledger.map(|ledger| ledger.committed_transaction.clone());
+            input
+        })
     }
 
     fn attach_content(
