@@ -19,6 +19,7 @@ use crate::executor::LinuxFileExecutor;
 use crate::ledger::LinuxLedgerStore;
 use crate::lifecycle::LinuxOutcome;
 
+#[derive(Clone)]
 pub struct LinuxRuntimeBackend {
     pub installer: PathBuf,
     pub operation: Operation,
@@ -199,6 +200,13 @@ impl LinuxRuntimeBackend {
         };
         crate::run::preflight_refresh(&request.transaction_plan)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let payload =
+            crate::run::RunnerPayload::open(&carrier, &self.installer, self.generated.clone())
+                .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let mut executor = LinuxFileExecutor::new().with_payload(payload);
+        executor
+            .register_plan(&request.transaction_plan)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let store = FilesystemTransactionStore::new(&request.state_root);
         let coordinator = TransactionCoordinator::new(store);
         let record = coordinator
@@ -209,20 +217,10 @@ impl LinuxRuntimeBackend {
                 request.transaction_plan.clone(),
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        if control.cancellation.is_cancelled() {
-            return Ok(ExecutionReport {
-                outcome: InstallOutcome::Cancelled,
-                recovery_transaction: None,
-            });
-        }
-        let payload =
-            crate::run::RunnerPayload::open(&carrier, &self.installer, self.generated.clone())
-                .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let mut executor = LinuxFileExecutor::new().with_payload(payload);
-        executor
-            .register_plan(&request.transaction_plan)
-            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         executor.set_transaction_id(record.transaction_id);
+        if control.cancellation.is_cancelled() {
+            return release_cancelled(&coordinator, record, &mut executor);
+        }
         let total_work = request.transaction_plan.total_work();
         let mut executor = EventingExecutor::new(
             executor,
@@ -277,15 +275,7 @@ impl LinuxRuntimeBackend {
                 outcome: InstallOutcome::RecoveryRequired,
                 recovery_transaction: Some(record.transaction_id.to_string()),
             }),
-            Err(error) => {
-                if error.to_string().contains("cancelled") {
-                    return Ok(ExecutionReport {
-                        outcome: InstallOutcome::Cancelled,
-                        recovery_transaction: None,
-                    });
-                }
-                Err(SessionError::Transaction(error.to_string()))
-            }
+            Err(error) => Err(SessionError::Transaction(error.to_string())),
         }
     }
 
@@ -378,6 +368,7 @@ impl LinuxRuntimeBackend {
             &request.target,
             &launcher,
             Some(&control.events),
+            Some(&control.cancellation),
         ) {
             Err(ExecError::StalePlan) => {
                 let roots = crate::locations::MachineRoots::production();
@@ -398,20 +389,36 @@ impl LinuxRuntimeBackend {
                 let (intent, expected) =
                     crate::elevate::plan_expected(&retry, &state_root, &roots, &systemd, 0)
                         .map_err(|error| SessionError::Transaction(error.to_string()))?;
-                crate::elevate::drive_elevated(
+                match crate::elevate::drive_elevated(
                     &intent,
                     &expected.digest,
                     &expected.target,
                     &launcher,
                     Some(&control.events),
-                )
-                .map_err(|error| match error {
-                    ExecError::RecoveryRequired(_) => SessionError::RecoveryRequired,
-                    _ => SessionError::Transaction(error.to_string()),
-                })?
+                    Some(&control.cancellation),
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(ExecError::Cancelled) => {
+                        return Ok(ExecutionReport {
+                            outcome: InstallOutcome::Cancelled,
+                            recovery_transaction: None,
+                        });
+                    }
+                    Err(ExecError::RecoveryRequired(_)) => {
+                        return Err(SessionError::RecoveryRequired);
+                    }
+                    Err(error) => return Err(SessionError::Transaction(error.to_string())),
+                }
+            }
+            Err(ExecError::Cancelled) => {
+                return Ok(ExecutionReport {
+                    outcome: InstallOutcome::Cancelled,
+                    recovery_transaction: None,
+                });
             }
             outcome => outcome.map_err(|error| match error {
                 ExecError::RecoveryRequired(_) => SessionError::RecoveryRequired,
+                ExecError::Cancelled => SessionError::Transaction("cancelled".into()),
                 _ => SessionError::Transaction(error.to_string()),
             })?,
         };
@@ -473,9 +480,35 @@ impl RuntimeBackend for LinuxRuntimeBackend {
         request: RuntimeRequest,
         control: RuntimeControl,
     ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
+        let backend = self.clone();
         Box::pin(async move {
-            self.execute_blocking(&request, &control)
-                .map(|report| report.outcome)
+            match tokio::task::spawn_blocking(move || backend.execute_blocking(&request, &control))
+                .await
+            {
+                Ok(result) => result.map(|report| report.outcome),
+                Err(error) => Err(SessionError::Transaction(error.to_string())),
+            }
         })
+    }
+}
+
+fn release_cancelled(
+    coordinator: &TransactionCoordinator<FilesystemTransactionStore>,
+    record: zup_transaction::TransactionRecord,
+    executor: &mut LinuxFileExecutor,
+) -> Result<ExecutionReport, SessionError> {
+    match coordinator.release(record, executor) {
+        Ok((_record, TransactionOutcome::RolledBack)) => Ok(ExecutionReport {
+            outcome: InstallOutcome::Cancelled,
+            recovery_transaction: None,
+        }),
+        Ok((record, TransactionOutcome::RecoveryRequired)) => Ok(ExecutionReport {
+            outcome: InstallOutcome::RecoveryRequired,
+            recovery_transaction: Some(record.transaction_id.to_string()),
+        }),
+        Ok((_, TransactionOutcome::Committed)) => Err(SessionError::Transaction(
+            "a cancelled transaction cannot commit".into(),
+        )),
+        Err(error) => Err(SessionError::Transaction(error.to_string())),
     }
 }

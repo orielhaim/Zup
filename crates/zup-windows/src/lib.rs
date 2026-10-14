@@ -62,6 +62,8 @@ mod planning;
 #[cfg(windows)]
 mod prerequisites;
 #[cfg(windows)]
+mod preset_stage;
+#[cfg(windows)]
 mod process;
 #[cfg(windows)]
 mod registry;
@@ -176,6 +178,8 @@ pub use prerequisites::{
     WindowsPrerequisiteDetector, WindowsPrerequisiteProvider, package_requirements,
     runtime_requirements,
 };
+#[cfg(windows)]
+pub use preset_stage::{StagedPreset, stage_session};
 #[cfg(windows)]
 pub use process::{
     ChildProcess, HandOff, LaunchError, LaunchRequest, Launcher, WindowsLauncher, launch,

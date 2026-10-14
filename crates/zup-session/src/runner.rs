@@ -1,28 +1,28 @@
 use zup_presentation::OutputFormat;
 use zup_runtime::{InstallOutcome, PreparedOperation, RuntimeControl, runtime_request};
 
-use crate::host::{SessionDiscovery, SessionHost};
+use crate::host::{OperationContext, SessionDiscovery, SessionHost};
 
 pub async fn run_operation<H: SessionHost>(
     host: &H,
+    context: &OperationContext,
     discovery: &SessionDiscovery,
     prepared: &PreparedOperation,
     control: RuntimeControl,
 ) -> Result<InstallOutcome, zup_runtime::SessionError> {
-    let backend = host.backend(prepared).map_err(session_error)?;
+    let backend = host.backend(context, prepared).map_err(session_error)?;
     let runtime = runtime_request(
         prepared,
         discovery.build.installer.app.id.clone(),
         prepared
-            .target_plan
-            .as_ref()
+            .target_plan()
             .map(|target| target.app.version.clone())
-            .or_else(|| discovery.prior().map(|ledger| ledger.version.clone()))
+            .or_else(|| context.ledger.as_ref().map(|ledger| ledger.version.clone()))
             .unwrap_or_else(|| discovery.build.installer.app.version.clone()),
-        discovery.scope,
-        discovery.state_root.clone(),
+        context.scope,
+        context.state_root.clone(),
         zup_runtime::RequestOptions {
-            bootstrap: prepared.bootstrap.clone(),
+            bootstrap: prepared.bootstrap().cloned(),
             release: None,
             recovery_id: None,
         },

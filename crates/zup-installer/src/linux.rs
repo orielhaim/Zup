@@ -145,18 +145,34 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             },
         )
         .map_err(|error| miette::miette!("{error}"))?;
-    let state_root = discovery.state_root.clone();
+    let scope = zup_session::select_scope(
+        discovery.installer().install.scope,
+        &zup_session::SessionLaunch {
+            scope: cli.scope.map(ScopeFlag::selected),
+            state_root: cli.state_root.clone(),
+            ..Default::default()
+        },
+        &discovery.installations,
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
+    let context = discovery
+        .context(scope)
+        .map_err(|error| miette::miette!("{error}"))?;
+    let state_root = context.state_root.clone();
+    let bound = host
+        .bind(&context)
+        .map_err(|error| miette::miette!("{error}"))?;
     let input = zup_runtime::OperationInput {
         build: &discovery.build,
         installer: &executable,
-        scope: discovery.scope,
+        scope: context.scope,
         operation,
         selection,
-        prior: discovery.prior(),
-        state_root: &discovery.state_root,
+        prior: context.ledger.as_ref(),
+        state_root: &context.state_root,
         cancellation: &zup_plan::NeverCancelled,
     };
-    let prepared = zup_runtime::prepare_operation(&input, &host)
+    let prepared = zup_runtime::prepare_operation(&input, &bound)
         .map_err(|error| miette::miette!("{error}"))?;
     let (events, receiver) = tokio::sync::broadcast::channel(256);
     let pump = std::thread::spawn(move || {
@@ -177,7 +193,7 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
         .build()
         .map_err(|error| miette::miette!("session runtime: {error}"))?
         .block_on(zup_session::run_operation(
-            &host, &discovery, &prepared, control,
+            &host, &context, &discovery, &prepared, control,
         ));
     let _ = pump.join();
     match outcome {
@@ -264,6 +280,7 @@ fn run_gui() -> miette::Result<()> {
             zup_session::SessionLaunch {
                 scope,
                 state_root: None,
+                interactive: true,
                 ..Default::default()
             },
         ))

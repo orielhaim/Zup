@@ -55,6 +55,32 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
         Ok(record)
     }
 
+    pub fn release<E: OperationExecutor>(
+        &self,
+        mut record: TransactionRecord,
+        executor: &mut E,
+    ) -> Result<(TransactionRecord, TransactionOutcome), TransactionError>
+    where
+        E::Error: std::fmt::Display,
+    {
+        if record.phase != TransactionPhase::Prepared {
+            return Err(TransactionError::InvalidState(
+                "only a prepared transaction can be released before execution".into(),
+            ));
+        }
+        if record
+            .nodes
+            .values()
+            .any(|state| !matches!(state, NodeState::Pending))
+        {
+            return Err(TransactionError::InvalidState(
+                "a prepared transaction has no applied work".into(),
+            ));
+        }
+        let outcome = rollback_after_failure(&self.store, &mut record, executor)?;
+        Ok((record, outcome))
+    }
+
     pub fn execute<E: OperationExecutor>(
         &self,
         mut record: TransactionRecord,

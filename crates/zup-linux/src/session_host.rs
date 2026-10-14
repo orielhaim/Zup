@@ -7,108 +7,41 @@ use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
 
 use crate::operation_host::LinuxOperationHost;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LinuxSessionHost {
     installer: PathBuf,
-    scope: Option<SelectedScope>,
-    state_root: Option<PathBuf>,
 }
 
 impl LinuxSessionHost {
     pub fn open(installer: PathBuf) -> Self {
-        Self {
-            installer,
-            scope: None,
-            state_root: None,
-        }
+        Self { installer }
     }
 
-    fn operation_host(&self) -> Result<LinuxOperationHost, String> {
-        let machine = match self.scope {
-            Some(SelectedScope::Machine) => Some(crate::operation_host::MachineHost {
+    fn operation_host(&self, scope: SelectedScope) -> LinuxOperationHost {
+        let machine = match scope {
+            SelectedScope::Machine => Some(crate::operation_host::MachineHost {
                 roots: crate::locations::MachineRoots::production(),
                 systemd: crate::machine::SystemdRoots::production(),
             }),
-            _ => None,
+            SelectedScope::User => None,
         };
-        Ok(LinuxOperationHost { machine })
-    }
-}
-
-impl zup_runtime::OperationHost for LinuxSessionHost {
-    fn check_capabilities(&self, input: &zup_runtime::OperationInput) -> Result<(), String> {
-        self.operation_host()?.check_capabilities(input)
-    }
-
-    fn plan_build(
-        &self,
-        build: &zup_core::TargetBuildPlan,
-        request: &zup_plan::PlanRequest,
-        cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<zup_plan::PlannedInstallation, String> {
-        self.operation_host()?
-            .plan_build(build, request, cancellation)
-    }
-
-    fn resolve_target(
-        &self,
-        install: &zup_plan::InstallPlan,
-    ) -> Result<zup_platform::TargetPlan, String> {
-        self.operation_host()?.resolve_target(install)
-    }
-
-    fn resolve_target_for_uninstall(&self) -> bool {
-        true
-    }
-
-    fn install_directory(
-        &self,
-        explicit: Option<&std::path::Path>,
-        prior: Option<&zup_exec::InstallLedger>,
-        allowed: bool,
-        repair: bool,
-    ) -> Result<Option<zup_core::Template>, String> {
-        self.operation_host()?
-            .install_directory(explicit, prior, allowed, repair)
-    }
-
-    fn observe(
-        &self,
-        target: Option<&zup_platform::TargetPlan>,
-        ledger: Option<&zup_exec::InstallLedger>,
-    ) -> Result<
-        (
-            Option<zup_exec::HostSnapshot>,
-            std::collections::BTreeMap<zup_core::ResourceKey, bool>,
-        ),
-        String,
-    > {
-        self.operation_host()?.observe(target, ledger)
-    }
-
-    fn compile(
-        &self,
-        action: zup_exec::LifecycleAction,
-        execution: &zup_exec::ExecutionPlan,
-        target: Option<&zup_platform::TargetPlan>,
-        ledger: Option<&zup_exec::InstallLedger>,
-    ) -> Result<zup_transaction::TransactionInput, String> {
-        self.operation_host()?
-            .compile(action, execution, target, ledger)
-    }
-
-    fn attach_content(
-        &self,
-        target: &mut zup_platform::TargetPlan,
-        content: &zup_runtime::ContentAccess,
-        preset: Option<&zup_core::PresetRuntime>,
-    ) -> Result<(), String> {
-        self.operation_host()?
-            .attach_content(target, content, preset)
+        LinuxOperationHost { machine }
     }
 }
 
 impl SessionHost for LinuxSessionHost {
+    type Bound<'a>
+        = LinuxOperationHost
+    where
+        Self: 'a;
+
+    fn bind<'a>(
+        &'a self,
+        context: &'a zup_session::OperationContext,
+    ) -> Result<Self::Bound<'a>, String> {
+        Ok(self.operation_host(context.scope))
+    }
+
     fn discover(
         &mut self,
         executable: &Path,
@@ -125,60 +58,61 @@ impl SessionHost for LinuxSessionHost {
             .into_iter()
             .next()
             .ok_or_else(|| "an installer package holds exactly one target".to_owned())?;
-        let scope = zup_runtime::resolve_scope(build.installer.install.scope, launch.scope)
-            .map_err(|error| error.to_string())?;
-        let state_root = match &launch.state_root {
-            Some(root) => root.clone(),
-            None => crate::paths::state_root(scope).map_err(|error| error.to_string())?,
-        };
-        let mut priors = Vec::new();
-        for candidate in [SelectedScope::User, SelectedScope::Machine] {
-            let root = if candidate == scope || launch.state_root.is_some() {
-                state_root.clone()
-            } else {
-                crate::paths::state_root(candidate).map_err(|error| error.to_string())?
+        let mut installations = Vec::new();
+        for scope in [SelectedScope::User, SelectedScope::Machine] {
+            let permitted = match scope {
+                SelectedScope::User => build.installer.install.scope.allows_user(),
+                SelectedScope::Machine => build.installer.install.scope.allows_machine(),
             };
-            let ledger = crate::ledger::LinuxLedgerStore::new(&root)
-                .load(&build.installer.app.id, candidate)
-                .map_err(|error| error.to_string())?;
-            if let Some(ledger) = ledger {
-                priors.push((candidate, ledger));
+            if !permitted {
+                continue;
             }
+            let state_root = match &launch.state_root {
+                Some(root) => root.clone(),
+                None => crate::paths::state_root(scope).map_err(|error| error.to_string())?,
+            };
+            let ledger = crate::ledger::LinuxLedgerStore::new(&state_root)
+                .load(&build.installer.app.id, scope)
+                .map_err(|error| error.to_string())?;
+            installations.push(zup_session::ScopedInstallation {
+                scope,
+                state_root,
+                ledger,
+            });
         }
-        self.scope = Some(scope);
-        self.state_root = Some(state_root.clone());
         Ok(SessionDiscovery {
             build,
-            priors,
-            scope,
-            state_root,
+            installations,
         })
     }
 
-    fn backend(&self, prepared: &PreparedOperation) -> Result<Arc<dyn RuntimeBackend>, String> {
-        let state_root = self
-            .state_root
-            .clone()
-            .ok_or_else(|| "the session host was not discovered".to_owned())?;
+    fn backend(
+        &self,
+        context: &zup_session::OperationContext,
+        prepared: &PreparedOperation,
+    ) -> Result<Arc<dyn RuntimeBackend>, String> {
         let target = prepared
-            .target_plan
-            .as_ref()
+            .target_plan()
             .ok_or_else(|| "a Linux transaction resolves its target".to_owned())?;
-        let generated = match prepared.install_plan.as_ref() {
+        let generated = match prepared.install_plan() {
             Some(install) => {
                 let generated = crate::integration::generated_map(install)
                     .map_err(|error| error.to_string())?;
                 crate::integration::save_generated(
-                    &state_root,
+                    &context.state_root,
                     &install.app.id,
-                    target.scope,
+                    context.scope,
                     &generated,
                 )
                 .map_err(|error| error.to_string())?;
                 generated
             }
-            None => crate::integration::load_generated(&state_root, &target.app.id, target.scope)
-                .map_err(|error| error.to_string())?,
+            None => crate::integration::load_generated(
+                &context.state_root,
+                &target.app.id,
+                context.scope,
+            )
+            .map_err(|error| error.to_string())?,
         };
         Ok(Arc::new(crate::backend::LinuxRuntimeBackend {
             installer: self.installer.clone(),
@@ -192,11 +126,12 @@ impl SessionHost for LinuxSessionHost {
     fn materialize_preset(
         &self,
         discovery: &SessionDiscovery,
+        context: &zup_session::OperationContext,
     ) -> Result<zup_session::PresetLaunch, String> {
         let installer = discovery.installer();
-        let installed = discovery.prior().is_some();
+        let installed = context.ledger.is_some();
         let capabilities = zup_preset_host::surface::capabilities(installer, installed);
-        let runtime = match discovery.prior() {
+        let runtime = match context.ledger.as_ref() {
             Some(ledger) => ledger
                 .preset()
                 .map(|recorded| recorded.preset.clone())
@@ -215,7 +150,7 @@ impl SessionHost for LinuxSessionHost {
         };
         zup_preset_host::process::check_presentable(&runtime, &capabilities)
             .map_err(|error| error.to_string())?;
-        let (executable, assets) = match discovery.prior() {
+        let (executable, assets, stage) = match context.ledger.as_ref() {
             Some(ledger) => {
                 let recorded = ledger.preset().ok_or_else(|| {
                     format!(
@@ -224,9 +159,9 @@ impl SessionHost for LinuxSessionHost {
                     )
                 })?;
                 let directory = zup_transaction::maintenance_directory(
-                    &discovery.state_root,
+                    &context.state_root,
                     &installer.app.id,
-                    discovery.scope,
+                    context.scope,
                     &ledger.version,
                 );
                 let resolved = zup_bundle::resolve_preset_content(
@@ -236,39 +171,34 @@ impl SessionHost for LinuxSessionHost {
                     |path| path.to_string_lossy().into_owned(),
                 )
                 .map_err(|error| error.to_string())?;
-                (resolved.executable, resolved.assets)
+                (resolved.executable, resolved.assets, None)
             }
             None => {
                 let carrier = crate::carrier::Carrier::open(&self.installer)
                     .map_err(|error| error.to_string())?;
-                let staged = self
-                    .installer
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join(format!("preset{}", installer.target.executable_suffix()));
-                write_staged(
-                    &staged,
+                let executable_name = format!("preset{}", installer.target.executable_suffix());
+                let mut files = vec![(
+                    executable_name.clone(),
                     carrier
                         .preset()
-                        .ok_or_else(|| "this installer was composed without a preset".to_owned())?,
-                )?;
-                let assets = self
-                    .installer
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join("preset-assets");
-                let mut staged_assets = std::collections::BTreeMap::new();
+                        .ok_or_else(|| "this installer was composed without a preset".to_owned())?
+                        .to_vec(),
+                )];
                 for asset in &runtime.assets {
                     let (_, bytes) = carrier
                         .package()
                         .ui_asset(asset.name.as_str())
                         .map_err(|error| format!("the asset `{}`: {error}", asset.name))?;
-                    let path = assets.join(asset.name.as_str());
-                    write_staged(&path, &bytes)?;
-                    staged_assets
-                        .insert(asset.name.to_string(), path.to_string_lossy().into_owned());
+                    files.push((asset.name.to_string(), bytes));
                 }
-                (staged, staged_assets)
+                let staged = stage_session(&files).map_err(|error| error.to_string())?;
+                let executable = staged.executable.clone();
+                let assets = staged.assets.clone();
+                (
+                    executable,
+                    assets,
+                    Some(zup_preset_host::PresetStage::acquire(staged.root)),
+                )
             }
         };
         Ok(zup_session::PresetLaunch {
@@ -280,6 +210,7 @@ impl SessionHost for LinuxSessionHost {
             capabilities,
             product: zup_preset_host::surface::product(installer),
             environment: zup_preset_protocol::environment::current(installer.target.as_str()),
+            stage,
         })
     }
 
@@ -312,26 +243,138 @@ impl SessionHost for LinuxSessionHost {
     }
 }
 
-fn write_staged(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+struct StagedSession {
+    root: PathBuf,
+    executable: PathBuf,
+    assets: std::collections::BTreeMap<String, String>,
+}
+
+fn stage_session(files: &[(String, Vec<u8>)]) -> Result<StagedSession, crate::error::PathError> {
+    let parent = std::env::temp_dir();
+    let parent = crate::fs::OwnedDirectory::open(&parent)?;
+    let name = format!(
+        "zup-preset-{:x}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    );
+    let directory = parent.create_exclusive_directory(&name, crate::fs::STATE_DIRECTORY_MODE)?;
+    let root = directory.path().to_path_buf();
+    let staged = (|| {
+        let mut executable = None;
+        let mut assets = std::collections::BTreeMap::new();
+        for (name, bytes) in files {
+            let path = write_tree(&directory, name, bytes)?;
+            zup_preset_host::confirm_bytes(&path, bytes).map_err(|error| {
+                crate::error::PathError::Refused {
+                    path: path.display().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            if executable.is_none() {
+                executable = Some(path);
+            } else {
+                assets.insert(name.clone(), path.to_string_lossy().into_owned());
+            }
+        }
+        Ok(StagedSession {
+            root: root.clone(),
+            executable: executable.ok_or_else(|| crate::error::PathError::Refused {
+                path: directory.path().display().to_string(),
+                reason: "the staged preset has no executable".into(),
+            })?,
+            assets,
+        })
+    })();
+    if staged.is_err() {
+        drop(directory);
+        let _ = std::fs::remove_dir_all(root);
     }
-    let temporary = path.with_extension("zup-tmp");
-    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755));
+    staged
+}
+
+fn write_tree(
+    directory: &crate::fs::OwnedDirectory,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, crate::error::PathError> {
+    use rustix::fs::Mode;
+
+    let names: Vec<&str> = relative
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    if names.is_empty() || names.iter().any(|part| *part == "." || *part == "..") {
+        return Err(crate::error::PathError::Refused {
+            path: relative.into(),
+            reason: "a staged preset path stays inside its directory".into(),
+        });
     }
-    std::fs::rename(&temporary, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary);
-        error.to_string()
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|error| error.to_string())?;
+    let file_name = names[names.len() - 1];
+    let mut current = directory.duplicate()?;
+    for name in &names[..names.len() - 1] {
+        current = match current.kind_or_absent(name)? {
+            None => current.create_exclusive_directory(name, crate::fs::STATE_DIRECTORY_MODE)?,
+            Some(crate::fs::EntryKind::Directory) => {
+                let (child, _, _) = current.open_child_verified(name)?;
+                child
+            }
+            Some(_) => {
+                return Err(crate::error::PathError::UnexpectedKind {
+                    path: current.path().join(name).display().to_string(),
+                    expected: "a directory",
+                });
+            }
+        };
     }
-    Ok(())
+    let mode = Mode::from_bits_truncate(0o700);
+    current.write_durable(file_name, bytes, mode)?;
+    let streamed = current.stream_regular(file_name)?;
+    if streamed.sha256 != zup_core::hash_bytes(bytes) {
+        return Err(crate::error::PathError::Refused {
+            path: current.path().join(file_name).display().to_string(),
+            reason: "staged content does not match the verified preset".into(),
+        });
+    }
+    Ok(current.path().join(file_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::write_tree;
+
+    #[test]
+    fn a_symlink_is_replaced_instead_of_followed() {
+        let root = std::env::temp_dir().join(format!("zup-stage-{}-symlink", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let directory =
+            crate::fs::OwnedDirectory::create(&root, crate::fs::STATE_DIRECTORY_MODE).unwrap();
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        symlink(&sentinel, root.join("preset")).unwrap();
+        let written = write_tree(&directory, "preset", b"real").unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+        assert_eq!(std::fs::read(written).unwrap(), b"real");
+        drop(directory);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_sessions_do_not_share_a_staging_directory() {
+        let first = super::stage_session(&[("preset".into(), b"one".to_vec())]).unwrap();
+        let second = super::stage_session(&[("preset".into(), b"two".to_vec())]).unwrap();
+        assert_ne!(first.root, second.root);
+        assert_eq!(std::fs::read(&first.executable).unwrap(), b"one");
+        std::fs::write(&first.executable, b"tampered").unwrap();
+        assert!(zup_preset_host::confirm_bytes(&first.executable, b"one").is_err());
+        let root = first.root.clone();
+        drop(zup_preset_host::PresetStage::acquire(first.root));
+        assert!(!root.exists());
+        assert!(second.root.exists());
+        drop(zup_preset_host::PresetStage::acquire(second.root));
+    }
 }

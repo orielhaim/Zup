@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 use zup_core::{SelectedScope, Target};
-use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
+use zup_session::{OperationContext, SessionDiscovery, SessionHost, SessionLaunch};
 
 #[derive(Clone)]
 struct FakeBackend {
@@ -38,11 +38,18 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
     }
 }
 
+#[derive(Clone, Default)]
+struct Seen {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
 #[derive(Clone)]
 struct FakeHost {
     build: zup_core::TargetBuildPlan,
     backend: FakeBackend,
     preset: PathBuf,
+    installations: Vec<zup_session::ScopedInstallation>,
+    seen: Seen,
 }
 
 fn fixture_build() -> zup_core::TargetBuildPlan {
@@ -215,30 +222,60 @@ impl zup_runtime::OperationHost for FakeHost {
 }
 
 impl SessionHost for FakeHost {
+    type Bound<'a>
+        = Self
+    where
+        Self: 'a;
+
+    fn bind<'a>(&'a self, context: &'a OperationContext) -> Result<Self, String> {
+        self.seen.events.lock().expect("seen").push(format!(
+            "bind {} {}",
+            context.scope,
+            context.state_root.display()
+        ));
+        Ok(self.clone())
+    }
+
     fn discover(
         &mut self,
         _executable: &std::path::Path,
         _launch: &SessionLaunch,
     ) -> Result<SessionDiscovery, String> {
-        let root = tempfile::tempdir().expect("state root");
+        let installations = if self.installations.is_empty() {
+            let root = tempfile::tempdir().expect("state root");
+            vec![zup_session::ScopedInstallation {
+                scope: SelectedScope::User,
+                state_root: root.keep(),
+                ledger: None,
+            }]
+        } else {
+            self.installations.clone()
+        };
         Ok(SessionDiscovery {
             build: self.build.clone(),
-            priors: Vec::new(),
-            scope: SelectedScope::User,
-            state_root: root.keep(),
+            installations,
         })
     }
 
     fn backend(
         &self,
-        _prepared: &zup_runtime::PreparedOperation,
+        context: &OperationContext,
+        prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
+        self.seen.events.lock().expect("seen").push(format!(
+            "backend {} {} uninstall={} plan={}",
+            context.scope,
+            context.state_root.display(),
+            prepared.action == zup_exec::LifecycleAction::Uninstall,
+            prepared.install_plan().is_some()
+        ));
         Ok(Arc::new(self.backend.clone()))
     }
 
     fn materialize_preset(
         &self,
         discovery: &SessionDiscovery,
+        _context: &OperationContext,
     ) -> Result<zup_session::PresetLaunch, String> {
         Ok(zup_session::PresetLaunch {
             executable: self.preset.clone(),
@@ -251,6 +288,7 @@ impl SessionHost for FakeHost {
             environment: zup_preset_protocol::environment::current(
                 discovery.installer().target.as_str(),
             ),
+            stage: None,
         })
     }
 }
@@ -264,6 +302,8 @@ fn host(preset: &str) -> FakeHost {
             ran: Arc::new(AtomicBool::new(false)),
         },
         preset: stub,
+        installations: Vec::new(),
+        seen: Seen::default(),
     }
 }
 
@@ -289,4 +329,178 @@ async fn an_install_runs_the_shared_operation_to_commit() {
         host.backend.ran.load(Ordering::SeqCst),
         "the preset action reached the backend through the shared operation"
     );
+}
+
+#[test]
+fn an_unspecified_either_scope_presents_an_existing_installation() {
+    let installed = [SelectedScope::Machine];
+    let installations = [zup_session::ScopedInstallation {
+        scope: SelectedScope::Machine,
+        state_root: PathBuf::from("machine"),
+        ledger: None,
+    }];
+    let _ = installations;
+    let scope = zup_session::select_scope(
+        zup_core::InstallScope::Either,
+        &SessionLaunch {
+            interactive: true,
+            ..SessionLaunch::default()
+        },
+        &[zup_session::ScopedInstallation {
+            scope: SelectedScope::Machine,
+            state_root: PathBuf::from("machine"),
+            ledger: Some(zup_exec::InstallLedger::new(
+                zup_core::AppId::new("com.example.session").expect("id"),
+                Target::parse("windows-x64").expect("target"),
+                SelectedScope::Machine,
+            )),
+        }],
+    )
+    .expect("presentation");
+    assert_eq!(scope, SelectedScope::Machine);
+    let headless = zup_session::select_scope(
+        zup_core::InstallScope::Either,
+        &SessionLaunch::default(),
+        &[],
+    );
+    assert!(
+        headless.is_err(),
+        "a console either install names its scope"
+    );
+    let _ = installed;
+}
+
+#[tokio::test]
+async fn switching_scope_plans_and_executes_against_that_installation() {
+    let user_root = tempfile::tempdir().expect("user root");
+    let machine_root = tempfile::tempdir().expect("machine root");
+    let mut host = host("scope_install_preset");
+    host.build.installer.install.scope = zup_core::InstallScope::Either;
+    host.installations = vec![
+        zup_session::ScopedInstallation {
+            scope: SelectedScope::User,
+            state_root: user_root.path().to_path_buf(),
+            ledger: None,
+        },
+        zup_session::ScopedInstallation {
+            scope: SelectedScope::Machine,
+            state_root: machine_root.path().to_path_buf(),
+            ledger: None,
+        },
+    ];
+    let seen = host.seen.clone();
+    zup_session::run(
+        host,
+        fake_exe(),
+        SessionLaunch {
+            interactive: true,
+            ..SessionLaunch::default()
+        },
+    )
+    .await
+    .expect("scope switch installs");
+    let events = seen.events.lock().expect("seen");
+    let backend = events
+        .iter()
+        .rev()
+        .find(|event| event.starts_with("backend "))
+        .expect("the install reached a backend");
+    assert!(
+        backend.contains(&machine_root.path().display().to_string()),
+        "execution uses the machine installation: {backend}"
+    );
+    assert!(
+        backend.contains("plan=true"),
+        "an install carries its plan: {backend}"
+    );
+    assert!(
+        events.iter().any(|event| event.starts_with("bind user")),
+        "the initial preview is bound to the presented user scope"
+    );
+}
+
+#[tokio::test]
+async fn switching_from_machine_to_user_uses_the_user_installation() {
+    let user_root = tempfile::tempdir().expect("user root");
+    let machine_root = tempfile::tempdir().expect("machine root");
+    let mut host = host("user_scope_install_preset");
+    host.build.installer.install.scope = zup_core::InstallScope::Either;
+    let mut user_ledger = zup_exec::InstallLedger::new(
+        host.build.installer.app.id.clone(),
+        host.build.installer.target,
+        SelectedScope::User,
+    );
+    user_ledger.version = host.build.installer.app.version.clone();
+    host.installations = vec![
+        zup_session::ScopedInstallation {
+            scope: SelectedScope::User,
+            state_root: user_root.path().to_path_buf(),
+            ledger: Some(user_ledger),
+        },
+        zup_session::ScopedInstallation {
+            scope: SelectedScope::Machine,
+            state_root: machine_root.path().to_path_buf(),
+            ledger: None,
+        },
+    ];
+    let seen = host.seen.clone();
+    zup_session::run(
+        host,
+        fake_exe(),
+        SessionLaunch {
+            scope: Some(SelectedScope::Machine),
+            interactive: true,
+            ..SessionLaunch::default()
+        },
+    )
+    .await
+    .expect("scope switch installs");
+    let events = seen.events.lock().expect("seen");
+    let backend = events
+        .iter()
+        .rev()
+        .find(|event| event.starts_with("backend "))
+        .expect("the install reached a backend");
+    assert!(
+        backend.contains(&user_root.path().display().to_string()),
+        "execution uses the user installation: {backend}"
+    );
+    assert!(
+        events.iter().any(|event| event.starts_with("bind machine")),
+        "planning starts from the requested machine scope"
+    );
+}
+
+#[tokio::test]
+async fn a_gui_uninstall_reaches_execution_without_an_install_plan() {
+    let root = tempfile::tempdir().expect("state root");
+    let mut host = host("uninstall_preset");
+    let mut ledger = zup_exec::InstallLedger::new(
+        host.build.installer.app.id.clone(),
+        host.build.installer.target,
+        SelectedScope::User,
+    );
+    ledger.version = host.build.installer.app.version.clone();
+    host.installations = vec![zup_session::ScopedInstallation {
+        scope: SelectedScope::User,
+        state_root: root.path().to_path_buf(),
+        ledger: Some(ledger),
+    }];
+    let seen = host.seen.clone();
+    let backend = host.backend.clone();
+    zup_session::run(host, fake_exe(), SessionLaunch::default())
+        .await
+        .expect("uninstall runs");
+    assert!(backend.ran.load(Ordering::SeqCst));
+    let events = seen.events.lock().expect("seen");
+    let record = events
+        .iter()
+        .rev()
+        .find(|event| event.starts_with("backend "))
+        .expect("uninstall reached the backend");
+    assert!(
+        record.contains("uninstall=true") && record.contains("plan=false"),
+        "uninstall executes from the ledger, not an install plan: {record}"
+    );
+    assert!(record.contains(&root.path().display().to_string()));
 }

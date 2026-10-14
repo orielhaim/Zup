@@ -642,3 +642,26 @@ fn oversized_backend_payload_is_rejected() {
         zup_transaction::TransactionPlanError::InvalidInput(_)
     ));
 }
+
+#[test]
+fn releasing_a_prepared_transaction_settles_the_journal() {
+    let (dir, coordinator) = coord();
+    let plan = compile_transaction(&sample_input()).unwrap();
+    let record = coordinator
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            plan,
+        )
+        .unwrap();
+    let mut executor = FakeExecutor::default();
+    let (settled, outcome) = coordinator.release(record, &mut executor).unwrap();
+    assert_eq!(outcome, TransactionOutcome::RolledBack);
+    assert_eq!(settled.phase, TransactionPhase::RolledBack);
+    assert!(executor.applied.is_empty(), "release applies no work");
+    let reloaded = FilesystemTransactionStore::new(dir.path())
+        .load(&settled.transaction_id)
+        .unwrap();
+    assert_eq!(reloaded.phase, TransactionPhase::RolledBack);
+}

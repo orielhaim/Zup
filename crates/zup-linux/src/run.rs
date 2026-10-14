@@ -38,33 +38,46 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
             },
         )
         .map_err(ExecError::Ownership)?;
+    let launch = zup_session::SessionLaunch {
+        scope: Some(request.scope),
+        state_root: request.state_root.clone(),
+        ..Default::default()
+    };
+    let scope = zup_session::select_scope(
+        discovery.installer().install.scope,
+        &launch,
+        &discovery.installations,
+    )
+    .map_err(ExecError::Ownership)?;
+    let context = discovery.context(scope).map_err(ExecError::Ownership)?;
     if request.scope == SelectedScope::Machine {
         crate::machine::resolve_machine_state_root(
             request.state_root.as_deref(),
             &crate::locations::MachineRoots::production(),
         )?;
     } else {
-        refuse_redirected_hierarchy(&discovery.state_root)?;
+        refuse_redirected_hierarchy(&context.state_root)?;
     }
     let mut selection = request.selection.clone();
     if selection.install_directory.is_none() {
         selection.install_directory = request.install_dir_override.clone();
     }
+    let bound = host.bind(&context).map_err(ExecError::Ownership)?;
     let input = zup_runtime::OperationInput {
         build: &discovery.build,
         installer: &request.installer,
-        scope: discovery.scope,
+        scope: context.scope,
         operation: request.action,
         selection,
-        prior: discovery.prior(),
-        state_root: &discovery.state_root,
+        prior: context.ledger.as_ref(),
+        state_root: &context.state_root,
         cancellation: &zup_plan::NeverCancelled,
     };
-    let prepared = zup_runtime::prepare_operation(&input, &host).map_err(|error| {
+    let prepared = zup_runtime::prepare_operation(&input, &bound).map_err(|error| {
         let message = error.to_string();
         if message.contains("pass through a link") || message.contains("symbolic link") {
             ExecError::Path(PathError::Refused {
-                path: discovery.state_root.display().to_string(),
+                path: context.state_root.display().to_string(),
                 reason: message,
             })
         } else {
@@ -82,12 +95,11 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
         .build()
         .map_err(|error| ExecError::Executor(error.to_string()))?
         .block_on(zup_session::run_operation(
-            &host, &discovery, &prepared, control,
+            &host, &context, &discovery, &prepared, control,
         ))
         .map_err(|error| ExecError::Executor(error.to_string()))?;
     let app_version = prepared
-        .target_plan
-        .as_ref()
+        .target_plan()
         .map(|target| target.app.version.clone())
         .unwrap_or_else(|| discovery.build.installer.app.version.clone());
     match outcome {
@@ -96,7 +108,7 @@ pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
         }),
         zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
         zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
-            transaction: zup_runtime::discover_recovery(&discovery.state_root)
+            transaction: zup_runtime::discover_recovery(&context.state_root)
                 .into_iter()
                 .find_map(|status| match status {
                     zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {

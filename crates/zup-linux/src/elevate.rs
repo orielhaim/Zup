@@ -154,7 +154,14 @@ pub(crate) fn run_machine_elevated_once(
         crate::machine::resolve_machine_state_root(request.state_root.as_deref(), &roots)?;
     let systemd = crate::machine::SystemdRoots::production();
     let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
-    drive_elevated(&intent, &expected.digest, &expected.target, launcher, None)
+    drive_elevated(
+        &intent,
+        &expected.digest,
+        &expected.target,
+        launcher,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn drive_elevated(
@@ -163,6 +170,7 @@ pub(crate) fn drive_elevated(
     target: &zup_core::Target,
     launcher: &impl PkexecLauncher,
     events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
+    cancellation: Option<&zup_runtime::CancellationHandle>,
 ) -> Result<LinuxOutcome, ExecError> {
     let session = SessionId::new_v7();
     let invoking = rustix::process::getuid().as_raw();
@@ -189,6 +197,9 @@ pub(crate) fn drive_elevated(
     let mut stream = {
         let start = std::time::Instant::now();
         loop {
+            if cancellation.is_some_and(|cancel| cancel.is_cancelled()) {
+                return Err(ExecError::Cancelled);
+            }
             match rendezvous.accept(Duration::from_secs(1)) {
                 Ok(stream) => {
                     let peer = peer_identity(&stream).map_err(into_run_error)?;
@@ -229,6 +240,7 @@ pub(crate) fn drive_elevated(
         expected_digest,
         target,
         events,
+        cancellation,
     );
 
     let launch_result = spawned
@@ -249,11 +261,12 @@ pub(crate) fn drive_client(
     expected_digest: &str,
     expected_target: &zup_core::Target,
     events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
+    cancellation: Option<&zup_runtime::CancellationHandle>,
 ) -> Result<LinuxOutcome, ExecError> {
     let mut incoming = SequenceTracker::new();
     let mut outgoing: u64 = 0;
 
-    let hello = recv_msg(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?;
+    let hello = recv_or_fail(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?;
     let worker_pid = match hello.message {
         Message::WorkerHello(hello) => {
             if hello.session_id != session || hello.target != *expected_target {
@@ -273,7 +286,7 @@ pub(crate) fn drive_client(
         Message::Prepare(intent.clone()),
     )?;
     let prepared = loop {
-        match recv_msg(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?.message {
+        match recv_or_fail(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?.message {
             Message::Prepared(prepared) => break prepared,
             Message::Progress(report) => {
                 emit_progress(&report, events);
@@ -306,6 +319,10 @@ pub(crate) fn drive_client(
         &prepared.plan_digest[..16]
     );
 
+    if cancellation.is_some_and(|cancel| cancel.is_cancelled()) {
+        send_msg(stream, session, &mut outgoing, Message::Cancel)?;
+        return Err(ExecError::Cancelled);
+    }
     send_msg(
         stream,
         session,
@@ -318,12 +335,36 @@ pub(crate) fn drive_client(
         .app_version
         .parse()
         .map_err(|_| ExecError::Worker("the worker prepared an unparsable version".into()))?;
+    let deadline = std::time::Instant::now() + EXECUTE_TIMEOUT;
+    let mut cancel_sent = false;
     loop {
-        match recv_msg(stream, session, &mut incoming, EXECUTE_TIMEOUT)?.message {
+        if cancellation.is_some_and(|cancel| cancel.is_cancelled()) && !cancel_sent {
+            send_msg(stream, session, &mut outgoing, Message::Cancel)?;
+            cancel_sent = true;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ExecError::Worker("the worker timed out".into()));
+        }
+        let slice = if cancellation.is_some() {
+            remaining.min(Duration::from_millis(200))
+        } else {
+            remaining
+        };
+        let message = match recv_msg(stream, session, &mut incoming, slice) {
+            Ok(envelope) => envelope.message,
+            Err(RecvFail::Timeout) if cancellation.is_some() => continue,
+            Err(RecvFail::Timeout) => {
+                return Err(ExecError::Worker("the worker timed out".into()));
+            }
+            Err(RecvFail::Failed(error)) => return Err(error),
+        };
+        match message {
             Message::Completed(completed) => {
                 return match completed.outcome.as_str() {
                     "committed" => Ok(LinuxOutcome::Committed { version }),
                     "rolled_back" => Ok(LinuxOutcome::RolledBack),
+                    "cancelled" => Err(ExecError::Cancelled),
                     "recovery_required" => Ok(LinuxOutcome::RecoveryRequired {
                         transaction: completed.transaction_id.to_string(),
                     }),
@@ -332,6 +373,9 @@ pub(crate) fn drive_client(
                         completed.outcome
                     ))),
                 };
+            }
+            Message::Failed(failed) if failed.kind == zup_protocol::failure::CANCELLED => {
+                return Err(ExecError::Cancelled);
             }
             Message::Failed(failed) => {
                 return Err(ExecError::Worker(format!(
@@ -346,6 +390,18 @@ pub(crate) fn drive_client(
             _ => {}
         }
     }
+}
+
+fn recv_or_fail(
+    stream: &mut UnixStream,
+    session: SessionId,
+    incoming: &mut SequenceTracker,
+    timeout: Duration,
+) -> Result<WireEnvelope, ExecError> {
+    recv_msg(stream, session, incoming, timeout).map_err(|error| match error {
+        RecvFail::Timeout => ExecError::Worker("the worker timed out".into()),
+        RecvFail::Failed(error) => error,
+    })
 }
 
 fn emit_progress(
@@ -407,21 +463,34 @@ fn send_msg(
     Ok(())
 }
 
+enum RecvFail {
+    Timeout,
+    Failed(ExecError),
+}
+
 fn recv_msg(
     stream: &mut UnixStream,
     session: SessionId,
     incoming: &mut SequenceTracker,
     timeout: Duration,
-) -> Result<WireEnvelope, ExecError> {
-    let envelope = recv_envelope(stream, timeout).map_err(into_run_error)?;
+) -> Result<WireEnvelope, RecvFail> {
+    let envelope = match recv_envelope(stream, timeout) {
+        Ok(envelope) => envelope,
+        Err(crate::error::IpcError::Timeout) => return Err(RecvFail::Timeout),
+        Err(error) => return Err(RecvFail::Failed(into_run_error(error))),
+    };
     incoming
         .accept(envelope.sequence)
-        .map_err(|error| ExecError::Worker(format!("sequence: {error}")))?;
+        .map_err(|error| RecvFail::Failed(ExecError::Worker(format!("sequence: {error}"))))?;
     if envelope.session_id != session {
-        return Err(ExecError::Worker("session mismatch".into()));
+        return Err(RecvFail::Failed(ExecError::Worker(
+            "session mismatch".into(),
+        )));
     }
     if envelope.version != PROTOCOL_VERSION {
-        return Err(ExecError::Worker("protocol version mismatch".into()));
+        return Err(RecvFail::Failed(ExecError::Worker(
+            "protocol version mismatch".into(),
+        )));
     }
     Ok(envelope)
 }
@@ -552,6 +621,7 @@ fn drive_client_loopback(
         intent,
         expected_digest,
         expected_target,
+        None,
         None,
     )
 }

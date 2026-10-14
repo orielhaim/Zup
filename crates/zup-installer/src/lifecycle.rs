@@ -528,8 +528,7 @@ pub fn run_acquired_transition(
     };
     let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
     let app_version = prepared
-        .target_plan
-        .as_ref()
+        .target_plan()
         .map(|target| target.app.version.clone())
         .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
         .ok_or_else(|| miette::miette!("installation not found"))?;
@@ -540,7 +539,7 @@ pub fn run_acquired_transition(
         scope,
         state_root,
         zup_runtime::RequestOptions {
-            bootstrap: prepared.bootstrap.clone(),
+            bootstrap: prepared.bootstrap().cloned(),
             release: Some(identity.clone()),
             recovery_id: None,
         },
@@ -642,8 +641,7 @@ pub fn prepare_embedded_transition_with_cancellation(
     };
     let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
     let app_version = prepared
-        .target_plan
-        .as_ref()
+        .target_plan()
         .map(|target| target.app.version.clone())
         .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
         .ok_or_else(|| miette::miette!("installation not found"))?;
@@ -654,7 +652,7 @@ pub fn prepare_embedded_transition_with_cancellation(
         scope,
         state_root.clone(),
         zup_runtime::RequestOptions {
-            bootstrap: prepared.bootstrap.clone(),
+            bootstrap: prepared.bootstrap().cloned(),
             release: None,
             recovery_id: None,
         },
@@ -664,15 +662,14 @@ pub fn prepare_embedded_transition_with_cancellation(
             .map_err(|error| miette::miette!("payload source: {error}"))?
     } else {
         let install = prepared
-            .install_plan
-            .as_ref()
+            .install_plan()
             .ok_or_else(|| miette::miette!("the operation planned no installation to execute"))?;
         WindowsRuntimeBackend::from_path_with_generated_files(
             executable,
             &state_root,
             scope,
             install,
-            &prepared.generated_files,
+            prepared.generated_files(),
             &prepared.transaction_plan,
         )
         .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?

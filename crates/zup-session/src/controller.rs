@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex};
 use zup_exec::LifecycleAction;
 use zup_preset_host::{HostDecision, HostState, Selection};
 use zup_preset_protocol::{Action, UpdateState};
-use zup_runtime::{CancellationHandle, InstallOutcome, RuntimeEvent};
+use zup_runtime::{CancellationHandle, InstallOutcome, OperationHost, RuntimeEvent};
 
 use crate::host::{
-    PresetLaunch, SessionDiscovery, SessionHost, SessionLaunch, initial_state, is_terminal,
+    OperationContext, PresetLaunch, SessionDiscovery, SessionHost, SessionLaunch, initial_state,
+    is_terminal, select_scope,
 };
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ struct Control<H: SessionHost> {
     executable: PathBuf,
     state: HostState,
     discovery: SessionDiscovery,
+    presented: zup_core::SelectedScope,
     active: Arc<Mutex<Active>>,
     reports: Reports,
     inbox: Inbox,
@@ -66,15 +68,25 @@ where
     let discovery = host
         .discover(executable, &launch)
         .map_err(|error| miette::miette!("{error}"))?;
-    let state = initial_state(&discovery, &launch);
+    let presented = select_scope(
+        discovery.installer().install.scope,
+        &launch,
+        &discovery.installations,
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
+    let context = discovery
+        .context(presented)
+        .map_err(|error| miette::miette!("{error}"))?;
+    let state = initial_state(&discovery, &context, launch.preselected.as_deref());
     let PresetLaunch {
         executable: preset_exe,
         configuration,
         capabilities,
         product,
         environment,
+        stage: _stage,
     } = host
-        .materialize_preset(&discovery)
+        .materialize_preset(&discovery, &context)
         .map_err(|error| miette::miette!("{error}"))?;
 
     let mut preset =
@@ -103,6 +115,7 @@ where
         executable: executable.to_path_buf(),
         state,
         discovery,
+        presented,
         active,
         reports,
         inbox,
@@ -234,9 +247,15 @@ where
                 run_lifecycle(host, executable, discovery, operation, cancel, reports);
             });
         }
-        HostDecision::Plan(selection) => request_plan(control, selection),
+        HostDecision::Plan(selection) => {
+            if selection.scope != control.presented {
+                rebind(control, selection.scope);
+            } else {
+                request_plan(control, selection);
+            }
+        }
         HostDecision::Update => {
-            let scope = control.discovery.scope;
+            let scope = zup_preset_host::engine_scope(control.state.snapshot().surface.scope());
             let sender = control.reports.clone();
             let host = control.host.clone();
             spawn("setup-update", move || {
@@ -295,6 +314,29 @@ impl zup_plan::CancellationQuery for CancelQuery<'_> {
     }
 }
 
+fn rebind<H: SessionHost + Clone + Send + 'static>(
+    control: &mut Control<H>,
+    scope: zup_core::SelectedScope,
+) {
+    let context = match control.discovery.context(scope) {
+        Ok(context) => context,
+        Err(message) => {
+            control.state.fail(message, false);
+            return;
+        }
+    };
+    let log = control.state.log_path().map(str::to_owned);
+    let mut state = initial_state(&control.discovery, &context, None);
+    if let Some(log) = log {
+        state.set_log_path(log);
+    }
+    control.state = state;
+    control.presented = scope;
+    if let Some(selection) = control.state.plan_request() {
+        request_plan(control, selection);
+    }
+}
+
 fn run_lifecycle<H>(
     host: H,
     executable: PathBuf,
@@ -305,13 +347,33 @@ fn run_lifecycle<H>(
 ) where
     H: SessionHost,
 {
+    let context = match discovery.context(operation.selection.scope) {
+        Ok(context) => context,
+        Err(message) => {
+            let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
+                kind: "prepare_failed".into(),
+                message,
+            }));
+            return;
+        }
+    };
     let (enable, disable) =
         crate::host::selection_of(&discovery.build.installer, &operation.selection);
     let query = CancelQuery(&cancel);
+    let bound = match host.bind(&context) {
+        Ok(bound) => bound,
+        Err(message) => {
+            let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
+                kind: "prepare_failed".into(),
+                message,
+            }));
+            return;
+        }
+    };
     let input = zup_runtime::OperationInput {
         build: &discovery.build,
         installer: &executable,
-        scope: operation.selection.scope,
+        scope: context.scope,
         operation: zup_runtime::Operation::from(operation.action),
         selection: zup_runtime::OperationSelection {
             enable,
@@ -322,15 +384,11 @@ fn run_lifecycle<H>(
                 .as_deref()
                 .map(PathBuf::from),
         },
-        prior: discovery
-            .priors
-            .iter()
-            .find(|(scope, _)| *scope == operation.selection.scope)
-            .map(|(_, ledger)| ledger),
-        state_root: &discovery.state_root,
+        prior: context.ledger.as_ref(),
+        state_root: &context.state_root,
         cancellation: &query,
     };
-    let prepared = match zup_runtime::prepare_operation(&input, &host) {
+    let prepared = match zup_runtime::prepare_operation(&input, &bound) {
         Ok(prepared) => prepared,
         Err(error) => {
             let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
@@ -368,7 +426,7 @@ fn run_lifecycle<H>(
         .and_then(|runtime| {
             runtime
                 .block_on(crate::runner::run_operation(
-                    &host, &discovery, &prepared, control,
+                    &host, &context, &discovery, &prepared, control,
                 ))
                 .map_err(|error| error.to_string())
         });
@@ -383,7 +441,7 @@ fn run_lifecycle<H>(
     }
     if operation.cleanup_lock
         && matches!(outcome, Ok(InstallOutcome::Committed))
-        && let Err(error) = host.after_commit(&discovery, &prepared)
+        && let Err(error) = host.after_commit(&context, &prepared)
     {
         let _ = reports.send(Report::Engine(RuntimeEvent::Failed {
             kind: "commit_failed".into(),
@@ -401,10 +459,11 @@ fn preview<H: SessionHost>(
     discovery: &SessionDiscovery,
     selection: &Selection,
 ) -> Result<zup_presentation::PlanPreview, String> {
-    let (plan, installer) = target_plan(host, discovery, selection)?;
+    let context = discovery.context(selection.scope)?;
+    let (plan, installer, target) = target_plan(host, discovery, &context, selection)?;
     let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan)
         .with_declared_prerequisites(&installer.prerequisites);
-    if let Ok(target) = host.resolve_target(&plan) {
+    if let Some(target) = target {
         preview.install_directory = target.install_directory.to_string();
         preview.estimated_bytes = target.summary.install_bytes;
         preview.requires_authorization = target.summary.requires_authorization;
@@ -418,10 +477,9 @@ fn launch_target<H: SessionHost>(
     selection: &Selection,
     name: &str,
 ) -> Result<(), String> {
-    let (plan, _) = target_plan(host, discovery, selection)?;
-    let target = host
-        .resolve_target(&plan)
-        .map_err(|error| error.to_string())?;
+    let context = discovery.context(selection.scope)?;
+    let (_, _, target) = target_plan(host, discovery, &context, selection)?;
+    let target = target.ok_or_else(|| "the launcher has no resolved target".to_owned())?;
     let launcher = target
         .launchers
         .iter()
@@ -438,8 +496,17 @@ fn launch_target<H: SessionHost>(
 fn target_plan<H: SessionHost>(
     host: &H,
     discovery: &SessionDiscovery,
+    context: &OperationContext,
     selection: &Selection,
-) -> Result<(zup_plan::InstallPlan, zup_core::Installer), String> {
+) -> Result<
+    (
+        zup_plan::InstallPlan,
+        zup_core::Installer,
+        Option<zup_platform::TargetPlan>,
+    ),
+    String,
+> {
+    let bound = host.bind(context)?;
     let installer = discovery.build.installer.clone();
     let mut request = zup_plan::PlanRequest::new(installer.target, selection.scope);
     for component in &installer.components {
@@ -461,10 +528,11 @@ fn target_plan<H: SessionHost>(
     let build = zup_core::BuildPlan {
         targets: vec![discovery.build.clone()],
     };
-    let plan = host
+    let plan = bound
         .plan_build(&build.targets[0], &request, &zup_plan::NeverCancelled)
         .map_err(|error| error.to_string())?;
-    Ok((plan.plan, installer))
+    let target = bound.resolve_target(&plan.plan).ok();
+    Ok((plan.plan, installer, target))
 }
 
 fn diagnostic_summary(path: Option<&str>) -> String {

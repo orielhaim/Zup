@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use zup_core::{AppId, ComponentId, Installer, SelectedScope, TargetBuildPlan};
+use zup_core::{AppId, ComponentId, InstallScope, Installer, SelectedScope, TargetBuildPlan};
 use zup_exec::InstallLedger;
 use zup_preset_protocol::UpdateState;
 use zup_runtime::{InstallOutcome, OperationHost, PreparedOperation, RuntimeBackend, RuntimeEvent};
@@ -15,14 +15,27 @@ pub struct SessionLaunch {
     pub preselected: Option<Vec<ComponentId>>,
     pub maintenance: bool,
     pub auto_uninstall: bool,
+    pub interactive: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedInstallation {
+    pub scope: SelectedScope,
+    pub state_root: PathBuf,
+    pub ledger: Option<InstallLedger>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperationContext {
+    pub scope: SelectedScope,
+    pub state_root: PathBuf,
+    pub ledger: Option<InstallLedger>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionDiscovery {
     pub build: TargetBuildPlan,
-    pub priors: Vec<(SelectedScope, InstallLedger)>,
-    pub scope: SelectedScope,
-    pub state_root: PathBuf,
+    pub installations: Vec<ScopedInstallation>,
 }
 
 impl SessionDiscovery {
@@ -34,15 +47,61 @@ impl SessionDiscovery {
         &self.build.installer.app.id
     }
 
-    pub fn prior(&self) -> Option<&InstallLedger> {
-        self.priors
+    pub fn installation(&self, scope: SelectedScope) -> Option<&ScopedInstallation> {
+        self.installations
             .iter()
-            .find(|(scope, _)| *scope == self.scope)
-            .map(|(_, ledger)| ledger)
+            .find(|installation| installation.scope == scope)
     }
 
-    pub fn installed_version(&self) -> Option<&semver::Version> {
-        self.prior().map(|ledger| &ledger.version)
+    pub fn context(&self, scope: SelectedScope) -> Result<OperationContext, String> {
+        let installation = self
+            .installation(scope)
+            .ok_or_else(|| format!("this installer has no {scope} installation to operate on"))?;
+        Ok(OperationContext {
+            scope: installation.scope,
+            state_root: installation.state_root.clone(),
+            ledger: installation.ledger.clone(),
+        })
+    }
+}
+
+pub fn select_scope(
+    declared: InstallScope,
+    launch: &SessionLaunch,
+    installations: &[ScopedInstallation],
+) -> Result<SelectedScope, String> {
+    if !launch.interactive {
+        return zup_runtime::resolve_scope(declared, launch.scope)
+            .map_err(|error| error.to_string());
+    }
+    if let Some(scope) = launch.scope {
+        return zup_runtime::resolve_scope(declared, Some(scope))
+            .map_err(|error| error.to_string());
+    }
+    let permitted = permitted_scopes(declared);
+    let installed: Vec<SelectedScope> = permitted
+        .iter()
+        .copied()
+        .filter(|scope| {
+            installations
+                .iter()
+                .any(|installation| installation.scope == *scope && installation.ledger.is_some())
+        })
+        .collect();
+    match installed.as_slice() {
+        [scope, ..] => Ok(*scope),
+        [] => permitted
+            .first()
+            .copied()
+            .ok_or_else(|| "this installer declares no installation scope".to_owned()),
+    }
+}
+
+fn permitted_scopes(declared: InstallScope) -> Vec<SelectedScope> {
+    match declared {
+        InstallScope::User => vec![SelectedScope::User],
+        InstallScope::Machine => vec![SelectedScope::Machine],
+        InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
     }
 }
 
@@ -52,22 +111,37 @@ pub struct PresetLaunch {
     pub capabilities: zup_preset_protocol::Capabilities,
     pub product: zup_preset_protocol::ProductIdentity,
     pub environment: zup_preset_protocol::HostEnvironment,
+    pub stage: Option<zup_preset_host::PresetStage>,
 }
 
-pub trait SessionHost: OperationHost {
+pub trait SessionHost {
+    type Bound<'a>: OperationHost
+    where
+        Self: 'a;
+
     fn discover(
         &mut self,
         executable: &Path,
         launch: &SessionLaunch,
     ) -> Result<SessionDiscovery, String>;
 
-    fn backend(&self, prepared: &PreparedOperation) -> Result<Arc<dyn RuntimeBackend>, String>;
+    fn bind<'a>(&'a self, context: &'a OperationContext) -> Result<Self::Bound<'a>, String>;
 
-    fn materialize_preset(&self, discovery: &SessionDiscovery) -> Result<PresetLaunch, String>;
+    fn backend(
+        &self,
+        context: &OperationContext,
+        prepared: &PreparedOperation,
+    ) -> Result<Arc<dyn RuntimeBackend>, String>;
+
+    fn materialize_preset(
+        &self,
+        discovery: &SessionDiscovery,
+        context: &OperationContext,
+    ) -> Result<PresetLaunch, String>;
 
     fn after_commit(
         &self,
-        _discovery: &SessionDiscovery,
+        _context: &OperationContext,
         _prepared: &PreparedOperation,
     ) -> Result<(), String> {
         Ok(())
@@ -88,13 +162,17 @@ pub trait SessionHost: OperationHost {
     fn copy_diagnostics(&self, _text: &str) {}
 }
 
-pub fn initial_state(discovery: &SessionDiscovery, launch: &SessionLaunch) -> HostState {
+pub fn initial_state(
+    discovery: &SessionDiscovery,
+    context: &OperationContext,
+    preselected: Option<&[ComponentId]>,
+) -> HostState {
     let installer = discovery.installer();
     let launchers = zup_preset_host::surface::launchers(installer);
-    let state = match discovery.prior() {
+    let state = match context.ledger.as_ref() {
         Some(ledger) => {
             let maintenance =
-                zup_preset_host::surface::maintenance_state(installer, ledger, discovery.scope);
+                zup_preset_host::surface::maintenance_state(installer, ledger, context.scope);
             HostState::maintenance(
                 zup_preset_host::surface::product(installer),
                 maintenance,
@@ -104,9 +182,9 @@ pub fn initial_state(discovery: &SessionDiscovery, launch: &SessionLaunch) -> Ho
         None => {
             let options = zup_preset_host::surface::install_options(
                 installer,
-                discovery.scope,
+                context.scope,
                 None,
-                launch.preselected.as_deref(),
+                preselected,
                 None,
             );
             HostState::install(

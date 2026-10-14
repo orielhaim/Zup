@@ -16,8 +16,8 @@ use zup_runtime::{
 };
 use zup_transaction::{
     CancellationProbe, FileDelta, FilePrecondition, FilesystemTransactionStore, InstallationLock,
-    OperationExecutor, OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionError,
-    TransactionId, TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
+    OperationExecutor, OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionId,
+    TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
 };
 
 use crate::{
@@ -1404,7 +1404,28 @@ fn execute_local_blocking_with_events_inner(
     };
 
     if cancel.is_cancelled() {
-        return InstallOutcome::Cancelled;
+        let mut executor = ProductionExecutor {
+            inner: WindowsFileExecutor::new(
+                payload,
+                request.work_root.clone(),
+                record.transaction_id.to_string(),
+                record.target.executable_suffix(),
+                Box::new(NullProgress),
+            ),
+            cancel,
+            events,
+            completed_work: 0,
+            total_work: 0,
+            blocked_paths: Vec::new(),
+        };
+        return match coordinator.release(record, &mut executor) {
+            Ok((_, TransactionOutcome::RolledBack)) => InstallOutcome::Cancelled,
+            Ok((_, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
+            Ok((_, TransactionOutcome::Committed)) => {
+                InstallOutcome::Failed("a cancelled transaction cannot commit".into())
+            }
+            Err(error) => InstallOutcome::Failed(error.to_string()),
+        };
     }
 
     let mut executor = ProductionExecutor {
@@ -1440,12 +1461,15 @@ fn execute_local_blocking_with_events_inner(
                 )),
             }
         }
-        Ok((_record, TransactionOutcome::RolledBack)) => InstallOutcome::RolledBack,
-        Ok((_record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
-        Err(TransactionError::Executor { message, .. }) if message.contains("cancelled") => {
-            InstallOutcome::Cancelled
+        Ok((_record, TransactionOutcome::RolledBack)) => {
+            if executor.cancel.is_cancelled() {
+                InstallOutcome::Cancelled
+            } else {
+                InstallOutcome::RolledBack
+            }
         }
-        Err(e) => InstallOutcome::Failed(e.to_string()),
+        Ok((_record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
+        Err(error) => InstallOutcome::Failed(error.to_string()),
     }
 }
 

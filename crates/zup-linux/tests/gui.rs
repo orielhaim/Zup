@@ -68,7 +68,7 @@ fn a_graphical_run_without_a_display_is_refused_with_a_diagnostic() {
 }
 
 #[test]
-fn materialize_stages_an_executable_preset_beside_the_installer() {
+fn materialize_stages_a_private_executable_preset() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let preset = driver_binary("test-gui-install-preset");
@@ -85,9 +85,26 @@ fn materialize_stages_an_executable_preset_beside_the_installer() {
         )
         .expect("a GUI carrier discovers");
     assert!(discovery.installer().preset.is_some());
+    let scope = zup_session::select_scope(
+        discovery.installer().install.scope,
+        &zup_session::SessionLaunch {
+            scope: Some(SelectedScope::User),
+            state_root: Some(user.state.clone()),
+            interactive: true,
+            ..Default::default()
+        },
+        &discovery.installations,
+    )
+    .expect("user scope");
+    let context = discovery.context(scope).expect("context");
     let launched = host
-        .materialize_preset(&discovery)
+        .materialize_preset(&discovery, &context)
         .expect("the preset materializes");
+    assert_ne!(
+        launched.executable.parent(),
+        installer.parent(),
+        "the preset is not staged beside the installer"
+    );
     assert_eq!(
         std::fs::read(&launched.executable).expect("the staged preset reads"),
         preset,

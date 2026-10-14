@@ -197,6 +197,26 @@ impl SessionChannel<'_> {
         }
         Ok(envelope)
     }
+
+    fn poll_cancel(&mut self) -> Result<bool, IpcError> {
+        if !crate::socket::inbound_frame_ready(self.stream)? {
+            return Ok(false);
+        }
+        let envelope = recv_envelope(self.stream, Duration::from_secs(1))
+            .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
+        self.incoming
+            .accept(envelope.sequence)
+            .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
+        if envelope.session_id != self.session {
+            return Err(IpcError::WorkerAuth("session mismatch".into()));
+        }
+        match envelope.message {
+            Message::Cancel => Ok(true),
+            _ => Err(IpcError::WorkerProtocol(
+                "unexpected message during execution".into(),
+            )),
+        }
+    }
 }
 
 fn serve_inner(
@@ -497,7 +517,8 @@ fn prepare_operation(
     let prepared = zup_runtime::prepare_operation(&input, &host)
         .map_err(|error| IpcError::Policy(error.to_string()))?;
     let target_plan = prepared
-        .target_plan
+        .target_plan()
+        .cloned()
         .ok_or_else(|| IpcError::Policy("a machine transaction resolves its target".into()))?;
     enforce_machine_policy(&target_plan, &roots)?;
     if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
@@ -865,17 +886,6 @@ fn execute_prepared(
     prepared: &PreparedPlan,
 ) -> Result<String, IpcError> {
     let lock_key = zup_transaction::InstallationLock::lock_key(&prepared.app_id, "machine");
-    let store = zup_transaction::FilesystemTransactionStore::new(&prepared.state_root);
-    let coordinator = zup_transaction::TransactionCoordinator::new(store);
-    let record = coordinator
-        .begin(
-            prepared.target_plan.app.id.clone(),
-            SelectedScope::Machine,
-            prepared.target_plan.app.version.clone(),
-            prepared.plan.clone(),
-        )
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
-
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
         prepared.payload.installer.clone(),
@@ -907,7 +917,31 @@ fn execute_prepared(
     executor
         .register_plan(&prepared.plan)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let store = zup_transaction::FilesystemTransactionStore::new(&prepared.state_root);
+    let coordinator = zup_transaction::TransactionCoordinator::new(store);
+    let record = coordinator
+        .begin(
+            prepared.target_plan.app.id.clone(),
+            SelectedScope::Machine,
+            prepared.target_plan.app.version.clone(),
+            prepared.plan.clone(),
+        )
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     executor.set_transaction_id(record.transaction_id);
+    if channel.poll_cancel()? {
+        return match coordinator
+            .release(record, &mut executor)
+            .map_err(|error| IpcError::Transaction(error.to_string()))?
+        {
+            (_, zup_transaction::TransactionOutcome::RolledBack) => Ok("cancelled".to_owned()),
+            (_, zup_transaction::TransactionOutcome::RecoveryRequired) => {
+                Ok("recovery_required".to_owned())
+            }
+            (_, zup_transaction::TransactionOutcome::Committed) => Err(IpcError::Transaction(
+                "a cancelled transaction cannot commit".into(),
+            )),
+        };
+    }
 
     let total_files = prepared.file_count as u64;
     channel.send(Message::Progress(ProgressReport {
@@ -916,9 +950,17 @@ fn execute_prepared(
         completed: None,
         total: None,
     }))?;
-    let (record, outcome) = coordinator
-        .execute(record, &mut executor)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let mut cancelled = false;
+    let (record, outcome) = {
+        let mut gated = GatedExecutor {
+            inner: executor,
+            channel,
+            cancelled: &mut cancelled,
+        };
+        coordinator
+            .execute(record, &mut gated)
+            .map_err(|error| IpcError::Transaction(error.to_string()))?
+    };
     channel.send(Message::Progress(ProgressReport {
         kind: ProgressKind::OperationProgress,
         detail: prepared.operation.clone(),
@@ -958,14 +1000,99 @@ fn execute_prepared(
             }
             Ok("committed".to_owned())
         }
+        zup_transaction::TransactionOutcome::RolledBack if cancelled => Ok("cancelled".to_owned()),
         zup_transaction::TransactionOutcome::RolledBack => Ok("rolled_back".to_owned()),
         zup_transaction::TransactionOutcome::RecoveryRequired => Ok("recovery_required".to_owned()),
+    }
+}
+
+struct GatedExecutor<'a, 'b> {
+    inner: crate::executor::LinuxFileExecutor,
+    channel: &'a mut SessionChannel<'b>,
+    cancelled: &'a mut bool,
+}
+
+impl GatedExecutor<'_, '_> {
+    fn note(&mut self) -> Result<(), crate::error::ExecError> {
+        match self.channel.poll_cancel() {
+            Ok(true) => {
+                *self.cancelled = true;
+                Err(crate::error::ExecError::Cancelled)
+            }
+            Ok(false) => Ok(()),
+            Err(error) => Err(crate::error::ExecError::Worker(error.to_string())),
+        }
+    }
+}
+
+impl zup_transaction::OperationExecutor for GatedExecutor<'_, '_> {
+    type Error = crate::error::ExecError;
+
+    fn prepare(&mut self, operation: &zup_transaction::TransactionNode) -> Result<(), Self::Error> {
+        self.note()?;
+        self.inner.prepare(operation)
+    }
+
+    fn apply(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+    ) -> Result<zup_transaction::OperationReceipt, Self::Error> {
+        self.note()?;
+        self.inner.apply(operation)
+    }
+
+    fn verify(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.verify(operation, receipt)
+    }
+
+    fn rollback(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.rollback(operation, receipt)
+    }
+
+    fn reconcile(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: Option<&zup_transaction::OperationReceipt>,
+    ) -> Result<zup_transaction::ReconcileResult, Self::Error> {
+        self.inner.reconcile(operation, receipt)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_execution_cancel_is_readable_without_consuming_later_frames() {
+        let (mut client, mut worker) = UnixStream::pair().expect("socket pair");
+        let session = SessionId::new_v7();
+        send_envelope(
+            &mut client,
+            &WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: session,
+                sequence: 0,
+                message: Message::Cancel,
+            },
+        )
+        .expect("send cancel");
+        let mut channel = SessionChannel {
+            stream: &mut worker,
+            session,
+            incoming: SequenceTracker::new(),
+            outgoing: 0,
+        };
+        assert!(channel.poll_cancel().expect("poll"));
+        assert!(!channel.poll_cancel().expect("quiet"));
+    }
 
     #[test]
     fn file_pins_detect_a_swap() {

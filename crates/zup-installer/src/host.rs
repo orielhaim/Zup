@@ -42,6 +42,7 @@ pub mod preset {
     pub struct Composed {
         pub executable: PathBuf,
         pub configuration: zup_preset_protocol::Configuration,
+        pub stage: Option<PathBuf>,
     }
 
     pub fn materialize(
@@ -55,7 +56,7 @@ pub mod preset {
         zup_preset_host::process::check_presentable(preset, capabilities)
             .map_err(PresetError::Incompatible)?;
 
-        let (executable, assets) = match source {
+        let (executable, assets, stage) = match source {
             Source::Installed {
                 directory,
                 runtime,
@@ -67,27 +68,28 @@ pub mod preset {
                     target.executable_suffix(),
                     zup_windows::plain_path_text,
                 )?;
-                (resolved.executable, resolved.assets)
+                (resolved.executable, resolved.assets, None)
             }
-            Source::Composed {
-                executable, bundle, ..
-            } => {
-                let mut assets = BTreeMap::new();
+            Source::Composed { bundle, .. } => {
+                let bytes = bundle.preset().ok_or(PresetError::Missing(
+                    "this installer was composed without a preset".into(),
+                ))?;
+                let executable_name =
+                    zup_windows::preset_executable_name(std::env::consts::EXE_SUFFIX);
+                let mut files = vec![(executable_name.as_str(), bytes)];
+                let mut owned = Vec::new();
                 for asset in &preset.assets {
-                    let (_, bytes) = bundle.ui_asset(asset.name.as_str()).map_err(|error| {
+                    let (_, contents) = bundle.ui_asset(asset.name.as_str()).map_err(|error| {
                         PresetError::Missing(format!("the asset `{}`: {error}", asset.name))
                     })?;
-                    let path = staging_directory(executable).join(asset.name.as_str());
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|error| PresetError::Prepare(io::Error::other(error)))?;
-                    }
-                    zup_windows::write_durable(&path, &bytes).map_err(|error| {
-                        PresetError::Prepare(io::Error::other(error.to_string()))
-                    })?;
-                    assets.insert(asset.name.to_string(), zup_windows::plain_path_text(&path));
+                    owned.push((asset.name.to_string(), contents));
                 }
-                (locate(executable)?, assets)
+                for (name, contents) in &owned {
+                    files.push((name.as_str(), contents.as_slice()));
+                }
+                let staged = zup_windows::stage_session(&executable_name, &files)
+                    .map_err(|error| PresetError::Prepare(io::Error::other(error)))?;
+                (staged.executable, staged.assets, Some(staged.root))
             }
         };
 
@@ -97,31 +99,8 @@ pub mod preset {
                 settings: preset.settings.clone(),
                 assets,
             },
+            stage,
         })
-    }
-
-    fn staging_directory(executable: &Path) -> PathBuf {
-        executable
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("preset-assets")
-    }
-
-    fn locate(executable: &Path) -> Result<PathBuf, PresetError> {
-        let composed = executable.parent().unwrap_or(Path::new(".")).join(
-            zup_windows::preset_executable_name(std::env::consts::EXE_SUFFIX),
-        );
-        if composed.is_file() {
-            return Ok(composed);
-        }
-        let bundle = crate::package::open_bundle(executable)
-            .map_err(|error| PresetError::Prepare(io::Error::other(error.to_string())))?;
-        let bytes = bundle.preset().ok_or(PresetError::Missing(
-            "this installer was composed without a preset".into(),
-        ))?;
-        zup_windows::write_durable(&composed, bytes)
-            .map_err(|error| PresetError::Prepare(io::Error::other(error.to_string())))?;
-        Ok(composed)
     }
 
     pub use zup_preset_host::process::{PresetProcess, PresetReader, SessionError, launch};
@@ -131,7 +110,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_core::{Frontend, SelectedScope};
-use zup_exec::InstallLedger;
 use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
 
 use crate::maintenance as state;
@@ -142,13 +120,14 @@ pub struct WindowsSessionHost {
     executable: PathBuf,
     bundle: Option<zup_windows::EmbeddedBundle>,
     app_id: Option<zup_core::AppId>,
-    scope: SelectedScope,
     frontend: Frontend,
-    state_root: PathBuf,
 }
 
 impl WindowsSessionHost {
-    fn operation_host(&self) -> Result<zup_windows::WindowsOperationHost<'_>, String> {
+    fn operation_host<'a>(
+        &'a self,
+        context: &'a zup_session::OperationContext,
+    ) -> Result<zup_windows::WindowsOperationHost<'a>, String> {
         let bundle = self
             .bundle
             .as_ref()
@@ -158,77 +137,25 @@ impl WindowsSessionHost {
                 .app_id
                 .clone()
                 .ok_or_else(|| "the session host was not discovered".to_owned())?,
-            scope: self.scope,
+            scope: context.scope,
             frontend: self.frontend,
-            state_root: self.state_root.clone(),
+            state_root: context.state_root.clone(),
             content: zup_windows::WindowsContent::Embedded(bundle),
             acquire_prerequisites: true,
         })
     }
 }
 
-impl zup_runtime::OperationHost for WindowsSessionHost {
-    fn plan_build(
-        &self,
-        build: &zup_core::TargetBuildPlan,
-        request: &zup_plan::PlanRequest,
-        cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<zup_plan::PlannedInstallation, String> {
-        self.operation_host()?
-            .plan_build(build, request, cancellation)
-    }
-
-    fn resolve_target(
-        &self,
-        install: &zup_plan::InstallPlan,
-    ) -> Result<zup_platform::TargetPlan, String> {
-        self.operation_host()?.resolve_target(install)
-    }
-
-    fn observe(
-        &self,
-        target: Option<&zup_platform::TargetPlan>,
-        ledger: Option<&InstallLedger>,
-    ) -> Result<
-        (
-            Option<zup_exec::HostSnapshot>,
-            std::collections::BTreeMap<zup_core::ResourceKey, bool>,
-        ),
-        String,
-    > {
-        self.operation_host()?.observe(target, ledger)
-    }
-
-    fn compile(
-        &self,
-        action: zup_exec::LifecycleAction,
-        execution: &zup_exec::ExecutionPlan,
-        target: Option<&zup_platform::TargetPlan>,
-        ledger: Option<&InstallLedger>,
-    ) -> Result<zup_transaction::TransactionInput, String> {
-        self.operation_host()?
-            .compile(action, execution, target, ledger)
-    }
-
-    fn attach_content(
-        &self,
-        target: &mut zup_platform::TargetPlan,
-        content: &zup_runtime::ContentAccess,
-        preset: Option<&zup_core::PresetRuntime>,
-    ) -> Result<(), String> {
-        self.operation_host()?
-            .attach_content(target, content, preset)
-    }
-
-    fn prepare_bootstrap(
-        &self,
-        install: &zup_plan::InstallPlan,
-    ) -> Result<Option<zup_runtime::BootstrapRequest>, String> {
-        self.operation_host()?.prepare_bootstrap(install)
-    }
-}
-
 impl SessionHost for WindowsSessionHost {
+    type Bound<'a> = zup_windows::WindowsOperationHost<'a>;
+
+    fn bind<'a>(
+        &'a self,
+        context: &'a zup_session::OperationContext,
+    ) -> Result<Self::Bound<'a>, String> {
+        self.operation_host(context)
+    }
+
     fn discover(
         &mut self,
         executable: &Path,
@@ -242,62 +169,57 @@ impl SessionHost for WindowsSessionHost {
             })?;
         let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
         let installer = build.installer.clone();
-        let mut priors = Vec::new();
+        let mut installations = Vec::new();
         for scope in zup_preset_host::surface::scopes(&installer)
             .into_iter()
-            .map(zup_preset_host::convert::engine_scope)
+            .map(zup_preset_host::engine_scope)
         {
-            let root = state::resolve_state_root(launch.state_root.clone(), scope)
+            let state_root = state::resolve_state_root(launch.state_root.clone(), scope)
                 .map_err(|error| error.to_string())?;
-            let ledger = zup_windows::InstallLedgerStore::new(root)
+            let ledger = zup_windows::InstallLedgerStore::new(&state_root)
                 .load(&installer.app.id, scope)
                 .map_err(|error| error.to_string())?;
-            if let Some(ledger) = ledger {
-                priors.push((scope, ledger));
-            }
+            installations.push(zup_session::ScopedInstallation {
+                scope,
+                state_root,
+                ledger,
+            });
         }
-        if launch.maintenance && priors.is_empty() {
+        if launch.maintenance
+            && installations
+                .iter()
+                .all(|installation| installation.ledger.is_none())
+        {
             return Err("the installed application was not found".into());
         }
-        let scope = priors
-            .first()
-            .map(|(scope, _)| *scope)
-            .or(launch.scope)
-            .unwrap_or_else(|| zup_preset_host::surface::default_scope(&installer));
-        let state_root = state::resolve_state_root(launch.state_root.clone(), scope)
-            .map_err(|error| error.to_string())?;
         self.executable = executable.to_path_buf();
         self.bundle = Some(bundle);
         self.app_id = Some(installer.app.id.clone());
-        self.scope = scope;
         self.frontend = installer.frontend;
-        self.state_root = state_root.clone();
         Ok(SessionDiscovery {
             build,
-            priors,
-            scope,
-            state_root,
+            installations,
         })
     }
 
     fn backend(
         &self,
+        context: &zup_session::OperationContext,
         prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
-        let install = prepared
-            .install_plan
-            .as_ref()
-            .ok_or_else(|| "the operation planned no installation to execute".to_owned())?;
         let backend = if prepared.action == zup_exec::LifecycleAction::Uninstall {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
         } else {
+            let install = prepared
+                .install_plan()
+                .ok_or_else(|| "the operation planned no installation to execute".to_owned())?;
             zup_windows::WindowsRuntimeBackend::from_path_with_generated_files(
                 self.executable.clone(),
-                &self.state_root,
-                self.scope,
+                &context.state_root,
+                context.scope,
                 install,
-                &prepared.generated_files,
+                prepared.generated_files(),
                 &prepared.transaction_plan,
             )
             .map_err(|error| error.to_string())?
@@ -308,16 +230,18 @@ impl SessionHost for WindowsSessionHost {
     fn materialize_preset(
         &self,
         discovery: &SessionDiscovery,
+        context: &zup_session::OperationContext,
     ) -> Result<zup_session::PresetLaunch, String> {
         let installer = discovery.installer();
         let bundle = self
             .bundle
             .as_ref()
             .ok_or_else(|| "this file carries no installer package".to_owned())?;
-        let installed = discovery.prior().is_some();
+        let installed = context.ledger.is_some();
         let capabilities = zup_preset_host::surface::capabilities(installer, installed);
-        let installed: Option<(zup_core::InstalledPreset, PathBuf)> = discovery
-            .prior()
+        let installed: Option<(zup_core::InstalledPreset, PathBuf)> = context
+            .ledger
+            .as_ref()
             .map(|ledger| {
                 let runtime = ledger.preset().cloned().ok_or_else(|| {
                     format!(
@@ -328,9 +252,9 @@ impl SessionHost for WindowsSessionHost {
                     )
                 })?;
                 let directory = zup_transaction::maintenance_directory(
-                    &discovery.state_root,
+                    &context.state_root,
                     &installer.app.id,
-                    discovery.scope,
+                    context.scope,
                     &ledger.version,
                 );
                 Ok::<_, String>((runtime, directory))
@@ -362,6 +286,7 @@ impl SessionHost for WindowsSessionHost {
             capabilities,
             product: zup_preset_host::surface::product(installer),
             environment: zup_preset_protocol::environment::current(installer.target.as_str()),
+            stage: composed.stage.map(zup_preset_host::PresetStage::acquire),
         })
     }
 
@@ -379,21 +304,17 @@ impl SessionHost for WindowsSessionHost {
 
     fn after_commit(
         &self,
-        discovery: &SessionDiscovery,
+        context: &zup_session::OperationContext,
         _prepared: &zup_runtime::PreparedOperation,
     ) -> Result<(), String> {
-        state::remove_lock(
-            &discovery.state_root,
-            &discovery.build.installer.app.id,
-            discovery.scope,
-        )
-        .map_err(|error| error.to_string())?;
-        zup_windows::cleanup_app_payload_overlays(
-            &discovery.state_root,
-            &discovery.build.installer.app.id,
-            discovery.scope,
-        )
-        .map_err(|error| error.to_string())
+        let app_id = self
+            .app_id
+            .as_ref()
+            .ok_or_else(|| "the session host was not discovered".to_owned())?;
+        state::remove_lock(&context.state_root, app_id, context.scope)
+            .map_err(|error| error.to_string())?;
+        zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -448,6 +369,7 @@ impl Launch {
             preselected: self.preselected.clone(),
             maintenance: self.maintenance,
             auto_uninstall: self.auto_uninstall,
+            interactive: true,
         }
     }
 }
@@ -500,9 +422,7 @@ impl Default for WindowsSessionHost {
             executable: PathBuf::new(),
             bundle: None,
             app_id: None,
-            scope: SelectedScope::User,
             frontend: Frontend::Gui,
-            state_root: PathBuf::new(),
         }
     }
 }

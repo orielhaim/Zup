@@ -33,10 +33,34 @@ pub fn close() {
     send(&channel, &mut peer, Action::Close);
 }
 
+pub fn install_in(scope: zup_preset_protocol::InstallScope) {
+    let (channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::SetScope { scope });
+    send(&channel, &mut peer, Action::Install);
+    wait_until_succeeded(channel);
+}
+
+pub fn modify_in(scope: zup_preset_protocol::InstallScope) {
+    let (channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::SetScope { scope });
+    send(&channel, &mut peer, Action::Modify);
+    wait_until_succeeded(channel);
+}
+
+pub fn uninstall() {
+    let (channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::RequestUninstall);
+    send(&channel, &mut peer, Action::ConfirmUninstall);
+    wait_until_succeeded(channel);
+}
+
 pub fn install() {
     let (channel, mut peer) = connect();
     send(&channel, &mut peer, Action::Install);
+    wait_until_succeeded(channel);
+}
 
+fn wait_until_succeeded(channel: Channel) {
     let mut channel = channel;
     let mut succeeded = false;
     loop {
@@ -45,10 +69,20 @@ pub fn install() {
             Err(_) => break,
         };
         channel = next;
-        if let Message::Snapshot(snapshot) = &incoming.message
-            && snapshot.state == InstallerState::Succeeded
-        {
-            succeeded = true;
+        if let Message::Snapshot(snapshot) = &incoming.message {
+            if snapshot.state == InstallerState::Succeeded {
+                succeeded = true;
+            }
+            if matches!(
+                snapshot.state,
+                InstallerState::Failed | InstallerState::RecoveryRequired
+            ) {
+                eprintln!(
+                    "preset stopped in {:?} {:?}",
+                    snapshot.state, snapshot.diagnostic
+                );
+                std::process::exit(4);
+            }
         }
         if succeeded {
             break;

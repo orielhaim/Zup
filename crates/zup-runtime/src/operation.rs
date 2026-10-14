@@ -227,16 +227,59 @@ pub trait OperationHost {
 }
 
 #[derive(Debug)]
+pub struct PlannedOperation {
+    pub install_plan: InstallPlan,
+    pub target_plan: TargetPlan,
+    pub generated_files: Vec<zup_plan::GeneratedFile>,
+    pub bootstrap: Option<BootstrapRequest>,
+}
+
+#[derive(Debug)]
+pub enum OperationBody {
+    Planned(Box<PlannedOperation>),
+    Uninstall {
+        target_plan: Option<Box<TargetPlan>>,
+    },
+}
+
+#[derive(Debug)]
 pub struct PreparedOperation {
     pub operation: Operation,
     pub action: LifecycleAction,
-    pub install_plan: Option<InstallPlan>,
-    pub target_plan: Option<TargetPlan>,
     pub execution_plan: ExecutionPlan,
     pub transaction_plan: TransactionPlan,
-    pub generated_files: Vec<zup_plan::GeneratedFile>,
-    pub bootstrap: Option<BootstrapRequest>,
     pub selection: OperationSelection,
+    pub body: OperationBody,
+}
+
+impl PreparedOperation {
+    pub fn target_plan(&self) -> Option<&TargetPlan> {
+        match &self.body {
+            OperationBody::Planned(planned) => Some(&planned.target_plan),
+            OperationBody::Uninstall { target_plan } => target_plan.as_deref(),
+        }
+    }
+
+    pub fn install_plan(&self) -> Option<&InstallPlan> {
+        match &self.body {
+            OperationBody::Planned(planned) => Some(&planned.install_plan),
+            OperationBody::Uninstall { .. } => None,
+        }
+    }
+
+    pub fn generated_files(&self) -> &[zup_plan::GeneratedFile] {
+        match &self.body {
+            OperationBody::Planned(planned) => &planned.generated_files,
+            OperationBody::Uninstall { .. } => &[],
+        }
+    }
+
+    pub fn bootstrap(&self) -> Option<&BootstrapRequest> {
+        match &self.body {
+            OperationBody::Planned(planned) => planned.bootstrap.as_ref(),
+            OperationBody::Uninstall { .. } => None,
+        }
+    }
 }
 
 pub fn prepare_operation<H: OperationHost>(
@@ -315,13 +358,12 @@ pub fn prepare_operation<H: OperationHost>(
         return Ok(PreparedOperation {
             operation: input.operation,
             action,
-            install_plan: None,
-            target_plan: target,
             execution_plan: execution,
             transaction_plan,
-            generated_files: Vec::new(),
-            bootstrap: None,
             selection: input.selection.clone(),
+            body: OperationBody::Uninstall {
+                target_plan: target.map(Box::new),
+            },
         });
     }
     let mut plan_request = PlanRequest::new(installer.target, input.scope);
@@ -389,13 +431,15 @@ pub fn prepare_operation<H: OperationHost>(
     Ok(PreparedOperation {
         operation: input.operation,
         action,
-        install_plan: Some(planned.plan),
-        target_plan: Some(target),
         execution_plan: execution,
         transaction_plan,
-        generated_files: planned.generated_files,
-        bootstrap,
         selection: input.selection.clone(),
+        body: OperationBody::Planned(Box::new(PlannedOperation {
+            install_plan: planned.plan,
+            target_plan: target,
+            generated_files: planned.generated_files,
+            bootstrap,
+        })),
     })
 }
 
@@ -529,8 +573,7 @@ pub fn runtime_request(
 ) -> crate::RuntimeRequest {
     crate::RuntimeRequest {
         target: prepared
-            .target_plan
-            .as_ref()
+            .target_plan()
             .map(|target| target.target)
             .unwrap_or_else(|| prepared.transaction_plan.target),
         app_id,
@@ -814,8 +857,8 @@ mod tests {
         .expect("an uninstall prepares");
         assert_eq!(prepared.action, LifecycleAction::Uninstall);
         assert_eq!(host.plan_calls.get(), 0);
-        assert!(prepared.install_plan.is_none());
-        assert!(prepared.target_plan.is_none());
+        assert!(prepared.install_plan().is_none());
+        assert!(prepared.target_plan().is_none());
         assert!(prepared.transaction_plan.uninstall);
     }
 
