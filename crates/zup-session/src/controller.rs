@@ -28,6 +28,7 @@ type Inbox = tokio::sync::broadcast::Receiver<Report>;
 struct ActiveOperation {
     id: zup_runtime::Uuid,
     cancel: CancellationHandle,
+    task: tokio::task::JoinHandle<crate::runner::OperationCompletion>,
 }
 
 impl ActiveOperation {
@@ -101,8 +102,6 @@ where
     }
 
     let (reports, inbox) = tokio::sync::broadcast::channel::<Report>(256);
-    let (settled_tx, mut settled_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::runner::OperationCompletion>();
     let mut control = Control {
         host,
         executable: executable.to_path_buf(),
@@ -121,7 +120,11 @@ where
     if let Some(selection) = control.state.plan_request() {
         request_plan(&mut control, selection);
     }
-    let mut deliverable = publish(&mut preset, &control.state, &configuration)?;
+    let mut deliverable = match publish(&mut preset, &control.state, &configuration) {
+        Ok(deliverable) => deliverable,
+        Err(error) => return Err(error),
+    };
+    let mut interaction_error = None;
 
     loop {
         if !preset.is_running() {
@@ -152,8 +155,9 @@ where
                         control.state.fail(message, false);
                     }
                 }
-                if deliverable {
-                    deliverable = publish(&mut preset, &control.state, &configuration)?;
+                if let Err(error) = publish_if(&mut preset, &control.state, &configuration, &mut deliverable) {
+                    interaction_error = Some(error);
+                    break;
                 }
             }
             asked = questions.recv() => {
@@ -161,38 +165,79 @@ where
                 if action == Action::Close {
                     break;
                 }
-                act(&mut control, action, &settled_tx);
-                if deliverable {
-                    deliverable = publish(&mut preset, &control.state, &configuration)?;
+                act(&mut control, action);
+                if let Err(error) = publish_if(&mut preset, &control.state, &configuration, &mut deliverable) {
+                    interaction_error = Some(error);
+                    break;
                 }
             }
-            completion = settled_rx.recv() => {
-                let Some(completion) = completion else { break };
-                apply_completion(&mut control, completion);
-                if deliverable {
-                    deliverable = publish(&mut preset, &control.state, &configuration)?;
+            completion = await_active(&mut control.active) => {
+                match completion {
+                    Ok(completion) => apply_completion(&mut control, completion),
+                    Err(error) => {
+                        control.active = None;
+                        interaction_error = Some(error);
+                        break;
+                    }
+                }
+                if let Err(error) = publish_if(&mut preset, &control.state, &configuration, &mut deliverable) {
+                    interaction_error = Some(error);
+                    break;
                 }
             }
         }
     }
 
-    let pending = control.active.take();
-    if let Some(operation) = &pending {
-        operation.cancel();
-    }
     drop(preset);
-    if let Some(operation) = pending {
-        loop {
-            let Some(completion) = settled_rx.recv().await else {
-                return Err(miette::miette!(
-                    "the operation ended without a settlement result"
-                ));
-            };
-            if completion.id == operation.id {
-                apply_completion(&mut control, completion);
-                break;
-            }
+    let settled = finish_active(&mut control).await;
+    match (interaction_error, settled) {
+        (Some(error), Err(settled)) => Err(miette::miette!("{error}").wrap_err(settled)),
+        (Some(error), Ok(())) => Err(error),
+        (None, settled) => settled,
+    }
+}
+
+async fn await_active(
+    active: &mut Option<ActiveOperation>,
+) -> Result<crate::runner::OperationCompletion, miette::Report> {
+    let Some(operation) = active.as_mut() else {
+        std::future::pending().await
+    };
+    let id = operation.id;
+    match (&mut operation.task).await {
+        Ok(completion) if completion.id == id => Ok(completion),
+        Ok(_) => Err(miette::miette!(
+            "the operation completed with a result for a different operation"
+        )),
+        Err(_) => Err(miette::miette!("the operation task ended unexpectedly")),
+    }
+}
+
+async fn finish_active<H: SessionHost>(control: &mut Control<H>) -> miette::Result<()> {
+    let Some(operation) = control.active.take() else {
+        return Ok(());
+    };
+    operation.cancel();
+    match operation.task.await {
+        Ok(completion) if completion.id == operation.id => {
+            apply_completion(control, completion);
+            Ok(())
         }
+        Ok(_) => Err(miette::miette!(
+            "the operation completed with a result for a different operation"
+        )),
+        Err(_) => Err(miette::miette!("the operation task ended unexpectedly")),
+    }
+}
+
+fn publish_if(
+    preset: &mut zup_preset_host::process::PresetProcess,
+    state: &HostState,
+    configuration: &zup_preset_protocol::Configuration,
+    deliverable: &mut bool,
+) -> miette::Result<()> {
+    if *deliverable {
+        *deliverable = publish(preset, state, configuration)?;
     }
     Ok(())
 }
@@ -204,10 +249,11 @@ fn apply_completion<H: SessionHost>(
     if control
         .active
         .as_ref()
-        .is_some_and(|operation| operation.id == completion.id)
+        .is_some_and(|operation| operation.id != completion.id)
     {
-        control.active = None;
+        return;
     }
+    control.active = None;
     if !completion.repair_drift.is_empty() {
         control.state.set_repair_drift(completion.repair_drift);
     }
@@ -241,11 +287,8 @@ where
     });
 }
 
-fn act<H>(
-    control: &mut Control<H>,
-    action: Action,
-    settled: &tokio::sync::mpsc::UnboundedSender<crate::runner::OperationCompletion>,
-) where
+fn act<H>(control: &mut Control<H>, action: Action)
+where
     H: SessionHost + Clone + Send + Sync + 'static,
 {
     match control.state.accept(action) {
@@ -255,11 +298,13 @@ fn act<H>(
             cleanup_lock,
         } => {
             control.inbox = control.reports.subscribe();
+            if control.active.is_some() {
+                return;
+            }
             let operation_control =
                 OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
             let cancel = operation_control.cancellation();
             let id = zup_runtime::Uuid::now_v7();
-            control.active = Some(ActiveOperation { id, cancel });
             let operation = OperationRequest {
                 id,
                 action,
@@ -270,19 +315,15 @@ fn act<H>(
             let executable = control.executable.clone();
             let discovery = control.discovery.clone();
             let reports = control.reports.clone();
-            let settled = settled.clone();
-            tokio::spawn(async move {
-                let done = settle_operation(
-                    host,
-                    executable,
-                    discovery,
-                    operation,
-                    operation_control,
-                    reports,
-                )
-                .await;
-                let _ = settled.send(done);
-            });
+            let task = tokio::spawn(settle_operation(
+                host,
+                executable,
+                discovery,
+                operation,
+                operation_control,
+                reports,
+            ));
+            control.active = Some(ActiveOperation { id, cancel, task });
         }
         HostDecision::Plan(selection) => {
             if selection.scope != control.presented {
@@ -378,47 +419,54 @@ async fn settle_operation<H>(
 where
     H: SessionHost + Send + Sync + 'static,
 {
-    let id = operation.id;
     let mut received = control.subscribe();
-    let pump = tokio::spawn(async move {
-        loop {
-            match received.recv().await {
-                Ok(event) if !is_terminal(&event) => {
-                    if reports.send(Report::Engine(event)).is_err() {
-                        break;
+    let work = crate::runner::complete_operation(
+        &host,
+        &executable,
+        &discovery,
+        crate::runner::OperationLaunch {
+            id: operation.id,
+            action: operation.action,
+            selection: &operation.selection,
+            cleanup_lock: operation.cleanup_lock,
+            control,
+        },
+    );
+    tokio::pin!(work);
+    let completion = loop {
+        tokio::select! {
+            biased;
+            done = &mut work => break done,
+            event = received.recv() => {
+                match event {
+                    Ok(event) if !is_terminal(&event) => {
+                        if reports.send(Report::Engine(event)).is_err() {
+                            break work.await;
+                        }
                     }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break work.await,
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
-    let joined = tokio::spawn(async move {
-        crate::runner::complete_operation(
-            &host,
-            &executable,
-            &discovery,
-            crate::runner::OperationLaunch {
-                id: operation.id,
-                action: operation.action,
-                selection: &operation.selection,
-                cleanup_lock: operation.cleanup_lock,
-                control,
-            },
-        )
-        .await
-    })
-    .await;
-    let _ = pump.await;
-    match joined {
-        Ok(completion) => completion,
-        Err(_) => crate::runner::OperationCompletion {
-            id,
-            outcome: zup_runtime::InstallOutcome::RecoveryRequired,
-            repair_drift: Vec::new(),
-        },
+    };
+    loop {
+        match received.try_recv() {
+            Ok(event) if !is_terminal(&event) => {
+                if reports.send(Report::Engine(event)).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
     }
+    completion
 }
 
 fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<(), String> {

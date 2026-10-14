@@ -16,10 +16,18 @@ struct Hold {
     release: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy)]
+enum Script {
+    Commit,
+    Panic,
+    CommitAfterCancel,
+}
+
 #[derive(Clone)]
 struct FakeBackend {
     ran: Arc<AtomicBool>,
     hold: Option<Hold>,
+    script: Script,
 }
 
 impl zup_runtime::RuntimeBackend for FakeBackend {
@@ -57,7 +65,21 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
                 }
             }
             self.ran.store(true, Ordering::SeqCst);
-            Ok(zup_runtime::InstallOutcome::Committed)
+            match self.script {
+                Script::Panic => panic!("operation task failed"),
+                Script::CommitAfterCancel => {
+                    let _ = control.events.send(zup_runtime::RuntimeEvent::Progress {
+                        completed: 0,
+                        total: 1,
+                        action: "holding".into(),
+                    });
+                    while !control.cancellation.is_cancelled() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok(zup_runtime::InstallOutcome::Committed)
+                }
+                Script::Commit => Ok(zup_runtime::InstallOutcome::Committed),
+            }
         })
     }
 }
@@ -341,6 +363,7 @@ fn host(preset: &str) -> FakeHost {
         backend: FakeBackend {
             ran: Arc::new(AtomicBool::new(false)),
             hold: None,
+            script: Script::Commit,
         },
         preset: stub,
         installations: Vec::new(),
@@ -639,4 +662,62 @@ async fn a_gui_uninstall_reaches_execution_without_an_install_plan() {
         "uninstall executes from the ledger, not an install plan: {record}"
     );
     assert!(record.contains(&root.path().display().to_string()));
+}
+
+#[tokio::test]
+async fn a_protocol_error_during_execution_still_waits_for_settlement() {
+    let hold = Hold::default();
+    let mut session_host = host("protocol_fault_preset");
+    session_host.backend.hold = Some(hold.clone());
+    let cancelled = Arc::clone(&hold.cancelled);
+    let release = Arc::clone(&hold.release);
+    let session = tokio::spawn(zup_session::run(
+        session_host,
+        fake_exe(),
+        SessionLaunch::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !cancelled.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a protocol fault cancels the running operation");
+    assert!(!session.is_finished());
+    release.store(true, Ordering::SeqCst);
+    session
+        .await
+        .expect("session task")
+        .expect("shutdown waits for the operation");
+}
+
+#[tokio::test]
+async fn an_unexpected_operation_failure_is_reported() {
+    let mut session_host = host("install_preset");
+    session_host.backend.script = Script::Panic;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        zup_session::run(session_host, fake_exe(), SessionLaunch::default()),
+    )
+    .await
+    .expect("a panicked operation cannot hang shutdown")
+    .expect_err("the session reports the lost operation");
+    assert!(error.to_string().contains("ended unexpectedly"), "{error}");
+}
+
+#[tokio::test]
+async fn closing_after_commit_keeps_the_committed_result() {
+    let mut session_host = host("install_close_preset");
+    session_host.backend.script = Script::CommitAfterCancel;
+    let session = tokio::spawn(zup_session::run(
+        session_host.clone(),
+        fake_exe(),
+        SessionLaunch::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), session)
+        .await
+        .expect("close settles")
+        .expect("session task")
+        .expect("a late close does not fail a committed operation");
+    assert!(session_host.backend.ran.load(Ordering::SeqCst));
 }

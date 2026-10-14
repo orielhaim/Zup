@@ -422,49 +422,33 @@ fn execute_once(
             .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()),
     );
     let control = zup_runtime::OperationControl::new(ExecutionPolicy::Interactive);
-    let mut receiver = control.subscribe();
     let pump_progress = progress.clone();
-    let pump = std::thread::spawn(move || {
-        loop {
-            let event = match receiver.blocking_recv() {
-                Ok(event) => event,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            let terminal = execute::is_terminal(&event);
-            match &event {
-                zup_runtime::RuntimeEvent::Progress {
-                    completed,
-                    total,
-                    action,
-                } => {
-                    if *total > 0 {
-                        pump_progress.set_length(*total);
-                    }
-                    pump_progress.set_position((*completed).min((*total).max(1)));
-                    pump_progress.set_message(action.clone());
-                }
-                zup_runtime::RuntimeEvent::ResourceBlocked { detail, .. } => {
-                    eprintln!("installation blocked by running applications\n{detail}");
-                }
-                zup_runtime::RuntimeEvent::Failed { message, .. } => {
-                    eprintln!("{message}");
-                }
-                zup_runtime::RuntimeEvent::StateChanged { state }
-                    if *state == zup_runtime::RuntimeState::Cancelled =>
-                {
-                    println!("Cancelling safely…");
-                }
-                _ => {}
-            }
-            if terminal {
-                break;
-            }
-        }
-    });
     let prepared = prepared.retaining_overlay();
-    let result = execute::execute_with_control_signal(prepared, &control);
+    let result = execute::execute_observing(prepared, &control, |event| match event {
+        zup_runtime::RuntimeEvent::Progress {
+            completed,
+            total,
+            action,
+        } => {
+            if *total > 0 {
+                pump_progress.set_length(*total);
+            }
+            pump_progress.set_position((*completed).min((*total).max(1)));
+            pump_progress.set_message(action.clone());
+        }
+        zup_runtime::RuntimeEvent::ResourceBlocked { detail, .. } => {
+            eprintln!("installation blocked by running applications\n{detail}");
+        }
+        zup_runtime::RuntimeEvent::Failed { message, .. } => {
+            eprintln!("{message}");
+        }
+        zup_runtime::RuntimeEvent::StateChanged { state }
+            if *state == zup_runtime::RuntimeState::Cancelled =>
+        {
+            println!("Cancelling safely…");
+        }
+        _ => {}
+    });
     progress.finish_and_clear();
-    let _ = pump.join();
     result
 }

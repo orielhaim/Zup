@@ -162,8 +162,30 @@ impl LinuxRuntimeBackend {
         let _ = events.send(RuntimeEvent::StateChanged {
             state: zup_runtime::RuntimeState::Executing,
         });
+        crate::run::refuse_redirected_hierarchy(&request.state_root)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let carrier = Carrier::open(&self.installer)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        let lock_key =
+            InstallationLock::lock_key(request.app_id.as_str(), scope_token(request.scope));
+        let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return Ok(ExecutionReport {
+                    outcome: InstallOutcome::Busy {
+                        operation: "linux install",
+                    },
+                    recovery_transaction: None,
+                });
+            }
+            Err(error) => return Err(SessionError::Transaction(error.to_string())),
+        };
+        if control.cancellation.is_cancelled() {
+            return Ok(ExecutionReport {
+                outcome: InstallOutcome::Cancelled,
+                recovery_transaction: None,
+            });
+        }
         let ledger_store = LinuxLedgerStore::new(&request.state_root);
         match ledger_store.repair_committed(&request.app_id, request.scope) {
             Ok(()) => {}
@@ -192,20 +214,6 @@ impl LinuxRuntimeBackend {
                 &request.transaction_plan,
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let lock_key =
-            InstallationLock::lock_key(request.app_id.as_str(), scope_token(request.scope));
-        let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                return Ok(ExecutionReport {
-                    outcome: InstallOutcome::Busy {
-                        operation: "linux install",
-                    },
-                    recovery_transaction: None,
-                });
-            }
-            Err(error) => return Err(SessionError::Transaction(error.to_string())),
-        };
         crate::run::preflight_refresh(&request.transaction_plan)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let payload =
