@@ -7,12 +7,11 @@ use zup_core::{
     App, AppId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope, Target,
     hash_reader,
 };
-use zup_exec::{LifecycleAction, OwnedResource};
+use zup_exec::LifecycleAction;
 use zup_platform::{TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest, SessionError};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork, TransactionInput,
-    compile_transaction,
+    FileDelta, FilePrecondition, FileWork, TransactionInput, compile_transaction,
 };
 use zup_windows::{InstallLedgerStore, PayloadOverlayIdentity, WindowsRuntimeBackend};
 
@@ -167,37 +166,20 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         .load(&app_id, SelectedScope::User)
         .unwrap()
         .unwrap();
-    let mut input = TransactionInput::new(target());
-    input.uninstall = true;
-    for (key, owned) in &ledger.resources {
-        input.retired_keys.push(key.clone());
-        let OwnedResource::File {
-            destination,
-            sha256,
-            size,
-            created_directories,
-            ..
-        } = owned
-        else {
-            continue;
-        };
-        input.removals.push(FileRemoval {
-            key: key.clone(),
-            kind: FileRemovalKind::RemoveOwned,
-            scope: SelectedScope::User,
-            privilege: Privilege::User,
-            destination: destination.clone(),
-            sha256: *sha256,
-            size: *size,
-            created_directories: created_directories.clone(),
-        });
-    }
+    let uninstall = zup_windows::plan_target_lifecycle(
+        LifecycleAction::Uninstall,
+        &app_id,
+        SelectedScope::User,
+        None,
+        &state_root,
+    )
+    .unwrap();
     let request = RuntimeRequest {
         target: target(),
         app_id,
         app_version,
         scope: SelectedScope::User,
-        transaction_plan: compile_transaction(&input).unwrap(),
+        transaction_plan: uninstall,
         state_root: state_root.clone(),
         work_root: root.path().join("work"),
         recovery_id: None,
@@ -215,6 +197,64 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
             .load(&ledger.app_id, SelectedScope::User)
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_stale_uninstall_is_rejected_after_the_generation_changes() {
+    let root = TempDir::new().unwrap();
+    let (request, backend) = request(&root, SelectedScope::User);
+    let app_id = request.app_id.clone();
+    let app_version = request.app_version.clone();
+    let state_root = request.state_root.clone();
+    let destination = root.path().join("install").join("app.exe");
+    let payload_root = root.path().join("payload");
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
+    assert_eq!(outcome, InstallOutcome::Committed);
+    let uninstall = zup_windows::plan_target_lifecycle(
+        LifecycleAction::Uninstall,
+        &app_id,
+        SelectedScope::User,
+        None,
+        &state_root,
+    )
+    .unwrap();
+    let store = InstallLedgerStore::new(&state_root);
+    let mut ledger = store.load(&app_id, SelectedScope::User).unwrap().unwrap();
+    ledger.committed_transaction = "ffffffff-ffff-ffff-ffff-ffffffffffff".into();
+    std::fs::write(
+        store.path_for(&app_id, SelectedScope::User),
+        serde_json::to_vec(&ledger).unwrap(),
+    )
+    .unwrap();
+    let request = RuntimeRequest {
+        target: target(),
+        app_id,
+        app_version,
+        scope: SelectedScope::User,
+        transaction_plan: uninstall,
+        state_root: state_root.clone(),
+        work_root: root.path().join("work"),
+        recovery_id: None,
+        release: None,
+        bootstrap: None,
+    };
+    let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
+    let outcome = run(&backend, request, ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, InstallOutcome::Failed(ref detail) if detail.contains("installation generation")),
+        "{outcome:?}"
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
+    assert!(
+        InstallLedgerStore::new(&state_root)
+            .load(&ledger.app_id, SelectedScope::User)
+            .unwrap()
+            .is_some()
     );
 }
 
