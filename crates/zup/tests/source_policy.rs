@@ -12,6 +12,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use zup_core::hash_reader;
 
+#[path = "support/toolchain_fixture.rs"]
+mod toolchain_fixture;
+
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 const PREREQUISITE: &[u8] = b"runtime payload";
 
@@ -96,14 +99,14 @@ package = {{ type = "embedded", path = "vendor/runtime.exe", sha256 = "{}", size
     (project, junction)
 }
 
-fn zup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_zup"))
+fn zup(root: &Path) -> Command {
+    toolchain_fixture::zup(&toolchain_fixture::host_toolchain(root))
 }
 
 #[test]
 fn check_refuses_a_prerequisite_reached_through_a_junction() {
     let (project, _junction) = junction_project();
-    let output = zup()
+    let output = zup(project.path())
         .args(["check", "--manifest"])
         .arg(project.path().join("zup.toml"))
         .output()
@@ -124,7 +127,7 @@ fn check_refuses_a_prerequisite_reached_through_a_junction() {
 #[test]
 fn doctor_reports_a_junctioned_prerequisite_as_a_payload_failure() {
     let (project, _junction) = junction_project();
-    let output = zup()
+    let output = zup(project.path())
         .args(["doctor", "--manifest"])
         .arg(project.path().join("zup.toml"))
         .args(["--format", "json"])

@@ -64,6 +64,7 @@ fn worker_with_bundle(work_root: &Path, version: &str) -> PathBuf {
     let manifest = format!(
         r#"
 schema = 1
+frontend = "console"
 [app]
 id = "com.acme.app"
 name = "Acme App"

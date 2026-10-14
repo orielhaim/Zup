@@ -1,10 +1,20 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
 
+#[path = "support/toolchain_fixture.rs"]
+mod toolchain_fixture;
+
 fn zup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_zup"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zup"));
+    command.env_remove("ZUP_TOOLCHAIN");
+    command
+}
+
+fn zup_with_toolchain(root: &Path) -> Command {
+    toolchain_fixture::zup(&toolchain_fixture::host_toolchain(root))
 }
 
 /// The target fixtures check on this host, and a frontend its backend ships.
@@ -55,7 +65,7 @@ fn init_creates_a_small_editor_ready_manifest() {
     assert!(source.starts_with("#:schema https://zup.dev/schema/zup.toml.json"));
     assert!(source.contains("allow_directory_override = true"));
     assert!(root.path().join("dist").is_dir());
-    let checked = zup()
+    let checked = zup_with_toolchain(root.path())
         .args(["check", "--manifest", manifest.to_str().unwrap()])
         .output()
         .unwrap();
@@ -92,7 +102,7 @@ user = "${location.user_data}/Plan"
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
-    let plan = zup()
+    let plan = zup_with_toolchain(root.path())
         .args([
             "plan",
             "--manifest",
@@ -182,7 +192,7 @@ component = "missing"
         ),
     )
     .unwrap();
-    let output = zup()
+    let output = zup_with_toolchain(root.path())
         .args(["check", "--manifest", manifest.to_str().unwrap()])
         .output()
         .unwrap();

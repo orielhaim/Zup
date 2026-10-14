@@ -34,6 +34,9 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[path = "support/toolchain_fixture.rs"]
+mod toolchain_fixture;
+
 /// A project with one target, enough for `zup check` and `zup publish`.
 fn project() -> TempDir {
     let project = TempDir::new().expect("a project directory");
@@ -71,12 +74,15 @@ destination = "${install}"
 }
 
 fn zup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_zup"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zup"));
+    command.env_remove("ZUP_TOOLCHAIN");
+    command
 }
 
 /// `zup <args>` in `project`, with an environment a test controls.
 fn run(project: &Path, path: Option<&Path>, args: &[&str]) -> Output {
-    let mut command = zup();
+    let toolchain = toolchain_fixture::host_toolchain(project);
+    let mut command = toolchain_fixture::zup(&toolchain);
     command
         .args(args)
         .arg("--manifest")
