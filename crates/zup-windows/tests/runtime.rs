@@ -392,3 +392,145 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     );
     assert!(!maintenance.exists());
 }
+
+#[tokio::test]
+#[ignore = "requires elevated administrator; uses the authoritative machine root"]
+async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
+    let root = TempDir::new().unwrap();
+    let (mut install, backend) = request(&root, SelectedScope::Machine);
+    install.app_id = AppId::new(format!(
+        "com.zup.machine-probe-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .unwrap();
+    let machine = zup_windows::MachineRoot::acquire().expect("machine authority");
+    let destination = root.path().join("install/app.exe");
+    let ledgers = InstallLedgerStore::new(machine.path());
+    for iteration in 0..2 {
+        assert_eq!(
+            run(&backend, install.clone(), ExecutionPolicy::Interactive)
+                .await
+                .unwrap(),
+            InstallOutcome::Committed
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
+        assert!(
+            !install.state_root.exists(),
+            "caller cannot choose machine state"
+        );
+        assert!(
+            !install.work_root.exists(),
+            "caller cannot choose machine work"
+        );
+        let mut input = file_input(&root, SelectedScope::Machine);
+        input.observed_transaction = Some(
+            ledgers
+                .load(&install.app_id, SelectedScope::Machine)
+                .unwrap()
+                .unwrap()
+                .committed_transaction,
+        );
+        let file = &mut input.files[0];
+        file.precondition = FilePrecondition::Exact {
+            size: 9,
+            sha256: digest(b"installed"),
+        };
+        file.expected_sha256 = digest(b"modified");
+        file.expected_size = 8;
+        file.delta = FileDelta::Replace;
+        std::fs::write(root.path().join("payload/app.exe"), b"modified").unwrap();
+        let mut modify = install.clone();
+        modify.app_version = "2.0.0".parse().unwrap();
+        modify.transaction_plan = compile_transaction(&input).unwrap();
+        let guard = if iteration == 0 {
+            use std::os::windows::fs::OpenOptionsExt;
+            Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(ledgers.path_for(&install.app_id, SelectedScope::Machine))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let outcome = run(&backend, modify.clone(), ExecutionPolicy::Interactive)
+            .await
+            .unwrap();
+        if let Some(guard) = guard {
+            assert!(
+                matches!(
+                    outcome,
+                    InstallOutcome::CommittedPendingReconciliation { .. }
+                ),
+                "{outcome:?}"
+            );
+            let ids = machine.transaction_store().list_ids().unwrap();
+            let pending = ids
+                .iter()
+                .filter(|id| {
+                    use zup_transaction::TransactionStore;
+                    let record = machine.transaction_store().load(id).unwrap();
+                    record.app_id == install.app_id && record.app_version == modify.app_version
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(pending.len(), 1);
+            let work = machine.path().join("work").join(pending[0].to_string());
+            assert!(
+                work.is_dir(),
+                "pending reconciliation retains rollback material"
+            );
+            drop(guard);
+            ledgers
+                .repair_committed(&install.app_id, SelectedScope::Machine)
+                .unwrap();
+            assert!(!work.exists(), "durable ledger publication releases work");
+        } else {
+            assert_eq!(outcome, InstallOutcome::Committed);
+        }
+        assert_eq!(std::fs::read(&destination).unwrap(), b"modified");
+        assert_eq!(
+            ledgers
+                .load(&install.app_id, SelectedScope::Machine)
+                .unwrap()
+                .unwrap()
+                .version,
+            modify.app_version
+        );
+        let committed = ledgers
+            .load(&install.app_id, SelectedScope::Machine)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !machine
+                .path()
+                .join("work")
+                .join(&committed.committed_transaction)
+                .exists()
+        );
+        let mut uninstall = modify;
+        uninstall.transaction_plan = zup_windows::plan_target_lifecycle(
+            LifecycleAction::Uninstall,
+            &install.app_id,
+            SelectedScope::Machine,
+            None,
+            machine.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&backend, uninstall, ExecutionPolicy::Interactive)
+                .await
+                .unwrap(),
+            InstallOutcome::Committed
+        );
+        assert!(!destination.exists());
+        assert!(
+            ledgers
+                .load(&install.app_id, SelectedScope::Machine)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!install.work_root.exists());
+        std::fs::write(root.path().join("payload/app.exe"), b"installed").unwrap();
+    }
+}

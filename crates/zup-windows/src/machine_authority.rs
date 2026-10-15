@@ -22,20 +22,31 @@ impl MachineRoot {
         Self::establish_at(&path)
     }
 
-    pub fn establish_at(path: &Path) -> Result<Self, MachineStateError> {
+    fn establish_at(path: &Path) -> Result<Self, MachineStateError> {
         let root = MachineDir::open_root(path)?;
         let state = Self {
             path: path.to_path_buf(),
             root: Arc::new(root),
         };
-        state.child("transactions", PolicyKind::Administrators)?;
-        state.child("locks", PolicyKind::Administrators)?;
-        state.child("installations", PolicyKind::Ledger)?;
+        state
+            .root
+            .ensure_dir("transactions", PolicyKind::Administrators)?;
+        state.root.ensure_dir("locks", PolicyKind::Administrators)?;
+        state.root.ensure_dir("work", PolicyKind::Administrators)?;
+        state.root.ensure_dir("installations", PolicyKind::Ledger)?;
         Ok(state)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn work_dir(&self) -> Result<MachineDir, MachineStateError> {
+        self.child("work", PolicyKind::Administrators)
+    }
+
+    pub(crate) fn remove_work(&self, id: &TransactionId) -> Result<(), MachineStateError> {
+        self.work_dir()?.remove_owned_tree(&id.to_string())
     }
 
     pub fn transaction_store(&self) -> FilesystemTransactionStore {
@@ -69,23 +80,7 @@ impl MachineRoot {
 
     pub fn remove_installation(&self, name: &str) -> Result<(), MachineStateError> {
         let directory = self.child("installations", PolicyKind::Ledger)?;
-        match directory.read(name, PolicyKind::Ledger)? {
-            Some(_) => directory.remove(name),
-            None => Ok(()),
-        }
-    }
-
-    pub fn list_journals(&self) -> Result<Vec<TransactionId>, MachineStateError> {
-        let names = self
-            .child("transactions", PolicyKind::Administrators)?
-            .list()?;
-        let mut ids = Vec::new();
-        for name in names {
-            if let Ok(id) = name.parse::<TransactionId>() {
-                ids.push(id);
-            }
-        }
-        Ok(ids)
+        directory.remove(name)
     }
 
     pub fn remove_journal(&self, id: &TransactionId) -> Result<(), MachineStateError> {
@@ -94,7 +89,7 @@ impl MachineRoot {
     }
 
     fn child(&self, name: &str, kind: PolicyKind) -> Result<MachineDir, MachineStateError> {
-        self.root.ensure_dir(name, kind)
+        self.root.open_dir(name, kind)
     }
 }
 
@@ -161,7 +156,17 @@ impl JournalVolume for MachineJournals {
         })?;
         let mut ids = Vec::new();
         for name in names {
-            if let Ok(id) = name.parse::<TransactionId>() {
+            let Ok(id) = name.parse::<TransactionId>() else {
+                continue;
+            };
+            let Some(directory) = open_optional(&transactions, &name)? else {
+                continue;
+            };
+            if directory
+                .read("transaction.json", PolicyKind::Administrators)
+                .map_err(|error| store_io(&id, error))?
+                .is_some()
+            {
                 ids.push(id);
             }
         }
@@ -172,7 +177,7 @@ impl JournalVolume for MachineJournals {
 impl MachineJournals {
     fn transactions(&self) -> Result<MachineDir, StoreError> {
         self.root
-            .ensure_dir("transactions", PolicyKind::Administrators)
+            .open_dir("transactions", PolicyKind::Administrators)
             .map_err(|error| StoreError::Io {
                 path: std::path::PathBuf::from("transactions"),
                 source: std::io::Error::other(error),
@@ -181,7 +186,7 @@ impl MachineJournals {
 }
 
 fn open_optional(parent: &MachineDir, name: &str) -> Result<Option<MachineDir>, StoreError> {
-    match parent.open_dir(name) {
+    match parent.open_dir(name, PolicyKind::Administrators) {
         Ok(directory) => Ok(Some(directory)),
         Err(MachineStateError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
@@ -203,43 +208,33 @@ fn store_io(id: &TransactionId, error: MachineStateError) -> StoreError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
     fn machine_state_follows_the_token_privilege_contract() {
         let root = tempfile::tempdir().expect("temp");
         let path = root.path().join("zup");
-        match MachineRoot::establish_at(&path) {
-            Ok(machine) => {
-                assert!(machine.path() == path);
-                assert!(
-                    machine.list_journals().expect("journal list").is_empty(),
-                    "a new machine root has no journals"
-                );
-                let weakened = path.join("transactions");
-                weaken_dacl(&weakened);
-                let again = MachineRoot::establish_at(&path);
-                assert!(
-                    again.is_err(),
-                    "a directory whose DACL no longer matches the policy is refused"
-                );
-            }
-            Err(error) => {
-                let message = error.to_string();
-                assert!(
-                    message.contains("elevated") || message.contains("SeRestorePrivilege"),
-                    "refusal must name the missing authority: {message}"
-                );
-                assert!(
-                    !path.exists(),
-                    "a refused machine root must not leave a directory behind"
-                );
-            }
+        if !crate::transport::is_process_elevated().expect("token elevation") {
+            assert!(MachineRoot::establish_at(&path).is_err());
+            assert!(!path.exists());
+            return;
         }
+        let machine = MachineRoot::establish_at(&path).expect("elevated root");
+        assert_eq!(machine.path(), path);
+        assert!(
+            machine
+                .transaction_store()
+                .list_ids()
+                .expect("journal list")
+                .is_empty()
+        );
+        weaken_dacl(&path.join("transactions"));
+        assert!(MachineRoot::establish_at(&path).is_err());
     }
 
     #[test]
+    #[ignore = "requires elevated administrator"]
     fn a_second_process_sees_the_machine_lock_as_busy() {
         if std::env::var("ZUP_MACHINE_LOCK_CHILD").is_ok() {
             let path = std::env::var("ZUP_MACHINE_LOCK_PATH").expect("path");
@@ -254,24 +249,19 @@ mod tests {
             )
             .expect("ready");
             let release = std::env::var("ZUP_MACHINE_LOCK_RELEASE").expect("release");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
             while !Path::new(&release).exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parent never released child"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             return;
         }
         let directory = tempfile::tempdir().expect("temp");
         let path = directory.path().join("zup");
-        let root = match MachineRoot::establish_at(&path) {
-            Ok(root) => root,
-            Err(error) => {
-                let message = error.to_string();
-                assert!(
-                    message.contains("elevated") || message.contains("SeRestorePrivilege"),
-                    "{message}"
-                );
-                return;
-            }
-        };
+        let root = MachineRoot::establish_at(&path).expect("elevated root");
         let ready = directory.path().join("ready");
         let release = directory.path().join("release");
         let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -282,6 +272,7 @@ mod tests {
             .args([
                 "--exact",
                 "machine_authority::tests::a_second_process_sees_the_machine_lock_as_busy",
+                "--ignored",
             ])
             .spawn()
             .expect("child");
@@ -301,7 +292,98 @@ mod tests {
         assert!(child.wait().expect("wait").success());
     }
 
-    fn weaken_dacl(path: &Path) {
+    #[test]
+    #[ignore = "requires elevated administrator"]
+    fn machine_journals_use_shared_revision_cas_and_reopen() {
+        use zup_transaction::{
+            TransactionInput, TransactionRecord, TransactionStore, compile_transaction,
+        };
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("state");
+        let machine = MachineRoot::establish_at(&path).expect("machine");
+        let store = machine.transaction_store();
+        let orphan = TransactionId::new_v7();
+        let volume = MachineJournals {
+            root: Arc::clone(&machine.root),
+        };
+        drop(
+            volume
+                .lock_journal(&orphan)
+                .expect("initial unpublished journal"),
+        );
+        assert!(
+            store
+                .list_ids()
+                .expect("unpublished directories are not recovery records")
+                .is_empty()
+        );
+        machine
+            .remove_journal(&orphan)
+            .expect("validated orphan cleanup");
+        let plan = compile_transaction(&TransactionInput::new(zup_core::Target::host()))
+            .expect("barrier plan");
+        let record = TransactionRecord::new(
+            TransactionId::new_v7(),
+            zup_core::AppId::new("probe").expect("app"),
+            zup_core::SelectedScope::Machine,
+            "1.0.0".parse().expect("version"),
+            plan,
+        );
+        store.create(&record).expect("create");
+        assert!(matches!(
+            store.create(&record),
+            Err(StoreError::AlreadyExists { .. })
+        ));
+        let mut next = record.clone();
+        next.touch();
+        store.compare_and_swap(0, &next).expect("CAS");
+        assert!(matches!(
+            store.compare_and_swap(0, &next),
+            Err(StoreError::RevisionConflict { .. })
+        ));
+        let reopened = MachineRoot::establish_at(&path).expect("reopen");
+        assert_eq!(
+            reopened
+                .transaction_store()
+                .load(&record.transaction_id)
+                .expect("recover journal"),
+            next
+        );
+        assert_eq!(
+            reopened.transaction_store().list_ids().expect("list"),
+            [record.transaction_id]
+        );
+        machine
+            .publish_installation("probe.json", b"ledger")
+            .expect("ledger");
+        assert_eq!(
+            reopened
+                .read_installation("probe.json")
+                .expect("read ledger"),
+            Some(b"ledger".to_vec())
+        );
+        machine
+            .remove_installation("probe.json")
+            .expect("remove ledger");
+        assert!(
+            reopened
+                .read_installation("probe.json")
+                .expect("absent ledger")
+                .is_none()
+        );
+        machine
+            .remove_journal(&record.transaction_id)
+            .expect("remove journal");
+        assert!(
+            reopened
+                .transaction_store()
+                .list_ids()
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    pub(crate) fn weaken_dacl(path: &Path) {
         let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(path.as_os_str())
             .chain(Some(0))
             .collect();

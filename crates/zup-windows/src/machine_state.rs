@@ -16,11 +16,6 @@ pub enum MachineStateError {
     },
 }
 
-pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
-    std::fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
-    canonical(path)
-}
-
 fn ensure_user_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
@@ -60,7 +55,7 @@ pub fn resolve_state_root(
             }
             Ok(authoritative)
         }
-        Some(path) => ensure_state_root(&path),
+        Some(path) => ensure_user_state_root(&path),
         None => default_state_root(scope),
     }
 }
@@ -92,6 +87,15 @@ mod tests {
     use super::*;
     use crate::host_dirs::{shared_data, user_data};
     use rstest::rstest;
+
+    #[test]
+    fn explicit_user_state_uses_private_filesystem_authority() {
+        let parent = tempfile::tempdir().expect("temporary parent");
+        let path = resolve_state_root(Some(parent.path().join("state")), SelectedScope::User)
+            .expect("private root");
+        private_fs::PrivateDir::open(&path)
+            .expect("the explicit root satisfies the same private policy as the default root");
+    }
 
     #[rstest]
     #[case(

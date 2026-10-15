@@ -139,12 +139,16 @@ jobs:
 
       - name: Windows tests
         if: matrix.platform == 'windows'
-        run: cargo nextest run --workspace --all-features --profile fast
+        run: cargo nextest run --workspace --all-features --no-fail-fast --profile fast
+
+      - name: Windows machine authority tests
+        if: matrix.platform == 'windows'
+        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
 
       - name: Linux tests
         if: matrix.platform == 'linux'
         shell: bash
-        run: cargo nextest run --all-features --profile fast $PORTABLE $LINUX
+        run: cargo nextest run --all-features --no-fail-fast --profile fast $PORTABLE $LINUX
 
       - name: Windows doc tests
         if: matrix.platform == 'windows'

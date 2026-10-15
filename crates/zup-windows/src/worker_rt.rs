@@ -544,18 +544,6 @@ async fn run_worker_inner(
             .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
         Some(plan)
     };
-    if let Some(plan) = &plan {
-        for node in &plan.nodes {
-            match node.kind {
-                zup_transaction::NodeKind::Barrier
-                | zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::FileMutation { .. }
-                | zup_transaction::NodeKind::FileRemoval { .. }
-                | zup_transaction::NodeKind::BackendOperation { .. }
-                | zup_transaction::NodeKind::BackendRemoval { .. } => {}
-            }
-        }
-    }
 
     let app_id = zup_core::AppId::new(&exec.app_id)
         .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
@@ -593,7 +581,15 @@ async fn run_worker_inner(
         Some(machine) => machine.path().to_path_buf(),
         None => PathBuf::from(exec.state_root),
     };
-    let work_root = PathBuf::from(exec.work_root);
+    let _machine_work = machine
+        .as_ref()
+        .map(|machine| machine.work_dir())
+        .transpose()
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let work_root = match &machine {
+        Some(machine) => machine.path().join("work"),
+        None => PathBuf::from(exec.work_root),
+    };
     let store = match &machine {
         Some(machine) => machine.transaction_store(),
         None => FilesystemTransactionStore::private_at(&state_root),
@@ -830,6 +826,9 @@ async fn run_worker_inner(
             (r.transaction_id.as_uuid(), outcome.to_owned())
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
+            crate::ledger::InstallLedgerStore::new(&state_root)
+                .cleanup_work(&r)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             drop_overlay(
                 payload_overlay_base_root.as_deref(),
                 payload_overlay_root.as_deref(),

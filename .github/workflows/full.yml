@@ -81,12 +81,16 @@ jobs:
 
       - name: Windows tests
         if: matrix.platform == 'windows'
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      - name: Windows machine authority tests
+        if: matrix.platform == 'windows'
+        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
 
       - name: Linux tests
         if: matrix.platform == 'linux'
         shell: bash
-        run: cargo nextest run --all-features $PORTABLE $LINUX
+        run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
 
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7

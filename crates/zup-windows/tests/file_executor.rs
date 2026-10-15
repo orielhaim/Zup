@@ -67,6 +67,8 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
         ReconcileResult::AppliedWithReceipt(zup_transaction::OperationReceipt::RemoveFile { .. })
     ));
     exec.rollback_transaction_receipt(&receipt).unwrap();
+    exec.rollback_transaction_receipt(&receipt)
+        .expect("restoration survives a crash before journal advancement");
     assert_eq!(
         std::fs::read(to_host_path(&destination).unwrap()).unwrap(),
         b"owned"
@@ -350,6 +352,57 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"new!");
 }
 
+#[test]
+fn replacement_rollback_is_repeatable_while_backup_deletion_is_blocked() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (dir, payload, _target, source) = setup();
+    let target = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let destination = target.path().join("a.bin");
+    std::fs::write(&destination, b"old!").unwrap();
+    std::fs::write(payload.join("a.bin"), b"new!").unwrap();
+    let mut executor = WindowsFileExecutor::new(
+        source,
+        dir.path().join("work"),
+        "rollback-repeat".into(),
+        ".exe",
+        Box::new(NullProgress),
+    );
+    let relative = RelativePath::new("a.bin").unwrap();
+    let stage = stage_node(&destination);
+    executor.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
+    apply_node(&mut executor, &stage, &relative, &destination).unwrap();
+    let replace = mutation_node("replace", FileDelta::Replace, &destination);
+    executor.note_file(
+        &replace.id,
+        FilePrecondition::Exact {
+            size: 4,
+            sha256: digest(b"old!"),
+        },
+        digest(b"new!"),
+        4,
+    );
+    let receipt = zup_windows::transaction_receipt(
+        apply_node(&mut executor, &replace, &relative, &destination).unwrap(),
+    );
+    let zup_transaction::OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
+        panic!("replace receipt");
+    };
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(backup_path)
+        .unwrap();
+    executor
+        .rollback_transaction_receipt(&receipt)
+        .expect("source cleanup does not invalidate restoration");
+    executor
+        .rollback_transaction_receipt(&receipt)
+        .expect("repeated rollback recognizes restored content");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old!");
+    assert_eq!(std::fs::read(backup_path).unwrap(), b"old!");
+    drop(held);
+}
+
 fn stage_node(dest: &Path) -> zup_transaction::TransactionNode {
     zup_transaction::TransactionNode {
         id: stage_op("a"),
@@ -487,11 +540,11 @@ fn verification_follows_every_part_of_a_receipt() {
         apply_node(&mut exec, &create, &rel, &dest).expect("create"),
     );
     verify_installed_file(&created).expect("installed file matches its receipt");
-    assert!(
-        verify_installed_file(&stage_receipt).is_err(),
-        "a published payload is not still staged"
-    );
-    assert!(!staged_path.exists());
+    verify_installed_file(&stage_receipt)
+        .expect("staging remains valid until durable ledger publication");
+    assert_eq!(std::fs::read(&staged_path).unwrap(), b"hello");
+    std::fs::write(&staged_path, b"wrong").unwrap();
+    assert!(verify_installed_file(&stage_receipt).is_err());
     std::fs::write(&dest, b"HELLO").unwrap();
     assert!(matches!(
         verify_installed_file(&created).unwrap_err(),

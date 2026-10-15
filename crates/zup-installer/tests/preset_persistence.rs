@@ -267,7 +267,7 @@ fn the_installer_can_be_deleted_and_the_window_still_opens() {
 #[test]
 fn a_failed_update_leaves_the_previous_window_coherent() {
     let state_root = tempfile::tempdir().expect("a state root");
-    let state = State::with_root(state_root.path().to_path_buf());
+    let state = State::with_root(state_root.path().join("state"));
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let report = scratch.path().join("report.txt");
     let (app, preset) = preset_app("rollback", &report);
@@ -353,7 +353,7 @@ fn a_failed_update_leaves_the_previous_window_coherent() {
 #[test]
 fn a_graphical_installation_with_no_recorded_window_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
-    let state = State::with_root(state_root.path().to_path_buf());
+    let state = State::with_root(state_root.path().join("state"));
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let report = scratch.path().join("never-written.txt");
     let (app, preset) = preset_app("forgotten", &report);

@@ -158,7 +158,7 @@ pub use lowering::{
 pub use machine_authority::MachineRoot;
 #[cfg(windows)]
 pub use machine_state::{
-    MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,
+    MachineStateError, default_state_root, plain_path_text, resolve_state_root,
 };
 #[cfg(windows)]
 pub use operation_host::{WindowsContent, WindowsOperationHost};

@@ -1336,6 +1336,19 @@ fn execute_local_blocking_with_events_inner(
         .as_ref()
         .map(|machine| machine.path().to_path_buf())
         .unwrap_or_else(|| request.state_root.clone());
+    let _machine_work = match machine
+        .as_ref()
+        .map(|machine| machine.work_dir())
+        .transpose()
+    {
+        Ok(work) => work,
+        Err(error) => return InstallOutcome::Failed(error.to_string()),
+    };
+    let work_root = if machine.is_some() {
+        state_root.join("work")
+    } else {
+        request.work_root.clone()
+    };
     let lock_result = match &machine {
         Some(machine) => machine
             .try_lock(&lock_key)
@@ -1377,7 +1390,7 @@ fn execute_local_blocking_with_events_inner(
         let mut executor = ProductionExecutor {
             inner: WindowsFileExecutor::new(
                 payload,
-                request.work_root.clone(),
+                work_root.clone(),
                 id.to_string(),
                 record.target.executable_suffix(),
                 Box::new(NullProgress),
@@ -1401,7 +1414,12 @@ fn execute_local_blocking_with_events_inner(
                     Err(error) => InstallOutcome::Failed(error.to_string()),
                 }
             }
-            Ok((_, TransactionOutcome::RolledBack)) => InstallOutcome::RolledBack,
+            Ok((record, TransactionOutcome::RolledBack)) => {
+                match InstallLedgerStore::new(&state_root).cleanup_work(&record) {
+                    Ok(()) => InstallOutcome::RolledBack,
+                    Err(error) => InstallOutcome::Failed(error.to_string()),
+                }
+            }
             Ok((_, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
             Err(error) => InstallOutcome::Failed(error.to_string()),
         };
@@ -1437,7 +1455,7 @@ fn execute_local_blocking_with_events_inner(
         let mut executor = ProductionExecutor {
             inner: WindowsFileExecutor::new(
                 payload,
-                request.work_root.clone(),
+                work_root.clone(),
                 transaction_id.to_string(),
                 target_suffix,
                 Box::new(NullProgress),
@@ -1468,7 +1486,7 @@ fn execute_local_blocking_with_events_inner(
     let mut executor = ProductionExecutor {
         inner: WindowsFileExecutor::new(
             payload,
-            request.work_root.clone(),
+            work_root.clone(),
             transaction_id.to_string(),
             target_suffix,
             Box::new(NullProgress),
@@ -1503,8 +1521,11 @@ fn execute_local_blocking_with_events_inner(
         }
         Ok(zup_transaction::SettledTransaction {
             outcome: TransactionOutcome::RolledBack,
-            ..
+            record,
         }) => {
+            if let Err(error) = InstallLedgerStore::new(&state_root).cleanup_work(&record) {
+                return InstallOutcome::Failed(error.to_string());
+            }
             if executor.cancel.is_cancelled() {
                 InstallOutcome::Cancelled
             } else {
