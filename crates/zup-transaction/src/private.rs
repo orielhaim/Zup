@@ -5,7 +5,7 @@ use private_fs::{
     Durability, Error, FileAccess, FileCreation, OpenOptions, PrivateDir, PrivateFile, Publication,
 };
 
-use crate::record::PublishError;
+use crate::record::{PublishError, VisiblePublish, settle_visible};
 
 /// Create missing ancestors and make each new directory entry durable in its parent.
 ///
@@ -115,9 +115,12 @@ pub fn publish_full(
         Err(Error::AtomicCommit {
             may_have_published: true,
             source,
-        }) => confirm_published(dir, name, bytes).map_err(|detail| PublishError::Indeterminate {
-            may_have_published: true,
-            detail: format!("{source}; {detail}"),
+        }) => confirm_published(dir, name, bytes).map_err(|error| match error {
+            PublishError::Indeterminate { detail, .. } => PublishError::Indeterminate {
+                may_have_published: true,
+                detail: format!("{source}; {detail}"),
+            },
+            other => other,
         }),
         Err(error) => Err(not_published(error)),
     }
@@ -146,18 +149,54 @@ pub fn absent_collision(error: &PublishError) -> bool {
     )
 }
 
-fn confirm_published(dir: &PrivateDir, name: &Path, bytes: &[u8]) -> Result<(), String> {
-    let found = read_file(dir, name).map_err(|error| error.to_string())?;
-    if found != bytes {
-        return Err("visible bytes are not the attempted record".into());
+fn confirm_published(dir: &PrivateDir, name: &Path, bytes: &[u8]) -> Result<(), PublishError> {
+    let found = match read_file(dir, name) {
+        Ok(found) => found,
+        Err(error) => {
+            return settle_visible(VisiblePublish {
+                security_ok: false,
+                bytes_match: false,
+                directory_durable: false,
+            })
+            .map_err(|failure| annotate(failure, &error.to_string()));
+        }
+    };
+    let directory_durable = match dir.sync_all() {
+        Ok(()) => true,
+        Err(error) => {
+            return settle_visible(VisiblePublish {
+                security_ok: true,
+                bytes_match: found == bytes,
+                directory_durable: false,
+            })
+            .map_err(|failure| annotate(failure, &error.to_string()));
+        }
+    };
+    let again = read_file(dir, name).ok();
+    settle_visible(VisiblePublish {
+        security_ok: again.is_some(),
+        bytes_match: again.as_deref() == Some(bytes),
+        directory_durable,
+    })
+}
+
+fn annotate(error: PublishError, detail: &str) -> PublishError {
+    match error {
+        PublishError::Indeterminate {
+            may_have_published,
+            detail: existing,
+        } => PublishError::Indeterminate {
+            may_have_published,
+            detail: format!("{existing}; {detail}"),
+        },
+        PublishError::NotPublished {
+            kind,
+            detail: existing,
+        } => PublishError::NotPublished {
+            kind,
+            detail: format!("{existing}; {detail}"),
+        },
     }
-    dir.sync_all()
-        .map_err(|error| format!("directory sync: {error}"))?;
-    let again = read_file(dir, name).map_err(|error| error.to_string())?;
-    if again != bytes {
-        return Err("verified bytes changed across the durability barrier".into());
-    }
-    Ok(())
 }
 
 fn not_published(error: Error) -> PublishError {
@@ -229,6 +268,7 @@ fn duplicate(file: &PrivateFile) -> Result<std::fs::File, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::PublishError;
     use std::sync::Arc;
 
     #[test]
@@ -264,7 +304,21 @@ mod tests {
         publish_full(&dir, "transaction.json", b"current", Publication::CreateNew).expect("seed");
         let error = confirm_published(&dir, Path::new("transaction.json"), b"attempted")
             .expect_err("different bytes");
-        assert!(error.contains("not the attempted record"), "{error}");
+        assert!(error.to_string().contains("bytes=false"), "{error}");
+    }
+
+    #[test]
+    fn matching_bytes_without_a_directory_barrier_stay_indeterminate() {
+        let error = settle_visible(VisiblePublish {
+            security_ok: true,
+            bytes_match: true,
+            directory_durable: false,
+        })
+        .expect_err("directory durability is required");
+        assert!(
+            matches!(error, PublishError::Indeterminate { .. }),
+            "{error}"
+        );
     }
 
     #[test]

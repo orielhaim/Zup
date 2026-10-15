@@ -49,6 +49,8 @@ mod lowering;
 #[cfg(windows)]
 mod machine_authority;
 #[cfg(windows)]
+mod machine_fs;
+#[cfg(windows)]
 mod machine_state;
 #[cfg(windows)]
 mod operation_host;

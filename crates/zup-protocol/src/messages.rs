@@ -114,7 +114,39 @@ pub struct ExecuteTransaction {
     pub work_root: String,
     pub recovery_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_intent: Option<MachineRecoveryIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<zup_core::ReleaseIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineRecoveryIntent {
+    pub transaction_id: uuid::Uuid,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: Target,
+}
+
+impl MachineRecoveryIntent {
+    pub fn canonical_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), crate::WireError> {
+        if self.scope != "machine" {
+            return Err(crate::WireError::Malformed(
+                "machine recovery is only for machine scope".into(),
+            ));
+        }
+        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_INTENT_STRING_BYTES;
+        if !bounded(&self.app_id) || !bounded(&self.app_version) || !bounded(&self.scope) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

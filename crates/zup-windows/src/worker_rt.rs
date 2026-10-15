@@ -151,8 +151,6 @@ pub fn format_bootstrap(bootstrap: &WorkerBootstrap) -> String {
     )
 }
 
-pub const MACHINE_RECOVERY_INTENT: &str = "zup-machine-recovery-v1";
-
 pub fn plan_hash_hex(plan_json: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -513,9 +511,27 @@ async fn run_worker_inner(
     if hash != bootstrap.expected_plan_hash || hash != exec.plan_hash {
         return Err(WorkerError::PlanHashMismatch);
     }
-    let machine_recovery = exec.scope == "machine"
-        && exec.recovery_id.is_some()
-        && exec.plan_json.contains(MACHINE_RECOVERY_INTENT);
+    let machine_recovery = exec.recovery_intent.is_some();
+    if let Some(intent) = &exec.recovery_intent {
+        intent
+            .validate_shape()
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        if exec.recovery_id != Some(intent.transaction_id)
+            || exec.app_id != intent.app_id
+            || exec.app_version != intent.app_version
+            || exec.scope != intent.scope
+            || exec.target != intent.target
+            || exec.plan_json != intent.canonical_json().unwrap_or_default()
+        {
+            return Err(WorkerError::AuthFailed(
+                "machine recovery intent does not match the authenticated request".into(),
+            ));
+        }
+    } else if exec.scope == "machine" && exec.recovery_id.is_some() {
+        return Err(WorkerError::Protocol(
+            "machine recovery requires a typed recovery intent".into(),
+        ));
+    }
     let mut plan = if machine_recovery {
         None
     } else {

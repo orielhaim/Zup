@@ -31,7 +31,7 @@ pub use private::{
 };
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError, StoreError,
-    TransactionPhase, TransactionRecord,
+    TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};

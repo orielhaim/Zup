@@ -371,3 +371,26 @@ pub enum PublishError {
         detail: String,
     },
 }
+
+/// What a storage backend observed after a publication attempt that may have
+/// become visible. Success requires the security check, the exact bytes, and
+/// a completed parent-directory durability barrier. A matching read does not
+/// stand in for that barrier.
+pub struct VisiblePublish {
+    pub security_ok: bool,
+    pub bytes_match: bool,
+    pub directory_durable: bool,
+}
+
+pub fn settle_visible(visible: VisiblePublish) -> Result<(), PublishError> {
+    if visible.security_ok && visible.bytes_match && visible.directory_durable {
+        return Ok(());
+    }
+    Err(PublishError::Indeterminate {
+        may_have_published: true,
+        detail: format!(
+            "security={} bytes={} directory_durable={}",
+            visible.security_ok, visible.bytes_match, visible.directory_durable
+        ),
+    })
+}

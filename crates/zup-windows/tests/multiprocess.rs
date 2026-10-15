@@ -218,6 +218,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
                 state_root: state_root.display().to_string(),
                 work_root: work_root.display().to_string(),
                 recovery_id,
+                recovery_intent: None,
                 release: release.clone(),
             })),
         })

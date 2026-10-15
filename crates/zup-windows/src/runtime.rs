@@ -957,16 +957,25 @@ async fn run_elevated_worker(
             "transaction plan target does not match runtime request".into(),
         ));
     }
-    let plan_json = if machine_recovery {
-        serde_json::json!({
-            "kind": crate::worker_rt::MACHINE_RECOVERY_INTENT,
-            "transaction_id": request.recovery_id.map(|id| id.to_string()),
-            "app_id": request.app_id.to_string(),
-            "app_version": request.app_version.to_string(),
-            "scope": "machine",
-            "target": request.target,
-        })
-        .to_string()
+    let recovery_intent = if machine_recovery {
+        let intent = zup_protocol::MachineRecoveryIntent {
+            transaction_id: request
+                .recovery_id
+                .map(|id| id.as_uuid())
+                .unwrap_or(uuid::Uuid::nil()),
+            app_id: request.app_id.to_string(),
+            app_version: request.app_version.to_string(),
+            scope: "machine".into(),
+            target: request.target,
+        };
+        Some(intent)
+    } else {
+        None
+    };
+    let plan_json = if let Some(intent) = &recovery_intent {
+        intent
+            .canonical_json()
+            .map_err(|error| SessionError::PlanInvalid(error.to_string()))?
     } else {
         serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?
     };
@@ -1070,6 +1079,7 @@ async fn run_elevated_worker(
                     state_root: request.state_root.display().to_string(),
                     work_root: request.work_root.display().to_string(),
                     recovery_id: request.recovery_id.map(|id| id.as_uuid()),
+                    recovery_intent,
                     release: request.release.clone(),
                 },
             )),
