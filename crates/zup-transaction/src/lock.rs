@@ -57,7 +57,10 @@ impl InstallationLock {
         let file = private::open_lock(&directory, &format!("{key}.lock")).map_err(|source| {
             LockError::Io {
                 path: path.display().to_string(),
-                source,
+                source: match source {
+                    private_fs::Error::Io(source) => source,
+                    other => std::io::Error::other(other),
+                },
             }
         })?;
         match file.try_lock() {
@@ -67,33 +70,6 @@ impl InstallationLock {
             })),
             Err(_) => Ok(None),
         }
-    }
-
-    pub fn remove_if_unheld(state_root: &Path, key: &str) -> Result<(), LockError> {
-        let Some(lock) = Self::try_acquire(state_root, key)? else {
-            return Ok(());
-        };
-        let path = lock_path(state_root, key);
-        let directory = lock_dir(state_root)?;
-        match directory.remove_file(format!("{key}.lock"), private_fs::Durability::Full) {
-            Ok(()) => {}
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-            }
-            Err(private_fs::Error::Removal { source, .. }) => {
-                return Err(LockError::Io {
-                    path: path.display().to_string(),
-                    source: std::io::Error::other(source),
-                });
-            }
-            Err(error) => {
-                return Err(LockError::Io {
-                    path: path.display().to_string(),
-                    source: std::io::Error::other(error),
-                });
-            }
-        }
-        drop(lock);
-        Ok(())
     }
 
     pub fn key(&self) -> &str {
@@ -111,7 +87,10 @@ fn lock_dir(state_root: &Path) -> Result<private_fs::PrivateDir, LockError> {
     let path = state_root.join("locks");
     private::ensure_dir(&path).map_err(|source| LockError::Io {
         path: path.display().to_string(),
-        source,
+        source: match source {
+            private_fs::Error::Io(source) => source,
+            other => std::io::Error::other(other),
+        },
     })
 }
 
@@ -193,26 +172,29 @@ mod tests {
         assert!(sanitized.starts_with("zup-install-"));
     }
 
-    /// Cleanup is for the uninstall path, and it must not remove a file a
     #[test]
-    fn a_held_lock_is_not_removed_and_an_unheld_one_is() {
+    fn releasing_a_lock_keeps_the_same_file() {
         let root = tempfile::tempdir().expect("a temp root");
         let key = InstallationLock::lock_key("com.acme.desktop", "user");
-
-        InstallationLock::remove_if_unheld(root.path(), &key).expect("cleanup");
-        assert!(
-            !lock_path(root.path(), &key).exists(),
-            "there was nothing holding it, so the marker goes"
-        );
-
+        let path = lock_path(root.path(), &key);
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
         let held = InstallationLock::try_acquire(root.path(), &key)
             .expect("acquire")
             .expect("held");
-        InstallationLock::remove_if_unheld(root.path(), &key).expect("cleanup");
-        assert!(
-            lock_path(root.path(), &key).exists(),
-            "a lock file a session is holding is not removed underneath it"
-        );
+        #[cfg(unix)]
+        let identity = std::fs::metadata(&path).expect("stat").ino();
         drop(held);
+        assert!(path.exists(), "the lock file stays after release");
+        let again = InstallationLock::try_acquire(root.path(), &key)
+            .expect("acquire")
+            .expect("held again");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").ino(),
+            identity,
+            "a new acquire must lock the same file, not a replacement"
+        );
+        drop(again);
     }
 }

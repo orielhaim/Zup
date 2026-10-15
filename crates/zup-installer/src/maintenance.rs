@@ -113,7 +113,6 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
             .map_err(Into::into)
     };
     if result.is_ok() {
-        remove_lock(&state_root, &app_id, scope)?;
         zup_windows::cleanup_app_payload_overlays(&state_root, &app_id, scope)
             .map_err(|error| miette::miette!("clean up payload overlays: {error}"))?;
     }
@@ -250,16 +249,6 @@ fn discover_scope(
         scope,
         resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
     ))
-}
-
-pub fn remove_lock(state_root: &Path, app_id: &AppId, scope: SelectedScope) -> miette::Result<()> {
-    let scope = match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    };
-    let key = zup_transaction::InstallationLock::lock_key(app_id.as_str(), scope);
-    zup_transaction::InstallationLock::remove_if_unheld(state_root, &key)
-        .map_err(|error| miette::miette!("remove the uninstall lock: {error}"))
 }
 
 /// in both cases waiting would mean the runner could never begin.

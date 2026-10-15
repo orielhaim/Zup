@@ -280,11 +280,18 @@ fn objects_dir(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
+    lock: &zup_transaction::InstallationLock,
 ) -> Result<private_fs::PrivateDir, PlanError> {
+    let key = object_key(app_id, scope);
+    if lock.key() != key {
+        return Err(PlanError::InvalidTargetPath {
+            path: key,
+            reason: "generated content requires this installation's lock".into(),
+        });
+    }
     let objects = state_root.join("objects");
     let root =
         private_fs::PrivateDir::ensure(&objects).map_err(|error| io_path(&objects, error))?;
-    let key = object_key(app_id, scope);
     root.ensure_dir(&key)
         .map_err(|error| io_path(&objects.join(&key), error))
 }
@@ -297,19 +304,20 @@ pub fn phase_keeps_generated(phase: zup_transaction::TransactionPhase) -> bool {
 }
 
 /// Publishes each blob under its digest inside this application scope.
-/// A valid object is never replaced. A readable object whose bytes do not
-/// match its name is replaced. Publication uses a private temporary identity.
+/// The installation lock is the ownership boundary: staging and collection
+/// refuse a lock for a different application.
 #[cfg(target_os = "linux")]
 pub fn stage_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
+    lock: &zup_transaction::InstallationLock,
     generated: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PlanError> {
     if generated.is_empty() {
         return Ok(());
     }
-    let directory = objects_dir(state_root, app_id, scope)?;
+    let directory = objects_dir(state_root, app_id, scope, lock)?;
     for (name, bytes) in generated {
         let (size, digest) =
             zup_core::hash_reader(bytes.as_slice()).map_err(|_| PlanError::InvalidTargetPath {
@@ -330,71 +338,39 @@ fn publish_object(
     bytes: &[u8],
 ) -> Result<(), private_fs::Error> {
     let name = digest.to_hex();
-    match read_object(directory, &name)? {
-        Some(existing) if object_matches(&existing, digest, size) => return Ok(()),
-        Some(_) => {
-            return publish_policy(
-                directory,
-                &name,
-                bytes,
-                digest,
-                size,
-                private_fs::Publication::Replace,
-            );
+    if let Some(existing) = read_object(directory, &name)? {
+        if !object_matches(&existing, digest, size) {
+            return Err(private_fs::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "content-addressed object does not match its digest",
+            )));
         }
-        None => {}
+        directory.sync_all()?;
+        let current = read_object(directory, &name)?.ok_or_else(|| {
+            private_fs::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "content-addressed object disappeared during its durability sync",
+            ))
+        })?;
+        if object_matches(&current, digest, size) {
+            return Ok(());
+        }
+        return Err(private_fs::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "content-addressed object changed during its durability sync",
+        )));
     }
-    publish_policy(
-        directory,
-        &name,
-        bytes,
-        digest,
-        size,
-        private_fs::Publication::CreateNew,
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn publish_policy(
-    directory: &private_fs::PrivateDir,
-    name: &str,
-    bytes: &[u8],
-    digest: &zup_core::Sha256Digest,
-    size: u64,
-    policy: private_fs::Publication,
-) -> Result<(), private_fs::Error> {
-    use std::io::Write as _;
-    let mut writer = directory.atomic_with_policy(name, private_fs::Durability::Full, policy)?;
-    writer.write_all(bytes)?;
-    match writer.commit() {
+    match zup_transaction::publish_full(directory, &name, bytes, private_fs::Publication::CreateNew)
+    {
         Ok(()) => Ok(()),
-        Err(error) => match read_object(directory, name) {
-            Ok(Some(existing)) if object_matches(&existing, digest, size) => Ok(()),
-            Ok(Some(_))
-                if !commit_may_have_published(&error)
-                    && policy == private_fs::Publication::CreateNew =>
-            {
-                publish_policy(
-                    directory,
-                    name,
-                    bytes,
-                    digest,
-                    size,
-                    private_fs::Publication::Replace,
-                )
+        Err(error) if !zup_transaction::absent_collision(&error) => Err(error),
+        Err(error) => match read_object(directory, &name)? {
+            Some(existing) if object_matches(&existing, digest, size) => {
+                directory.sync_all()?;
+                Ok(())
             }
             _ => Err(error),
         },
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn commit_may_have_published(error: &private_fs::Error) -> bool {
-    match error {
-        private_fs::Error::AtomicCommit {
-            may_have_published, ..
-        } => *may_have_published,
-        _ => true,
     }
 }
 
@@ -428,6 +404,7 @@ pub fn generated_for_plan(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
+    lock: &zup_transaction::InstallationLock,
     plan: &zup_transaction::TransactionPlan,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
     let mut generated = std::collections::BTreeMap::new();
@@ -452,7 +429,7 @@ pub fn generated_for_plan(
             });
         };
         if directory.is_none() {
-            directory = Some(objects_dir(state_root, app_id, scope)?);
+            directory = Some(objects_dir(state_root, app_id, scope, lock)?);
         }
         let name = digest.to_hex();
         let bytes = read_object(directory.as_ref().expect("opened"), &name)
@@ -475,13 +452,20 @@ pub fn generated_for_plan(
 }
 
 /// Drops this application's objects that no applying journal still names.
-/// Callers hold that application's installation lock.
 #[cfg(target_os = "linux")]
 pub fn reap_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
+    lock: &zup_transaction::InstallationLock,
 ) -> Result<(), PlanError> {
+    let key = object_key(app_id, scope);
+    if lock.key() != key {
+        return Err(PlanError::InvalidTargetPath {
+            path: key,
+            reason: "generated content requires this installation's lock".into(),
+        });
+    }
     let objects = state_root.join("objects");
     let root = match private_fs::PrivateDir::open(&objects) {
         Ok(root) => root,
@@ -490,7 +474,6 @@ pub fn reap_generated(
         }
         Err(error) => return Err(io_path(&objects, error)),
     };
-    let key = object_key(app_id, scope);
     let directory = match root.open_dir(&key) {
         Ok(directory) => directory,
         Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {

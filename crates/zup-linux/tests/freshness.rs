@@ -312,9 +312,6 @@ fn report_name(outcome: &InstallOutcome) -> String {
 }
 
 fn store_ledger(path: &Path, ledger: &InstallLedger) {
-    zup_transaction::write_private_durable(
-        path,
-        &serde_json::to_vec_pretty(ledger).expect("ledger"),
-    )
-    .expect("ledger");
+    zup_transaction::publish_private(path, &serde_json::to_vec_pretty(ledger).expect("ledger"))
+        .expect("ledger");
 }

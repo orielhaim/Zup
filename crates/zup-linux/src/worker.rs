@@ -532,8 +532,11 @@ fn prepare_operation(
         &app_id,
         &carrier,
         &carrier_path,
-        &roots,
-        &context.systemd,
+        &RecoveryHost {
+            roots: &roots,
+            systemd: &context.systemd,
+            lock: &lock,
+        },
     )?;
 
     ledger_store
@@ -649,13 +652,18 @@ fn prepare_operation(
     })
 }
 
+struct RecoveryHost<'a> {
+    roots: &'a MachineRoots,
+    systemd: &'a crate::machine::SystemdRoots,
+    lock: &'a zup_transaction::InstallationLock,
+}
+
 fn recover_pending(
     state_root: &Path,
     app_id: &AppId,
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
-    roots: &MachineRoots,
-    systemd: &crate::machine::SystemdRoots,
+    host: &RecoveryHost<'_>,
 ) -> Result<(), IpcError> {
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     loop {
@@ -668,8 +676,7 @@ fn recover_pending(
                     carrier,
                     carrier_path,
                     &transaction,
-                    roots,
-                    systemd,
+                    host,
                 )?;
             }
             Err(error) => return Err(IpcError::Transaction(error.to_string())),
@@ -683,8 +690,7 @@ fn recover_one(
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
     transaction: &str,
-    roots: &MachineRoots,
-    systemd: &crate::machine::SystemdRoots,
+    host: &RecoveryHost<'_>,
 ) -> Result<(), IpcError> {
     let id = transaction
         .parse::<uuid::Uuid>()
@@ -710,13 +716,19 @@ fn recover_one(
         ));
     }
 
-    crate::machine::verify_machine_install_roots(roots, rustix::process::geteuid().as_raw())
+    crate::machine::verify_machine_install_roots(host.roots, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
     let generated = if crate::integration::phase_keeps_generated(record.phase) {
-        crate::integration::generated_for_plan(state_root, app_id, record.scope, &record.plan)
-            .map_err(|error| IpcError::Transaction(error.to_string()))?
+        crate::integration::generated_for_plan(
+            state_root,
+            app_id,
+            record.scope,
+            host.lock,
+            &record.plan,
+        )
+        .map_err(|error| IpcError::Transaction(error.to_string()))?
     } else {
         std::collections::BTreeMap::new()
     };
@@ -741,8 +753,8 @@ fn recover_one(
         let manager = crate::systemd::RealSystemd::connect()
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
         executor = executor.with_services(crate::executor::ServiceSupport::isolated(
-            roots.clone(),
-            systemd.clone(),
+            host.roots.clone(),
+            host.systemd.clone(),
             manager,
             rustix::process::geteuid().as_raw(),
         ));
@@ -755,7 +767,7 @@ fn recover_one(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     match outcome {
         zup_transaction::TransactionOutcome::Committed => {
-            crate::integration::reap_generated(state_root, app_id, record.scope)
+            crate::integration::reap_generated(state_root, app_id, record.scope, host.lock)
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
             let ledger = ledger_store_publish(state_root, &record)?;
 
@@ -768,8 +780,13 @@ fn recover_one(
             Ok(())
         }
         zup_transaction::TransactionOutcome::RolledBack => {
-            crate::integration::reap_generated(state_root, app_id, SelectedScope::Machine)
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
+            crate::integration::reap_generated(
+                state_root,
+                app_id,
+                SelectedScope::Machine,
+                host.lock,
+            )
+            .map_err(|error| IpcError::Transaction(error.to_string()))?;
             Ok(())
         }
         zup_transaction::TransactionOutcome::RecoveryRequired => Err(IpcError::Transaction(
@@ -974,15 +991,20 @@ fn execute_prepared(
     prepared: &PreparedPlan,
     fault: WorkerFault,
 ) -> Result<ExecutionVerdict, IpcError> {
-    let lock_key = zup_transaction::InstallationLock::lock_key(&prepared.app_id, "machine");
     let app_id = zup_core::AppId::new(&prepared.app_id)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    crate::integration::reap_generated(&prepared.state_root, &app_id, SelectedScope::Machine)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    crate::integration::reap_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared._lock,
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
     crate::integration::stage_generated(
         &prepared.state_root,
         &app_id,
         SelectedScope::Machine,
+        &prepared._lock,
         &prepared.payload.generated,
     )
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
@@ -1091,6 +1113,7 @@ fn execute_prepared(
                 &prepared.state_root,
                 &app_id,
                 SelectedScope::Machine,
+                &prepared._lock,
             )
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
         }
@@ -1109,8 +1132,13 @@ fn execute_prepared(
         return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
     }
     let record = settled.record;
-    crate::integration::reap_generated(&prepared.state_root, &app_id, SelectedScope::Machine)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    crate::integration::reap_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared._lock,
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
     let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
         Ok(ledger) => ledger,
@@ -1118,7 +1146,7 @@ fn execute_prepared(
             return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
         }
     };
-    if finalize_committed(prepared, &ledger, &lock_key).is_err() {
+    if finalize_committed(prepared, &ledger).is_err() {
         return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
     }
     let _ = channel.send(Message::Progress(ProgressReport {
@@ -1133,7 +1161,6 @@ fn execute_prepared(
 fn finalize_committed(
     prepared: &PreparedPlan,
     ledger: &zup_exec::InstallLedger,
-    lock_key: &str,
 ) -> Result<(), IpcError> {
     if prepared.action != zup_exec::LifecycleAction::Uninstall {
         crate::machine::normalize_published_modes(&prepared.state_root, ledger)
@@ -1152,9 +1179,6 @@ fn finalize_committed(
             &ledger.version,
         )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    }
-    if prepared.action == zup_exec::LifecycleAction::Uninstall {
-        let _ = zup_transaction::InstallationLock::remove_if_unheld(&prepared.state_root, lock_key);
     }
     Ok(())
 }

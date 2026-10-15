@@ -48,10 +48,22 @@ fn app() -> zup_core::AppId {
     zup_core::AppId::new("com.example.generated").expect("id")
 }
 
-fn stage(root: &Path, name: &str, bytes: &[u8]) {
+fn lock_for(root: &Path, id: &zup_core::AppId) -> InstallationLock {
+    let key = InstallationLock::lock_key(id.as_str(), "user");
+    InstallationLock::try_acquire(root, &key)
+        .expect("lock")
+        .expect("acquired")
+}
+
+fn stage_with(root: &Path, lock: &InstallationLock, name: &str, bytes: &[u8]) {
     let mut generated = BTreeMap::new();
     generated.insert(name.into(), bytes.to_vec());
-    zup_linux::stage_generated(root, &app(), SelectedScope::User, &generated).expect("stage");
+    zup_linux::stage_generated(root, &app(), SelectedScope::User, lock, &generated).expect("stage");
+}
+
+fn stage(root: &Path, name: &str, bytes: &[u8]) {
+    let held = lock_for(root, &app());
+    stage_with(root, &held, name, bytes);
 }
 
 fn object(root: &Path, bytes: &[u8]) -> std::path::PathBuf {
@@ -85,10 +97,12 @@ fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs() {
 
     stage(root, source, b"[Desktop Entry]\nName=Replacement\n");
     assert_eq!(std::fs::read(&object).expect("original object"), original);
-    let loaded = zup_linux::generated_for_plan(root, &app(), SelectedScope::User, &plan)
+    let held = lock_for(root, &app());
+    let loaded = zup_linux::generated_for_plan(root, &app(), SelectedScope::User, &held, &plan)
         .expect("recovery bytes");
     assert_eq!(loaded.get(source).expect("source"), original);
-    zup_linux::reap_generated(root, &app(), SelectedScope::User).expect("reap");
+    zup_linux::reap_generated(root, &app(), SelectedScope::User, &held).expect("reap");
+    drop(held);
     assert_eq!(
         std::fs::read(&object).expect("retained"),
         original,
@@ -100,12 +114,13 @@ fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs() {
     );
 
     std::fs::remove_dir_all(root.join("transactions").join(id.to_string())).expect("journal");
-    zup_linux::reap_generated(root, &app(), SelectedScope::User).expect("reap settled");
+    zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))
+        .expect("reap settled");
     assert!(!object.exists(), "content with no owner is removed");
 }
 
 #[test]
-fn a_partial_object_is_rejected_and_a_completed_stage_replaces_it() {
+fn a_corrupt_object_is_left_in_place() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let bytes = b"[Desktop Entry]\nName=Complete\n";
@@ -114,23 +129,30 @@ fn a_partial_object_is_rejected_and_a_completed_stage_replaces_it() {
     let key = InstallationLock::lock_key(app().as_str(), "user");
     let directory = private_fs::PrivateDir::ensure(root.join("objects"))
         .expect("objects")
-        .ensure_dir(key)
+        .ensure_dir(&key)
         .expect("app objects");
     directory
         .write_atomic_durable(sha.to_hex(), b"partial")
         .expect("partial");
-    let error = zup_linux::generated_for_plan(root, &app(), SelectedScope::User, &plan)
+    let held = lock_for(root, &app());
+    let error = zup_linux::generated_for_plan(root, &app(), SelectedScope::User, &held, &plan)
         .expect_err("partial content");
     assert!(error.to_string().contains("does not match"), "{error}");
-    stage(root, "__zup_generated__/applications/app.desktop", bytes);
-    let loaded =
-        zup_linux::generated_for_plan(root, &app(), SelectedScope::User, &plan).expect("repaired");
+    let error = zup_linux::stage_generated(
+        root,
+        &app(),
+        SelectedScope::User,
+        &held,
+        &BTreeMap::from([(
+            "__zup_generated__/applications/app.desktop".into(),
+            bytes.to_vec(),
+        )]),
+    )
+    .expect_err("corrupt objects are not replaced");
+    assert!(error.to_string().contains("does not match"), "{error}");
     assert_eq!(
-        loaded
-            .get("__zup_generated__/applications/app.desktop")
-            .expect("source")
-            .as_slice(),
-        bytes
+        std::fs::read(object(root, bytes)).expect("corrupt object"),
+        b"partial"
     );
 }
 
@@ -192,16 +214,26 @@ fn concurrent_writers_publish_one_immutable_object() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let bytes = b"[Desktop Entry]\nName=Shared\n";
-    let source = "__zup_generated__/applications/app.desktop";
-    let barrier = std::sync::Barrier::new(2);
-    std::thread::scope(|scope| {
-        for _ in 0..2 {
-            scope.spawn(|| {
-                barrier.wait();
-                stage(root, source, bytes);
-            });
+    let key = InstallationLock::lock_key(app().as_str(), "user");
+    let held = lock_for(root, &app());
+    stage_with(root, &held, "payload", bytes);
+    let (started, started_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn({
+        let root = root.to_path_buf();
+        move || {
+            assert!(
+                InstallationLock::try_acquire(&root, &key)
+                    .expect("attempt")
+                    .is_none(),
+                "the holder excludes a second writer"
+            );
+            started.send(()).expect("started");
         }
     });
+    started_rx.recv().expect("waiter saw the lock");
+    drop(held);
+    waiter.join().expect("waiter");
+    stage(root, "payload", bytes);
     assert_eq!(std::fs::read(object(root, bytes)).expect("object"), bytes);
 }
 
@@ -211,17 +243,28 @@ fn concurrent_writers_publish_distinct_objects() {
     let root = scratch.path();
     let first = b"first-object";
     let second = b"second-object";
+    let other = zup_core::AppId::new("com.example.other").expect("id");
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
-        for bytes in [first.as_slice(), second.as_slice()] {
-            scope.spawn(|| {
-                barrier.wait();
-                stage(root, "payload", bytes);
-            });
-        }
+        scope.spawn(|| {
+            barrier.wait();
+            stage(root, "payload", first);
+        });
+        scope.spawn(|| {
+            let held = lock_for(root, &other);
+            barrier.wait();
+            let mut generated = BTreeMap::new();
+            generated.insert("payload".into(), second.to_vec());
+            zup_linux::stage_generated(root, &other, SelectedScope::User, &held, &generated)
+                .expect("other stage");
+        });
     });
     assert_eq!(std::fs::read(object(root, first)).expect("first"), first);
-    assert_eq!(std::fs::read(object(root, second)).expect("second"), second);
+    let other_object = root
+        .join("objects")
+        .join(InstallationLock::lock_key(other.as_str(), "user"))
+        .join(digest(second).1.to_hex());
+    assert_eq!(std::fs::read(other_object).expect("second"), second);
 }
 
 #[test]
@@ -231,9 +274,11 @@ fn another_application_cannot_collect_staged_objects() {
     let bytes = b"owned-by-the-staging-app";
     stage(root, "payload", bytes);
     let other = zup_core::AppId::new("com.example.other").expect("id");
-    zup_linux::reap_generated(root, &other, SelectedScope::User).expect("other reap");
+    zup_linux::reap_generated(root, &other, SelectedScope::User, &lock_for(root, &other))
+        .expect("other reap");
     assert_eq!(std::fs::read(object(root, bytes)).expect("kept"), bytes);
-    zup_linux::reap_generated(root, &app(), SelectedScope::User).expect("owner reap");
+    zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))
+        .expect("owner reap");
     assert!(!object(root, bytes).exists());
 }
 
@@ -254,7 +299,8 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
     FilesystemTransactionStore::new(root)
         .create(&prepared)
         .expect("prepared");
-    zup_linux::reap_generated(root, &app(), SelectedScope::User).expect("reap prepared");
+    zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))
+        .expect("reap prepared");
     assert!(
         !object(root, bytes).exists(),
         "rollback of a prepared journal does not read generated bytes"
@@ -266,7 +312,8 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
     FilesystemTransactionStore::new(root)
         .create(&prepared)
         .expect("applying");
-    zup_linux::reap_generated(root, &app(), SelectedScope::User).expect("reap applying");
+    zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))
+        .expect("reap applying");
     assert_eq!(std::fs::read(object(root, bytes)).expect("retained"), bytes);
 }
 
@@ -279,7 +326,7 @@ fn garbage_collection_waits_for_the_installation_lock() {
     let held = InstallationLock::try_acquire(root, &key)
         .expect("lock")
         .expect("held");
-    stage(root, "payload", bytes);
+    stage_with(root, &held, "payload", bytes);
     let (started, started_rx) = std::sync::mpsc::channel();
     let (observed, observed_rx) = std::sync::mpsc::channel();
     let collector = std::thread::spawn({
@@ -314,6 +361,7 @@ fn a_world_writable_object_directory_is_refused() {
         root,
         &app(),
         SelectedScope::User,
+        &lock_for(root, &app()),
         &BTreeMap::from([("payload".into(), b"private-bytes".to_vec())]),
     )
     .expect_err("loose directory");
@@ -339,6 +387,7 @@ fn a_symlink_cannot_replace_the_object_directory() {
         root,
         &app(),
         SelectedScope::User,
+        &lock_for(root, &app()),
         &BTreeMap::from([("payload".into(), b"bytes".to_vec())]),
     )
     .expect_err("symlink");

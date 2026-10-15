@@ -141,7 +141,7 @@ fn validate(
         Some(ledger) => {
             let name = store.path_for(&app_id(), scope);
             if scope == SelectedScope::User {
-                zup_transaction::write_private_durable(
+                zup_transaction::publish_private(
                     &name,
                     &serde_json::to_vec(&ledger).expect("the ledger serializes"),
                 )
@@ -399,7 +399,7 @@ fn the_persisted_window_is_the_runtime_model() {
 fn a_ledger_of_a_superseded_format_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let store = zup_windows::InstallLedgerStore::new(state_root.path());
-    zup_transaction::write_private_durable(
+    zup_transaction::publish_private(
         &store.path_for(&app_id(), SelectedScope::User),
         &serde_json::to_vec(&serde_json::json!({
             "schema": 1,

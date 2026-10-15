@@ -310,8 +310,6 @@ impl SessionHost for WindowsSessionHost {
             .app_id
             .as_ref()
             .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        state::remove_lock(&context.state_root, app_id, context.scope)
-            .map_err(|error| error.to_string())?;
         zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
             .map_err(|error| error.to_string())
     }

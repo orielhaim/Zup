@@ -6639,9 +6639,9 @@ dependencies = [
 
 [[package]]
 name = "private-fs"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed7056d1bac07ca4967ece526a7cb99332e235fa78aeaca97ef7aaafe143cd1e"
+checksum = "216836ac7881f1a6a3ef0a0d92e9e8892c8f5b4070c338b0a408ab996ba219ef"
 dependencies = [
  "getrandom 0.4.3",
  "libc",

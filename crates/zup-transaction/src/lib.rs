@@ -26,7 +26,7 @@ pub use plan::{
     Dependency, NodeKind, NodeMeta, Phase, TRANSACTION_PLAN_SCHEMA, TransactionAudit,
     TransactionNode, TransactionPlan, TransactionPlanError, compile_transaction,
 };
-pub use private::{read_at as read_private_file, write_durable_at as write_private_durable};
+pub use private::{absent_collision, publish_full, publish_private, read_private};
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,
     TransactionPhase, TransactionRecord,

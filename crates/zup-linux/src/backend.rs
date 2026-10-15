@@ -100,6 +100,7 @@ impl LinuxRuntimeBackend {
                             &request.state_root,
                             &request.app_id,
                             request.scope,
+                            &_lock,
                         );
                         Ok(ExecutionReport {
                             outcome: InstallOutcome::Committed,
@@ -119,6 +120,7 @@ impl LinuxRuntimeBackend {
                     &request.state_root,
                     &request.app_id,
                     request.scope,
+                    &_lock,
                 );
                 return Ok(ExecutionReport {
                     outcome: InstallOutcome::RolledBack,
@@ -138,6 +140,7 @@ impl LinuxRuntimeBackend {
                 &request.state_root,
                 &record.app_id,
                 record.scope,
+                &_lock,
                 &record.plan,
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?
@@ -180,6 +183,7 @@ impl LinuxRuntimeBackend {
                             &request.state_root,
                             &request.app_id,
                             request.scope,
+                            &_lock,
                         );
                         Ok(ExecutionReport {
                             outcome: InstallOutcome::Committed,
@@ -199,6 +203,7 @@ impl LinuxRuntimeBackend {
                     &request.state_root,
                     &request.app_id,
                     request.scope,
+                    &_lock,
                 );
                 let _ = crate::run::sweep_refresh(&record);
                 Ok(ExecutionReport {
@@ -276,12 +281,18 @@ impl LinuxRuntimeBackend {
             )
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let generated = generated_inputs(&request.transaction_plan, &self.generated)?;
-        crate::integration::reap_generated(&request.state_root, &request.app_id, request.scope)
-            .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        crate::integration::reap_generated(
+            &request.state_root,
+            &request.app_id,
+            request.scope,
+            &_lock,
+        )
+        .map_err(|error| SessionError::Transaction(error.to_string()))?;
         crate::integration::stage_generated(
             &request.state_root,
             &request.app_id,
             request.scope,
+            &_lock,
             &generated,
         )
         .map_err(|error| SessionError::Transaction(error.to_string()))?;
@@ -323,7 +334,6 @@ impl LinuxRuntimeBackend {
             }) => match ledger_store.publish_committed(&record, request.scope) {
                 Ok(ledger) => {
                     if action == zup_exec::LifecycleAction::Uninstall {
-                        let _ = InstallationLock::remove_if_unheld(&request.state_root, &lock_key);
                     } else {
                         if action == zup_exec::LifecycleAction::Upgrade
                             && let Err(error) = crate::run::retire_old_generations_for(
@@ -346,6 +356,7 @@ impl LinuxRuntimeBackend {
                         &request.state_root,
                         &request.app_id,
                         request.scope,
+                        &_lock,
                     );
                     Ok(ExecutionReport {
                         outcome: InstallOutcome::Committed,
@@ -367,6 +378,7 @@ impl LinuxRuntimeBackend {
                     &request.state_root,
                     &request.app_id,
                     request.scope,
+                    &_lock,
                 );
                 let _ = crate::run::sweep_refresh(&record);
                 if control.cancellation.is_cancelled() {

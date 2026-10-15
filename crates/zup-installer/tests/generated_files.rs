@@ -24,7 +24,6 @@ use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     wit_package_digest,
 };
-use zup_transaction::InstallationLock;
 use zup_windows::{InstallLedgerStore, PAYLOAD_OVERLAY_DIRECTORY};
 
 #[path = "support/project.rs"]
@@ -295,14 +294,6 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
             "{residue} survived the uninstall"
         );
     }
-    let lock_key = InstallationLock::lock_key(&app_id_text, "user");
-    assert!(
-        !state
-            .path()
-            .join("locks")
-            .join(format!("{lock_key}.lock"))
-            .exists()
-    );
 }
 
 /// The plugin payload overlay is a scratch area. A file left there after a

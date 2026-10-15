@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use private_fs::PrivateDir;
+use private_fs::{PrivateDir, Publication};
 
 use crate::id::TransactionId;
 use crate::private;
@@ -61,36 +61,28 @@ impl FilesystemTransactionStore {
 
     fn journal_dir(&self, id: &TransactionId) -> Result<PrivateDir, StoreError> {
         let transactions = self.root.join("transactions");
-        let root = private::ensure_dir(&transactions).map_err(|source| StoreError::Io {
-            path: transactions,
-            source,
-        })?;
+        let root =
+            private::ensure_dir(&transactions).map_err(|source| store_fs(transactions, source))?;
         let name = id.to_string();
-        root.ensure_dir(&name).map_err(|error| StoreError::Io {
-            path: self.directory(id),
-            source: private_io(error),
-        })
+        root.ensure_dir(&name)
+            .map_err(|error| store_fs(self.directory(id), error))
     }
 
     fn lock(&self, id: &TransactionId) -> Result<File, StoreError> {
         let directory = self.journal_dir(id)?;
         let path = self.directory(id).join("transaction.lock");
-        let file = private::open_lock(&directory, "transaction.lock").map_err(|source| {
-            StoreError::Io {
-                path: path.clone(),
-                source,
-            }
-        })?;
+        let file = private::open_lock(&directory, "transaction.lock")
+            .map_err(|source| store_fs(path.clone(), source))?;
         file.lock()
             .map_err(|source| StoreError::Io { path, source })?;
         Ok(file)
     }
 }
 
-fn private_io(error: private_fs::Error) -> std::io::Error {
+fn store_fs(path: PathBuf, error: private_fs::Error) -> StoreError {
     match error {
-        private_fs::Error::Io(source) => source,
-        other => std::io::Error::other(other),
+        private_fs::Error::Io(source) => StoreError::Io { path, source },
+        source => StoreError::Publication { path, source },
     }
 }
 
@@ -100,32 +92,23 @@ fn write_record(
     record: &TransactionRecord,
 ) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?;
-    let io = |source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
-    };
-    match private::write_replace(dir, "transaction.json", &bytes) {
-        Ok(()) => Ok(()),
-        Err(source) => {
-            if let Ok(found) = read_record(dir, path)
-                && found == *record
-            {
-                return Ok(());
-            }
-            Err(io(source))
-        }
-    }
+    private::publish_full(dir, "transaction.json", &bytes, Publication::Replace)
+        .map_err(|source| store_fs(path.to_path_buf(), source))
 }
 
 fn read_record(dir: &PrivateDir, path: &Path) -> Result<TransactionRecord, StoreError> {
     let bytes = private::read_file(dir, "transaction.json").map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            StoreError::Corrupt(CorruptReason::Missing)
-        } else {
-            StoreError::Io {
-                path: path.to_path_buf(),
-                source,
+        if let private_fs::Error::Io(source) = source {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                StoreError::Corrupt(CorruptReason::Missing)
+            } else {
+                StoreError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }
             }
+        } else {
+            store_fs(path.to_path_buf(), source)
         }
     })?;
     let record: TransactionRecord = serde_json::from_slice(&bytes)
@@ -143,38 +126,33 @@ impl TransactionStore for FilesystemTransactionStore {
         let directory = self.journal_dir(&id)?;
         match private::read_file(&directory, "transaction.json") {
             Ok(_) => return Err(StoreError::AlreadyExists { id: id.to_string() }),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(StoreError::Io {
-                    path: path.clone(),
-                    source,
-                });
+            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
             }
+            Err(source) => return Err(store_fs(path.clone(), source)),
         }
-        match private::write_new(
+        let bytes = serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?;
+        match private::publish_full(
             &directory,
             "transaction.json",
-            &serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?,
+            &bytes,
+            Publication::CreateNew,
         ) {
             Ok(()) => Ok(()),
-            Err(source) if private::already_exists(&source) => {
+            Err(source) if private::absent_collision(&source) => {
                 Err(StoreError::AlreadyExists { id: id.to_string() })
             }
-            Err(source) => match read_record(&directory, &path) {
-                Ok(found) if found == *record => Ok(()),
-                _ => Err(StoreError::Io { path, source }),
-            },
+            Err(source) => Err(store_fs(path, source)),
         }
     }
 
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
         let path = self.record_path(id);
-        let directory = match private::open_dir(&self.directory(id)) {
+        let directory = match PrivateDir::open(self.directory(id)) {
             Ok(directory) => directory,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
                 return Err(StoreError::Corrupt(CorruptReason::Missing));
             }
-            Err(source) => return Err(StoreError::Io { path, source }),
+            Err(source) => return Err(store_fs(path, source)),
         };
         read_record(&directory, &path)
     }

@@ -9,9 +9,7 @@ use zup_transaction::{
     FileDelta, FilePrecondition, InstallationLock, LockScope, OperationId, TransactionInput,
     compile_transaction,
 };
-use zup_windows::{
-    NullProgress, WindowsFileExecutor, apply_node, create_durable, reconcile_node, to_host_path,
-};
+use zup_windows::{NullProgress, WindowsFileExecutor, apply_node, reconcile_node, to_host_path};
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
     zup_platform::TargetPath::new(
@@ -223,16 +221,6 @@ fn stage_op(id: &str) -> OperationId {
 }
 
 #[test]
-fn create_durable_refuses_overwrite() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("f.bin");
-    create_durable(&path, b"first").unwrap();
-    let err = create_durable(&path, b"second").unwrap_err();
-    assert!(matches!(err, zup_windows::DurableError::Win32 { .. }));
-    assert_eq!(std::fs::read(&path).unwrap(), b"first");
-}
-
-#[test]
 fn installation_lock_exclusive() {
     let dir = TempDir::new().unwrap();
     let key = InstallationLock::lock_key("com.acme.acme", "user");
@@ -283,30 +271,19 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
 }
 
 #[test]
-fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
+fn a_released_lock_keeps_its_file() {
     let dir = TempDir::new().unwrap();
     let key = InstallationLock::lock_key("com.acme.desktop", "user");
+    let path = dir.path().join("locks").join(format!("{key}.lock"));
     let held = InstallationLock::try_acquire(dir.path(), &key)
         .unwrap()
         .expect("first lock");
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
-    assert!(
-        dir.path()
-            .join("locks")
-            .join(format!("{key}.lock"))
-            .exists(),
-        "a held lock's marker is not somebody else's to delete"
-    );
     drop(held);
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
-    assert!(
-        !dir.path()
-            .join("locks")
-            .join(format!("{key}.lock"))
-            .exists()
-    );
-
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
+    assert!(path.exists(), "releasing the lock does not delete its file");
+    let again = InstallationLock::try_acquire(dir.path(), &key)
+        .unwrap()
+        .expect("the same file locks again");
+    drop(again);
 }
 
 #[test]

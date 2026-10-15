@@ -647,10 +647,13 @@ impl InstallLedgerStore {
         let path = self.path(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         if scope == SelectedScope::User {
-            zup_transaction::write_private_durable(Path::new(&path), &bytes).map_err(|source| {
+            zup_transaction::publish_private(Path::new(&path), &bytes).map_err(|error| {
                 LedgerError::Io {
                     path: PathBuf::from(&path),
-                    source,
+                    source: match error {
+                        private_fs::Error::Io(source) => source,
+                        other => std::io::Error::other(other),
+                    },
                 }
             })?;
         } else {
@@ -665,7 +668,10 @@ impl InstallLedgerStore {
 
 fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
     if scope == SelectedScope::User {
-        return zup_transaction::read_private_file(path);
+        return zup_transaction::read_private(path).map_err(|error| match error {
+            private_fs::Error::Io(source) => source,
+            other => std::io::Error::other(other),
+        });
     }
     std::fs::read(path)
 }

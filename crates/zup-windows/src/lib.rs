@@ -120,9 +120,7 @@ pub use content_store::{
     validate_content_store_base, verify_directory_chain,
 };
 #[cfg(windows)]
-pub use durable::{
-    DurableError, copy_new_durable, create_durable, move_durable, volume_root, write_durable,
-};
+pub use durable::{DurableError, copy_new_durable, move_durable, volume_root, write_durable};
 #[cfg(windows)]
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,

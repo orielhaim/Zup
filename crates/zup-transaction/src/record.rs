@@ -341,4 +341,12 @@ pub enum StoreError {
     #[error("journal serialization failed: {0}")]
     #[diagnostic(code(zup_transaction::serialize))]
     Serialize(#[source] serde_json::Error),
+
+    #[error("journal publication failed at `{path}`: {source}")]
+    #[diagnostic(code(zup_transaction::publication))]
+    Publication {
+        path: PathBuf,
+        #[source]
+        source: private_fs::Error,
+    },
 }
