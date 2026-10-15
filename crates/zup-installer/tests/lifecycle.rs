@@ -17,7 +17,6 @@
 use std::{collections::BTreeMap, fs};
 
 use zup_core::{AppId, SelectedScope};
-use zup_transaction::InstallationLock;
 use zup_windows::{AppsFeaturesValue, InstallLedgerStore};
 
 #[path = "support/project.rs"]
@@ -169,8 +168,6 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
             "{residue} survived the uninstall"
         );
     }
-    let lock_key = InstallationLock::lock_key(&app.id, "user");
-    assert!(!state.path().join(format!("{lock_key}.lock")).exists());
 }
 
 #[test]

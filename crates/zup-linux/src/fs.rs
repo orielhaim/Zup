@@ -113,6 +113,37 @@ impl OwnedDirectory {
         Ok(directory)
     }
 
+    pub fn duplicate(&self) -> Result<Self, PathError> {
+        let file = rustix::fs::openat(self.as_fd(), ".", DIR_FLAGS, Mode::empty())
+            .map_err(|error| PathError::errno(&self.path, error))?;
+        Ok(Self {
+            path: self.path.clone(),
+            file: std::fs::File::from(file),
+        })
+    }
+
+    pub fn create_exclusive_directory(
+        &self,
+        name: &str,
+        mode: Mode,
+    ) -> Result<OwnedDirectory, PathError> {
+        check_child_name(name)?;
+        let display = self.display_child(name);
+        match rustix::fs::mkdirat(self.as_fd(), name, mode) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {
+                return Err(PathError::AlreadyExists {
+                    path: display.display().to_string(),
+                });
+            }
+            Err(error) => return Err(PathError::errno(&display, error)),
+        }
+        let (directory, _, _) = self.open_child_verified(name)?;
+        directory.chmod_self(mode)?;
+        self.sync()?;
+        Ok(directory)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

@@ -8,9 +8,8 @@ pub use gpui_kit::{
 };
 
 pub use zup_preset_protocol::{
-    Action, ComponentGroupOption, ComponentId, ComponentOption, ComponentProminence, InstallScope,
-    InstallerState, MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement,
-    Snapshot, Surface, format_bytes,
+    Action, Capabilities, Capability, ComponentGroupOption, ComponentId, ComponentOption,
+    ComponentProminence, HostEnvironment, InstallScope, InstallerState, MaintenanceState,
+    OperatingSystem, OperationKind, ProductIdentity, SelectionRequirement, Snapshot, Surface,
+    format_bytes,
 };
-
-pub use zup_preset_protocol::{Capabilities, Capability};

@@ -32,6 +32,7 @@ zup-automation.workspace = true
 zup-artifact.workspace = true
 zup-build.workspace = true
 zup-bundle.workspace = true
+zup-compose.workspace = true
 zup-core.workspace = true
 zup-binary.workspace = true
 zup-distribute-github.workspace = true
@@ -61,6 +62,6 @@ tempfile.workspace = true
 zstd.workspace = true
 wat = "1"
 windows-registry.workspace = true
-wit-component = { version = "=0.261", features = ["dummy-module"] }
-wit-parser = "=0.261"
+wit-component = { version = "0.262", features = ["dummy-module"] }
+wit-parser = "0.262"
 zup-xtask.workspace = true

@@ -16,7 +16,6 @@ use zup_core::TargetBuildPlan;
 use zup_core::{Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, Target, hash_reader};
 use zup_pe::{
     MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, RESOURCE_ID_PRESET,
-    ResourceDocument,
 };
 
 #[derive(Debug, Error)]
@@ -45,6 +44,8 @@ pub enum BundleError {
     Resource(String),
     #[error("runtime already has an Authenticode certificate table; embed before signing")]
     RuntimeAlreadySigned,
+    #[error("installer composition: {0}")]
+    Compose(#[from] zup_compose::ComposeError),
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
     TargetMismatch { expected: Target, found: Target },
     #[error(transparent)]
@@ -504,12 +505,9 @@ pub fn build_self_contained_executable(
     artifacts: &[CompiledPluginArtifact],
     preset: Option<&[u8]>,
 ) -> Result<(u64, u64), BundleError> {
-    validate_runtime_executable(executable, &plan.installer)?;
-    validate_unsigned_pe(executable)?;
-    let temporary = tempfile::tempdir()?;
-    let package = temporary.path().join("installer.zup");
-    let package_size = BundleWriter::write_file(plan, artifacts, &package)?;
-    embed_bundle_file(executable, output, &package, preset)?;
+    let package = BundleWriter::encode(plan, artifacts)?;
+    let package_size = package.len() as u64;
+    zup_compose::compose_windows(executable, output, &package, preset).map_compose()?;
     apply_plan_icon(output, plan)?;
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
@@ -530,15 +528,11 @@ pub fn plan_only_runtime_bytes(
     plan: &TargetBuildPlan,
     artifacts: &[CompiledPluginArtifact],
 ) -> Result<(Vec<u8>, u64), BundleError> {
-    validate_runtime_executable(executable, &plan.installer)?;
-    validate_unsigned_pe(executable)?;
     let package = BundleWriter::encode_plan_only(plan, artifacts)?;
     let package_size = package.len() as u64;
     let temporary = tempfile::tempdir()?;
-    let path = temporary.path().join("runtime.zup");
-    std::fs::write(&path, &package)?;
     let out = temporary.path().join("runtime.exe");
-    embed_bundle_file(executable, &out, &path, None)?;
+    zup_compose::compose_windows(executable, &out, &package, None).map_compose()?;
     apply_plan_icon(&out, plan)?;
     Ok((std::fs::read(&out)?, package_size))
 }
@@ -549,21 +543,22 @@ pub fn embed_bundle_file(
     package: &Path,
     preset: Option<&[u8]>,
 ) -> Result<(), BundleError> {
-    validate_unsigned_pe(executable)?;
-    embed_bundle_resource(executable, output, package, preset)
+    let bytes = std::fs::read(package)?;
+    zup_compose::compose_windows(executable, output, &bytes, preset).map_compose()?;
+    Ok(())
 }
 
-fn validate_runtime_executable(
-    executable: &Path,
-    installer: &zup_core::Installer,
-) -> Result<(), BundleError> {
-    let runtime = Executable::read(executable)?;
-    if runtime.format() != BinaryFormat::Pe {
-        return Err(BundleError::Invalid);
+trait MapCompose<T> {
+    fn map_compose(self) -> Result<T, BundleError>;
+}
+
+impl<T> MapCompose<T> for Result<T, zup_compose::ComposeError> {
+    fn map_compose(self) -> Result<T, BundleError> {
+        self.map_err(|error| match error {
+            zup_compose::ComposeError::Inspect(inner) => BundleError::Inspect(inner),
+            other => BundleError::Compose(other),
+        })
     }
-    runtime.refuse_target(&installer.target)?;
-    runtime.refuse_frontend(installer.frontend)?;
-    Ok(())
 }
 
 pub fn is_executable_image(path: &Path) -> bool {
@@ -597,47 +592,6 @@ pub fn validate_frontend(path: &Path, expected: Frontend) -> Result<(), BundleEr
     Ok(())
 }
 
-fn validate_unsigned_pe(path: &Path) -> Result<(), BundleError> {
-    if zup_pe::is_signed(path)? {
-        return Err(BundleError::RuntimeAlreadySigned);
-    }
-    Ok(())
-}
-
-fn package_documents(package: &Package) -> Result<Vec<ResourceDocument>, BundleError> {
-    let index = package.index_bytes()?;
-    if index.len() as u64 > MAX_RESOURCE_SIZE {
-        return Err(BundleError::ResourceTooLarge {
-            size: index.len() as u64,
-            limit: MAX_RESOURCE_SIZE,
-        });
-    }
-    if package.blob_count() > zup_pe::MAX_RESOURCE_ID {
-        return Err(BundleError::TooManyBlobs {
-            count: package.blob_count(),
-            limit: zup_pe::MAX_RESOURCE_ID,
-        });
-    }
-    let mut documents = Vec::with_capacity(package.blob_count() + 1);
-    documents.push(ResourceDocument {
-        id: RESOURCE_ID_INDEX,
-        bytes: index,
-    });
-    for index in 0..package.blob_count() {
-        if package.index_info().compressed_size(index).unwrap_or(0) > MAX_RESOURCE_SIZE {
-            return Err(BundleError::ResourceTooLarge {
-                size: package.index_info().compressed_size(index).unwrap_or(0),
-                limit: MAX_RESOURCE_SIZE,
-            });
-        }
-        documents.push(ResourceDocument {
-            id: index + RESOURCE_ID_BLOB_START,
-            bytes: package.compressed_blob(index)?,
-        });
-    }
-    Ok(documents)
-}
-
 fn apply_plan_icon(output: &Path, plan: &TargetBuildPlan) -> Result<(), BundleError> {
     let Some(icon) = plan
         .icons
@@ -655,33 +609,4 @@ fn apply_plan_icon(output: &Path, plan: &TargetBuildPlan) -> Result<(), BundleEr
             crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
             other => BundleError::Resource(other.to_string()),
         })
-}
-
-fn embed_bundle_resource(
-    executable: &Path,
-    output: &Path,
-    package_path: &Path,
-    preset: Option<&[u8]>,
-) -> Result<(), BundleError> {
-    let package = Package::open_unverified(package_path)?;
-    let mut documents = package_documents(&package)?;
-    if let Some(bytes) = preset {
-        if bytes.len() as u64 > MAX_RESOURCE_SIZE {
-            return Err(BundleError::ResourceTooLarge {
-                size: bytes.len() as u64,
-                limit: MAX_RESOURCE_SIZE,
-            });
-        }
-        documents.push(ResourceDocument {
-            id: RESOURCE_ID_PRESET,
-            bytes: bytes.to_vec(),
-        });
-    }
-    crate::pe_resources::write_resources(executable, output, &documents).map_err(|error| {
-        match error {
-            crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
-            other => BundleError::Resource(other.to_string()),
-        }
-    })?;
-    Ok(())
 }

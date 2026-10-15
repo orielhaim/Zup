@@ -75,6 +75,14 @@ pub struct PackCommand {
     pub binaries: Vec<BinarySource>,
     #[arg(long = "build", value_name = "TARGET")]
     pub build: Vec<String>,
+    /// A `--zup-describe` document for the preset, as JSON.
+    ///
+    /// Packaging runs one binary to describe the preset, and a binary for
+    /// another target cannot run here. Pass a document produced by building
+    /// the same preset natively (for example `preset-binary --zup-describe`)
+    /// to pack binaries built elsewhere without executing them.
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub describe_file: Option<PathBuf>,
     #[arg(long, value_name = "PROFILE", default_value = "release")]
     pub profile: String,
     #[arg(long)]
@@ -124,7 +132,10 @@ pub fn pack(args: &PackCommand) -> miette::Result<()> {
         ));
     }
 
-    let description = describe(&root, &cargo, &identity, &sources, &args.profile)?;
+    let description = match &args.describe_file {
+        Some(path) => read_description(path, &identity)?,
+        None => describe(&root, &cargo, &identity, &sources, &args.profile)?,
+    };
     description
         .validate()
         .map_err(|error| miette::miette!("the preset described itself as unusable: {error}"))?;
@@ -245,6 +256,24 @@ fn settings_summary(schema: &serde_json::Value) -> String {
 
 fn human_bytes(bytes: u64) -> String {
     zup_presentation::format_bytes(bytes)
+}
+
+fn read_description(path: &Path, identity: &PresetIdentity) -> miette::Result<PresetDescription> {
+    let document =
+        std::fs::read(path).map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+    if document.len() > MAX_DESCRIBE_BYTES {
+        return Err(miette::miette!(
+            "the describe document is {} bytes; the limit is {MAX_DESCRIBE_BYTES}",
+            document.len()
+        ));
+    }
+    let description: PresetDescription = serde_json::from_slice(&document)
+        .map_err(|error| miette::miette!("the describe document is unusable: {error}"))?;
+    description
+        .validate()
+        .map_err(|error| miette::miette!("the describe document is unusable: {error}"))?;
+    identity.cross_check(&description)?;
+    Ok(description)
 }
 
 fn describe(
@@ -471,6 +500,63 @@ mod tests {
             .cross_check(&bumped)
             .expect_err("a different version");
         assert!(refusal.to_string().contains("9.9.9"), "{refusal}");
+    }
+
+    fn identity() -> PresetIdentity {
+        PresetIdentity {
+            name: "aurora".into(),
+            version: "1.4.2".into(),
+            binary: "aurora-preset".into(),
+        }
+    }
+
+    fn write_document(contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let path = directory.path().join("describe.json");
+        std::fs::write(&path, contents).expect("a document");
+        (directory, path)
+    }
+
+    #[test]
+    fn a_describe_document_packs_binaries_built_elsewhere() {
+        let document = serde_json::to_vec(&PresetDescription::new(
+            "aurora",
+            "1.4.2",
+            serde_json::json!({"type": "object"}),
+        ))
+        .expect("a document");
+        let (_directory, path) = write_document(&document);
+        let description = read_description(&path, &identity()).expect("a native describe document");
+        assert_eq!(description.name, "aurora");
+        identity()
+            .cross_check(&description)
+            .expect("the same manifest the binary was built from");
+    }
+
+    #[rstest]
+    #[case::not_json(b"this is not json".to_vec())]
+    #[case::wrong_shape(
+        serde_json::to_vec(&serde_json::json!({"name": 1})).expect("a document")
+    )]
+    fn an_unusable_describe_document_is_refused(#[case] contents: Vec<u8>) {
+        let (_directory, path) = write_document(&contents);
+        assert!(
+            read_description(&path, &identity()).is_err(),
+            "a document no build produced packs nothing"
+        );
+    }
+
+    #[test]
+    fn a_describe_document_for_another_preset_is_refused() {
+        let document = serde_json::to_vec(&PresetDescription::new(
+            "borealis",
+            "1.4.2",
+            serde_json::json!({"type": "object"}),
+        ))
+        .expect("a document");
+        let (_directory, path) = write_document(&document);
+        let refusal = read_description(&path, &identity()).expect_err("another preset");
+        assert!(refusal.to_string().contains("borealis"), "{refusal}");
     }
 }
 

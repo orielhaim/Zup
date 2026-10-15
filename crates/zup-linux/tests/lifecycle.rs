@@ -2,12 +2,13 @@
 #![cfg(feature = "test-support")]
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxAction, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
+use zup_linux::{FOOTER_LEN, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_fixture, mode_of, run_installer, run_tool, tool_script, v1_files,
     v2_files,
 };
+use zup_runtime::Operation;
 
 #[test]
 fn fresh_install_runs_the_application() {
@@ -15,7 +16,7 @@ fn fresh_install_runs_the_application() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = compose_fixture(scratch.path(), "Acme-Setup", "1.0.0", &v1_files());
 
-    let outcome = run_installer(&installer, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&installer, &user.state, Operation::Apply);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a fresh install commits: {outcome:?}"
@@ -71,14 +72,14 @@ fn upgrade_moves_the_installation_to_v2() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let v1 = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
-    let outcome = run_installer(&v1, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&v1, &user.state, Operation::Apply);
     assert!(matches!(outcome, LinuxOutcome::Committed { .. }));
 
     let install = user.programs().join("tool");
     std::fs::write(install.join("user-notes.txt"), b"the user's").expect("a user file");
 
     let v2 = compose_fixture(scratch.path(), "v2", "1.1.0", &v2_files());
-    let outcome = run_installer(&v2, &user.state, LinuxAction::Apply);
+    let outcome = run_installer(&v2, &user.state, Operation::Apply);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "an upgrade commits: {outcome:?}"
@@ -140,14 +141,14 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let v1 = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
     assert!(matches!(
-        run_installer(&v1, &user.state, LinuxAction::Apply),
+        run_installer(&v1, &user.state, Operation::Apply),
         LinuxOutcome::Committed { .. }
     ));
     let install = user.programs().join("tool");
 
     std::fs::remove_file(install.join("keep.dat")).expect("delete");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
-    let outcome = run_installer(&v1, &user.state, LinuxAction::Repair { force_files: false });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: false });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a repair commits: {outcome:?}"
@@ -163,8 +164,9 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         installer: v1.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Repair { force_files: false },
+        action: Operation::Repair { force_files: false },
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(
         outcome.is_err(),
@@ -176,7 +178,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         "the refusal leaves the bytes alone"
     );
 
-    let outcome = run_installer(&v1, &user.state, LinuxAction::Repair { force_files: true });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: true });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a forced repair commits: {outcome:?}"
@@ -204,13 +206,13 @@ fn uninstall_removes_what_zup_owns_and_nothing_else() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let v1 = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
     assert!(matches!(
-        run_installer(&v1, &user.state, LinuxAction::Apply),
+        run_installer(&v1, &user.state, Operation::Apply),
         LinuxOutcome::Committed { .. }
     ));
     let install = user.programs().join("tool");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
 
-    let outcome = run_installer(&v1, &user.state, LinuxAction::Uninstall);
+    let outcome = run_installer(&v1, &user.state, Operation::Uninstall);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "an uninstall commits: {outcome:?}"
@@ -260,7 +262,7 @@ fn a_tampered_package_is_refused_before_mutation() {
     let template_len = std::fs::metadata("/bin/true").expect("a template").len() as usize;
     let tamper_at = template_len + 100;
     assert!(
-        tamper_at < bytes.len() - 81,
+        tamper_at < bytes.len() - FOOTER_LEN as usize,
         "the fixture package is larger than the tamper offset"
     );
     bytes[tamper_at] ^= 0x40;
@@ -271,8 +273,9 @@ fn a_tampered_package_is_refused_before_mutation() {
         installer: tampered,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(
         outcome.is_err(),
@@ -299,8 +302,9 @@ fn a_truncated_installer_is_refused_without_panicking() {
         installer: truncated,
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: LinuxAction::Apply,
+        action: Operation::Apply,
         install_dir_override: None,
+        selection: Default::default(),
     });
     assert!(
         outcome.is_err(),
@@ -318,7 +322,7 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
     assert!(matches!(
-        run_installer(&installer, &user.state, LinuxAction::Apply),
+        run_installer(&installer, &user.state, Operation::Apply),
         LinuxOutcome::Committed { .. }
     ));
 
@@ -337,7 +341,7 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
     let outcome = run_installer(
         &maintenance,
         &user.state,
-        LinuxAction::Repair { force_files: false },
+        Operation::Repair { force_files: false },
     );
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),

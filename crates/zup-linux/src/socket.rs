@@ -332,6 +332,56 @@ pub fn send_envelope(stream: &mut UnixStream, envelope: &WireEnvelope) -> Result
         })
 }
 
+pub fn inbound_frame_ready(stream: &UnixStream) -> Result<bool, IpcError> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|source| IpcError::Io {
+            path: "<recv>".to_owned(),
+            source,
+        })?;
+    let ready = peek_frame(stream);
+    let restored = stream
+        .set_nonblocking(false)
+        .map_err(|source| IpcError::Io {
+            path: "<recv>".to_owned(),
+            source,
+        });
+    restored?;
+    ready
+}
+
+fn peek_frame(stream: &UnixStream) -> Result<bool, IpcError> {
+    let mut header = [0u8; LENGTH_WIDTH];
+    let header_len = match rustix::net::recv(stream, &mut header, rustix::net::RecvFlags::PEEK) {
+        Ok((0, _)) => {
+            return Err(IpcError::Framing("peer closed".into()));
+        }
+        Ok((read, _)) if read < LENGTH_WIDTH => return Ok(false),
+        Ok(_) => u32::from_be_bytes(header) as usize,
+        Err(rustix::io::Errno::AGAIN) => return Ok(false),
+        Err(error) => {
+            return Err(IpcError::Io {
+                path: "<recv>".to_owned(),
+                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+            });
+        }
+    };
+    if header_len == 0 || header_len > MAX_FRAME_BYTES {
+        return Err(IpcError::Framing(format!(
+            "frame length {header_len} is outside the bound {MAX_FRAME_BYTES}"
+        )));
+    }
+    let mut frame = vec![0u8; LENGTH_WIDTH + header_len];
+    match rustix::net::recv(stream, &mut frame, rustix::net::RecvFlags::PEEK) {
+        Ok((read, _)) => Ok(read == frame.len()),
+        Err(rustix::io::Errno::AGAIN) => Ok(false),
+        Err(error) => Err(IpcError::Io {
+            path: "<recv>".to_owned(),
+            source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+        }),
+    }
+}
+
 pub fn recv_envelope(stream: &mut UnixStream, timeout: Duration) -> Result<WireEnvelope, IpcError> {
     stream
         .set_read_timeout(Some(timeout))

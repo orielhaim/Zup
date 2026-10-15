@@ -27,5 +27,12 @@ uuid.workspace = true
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
+zup-exec.workspace = true
+zup-plan.workspace = true
+zup-platform.workspace = true
 zup-protocol.workspace = true
 zup-transaction.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

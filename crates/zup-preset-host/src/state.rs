@@ -551,6 +551,15 @@ impl HostState {
                 self.finish();
             }
             InstallOutcome::RecoveryRequired => self.fail("recovery required".into(), true),
+            InstallOutcome::CommittedPendingReconciliation { detail } => {
+                self.fail(detail.clone(), true);
+            }
+            InstallOutcome::AuthorizationRequired => {
+                self.fail("authorization required".into(), false);
+            }
+            InstallOutcome::AuthorizationCancelled => {
+                self.fail("authorization cancelled".into(), false);
+            }
             InstallOutcome::Busy { operation } => {
                 self.snapshot.diagnostic = Some(DiagnosticPresentation {
                     kind: DiagnosticKind::Busy,

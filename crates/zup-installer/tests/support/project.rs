@@ -99,17 +99,18 @@ impl AppSpec {
 }
 
 /// A state root a test drives the runtime against, shared with nothing.
-///
-/// The directory is removed by [`cleanup`], which every test that installs
-/// something holds; keeping it here would delete it out from under a test that
-/// is still reading it.
 pub struct State {
     root: PathBuf,
+    _parent: Option<TempDir>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self::with_root(TempDir::new().expect("a state root").keep())
+        let parent = TempDir::new().expect("a state parent");
+        Self {
+            root: parent.path().join("state"),
+            _parent: Some(parent),
+        }
     }
 
     /// A state root at a path the caller chose.
@@ -117,7 +118,10 @@ impl State {
     /// For a test that has to reach the same directory the runtime was given -
     /// to rewrite the record it wrote, for instance.
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            _parent: None,
+        }
     }
 
     pub fn path(&self) -> &Path {

@@ -9,7 +9,7 @@ use zup_windows::EmbeddedBundle;
 
 use crate::cli::{LifecycleArgs, ScopeArg};
 use crate::execute;
-use crate::lifecycle::{self, PreparedRuntime, Request};
+use crate::lifecycle::{self, PreparedRuntime};
 use crate::maintenance as state;
 use crate::package;
 use crate::run::RuntimeContext;
@@ -36,7 +36,7 @@ impl cliclack::Theme for SetupTheme {
 }
 
 pub fn run_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
-    ask(context, Request::Apply, args)
+    ask(context, zup_runtime::Operation::Apply, args)
 }
 
 pub fn run(
@@ -44,7 +44,7 @@ pub fn run(
     verb: lifecycle::Verb,
     args: LifecycleArgs,
 ) -> miette::Result<()> {
-    ask(context, Request::Named(verb.action()), args)
+    ask(context, verb.action(), args)
 }
 
 pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
@@ -52,7 +52,8 @@ pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Resu
     let build = package::target_plan(bundle)?;
     let installer = &build.installer;
     let installed = find_installation(installer, None, ScopeArg::Either)?;
-    let action = state::resolve_applied_action(
+    let action = crate::lifecycle::resolve_request_operation(
+        zup_runtime::Operation::Apply,
         installed.as_ref().map(|(_, ledger)| &ledger.version),
         &installer.app.version.to_string(),
     )?;
@@ -98,13 +99,17 @@ pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Resu
     };
     lifecycle::transition(
         RuntimeContext::new(Frontend::Console).with_output(zup_presentation::OutputFormat::Human),
-        Request::Named(action),
+        zup_runtime::Operation::from(action),
         &args,
         ExecutionPolicy::Interactive,
     )
 }
 
-fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> miette::Result<()> {
+fn ask(
+    context: RuntimeContext,
+    request: zup_runtime::Operation,
+    mut args: LifecycleArgs,
+) -> miette::Result<()> {
     cliclack::set_theme(SetupTheme);
     let executable = package::current_executable()?;
     let bundle = package::open_bundle(&executable)?;
@@ -112,11 +117,12 @@ fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> mi
     let installer = &build.installer;
     let installed = find_installation(installer, args.state_root.as_deref(), args.scope)?;
     let action = match request {
-        Request::Named(action) => action,
-        Request::Apply => state::resolve_applied_action(
+        zup_runtime::Operation::Apply => crate::lifecycle::resolve_request_operation(
+            zup_runtime::Operation::Apply,
             installed.as_ref().map(|(_, ledger)| &ledger.version),
             &installer.app.version.to_string(),
         )?,
+        named => crate::lifecycle::named_action(named).expect("named operations resolve directly"),
     };
     let scope = choose_scope(installer, args.scope, installed.as_ref().map(|(s, _)| *s))?;
     let repair = matches!(action, LifecycleAction::Repair { .. });
@@ -176,7 +182,7 @@ fn ask(context: RuntimeContext, request: Request, mut args: LifecycleArgs) -> mi
     let _ = context;
     lifecycle::transition(
         context,
-        Request::Named(action),
+        zup_runtime::Operation::from(action),
         &args,
         ExecutionPolicy::Interactive,
     )
@@ -415,56 +421,34 @@ fn execute_once(
         indicatif::ProgressStyle::with_template("  {msg:.<28} {bar:30.cyan/blue} {percent:>3}%")
             .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()),
     );
-    let (events, _) = tokio::sync::broadcast::channel(256);
-    let mut receiver = events.subscribe();
+    let control = zup_runtime::OperationControl::new(ExecutionPolicy::Interactive);
     let pump_progress = progress.clone();
-    let pump = std::thread::spawn(move || {
-        loop {
-            let event = match receiver.blocking_recv() {
-                Ok(event) => event,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            let terminal = execute::is_terminal(&event);
-            match &event {
-                zup_runtime::RuntimeEvent::Progress {
-                    completed,
-                    total,
-                    action,
-                } => {
-                    if *total > 0 {
-                        pump_progress.set_length(*total);
-                    }
-                    pump_progress.set_position((*completed).min((*total).max(1)));
-                    pump_progress.set_message(action.clone());
-                }
-                zup_runtime::RuntimeEvent::ResourceBlocked { detail, .. } => {
-                    eprintln!("installation blocked by running applications\n{detail}");
-                }
-                zup_runtime::RuntimeEvent::Failed { message, .. } => {
-                    eprintln!("{message}");
-                }
-                zup_runtime::RuntimeEvent::StateChanged { state }
-                    if *state == zup_runtime::RuntimeState::Cancelled =>
-                {
-                    println!("Cancelling safely…");
-                }
-                _ => {}
-            }
-            if terminal {
-                break;
-            }
-        }
-    });
-    let cancel = zup_runtime::CancellationHandle::new();
     let prepared = prepared.retaining_overlay();
-    let result = execute::execute_with_control_signal(
-        prepared,
-        cancel,
-        events,
-        ExecutionPolicy::Interactive,
-    );
+    let result = execute::execute_observing(prepared, &control, |event| match event {
+        zup_runtime::RuntimeEvent::Progress {
+            completed,
+            total,
+            action,
+        } => {
+            if *total > 0 {
+                pump_progress.set_length(*total);
+            }
+            pump_progress.set_position((*completed).min((*total).max(1)));
+            pump_progress.set_message(action.clone());
+        }
+        zup_runtime::RuntimeEvent::ResourceBlocked { detail, .. } => {
+            eprintln!("installation blocked by running applications\n{detail}");
+        }
+        zup_runtime::RuntimeEvent::Failed { message, .. } => {
+            eprintln!("{message}");
+        }
+        zup_runtime::RuntimeEvent::StateChanged { state }
+            if *state == zup_runtime::RuntimeState::Cancelled =>
+        {
+            println!("Cancelling safely…");
+        }
+        _ => {}
+    });
     progress.finish_and_clear();
-    let _ = pump.join();
     result
 }

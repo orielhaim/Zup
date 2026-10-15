@@ -119,6 +119,7 @@ pub fn launch(
     executable: &Path,
     capabilities: Capabilities,
     product: zup_preset_protocol::ProductIdentity,
+    environment: zup_preset_protocol::HostEnvironment,
 ) -> Result<PresetProcess, SessionError> {
     let endpoint =
         Endpoint::create().map_err(|error| SessionError::Handshake(error.to_string()))?;
@@ -128,6 +129,15 @@ pub fn launch(
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        // A console-subsystem preset started by the windowed installer otherwise
+        // becomes a new console. Windows gives that console to the default
+        // terminal, which shows its own error window when the launch pipe closes.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
     });
     manage(&mut command);
     let mut child = command.spawn().map_err(SessionError::Launch)?;
@@ -147,6 +157,7 @@ pub fn launch(
             SessionId(channel.session()),
             capabilities,
             product,
+            environment,
         ))),
         reading: Some(channel),
     };

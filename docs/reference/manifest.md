@@ -46,8 +46,10 @@ Top-level `frontend` and per-target frontend values are:
 - `console`
 - `headless`
 
-The default is `gui`. A Linux target with `gui` is refused: the Linux backend
-ships `console` and `headless` runtimes only in this phase.
+The default is `gui`. A Linux `gui` installer presents the same Default Preset
+through the shared session controller; at run time it needs a Wayland
+(`WAYLAND_DISPLAY`) or X11 (`DISPLAY`) session, and refuses with a diagnostic
+otherwise.
 
 ## `[build.targets.<profile>]`
 

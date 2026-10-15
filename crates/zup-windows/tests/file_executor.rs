@@ -9,9 +9,7 @@ use zup_transaction::{
     FileDelta, FilePrecondition, InstallationLock, LockScope, OperationId, TransactionInput,
     compile_transaction,
 };
-use zup_windows::{
-    NullProgress, WindowsFileExecutor, apply_node, create_durable, reconcile_node, to_host_path,
-};
+use zup_windows::{NullProgress, WindowsFileExecutor, apply_node, reconcile_node, to_host_path};
 
 fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
     zup_platform::TargetPath::new(
@@ -69,6 +67,8 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
         ReconcileResult::AppliedWithReceipt(zup_transaction::OperationReceipt::RemoveFile { .. })
     ));
     exec.rollback_transaction_receipt(&receipt).unwrap();
+    exec.rollback_transaction_receipt(&receipt)
+        .expect("restoration survives a crash before journal advancement");
     assert_eq!(
         std::fs::read(to_host_path(&destination).unwrap()).unwrap(),
         b"owned"
@@ -154,7 +154,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         created_directories: vec![],
     });
     let plan = compile_transaction(&input).unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     let mut record = TransactionRecord::new(
         TransactionId::new_v7(),
         AppId::new("com.zup.crash-removal").unwrap(),
@@ -223,16 +223,6 @@ fn stage_op(id: &str) -> OperationId {
 }
 
 #[test]
-fn create_durable_refuses_overwrite() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("f.bin");
-    create_durable(&path, b"first").unwrap();
-    let err = create_durable(&path, b"second").unwrap_err();
-    assert!(matches!(err, zup_windows::DurableError::Win32 { .. }));
-    assert_eq!(std::fs::read(&path).unwrap(), b"first");
-}
-
-#[test]
 fn installation_lock_exclusive() {
     let dir = TempDir::new().unwrap();
     let key = InstallationLock::lock_key("com.acme.acme", "user");
@@ -283,22 +273,19 @@ fn lock_identity_separates_installations_and_joins_the_ones_that_are_one() {
 }
 
 #[test]
-fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
+fn a_released_lock_keeps_its_file() {
     let dir = TempDir::new().unwrap();
     let key = InstallationLock::lock_key("com.acme.desktop", "user");
+    let path = dir.path().join("locks").join(format!("{key}.lock"));
     let held = InstallationLock::try_acquire(dir.path(), &key)
         .unwrap()
         .expect("first lock");
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
-    assert!(
-        dir.path().join(format!("{key}.lock")).exists(),
-        "a held lock's marker is not somebody else's to delete"
-    );
     drop(held);
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
-    assert!(!dir.path().join(format!("{key}.lock")).exists());
-
-    InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
+    assert!(path.exists(), "releasing the lock does not delete its file");
+    let again = InstallationLock::try_acquire(dir.path(), &key)
+        .unwrap()
+        .expect("the same file locks again");
+    drop(again);
 }
 
 #[test]
@@ -363,6 +350,57 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
         other => panic!("expected ReplaceFile receipt, got {other:?}"),
     }
     assert_eq!(std::fs::read(&dest).unwrap(), b"new!");
+}
+
+#[test]
+fn replacement_rollback_is_repeatable_while_backup_deletion_is_blocked() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (dir, payload, _target, source) = setup();
+    let target = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let destination = target.path().join("a.bin");
+    std::fs::write(&destination, b"old!").unwrap();
+    std::fs::write(payload.join("a.bin"), b"new!").unwrap();
+    let mut executor = WindowsFileExecutor::new(
+        source,
+        dir.path().join("work"),
+        "rollback-repeat".into(),
+        ".exe",
+        Box::new(NullProgress),
+    );
+    let relative = RelativePath::new("a.bin").unwrap();
+    let stage = stage_node(&destination);
+    executor.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
+    apply_node(&mut executor, &stage, &relative, &destination).unwrap();
+    let replace = mutation_node("replace", FileDelta::Replace, &destination);
+    executor.note_file(
+        &replace.id,
+        FilePrecondition::Exact {
+            size: 4,
+            sha256: digest(b"old!"),
+        },
+        digest(b"new!"),
+        4,
+    );
+    let receipt = zup_windows::transaction_receipt(
+        apply_node(&mut executor, &replace, &relative, &destination).unwrap(),
+    );
+    let zup_transaction::OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
+        panic!("replace receipt");
+    };
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(backup_path)
+        .unwrap();
+    executor
+        .rollback_transaction_receipt(&receipt)
+        .expect("source cleanup does not invalidate restoration");
+    executor
+        .rollback_transaction_receipt(&receipt)
+        .expect("repeated rollback recognizes restored content");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old!");
+    assert_eq!(std::fs::read(backup_path).unwrap(), b"old!");
+    drop(held);
 }
 
 fn stage_node(dest: &Path) -> zup_transaction::TransactionNode {
@@ -502,11 +540,11 @@ fn verification_follows_every_part_of_a_receipt() {
         apply_node(&mut exec, &create, &rel, &dest).expect("create"),
     );
     verify_installed_file(&created).expect("installed file matches its receipt");
-    assert!(
-        verify_installed_file(&stage_receipt).is_err(),
-        "a published payload is not still staged"
-    );
-    assert!(!staged_path.exists());
+    verify_installed_file(&stage_receipt)
+        .expect("staging remains valid until durable ledger publication");
+    assert_eq!(std::fs::read(&staged_path).unwrap(), b"hello");
+    std::fs::write(&staged_path, b"wrong").unwrap();
+    assert!(verify_installed_file(&stage_receipt).is_err());
     std::fs::write(&dest, b"HELLO").unwrap();
     assert!(matches!(
         verify_installed_file(&created).unwrap_err(),

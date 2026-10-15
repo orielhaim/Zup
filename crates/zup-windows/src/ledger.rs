@@ -9,11 +9,11 @@ use zup_exec::{INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource};
 use zup_platform::TargetPath;
 use zup_transaction::{
     BackendOperationIntent, FileDelta, FilePrecondition, FilesystemTransactionStore, NodeKind,
-    OperationReceipt, TransactionId, TransactionPhase, TransactionPlan, TransactionRecord,
-    TransactionStore, maintenance_directory, maintenance_root as transaction_maintenance_root,
+    OperationReceipt, TransactionPhase, TransactionPlan, TransactionRecord, TransactionStore,
+    maintenance_directory, maintenance_root as transaction_maintenance_root,
 };
 
-use crate::durable::{DurableError, write_durable};
+use crate::durable::DurableError;
 use crate::lowering::{host_path, target_path_from_host};
 use crate::transaction_payload::{
     BackendReceipt, apps_owned_payload, ledger_key_for_backend_node, receipt_from_bytes,
@@ -78,7 +78,7 @@ impl InstallLedgerStore {
         scope: SelectedScope,
     ) -> Result<Option<InstallLedger>, LedgerError> {
         let path = self.path_for(app_id, scope);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_ledger(&path, scope) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(LedgerError::Io { path, source }),
@@ -103,33 +103,23 @@ impl InstallLedgerStore {
         scope: SelectedScope,
     ) -> Result<(), LedgerError> {
         let directory = self.root.join("transactions");
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(LedgerError::Io {
-                    path: directory,
-                    source,
-                });
-            }
+        let journals = if scope == SelectedScope::Machine {
+            crate::machine_authority::MachineRoot::acquire()
+                .map_err(|error| LedgerError::Io {
+                    path: self.root.clone(),
+                    source: std::io::Error::other(error),
+                })?
+                .transaction_store()
+        } else {
+            FilesystemTransactionStore::private_at(&self.root)
         };
-        let journals = FilesystemTransactionStore::new(&self.root);
+        let ids = journals.list_ids().map_err(|error| LedgerError::Io {
+            path: directory.clone(),
+            source: std::io::Error::other(error),
+        })?;
         let mut committed = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|source| LedgerError::Io {
-                path: directory.clone(),
-                source,
-            })?;
-            let Some(id) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<uuid::Uuid>().ok())
-            else {
-                continue;
-            };
-            let record = journals
-                .load(&TransactionId::from_uuid(id))
-                .map_err(|_| LedgerError::Invalid)?;
+        for id in ids {
+            let record = journals.load(&id).map_err(|_| LedgerError::Invalid)?;
             if record.app_id != *app_id || record.scope != scope {
                 continue;
             }
@@ -142,7 +132,7 @@ impl InstallLedgerStore {
             }
             match record.phase {
                 TransactionPhase::Committed => committed.push(record),
-                TransactionPhase::RolledBack => {}
+                TransactionPhase::RolledBack => self.cleanup_work(&record)?,
                 _ => {
                     return Err(LedgerError::RecoveryRequired(
                         record.transaction_id.to_string(),
@@ -161,7 +151,29 @@ impl InstallLedgerStore {
                 latest = Some(id);
             } else {
                 cleanup_committed_files(&record)?;
+                self.cleanup_work(&record)?;
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_work(&self, record: &TransactionRecord) -> Result<(), LedgerError> {
+        if !matches!(
+            record.phase,
+            TransactionPhase::Committed | TransactionPhase::RolledBack
+        ) {
+            return Err(LedgerError::Uncommitted);
+        }
+        if record.scope == SelectedScope::Machine {
+            crate::machine_authority::MachineRoot::acquire()
+                .and_then(|machine| machine.remove_work(&record.transaction_id))
+                .map_err(|error| LedgerError::Io {
+                    path: self
+                        .root
+                        .join("work")
+                        .join(record.transaction_id.to_string()),
+                    source: std::io::Error::other(error),
+                })?;
         }
         Ok(())
     }
@@ -181,6 +193,16 @@ impl InstallLedgerStore {
             .is_some_and(|ledger| ledger.target != plan.target)
         {
             return Err(LedgerError::Ownership("target identity".into()));
+        }
+        match (
+            ledger
+                .as_ref()
+                .map(|ledger| ledger.committed_transaction.as_str()),
+            plan.observed_transaction.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(current), Some(observed)) if current == observed => {}
+            _ => return Err(LedgerError::Ownership("installation generation".into())),
         }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
         let retired_ledger_keys = retired_ledger_keys(plan)?;
@@ -439,6 +461,7 @@ impl InstallLedgerStore {
             .is_some_and(|ledger| ledger.committed_transaction == record.transaction_id.to_string())
         {
             cleanup_committed_files(record)?;
+            self.cleanup_work(record)?;
             return Ok(previous.expect("checked above"));
         }
         if record.plan.uninstall {
@@ -452,10 +475,27 @@ impl InstallLedgerStore {
                 return Err(LedgerError::Invalid);
             }
             let path = self.path(&record.app_id, scope);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(LedgerError::Io { path, source }),
+            if scope == SelectedScope::Machine {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or(LedgerError::Invalid)?;
+                crate::machine_authority::MachineRoot::acquire()
+                    .map_err(|error| LedgerError::Io {
+                        path: path.clone(),
+                        source: std::io::Error::other(error),
+                    })?
+                    .remove_installation(name)
+                    .map_err(|error| LedgerError::Io {
+                        path: path.clone(),
+                        source: std::io::Error::other(error),
+                    })?;
+            } else {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(LedgerError::Io { path, source }),
+                }
             }
             cleanup_committed_files(record)?;
             cleanup_removed_directories(record)?;
@@ -636,11 +676,61 @@ impl InstallLedgerStore {
         ledger.committed_transaction = record.transaction_id.to_string();
         let path = self.path(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
-        write_durable(Path::new(&path), &bytes)?;
+        if scope == SelectedScope::User {
+            zup_transaction::publish_private(Path::new(&path), &bytes).map_err(|error| {
+                LedgerError::Io {
+                    path: PathBuf::from(&path),
+                    source: match error {
+                        private_fs::Error::Io(source) => source,
+                        other => std::io::Error::other(other),
+                    },
+                }
+            })?;
+        } else {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(LedgerError::Invalid)?;
+            crate::machine_authority::MachineRoot::acquire()
+                .map_err(|error| LedgerError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::other(error),
+                })?
+                .publish_installation(name, &bytes)
+                .map_err(|error| LedgerError::Io {
+                    path,
+                    source: std::io::Error::other(error),
+                })?;
+        }
         cleanup_committed_files(record)?;
 
         cleanup_removed_directories(record)?;
+        self.cleanup_work(record)?;
         Ok(ledger)
+    }
+}
+
+fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
+    if scope == SelectedScope::User {
+        return zup_transaction::read_private(path).map_err(|error| match error {
+            private_fs::Error::Io(source) => source,
+            other => std::io::Error::other(other),
+        });
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ledger name"))?;
+    let root = crate::machine_state::default_state_root(SelectedScope::Machine)
+        .map_err(std::io::Error::other)?;
+    match crate::machine_fs::MachineDir::read_ledger(&root, name) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "machine ledger is absent",
+        )),
+        Err(crate::machine_state::MachineStateError::Io { source, .. }) => Err(source),
+        Err(error) => Err(std::io::Error::other(error)),
     }
 }
 
@@ -810,33 +900,35 @@ fn cleanup_application_state(
     uninstall: &TransactionRecord,
 ) -> Result<(), LedgerError> {
     let transactions = root.join("transactions");
-    let entries = match std::fs::read_dir(&transactions) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(LedgerError::Io {
-                path: transactions,
-                source,
-            });
-        }
+    let machine = if uninstall.scope == SelectedScope::Machine {
+        Some(
+            crate::machine_authority::MachineRoot::acquire().map_err(|error| LedgerError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(error),
+            })?,
+        )
+    } else {
+        None
     };
-    let store = FilesystemTransactionStore::new(root);
-    for entry in entries {
-        let entry = entry.map_err(|source| LedgerError::Io {
-            path: transactions.clone(),
-            source,
+    let _machine_work = machine
+        .as_ref()
+        .map(|machine| machine.work_dir())
+        .transpose()
+        .map_err(|error| LedgerError::Io {
+            path: root.join("work"),
+            source: std::io::Error::other(error),
         })?;
-        let Some(id) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<uuid::Uuid>().ok())
-        else {
-            continue;
-        };
-        let transaction_id = TransactionId::from_uuid(id);
-        let record = store
-            .load(&transaction_id)
-            .map_err(|_| LedgerError::Invalid)?;
+    let store = if let Some(machine) = &machine {
+        machine.transaction_store()
+    } else {
+        FilesystemTransactionStore::private_at(root)
+    };
+    let ids = store.list_ids().map_err(|error| LedgerError::Io {
+        path: transactions.clone(),
+        source: std::io::Error::other(error),
+    })?;
+    for id in ids {
+        let record = store.load(&id).map_err(|_| LedgerError::Invalid)?;
         if record.app_id != uninstall.app_id || record.scope != uninstall.scope {
             continue;
         }
@@ -848,26 +940,42 @@ fn cleanup_application_state(
                 record.transaction_id.to_string(),
             ));
         }
-        let directory = entry.path();
-        if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_dir())
-        {
-            std::fs::remove_dir_all(&directory).map_err(|source| LedgerError::Io {
-                path: directory.clone(),
-                source,
-            })?;
-            let work_directory = root.join("work").join(record.transaction_id.to_string());
-            match std::fs::remove_dir_all(&work_directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(LedgerError::Io {
-                        path: work_directory,
-                        source,
-                    });
-                }
+        let work_directory = root.join("work").join(record.transaction_id.to_string());
+        match std::fs::remove_dir_all(&work_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(LedgerError::Io {
+                    path: work_directory,
+                    source,
+                });
             }
+        }
+        if let Some(work) = &_machine_work {
+            work.sync().map_err(|error| LedgerError::Io {
+                path: root.join("work"),
+                source: std::io::Error::other(error),
+            })?;
+        }
+        if let Some(machine) = &machine {
+            machine
+                .remove_journal(&record.transaction_id)
+                .map_err(|error| LedgerError::Io {
+                    path: transactions.join(record.transaction_id.to_string()),
+                    source: std::io::Error::other(error),
+                })?;
         } else {
-            return Err(LedgerError::Invalid);
+            let directory = transactions.join(record.transaction_id.to_string());
+            if std::fs::symlink_metadata(&directory)
+                .is_ok_and(|metadata| metadata.file_type().is_dir())
+            {
+                std::fs::remove_dir_all(&directory).map_err(|source| LedgerError::Io {
+                    path: directory.clone(),
+                    source,
+                })?;
+            } else {
+                return Err(LedgerError::Invalid);
+            }
         }
     }
     let work_directory = root.join("work").join(uninstall.transaction_id.to_string());
@@ -881,12 +989,14 @@ fn cleanup_application_state(
             });
         }
     }
-    for directory in [
-        root.join("transactions"),
-        root.join("work"),
-        root.join("installations"),
-    ] {
-        cleanup_empty_directory_tree(&directory)?;
+    if machine.is_none() {
+        for directory in [
+            root.join("transactions"),
+            root.join("work"),
+            root.join("installations"),
+        ] {
+            cleanup_empty_directory_tree(&directory)?;
+        }
     }
     Ok(())
 }
@@ -1011,16 +1121,34 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), LedgerError
         let Some(receipt) = record.receipt(&node.id) else {
             continue;
         };
-        let OperationReceipt::RemoveFile {
-            backup_path,
-            sha256,
-            size,
-            ..
-        } = receipt
-        else {
-            continue;
+        let (backup, sha256, size) = match receipt {
+            OperationReceipt::StageFile {
+                staged_path,
+                sha256,
+                size,
+            } => (
+                PathBuf::from(staged_path),
+                sha256.parse().map_err(|_| LedgerError::Invalid)?,
+                *size,
+            ),
+            OperationReceipt::ReplaceFile {
+                backup_path,
+                previous_sha256,
+                previous_size,
+                ..
+            } => (
+                PathBuf::from(backup_path),
+                previous_sha256.parse().map_err(|_| LedgerError::Invalid)?,
+                *previous_size,
+            ),
+            OperationReceipt::RemoveFile {
+                backup_path,
+                sha256,
+                size,
+                ..
+            } => (host_path(backup_path), *sha256, *size),
+            _ => continue,
         };
-        let backup = host_path(backup_path);
         match std::fs::symlink_metadata(&backup) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
@@ -1037,7 +1165,7 @@ fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), LedgerError
                 if zup_core::hash_reader(file).map_err(|source| LedgerError::Io {
                     path: backup.to_path_buf(),
                     source,
-                })? != (*size, *sha256)
+                })? != (size, sha256)
                 {
                     return Err(LedgerError::Invalid);
                 }

@@ -34,7 +34,7 @@ fn main() {
 
     channel
         .sender()
-        .send(&frame(Message::HostHello(HostHello::new(
+        .send(&frame(Message::HostHello(Box::new(HostHello::new(
             session,
             Capabilities::new([Capability::Components]),
             zup_preset_protocol::ProductIdentity {
@@ -44,7 +44,8 @@ fn main() {
                 description: None,
             },
             env!("CARGO_PKG_VERSION"),
-        ))))
+            zup_preset_protocol::environment::current("test-target"),
+        )))))
         .expect("the preset answers the hello");
 
     while let Ok(incoming) = channel.recv() {

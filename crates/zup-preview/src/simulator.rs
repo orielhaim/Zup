@@ -166,6 +166,7 @@ impl Simulator {
             &candidate.executable,
             self.machine.capabilities().clone(),
             self.machine.snapshot().product.clone(),
+            self.machine.scenario().environment(),
         )?;
         // The state goes out before the reader starts, so a child that draws the
         // instant it can draws the real one rather than an empty window. A

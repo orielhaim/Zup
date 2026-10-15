@@ -1,11 +1,16 @@
-//! before artifact composition on every host, so `check` never calls a project
+//! Target capability rules for the Linux backend, evaluated on any host.
+//!
+//! Build tooling calls these before artifact composition; the installer calls
+//! them again through operation preparation when it runs.
 
-use zup_core::{Frontend, InstallScope, ResolvedTargetConfig, Target, TargetBuildPlan};
+use zup_core::{
+    Frontend, InstallScope, ResolvedTargetConfig, SelectedScope, Target, TargetBuildPlan,
+};
 
-pub const SUPPORTED_LINUX_TARGET: &str = "linux-x64";
+pub use zup_platform::{SUPPORTED_LINUX_TARGET, is_linux_target};
 
-pub fn is_linux_target(target: &Target) -> bool {
-    target.operating_system() == zup_core::TargetOperatingSystem::Linux
+pub fn is_supported_linux_target(target: &Target) -> bool {
+    is_linux_target(target) && zup_platform::is_supported_target(target)
 }
 
 pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String> {
@@ -14,10 +19,6 @@ pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String
         errors.extend(linux_frontend_errors(target, frontend));
     }
     errors
-}
-
-pub fn is_supported_linux_target(target: &Target) -> bool {
-    target.as_str() == SUPPORTED_LINUX_TARGET
 }
 
 fn linux_target_errors(target: &Target) -> Vec<String> {
@@ -36,13 +37,12 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
 }
 
 fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
-    match frontend {
-        Frontend::Gui => vec![format!(
-            "GUI installer runtime is not supported for `{target}`: the Linux backend ships \
-             console and headless runtimes in this phase"
-        )],
-        Frontend::Console | Frontend::Headless => Vec::new(),
+    if zup_platform::supports_frontend(target, frontend) {
+        return Vec::new();
     }
+    vec![format!(
+        "frontend `{frontend}` is not supported for `{target}`"
+    )]
 }
 
 /// when the installer runs, never at build time - and either-scope
@@ -53,13 +53,56 @@ pub fn linux_capability_errors(
     let mut errors = Vec::new();
     let target = &config.target;
     errors.extend(linux_selection_errors(target, config.frontend));
-    let machine_leg = matches!(
-        config.install.scope,
-        InstallScope::Machine | InstallScope::Either
-    );
-    let installer = &plan.installer;
+    errors.extend(resource_errors(
+        &plan.installer,
+        matches!(
+            config.install.scope,
+            InstallScope::Machine | InstallScope::Either
+        ),
+        !matches!(config.install.scope, InstallScope::Machine),
+        config.profile.as_str(),
+        plan,
+    ));
+    errors
+}
+
+pub fn operation_capability_errors(build: &TargetBuildPlan, scope: SelectedScope) -> Vec<String> {
+    let installer = &build.installer;
+    let mut errors = Vec::new();
+    errors.extend(linux_selection_errors(
+        &installer.target,
+        installer.frontend,
+    ));
+    errors.extend(resource_errors(
+        installer,
+        scope == SelectedScope::Machine,
+        scope == SelectedScope::User,
+        installer.app.name.as_str(),
+        build,
+    ));
+    if scope == SelectedScope::Machine && !installer.plugins.is_empty() {
+        errors.push(
+            "machine scope refuses projects that need plugin execution: the privileged worker \
+             never executes plugins as root"
+                .to_owned(),
+        );
+    }
+    if scope == SelectedScope::Machine && !installer.prerequisites.is_empty() {
+        errors.push("machine scope runs no prerequisite installers".to_owned());
+    }
+    errors
+}
+
+fn resource_errors(
+    installer: &zup_core::Installer,
+    machine_leg: bool,
+    user_scope: bool,
+    name: &str,
+    plan: &TargetBuildPlan,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     // privileged worker never executes plugins as root.
-    if !matches!(config.install.scope, InstallScope::Machine) && !installer.services.is_empty() {
+    if user_scope && !installer.services.is_empty() {
         errors.push(format!(
             "{} service resource{} {} not supported by the Linux backend yet: system services \
              need machine scope (systemd system units); user services are deferred past this \
@@ -147,14 +190,7 @@ pub fn linux_capability_errors(
     }
     errors.extend(protocol_errors(&installer.protocols));
     errors.extend(association_errors(&installer.file_associations));
-    if installer.preset.is_some() {
-        errors.push(
-            "a preset window is not supported by the Linux backend yet: console and headless \
-             installers present no window"
-                .to_owned(),
-        );
-    }
-    errors.extend(main_executable_errors(config, plan));
+    errors.extend(main_executable_errors(name, plan));
     errors
 }
 
@@ -200,7 +236,7 @@ fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String>
     Vec::new()
 }
 
-fn main_executable_errors(config: &ResolvedTargetConfig, plan: &TargetBuildPlan) -> Vec<String> {
+fn main_executable_errors(name: &str, plan: &TargetBuildPlan) -> Vec<String> {
     if plan.files.is_empty() {
         return Vec::new();
     }
@@ -215,16 +251,14 @@ fn main_executable_errors(config: &ResolvedTargetConfig, plan: &TargetBuildPlan)
         .collect::<Vec<_>>();
     if matches.is_empty() {
         return vec![format!(
-            "the declared application main `{main}` for `{}` matches no shipped file: name a \
+            "the declared application main `{main}` for `{name}` matches no shipped file: name a \
              `[[files]]` destination, or remove `app.main`",
-            config.profile,
         )];
     }
     if matches.iter().all(|file| !file.executable) {
         return vec![format!(
-            "the declared application main `{main}` for `{}` is not executable: mark the shipped \
+            "the declared application main `{main}` for `{name}` is not executable: mark the shipped \
              file `executable = true`",
-            config.profile,
         )];
     }
     Vec::new()
@@ -318,6 +352,25 @@ mod tests {
     }
 
     #[test]
+    fn a_gui_plan_with_a_preset_is_accepted() {
+        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
+        let mut plan = plan();
+        plan.installer.frontend = Frontend::Gui;
+        plan.installer.preset = Some(zup_core::PresetRuntime {
+            name: zup_core::NonEmptyString::new("aurora").unwrap(),
+            version: semver::Version::parse("1.4.2").unwrap(),
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+            required_capabilities: Vec::new(),
+            settings: serde_json::json!({}),
+            assets: Vec::new(),
+        });
+        let errors = linux_capability_errors(&config, &plan);
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = operation_capability_errors(&plan, SelectedScope::User);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn protocols_without_one_placeholder_are_refused() {
         let config = config(
             SUPPORTED_LINUX_TARGET,
@@ -369,7 +422,11 @@ mod tests {
     }
     #[test]
     fn every_unsupported_dimension_is_named() {
-        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
+        let config = config(
+            SUPPORTED_LINUX_TARGET,
+            Frontend::Console,
+            InstallScope::User,
+        );
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
             id: zup_core::ServiceId::new("tool").unwrap(),
@@ -383,7 +440,6 @@ mod tests {
         });
         let errors = linux_capability_errors(&config, &plan);
         let text = errors.join("\n");
-        assert!(text.contains("GUI"), "{text}");
         assert!(text.contains("service"), "{text}");
         assert!(
             !text.contains("zup-linux"),

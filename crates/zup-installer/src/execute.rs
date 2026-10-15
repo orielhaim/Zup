@@ -1,8 +1,10 @@
+use std::cell::RefCell;
+
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{
-    CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeEvent, RuntimeRequest,
+    ExecutionPolicy, InstallOutcome, OperationControl, RuntimeEvent, RuntimeRequest,
 };
 
 /// process-level failure writer must not then add a second, differently shaped
@@ -99,9 +101,8 @@ pub fn execute_with_policy(
     policy: ExecutionPolicy,
 ) -> Result<(), ExecutionError> {
     let drifted = drifted_keys(&prepared.request);
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let cancel = CancellationHandle::new();
-    match execute_with_control_signal(prepared, cancel, events, policy)? {
+    let control = OperationControl::new(policy);
+    match execute_with_control_signal(prepared, &control)? {
         InstallOutcome::Committed => {
             println!("committed");
             for key in drifted {
@@ -115,20 +116,17 @@ pub fn execute_with_policy(
     }
 }
 
-#[cfg(feature = "gui")]
-pub fn execute_with_control(
-    prepared: PreparedRuntime,
-    cancel: CancellationHandle,
-    events: tokio::sync::broadcast::Sender<RuntimeEvent>,
-) -> miette::Result<InstallOutcome> {
-    execute_with_control_signal(prepared, cancel, events, ExecutionPolicy::Interactive)
-}
-
 pub fn execute_with_control_signal(
     prepared: PreparedRuntime,
-    cancel: CancellationHandle,
-    events: tokio::sync::broadcast::Sender<RuntimeEvent>,
-    policy: ExecutionPolicy,
+    control: &OperationControl,
+) -> miette::Result<InstallOutcome> {
+    execute_observing(prepared, control, |_| {})
+}
+
+pub fn execute_observing(
+    prepared: PreparedRuntime,
+    control: &OperationControl,
+    on_event: impl FnMut(&RuntimeEvent),
 ) -> miette::Result<InstallOutcome> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -137,32 +135,59 @@ pub fn execute_with_control_signal(
             prepared.backend.cleanup_overlay(&prepared.request);
             miette::miette!("runtime: {error}")
         })?;
+    let PreparedRuntime {
+        request, backend, ..
+    } = prepared;
     runtime
-        .block_on(async move {
-            let PreparedRuntime {
-                request, backend, ..
-            } = prepared;
-            let operation = zup_windows::run_install_control_with_policy(
-                &backend,
-                request,
-                cancel.clone(),
-                events.clone(),
-                policy,
-            );
-            tokio::pin!(operation);
-            tokio::select! {
-                result = &mut operation => result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?;
-                    cancel.cancel();
-                    let _ = events.send(RuntimeEvent::StateChanged {
-                        state: zup_runtime::RuntimeState::Cancelled,
-                    });
-                    operation.await
+        .block_on(observe_execution(
+            zup_runtime::execute(&*backend, request, control),
+            control,
+            on_event,
+        ))
+        .map_err(|error| miette::miette!("install session: {error}"))
+}
+
+async fn observe_execution<T>(
+    operation: impl std::future::Future<Output = Result<T, zup_runtime::SessionError>>,
+    control: &OperationControl,
+    mut on_event: impl FnMut(&RuntimeEvent),
+) -> Result<T, zup_runtime::SessionError> {
+    let mut receiver = control.subscribe();
+    let cancel = control.cancellation();
+    let mut interrupted = false;
+    tokio::pin!(operation);
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            result = &mut operation => break result,
+            signal = tokio::signal::ctrl_c(), if !interrupted => {
+                signal.map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?;
+                interrupted = true;
+                cancel.cancel();
+                let _ = control.events().send(RuntimeEvent::StateChanged {
+                    state: zup_runtime::RuntimeState::Cancelled,
+                });
+            }
+            event = receiver.recv() => {
+                match event {
+                    Ok(event) => on_event(&event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break operation.await,
                 }
             }
-        })
-        .map_err(|error| miette::miette!("install session: {error}"))
+        }
+    };
+    loop {
+        match receiver.try_recv() {
+            Ok(event) => on_event(&event),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
+    }
+    outcome
 }
 
 fn drifted_keys(request: &RuntimeRequest) -> Vec<String> {
@@ -189,58 +214,57 @@ pub fn execute_frontend(
         .as_ref()
         .map(ToString::to_string);
     let drifted = drifted_keys(&request);
-    let (events, _) = tokio::sync::broadcast::channel(256);
-    let mut receiver = events.subscribe();
+    let control = OperationControl::new(ExecutionPolicy::NonInteractive);
     if output == OutputFormat::Jsonl {
         let started = InstallerEvent::started(
             &application,
             &version,
             crate::maintenance::action_name(action),
         );
-        println!(
-            "{}",
-            serde_json::to_string(&started).map_err(|error| miette::miette!("output: {error}"))?
+        emit_line(
+            &serde_json::to_string(&started).map_err(|error| miette::miette!("output: {error}"))?,
         );
     }
     let log_path = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let pump_log_path = log_path.clone();
+    let observed_log = log_path.clone();
     let jsonl = output == OutputFormat::Jsonl;
-    let pump = std::thread::spawn(move || {
-        loop {
-            let event = match receiver.blocking_recv() {
-                Ok(event) => event,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
-            };
-            if let RuntimeEvent::LogPath { path } = &event {
-                *pump_log_path.lock().expect("log path state") = Some(path.clone());
-            }
-            for output_event in automation_events(&event) {
-                if jsonl && let Ok(line) = serde_json::to_string(&output_event) {
-                    println!("{line}");
-                }
-            }
-            if is_terminal(&event) {
-                return true;
-            }
-        }
+    let outcome = execute_observing(prepared, &control, |event| {
+        note_progress(jsonl, &observed_log, event);
     });
-    let cancel = CancellationHandle::new();
-    let outcome =
-        execute_with_control_signal(prepared, cancel, events, ExecutionPolicy::NonInteractive);
-    let terminal_seen = pump.join().unwrap_or(false);
+    publish_outcome(
+        output,
+        &application,
+        &version,
+        scope,
+        install_directory,
+        log_path.lock().expect("log path state").clone(),
+        &drifted,
+        outcome,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_outcome(
+    output: OutputFormat,
+    application: &str,
+    version: &str,
+    scope: Option<zup_core::SelectedScope>,
+    install_directory: Option<String>,
+    log_path: Option<String>,
+    drifted: &[String],
+    outcome: miette::Result<InstallOutcome>,
+) -> Result<(), ExecutionError> {
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             return Err(ExecutionError::reported(report_failure(
                 output,
-                &application,
-                &version,
+                application,
+                version,
                 scope,
                 install_directory.as_deref(),
-                log_path.lock().expect("log path state").as_deref(),
-                &drifted,
-                terminal_seen,
+                log_path.as_deref(),
+                drifted,
                 error,
             )));
         }
@@ -264,16 +288,15 @@ pub fn execute_frontend(
             let mut result = InstallerResult::new(process, application, version);
             result.scope = scope;
             result.install_directory = install_directory;
-            result.log_path = log_path.lock().expect("log path state").clone();
-            result.drift = drifted;
+            result.log_path = log_path;
+            result.drift = drifted.to_vec();
             if process != ProcessOutcome::Success {
                 result.message = Some(format!("{outcome:?}"));
             }
-            println!(
-                "{}",
-                result
+            emit_line(
+                &result
                     .to_json()
-                    .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?
+                    .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?,
             );
             if process == ProcessOutcome::Success {
                 Ok(())
@@ -284,15 +307,11 @@ pub fn execute_frontend(
             }
         }
         OutputFormat::Jsonl => {
-            if !terminal_seen {
-                let event = InstallerEvent::Completed { outcome: process };
-                println!(
-                    "{}",
-                    serde_json::to_string(&event).map_err(|error| ExecutionError::silent(
-                        miette::miette!("output: {error}")
-                    ))?
-                );
-            }
+            let event = InstallerEvent::Completed { outcome: process };
+            emit_line(
+                &serde_json::to_string(&event)
+                    .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?,
+            );
             if !matches!(outcome, InstallOutcome::Committed) {
                 return Err(ExecutionError::silent(miette::miette!(
                     "transaction: {outcome:?}"
@@ -312,7 +331,6 @@ fn report_failure(
     install_directory: Option<&str>,
     log_path: Option<&str>,
     drift: &[String],
-    terminal_seen: bool,
     error: miette::Report,
 ) -> miette::Report {
     let process = ProcessOutcome::from_message(&error.to_string());
@@ -327,167 +345,74 @@ fn report_failure(
             result.drift = drift.to_vec();
             result.message = Some(message);
             if let Ok(value) = result.to_json() {
-                println!("{value}");
+                emit_line(&value);
             }
         }
         OutputFormat::Jsonl => {
-            if !terminal_seen {
-                let event = InstallerEvent::Failed {
-                    outcome: process,
-                    code: process.code(),
-                    message: message.clone(),
-                    diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                        &message,
-                        process == ProcessOutcome::RecoveryRequired,
-                    )),
-                };
-                if let Ok(value) = serde_json::to_string(&event) {
-                    println!("{value}");
-                }
+            let event = InstallerEvent::Failed {
+                outcome: process,
+                code: process.code(),
+                message: message.clone(),
+                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
+                    &message,
+                    process == ProcessOutcome::RecoveryRequired,
+                )),
+            };
+            if let Ok(value) = serde_json::to_string(&event) {
+                emit_line(&value);
             }
         }
     }
     error
 }
 
-pub fn is_terminal(event: &RuntimeEvent) -> bool {
+fn note_progress(jsonl: bool, log_path: &std::sync::Mutex<Option<String>>, event: &RuntimeEvent) {
+    if let RuntimeEvent::LogPath { path } = event {
+        *log_path.lock().expect("log path state") = Some(path.clone());
+    }
+    if !jsonl {
+        return;
+    }
+    for output_event in automation_events(event) {
+        if is_result_event(&output_event) {
+            continue;
+        }
+        if let Ok(line) = serde_json::to_string(&output_event) {
+            emit_line(&line);
+        }
+    }
+}
+
+fn is_result_event(event: &InstallerEvent) -> bool {
     matches!(
         event,
-        RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
+        InstallerEvent::Completed { .. } | InstallerEvent::Failed { .. }
     )
 }
 
-pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
-    match outcome {
-        InstallOutcome::RebootRequired { .. } => ProcessOutcome::RebootRequired,
-        InstallOutcome::Committed => ProcessOutcome::Success,
-        InstallOutcome::Cancelled => ProcessOutcome::Cancelled,
-        InstallOutcome::RecoveryRequired => ProcessOutcome::RecoveryRequired,
-        InstallOutcome::Busy { .. } => ProcessOutcome::InstallationBusy,
-        InstallOutcome::RolledBack => ProcessOutcome::Failure,
-        InstallOutcome::Failed(message) => ProcessOutcome::from_message(message),
+fn emit_line(line: &str) {
+    let mut captured = false;
+    OUTPUT.with(|output| {
+        if let Some(lines) = output.borrow_mut().as_mut() {
+            lines.push(line.to_owned());
+            captured = true;
+        }
+    });
+    if !captured {
+        println!("{line}");
     }
 }
 
-pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
-    match state {
-        zup_runtime::RuntimeState::Preparing => "preparing",
-        zup_runtime::RuntimeState::CheckingPrerequisites => "checking_prerequisites",
-        zup_runtime::RuntimeState::InstallingPrerequisites => "installing_prerequisites",
-        zup_runtime::RuntimeState::RebootRequired => "reboot_required",
-        zup_runtime::RuntimeState::WaitingForAuthorization => "waiting_for_authorization",
-        zup_runtime::RuntimeState::ConnectingWorker => "connecting_worker",
-        zup_runtime::RuntimeState::Executing => "executing",
-        zup_runtime::RuntimeState::RollingBack => "rolling_back",
-        zup_runtime::RuntimeState::Completed => "completed",
-        zup_runtime::RuntimeState::Cancelled => "cancelling",
-        zup_runtime::RuntimeState::Failed => "failed",
-    }
+pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
+    zup_session::process_outcome(outcome)
 }
 
 pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
-    match event {
-        RuntimeEvent::StateChanged { state } => {
-            if *state == zup_runtime::RuntimeState::Cancelled {
-                vec![InstallerEvent::Cancelling {
-                    state: "safe_boundary".into(),
-                }]
-            } else {
-                vec![InstallerEvent::Phase {
-                    state: state_name(*state).into(),
-                }]
-            }
-        }
-        RuntimeEvent::WaitingForAuthorization => vec![InstallerEvent::Phase {
-            state: "waiting_for_authorization".into(),
-        }],
-        RuntimeEvent::WorkerConnected => vec![InstallerEvent::Phase {
-            state: "worker_connected".into(),
-        }],
-        RuntimeEvent::PreflightStarted => vec![InstallerEvent::Phase {
-            state: "preflight".into(),
-        }],
-        RuntimeEvent::ResourceBlocked { detail, pids } => {
-            vec![InstallerEvent::blocked_with_processes(detail, pids.clone())]
-        }
-        RuntimeEvent::StagingStarted { id } => vec![InstallerEvent::Phase {
-            state: format!("staging:{id}"),
-        }],
-        RuntimeEvent::StagingProgress { id, detail } => vec![InstallerEvent::Phase {
-            state: format!("staging:{id}:{detail}"),
-        }],
-        RuntimeEvent::OperationStarted { id } => vec![InstallerEvent::Phase {
-            state: format!("operation:{id}"),
-        }],
-        RuntimeEvent::Progress {
-            completed,
-            total,
-            action,
-        } => vec![InstallerEvent::progress(
-            &zup_presentation::ProgressPresentation::new(*completed, *total, action),
-        )],
-        RuntimeEvent::PrerequisiteCheck {
-            id,
-            name,
-            satisfied,
-            version,
-        } => vec![InstallerEvent::PrerequisiteCheck {
-            id: id.clone(),
-            name: name.clone(),
-            satisfied: *satisfied,
-            version: version.clone(),
-        }],
-        RuntimeEvent::PrerequisiteDownload {
-            id,
-            completed,
-            total,
-        } => vec![InstallerEvent::PrerequisiteDownload {
-            id: id.clone(),
-            completed: *completed,
-            total: *total,
-        }],
-        RuntimeEvent::PrerequisiteInstall { id, name } => {
-            vec![InstallerEvent::PrerequisiteInstall {
-                id: id.clone(),
-                name: name.clone(),
-            }]
-        }
-        RuntimeEvent::RebootRequired { id, exit_code } => {
-            vec![InstallerEvent::RebootRequired {
-                id: id.clone(),
-                exit_code: *exit_code,
-            }]
-        }
-        RuntimeEvent::RollingBack => vec![InstallerEvent::Phase {
-            state: "rolling_back".into(),
-        }],
-        RuntimeEvent::Completed { outcome } => {
-            let outcome = if outcome == "committed" {
-                ProcessOutcome::Success
-            } else {
-                ProcessOutcome::from_message(outcome)
-            };
-            vec![InstallerEvent::Completed { outcome }]
-        }
-        RuntimeEvent::Failed { kind, message } => {
-            let outcome = match kind.as_str() {
-                "installation_busy" => ProcessOutcome::InstallationBusy,
-                "recovery_required" => ProcessOutcome::RecoveryRequired,
-                "authorization_required" => ProcessOutcome::AuthorizationRequired,
-                _ => ProcessOutcome::from_message(message),
-            };
-            vec![InstallerEvent::Failed {
-                outcome,
-                code: outcome.code(),
-                message: message.clone(),
-                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                    message,
-                    *kind == "recovery_required",
-                )),
-            }]
-        }
-        RuntimeEvent::LogPath { .. } => Vec::new(),
-    }
+    zup_session::automation_events(event)
+}
+
+thread_local! {
+    static OUTPUT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -524,5 +449,120 @@ mod tests {
             1,
             "a phase a consumer can wait on is a phase"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Sample {
+        Committed,
+        Failed,
+        Cancelled,
+        Quiet,
+        Lagged,
+        Reconciliation,
+    }
+
+    #[test]
+    fn the_frontend_returns_from_the_operation_result() {
+        for sample in [
+            Sample::Committed,
+            Sample::Failed,
+            Sample::Cancelled,
+            Sample::Quiet,
+            Sample::Lagged,
+            Sample::Reconciliation,
+        ] {
+            for output in [OutputFormat::Json, OutputFormat::Jsonl] {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = sender.send(drive_sample(sample, output));
+                });
+                let lines = receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the frontend returns without a terminal event");
+                let results = lines
+                    .iter()
+                    .filter(|line| {
+                        line.contains("\"type\":\"completed\"")
+                            || line.contains("\"type\":\"failed\"")
+                    })
+                    .count();
+                if output == OutputFormat::Jsonl {
+                    assert_eq!(results, 1, "{sample:?} {lines:?}");
+                }
+            }
+        }
+    }
+
+    fn drive_sample(sample: Sample, output: OutputFormat) -> Vec<String> {
+        let control = OperationControl::new(ExecutionPolicy::NonInteractive);
+        let events = control.events();
+        let cancel = control.cancellation();
+        let log_path = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = log_path.clone();
+        let jsonl = output == OutputFormat::Jsonl;
+        OUTPUT.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+        if jsonl {
+            emit_line(
+                &serde_json::to_string(&InstallerEvent::started("app", "1.0.0", "install"))
+                    .expect("started"),
+            );
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let outcome = runtime.block_on(observe_execution(
+            async move {
+                match sample {
+                    Sample::Quiet => Ok(InstallOutcome::Committed),
+                    Sample::Lagged => {
+                        for index in 0..400 {
+                            let _ = events.send(RuntimeEvent::Progress {
+                                completed: index,
+                                total: 400,
+                                action: "copy".into(),
+                            });
+                        }
+                        Ok(InstallOutcome::Committed)
+                    }
+                    Sample::Cancelled => {
+                        let _ = events.send(RuntimeEvent::Progress {
+                            completed: 0,
+                            total: 1,
+                            action: "copy".into(),
+                        });
+                        tokio::task::yield_now().await;
+                        cancel.cancel();
+                        Ok(InstallOutcome::Cancelled)
+                    }
+                    Sample::Failed => Err(zup_runtime::SessionError::Transaction("disk".into())),
+                    Sample::Reconciliation => Ok(InstallOutcome::CommittedPendingReconciliation {
+                        detail: "ledger publish failed".into(),
+                    }),
+                    Sample::Committed => {
+                        let _ = events.send(RuntimeEvent::Progress {
+                            completed: 1,
+                            total: 1,
+                            action: "copy".into(),
+                        });
+                        Ok(InstallOutcome::Committed)
+                    }
+                }
+            },
+            &control,
+            |event| note_progress(jsonl, &observed, event),
+        ));
+        let outcome = outcome.map_err(|error| miette::miette!("{error}"));
+        let _ = publish_outcome(
+            output,
+            "app",
+            "1.0.0",
+            None,
+            None,
+            log_path.lock().expect("log").clone(),
+            &[],
+            outcome,
+        );
+        OUTPUT.with(|slot| slot.borrow_mut().take().unwrap_or_default())
     }
 }

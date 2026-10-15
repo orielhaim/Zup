@@ -7,56 +7,17 @@ use crate::toolchain::ToolchainResolver;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
 use zup_platform::SourceFilePolicy;
 
-#[cfg(windows)]
-static WINDOWS_SOURCE_POLICY: zup_windows::WindowsSourceFilePolicy =
-    zup_windows::WindowsSourceFilePolicy;
-#[cfg(target_os = "linux")]
-static LINUX_SOURCE_POLICY: zup_linux::LinuxSourceFilePolicy = zup_linux::LinuxSourceFilePolicy;
 static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
     zup_platform::PortableSourceFilePolicy;
 
-pub fn source_policy_for(target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
-    match target.operating_system() {
-        zup_core::TargetOperatingSystem::Linux => {
-            #[cfg(target_os = "linux")]
-            {
-                &LINUX_SOURCE_POLICY
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                &PORTABLE_SOURCE_POLICY
-            }
-        }
-        _ => {
-            #[cfg(windows)]
-            {
-                &WINDOWS_SOURCE_POLICY
-            }
-            #[cfg(not(windows))]
-            {
-                &PORTABLE_SOURCE_POLICY
-            }
-        }
-    }
+pub fn source_policy_for(_target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
+    &PORTABLE_SOURCE_POLICY
 }
 
 pub fn source_policy_for_selection(
-    targets: &[ResolvedTargetConfig],
+    _targets: &[ResolvedTargetConfig],
 ) -> &'static dyn SourceFilePolicy {
-    let all_linux = targets
-        .iter()
-        .all(|target| target.target.operating_system() == zup_core::TargetOperatingSystem::Linux);
-    if all_linux && !targets.is_empty() {
-        return source_policy_for(&targets[0].target);
-    }
-    #[cfg(windows)]
-    {
-        &WINDOWS_SOURCE_POLICY
-    }
-    #[cfg(not(windows))]
-    {
-        &PORTABLE_SOURCE_POLICY
-    }
+    &PORTABLE_SOURCE_POLICY
 }
 
 use zup_core::Frontend;
@@ -271,14 +232,6 @@ pub fn materialize_project(
     let mut executables = Vec::with_capacity(selected_targets.len());
     let policy = source_policy_for_selection(&selected_targets);
     for config in &selected_targets {
-        // A Linux GUI target never reaches preset resolution: there is no Linux
-        if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux
-            && config.frontend == Frontend::Gui
-        {
-            let errors =
-                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
-            return Err(miette::miette!("{}", errors.join("\n")));
-        }
         let mut installer =
             zup_manifest::compile(&manifest, config, overrides.get(&config.profile)).map_err(
                 |error| miette::Report::new(error.with_source_named(&source, &manifest_name)),
@@ -365,8 +318,7 @@ pub fn load_for_build(
     let selected = select_project(path, selectors, args, false)?;
     for config in &selected.selected_targets {
         if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
-            let errors =
-                crate::linux_support::linux_selection_errors(&config.target, config.frontend);
+            let errors = zup_linux::linux_selection_errors(&config.target, config.frontend);
             if !errors.is_empty() {
                 return Err(miette::miette!("{}", errors.join("\n")));
             }

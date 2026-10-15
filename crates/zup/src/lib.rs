@@ -9,7 +9,6 @@ pub mod doctor;
 pub mod failure;
 mod init;
 mod inspect_artifact;
-mod linux_support;
 mod manifest_tools;
 mod packages;
 pub mod plugin;

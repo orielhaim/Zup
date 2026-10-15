@@ -60,6 +60,7 @@ zup-signing = { path = "crates/zup-signing" }
 zup-bootstrap = { path = "crates/zup-bootstrap" }
 zup-manifest = { path = "crates/zup-manifest" }
 zup-build = { path = "crates/zup-build" }
+zup-compose = { path = "crates/zup-compose" }
 zup-acquire = { path = "crates/zup-acquire" }
 zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }
@@ -73,6 +74,7 @@ zup-publish-github = { path = "crates/zup-publish-github" }
 zup-distribute-github = { path = "crates/zup-distribute-github" }
 zup-protocol = { path = "crates/zup-protocol" }
 zup-runtime = { path = "crates/zup-runtime" }
+zup-session = { path = "crates/zup-session" }
 zup-presentation = { path = "crates/zup-presentation" }
 zup-preset-protocol = { path = "crates/zup-preset-protocol", version = "0.1.0" }
 zup-preset-host = { path = "crates/zup-preset-host" }
@@ -114,6 +116,7 @@ xdg = "3"
 
 # Build / filesystem
 atomic-write-file = "0.3"
+private-fs = "0.2.1"
 walkdir = "2"
 directories = "6"
 globset = "0.4"

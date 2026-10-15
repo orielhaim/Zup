@@ -16,15 +16,19 @@ pub enum MachineStateError {
     },
 }
 
-pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
-    std::fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
+fn ensure_user_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    zup_transaction::ensure_private_dir(path)
+        .map_err(|error| io_error(path, std::io::Error::other(error)))?;
     canonical(path)
 }
 
 pub fn default_state_root(scope: SelectedScope) -> Result<PathBuf, MachineStateError> {
     match scope {
         SelectedScope::User => {
-            ensure_state_root(&host_dirs::user_data()?.join(zup_transaction::STATE_FOLDER))
+            ensure_user_state_root(&host_dirs::user_data()?.join(zup_transaction::STATE_FOLDER))
         }
         SelectedScope::Machine => {
             let base = host_dirs::shared_data()?;
@@ -39,19 +43,19 @@ pub fn resolve_state_root(
 ) -> Result<PathBuf, MachineStateError> {
     match explicit {
         Some(path) if scope == SelectedScope::Machine => {
-            if path.exists() || path.is_absolute() {
-                if path.exists() {
-                    ensure_state_root(&path)
-                } else {
-                    Ok(path)
-                }
-            } else {
-                std::env::current_dir()
-                    .map_err(|source| io_error(&path, source))
-                    .map(|directory| directory.join(path))
+            let authoritative = default_state_root(SelectedScope::Machine)?;
+            if path != authoritative {
+                return Err(MachineStateError::Io {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "machine state is the elevated worker's root, never a caller path",
+                    ),
+                });
             }
+            Ok(authoritative)
         }
-        Some(path) => ensure_state_root(&path),
+        Some(path) => ensure_user_state_root(&path),
         None => default_state_root(scope),
     }
 }
@@ -83,6 +87,15 @@ mod tests {
     use super::*;
     use crate::host_dirs::{shared_data, user_data};
     use rstest::rstest;
+
+    #[test]
+    fn explicit_user_state_uses_private_filesystem_authority() {
+        let parent = tempfile::tempdir().expect("temporary parent");
+        let path = resolve_state_root(Some(parent.path().join("state")), SelectedScope::User)
+            .expect("private root");
+        private_fs::PrivateDir::open(&path)
+            .expect("the explicit root satisfies the same private policy as the default root");
+    }
 
     #[rstest]
     #[case(

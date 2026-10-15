@@ -155,6 +155,9 @@ pub struct TransactionPlan {
     pub execution_order: Vec<OperationId>,
     pub rollback_order: Vec<OperationId>,
     pub preset: Option<InstalledPreset>,
+    /// Committed transaction this plan was prepared against.
+    /// `None` means no installation existed.
+    pub observed_transaction: Option<String>,
 }
 
 impl TransactionPlan {
@@ -619,6 +622,7 @@ pub fn compile_transaction(
         execution_order,
         rollback_order,
         preset: input.preset.clone(),
+        observed_transaction: input.observed_transaction.clone(),
     };
     plan.validate()?;
     Ok(plan)

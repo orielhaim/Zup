@@ -45,7 +45,7 @@ impl LinuxLedgerStore {
         scope: SelectedScope,
     ) -> Result<Option<InstallLedger>, ExecError> {
         let path = self.path_for(app_id, scope);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_ledger(&path, scope) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(PathError::io(&(path), source).into()),
@@ -75,6 +75,16 @@ impl LinuxLedgerStore {
             .is_some_and(|ledger| ledger.target != plan.target)
         {
             return Err(ExecError::Ownership("target identity".into()));
+        }
+        match (
+            ledger
+                .as_ref()
+                .map(|ledger| ledger.committed_transaction.as_str()),
+            plan.observed_transaction.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(current), Some(observed)) if current == observed => {}
+            _ => return Err(ExecError::Ownership("installation generation".into())),
         }
         let retired: BTreeSet<_> = plan.retired_keys.iter().collect();
 
@@ -193,10 +203,8 @@ impl LinuxLedgerStore {
                 NodeKind::Barrier | NodeKind::StageFile { .. } => {}
             }
         }
-        if plan.preset.is_some() {
-            return Err(ExecError::Ownership(
-                "a Linux console or headless transaction presents no window".into(),
-            ));
+        if let Some(preset) = &plan.preset {
+            validate_preset_plan(preset)?;
         }
         Ok(())
     }
@@ -290,7 +298,7 @@ impl LinuxLedgerStore {
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
-        ledger.preset = None;
+        ledger.preset = record.plan.preset.clone();
 
         ledger.release = None;
         for node in &record.plan.nodes {
@@ -417,7 +425,7 @@ impl LinuxLedgerStore {
         ledger.committed_transaction = record.transaction_id.to_string();
         let path = self.path_for(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
-        write_ledger(&path, &bytes)?;
+        write_ledger(&path, &bytes, scope)?;
         cleanup_committed_files(record)?;
 
         cleanup_removed_directories(record)?;
@@ -433,7 +441,7 @@ impl LinuxLedgerStore {
                 return Err(PathError::io(&(directory), source).into());
             }
         };
-        let journals = zup_transaction::FilesystemTransactionStore::new(&self.root);
+        let journals = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
         let mut committed = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| PathError::io(&(directory.clone()), source))?;
@@ -543,6 +551,22 @@ fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
     }
     let payload = crate::service_ops::decode_payload(&backend.payload).ok()?;
     Some(crate::service_ops::ledger_key_for_payload(&payload))
+}
+
+fn validate_preset_plan(preset: &zup_core::InstalledPreset) -> Result<(), ExecError> {
+    if preset.preset.protocol != zup_preset_protocol::PRESET_PROTOCOL_VERSION {
+        return Err(ExecError::Ownership(format!(
+            "preset protocol {} is not this build's {}",
+            preset.preset.protocol,
+            zup_preset_protocol::PRESET_PROTOCOL_VERSION
+        )));
+    }
+    for name in &preset.preset.required_capabilities {
+        zup_preset_protocol::Capability::parse(name).ok_or_else(|| {
+            ExecError::Ownership(format!("preset requires unknown capability `{name}`"))
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_service_apply(
@@ -657,7 +681,29 @@ fn publish_service_node(
     Ok(())
 }
 
-fn write_ledger(path: &Path, bytes: &[u8]) -> Result<(), ExecError> {
+fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
+    if scope == SelectedScope::User {
+        return zup_transaction::read_private(path).map_err(|error| match error {
+            private_fs::Error::Io(source) => source,
+            other => std::io::Error::other(other),
+        });
+    }
+    std::fs::read(path)
+}
+
+fn write_ledger(path: &Path, bytes: &[u8], scope: SelectedScope) -> Result<(), ExecError> {
+    if scope == SelectedScope::User {
+        return zup_transaction::publish_private(path, bytes).map_err(|error| {
+            PathError::io(
+                path,
+                match error {
+                    private_fs::Error::Io(source) => source,
+                    other => std::io::Error::other(other),
+                },
+            )
+            .into()
+        });
+    }
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -811,7 +857,7 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
             return Err(PathError::io(&(transactions), source).into());
         }
     };
-    let store = zup_transaction::FilesystemTransactionStore::new(root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(root);
     for entry in entries {
         let entry = entry.map_err(|source| PathError::io(&(transactions.clone()), source))?;
         let Some(id) = entry
@@ -981,6 +1027,7 @@ mod tests {
             execution_order: vec![node.id.clone()],
             rollback_order: vec![node.id.clone()],
             preset: None,
+            observed_transaction: None,
         };
         let mut record = TransactionRecord::new(
             *transaction,

@@ -48,6 +48,20 @@ fn every_capability() -> Capabilities {
     Capabilities::new(Capability::ALL.iter().copied())
 }
 
+fn test_environment() -> zup_preset_protocol::HostEnvironment {
+    zup_preset_protocol::HostEnvironment {
+        operating_system: zup_preset_protocol::OperatingSystem::Windows,
+        architecture: "x86_64".into(),
+        target: "windows-x64".into(),
+        desktop: zup_preset_protocol::DesktopEnvironment {
+            session: zup_preset_protocol::GraphicalSession::Native,
+            desktop_id: None,
+            desktop_name: None,
+        },
+        machine_authorization: zup_preset_protocol::MachineAuthorization::Available,
+    }
+}
+
 struct Pair {
     host: Session,
     preset: Session,
@@ -57,7 +71,7 @@ struct Pair {
 impl Pair {
     fn connected() -> Self {
         let id = SessionId::new_v7();
-        let mut host = Session::host(id, every_capability(), product());
+        let mut host = Session::host(id, every_capability(), product(), test_environment());
         let mut preset = Session::preset(
             id,
             Capabilities::new([Capability::Components, Capability::PlanPreview]),
@@ -115,7 +129,12 @@ fn a_reconnecting_preset_is_sent_the_whole_state_again() {
     pair.publish(Configuration::empty());
 
     let reconnected = SessionId::new_v7();
-    let mut host = Session::host(reconnected, every_capability(), product());
+    let mut host = Session::host(
+        reconnected,
+        every_capability(),
+        product(),
+        test_environment(),
+    );
     let mut preset = Session::preset(
         reconnected,
         Capabilities::new([Capability::Components]),
@@ -145,7 +164,12 @@ fn a_reconnecting_preset_is_sent_the_whole_state_again() {
 #[test]
 fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(id, Capabilities::new([Capability::Components]), product());
+    let mut host = Session::host(
+        id,
+        Capabilities::new([Capability::Components]),
+        product(),
+        test_environment(),
+    );
     let mut preset = Session::preset(
         id,
         Capabilities::new([Capability::Maintenance]),
@@ -162,7 +186,7 @@ fn a_capability_the_host_does_not_provide_stops_the_preset_before_it_runs() {
 #[test]
 fn a_preset_that_needs_nothing_still_connects() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(id, Capabilities::default(), product());
+    let mut host = Session::host(id, Capabilities::default(), product(), test_environment());
     let mut preset = Session::preset(id, Capabilities::default(), "plain".into(), "0.1.0".into());
     let hello = preset.opening().expect("opens");
     assert!(matches!(host.receive(hello), Ok(SessionProgress::Send(_))));
@@ -219,7 +243,7 @@ fn a_message_from_the_wrong_side_is_refused() {
 #[test]
 fn a_version_this_build_does_not_speak_is_refused() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(id, every_capability(), product());
+    let mut host = Session::host(id, every_capability(), product(), test_environment());
     let stale_frame = Envelope {
         version: PRESET_PROTOCOL_VERSION + 1,
         session: id,
@@ -240,7 +264,7 @@ fn a_version_this_build_does_not_speak_is_refused() {
         })
     );
 
-    let mut host = Session::host(id, every_capability(), product());
+    let mut host = Session::host(id, every_capability(), product(), test_environment());
     assert_eq!(
         host.receive(Envelope {
             version: PRESET_PROTOCOL_VERSION,
@@ -264,7 +288,7 @@ fn a_version_this_build_does_not_speak_is_refused() {
 #[test]
 fn a_hello_that_claims_the_wrong_version_is_refused() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(id, every_capability(), product());
+    let mut host = Session::host(id, every_capability(), product(), test_environment());
     let envelope = Envelope {
         version: PRESET_PROTOCOL_VERSION,
         session: id,
@@ -382,7 +406,7 @@ fn a_configuration_beyond_the_limits_is_refused() {
 #[test]
 fn a_session_knows_which_side_it_is() {
     let id = SessionId::new_v7();
-    let host = Session::host(id, Capabilities::default(), product());
+    let host = Session::host(id, Capabilities::default(), product(), test_environment());
     let preset = Session::preset(id, Capabilities::default(), "a".into(), "1".into());
     assert_eq!(host.role(), PeerRole::Host);
     assert_eq!(preset.role(), PeerRole::Preset);
@@ -393,7 +417,7 @@ fn a_session_knows_which_side_it_is() {
 #[test]
 fn a_maintenance_session_is_the_same_handshake() {
     let id = SessionId::new_v7();
-    let mut host = Session::host(id, every_capability(), product());
+    let mut host = Session::host(id, every_capability(), product(), test_environment());
     let mut preset = Session::preset(id, Capabilities::default(), "aurora".into(), "1".into());
     let hello = preset.opening().expect("opens");
     let SessionProgress::Send(answer) = host.receive(hello).expect("greets") else {

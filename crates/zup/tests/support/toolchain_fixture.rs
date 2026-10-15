@@ -57,6 +57,35 @@ impl Staged {
     }
 }
 
+/// A private toolchain directory holding the host runtime, and a preset when the
+/// host's default frontend is graphical.
+///
+/// The directory is what `ZUP_TOOLCHAIN` names. Each test passes its own
+/// temporary directory, so concurrent tests never share a component.
+pub fn host_toolchain(directory: &Path) -> PathBuf {
+    let toolchain = directory.join("toolchain");
+    let target = zup_plugin_contract::HOST_TARGET;
+    let frontend = if cfg!(windows) {
+        zup_core::Frontend::Gui
+    } else {
+        zup_core::Frontend::Console
+    };
+    runtime(target, frontend).write(&toolchain);
+    if frontend == zup_core::Frontend::Gui {
+        preset(&[target]).write(&toolchain);
+    }
+    toolchain
+}
+
+/// `zup`, resolving components only from `toolchain`.
+pub fn zup(toolchain: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zup"));
+    command
+        .env("ZUP_TOOLCHAIN", toolchain)
+        .env_remove("ZUP_DRY_RUN");
+    command
+}
+
 /// A runtime template for one target and frontend.
 pub fn runtime(target: &str, frontend: zup_core::Frontend) -> Staged {
     Staged {
@@ -130,7 +159,7 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
         }
         ToolchainComponent::Preset => unreachable!("a package is not a PE image"),
     };
-    let mut bytes = vec![0u8; 0x178];
+    let mut bytes = vec![0u8; 0x400];
     bytes[..2].copy_from_slice(b"MZ");
     bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
     bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
@@ -138,7 +167,16 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
     bytes[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
     bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
     bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+    bytes[0x78..0x7c].copy_from_slice(&0x1000u32.to_le_bytes());
+    bytes[0x7c..0x80].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[0x90..0x94].copy_from_slice(&0x2000u32.to_le_bytes());
+    bytes[0x94..0x98].copy_from_slice(&0x200u32.to_le_bytes());
     bytes[0x9c..0x9e].copy_from_slice(&subsystem.to_le_bytes());
+    let section = 0x148;
+    bytes[section + 8..section + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[section + 12..section + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    bytes[section + 16..section + 20].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[section + 20..section + 24].copy_from_slice(&0x200u32.to_le_bytes());
     bytes
 }
 

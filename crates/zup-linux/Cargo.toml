@@ -10,24 +10,41 @@ publish = false
 [features]
 test-support = ["dep:tempfile"]
 
+[[bin]]
+name = "test-gui-install-preset"
+path = "src/bin/test_gui_install_preset.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "test-gui-close-preset"
+path = "src/bin/test_gui_close_preset.rs"
+required-features = ["test-support"]
+
 [dependencies]
+private-fs.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+tracing.workspace = true
 typed-path.workspace = true
 uuid.workspace = true
 xdg.workspace = true
 zup-artifact.workspace = true
 zup-binary.workspace = true
 zup-bundle.workspace = true
+zup-compose.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
 zup-platform.workspace = true
+zup-preset-host.workspace = true
+zup-preset-protocol.workspace = true
 zup-protocol.workspace = true
+zup-runtime.workspace = true
+zup-session.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
@@ -40,6 +57,7 @@ zup-core.workspace = true
 zup-exec.workspace = true
 zup-manifest.workspace = true
 zup-platform.workspace = true
+zup-runtime.workspace = true
 zup-toolchain.workspace = true
 zup-transaction.workspace = true
 

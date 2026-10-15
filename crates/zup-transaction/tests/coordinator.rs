@@ -14,13 +14,13 @@ use zup_transaction::{
 
 fn coord() -> (TempDir, TransactionCoordinator<FilesystemTransactionStore>) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     (dir, TransactionCoordinator::new(store))
 }
 
 fn coord_with_store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     (dir, store)
 }
 
@@ -117,7 +117,7 @@ impl RevisionRaceStore {
         let conflicts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         (
             Self {
-                inner: FilesystemTransactionStore::new(root),
+                inner: FilesystemTransactionStore::private_at(root),
                 interloper,
                 budget: std::sync::Mutex::new(budget),
                 conflicts: std::sync::Arc::clone(&conflicts),
@@ -233,7 +233,7 @@ fn a_lost_swap_costs_a_retry_not_the_transaction() {
 #[test]
 fn commit_requires_every_mutation_verified_before_it() {
     let (_dir, coord) = coord();
-    let record = coord
+    let open = coord
         .begin(
             sample_app_id(),
             zup_core::SelectedScope::User,
@@ -241,6 +241,7 @@ fn commit_requires_every_mutation_verified_before_it() {
             sample_plan(),
         )
         .unwrap();
+    let record = open.record().clone();
     let verified_nodes = record
         .plan
         .nodes
@@ -252,7 +253,8 @@ fn commit_requires_every_mutation_verified_before_it() {
     let last_verify = verified_nodes.last().expect("has verified node").clone();
 
     let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
+    let settled = open.execute(&mut exec).unwrap();
+    let (final_record, outcome) = (settled.record, settled.outcome);
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert_eq!(final_record.phase, TransactionPhase::Committed);
 
@@ -303,7 +305,7 @@ fn commit_requires_every_mutation_verified_before_it() {
 #[test]
 fn barriers_are_prepared_before_any_side_effect() {
     let (_dir, coord) = coord();
-    let record = coord
+    let open = coord
         .begin(
             sample_app_id(),
             zup_core::SelectedScope::User,
@@ -311,6 +313,7 @@ fn barriers_are_prepared_before_any_side_effect() {
             sample_plan(),
         )
         .unwrap();
+    let record = open.record().clone();
     let begin = barrier("ctrl:begin");
     let preflight = barrier("ctrl:preflight");
     let commit_intent = barrier("ctrl:commit-intent");
@@ -318,7 +321,7 @@ fn barriers_are_prepared_before_any_side_effect() {
     let mutation = first_op(&record);
 
     let mut exec = FakeExecutor::new();
-    let (_, outcome) = coord.execute(record, &mut exec).unwrap();
+    let outcome = open.execute(&mut exec).unwrap().outcome;
     assert_eq!(outcome, TransactionOutcome::Committed);
 
     assert_eq!(
@@ -363,7 +366,7 @@ fn failure_rolls_back_applied_work_in_reverse_order(
     #[case] attempted_verifications: usize,
 ) {
     let (_dir, coord) = coord();
-    let record = coord
+    let open = coord
         .begin(
             sample_app_id(),
             zup_core::SelectedScope::User,
@@ -373,7 +376,8 @@ fn failure_rolls_back_applied_work_in_reverse_order(
         .unwrap();
 
     let mut exec = inject(FakeExecutor::new());
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
+    let settled = open.execute(&mut exec).unwrap();
+    let (final_record, outcome) = (settled.record, settled.outcome);
 
     assert_eq!(outcome, TransactionOutcome::RolledBack);
     assert_eq!(final_record.phase, TransactionPhase::RolledBack);
@@ -415,7 +419,7 @@ fn failure_rolls_back_applied_work_in_reverse_order(
 fn rollback_failure_requires_recovery() {
     let (_dir, coord) = coord();
     let plan = compile_transaction(&chain_input()).unwrap();
-    let record = coord
+    let open = coord
         .begin(
             sample_app_id(),
             zup_core::SelectedScope::User,
@@ -424,7 +428,8 @@ fn rollback_failure_requires_recovery() {
         )
         .unwrap();
     let mut exec = FakeExecutor::new().fail_on_apply(6).fail_on_rollback(0);
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
+    let settled = open.execute(&mut exec).unwrap();
+    let (final_record, outcome) = (settled.record, settled.outcome);
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
 }
@@ -641,4 +646,29 @@ fn oversized_backend_payload_is_rejected() {
         err,
         zup_transaction::TransactionPlanError::InvalidInput(_)
     ));
+}
+
+#[test]
+fn releasing_a_prepared_transaction_settles_the_journal() {
+    let (dir, coordinator) = coord();
+    let plan = compile_transaction(&sample_input()).unwrap();
+    let open = coordinator
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            plan,
+        )
+        .unwrap();
+    let mut executor = FakeExecutor::default();
+    let settled = open.release(&mut executor).unwrap();
+    let outcome = settled.outcome;
+    let settled = settled.record;
+    assert_eq!(outcome, TransactionOutcome::RolledBack);
+    assert_eq!(settled.phase, TransactionPhase::RolledBack);
+    assert!(executor.applied.is_empty(), "release applies no work");
+    let reloaded = FilesystemTransactionStore::private_at(dir.path())
+        .load(&settled.transaction_id)
+        .unwrap();
+    assert_eq!(reloaded.phase, TransactionPhase::RolledBack);
 }

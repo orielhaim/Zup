@@ -1,21 +1,23 @@
 use std::sync::Arc;
 
 use gpui_kit::{App, AppContext, AsyncApp, Entity};
-use zup_preset_protocol::{Action, Snapshot};
+use zup_preset_protocol::{Action, HostEnvironment, Snapshot};
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionState {
     snapshot: Option<Snapshot>,
     connected: bool,
     closed: Option<String>,
+    environment: Option<HostEnvironment>,
 }
 
 impl SessionState {
-    pub fn connected(snapshot: Snapshot) -> Self {
+    pub fn connected(snapshot: Snapshot, environment: Option<HostEnvironment>) -> Self {
         Self {
             snapshot: Some(snapshot),
             connected: true,
             closed: None,
+            environment,
         }
     }
 
@@ -25,6 +27,10 @@ impl SessionState {
 
     pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.as_ref()
+    }
+
+    pub fn environment(&self) -> Option<&HostEnvironment> {
+        self.environment.as_ref()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -39,6 +45,10 @@ impl SessionState {
         self.snapshot = Some(snapshot);
         self.connected = true;
         self.closed = None;
+    }
+
+    pub fn set_environment(&mut self, environment: HostEnvironment) {
+        self.environment = Some(environment);
     }
 }
 
@@ -94,6 +104,12 @@ impl Session {
             state.snapshot = Some(snapshot);
             state.connected = true;
             state.closed = None;
+        });
+    }
+
+    pub(crate) fn publish_environment(&self, cx: &mut App, environment: HostEnvironment) {
+        self.apply(cx, |state| {
+            state.environment = Some(environment);
         });
     }
 

@@ -64,6 +64,7 @@ fn worker_with_bundle(work_root: &Path, version: &str) -> PathBuf {
     let manifest = format!(
         r#"
 schema = 1
+frontend = "console"
 [app]
 id = "com.acme.app"
 name = "Acme App"
@@ -133,7 +134,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
     let payload_overlay_root = payload_overlay_root.as_deref();
     let plan = if let Some(id) = recovery_id {
         use zup_transaction::TransactionStore;
-        zup_transaction::FilesystemTransactionStore::new(state_root)
+        zup_transaction::FilesystemTransactionStore::private_at(state_root)
             .load(&zup_transaction::TransactionId::from_uuid(id))
             .expect("recovery journal")
             .plan
@@ -217,6 +218,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
                 state_root: state_root.display().to_string(),
                 work_root: work_root.display().to_string(),
                 recovery_id,
+                recovery_intent: None,
                 release: release.clone(),
             })),
         })

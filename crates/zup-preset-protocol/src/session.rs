@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{PRESET_PROTOCOL_VERSION, ProductIdentity};
+use crate::{HostEnvironment, PRESET_PROTOCOL_VERSION, ProductIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -155,6 +155,7 @@ pub struct HostHello {
     pub capabilities: Capabilities,
     pub product: ProductIdentity,
     pub host_version: String,
+    pub environment: HostEnvironment,
 }
 
 impl HostHello {
@@ -163,6 +164,7 @@ impl HostHello {
         capabilities: Capabilities,
         product: ProductIdentity,
         host_version: impl Into<String>,
+        environment: HostEnvironment,
     ) -> Self {
         Self {
             protocol_version: PRESET_PROTOCOL_VERSION,
@@ -170,6 +172,7 @@ impl HostHello {
             capabilities,
             product,
             host_version: host_version.into(),
+            environment,
         }
     }
 }

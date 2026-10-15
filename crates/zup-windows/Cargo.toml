@@ -26,6 +26,7 @@ tempfile.workspace = true
 zup-artifact.workspace = true
 zup-binary.workspace = true
 zup-bundle.workspace = true
+zup-compose.workspace = true
 zup-core.workspace = true
 zup-pe.workspace = true
 zup-plan.workspace = true
@@ -34,6 +35,7 @@ zup-transaction.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 directories.workspace = true
+private-fs.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -47,7 +49,7 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 windows-link.workspace = true
 windows-registry.workspace = true
 windows-result.workspace = true
@@ -57,16 +59,24 @@ zup-acquire.workspace = true
 zup-bootstrap.workspace = true
 zup-exec.workspace = true
 zup-protocol.workspace = true
+zup-plugin-runtime.workspace = true
 zup-runtime.workspace = true
+zup-preset-host.workspace = true
+zup-preset-protocol.workspace = true
 zup-signing.workspace = true
+zup-update.workspace = true
 zstd.workspace = true
 semver.workspace = true
 windows = { version = "0.62", features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_ApplicationInstallationAndServicing",
+  "Win32_System_Memory",
   "Win32_System_RestartManager",
   "Win32_System_SystemInformation",
+  "Win32_System_Threading",
 ] }
 
 [build-dependencies]

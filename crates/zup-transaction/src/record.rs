@@ -341,4 +341,56 @@ pub enum StoreError {
     #[error("journal serialization failed: {0}")]
     #[diagnostic(code(zup_transaction::serialize))]
     Serialize(#[source] serde_json::Error),
+
+    #[error("journal publication failed at `{path}`: {source}")]
+    #[diagnostic(code(zup_transaction::publication))]
+    Publication {
+        path: PathBuf,
+        #[source]
+        source: PublishError,
+    },
+}
+
+/// Outcome of an atomic journal write after the filesystem reports it.
+///
+/// `NotPublished` means the namespace was unchanged. `Indeterminate` means the
+/// publication syscall may have become visible, or a later validation failed,
+/// and a fresh verified read plus directory sync could not prove the attempted
+/// bytes are the durable private object.
+#[derive(Debug, Error)]
+pub enum PublishError {
+    #[error("not published: {detail}")]
+    NotPublished {
+        detail: String,
+        kind: Option<std::io::ErrorKind>,
+    },
+
+    #[error("publication indeterminate (may_have_published={may_have_published}): {detail}")]
+    Indeterminate {
+        may_have_published: bool,
+        detail: String,
+    },
+}
+
+/// What a storage backend observed after a publication attempt that may have
+/// become visible. Success requires the security check, the exact bytes, and
+/// a completed parent-directory durability barrier. A matching read does not
+/// stand in for that barrier.
+pub struct VisiblePublish {
+    pub security_ok: bool,
+    pub bytes_match: bool,
+    pub directory_durable: bool,
+}
+
+pub fn settle_visible(visible: VisiblePublish) -> Result<(), PublishError> {
+    if visible.security_ok && visible.bytes_match && visible.directory_durable {
+        return Ok(());
+    }
+    Err(PublishError::Indeterminate {
+        may_have_published: true,
+        detail: format!(
+            "security={} bytes={} directory_durable={}",
+            visible.security_ok, visible.bytes_match, visible.directory_durable
+        ),
+    })
 }

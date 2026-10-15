@@ -511,23 +511,39 @@ async fn run_worker_inner(
     if hash != bootstrap.expected_plan_hash || hash != exec.plan_hash {
         return Err(WorkerError::PlanHashMismatch);
     }
-    let plan: TransactionPlan = serde_json::from_str(&exec.plan_json)
-        .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
-    if exec.target != plan.target {
-        return Err(WorkerError::TargetMismatch);
-    }
-    plan.validate()
-        .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
-    for node in &plan.nodes {
-        match node.kind {
-            zup_transaction::NodeKind::Barrier
-            | zup_transaction::NodeKind::StageFile { .. }
-            | zup_transaction::NodeKind::FileMutation { .. }
-            | zup_transaction::NodeKind::FileRemoval { .. }
-            | zup_transaction::NodeKind::BackendOperation { .. }
-            | zup_transaction::NodeKind::BackendRemoval { .. } => {}
+    let machine_recovery = exec.recovery_intent.is_some();
+    if let Some(intent) = &exec.recovery_intent {
+        intent
+            .validate_shape()
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        if exec.recovery_id != Some(intent.transaction_id)
+            || exec.app_id != intent.app_id
+            || exec.app_version != intent.app_version
+            || exec.scope != intent.scope
+            || exec.target != intent.target
+            || exec.plan_json != intent.canonical_json().unwrap_or_default()
+        {
+            return Err(WorkerError::AuthFailed(
+                "machine recovery intent does not match the authenticated request".into(),
+            ));
         }
+    } else if exec.scope == "machine" && exec.recovery_id.is_some() {
+        return Err(WorkerError::Protocol(
+            "machine recovery requires a typed recovery intent".into(),
+        ));
     }
+    let mut plan = if machine_recovery {
+        None
+    } else {
+        let plan: TransactionPlan = serde_json::from_str(&exec.plan_json)
+            .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
+        if exec.target != plan.target {
+            return Err(WorkerError::TargetMismatch);
+        }
+        plan.validate()
+            .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
+        Some(plan)
+    };
 
     let app_id = zup_core::AppId::new(&exec.app_id)
         .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
@@ -553,36 +569,78 @@ async fn run_worker_inner(
             &bundle,
         )?;
     }
-    let state_root = PathBuf::from(exec.state_root);
-    let work_root = PathBuf::from(exec.work_root);
+    let machine = if scope == zup_core::SelectedScope::Machine {
+        Some(
+            crate::machine_authority::MachineRoot::acquire()
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let state_root = match &machine {
+        Some(machine) => machine.path().to_path_buf(),
+        None => PathBuf::from(exec.state_root),
+    };
+    let _machine_work = machine
+        .as_ref()
+        .map(|machine| machine.work_dir())
+        .transpose()
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    let work_root = match &machine {
+        Some(machine) => machine.path().join("work"),
+        None => PathBuf::from(exec.work_root),
+    };
+    let store = match &machine {
+        Some(machine) => machine.transaction_store(),
+        None => FilesystemTransactionStore::private_at(&state_root),
+    };
+    let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
+    let _lock = match &machine {
+        Some(machine) => machine
+            .try_lock(&lock_key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+        None => InstallationLock::try_acquire(&state_root, &lock_key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+    }
+    .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
     let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
     let payload_overlay_base_root = decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
-    let identity =
-        PayloadOverlayIdentity::from_transaction(app_id.clone(), app_version.clone(), scope, &plan)
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    validate_worker_overlay(
-        &state_root,
-        scope,
-        &identity,
-        payload_overlay_root.as_deref(),
-        payload_overlay_base_root.as_deref(),
-        exec.recovery_id.is_some(),
-        &bootstrap.expected_parent_sid,
-    )?;
     let existing_record = if let Some(id) = exec.recovery_id {
         let record = zup_transaction::TransactionStore::load(
-            &FilesystemTransactionStore::new(&state_root),
+            &store,
             &zup_transaction::TransactionId::from_uuid(id),
         )
         .map_err(|e| WorkerError::Transaction(e.to_string()))?;
         if record.app_id != app_id
             || record.scope != scope
             || record.app_version != app_version
-            || record.target != plan.target
-            || record.plan != plan
+            || record.target != exec.target
         {
             return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
         }
+        if let Some(plan) = &plan {
+            if record.plan != *plan || record.target != plan.target {
+                return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
+            }
+        } else {
+            plan = Some(record.plan.clone());
+        }
+        let identity = PayloadOverlayIdentity::from_transaction(
+            app_id.clone(),
+            app_version.clone(),
+            scope,
+            plan.as_ref().expect("recovery plan"),
+        )
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        validate_worker_overlay(
+            &state_root,
+            scope,
+            &identity,
+            payload_overlay_root.as_deref(),
+            payload_overlay_base_root.as_deref(),
+            true,
+            &bootstrap.expected_parent_sid,
+        )?;
         if identity.has_files() {
             verify_payload_overlay(
                 payload_overlay_base_root.as_deref().ok_or_else(|| {
@@ -597,6 +655,25 @@ async fn run_worker_inner(
         }
         Some(record)
     } else {
+        let plan = plan
+            .as_ref()
+            .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
+        let identity = PayloadOverlayIdentity::from_transaction(
+            app_id.clone(),
+            app_version.clone(),
+            scope,
+            plan,
+        )
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        validate_worker_overlay(
+            &state_root,
+            scope,
+            &identity,
+            payload_overlay_root.as_deref(),
+            payload_overlay_base_root.as_deref(),
+            false,
+            &bootstrap.expected_parent_sid,
+        )?;
         None
     };
     let payload_root = PathBuf::from(exec.payload_root);
@@ -619,28 +696,32 @@ async fn run_worker_inner(
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
     outgoing = outgoing.saturating_add(1);
 
-    let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
-    let _lock = InstallationLock::try_acquire(&state_root, &lock_key)
-        .map_err(|e| WorkerError::Transaction(e.to_string()))?
-        .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
-
+    let authorized = plan
+        .clone()
+        .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
     if exec.recovery_id.is_none() {
         crate::ledger::InstallLedgerStore::new(&state_root)
             .repair_committed(&app_id, scope)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
         crate::ledger::InstallLedgerStore::new(&state_root)
-            .validate_plan(&app_id, scope, &app_version, &plan)
+            .validate_plan(&app_id, scope, &app_version, &authorized)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
     }
 
-    let store = FilesystemTransactionStore::new(&state_root);
-    let coordinator = TransactionCoordinator::new(store);
-    let record = if let Some(record) = existing_record {
-        record
+    let coordinator = TransactionCoordinator::new(store.clone());
+    let fresh = if existing_record.is_none() {
+        Some(
+            coordinator
+                .begin(app_id, scope, app_version, authorized)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?,
+        )
     } else {
-        coordinator
-            .begin(app_id, scope, app_version, plan)
-            .map_err(|e| WorkerError::Transaction(e.to_string()))?
+        drop(coordinator);
+        None
+    };
+    let record = match &fresh {
+        Some(open) => open.record().clone(),
+        None => existing_record.expect("recovery loads its journal"),
     };
 
     let total_work = transaction_work_total(&record.plan);
@@ -697,36 +778,29 @@ async fn run_worker_inner(
 
     let cancel_token = cancel.clone();
     let reader_task = split_reader(reader, cancel_token, incoming);
+    let journal_id = record.transaction_id;
 
     let recovering = exec.recovery_id.is_some();
-    let recovery_root = state_root.clone();
     let result = tokio::task::spawn_blocking(move || {
         if recovering {
-            zup_transaction::recover(
-                record,
-                &FilesystemTransactionStore::new(&recovery_root),
-                &mut executor,
-            )
+            zup_transaction::recover(record, &store, &mut executor)
         } else {
-            coordinator.execute(record, &mut executor)
+            fresh
+                .expect("a fresh transaction")
+                .execute(&mut executor)
+                .map(|settled| (settled.record, settled.outcome))
         }
     })
-    .await
-    .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-
-    if matches!(&result, Ok((_, TransactionOutcome::Committed))) {
-        let _ = progress_tx.send(ProgressReport {
-            kind: ProgressKind::OperationProgress,
-            detail: "Finishing…".into(),
-            completed: Some(total_work),
-            total: Some(total_work),
-        });
-    }
+    .await;
+    let result = match result {
+        Ok(inner) => inner,
+        Err(_) => Err(zup_transaction::TransactionError::InvalidState(
+            journal_id.to_string(),
+        )),
+    };
 
     drop(progress_tx);
-    let (writer, outgoing) = progress_task
-        .await
-        .map_err(|error| WorkerError::Protocol(error.to_string()))??;
+    let progress_ended = progress_task.await;
 
     let (transaction_id, outcome) = match result {
         Ok((r, TransactionOutcome::Committed)) => {
@@ -742,15 +816,19 @@ async fn run_worker_inner(
                     .publish_committed(&r, scope, release_record(&exec.release))
                     .map(|_| ())
             };
-            publication.map_err(|e| {
-                WorkerError::Transaction(format!(
-                    "transaction committed but ledger publication failed: {e}"
-                ))
-            })?;
-            crate::integration::notify_committed_path_change(&r);
-            (r.transaction_id.as_uuid(), "committed".to_owned())
+            let outcome = match publication {
+                Ok(()) => {
+                    crate::integration::notify_committed_path_change(&r);
+                    "committed"
+                }
+                Err(_) => "committed_pending_reconciliation",
+            };
+            (r.transaction_id.as_uuid(), outcome.to_owned())
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
+            crate::ledger::InstallLedgerStore::new(&state_root)
+                .cleanup_work(&r)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             drop_overlay(
                 payload_overlay_base_root.as_deref(),
                 payload_overlay_root.as_deref(),
@@ -760,36 +838,24 @@ async fn run_worker_inner(
         Ok((r, TransactionOutcome::RecoveryRequired)) => {
             (r.transaction_id.as_uuid(), "recovery_required".to_owned())
         }
-        Err(e) => {
-            let message = e.to_string();
-            let _ = send_and_close(
-                writer,
-                bootstrap.session_id,
-                outgoing,
-                Message::Failed(zup_protocol::Failed {
-                    kind: failure::TRANSACTION.to_owned(),
-                    message: message.clone(),
-                }),
-            )
-            .await;
-            let _ = reader_task.await;
-            return Err(WorkerError::Transaction(message));
-        }
+        Err(_) => (journal_id.as_uuid(), "recovery_required".to_owned()),
     };
     drop(_lock);
 
-    let _ = send_and_close(
-        writer,
-        bootstrap.session_id,
-        outgoing,
-        Message::Completed(zup_protocol::Completed {
-            transaction_id,
-            outcome: outcome.clone(),
-            prerequisite_id: None,
-            exit_code: None,
-        }),
-    )
-    .await;
+    if let Ok(Ok((writer, outgoing))) = progress_ended {
+        let _ = send_and_close(
+            writer,
+            bootstrap.session_id,
+            outgoing,
+            Message::Completed(zup_protocol::Completed {
+                transaction_id,
+                outcome: outcome.clone(),
+                prerequisite_id: None,
+                exit_code: None,
+            }),
+        )
+        .await;
+    }
     let _ = reader_task.await;
     Ok(outcome)
 }

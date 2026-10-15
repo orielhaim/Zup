@@ -33,7 +33,9 @@ const UNSUPPORTED_TARGET: &str = "linux-arm64";
 const FRONTEND: &str = "gui";
 
 fn zup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_zup"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zup"));
+    command.env_remove("ZUP_TOOLCHAIN");
+    command
 }
 
 /// A diagnostic as one string. miette draws a box and wraps messages to the
@@ -257,8 +259,10 @@ destination = "${{install}}"
         !output.parent().unwrap().exists(),
         "the parent does not exist yet"
     );
+    let toolchain = toolchain_fixture::host_toolchain(root.path());
     let build = |extra: &[&str]| {
         zup()
+            .env("ZUP_TOOLCHAIN", &toolchain)
             .args(["build", "--manifest"])
             .arg(&manifest)
             .arg("--output")
@@ -358,8 +362,10 @@ user = "${{location.user_data}}/BackendBoundary"
 /// `repeatable_resolution_flags_must_line_up_with_the_selection` exists.
 #[test]
 fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
-    let (_matrix, manifest) = write_matrix_project();
+    let (matrix, manifest) = write_matrix_project();
+    let toolchain = toolchain_fixture::host_toolchain(matrix.path());
     let ambiguous = zup()
+        .env("ZUP_TOOLCHAIN", &toolchain)
         .args(["plan", "--manifest"])
         .arg(&manifest)
         .arg("--format")
@@ -379,6 +385,7 @@ fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
     );
 
     let explicit = zup()
+        .env("ZUP_TOOLCHAIN", &toolchain)
         .args(["plan", "--manifest"])
         .arg(&manifest)
         .args(["--target", "alpha", "--format", "json"])

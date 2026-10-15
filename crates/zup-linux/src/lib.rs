@@ -6,16 +6,21 @@
 //! compiles:
 //!
 //! - **Composition** turns a runtime template and a portable package into an
-//!   installer for a Linux target by appending the package and a footer. It is
-//!   plain file I/O, so it runs on any host. The target plan is validated with
-//!   [`resolve_target`], which answers user roots from fixed build roots
-//!   instead of the build host's environment. These modules have no `cfg`
-//!   gate.
+//!   installer for a Linux target by appending the package, the preset, and a
+//!   footer. It is plain file I/O, so it runs on any host. [`compose`] and
+//!   [`compose_with_preset`] are thin adapters over the portable
+//!   [`zup_compose`] pipeline, which owns the target-driven composition both
+//!   hosts share. The target plan is validated with [`resolve_target`], which
+//!   answers user roots from fixed build roots instead of the build host's
+//!   environment. These modules have no `cfg` gate.
 //! - **The native runtime** installs, repairs, and removes software through
 //!   filesystem ownership, systemd, D-Bus, and a privileged worker. It
 //!   executes only on Linux, and every module it needs is gated on
 //!   `cfg(target_os = "linux")`.
 
+#[cfg(target_os = "linux")]
+mod backend;
+mod capabilities;
 mod carrier;
 #[cfg(target_os = "linux")]
 mod elevate;
@@ -29,10 +34,13 @@ mod input;
 mod integration;
 #[cfg(target_os = "linux")]
 mod ledger;
+mod lifecycle;
 mod locations;
 mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
+#[cfg(target_os = "linux")]
+mod operation_host;
 #[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
@@ -48,6 +56,8 @@ mod service_exec;
 mod service_ops;
 mod services;
 #[cfg(target_os = "linux")]
+mod session_host;
+#[cfg(target_os = "linux")]
 mod socket;
 #[cfg(target_os = "linux")]
 mod systemd;
@@ -57,7 +67,16 @@ pub mod test_support;
 #[cfg(target_os = "linux")]
 mod worker;
 
-pub use carrier::{CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, compose};
+#[cfg(target_os = "linux")]
+pub use backend::{ExecutionReport, LinuxRuntimeBackend};
+pub use capabilities::{
+    is_supported_linux_target, linux_capability_errors, linux_selection_errors,
+    operation_capability_errors,
+};
+pub use carrier::{
+    CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, FOOTER_LEN, compose,
+    compose_with_preset,
+};
 pub use error::{ExecError, IpcError, PathError, PlanError};
 #[cfg(target_os = "linux")]
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};
@@ -74,7 +93,10 @@ pub use input::{
     ledger_has_services, requires_service_manager, snapshot_services,
 };
 #[cfg(target_os = "linux")]
+pub use integration::{generated_for_plan, phase_keeps_generated, reap_generated, stage_generated};
+#[cfg(target_os = "linux")]
 pub use ledger::LinuxLedgerStore;
+pub use lifecycle::LinuxOutcome;
 pub use locations::{
     LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
     MACHINE_STATE_ROOT, MachineRoots, user_data_home, user_data_home_in, user_programs_root,
@@ -100,7 +122,7 @@ pub use paths::{
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};
 pub use resolve::{resolve_target, validate_target_plan};
 #[cfg(target_os = "linux")]
-pub use run::{LinuxAction, LinuxOutcome, LinuxRunRequest, recover_transaction, run};
+pub use run::{LinuxRunRequest, run, run_outcome};
 #[cfg(target_os = "linux")]
 pub use service_ops::{
     MAX_UNIT_BYTES, SERVICE_BACKEND_PREFIX, ServicePayload, ServiceReceipt, admin_override_dir,
@@ -113,6 +135,8 @@ pub use services::{
     DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, UNIT_PREFIX,
     WANTED_BY, parse_manager_version,
 };
+#[cfg(target_os = "linux")]
+pub use session_host::LinuxSessionHost;
 #[cfg(target_os = "linux")]
 pub use socket::{
     FRAME_TIMEOUT, HANDSHAKE_TIMEOUT, PeerIdentity, PeerPin, Rendezvous, peer_alive, peer_identity,

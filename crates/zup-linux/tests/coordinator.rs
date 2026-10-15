@@ -59,7 +59,7 @@ fn run(
     state_root: &Path,
 ) -> (TransactionOutcome, LinuxFileExecutor) {
     let plan = compile_transaction(input).expect("a plan compiles");
-    let store = FilesystemTransactionStore::new(state_root);
+    let store = FilesystemTransactionStore::private_at(state_root);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(
@@ -73,9 +73,10 @@ fn run(
         LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(payload_root));
     executor.register_plan(&plan).expect("a plan registers");
     executor.set_transaction_id(record.transaction_id);
-    let (_, outcome) = coordinator
-        .execute(record, &mut executor)
-        .expect("execution reaches a stable outcome");
+    let outcome = record
+        .execute(&mut executor)
+        .expect("execution reaches a stable outcome")
+        .outcome;
     (outcome, executor)
 }
 
@@ -243,7 +244,7 @@ fn recovery_replays_a_journal_without_the_original_executor() {
     ));
     let plan = compile_transaction(&input).expect("a plan compiles");
 
-    let store = FilesystemTransactionStore::new(&state);
+    let store = FilesystemTransactionStore::private_at(&state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(
@@ -275,7 +276,7 @@ fn recovery_replays_a_journal_without_the_original_executor() {
         {
             let _ = executor.apply(node).expect("a mutation applies");
         }
-        let store = FilesystemTransactionStore::new(&state);
+        let store = FilesystemTransactionStore::private_at(&state);
         store
             .update(&transaction_id, &mut |record| {
                 for (id, receipt) in staged.drain(..) {
@@ -297,7 +298,7 @@ fn recovery_replays_a_journal_without_the_original_executor() {
             .expect("the interrupted phase persists");
     }
 
-    let store = FilesystemTransactionStore::new(&state);
+    let store = FilesystemTransactionStore::private_at(&state);
     let record = store.load(&transaction_id).expect("the journal survives");
     let mut executor = LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
     executor.register_plan(&plan).expect("a plan registers");
@@ -393,7 +394,7 @@ fn a_failed_transaction_restores_an_already_removed_file() {
 
     let plan = compile_transaction(&input).expect("a plan compiles");
     let fail = OperationId::resource("remove_file", &input.removals[1].key);
-    let store = FilesystemTransactionStore::new(&state);
+    let store = FilesystemTransactionStore::private_at(&state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(
@@ -412,9 +413,10 @@ fn a_failed_transaction_restores_an_already_removed_file() {
         },
         fail,
     };
-    let (record, outcome) = coordinator
-        .execute(record, &mut executor)
+    let settled = record
+        .execute(&mut executor)
         .expect("execution reaches a stable outcome");
+    let (record, outcome) = (settled.record, settled.outcome);
     let _ = record;
 
     assert_eq!(outcome, TransactionOutcome::RolledBack);
@@ -455,7 +457,7 @@ fn recovery_commits_an_interrupted_removal() {
     input.removals.push(removed);
     let plan = compile_transaction(&input).expect("a plan compiles");
 
-    let store = FilesystemTransactionStore::new(&state);
+    let store = FilesystemTransactionStore::private_at(&state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(
@@ -481,7 +483,7 @@ fn recovery_commits_an_interrupted_removal() {
             !install.join("doomed.dat").exists(),
             "the interruption lands after the unlink"
         );
-        let store = FilesystemTransactionStore::new(&state);
+        let store = FilesystemTransactionStore::private_at(&state);
         store
             .update(&transaction_id, &mut |record| {
                 record.nodes.insert(removal.id.clone(), NodeState::Running);
@@ -491,7 +493,7 @@ fn recovery_commits_an_interrupted_removal() {
             .expect("the interrupted phase persists");
     }
 
-    let store = FilesystemTransactionStore::new(&state);
+    let store = FilesystemTransactionStore::private_at(&state);
     let record = store.load(&transaction_id).expect("the journal survives");
     let mut executor = LinuxFileExecutor::new();
     executor.register_plan(&plan).expect("a plan registers");

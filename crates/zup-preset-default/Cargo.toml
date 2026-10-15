@@ -17,3 +17,4 @@ ignored = ["gpui-kit"]
 
 [dev-dependencies]
 gpui-kit = { version = "0.7", features = ["test-support"] }
+rstest.workspace = true

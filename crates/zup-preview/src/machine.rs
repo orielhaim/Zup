@@ -106,6 +106,8 @@ pub struct Scenario {
     pub footprint: Footprint,
     /// The launcher the application declares, if any.
     pub launcher: Option<String>,
+    /// The installer target this scenario simulates.
+    pub target: String,
 }
 
 impl Default for Scenario {
@@ -134,6 +136,7 @@ impl Default for Scenario {
             drift: Vec::new(),
             footprint: Footprint::default(),
             launcher: Some("Acme".into()),
+            target: "windows-x64".into(),
         }
     }
 }
@@ -203,7 +206,29 @@ impl Scenario {
                 .into_iter()
                 .next()
                 .map(|launcher| launcher.target.name),
+            target: installer.target.as_str().to_owned(),
             ..defaults
+        }
+    }
+
+    pub fn environment(&self) -> zup_preset_protocol::HostEnvironment {
+        let operating_system = if self.target.starts_with("windows") {
+            zup_preset_protocol::OperatingSystem::Windows
+        } else if self.target.starts_with("linux") {
+            zup_preset_protocol::OperatingSystem::Linux
+        } else {
+            zup_preset_protocol::OperatingSystem::Unknown
+        };
+        zup_preset_protocol::HostEnvironment {
+            operating_system,
+            architecture: std::env::consts::ARCH.to_owned(),
+            target: self.target.clone(),
+            desktop: zup_preset_protocol::DesktopEnvironment {
+                session: zup_preset_protocol::GraphicalSession::Native,
+                desktop_id: None,
+                desktop_name: None,
+            },
+            machine_authorization: zup_preset_protocol::MachineAuthorization::Available,
         }
     }
 

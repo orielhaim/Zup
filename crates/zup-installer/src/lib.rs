@@ -1,8 +1,6 @@
 #[cfg(windows)]
 mod acquire;
 #[cfg(windows)]
-mod bootstrap;
-#[cfg(windows)]
 mod cli;
 #[cfg(all(windows, feature = "console"))]
 mod console;
@@ -36,28 +34,46 @@ pub fn process_exit_code(error: &miette::Report) -> u8 {
         .clamp(1, 255) as u8
 }
 
-#[cfg(windows)]
 pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
-    let cli = cli::parse();
-    let output = cli.output_format();
-    let context = RuntimeContext::new(frontend).with_output(output);
-    let result = cli::dispatch(cli, context);
-    if let Err(error) = &result
-        && !execute::already_reported(error)
+    #[cfg(windows)]
     {
-        emit_failure(output, error);
+        let cli = cli::parse();
+        let output = cli.output_format();
+        let context = RuntimeContext::new(frontend).with_output(output);
+        let result = cli::dispatch(cli, context);
+        if let Err(error) = &result
+            && !execute::already_reported(error)
+        {
+            emit_failure(output, error);
+        }
+        result
     }
-    result
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::run(frontend)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = frontend;
+        Err(miette::miette!(
+            "no installer backend for this host: installers run on Windows or Linux"
+        ))
+    }
 }
 
-#[cfg(target_os = "linux")]
-pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
-    crate::linux::run(frontend)
-}
-
-#[cfg(windows)]
 pub fn command() -> clap::Command {
-    cli::parser()
+    #[cfg(windows)]
+    {
+        cli::parser()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::command()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        clap::Command::new("setup")
+    }
 }
 
 #[cfg(windows)]

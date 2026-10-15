@@ -24,6 +24,55 @@ zup preset pack \
 Use both forms in CI when targets require different build machines. At least one
 source is required.
 
+Packaging runs one native binary in describe mode and reads the document it
+prints. A binary for another target cannot run here, so packing one needs its
+describe document from a native run:
+
+```bash
+aurora-linux --zup-describe > describe.json
+zup preset pack \
+  --binary linux-x64=dist/aurora-linux \
+  --describe-file describe.json
+```
+
+The document is validated and cross-checked against the Cargo manifest exactly
+as a live describe run would be. Every binary in a package describes the same
+logical preset: one name, one version, one protocol, one settings schema.
+
+## Build a Linux GUI installer
+
+A Linux GUI installer is an ordinary build target. On a Linux host with the
+toolchain staged (`cargo xtask toolchain build`), this composes a graphical
+installer from the same Default Preset sources Windows uses:
+
+```bash
+zup build --manifest path/to/zup.toml --target linux-x64
+```
+
+The frontend comes from the manifest (`gui`, `console`, or `headless`); a
+`gui` build resolves the preset package, selects the `linux-x64` binary, and
+embeds it alongside the package. Composing a Linux GUI installer on Windows
+works the same way from a multi-target preset package (see `--describe-file`
+above): composition copies target binaries, it never executes them.
+
+Running a GUI installer with no graphical session is refused with a
+diagnostic; it never silently falls back to headless. It needs Wayland
+(`WAYLAND_DISPLAY`) or X11 (`DISPLAY`).
+
+## Native dependencies for Linux GUI builds
+
+Cross-compiling a GPUI preset is not supported: building a Linux GUI preset
+needs a Linux host with the GUI system libraries installed (fontconfig,
+freetype, Wayland, X11, xkbcommon). On Debian/Ubuntu:
+
+```bash
+sudo apt install pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
+```
+
+Packing a preset for a target whose binary cannot run here needs
+`--describe-file` (above). Composing an installer from staged binaries never
+needs those libraries; only building the preset itself does.
+
 ## What packing does
 
 `zup preset pack` runs the preset in describe mode and reads the document it prints: settings schema, identity, capabilities. The name and version are cross-checked against the Cargo manifest.

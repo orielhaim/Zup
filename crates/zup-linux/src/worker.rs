@@ -21,6 +21,18 @@ pub const EXECUTE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkerFault {
+    #[default]
+    None,
+    IpcBeforeBegin,
+    IpcAfterBegin,
+    CancelAfterBegin,
+    ProgressDuringExecute,
+    DisconnectAfterCommit,
+    FailLedgerPublish,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerContext {
     pub roots: MachineRoots,
@@ -36,6 +48,8 @@ pub struct WorkerContext {
     pub worker_exe: PathBuf,
 
     pub carrier_pin: Option<FilePin>,
+
+    pub fault: WorkerFault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +112,7 @@ pub fn run_worker_mode(
         session,
         worker_exe,
         carrier_pin: None,
+        fault: WorkerFault::None,
     };
     serve_session(&mut stream, context)
 }
@@ -149,6 +164,7 @@ pub fn serve_session(stream: &mut UnixStream, context: WorkerContext) -> Result<
         session: context.session,
         incoming: SequenceTracker::new(),
         outgoing: 0,
+        fail_next_send: false,
     };
     match serve_inner(&mut channel, &context) {
         Ok(outcome) => Ok(outcome),
@@ -167,10 +183,21 @@ struct SessionChannel<'a> {
     session: SessionId,
     incoming: SequenceTracker,
     outgoing: u64,
+    fail_next_send: bool,
 }
 
 impl SessionChannel<'_> {
     fn send(&mut self, message: Message) -> Result<(), IpcError> {
+        if self.fail_next_send {
+            self.fail_next_send = false;
+            return Err(IpcError::Io {
+                path: "<telemetry>".into(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "progress delivery failed",
+                ),
+            });
+        }
         let envelope = WireEnvelope {
             version: PROTOCOL_VERSION,
             session_id: self.session,
@@ -197,6 +224,51 @@ impl SessionChannel<'_> {
         }
         Ok(envelope)
     }
+
+    fn poll_cancel(&mut self) -> Result<bool, IpcError> {
+        if !crate::socket::inbound_frame_ready(self.stream)? {
+            return Ok(false);
+        }
+        let envelope = recv_envelope(self.stream, Duration::from_secs(1))?;
+        self.incoming
+            .accept(envelope.sequence)
+            .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
+        if envelope.session_id != self.session {
+            return Err(IpcError::WorkerAuth("session mismatch".into()));
+        }
+        if envelope.version != PROTOCOL_VERSION {
+            return Err(IpcError::WorkerProtocol("protocol version mismatch".into()));
+        }
+        match envelope.message {
+            Message::Cancel => Ok(true),
+            _ => Err(IpcError::WorkerProtocol(
+                "unexpected message during execution".into(),
+            )),
+        }
+    }
+}
+
+enum ControlGate {
+    Continue,
+    Cancel,
+    Disconnected,
+    FailClosed(IpcError),
+}
+
+fn control_gate(polled: Result<bool, IpcError>) -> ControlGate {
+    match polled {
+        Ok(false) => ControlGate::Continue,
+        Ok(true) => ControlGate::Cancel,
+        Err(error) if fail_closed(&error) => ControlGate::FailClosed(error),
+        Err(_) => ControlGate::Disconnected,
+    }
+}
+
+fn fail_closed(error: &IpcError) -> bool {
+    matches!(
+        error,
+        IpcError::WorkerAuth(_) | IpcError::WorkerProtocol(_) | IpcError::Framing(_)
+    )
 }
 
 fn serve_inner(
@@ -271,14 +343,14 @@ fn serve_inner(
         pin.verify(&prepared.carrier_path)?;
     }
 
-    let outcome = execute_prepared(channel, &prepared)?;
-    channel.send(Message::Completed(zup_protocol::Completed {
-        transaction_id: prepared.transaction_id,
-        outcome: outcome.clone(),
+    let verdict = execute_prepared(channel, &prepared, context.fault)?;
+    let _ = channel.send(Message::Completed(zup_protocol::Completed {
+        transaction_id: verdict.transaction_id,
+        outcome: verdict.outcome.clone(),
         prerequisite_id: None,
         exit_code: None,
-    }))?;
-    Ok(outcome)
+    }));
+    Ok(verdict.outcome)
 }
 
 fn worker_capabilities() -> Capabilities {
@@ -304,12 +376,11 @@ struct PreparedPlan {
     scope: String,
     target: zup_core::Target,
     file_count: u32,
-    transaction_id: uuid::Uuid,
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
     target_plan: zup_platform::TargetPlan,
-    action: crate::run::LinuxAction,
+    action: zup_exec::LifecycleAction,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -424,13 +495,14 @@ fn prepare_operation(
     }
 
     let requested = match intent.operation.as_str() {
-        zup_protocol::privileged_operation::INSTALL => crate::run::LinuxAction::Install,
-        zup_protocol::privileged_operation::UPGRADE => crate::run::LinuxAction::Upgrade,
-        zup_protocol::privileged_operation::REPAIR => crate::run::LinuxAction::Repair {
+        zup_protocol::privileged_operation::INSTALL => zup_runtime::Operation::Install,
+        zup_protocol::privileged_operation::UPGRADE => zup_runtime::Operation::Upgrade,
+        zup_protocol::privileged_operation::MODIFY => zup_runtime::Operation::Modify,
+        zup_protocol::privileged_operation::REPAIR => zup_runtime::Operation::Repair {
             force_files: intent.force_files,
         },
-        zup_protocol::privileged_operation::UNINSTALL => crate::run::LinuxAction::Uninstall,
-        zup_protocol::privileged_operation::APPLY => crate::run::LinuxAction::Apply,
+        zup_protocol::privileged_operation::UNINSTALL => zup_runtime::Operation::Uninstall,
+        zup_protocol::privileged_operation::APPLY => zup_runtime::Operation::Apply,
         _ => {
             return Err(IpcError::WorkerProtocol(
                 "unknown privileged operation".into(),
@@ -438,49 +510,10 @@ fn prepare_operation(
         }
     };
 
-    let mut plan_request = zup_plan::PlanRequest::new(target, SelectedScope::Machine);
-    for name in &intent.selected_components {
-        let id = zup_core::ComponentId::new(name)
-            .map_err(|error| IpcError::Policy(format!("component: {error}")))?;
-        plan_request.components.enable.insert(id);
-    }
-    if let Some(directory) = &intent.install_dir_override {
-        let host = PathBuf::from(directory);
-        authorize_machine_install_directory(&host, &roots)
-            .map_err(|error| IpcError::Policy(error.to_string()))?;
-        let template = crate::machine::host_to_install_template(&host, &roots, &target)
-            .map_err(|error| IpcError::Policy(format!("install directory override: {error}")))?;
-        plan_request.install_directory = Some(template);
-    }
-
-    let install = zup_plan::plan(
-        &zup_plan::BuildPlan {
-            targets: vec![build],
-        },
-        &plan_request,
-    )
-    .map_err(|error| IpcError::Policy(format!("plan: {error}")))?;
-    let mut target_plan = crate::resolve::resolve_target(
-        &install,
-        &crate::locations::LinuxInstallLocationResolver::with_machine_roots(roots.clone()),
-    )
-    .map_err(|error| IpcError::Policy(format!("target plan: {error}")))?;
-    crate::run::attach_maintenance_copy_for(
-        &mut target_plan,
-        &carrier_path,
-        &state_root,
-        SelectedScope::Machine,
-    )
-    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    enforce_machine_policy(&target_plan, &roots)?;
-    if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
-        authorize_machine_install_directory(&host, &roots)
-            .map_err(|error| IpcError::Policy(error.to_string()))?;
-        crate::fs::anchor_reachable(&host)
-            .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
-    }
-
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&state_root);
+    let seed = ledger_store
+        .load(&app_id, SelectedScope::Machine)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let lock_key = zup_transaction::InstallationLock::lock_key(app_id.as_str(), "machine");
     let lock = match zup_transaction::InstallationLock::try_acquire(&state_root, &lock_key)
         .map_err(|error| IpcError::Transaction(error.to_string()))?
@@ -491,85 +524,65 @@ fn prepare_operation(
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
 
-    let settled_before = ledger_store
-        .load(&app_id, SelectedScope::Machine)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?
+    let settled_before = seed
+        .as_ref()
         .map(|ledger| ledger.committed_transaction.clone());
     recover_pending(
         &state_root,
         &app_id,
         &carrier,
         &carrier_path,
-        &roots,
-        &context.systemd,
+        &RecoveryHost {
+            roots: &roots,
+            systemd: &context.systemd,
+            lock: &lock,
+        },
     )?;
 
     ledger_store
-        .repair_committed(&target_plan.app.id, SelectedScope::Machine)
+        .repair_committed(&app_id, SelectedScope::Machine)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    crate::machine::verify_ledger_trust(
-        &state_root,
-        &target_plan.app.id,
-        rustix::process::geteuid().as_raw(),
-    )
-    .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::verify_ledger_trust(&state_root, &app_id, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     let ledger = ledger_store
-        .load(&target_plan.app.id, SelectedScope::Machine)
+        .load(&app_id, SelectedScope::Machine)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    let action = crate::run::resolve_action(requested, ledger.as_ref(), &target_plan.app.version)
+    let selection = zup_runtime::OperationSelection {
+        enable: intent.selected_components.clone(),
+        disable: intent.disabled_components.clone(),
+        install_directory: intent.install_dir_override.as_ref().map(PathBuf::from),
+    };
+    let host = crate::operation_host::LinuxOperationHost {
+        machine: Some(crate::operation_host::MachineHost {
+            roots: roots.clone(),
+            systemd: context.systemd.clone(),
+        }),
+    };
+    let input = zup_runtime::OperationInput {
+        build: &build,
+        installer: &carrier_path,
+        scope: SelectedScope::Machine,
+        operation: requested,
+        selection,
+        prior: ledger.as_ref(),
+        state_root: &state_root,
+        cancellation: &zup_plan::NeverCancelled,
+    };
+    let prepared = zup_runtime::prepare_operation(&input, &host)
         .map_err(|error| IpcError::Policy(error.to_string()))?;
-
-    let mut snapshot = crate::executor::snapshot_target(&target_plan);
-
-    let needs_manager = crate::input::requires_service_manager(&target_plan, ledger.as_ref());
-    let mut manager = if needs_manager {
-        Some(
-            crate::systemd::RealSystemd::connect()
-                .map_err(|error| IpcError::Policy(format!("systemd is unavailable: {error}")))?,
-        )
-    } else {
-        None
-    };
-    if let Some(manager) = manager.as_mut() {
-        snapshot.services =
-            crate::input::snapshot_services(&target_plan, manager, &context.systemd)
-                .map_err(|error| IpcError::Policy(format!("service snapshot: {error}")))?;
+    let target_plan = prepared
+        .target_plan()
+        .cloned()
+        .ok_or_else(|| IpcError::Policy("a machine transaction resolves its target".into()))?;
+    enforce_machine_policy(&target_plan, &roots)?;
+    if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
+        authorize_machine_install_directory(&host, &roots)
+            .map_err(|error| IpcError::Policy(error.to_string()))?;
+        crate::fs::anchor_reachable(&host)
+            .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
     }
-    let owned_matches = crate::run::inspect_owned_matches_for(ledger.as_ref());
-    let execution = zup_exec::plan_lifecycle(
-        action,
-        (action != zup_exec::LifecycleAction::Uninstall).then_some(&target_plan),
-        Some(&snapshot),
-        ledger.as_ref(),
-        &owned_matches,
-    )
-    .map_err(|error| IpcError::Policy(format!("lifecycle: {error}")))?;
-    let force_services = matches!(
-        requested,
-        crate::run::LinuxAction::Repair { force_files: true }
-    );
-    let input = if needs_manager {
-        let manager = manager.as_mut().ok_or_else(|| {
-            IpcError::Policy("a service transaction without a systemd manager".into())
-        })?;
-        crate::input::compile_machine_execution_plan(
-            &execution,
-            &target_plan,
-            crate::input::ServiceCompilation {
-                roots: &roots,
-                systemd: &context.systemd,
-                manager,
-                force_services,
-            },
-        )
-        .map_err(|error| IpcError::Policy(format!("transaction input: {error}")))?
-    } else {
-        crate::input::compile_execution_plan(&execution, &target_plan)
-            .map_err(|error| IpcError::Policy(format!("transaction input: {error}")))?
-    };
-    let plan = zup_transaction::compile_transaction(&input)
-        .map_err(|error| IpcError::Policy(format!("transaction plan: {error}")))?;
 
+    let plan = prepared.transaction_plan;
     if plan.nodes.iter().any(|node| {
         matches!(
             &node.kind,
@@ -620,24 +633,11 @@ fn prepare_operation(
         scope: intent.scope.clone(),
         target,
         file_count,
-        transaction_id: uuid::Uuid::now_v7(),
         carrier_path: carrier_path.clone(),
         carrier_pin,
         plan,
         target_plan,
-        action: match action {
-            zup_exec::LifecycleAction::Install => crate::run::LinuxAction::Install,
-            zup_exec::LifecycleAction::Upgrade => crate::run::LinuxAction::Upgrade,
-            zup_exec::LifecycleAction::Repair { force_files } => {
-                crate::run::LinuxAction::Repair { force_files }
-            }
-            zup_exec::LifecycleAction::Uninstall => crate::run::LinuxAction::Uninstall,
-            zup_exec::LifecycleAction::Modify => {
-                return Err(IpcError::Policy(
-                    "a machine transaction modifies nothing outside its lifecycle".into(),
-                ));
-            }
-        },
+        action: prepared.action,
         state_root,
         roots: roots.clone(),
         systemd: context.systemd.clone(),
@@ -652,13 +652,18 @@ fn prepare_operation(
     })
 }
 
+struct RecoveryHost<'a> {
+    roots: &'a MachineRoots,
+    systemd: &'a crate::machine::SystemdRoots,
+    lock: &'a zup_transaction::InstallationLock,
+}
+
 fn recover_pending(
     state_root: &Path,
     app_id: &AppId,
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
-    roots: &MachineRoots,
-    systemd: &crate::machine::SystemdRoots,
+    host: &RecoveryHost<'_>,
 ) -> Result<(), IpcError> {
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     loop {
@@ -671,8 +676,7 @@ fn recover_pending(
                     carrier,
                     carrier_path,
                     &transaction,
-                    roots,
-                    systemd,
+                    host,
                 )?;
             }
             Err(error) => return Err(IpcError::Transaction(error.to_string())),
@@ -686,8 +690,7 @@ fn recover_one(
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
     transaction: &str,
-    roots: &MachineRoots,
-    systemd: &crate::machine::SystemdRoots,
+    host: &RecoveryHost<'_>,
 ) -> Result<(), IpcError> {
     let id = transaction
         .parse::<uuid::Uuid>()
@@ -701,7 +704,7 @@ fn recover_one(
         rustix::process::geteuid().as_raw(),
     )
     .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    let store = zup_transaction::FilesystemTransactionStore::new(state_root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(state_root);
     let record = zup_transaction::TransactionStore::load(
         &store,
         &zup_transaction::TransactionId::from_uuid(id),
@@ -713,16 +716,28 @@ fn recover_one(
         ));
     }
 
-    crate::machine::verify_machine_install_roots(roots, rustix::process::geteuid().as_raw())
+    crate::machine::verify_machine_install_roots(host.roots, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
+    let generated = if crate::integration::phase_keeps_generated(record.phase) {
+        crate::integration::generated_for_plan(
+            state_root,
+            app_id,
+            record.scope,
+            host.lock,
+            &record.plan,
+        )
+        .map_err(|error| IpcError::Transaction(error.to_string()))?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let payload = crate::run::RunnerPayload::from_prepared(
         carrier.package().payload_source(),
         carrier_path.to_path_buf(),
         maintenance_sha256,
         maintenance_size,
-        BTreeMap::new(),
+        generated,
     );
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)
@@ -738,8 +753,8 @@ fn recover_one(
         let manager = crate::systemd::RealSystemd::connect()
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
         executor = executor.with_services(crate::executor::ServiceSupport::isolated(
-            roots.clone(),
-            systemd.clone(),
+            host.roots.clone(),
+            host.systemd.clone(),
             manager,
             rustix::process::geteuid().as_raw(),
         ));
@@ -752,6 +767,8 @@ fn recover_one(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     match outcome {
         zup_transaction::TransactionOutcome::Committed => {
+            crate::integration::reap_generated(state_root, app_id, record.scope, host.lock)
+                .map_err(|error| IpcError::Transaction(error.to_string()))?;
             let ledger = ledger_store_publish(state_root, &record)?;
 
             if !record.plan.uninstall {
@@ -762,7 +779,16 @@ fn recover_one(
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
             Ok(())
         }
-        zup_transaction::TransactionOutcome::RolledBack => Ok(()),
+        zup_transaction::TransactionOutcome::RolledBack => {
+            crate::integration::reap_generated(
+                state_root,
+                app_id,
+                SelectedScope::Machine,
+                host.lock,
+            )
+            .map_err(|error| IpcError::Transaction(error.to_string()))?;
+            Ok(())
+        }
         zup_transaction::TransactionOutcome::RecoveryRequired => Err(IpcError::Transaction(
             format!("transaction {transaction} requires recovery"),
         )),
@@ -790,6 +816,14 @@ fn is_expected_backend(node: &zup_transaction::TransactionNode) -> bool {
         || backend.id.as_str() == crate::refresh::REFRESH_DESKTOP_ID
 }
 
+fn is_preset_source(source: &zup_core::RelativePath) -> bool {
+    source.as_str() == zup_bundle::PRESET_SOURCE
+        || source
+            .as_str()
+            .strip_prefix(zup_bundle::ASSET_SOURCE_PREFIX)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn enforce_machine_policy(
     target: &zup_platform::TargetPlan,
     roots: &MachineRoots,
@@ -811,6 +845,13 @@ fn enforce_machine_policy(
                 if destination != crate::machine::MachineDestination::MachineState {
                     return Err(IpcError::Policy(
                         "maintenance belongs to machine state".into(),
+                    ));
+                }
+            }
+            ResourceKey::File { .. } if is_preset_source(&file.source_relative) => {
+                if destination != crate::machine::MachineDestination::MachineState {
+                    return Err(IpcError::Policy(
+                        "preset content belongs to machine state".into(),
                     ));
                 }
             }
@@ -919,22 +960,54 @@ fn verify_carrier_declares(
     Ok(())
 }
 
+struct ExecutionVerdict {
+    transaction_id: uuid::Uuid,
+    outcome: String,
+}
+
+fn verdict(transaction_id: uuid::Uuid, outcome: &str) -> ExecutionVerdict {
+    ExecutionVerdict {
+        transaction_id,
+        outcome: outcome.to_owned(),
+    }
+}
+
+fn settled_name(
+    settled: &zup_transaction::SettledTransaction,
+    cancelled: bool,
+) -> ExecutionVerdict {
+    let transaction_id = settled.record.transaction_id.as_uuid();
+    let outcome = match settled.outcome {
+        zup_transaction::TransactionOutcome::Committed => "committed",
+        zup_transaction::TransactionOutcome::RolledBack if cancelled => "cancelled",
+        zup_transaction::TransactionOutcome::RolledBack => "rolled_back",
+        zup_transaction::TransactionOutcome::RecoveryRequired => "recovery_required",
+    };
+    verdict(transaction_id, outcome)
+}
+
 fn execute_prepared(
     channel: &mut SessionChannel<'_>,
     prepared: &PreparedPlan,
-) -> Result<String, IpcError> {
-    let lock_key = zup_transaction::InstallationLock::lock_key(&prepared.app_id, "machine");
-    let store = zup_transaction::FilesystemTransactionStore::new(&prepared.state_root);
-    let coordinator = zup_transaction::TransactionCoordinator::new(store);
-    let record = coordinator
-        .begin(
-            prepared.target_plan.app.id.clone(),
-            SelectedScope::Machine,
-            prepared.target_plan.app.version.clone(),
-            prepared.plan.clone(),
-        )
+    fault: WorkerFault,
+) -> Result<ExecutionVerdict, IpcError> {
+    let app_id = zup_core::AppId::new(&prepared.app_id)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-
+    crate::integration::reap_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared._lock,
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    crate::integration::stage_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared._lock,
+        &prepared.payload.generated,
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
         prepared.payload.installer.clone(),
@@ -966,58 +1039,243 @@ fn execute_prepared(
     executor
         .register_plan(&prepared.plan)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    executor.set_transaction_id(record.transaction_id);
+    if fault == WorkerFault::IpcBeforeBegin {
+        return Err(IpcError::Io {
+            path: "<telemetry>".into(),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "injected disconnect"),
+        });
+    }
+    match control_gate(channel.poll_cancel()) {
+        ControlGate::Continue => {}
+        ControlGate::Cancel | ControlGate::Disconnected => return Err(IpcError::Cancelled),
+        ControlGate::FailClosed(error) => return Err(error),
+    }
 
-    let (record, outcome) = coordinator
-        .execute(record, &mut executor)
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&prepared.state_root);
+    let open = zup_transaction::TransactionCoordinator::new(store)
+        .begin(
+            prepared.target_plan.app.id.clone(),
+            SelectedScope::Machine,
+            prepared.target_plan.app.version.clone(),
+            prepared.plan.clone(),
+        )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    channel.send(Message::Progress(ProgressReport {
-        kind: ProgressKind::OperationProgress,
-        detail: "finishing".into(),
-        completed: None,
-        total: None,
-    }))?;
-    let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
-    match outcome {
-        zup_transaction::TransactionOutcome::Committed => {
-            let ledger = ledger_store
-                .publish_committed(&record, SelectedScope::Machine)
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
-
-            if prepared.action != crate::run::LinuxAction::Uninstall {
-                crate::machine::normalize_published_modes(&prepared.state_root, &ledger)
-                    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            }
-            crate::machine::normalize_state_modes(
-                &prepared.state_root,
-                rustix::process::geteuid().as_raw(),
-            )
-            .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            if prepared.action == crate::run::LinuxAction::Upgrade {
-                crate::run::retire_old_generations_for(
-                    &prepared.state_root,
-                    &prepared.target_plan.app.id,
-                    SelectedScope::Machine,
-                    &ledger.version,
-                )
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            }
-            if prepared.action == crate::run::LinuxAction::Uninstall {
-                let _ = zup_transaction::InstallationLock::remove_if_unheld(
-                    &prepared.state_root,
-                    &lock_key,
-                );
-            }
-            Ok("committed".to_owned())
+    executor.set_transaction_id(open.record().transaction_id);
+    let transaction_id = open.record().transaction_id.as_uuid();
+    let gate = match fault {
+        WorkerFault::CancelAfterBegin => ControlGate::Cancel,
+        WorkerFault::IpcAfterBegin => ControlGate::Disconnected,
+        _ => control_gate(channel.poll_cancel()),
+    };
+    let total_files = prepared.file_count as u64;
+    let mut cancelled = matches!(gate, ControlGate::Cancel | ControlGate::Disconnected);
+    let settled = match gate {
+        ControlGate::FailClosed(error) => {
+            return match open.release(&mut executor) {
+                Ok(_) => Err(error),
+                Err(_) => Ok(verdict(transaction_id, "recovery_required")),
+            };
         }
-        zup_transaction::TransactionOutcome::RolledBack => Ok("rolled_back".to_owned()),
-        zup_transaction::TransactionOutcome::RecoveryRequired => Ok("recovery_required".to_owned()),
+        ControlGate::Cancel | ControlGate::Disconnected => match open.release(&mut executor) {
+            Ok(settled) => settled,
+            Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+        },
+        ControlGate::Continue => {
+            let _ = channel.send(Message::Progress(ProgressReport {
+                kind: ProgressKind::OperationStarted,
+                detail: prepared.operation.clone(),
+                completed: None,
+                total: None,
+            }));
+            if fault == WorkerFault::ProgressDuringExecute {
+                channel.fail_next_send = true;
+                let _ = channel.send(Message::Progress(ProgressReport {
+                    kind: ProgressKind::OperationProgress,
+                    detail: prepared.operation.clone(),
+                    completed: Some(0),
+                    total: Some(total_files),
+                }));
+            }
+            let mut gated = GatedExecutor {
+                inner: executor,
+                channel,
+                cancelled: &mut cancelled,
+            };
+            match open.execute(&mut gated) {
+                Ok(settled) => settled,
+                Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+            }
+        }
+    };
+    if settled.outcome != zup_transaction::TransactionOutcome::Committed {
+        if settled.outcome == zup_transaction::TransactionOutcome::RolledBack
+            && let Err(error) = crate::integration::reap_generated(
+                &prepared.state_root,
+                &app_id,
+                SelectedScope::Machine,
+                &prepared._lock,
+            )
+        {
+            tracing::warn!(%error, "generated content remains until the next locked cleanup");
+        }
+        return Ok(settled_name(&settled, cancelled));
+    }
+    if fault == WorkerFault::DisconnectAfterCommit {
+        channel.fail_next_send = true;
+        let _ = channel.send(Message::Progress(ProgressReport {
+            kind: ProgressKind::OperationProgress,
+            detail: prepared.operation.clone(),
+            completed: Some(total_files),
+            total: Some(total_files),
+        }));
+    }
+    if fault == WorkerFault::FailLedgerPublish {
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
+    let record = settled.record;
+    if let Err(error) = crate::integration::reap_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared._lock,
+    ) {
+        tracing::warn!(%error, "committed install left generated content for a later cleanup");
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
+    let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
+    let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
+        Ok(ledger) => ledger,
+        Err(_) => {
+            return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+        }
+    };
+    if finalize_committed(prepared, &ledger).is_err() {
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
+    let _ = channel.send(Message::Progress(ProgressReport {
+        kind: ProgressKind::OperationProgress,
+        detail: prepared.operation.clone(),
+        completed: Some(total_files),
+        total: Some(total_files),
+    }));
+    Ok(verdict(transaction_id, "committed"))
+}
+
+fn finalize_committed(
+    prepared: &PreparedPlan,
+    ledger: &zup_exec::InstallLedger,
+) -> Result<(), IpcError> {
+    if prepared.action != zup_exec::LifecycleAction::Uninstall {
+        crate::machine::normalize_published_modes(&prepared.state_root, ledger)
+            .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    }
+    crate::machine::normalize_state_modes(
+        &prepared.state_root,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    if prepared.action == zup_exec::LifecycleAction::Upgrade {
+        crate::run::retire_old_generations_for(
+            &prepared.state_root,
+            &prepared.target_plan.app.id,
+            SelectedScope::Machine,
+            &ledger.version,
+        )
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    }
+    Ok(())
+}
+
+struct GatedExecutor<'a, 'b> {
+    inner: crate::executor::LinuxFileExecutor,
+    channel: &'a mut SessionChannel<'b>,
+    cancelled: &'a mut bool,
+}
+
+impl GatedExecutor<'_, '_> {
+    fn note(&mut self) -> Result<(), crate::error::ExecError> {
+        match control_gate(self.channel.poll_cancel()) {
+            ControlGate::Continue => Ok(()),
+            ControlGate::Cancel | ControlGate::Disconnected => {
+                *self.cancelled = true;
+                Err(crate::error::ExecError::Cancelled)
+            }
+            ControlGate::FailClosed(error) => {
+                Err(crate::error::ExecError::Worker(error.to_string()))
+            }
+        }
+    }
+}
+
+impl zup_transaction::OperationExecutor for GatedExecutor<'_, '_> {
+    type Error = crate::error::ExecError;
+
+    fn prepare(&mut self, operation: &zup_transaction::TransactionNode) -> Result<(), Self::Error> {
+        self.note()?;
+        self.inner.prepare(operation)
+    }
+
+    fn apply(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+    ) -> Result<zup_transaction::OperationReceipt, Self::Error> {
+        self.note()?;
+        self.inner.apply(operation)
+    }
+
+    fn verify(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.verify(operation, receipt)
+    }
+
+    fn rollback(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), Self::Error> {
+        self.inner.rollback(operation, receipt)
+    }
+
+    fn reconcile(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: Option<&zup_transaction::OperationReceipt>,
+    ) -> Result<zup_transaction::ReconcileResult, Self::Error> {
+        self.inner.reconcile(operation, receipt)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_execution_cancel_is_readable_without_consuming_later_frames() {
+        let (mut client, mut worker) = UnixStream::pair().expect("socket pair");
+        let session = SessionId::new_v7();
+        send_envelope(
+            &mut client,
+            &WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: session,
+                sequence: 0,
+                message: Message::Cancel,
+            },
+        )
+        .expect("send cancel");
+        let mut channel = SessionChannel {
+            stream: &mut worker,
+            session,
+            incoming: SequenceTracker::new(),
+            outgoing: 0,
+            fail_next_send: false,
+        };
+        assert!(channel.poll_cancel().expect("poll"));
+        assert!(!channel.poll_cancel().expect("quiet"));
+    }
 
     #[test]
     fn file_pins_detect_a_swap() {

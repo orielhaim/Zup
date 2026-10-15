@@ -249,7 +249,7 @@ impl Fixture {
         )
         .map_err(|error| format!("lifecycle: {error}"))?;
         let mut manager = self.manager.clone();
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -260,6 +260,9 @@ impl Fixture {
             },
         )
         .map_err(|error| format!("input: {error}"))?;
+        input.observed_transaction = ledger
+            .as_ref()
+            .map(|ledger| ledger.committed_transaction.clone());
         let plan_compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
@@ -270,7 +273,7 @@ impl Fixture {
                 &plan_compiled,
             )
             .map_err(|error| format!("ledger validation: {error}"))?;
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let coordinator = TransactionCoordinator::new(store);
         let record = coordinator
             .begin(
@@ -293,9 +296,10 @@ impl Fixture {
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
-        let (record, outcome) = coordinator
-            .execute(record, &mut executor)
+        let settled = record
+            .execute(&mut executor)
             .map_err(|error| format!("execute: {error}"))?;
+        let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
             TransactionOutcome::Committed => {
                 let ledger = ledgers
@@ -354,7 +358,7 @@ impl Fixture {
                 &compiled,
             )
             .expect("a plan validates");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
             .begin(
                 plan.app.id.clone(),
@@ -363,6 +367,7 @@ impl Fixture {
                 compiled,
             )
             .expect("a journal begins")
+            .preserve()
     }
 
     fn begin_uninstall(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
@@ -378,7 +383,7 @@ impl Fixture {
         )
         .expect("lifecycle plans");
         let mut manager = self.manager.clone();
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -389,6 +394,7 @@ impl Fixture {
             },
         )
         .expect("an input compiles");
+        input.observed_transaction = Some(ledger.committed_transaction.clone());
         let compiled = compile_transaction(&input).expect("a transaction compiles");
         self.ledgers()
             .validate_plan(
@@ -398,7 +404,7 @@ impl Fixture {
                 &compiled,
             )
             .expect("a plan validates");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
             .begin(
                 plan.app.id.clone(),
@@ -407,13 +413,14 @@ impl Fixture {
                 compiled,
             )
             .expect("a journal begins")
+            .preserve()
     }
 
     fn recover(
         &self,
         record: zup_transaction::TransactionRecord,
     ) -> (zup_transaction::TransactionRecord, TransactionOutcome) {
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let mut executor = LinuxFileExecutor::new()
             .with_payload(DirectoryPayloadSource::new(&self.payload))
             .for_machine()
@@ -447,7 +454,7 @@ impl Fixture {
             .map(|node| node.id.clone())
             .collect();
         assert!(!ids.is_empty(), "the plan holds service work");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         store
             .update(&record.transaction_id, &mut |journaled| {
                 journaled.phase = TransactionPhase::Applying;
@@ -899,7 +906,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
         operation.payload = zup_linux::encode_payload(&payload).expect("a payload encodes");
     }
     let compiled = compile_transaction(&input).expect("a transaction compiles");
-    let store = FilesystemTransactionStore::new(&fixture.state);
+    let store = FilesystemTransactionStore::private_at(&fixture.state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(
@@ -922,9 +929,10 @@ fn tampered_unit_bytes_refuse_at_apply() {
         .register_plan(&record.plan)
         .expect("a plan registers");
     executor.set_transaction_id(record.transaction_id);
-    let (_, outcome) = coordinator
-        .execute(record, &mut executor)
-        .expect("execution reaches a stable outcome");
+    let outcome = record
+        .execute(&mut executor)
+        .expect("execution reaches a stable outcome")
+        .outcome;
     assert!(
         !matches!(outcome, TransactionOutcome::Committed),
         "a substituted payload never commits"

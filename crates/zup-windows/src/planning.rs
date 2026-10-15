@@ -65,14 +65,43 @@ pub fn plan_target_lifecycle_with_frontend(
         }
     }
     let ledger = InstallLedgerStore::new(state_root).load(app_id, scope)?;
+    let (snapshot, matches) = observe_target(target, ledger.as_ref())?;
+    let execution = plan_lifecycle(action, target, snapshot.as_ref(), ledger.as_ref(), &matches)?;
+    let input = transaction_input(
+        &execution,
+        target,
+        ledger.as_ref(),
+        scope,
+        state_root,
+        frontend,
+        app_id,
+    )?;
+    compile_transaction(&input)
+        .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))
+}
+
+pub(crate) fn observe_target(
+    target: Option<&TargetPlan>,
+    ledger: Option<&InstallLedger>,
+) -> Result<(Option<zup_exec::HostSnapshot>, BTreeMap<ResourceKey, bool>), WindowsPlanError> {
     let snapshot = target.map(inspect_target).transpose()?;
     let matches = ledger
-        .as_ref()
         .map(inspect_owned_matches)
         .transpose()?
         .unwrap_or_default();
-    let execution = plan_lifecycle(action, target, snapshot.as_ref(), ledger.as_ref(), &matches)?;
+    Ok((snapshot, matches))
+}
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn transaction_input(
+    execution: &zup_exec::ExecutionPlan,
+    target: Option<&TargetPlan>,
+    ledger: Option<&InstallLedger>,
+    scope: SelectedScope,
+    state_root: &Path,
+    frontend: Frontend,
+    app_id: &AppId,
+) -> Result<zup_transaction::TransactionInput, WindowsPlanError> {
     let key_path = format!(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         app_id
@@ -122,9 +151,8 @@ pub fn plan_target_lifecycle_with_frontend(
         key_path,
         uninstall: execution.uninstall,
     };
-    let input = compile_execution_plan(&execution, target, scope, app_id, ledger.as_ref(), apps)?;
-    compile_transaction(&input)
-        .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))
+    let input = compile_execution_plan(execution, target, scope, app_id, ledger, apps)?;
+    Ok(input)
 }
 
 fn apps_state(

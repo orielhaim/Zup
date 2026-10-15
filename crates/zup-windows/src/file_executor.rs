@@ -124,15 +124,32 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
     ) -> Result<(), WindowsFileExecutorError> {
         use zup_transaction::OperationReceipt as Receipt;
         match receipt {
-            Receipt::StageFile { staged_path, .. } => {
+            Receipt::StageFile {
+                staged_path,
+                size,
+                sha256,
+            } => {
                 let path = Path::new(staged_path);
-                if path.exists() {
-                    fs::remove_file(path).map_err(|source| WindowsFileExecutorError::Io {
-                        path: staged_path.clone(),
-                        source,
-                    })?;
+                match fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(source) => {
+                        return Err(WindowsFileExecutorError::Io {
+                            path: staged_path.clone(),
+                            source,
+                        });
+                    }
+                    Ok(_) => {}
                 }
-                Ok(())
+                if file_identity(path)? != Some((*size, digest_of(sha256, staged_path)?)) {
+                    return Err(WindowsFileExecutorError::RollbackDrift {
+                        path: staged_path.clone(),
+                        reason: "staged file changed".into(),
+                    });
+                }
+                fs::remove_file(path).map_err(|source| WindowsFileExecutorError::Io {
+                    path: staged_path.clone(),
+                    source,
+                })
             }
             Receipt::CreateFile {
                 destination,
@@ -148,16 +165,21 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                         reason: "invalid journal digest".into(),
                     }
                 })?;
-                if file_identity(path)? != Some((*installed_size, expected)) {
-                    return Err(WindowsFileExecutorError::RollbackDrift {
-                        path: destination.clone(),
-                        reason: "installed file changed".into(),
-                    });
+                match file_identity(path)? {
+                    None => {}
+                    Some(found) if found == (*installed_size, expected) => {
+                        fs::remove_file(path).map_err(|source| WindowsFileExecutorError::Io {
+                            path: destination.clone(),
+                            source,
+                        })?;
+                    }
+                    _ => {
+                        return Err(WindowsFileExecutorError::RollbackDrift {
+                            path: destination.clone(),
+                            reason: "installed file changed".into(),
+                        });
+                    }
                 }
-                fs::remove_file(path).map_err(|source| WindowsFileExecutorError::Io {
-                    path: destination.clone(),
-                    source,
-                })?;
                 for dir in created_directories.iter().rev() {
                     let _ = fs::remove_dir(dir);
                 }
@@ -185,6 +207,9 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                         reason: "invalid journal digest".into(),
                     }
                 })?;
+                if file_identity(path)? == Some((*previous_size, old_hash)) {
+                    return Ok(());
+                }
                 if file_identity(path)? != Some((*new_size, new_hash))
                     || file_identity(Path::new(backup_path))? != Some((*previous_size, old_hash))
                 {
@@ -193,7 +218,11 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                         reason: "installed file or backup changed".into(),
                     });
                 }
-                move_durable(Path::new(backup_path), path)?;
+                crate::durable::publish_staged(
+                    Path::new(backup_path),
+                    path,
+                    crate::durable::StagedPublication::Replace,
+                )?;
                 Ok(())
             }
             Receipt::RemoveFile {
@@ -203,6 +232,9 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 size,
                 ..
             } => {
+                if file_identity(&host_path(destination))? == Some((*size, *sha256)) {
+                    return Ok(());
+                }
                 if file_identity(&host_path(destination))?.is_some()
                     || file_identity(&host_path(backup_path))? != Some((*size, *sha256))
                 {
@@ -663,7 +695,11 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 reason: "destination appeared before publish".into(),
             });
         }
-        move_durable(&staged, dest)?;
+        crate::durable::publish_staged(
+            &staged,
+            dest,
+            crate::durable::StagedPublication::CreateNew,
+        )?;
 
         let file = fs::File::open(dest).map_err(|source| WindowsFileExecutorError::Io {
             path: dest.display().to_string(),
@@ -739,7 +775,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
 
         let volume = crate::durable::volume_root(dest)?;
         let staged = self.staged_path_for_key(key, &volume);
-        move_durable(&staged, dest)?;
+        crate::durable::publish_staged(&staged, dest, crate::durable::StagedPublication::Replace)?;
 
         let file = fs::File::open(dest).map_err(|source| WindowsFileExecutorError::Io {
             path: dest.display().to_string(),

@@ -3,15 +3,12 @@ use std::process::ExitCode;
 use zup_core::Frontend;
 
 pub fn gui() -> ExitCode {
-    #[cfg(target_os = "linux")]
-    {
-        eprintln!("the graphical installer is not supported on Linux in this phase");
-        ExitCode::from(3)
-    }
-    #[cfg(not(target_os = "linux"))]
     match run_frontend(Frontend::Gui) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            #[cfg(target_os = "linux")]
+            eprintln!("{error}");
+            #[cfg(not(target_os = "linux"))]
             if was_launched_interactively() {
                 show_error(&error.to_string());
             }

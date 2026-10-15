@@ -127,13 +127,20 @@ fn an_image_names_its_own_frontend_and_is_matched_against_the_requested_one(
 }
 
 #[cfg(windows)]
+fn console_plan(root: &Path) -> TargetBuildPlan {
+    let mut build = plan(root);
+    build.installer.frontend = Frontend::Console;
+    build
+}
+
+#[cfg(windows)]
 #[test]
 fn embed_and_open_round_trip_a_real_package() {
     let root = TempDir::new().unwrap();
     let package = root.path().join("package.zup");
     fs::write(
         &package,
-        BundleWriter::encode(&plan(root.path()), &[]).unwrap(),
+        BundleWriter::encode(&console_plan(root.path()), &[]).unwrap(),
     )
     .unwrap();
     let output = root.path().join("Setup.exe");
@@ -150,7 +157,7 @@ fn embedded_package_is_owned_after_the_executable_is_removed() {
     let package = root.path().join("package.zup");
     fs::write(
         &package,
-        BundleWriter::encode(&plan(root.path()), &[]).unwrap(),
+        BundleWriter::encode(&console_plan(root.path()), &[]).unwrap(),
     )
     .unwrap();
     let output = root.path().join("Setup.exe");
@@ -203,7 +210,7 @@ fn self_contained_build_round_trips_matching_target() {
 #[test]
 fn embed_accepts_structure_and_open_rejects_a_tampered_blob() {
     let root = TempDir::new().unwrap();
-    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let mut bytes = BundleWriter::encode(&console_plan(root.path()), &[]).unwrap();
     let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
     bytes[60 + metadata_len] ^= 1;
     let package = root.path().join("package.zup");

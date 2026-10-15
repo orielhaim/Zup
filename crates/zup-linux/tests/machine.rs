@@ -12,6 +12,7 @@ use zup_core::{
     App, AppId, Frontend, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
     RelativePath, ResolvedFile, SelectedScope, Target, TargetBuildPlan, Template, hash_reader,
 };
+use zup_linux::LinuxOutcome;
 use zup_linux::test_support::{
     MachineTestRoots, compose_installer, drive_client_isolated, inert_template, machine_fixture,
     machine_fixture_override, machine_install_dir, machine_maintenance_path, machine_package_bytes,
@@ -19,11 +20,11 @@ use zup_linux::test_support::{
     run_machine_elevated_for_test, run_machine_isolated, run_tool, send_envelope_on,
     serve_worker_isolated, validate_rendezvous_for_test,
 };
-use zup_linux::{LinuxAction, LinuxOutcome};
 use zup_protocol::{
     ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
     privileged_operation,
 };
+use zup_runtime::Operation;
 
 const HANDSHAKE: Duration = Duration::from_secs(30);
 
@@ -43,7 +44,7 @@ fn isolated() -> (tempfile::TempDir, MachineTestRoots) {
 fn commit(
     roots: &MachineTestRoots,
     installer: &Path,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
     what: &str,
 ) {
@@ -59,7 +60,7 @@ fn install_v1(roots: &MachineTestRoots, scratch: &Path) -> PathBuf {
     commit(
         roots,
         &installer,
-        LinuxAction::Apply,
+        Operation::Apply,
         None,
         "a fresh machine install commits: {outcome:?}",
     );
@@ -111,7 +112,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &upgrade,
-        LinuxAction::Apply,
+        Operation::Apply,
         None,
         "a machine upgrade commits: {outcome:?}",
     );
@@ -148,7 +149,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &upgrade,
-        LinuxAction::Repair { force_files: false },
+        Operation::Repair { force_files: false },
         None,
         "missing files come back without force: {outcome:?}",
     );
@@ -164,7 +165,7 @@ fn machine_full_lifecycle() {
     let outcome = run_machine_isolated(
         &upgrade,
         &roots,
-        LinuxAction::Repair { force_files: false },
+        Operation::Repair { force_files: false },
         None,
     );
     assert!(
@@ -174,7 +175,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &upgrade,
-        LinuxAction::Repair { force_files: true },
+        Operation::Repair { force_files: true },
         None,
         "force repair restores damage: {outcome:?}",
     );
@@ -190,7 +191,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &maintenance,
-        LinuxAction::Repair { force_files: false },
+        Operation::Repair { force_files: false },
         None,
         "repair works from trusted maintenance: {outcome:?}",
     );
@@ -198,7 +199,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &maintenance,
-        LinuxAction::Uninstall,
+        Operation::Uninstall,
         None,
         "uninstall commits: {outcome:?}",
     );
@@ -233,7 +234,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
     let outcome = run_machine_isolated(
         &installer,
         &roots,
-        LinuxAction::Install,
+        Operation::Install,
         Some(elsewhere.clone()),
     );
     assert!(
@@ -261,7 +262,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
         let outcome = run_machine_isolated(
             &installer,
             &roots,
-            LinuxAction::Install,
+            Operation::Install,
             Some(hostile.clone()),
         );
         assert!(
@@ -279,7 +280,7 @@ fn machine_install_dir_override_stays_in_the_program_tree() {
     let outcome = run_machine_isolated(
         &strict,
         &roots,
-        LinuxAction::Install,
+        Operation::Install,
         Some(roots.roots.programs.join("Other")),
     );
     assert!(outcome.is_err(), "an unpermitted override refuses");
@@ -437,7 +438,7 @@ fn machine_execute_replay_reaches_no_worker() {
         &mut client,
         session,
         &install_intent(&roots.state, None),
-        &expected_digest(&installer, &roots, LinuxAction::Install),
+        &expected_digest(&installer, &roots, Operation::Install),
         &linux_target(),
     );
     assert!(
@@ -479,7 +480,7 @@ fn machine_cross_session_execute_is_refused() {
     commit(
         &roots_b,
         &installer_v1,
-        LinuxAction::Apply,
+        Operation::Apply,
         None,
         "session B's world installs v1 first: {outcome:?}",
     );
@@ -922,8 +923,9 @@ fn machine_custom_state_root_refuses_before_elevation() {
         installer,
         scope: SelectedScope::Machine,
         state_root: Some(foreign),
-        action: LinuxAction::Install,
+        action: Operation::Install,
         install_dir_override: None,
+        selection: Default::default(),
     });
     let error = outcome.expect_err("a custom machine state root refuses");
     assert!(
@@ -1011,7 +1013,7 @@ fn machine_state_symlink_is_refused() {
     std::fs::create_dir_all(&roots.state).expect("a state root to redirect");
     std::os::unix::fs::symlink(elsewhere.path(), roots.state.join("transactions"))
         .expect("a planted redirect");
-    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Install, None);
     assert!(outcome.is_err(), "a redirected state refuses: {outcome:?}");
     assert_eq!(
         std::fs::read(elsewhere.path().join("owned")).expect("untouched"),
@@ -1029,17 +1031,17 @@ fn machine_interrupted_transaction_recovers_first() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
 
-    let (intent, plan) = plan_for_test(&installer, &roots, LinuxAction::Install, None);
+    let (intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
     let _ = intent;
     let coordinator = zup_transaction::TransactionCoordinator::new(
-        zup_transaction::FilesystemTransactionStore::new(&roots.state),
+        zup_transaction::FilesystemTransactionStore::private_at(&roots.state),
     );
     let app = app_id();
     let version = semver::Version::parse("1.0.0").expect("a version");
-    let record = coordinator
+    coordinator
         .begin(app.clone(), SelectedScope::Machine, version, plan)
-        .expect("a journal begins");
-    drop(record);
+        .expect("a journal begins")
+        .preserve();
     assert!(
         zup_linux::LinuxLedgerStore::new(&roots.state)
             .load(&app, SelectedScope::Machine)
@@ -1051,7 +1053,7 @@ fn machine_interrupted_transaction_recovers_first() {
     commit(
         &roots,
         &installer,
-        LinuxAction::Apply,
+        Operation::Apply,
         None,
         "recovery then apply commits: {outcome:?}",
     );
@@ -1069,7 +1071,7 @@ fn machine_interrupted_transaction_recovers_first() {
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.0.0");
 
-    let store = zup_transaction::FilesystemTransactionStore::new(&roots.state);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&roots.state);
     let mut terminal = 0;
     for entry in std::fs::read_dir(roots.state.join("transactions")).expect("transactions") {
         let entry = entry.expect("an entry");
@@ -1167,7 +1169,7 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     let installer = scratch.path().join("evil-installer");
     compose_installer(Path::new(inert_template()), &installer, &package);
 
-    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Install, None);
     assert!(
         outcome.is_err(),
         "a forbidden destination refuses: {outcome:?}"
@@ -1184,6 +1186,7 @@ fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
         force_files: false,
         install_dir_override: None,
         selected_components: Vec::new(),
+        disabled_components: Vec::new(),
         expected_plan_digest: expected,
         app_id: app_id().to_string(),
         app_version: "1.0.0".to_owned(),
@@ -1193,7 +1196,7 @@ fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
     }
 }
 
-fn expected_digest(installer: &Path, roots: &MachineTestRoots, action: LinuxAction) -> String {
+fn expected_digest(installer: &Path, roots: &MachineTestRoots, action: Operation) -> String {
     let (intent, _) = plan_for_test(installer, roots, action, None);
     intent.expected_plan_digest.expect("the planner binds")
 }
@@ -1253,7 +1256,7 @@ fn machine_destination_symlink_is_refused() {
     std::os::unix::fs::symlink(elsewhere.path().join("target"), &destination)
         .expect("a planted link");
 
-    let outcome = run_machine_isolated(&installer, &roots, LinuxAction::Install, None);
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Install, None);
     assert!(outcome.is_err(), "a planted link refuses: {outcome:?}");
     assert_eq!(
         std::fs::read(elsewhere.path().join("target")).expect("untouched"),
@@ -1322,12 +1325,8 @@ fn machine_override_swap_is_refused() {
     let uid = rustix::process::getuid().as_raw();
 
     let dir_a = roots.roots.programs.join("AppA");
-    let (intent_a, plan_a) = plan_for_test(
-        &installer,
-        &roots,
-        LinuxAction::Install,
-        Some(dir_a.clone()),
-    );
+    let (intent_a, plan_a) =
+        plan_for_test(&installer, &roots, Operation::Install, Some(dir_a.clone()));
     let _ = plan_a;
     let digest_a = intent_a.expected_plan_digest.clone().expect("bound");
 
@@ -1469,7 +1468,7 @@ fn machine_launcher_failures_surface_at_once() {
         let outcome = run_machine_elevated_for_test(
             &installer,
             &production.state,
-            LinuxAction::Install,
+            Operation::Install,
             None,
             &launcher,
         );

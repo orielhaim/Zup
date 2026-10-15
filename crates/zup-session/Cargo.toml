@@ -1,0 +1,30 @@
+[package]
+name = "zup-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared installer session controller for zup"
+
+[dependencies]
+miette.workspace = true
+opener.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+zup-core.workspace = true
+zup-exec.workspace = true
+zup-plan.workspace = true
+zup-platform.workspace = true
+zup-presentation.workspace = true
+zup-preset-host.workspace = true
+zup-preset-ipc.workspace = true
+zup-preset-protocol.workspace = true
+zup-runtime.workspace = true
+zup-transaction.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+zup-bundle.workspace = true

@@ -52,6 +52,16 @@ What a preset is given, once, at launch:
 - `settings()` - `PresetSettings<T>`
 - `assets()` - `ApplicationAssets`
 - `capabilities()` - what the host says it provides
+- `environment()` - the host environment: operating system, architecture, installer
+  target, desktop session (Wayland, X11, native, or none), and whether machine
+  scope can be authorized from this session
+
+The host owns installation semantics: scopes, the suggested install directory,
+whether the location can be changed, components, and operations all arrive in
+the session snapshot. A preset displays them and sends semantic actions; it
+never validates paths, checks authorization, or touches installation storage.
+Use `environment()` only to adapt presentation (wording, layout). A preset that
+needs no platform-specific presentation ignores it entirely.
 
 Use the supplied session. Do not open a second one.
 

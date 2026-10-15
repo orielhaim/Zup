@@ -1,3 +1,4 @@
+#![cfg(windows)]
 //! The dispatch loop.
 //!
 //! This is the whole of a universal artifact's launcher. It:

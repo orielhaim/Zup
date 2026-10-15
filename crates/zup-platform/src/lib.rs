@@ -12,6 +12,7 @@ mod resolve;
 mod source_policy;
 mod target_path;
 mod target_plan;
+mod target_support;
 
 pub use command::CommandSpec;
 pub use document::{DocumentError, publish, publish_new};
@@ -22,6 +23,10 @@ pub use target_path::{TargetPath, TargetPathError};
 pub use target_plan::{
     TargetFile, TargetFileAssociation, TargetLauncher, TargetPathEntry, TargetPlan,
     TargetPlanSummary, TargetPrerequisite, TargetProtocol, TargetService,
+};
+pub use target_support::{
+    SUPPORTED_LINUX_TARGET, is_linux_target, is_supported_target, supported_frontends,
+    supports_dispatcher, supports_frontend, supports_preset, supports_universal_artifact,
 };
 
 pub use zup_core::SelectedScope;

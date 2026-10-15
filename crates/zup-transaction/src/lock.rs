@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::private;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -49,21 +51,25 @@ impl InstallationLock {
         sanitize(scope)
     }
 
+    pub fn try_lock(file: std::fs::File, key: String) -> Result<Option<Self>, LockError> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file, key })),
+            Err(_) => Ok(None),
+        }
+    }
+
     pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, LockError> {
-        std::fs::create_dir_all(state_root).map_err(|source| LockError::Io {
-            path: state_root.display().to_string(),
-            source,
+        let path = lock_path(state_root, key);
+        let directory = lock_dir(state_root)?;
+        let file = private::open_lock(&directory, &format!("{key}.lock")).map_err(|source| {
+            LockError::Io {
+                path: path.display().to_string(),
+                source: match source {
+                    private_fs::Error::Io(source) => source,
+                    other => std::io::Error::other(other),
+                },
+            }
         })?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path(state_root, key))
-            .map_err(|source| LockError::Io {
-                path: state_root.display().to_string(),
-                source,
-            })?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self {
                 file,
@@ -71,25 +77,6 @@ impl InstallationLock {
             })),
             Err(_) => Ok(None),
         }
-    }
-
-    pub fn remove_if_unheld(state_root: &Path, key: &str) -> Result<(), LockError> {
-        let Some(lock) = Self::try_acquire(state_root, key)? else {
-            return Ok(());
-        };
-        let path = lock_path(state_root, key);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(LockError::Io {
-                    path: path.display().to_string(),
-                    source,
-                });
-            }
-        }
-        drop(lock);
-        Ok(())
     }
 
     pub fn key(&self) -> &str {
@@ -103,8 +90,19 @@ impl Drop for InstallationLock {
     }
 }
 
-fn lock_path(state_root: &Path, key: &str) -> std::path::PathBuf {
-    state_root.join(format!("{key}.lock"))
+fn lock_dir(state_root: &Path) -> Result<private_fs::PrivateDir, LockError> {
+    let path = state_root.join("locks");
+    private::ensure_dir(&path).map_err(|source| LockError::Io {
+        path: path.display().to_string(),
+        source: match source {
+            private_fs::Error::Io(source) => source,
+            other => std::io::Error::other(other),
+        },
+    })
+}
+
+fn lock_path(state_root: &Path, key: &str) -> PathBuf {
+    state_root.join("locks").join(format!("{key}.lock"))
 }
 
 fn sanitize(value: &str) -> String {
@@ -181,26 +179,29 @@ mod tests {
         assert!(sanitized.starts_with("zup-install-"));
     }
 
-    /// Cleanup is for the uninstall path, and it must not remove a file a
     #[test]
-    fn a_held_lock_is_not_removed_and_an_unheld_one_is() {
+    fn releasing_a_lock_keeps_the_same_file() {
         let root = tempfile::tempdir().expect("a temp root");
         let key = InstallationLock::lock_key("com.acme.desktop", "user");
-
-        InstallationLock::remove_if_unheld(root.path(), &key).expect("cleanup");
-        assert!(
-            !lock_path(root.path(), &key).exists(),
-            "there was nothing holding it, so the marker goes"
-        );
-
+        let path = lock_path(root.path(), &key);
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
         let held = InstallationLock::try_acquire(root.path(), &key)
             .expect("acquire")
             .expect("held");
-        InstallationLock::remove_if_unheld(root.path(), &key).expect("cleanup");
-        assert!(
-            lock_path(root.path(), &key).exists(),
-            "a lock file a session is holding is not removed underneath it"
-        );
+        #[cfg(unix)]
+        let identity = std::fs::metadata(&path).expect("stat").ino();
         drop(held);
+        assert!(path.exists(), "the lock file stays after release");
+        let again = InstallationLock::try_acquire(root.path(), &key)
+            .expect("acquire")
+            .expect("held again");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").ino(),
+            identity,
+            "a new acquire must lock the same file, not a replacement"
+        );
+        drop(again);
     }
 }

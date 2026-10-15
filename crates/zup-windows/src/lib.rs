@@ -13,7 +13,9 @@
 //! The build engine depends on the first and never on the second: bundles are
 //! embedded with [`build_self_contained_executable`], universal artifacts with
 //! [`compose_universal_executable`], and target plans are validated with
-//! [`resolve_target`] against [`CanonicalWindowsLocations`]. The live machine
+//! [`resolve_target`] against [`CanonicalWindowsLocations`]. Both embedders are
+//! thin adapters over the portable [`zup_compose`] pipeline, which owns the
+//! target-driven composition both hosts share. The live machine
 //! resolver behind [`WindowsInstallLocationResolver`] stays a runtime detail.
 
 #[cfg(windows)]
@@ -22,6 +24,8 @@ mod acquired;
 mod bindings;
 #[cfg(windows)]
 mod bootstrap_fs;
+#[cfg(windows)]
+mod bootstrap_plan;
 mod bundle_packager;
 mod cmdline;
 #[cfg(windows)]
@@ -43,7 +47,13 @@ mod ledger;
 mod locations;
 mod lowering;
 #[cfg(windows)]
+mod machine_authority;
+#[cfg(windows)]
+mod machine_fs;
+#[cfg(windows)]
 mod machine_state;
+#[cfg(windows)]
+mod operation_host;
 #[cfg(windows)]
 mod path_safety;
 #[cfg(windows)]
@@ -55,6 +65,8 @@ mod pipe;
 mod planning;
 #[cfg(windows)]
 mod prerequisites;
+#[cfg(windows)]
+mod preset_stage;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
@@ -94,6 +106,8 @@ pub use acquired::{
 };
 #[cfg(windows)]
 pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
+#[cfg(windows)]
+pub use bootstrap_plan::{BootstrapPlanError, peer_user_state_root};
 pub use bundle_packager::{
     AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
     build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
@@ -110,9 +124,7 @@ pub use content_store::{
     validate_content_store_base, verify_directory_chain,
 };
 #[cfg(windows)]
-pub use durable::{
-    DurableError, copy_new_durable, create_durable, move_durable, volume_root, write_durable,
-};
+pub use durable::{DurableError, copy_new_durable, move_durable, volume_root, write_durable};
 #[cfg(windows)]
 pub use file_executor::{
     CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
@@ -143,9 +155,13 @@ pub use lowering::{
     windows_target_path_identity,
 };
 #[cfg(windows)]
+pub use machine_authority::MachineRoot;
+#[cfg(windows)]
 pub use machine_state::{
-    MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,
+    MachineStateError, default_state_root, plain_path_text, resolve_state_root,
 };
+#[cfg(windows)]
+pub use operation_host::{WindowsContent, WindowsOperationHost};
 #[cfg(windows)]
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,
@@ -167,6 +183,8 @@ pub use prerequisites::{
     runtime_requirements,
 };
 #[cfg(windows)]
+pub use preset_stage::{StagedPreset, stage_session};
+#[cfg(windows)]
 pub use process::{
     ChildProcess, HandOff, LaunchError, LaunchRequest, Launcher, WindowsLauncher, launch,
     quote_argument,
@@ -179,10 +197,7 @@ pub use restart_manager::{
     BlockingProcess, FilePreflight, blocked_reason, mutating_paths, plan_mutating_paths, preflight,
 };
 #[cfg(windows)]
-pub use runtime::{
-    OverlayPolicy, WindowsRuntimeBackend, run_install, run_install_control,
-    run_install_control_with_policy, run_local_install,
-};
+pub use runtime::{OverlayPolicy, WindowsRuntimeBackend};
 #[cfg(windows)]
 pub use scm::ScmError;
 #[cfg(windows)]

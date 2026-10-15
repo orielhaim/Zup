@@ -353,7 +353,7 @@ fn check_linux_lowering(
     let plan = build
         .by_target(&config.target)
         .ok_or_else(|| miette::miette!("no materialized plan for target `{}`", config.target))?;
-    let errors = crate::linux_support::linux_capability_errors(config, plan);
+    let errors = zup_linux::linux_capability_errors(config, plan);
     if !errors.is_empty() {
         return Err(miette::miette!("{}", errors.join("\n")));
     }

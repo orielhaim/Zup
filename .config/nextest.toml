@@ -1,7 +1,21 @@
 [profile.default]
-slow-timeout = { period = "60s" }
 test-threads = 8
 
-[[profile.default.overrides]]
-filter = 'test(/^(frontends|lifecycle|generated_files|preset_session|preset_persistence|artifact_build|build_installer|thin_publish|runtime)::/)'
-slow-timeout = "180s"
+# Tests that need the staged toolchain (`cargo xtask toolchain build`) or a
+# second Cargo invocation. Fast CI uses this profile. Full verification uses
+# the default profile after the toolchain exists.
+[profile.fast]
+test-threads = 8
+default-filter = '''
+not (
+  binary(artifact_build) or binary(build_installer) or binary(thin_publish)
+  or binary(preview) or binary(linux_build) or binary(generated_projects)
+  or package(zup-preview)
+  or (package(zup-installer) and (
+    binary(lifecycle) or binary(frontends) or binary(generated_files)
+    or binary(preset_session) or binary(preset_persistence)
+  ))
+  or (package(zup-linux) and (binary(process) or binary(gui)))
+  or (package(zup-windows) and binary(universal))
+)
+'''

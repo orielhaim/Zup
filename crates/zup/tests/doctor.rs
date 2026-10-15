@@ -44,7 +44,9 @@ const CHECK_KINDS: [&str; 12] = [
 ];
 
 fn zup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_zup"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zup"));
+    command.env_remove("ZUP_TOOLCHAIN");
+    command
 }
 
 /// The frontend every fixture project declares.
@@ -315,7 +317,14 @@ fn healthy_single_target_passes_every_required_check() {
     // say anything about the runtime would be a report about the developer's
     // typing, and the resolver is what a person who installed `zup` depends on.
     let resolved = single_target_project(HOST_TARGET);
-    let output = run_doctor(&resolved.path().join("zup.toml"), &[]);
+    let toolchain = toolchain_fixture::host_toolchain(resolved.path());
+    let output = zup()
+        .env("ZUP_TOOLCHAIN", &toolchain)
+        .args(["doctor", "--manifest"])
+        .arg(resolved.path().join("zup.toml"))
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
     let rows = checks(&output, "default");
     let check = find(&rows, "runtime_template");
     assert_eq!(check["status"], "pass", "{}", message(check));

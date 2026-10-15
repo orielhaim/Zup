@@ -376,16 +376,23 @@ impl Package {
 
     /// Parse and verify owned package bytes.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, PackageError> {
+        let package = Self::from_bytes_unverified(bytes)?;
+        package.verify()?;
+        Ok(package)
+    }
+
+    /// Parse package structure without verifying blob data.
+    ///
+    /// Composition embeds bytes it just encoded; verification happens at open.
+    pub fn from_bytes_unverified(bytes: Vec<u8>) -> Result<Self, PackageError> {
         let len = bytes.len() as u64;
         let mut cursor = Cursor::new(bytes.as_slice());
         let (metadata, index_size) = parse_metadata(&mut cursor, Some(len))?;
-        let package = Self {
+        Ok(Self {
             storage: PackageStorage::Memory(Arc::new(bytes)),
             metadata,
             index_size,
-        };
-        package.verify()?;
-        Ok(package)
+        })
     }
 
     /// Parse the index portion used by a package adapter.

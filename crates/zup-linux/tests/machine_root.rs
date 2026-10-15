@@ -5,12 +5,13 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxAction, LinuxOutcome, SystemPkexec};
+use zup_linux::{LinuxOutcome, SystemPkexec};
 
 use zup_linux::test_support::{
     MachineTestRoots, machine_fixture, machine_maintenance_path, machine_v1_files,
     run_machine_isolated,
 };
+use zup_runtime::Operation;
 
 fn root_only() -> bool {
     if rustix::process::geteuid().as_raw() != 0 {
@@ -125,7 +126,7 @@ fn app_id() -> AppId {
 fn commit(
     roots: &MachineTestRoots,
     installer: &Path,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
     what: &str,
 ) {
@@ -190,7 +191,7 @@ fn root_machine_state_ownership_and_modes() {
     commit(
         &roots,
         &installer,
-        LinuxAction::Install,
+        Operation::Install,
         None,
         "install commits: {outcome:?}",
     );
@@ -198,7 +199,7 @@ fn root_machine_state_ownership_and_modes() {
     for directory in [
         roots.state.clone(),
         roots.state.join("installations"),
-        roots.state.join("generated"),
+        roots.state.join("objects"),
     ] {
         if directory.exists() {
             assert_eq!(uid_of(&directory), 0, "{}", directory.display());
@@ -222,6 +223,7 @@ fn root_machine_state_ownership_and_modes() {
 
     let lock = roots
         .state
+        .join("locks")
         .join("zup-install-com_example_tool-machine.lock");
     if lock.exists() {
         assert_eq!(uid_of(&lock), 0);
@@ -251,7 +253,7 @@ fn root_refuses_user_writable_maintenance() {
     commit(
         &roots,
         &installer,
-        LinuxAction::Install,
+        Operation::Install,
         None,
         "install commits: {outcome:?}",
     );
@@ -263,7 +265,7 @@ fn root_refuses_user_writable_maintenance() {
     let outcome = run_machine_isolated(
         &maintenance,
         &roots,
-        LinuxAction::Repair { force_files: true },
+        Operation::Repair { force_files: true },
         None,
     );
     assert!(
@@ -278,7 +280,7 @@ fn root_refuses_user_writable_maintenance() {
     commit(
         &roots,
         &maintenance,
-        LinuxAction::Repair { force_files: false },
+        Operation::Repair { force_files: false },
         None,
         "trusted maintenance serves again: {outcome:?}",
     );
@@ -295,7 +297,7 @@ fn root_refuses_user_writable_ledger() {
     commit(
         &roots,
         &installer,
-        LinuxAction::Install,
+        Operation::Install,
         None,
         "install commits: {outcome:?}",
     );
@@ -308,7 +310,7 @@ fn root_refuses_user_writable_ledger() {
     let outcome = run_machine_isolated(
         &installer,
         &roots,
-        LinuxAction::Repair { force_files: true },
+        Operation::Repair { force_files: true },
         None,
     );
     assert!(
@@ -331,9 +333,10 @@ fn root_public_run_dispatches_machine_scope() {
         state_root: None,
         action,
         install_dir_override: None,
+        selection: Default::default(),
     };
     let tool = PathBuf::from("/opt/tool/tool");
-    let outcome = zup_linux::run(&request(LinuxAction::Install));
+    let outcome = zup_linux::run(&request(Operation::Install));
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "the public machine run commits without pkexec: {outcome:?}"
@@ -347,7 +350,7 @@ fn root_public_run_dispatches_machine_scope() {
         Path::new("/var/lib/zup").is_dir(),
         "machine state lives in the isolated production namespace"
     );
-    let outcome = zup_linux::run(&request(LinuxAction::Uninstall));
+    let outcome = zup_linux::run(&request(Operation::Uninstall));
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "the public machine run uninstalls: {outcome:?}"

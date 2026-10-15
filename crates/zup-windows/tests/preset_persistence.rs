@@ -103,7 +103,12 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -
     compile_transaction(&input).expect("the plan compiles")
 }
 
-fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
+fn retire_plan_against(
+    state_root: &Path,
+    scope: SelectedScope,
+    ui: &InstalledPreset,
+    observed: Option<String>,
+) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
         let key = ResourceKey::File {
@@ -121,6 +126,7 @@ fn retire_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) ->
             created_directories: Vec::new(),
         });
     }
+    input.observed_transaction = observed;
     compile_transaction(&input).expect("the plan compiles")
 }
 
@@ -131,15 +137,23 @@ fn validate(
     ledger: Option<InstallLedger>,
 ) -> Result<(), String> {
     let store = zup_windows::InstallLedgerStore::new(state_root);
-    std::fs::create_dir_all(state_root.join("installations")).ok();
     match ledger {
         Some(ledger) => {
             let name = store.path_for(&app_id(), scope);
-            std::fs::write(
-                &name,
-                serde_json::to_vec(&ledger).expect("the ledger serializes"),
-            )
-            .expect("the ledger is written");
+            if scope == SelectedScope::User {
+                zup_transaction::publish_private(
+                    &name,
+                    &serde_json::to_vec(&ledger).expect("the ledger serializes"),
+                )
+                .expect("the ledger is written");
+            } else {
+                std::fs::create_dir_all(name.parent().expect("parent")).ok();
+                std::fs::write(
+                    &name,
+                    serde_json::to_vec(&ledger).expect("the ledger serializes"),
+                )
+                .expect("the ledger is written");
+            }
         }
         None => {
             let name = store.path_for(&app_id(), scope);
@@ -237,6 +251,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
         });
     }
     input.preset = Some(second.clone());
+    input.observed_transaction = Some(ledger.committed_transaction.clone());
     let replacing = compile_transaction(&input).expect("the plan compiles");
     validate(
         state_root.path(),
@@ -275,7 +290,9 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
             },
         );
     }
-    let empty = compile_transaction(&TransactionInput::new(target())).expect("an empty plan");
+    let mut input = TransactionInput::new(target());
+    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    let empty = compile_transaction(&input).expect("an empty plan");
     let error = validate(
         state_root.path(),
         SelectedScope::User,
@@ -288,7 +305,12 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
     validate(
         state_root.path(),
         SelectedScope::User,
-        &retire_plan(state_root.path(), SelectedScope::User, &ui),
+        &retire_plan_against(
+            state_root.path(),
+            SelectedScope::User,
+            &ui,
+            Some(ledger.committed_transaction.clone()),
+        ),
         Some(ledger),
     )
     .expect("and a plan that retires it is accepted");
@@ -377,10 +399,9 @@ fn the_persisted_window_is_the_runtime_model() {
 fn a_ledger_of_a_superseded_format_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let store = zup_windows::InstallLedgerStore::new(state_root.path());
-    std::fs::create_dir_all(state_root.path().join("installations")).expect("the directory");
-    std::fs::write(
-        store.path_for(&app_id(), SelectedScope::User),
-        serde_json::to_vec(&serde_json::json!({
+    zup_transaction::publish_private(
+        &store.path_for(&app_id(), SelectedScope::User),
+        &serde_json::to_vec(&serde_json::json!({
             "schema": 1,
             "app_id": "com.zup.test-ui",
             "scope": "user",

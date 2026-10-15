@@ -110,9 +110,10 @@ fn composition(
         .map(|config| config.profile.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    if borrowed.iter().any(|variant| {
-        variant.target().operating_system() == zup_core::TargetOperatingSystem::Linux
-    }) {
+    if borrowed
+        .iter()
+        .any(|variant| !zup_platform::supports_universal_artifact(variant.target()))
+    {
         let linux = loaded
             .selected_targets
             .iter()

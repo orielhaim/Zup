@@ -43,58 +43,53 @@ pub fn write_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
     Ok(())
 }
 
-pub fn create_durable(path: &Path, contents: &[u8]) -> Result<(), DurableError> {
-    let tmp = temp_sibling(path);
-    write_new_file(&tmp, contents)?;
-    if path.symlink_metadata().is_ok() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(DurableError::Win32 {
-            path: path.display().to_string(),
-            message: "destination already exists".into(),
-        });
-    }
-    if let Err(e) = publish_replace(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
-
 pub fn move_durable(from: &Path, to: &Path) -> Result<(), DurableError> {
     publish_replace(from, to)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum StagedPublication {
+    CreateNew,
+    Replace,
+}
+
+pub(crate) fn publish_staged(
+    source: &Path,
+    destination: &Path,
+    policy: StagedPublication,
+) -> Result<(), DurableError> {
+    copy_durable(source, destination, policy)
+}
+
 pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), DurableError> {
+    copy_durable(source, destination, StagedPublication::CreateNew)
+}
+
+fn copy_durable(
+    source: &Path,
+    destination: &Path,
+    policy: StagedPublication,
+) -> Result<(), DurableError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DurableError::Io {
             path: parent.display().to_string(),
             source,
         })?;
     }
-    if destination.exists() {
-        return Err(DurableError::Win32 {
-            path: destination.display().to_string(),
-            message: "destination already exists".into(),
-        });
-    }
-    let name = destination
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-    let temp = destination.with_file_name(format!(".{name}.zup-tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut input = std::fs::File::open(source).map_err(|error| DurableError::Io {
-            path: source.display().to_string(),
-            source: error,
+    let temp = destination.with_file_name(format!(".zup-{}.tmp", uuid::Uuid::new_v4()));
+    let mut input = std::fs::File::open(source).map_err(|error| DurableError::Io {
+        path: source.display().to_string(),
+        source: error,
+    })?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|source| DurableError::Io {
+            path: temp.display().to_string(),
+            source,
         })?;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|source| DurableError::Io {
-                path: temp.display().to_string(),
-                source,
-            })?;
+    let result = (|| {
         std::io::copy(&mut input, &mut output).map_err(|source| DurableError::Io {
             path: temp.display().to_string(),
             source,
@@ -103,16 +98,16 @@ pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), Durable
             path: temp.display().to_string(),
             source,
         })?;
-        if destination.exists() {
-            return Err(DurableError::Win32 {
-                path: destination.display().to_string(),
-                message: "destination already exists".into(),
-            });
+        drop(output);
+        match policy {
+            StagedPublication::CreateNew => publish_new(&temp, destination),
+            StagedPublication::Replace => publish_replace(&temp, destination),
         }
-        publish_new(&temp, destination)
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+    if result.is_err()
+        && let Err(error) = std::fs::remove_file(&temp)
+    {
+        tracing::warn!(path = %temp.display(), %error, "unpublished payload staging cleanup failed");
     }
     result
 }

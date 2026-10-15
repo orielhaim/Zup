@@ -114,7 +114,39 @@ pub struct ExecuteTransaction {
     pub work_root: String,
     pub recovery_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_intent: Option<MachineRecoveryIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<zup_core::ReleaseIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineRecoveryIntent {
+    pub transaction_id: uuid::Uuid,
+    pub app_id: String,
+    pub app_version: String,
+    pub scope: String,
+    pub target: Target,
+}
+
+impl MachineRecoveryIntent {
+    pub fn canonical_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), crate::WireError> {
+        if self.scope != "machine" {
+            return Err(crate::WireError::Malformed(
+                "machine recovery is only for machine scope".into(),
+            ));
+        }
+        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_INTENT_STRING_BYTES;
+        if !bounded(&self.app_id) || !bounded(&self.app_version) || !bounded(&self.scope) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +171,7 @@ pub const MAX_INTENT_COMPONENTS: usize = 64;
 pub mod privileged_operation {
     pub const INSTALL: &str = "install";
     pub const UPGRADE: &str = "upgrade";
+    pub const MODIFY: &str = "modify";
     pub const REPAIR: &str = "repair";
     pub const UNINSTALL: &str = "uninstall";
     pub const APPLY: &str = "apply";
@@ -147,6 +180,7 @@ pub mod privileged_operation {
 pub const PRIVILEGED_OPERATIONS: &[&str] = &[
     privileged_operation::INSTALL,
     privileged_operation::UPGRADE,
+    privileged_operation::MODIFY,
     privileged_operation::REPAIR,
     privileged_operation::UNINSTALL,
     privileged_operation::APPLY,
@@ -160,6 +194,8 @@ pub struct PrepareOperation {
     pub install_dir_override: Option<String>,
     #[serde(default)]
     pub selected_components: Vec<String>,
+    #[serde(default)]
+    pub disabled_components: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_plan_digest: Option<String>,
     pub app_id: String,
@@ -206,7 +242,17 @@ impl PrepareOperation {
                 max: MAX_INTENT_COMPONENTS,
             });
         }
+        if self.disabled_components.len() > MAX_INTENT_COMPONENTS {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_COMPONENTS,
+            });
+        }
         if self.selected_components.iter().any(|name| !bounded(name)) {
+            return Err(crate::WireError::FrameTooLarge {
+                max: MAX_INTENT_STRING_BYTES,
+            });
+        }
+        if self.disabled_components.iter().any(|name| !bounded(name)) {
             return Err(crate::WireError::FrameTooLarge {
                 max: MAX_INTENT_STRING_BYTES,
             });

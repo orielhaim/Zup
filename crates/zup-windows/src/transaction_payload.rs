@@ -471,6 +471,7 @@ pub(crate) fn compile_execution_plan(
         ));
     }
     let mut input = TransactionInput::new(target_triple);
+    input.observed_transaction = ledger.map(|ledger| ledger.committed_transaction.clone());
     input.selected_components = execution.selected_components.clone();
     input.install_directory = target
         .map(|target| target.install_directory.clone())

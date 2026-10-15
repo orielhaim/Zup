@@ -16,9 +16,12 @@ use zup_core::{
 use zup_protocol::{SessionId, WireEnvelope};
 
 use crate::error::{ExecError, IpcError};
+use crate::lifecycle::LinuxOutcome;
 use crate::locations::MachineRoots;
-use crate::run::{LinuxAction, LinuxOutcome, LinuxRunRequest, run};
+use crate::run::{LinuxRunRequest, run};
 use crate::systemd::{SystemdManager, UnitChange, UnitInfo};
+pub use crate::worker::WorkerFault;
+use zup_runtime::Operation;
 
 #[derive(Debug, Clone)]
 pub struct MachineTestRoots {
@@ -53,10 +56,31 @@ impl MachineTestRoots {
     }
 }
 
+pub fn run_machine_faulted(
+    installer: &Path,
+    test_roots: &MachineTestRoots,
+    action: Operation,
+    fault: crate::worker::WorkerFault,
+) -> Result<LinuxOutcome, ExecError> {
+    crate::elevate::run_machine_loopback_faulted(
+        &LinuxRunRequest {
+            installer: installer.to_path_buf(),
+            scope: zup_core::SelectedScope::Machine,
+            state_root: Some(test_roots.state.clone()),
+            action,
+            install_dir_override: None,
+            selection: Default::default(),
+        },
+        &test_roots.roots,
+        &test_roots.systemd,
+        fault,
+    )
+}
+
 pub fn run_machine_isolated(
     installer: &Path,
     test_roots: &MachineTestRoots,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
 ) -> Result<LinuxOutcome, ExecError> {
     crate::elevate::run_machine_loopback_for_test(
@@ -66,6 +90,7 @@ pub fn run_machine_isolated(
             state_root: Some(test_roots.state.clone()),
             action,
             install_dir_override,
+            selection: Default::default(),
         },
         &test_roots.roots,
         &test_roots.systemd,
@@ -90,6 +115,7 @@ pub fn serve_worker_isolated(
             session,
             worker_exe: worker_exe.to_path_buf(),
             carrier_pin: None,
+            fault: crate::worker::WorkerFault::None,
         },
     )
 }
@@ -100,14 +126,22 @@ pub fn drive_client_isolated(
     intent: &zup_protocol::PrepareOperation,
     expected_digest: &str,
     expected_target: &zup_core::Target,
-) -> Result<crate::run::LinuxOutcome, crate::error::ExecError> {
-    crate::elevate::drive_client(stream, session, intent, expected_digest, expected_target)
+) -> Result<crate::lifecycle::LinuxOutcome, crate::error::ExecError> {
+    crate::elevate::drive_client(
+        stream,
+        session,
+        intent,
+        expected_digest,
+        expected_target,
+        None,
+        None,
+    )
 }
 
 pub fn plan_for_test(
     installer: &Path,
     test_roots: &MachineTestRoots,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
 ) -> (
     zup_protocol::PrepareOperation,
@@ -119,6 +153,7 @@ pub fn plan_for_test(
         state_root: Some(test_roots.state.clone()),
         action,
         install_dir_override,
+        selection: Default::default(),
     };
     let (intent, expected) = crate::elevate::plan_expected(
         &request,
@@ -141,7 +176,7 @@ pub fn validate_rendezvous_for_test(
 pub fn run_machine_elevated_for_test(
     installer: &Path,
     state: &Path,
-    action: LinuxAction,
+    action: Operation,
     install_dir_override: Option<PathBuf>,
     launcher: &impl crate::pkexec::PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
@@ -152,6 +187,7 @@ pub fn run_machine_elevated_for_test(
             state_root: Some(state.to_path_buf()),
             action,
             install_dir_override,
+            selection: Default::default(),
         },
         launcher,
     )
@@ -841,7 +877,41 @@ pub fn package_bytes_for(
     version: &str,
     files: &[FixtureFile],
 ) -> Vec<u8> {
-    package_bytes_full(scratch, target, version, files, &[], &[], &[], &[])
+    package_bytes_full(
+        scratch,
+        target,
+        version,
+        files,
+        Frontend::Console,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+}
+
+pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
+    let target = Target::parse("linux-x64").expect("a Linux target");
+    package_bytes_full(
+        scratch,
+        &target,
+        version,
+        files,
+        Frontend::Gui,
+        Some(zup_core::PresetRuntime {
+            name: zup_core::NonEmptyString::new("tool-preset").expect("a name"),
+            version: semver::Version::parse(version).expect("a version"),
+            protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+            required_capabilities: Vec::new(),
+            settings: serde_json::json!({}),
+            assets: Vec::new(),
+        }),
+        &[],
+        &[],
+        &[],
+        &[],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -850,6 +920,8 @@ pub fn package_bytes_full(
     target: &Target,
     version: &str,
     files: &[FixtureFile],
+    frontend: Frontend,
+    preset: Option<zup_core::PresetRuntime>,
     launchers: &[Launcher],
     protocols: &[Protocol],
     associations: &[FileAssociation],
@@ -898,7 +970,7 @@ pub fn package_bytes_full(
     let total_size = resolved.iter().map(|file| file.size).sum();
     let plan = TargetBuildPlan {
         installer: Installer {
-            preset: None,
+            preset,
             app: App {
                 id: AppId::new("com.example.tool").expect("an id"),
                 name: NonEmptyString::new("Tool").expect("a name"),
@@ -908,7 +980,7 @@ pub fn package_bytes_full(
                 description: None,
             },
             target,
-            frontend: Frontend::Console,
+            frontend,
             updates: None,
             install: Install {
                 scope: InstallScope::User,
@@ -977,6 +1049,8 @@ pub fn compose_integration_fixture(
         &target,
         version,
         files,
+        Frontend::Console,
+        None,
         launchers,
         protocols,
         associations,
@@ -1095,13 +1169,14 @@ pub fn genuine_template(frontend: &str) -> PathBuf {
     found.pop().expect("a template")
 }
 
-pub fn run_installer(installer: &Path, state: &Path, action: LinuxAction) -> LinuxOutcome {
+pub fn run_installer(installer: &Path, state: &Path, action: Operation) -> LinuxOutcome {
     run(&LinuxRunRequest {
         installer: installer.to_path_buf(),
         scope: SelectedScope::User,
         state_root: Some(state.to_path_buf()),
         action,
         install_dir_override: None,
+        selection: Default::default(),
     })
     .expect("the run reaches a stable outcome")
 }
@@ -1118,6 +1193,27 @@ pub fn run_installer_process(
     command.env_clear();
     for (name, value) in user.child_env() {
         command.env(name, value);
+    }
+
+    command.env("PATH", "/usr/bin:/bin");
+    command.output().expect("the installer process runs")
+}
+
+pub fn run_gui_installer_process(
+    installer: &Path,
+    user: &IsolatedUser,
+    args: &[&str],
+    with_display: bool,
+) -> std::process::Output {
+    let mut command = Command::new(installer);
+    command.args(args);
+
+    command.env_clear();
+    for (name, value) in user.child_env() {
+        command.env(name, value);
+    }
+    if with_display {
+        command.env("DISPLAY", "test-display");
     }
 
     command.env("PATH", "/usr/bin:/bin");

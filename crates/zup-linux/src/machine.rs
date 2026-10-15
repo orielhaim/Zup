@@ -555,7 +555,7 @@ pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(),
             continue;
         }
         match (name.as_str(), stat.kind) {
-            ("transactions", crate::fs::EntryKind::Directory) => {
+            ("transactions" | "locks" | "objects", crate::fs::EntryKind::Directory) => {
                 owned.chmod_child(
                     &name,
                     rustix::fs::Mode::from_bits_truncate(MACHINE_PRIVATE_DIR_MODE),
@@ -574,7 +574,7 @@ pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(),
                     expected_uid,
                 )?
             }
-            ("installations" | "generated", crate::fs::EntryKind::Directory) => {
+            ("installations", crate::fs::EntryKind::Directory) => {
                 owned.chmod_child(
                     &name,
                     rustix::fs::Mode::from_bits_truncate(MACHINE_STATE_DIR_MODE),

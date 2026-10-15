@@ -339,7 +339,7 @@ impl RealWorld {
             &owned_matches,
         )
         .map_err(|error| format!("lifecycle: {error}"))?;
-        let input = compile_machine_execution_plan(
+        let mut input = compile_machine_execution_plan(
             &execution,
             plan,
             ServiceCompilation {
@@ -350,6 +350,9 @@ impl RealWorld {
             },
         )
         .map_err(|error| format!("input: {error}"))?;
+        input.observed_transaction = ledger
+            .as_ref()
+            .map(|ledger| ledger.committed_transaction.clone());
         let compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
@@ -360,7 +363,7 @@ impl RealWorld {
                 &compiled,
             )
             .map_err(|error| format!("ledger validation: {error}"))?;
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let coordinator = TransactionCoordinator::new(store);
         let record = coordinator
             .begin(
@@ -380,9 +383,10 @@ impl RealWorld {
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
-        let (record, outcome) = coordinator
-            .execute(record, &mut executor)
+        let settled = record
+            .execute(&mut executor)
             .map_err(|error| format!("execute: {error}"))?;
+        let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
             TransactionOutcome::Committed => {
                 ledgers

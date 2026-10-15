@@ -294,14 +294,19 @@ fn a_public_build_installs_runs_and_uninstalls() {
     assert!(ledger.is_none(), "the ledger is removed");
 }
 
-/// A GUI frontend is refused before any artifact work, naming the frontend.
+/// A GUI frontend checks cleanly: the Linux backend presents the same preset
+/// through the shared session, so a graphical target needs a preset package
+/// with a Linux binary, not a refusal.
 #[test]
-fn a_gui_frontend_is_refused_before_build() {
+fn a_gui_frontend_checks_cleanly_with_a_staged_preset() {
     let project =
         Project::with_manifest(&MANIFEST.replace("frontend = \"console\"", "frontend = \"gui\""));
     let result = project.zup("check", &["--target", "linux"]);
-    assert!(!result.status.success(), "a GUI project was accepted");
-    assert!(stderr(&result).contains("GUI"), "{}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "a GUI project was refused: {}",
+        stderr(&result)
+    );
 }
 
 /// A machine scope checks cleanly: machine installs run through the

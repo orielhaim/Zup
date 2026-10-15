@@ -16,18 +16,16 @@ pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
 
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
-#[cfg(windows)]
-pub const FRONTENDS: &[(&str, &str)] = &[
-    ("gui", "zup-setup-gui"),
-    ("console", "zup-setup-console"),
-    ("headless", "zup-setup-headless"),
-];
-
-#[cfg(not(windows))]
-pub const FRONTENDS: &[(&str, &str)] = &[
-    ("console", "zup-setup-console"),
-    ("headless", "zup-setup-headless"),
-];
+pub fn frontends_for(target: &zup_core::Target) -> Vec<(&'static str, &'static str)> {
+    zup_platform::supported_frontends(target)
+        .iter()
+        .map(|frontend| match frontend {
+            zup_core::Frontend::Gui => ("gui", "zup-setup-gui"),
+            zup_core::Frontend::Console => ("console", "zup-setup-console"),
+            zup_core::Frontend::Headless => ("headless", "zup-setup-headless"),
+        })
+        .collect()
+}
 
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
@@ -73,7 +71,7 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
 
-    for (feature, binary) in FRONTENDS {
+    for (feature, binary) in frontends_for(&zup_core::Target::host()) {
         cargo(
             root,
             &[
@@ -104,7 +102,6 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         )?);
     }
 
-    #[cfg(windows)]
     {
         let preset = build_and_stage_preset(root, &staged, &version, profile)?;
         println!("  preset             {}", component_name(&preset));
@@ -113,7 +110,9 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         let peer = build_and_stage_test_preset(root, &staged, profile)?;
         println!("  preset-peer        {}", component_name(&peer));
         written.push(peer);
-
+    }
+    #[cfg(windows)]
+    {
         build_example_plugin(root)?;
     }
     Ok(written)
@@ -192,7 +191,7 @@ fn build_cross_linux(
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
-    for frontend in ["console", "headless"] {
+    for frontend in ["gui", "console", "headless"] {
         let binary = format!("zup-setup-{frontend}");
         zigbuild(
             root,
@@ -216,6 +215,7 @@ fn build_cross_linux(
         let component = zup_toolchain::ToolchainComponent::Runtime {
             target: *target,
             frontend: match frontend {
+                "gui" => zup_core::Frontend::Gui,
                 "console" => zup_core::Frontend::Console,
                 _ => zup_core::Frontend::Headless,
             },
@@ -278,9 +278,10 @@ fn build_cross_windows(
             zup_toolchain::ToolchainComponent::Dispatcher { .. } => {}
             zup_toolchain::ToolchainComponent::Preset => {
                 println!(
-                    "  preset             skipped: a preset package executes its binaries to \
-                     describe itself, so stage it on Windows or install a release's toolchain \
-                     with `zup toolchain install <dir>`"
+                    "  preset             skipped: a preset package executes a native binary to \
+                     describe itself. Pack it on the target host (`zup preset pack --build \
+                     <target>`), or pack binaries built elsewhere with `--describe-file \
+                     <document>` from a native `--zup-describe` run"
                 );
             }
         }
@@ -343,7 +344,6 @@ fn build_example_plugin(root: &Path) -> Result<(), String> {
     )
 }
 
-#[cfg(windows)]
 fn build_and_stage_test_preset(
     root: &Path,
     staged: &Path,
@@ -370,7 +370,6 @@ fn build_and_stage_test_preset(
     Ok(destination)
 }
 
-#[cfg(windows)]
 fn build_and_stage_preset(
     root: &Path,
     staged: &Path,
@@ -379,35 +378,165 @@ fn build_and_stage_preset(
 ) -> Result<PathBuf, String> {
     let scratch = tempfile::tempdir_in(staged)
         .map_err(|error| format!("a scratch directory in {}: {error}", staged.display()))?;
-    let package = scratch.path().join(zup_toolchain::PRESET_PACKAGE_NAME);
+    let host = zup_core::Target::host();
+    let binary_name = "zup-preset-default";
     cargo(
         root,
         &[
-            "run",
+            "build",
             "-p",
-            CLI_PACKAGE,
+            PRESET_PACKAGE,
+            "--bin",
+            binary_name,
+            "--target",
+            host.rust_triple(),
             "--profile",
             profile,
-            "--",
-            "preset",
-            "pack",
-            "--manifest",
-            &root.join(PRESET_DIRECTORY).to_string_lossy(),
-            "--build",
-            zup_core::Target::host().as_str(),
-            "--profile",
-            profile,
-            "--output",
-            &package.to_string_lossy(),
-            "--force",
         ],
     )?;
+    let built = root
+        .join("target")
+        .join(host.rust_triple())
+        .join(output_directory(profile))
+        .join(format!("{binary_name}{}", host.executable_suffix()));
+    if !built.is_file() {
+        return Err(format!("the preset build wrote no `{}`", built.display()));
+    }
+    let describe = scratch.path().join("describe.json");
+    let document = Command::new(&built)
+        .arg("--zup-describe")
+        .output()
+        .map_err(|error| format!("describe the preset: {error}"))?;
+    if !document.status.success() {
+        return Err(format!(
+            "the preset's describe mode failed: {}",
+            String::from_utf8_lossy(&document.stderr).trim()
+        ));
+    }
+    std::fs::write(&describe, &document.stdout)
+        .map_err(|error| format!("{}: {error}", describe.display()))?;
+    let mut packaged = built.clone();
+    if !cfg!(windows) {
+        let stripped = scratch.path().join(format!(
+            "{binary_name}-stripped{}",
+            host.executable_suffix()
+        ));
+        std::fs::copy(&built, &stripped)
+            .map_err(|error| format!("{}: {error}", stripped.display()))?;
+        match Command::new("strip").arg(&stripped).status() {
+            Ok(status) if status.success() => packaged = stripped,
+            _ => println!(
+                "  preset             no `strip` for debug symbols; staging the unstripped binary"
+            ),
+        }
+    }
+    let mut binaries = vec![(host.as_str().to_owned(), packaged.clone())];
+    binaries.extend(retained_preset_binaries(
+        staged,
+        host,
+        &document.stdout,
+        scratch.path(),
+    )?);
+    let package = scratch.path().join(zup_toolchain::PRESET_PACKAGE_NAME);
+    let mut pack = vec![
+        "run".to_owned(),
+        "-p".to_owned(),
+        CLI_PACKAGE.to_owned(),
+        "--profile".to_owned(),
+        profile.to_owned(),
+        "--".to_owned(),
+        "preset".to_owned(),
+        "pack".to_owned(),
+        "--manifest".to_owned(),
+        root.join(PRESET_DIRECTORY).to_string_lossy().into_owned(),
+    ];
+    for (target, path) in &binaries {
+        pack.push("--binary".to_owned());
+        pack.push(format!("{target}={}", path.to_string_lossy()));
+    }
+    pack.extend([
+        "--describe-file".to_owned(),
+        describe.to_string_lossy().into_owned(),
+        "--output".to_owned(),
+        package.to_string_lossy().into_owned(),
+        "--force".to_owned(),
+    ]);
+    cargo(root, &pack.iter().map(String::as_str).collect::<Vec<_>>())?;
     stage_component(
         &package,
         staged,
         &zup_toolchain::ToolchainComponent::Preset,
         version,
     )
+}
+
+fn retained_preset_binaries(
+    staged: &Path,
+    host: zup_core::Target,
+    document: &[u8],
+    scratch: &Path,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let staged_package = staged.join(zup_toolchain::PRESET_PACKAGE_NAME);
+    let bytes = match std::fs::read(&staged_package) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", staged_package.display())),
+    };
+    let view = match zup_artifact::preset::PresetPackageView::open(bytes) {
+        Ok(view) => match view.verify() {
+            Ok(()) => view,
+            Err(error) => {
+                println!(
+                    "  preset             the staged preset does not verify, so only this host's binary is packed: {error}"
+                );
+                return Ok(Vec::new());
+            }
+        },
+        Err(error) => {
+            println!(
+                "  preset             the staged preset does not open, so only this host's binary is packed: {error}"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    let described: serde_json::Value = serde_json::from_slice(document)
+        .map_err(|error| format!("the describe document is unusable: {error}"))?;
+    if view.name() != described["name"].as_str().unwrap_or_default()
+        || view.version().to_string() != described["version"].as_str().unwrap_or_default()
+        || !view
+            .package()
+            .is_compatible_with(zup_preset_protocol::PRESET_PROTOCOL_VERSION)
+    {
+        println!(
+            "  preset             the staged preset is another version; packing this host's binary only"
+        );
+        return Ok(Vec::new());
+    }
+    let mut retained = Vec::new();
+    for target in view.targets() {
+        if target == host.as_str() {
+            continue;
+        }
+        let parsed = zup_core::Target::parse(target)
+            .map_err(|error| format!("the staged preset names `{target}`: {error}"))?;
+        let bytes = view
+            .binary_for(&parsed)
+            .map_err(|error| format!("the staged preset's `{target}` binary: {error}"))?;
+        let path = scratch.join(format!("retained-{target}"));
+        std::fs::write(&path, &bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+        retained.push((target.to_owned(), path));
+    }
+    if !retained.is_empty() {
+        println!(
+            "  preset             keeping {} from the staged package",
+            retained
+                .iter()
+                .map(|(target, _)| target.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(retained)
 }
 
 #[cfg(windows)]
@@ -699,15 +828,29 @@ mod tests {
         let target = zup_core::Target::parse(SUPPORTED_CROSS_TARGET).expect("a Linux target");
         let wanted: Vec<String> = zup_toolchain::supported_components(&target)
             .iter()
-            .map(|component| zup_toolchain::file_name(component, component_suffix(component)))
+            .filter_map(|component| match component {
+                zup_toolchain::ToolchainComponent::Runtime { .. } => Some(
+                    zup_toolchain::file_name(component, component_suffix(component)),
+                ),
+                zup_toolchain::ToolchainComponent::Preset => None,
+                other => panic!("a Linux target stages no {other:?}"),
+            })
             .collect();
         assert_eq!(
             wanted,
             vec![
+                format!("zup-setup-gui-{SUPPORTED_CROSS_TARGET}"),
                 format!("zup-setup-console-{SUPPORTED_CROSS_TARGET}"),
                 format!("zup-setup-headless-{SUPPORTED_CROSS_TARGET}"),
             ],
-            "console and headless, extensionless, and nothing else"
+            "gui, console and headless, extensionless"
+        );
+        assert!(
+            zup_toolchain::supported_components(&target)
+                .iter()
+                .any(|component| matches!(component, zup_toolchain::ToolchainComponent::Preset)),
+            "the preset package is a component; cross staging skips packing it, it does not \
+             drop it from the contract"
         );
         for name in &wanted {
             assert!(
@@ -725,12 +868,16 @@ mod tests {
             .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
             .collect();
 
-        let mut staged: Vec<String> = FRONTENDS
+        let mut staged: Vec<String> = frontends_for(&target)
             .iter()
             .map(|(feature, _)| {
                 zup_toolchain::file_name(&runtime_component(feature), EXECUTABLE_SUFFIX)
             })
             .collect();
+        staged.push(zup_toolchain::file_name(
+            &zup_toolchain::ToolchainComponent::Preset,
+            EXECUTABLE_SUFFIX,
+        ));
         #[cfg(windows)]
         {
             staged.extend(DISPATCHERS.iter().map(|(feature, _, subsystem)| {
@@ -746,10 +893,6 @@ mod tests {
                     EXECUTABLE_SUFFIX,
                 )
             }));
-            staged.push(zup_toolchain::file_name(
-                &zup_toolchain::ToolchainComponent::Preset,
-                EXECUTABLE_SUFFIX,
-            ));
         }
         staged.sort();
         let mut wanted = wanted;
