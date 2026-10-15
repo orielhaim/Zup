@@ -51,6 +51,13 @@ impl InstallationLock {
         sanitize(scope)
     }
 
+    pub fn try_lock(file: std::fs::File, key: String) -> Result<Option<Self>, LockError> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file, key })),
+            Err(_) => Ok(None),
+        }
+    }
+
     pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, LockError> {
         let path = lock_path(state_root, key);
         let directory = lock_dir(state_root)?;

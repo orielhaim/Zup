@@ -47,6 +47,8 @@ mod ledger;
 mod locations;
 mod lowering;
 #[cfg(windows)]
+mod machine_authority;
+#[cfg(windows)]
 mod machine_state;
 #[cfg(windows)]
 mod operation_host;
@@ -150,6 +152,8 @@ pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
     windows_target_path_identity,
 };
+#[cfg(windows)]
+pub use machine_authority::MachineRoot;
 #[cfg(windows)]
 pub use machine_state::{
     MachineStateError, default_state_root, ensure_state_root, plain_path_text, resolve_state_root,

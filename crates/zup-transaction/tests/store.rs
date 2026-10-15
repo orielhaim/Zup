@@ -15,7 +15,7 @@ use common::sample_plan;
 
 fn store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
-    let s = FilesystemTransactionStore::new(dir.path());
+    let s = FilesystemTransactionStore::private_at(dir.path());
     (dir, s)
 }
 
@@ -72,7 +72,7 @@ struct RendezvousStore {
 impl RendezvousStore {
     fn new(root: &std::path::Path, contenders: usize) -> Self {
         Self {
-            inner: FilesystemTransactionStore::new(root),
+            inner: FilesystemTransactionStore::private_at(root),
             contenders,
             loads: Mutex::new(0),
             arrived: Condvar::new(),
@@ -129,7 +129,7 @@ struct RevisionRaceStore {
 impl RevisionRaceStore {
     fn new(root: &std::path::Path, interloper: OperationId, budget: usize) -> Self {
         Self {
-            inner: FilesystemTransactionStore::new(root),
+            inner: FilesystemTransactionStore::private_at(root),
             interloper,
             budget: AtomicUsize::new(budget),
             conflicts: AtomicUsize::new(0),
@@ -276,7 +276,7 @@ fn concurrent_updaters_on_one_record_both_land() {
         store.conflicts.load(Ordering::SeqCst) >= 1,
         "the two updaters must actually have raced"
     );
-    let final_record = FilesystemTransactionStore::new(dir.path())
+    let final_record = FilesystemTransactionStore::private_at(dir.path())
         .load(&id)
         .unwrap();
     assert_eq!(

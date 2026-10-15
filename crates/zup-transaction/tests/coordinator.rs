@@ -14,13 +14,13 @@ use zup_transaction::{
 
 fn coord() -> (TempDir, TransactionCoordinator<FilesystemTransactionStore>) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     (dir, TransactionCoordinator::new(store))
 }
 
 fn coord_with_store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     (dir, store)
 }
 
@@ -117,7 +117,7 @@ impl RevisionRaceStore {
         let conflicts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         (
             Self {
-                inner: FilesystemTransactionStore::new(root),
+                inner: FilesystemTransactionStore::private_at(root),
                 interloper,
                 budget: std::sync::Mutex::new(budget),
                 conflicts: std::sync::Arc::clone(&conflicts),
@@ -667,7 +667,7 @@ fn releasing_a_prepared_transaction_settles_the_journal() {
     assert_eq!(outcome, TransactionOutcome::RolledBack);
     assert_eq!(settled.phase, TransactionPhase::RolledBack);
     assert!(executor.applied.is_empty(), "release applies no work");
-    let reloaded = FilesystemTransactionStore::new(dir.path())
+    let reloaded = FilesystemTransactionStore::private_at(dir.path())
         .load(&settled.transaction_id)
         .unwrap();
     assert_eq!(reloaded.phase, TransactionPhase::RolledBack);

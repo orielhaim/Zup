@@ -363,13 +363,13 @@ fn publish_object(
     match zup_transaction::publish_full(directory, &name, bytes, private_fs::Publication::CreateNew)
     {
         Ok(()) => Ok(()),
-        Err(error) if !zup_transaction::absent_collision(&error) => Err(error),
+        Err(error) if !zup_transaction::absent_collision(&error) => Err(error.into()),
         Err(error) => match read_object(directory, &name)? {
             Some(existing) if object_matches(&existing, digest, size) => {
                 directory.sync_all()?;
                 Ok(())
             }
-            _ => Err(error),
+            _ => Err(error.into()),
         },
     }
 }

@@ -353,9 +353,12 @@ mod tests {
             protocols: Vec::new(),
             file_associations: Vec::new(),
         };
-        let root = tempfile::TempDir::new().expect("temp dir");
-        let (scope, _) = resolve_scope(&app, Some(&installer), ScopeArg::User, Some(root.path()))
+        let (scope, root) = resolve_scope(&app, Some(&installer), ScopeArg::User, None)
             .expect("a machine-wide application resolves without asking");
+        assert!(
+            root.ends_with("zup"),
+            "machine scope uses the authoritative state root"
+        );
         assert_eq!(scope, SelectedScope::Machine);
     }
 }
@@ -750,7 +753,52 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     );
     let state_root = resolve_state_root(args.state_root, scope)?;
     let id = TransactionId::from_uuid(args.transaction_id);
-    let record = zup_transaction::FilesystemTransactionStore::new(&state_root)
+    if scope == SelectedScope::Machine {
+        let build = embedded.ok_or_else(|| {
+            miette::miette!("machine recovery uses the package embedded in this installer")
+        })?;
+        let plan = zup_transaction::compile_transaction(&zup_transaction::TransactionInput::new(
+            build.installer.target,
+        ))
+        .map_err(|error| miette::miette!("transaction: {error}"))?;
+        let request = RuntimeRequest {
+            target: build.installer.target,
+            app_id: build.installer.app.id.clone(),
+            app_version: build.installer.app.version.clone(),
+            scope,
+            transaction_plan: plan,
+            state_root,
+            work_root: args.work_root.unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("zup-work-{}", args.transaction_id))
+            }),
+            recovery_id: Some(id),
+            release: None,
+            bootstrap: None,
+        };
+        let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
+            args.payload_root.unwrap_or(executable),
+            &request.state_root,
+            scope,
+            id,
+        )
+        .map_err(|error| miette::miette!("payload recovery: {error}"))?;
+        let prepared = PreparedRuntime {
+            request,
+            backend: std::sync::Arc::new(backend),
+            action: LifecycleAction::Repair { force_files: false },
+        };
+        return if OutputFormat::from(args.output) == OutputFormat::Human {
+            execute::execute(prepared)
+        } else {
+            execute::execute_frontend(
+                prepared,
+                OutputFormat::from(args.output),
+                LifecycleAction::Repair { force_files: false },
+            )
+            .map_err(Into::into)
+        };
+    }
+    let record = zup_transaction::FilesystemTransactionStore::private_at(&state_root)
         .load(&id)
         .map_err(|error| miette::miette!("transaction: {error}"))?;
     let stages_files = record

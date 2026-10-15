@@ -347,6 +347,27 @@ pub enum StoreError {
     Publication {
         path: PathBuf,
         #[source]
-        source: private_fs::Error,
+        source: PublishError,
+    },
+}
+
+/// Outcome of an atomic journal write after the filesystem reports it.
+///
+/// `NotPublished` means the namespace was unchanged. `Indeterminate` means the
+/// publication syscall may have become visible, or a later validation failed,
+/// and a fresh verified read plus directory sync could not prove the attempted
+/// bytes are the durable private object.
+#[derive(Debug, Error)]
+pub enum PublishError {
+    #[error("not published: {detail}")]
+    NotPublished {
+        detail: String,
+        kind: Option<std::io::ErrorKind>,
+    },
+
+    #[error("publication indeterminate (may_have_published={may_have_published}): {detail}")]
+    Indeterminate {
+        may_have_published: bool,
+        detail: String,
     },
 }

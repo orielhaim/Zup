@@ -152,7 +152,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
         created_directories: vec![],
     });
     let plan = compile_transaction(&input).unwrap();
-    let store = FilesystemTransactionStore::new(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path());
     let mut record = TransactionRecord::new(
         TransactionId::new_v7(),
         AppId::new("com.zup.crash-removal").unwrap(),

@@ -17,7 +17,7 @@ fn app_id() -> zup_core::AppId {
 }
 
 fn journals(state: &Path) -> Vec<zup_transaction::TransactionRecord> {
-    let store = FilesystemTransactionStore::new(state);
+    let store = FilesystemTransactionStore::private_at(state);
     let directory = state.join("transactions");
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();

@@ -26,13 +26,15 @@ pub use plan::{
     Dependency, NodeKind, NodeMeta, Phase, TRANSACTION_PLAN_SCHEMA, TransactionAudit,
     TransactionNode, TransactionPlan, TransactionPlanError, compile_transaction,
 };
-pub use private::{absent_collision, publish_full, publish_private, read_private};
+pub use private::{
+    absent_collision, ensure_dir as ensure_private_dir, publish_full, publish_private, read_private,
+};
 pub use record::{
-    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,
+    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError, StoreError,
     TransactionPhase, TransactionRecord,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
-pub use storage::{FilesystemTransactionStore, TransactionStore};
+pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};
 pub use storage::{
     MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, MAINTENANCE_RUNTIME_DIRECTORY, STATE_FOLDER,
     is_maintenance_path, maintenance_directory, maintenance_root, maintenance_runtime_path,

@@ -12077,6 +12077,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "typed-path 0.12.3",
  "uuid",
  "xdg",

@@ -91,7 +91,7 @@ fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs() {
     );
     record.phase = zup_transaction::TransactionPhase::Applying;
     let id = record.transaction_id;
-    FilesystemTransactionStore::new(root)
+    FilesystemTransactionStore::private_at(root)
         .create(&record)
         .expect("journal");
 
@@ -296,7 +296,7 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
         semver::Version::new(1, 0, 0),
         plan,
     );
-    FilesystemTransactionStore::new(root)
+    FilesystemTransactionStore::private_at(root)
         .create(&prepared)
         .expect("prepared");
     zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))
@@ -309,7 +309,7 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
     stage(root, "payload", bytes);
     prepared.phase = zup_transaction::TransactionPhase::Applying;
     prepared.transaction_id = zup_transaction::TransactionId::new_v7();
-    FilesystemTransactionStore::new(root)
+    FilesystemTransactionStore::private_at(root)
         .create(&prepared)
         .expect("applying");
     zup_linux::reap_generated(root, &app(), SelectedScope::User, &lock_for(root, &app()))

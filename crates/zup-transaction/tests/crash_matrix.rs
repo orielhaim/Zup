@@ -161,8 +161,9 @@ fn fresh(
     TransactionId,
 ) {
     let dir = TempDir::new().expect("a temp dir");
-    let store = FilesystemTransactionStore::new(dir.path());
-    let coordinator = TransactionCoordinator::new(FilesystemTransactionStore::new(dir.path()));
+    let store = FilesystemTransactionStore::private_at(dir.path());
+    let coordinator =
+        TransactionCoordinator::new(FilesystemTransactionStore::private_at(dir.path()));
     let id = TransactionId::new_v7();
     let record = TransactionRecord::new(
         id,

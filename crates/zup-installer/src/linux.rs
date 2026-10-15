@@ -272,7 +272,7 @@ fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {
         Some(root) => root.clone(),
         None => zup_linux::state_root(scope).map_err(|error| miette::miette!("{error}"))?,
     };
-    let store = zup_transaction::FilesystemTransactionStore::new(&state_root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
     let record = zup_transaction::TransactionStore::load(&store, &id)
         .map_err(|error| miette::miette!("transaction: {error}"))?;
     let executable = std::env::current_exe().map_err(|error| miette::miette!("{error}"))?;

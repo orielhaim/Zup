@@ -363,7 +363,7 @@ impl RealWorld {
                 &compiled,
             )
             .map_err(|error| format!("ledger validation: {error}"))?;
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let coordinator = TransactionCoordinator::new(store);
         let record = coordinator
             .begin(

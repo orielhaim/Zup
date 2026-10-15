@@ -63,20 +63,6 @@ impl LinuxRuntimeBackend {
         let events = &control.events;
         crate::run::refuse_redirected_hierarchy(&request.state_root)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let store = FilesystemTransactionStore::new(&request.state_root);
-        let record = store
-            .load(id)
-            .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        if record.app_id != request.app_id
-            || record.scope != request.scope
-            || record.app_version != request.app_version
-            || record.target != request.target
-            || record.plan != request.transaction_plan
-        {
-            return Err(SessionError::Transaction(
-                "recovery identity mismatch".into(),
-            ));
-        }
         let lock_key =
             InstallationLock::lock_key(request.app_id.as_str(), scope_token(request.scope));
         let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
@@ -91,17 +77,26 @@ impl LinuxRuntimeBackend {
             }
             Err(error) => return Err(SessionError::Transaction(error.to_string())),
         };
+        let store = FilesystemTransactionStore::private_at(&request.state_root);
+        let record = store
+            .load(id)
+            .map_err(|error| SessionError::Transaction(error.to_string()))?;
+        if record.app_id != request.app_id
+            || record.scope != request.scope
+            || record.app_version != request.app_version
+            || record.target != request.target
+            || record.plan != request.transaction_plan
+        {
+            return Err(SessionError::Transaction(
+                "recovery identity mismatch".into(),
+            ));
+        }
         let ledger_store = LinuxLedgerStore::new(&request.state_root);
         match record.phase {
             zup_transaction::TransactionPhase::Committed => {
                 return match ledger_store.publish_committed(&record, request.scope) {
                     Ok(_) => {
-                        let _ = crate::integration::reap_generated(
-                            &request.state_root,
-                            &request.app_id,
-                            request.scope,
-                            &_lock,
-                        );
+                        observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                         Ok(ExecutionReport {
                             outcome: InstallOutcome::Committed,
                             recovery_transaction: None,
@@ -116,12 +111,7 @@ impl LinuxRuntimeBackend {
                 };
             }
             zup_transaction::TransactionPhase::RolledBack => {
-                let _ = crate::integration::reap_generated(
-                    &request.state_root,
-                    &request.app_id,
-                    request.scope,
-                    &_lock,
-                );
+                observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                 return Ok(ExecutionReport {
                     outcome: InstallOutcome::RolledBack,
                     recovery_transaction: None,
@@ -179,12 +169,7 @@ impl LinuxRuntimeBackend {
             Ok((record, TransactionOutcome::Committed)) => {
                 match ledger_store.publish_committed(&record, request.scope) {
                     Ok(_) => {
-                        let _ = crate::integration::reap_generated(
-                            &request.state_root,
-                            &request.app_id,
-                            request.scope,
-                            &_lock,
-                        );
+                        observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                         Ok(ExecutionReport {
                             outcome: InstallOutcome::Committed,
                             recovery_transaction: None,
@@ -199,12 +184,7 @@ impl LinuxRuntimeBackend {
                 }
             }
             Ok((record, TransactionOutcome::RolledBack)) => {
-                let _ = crate::integration::reap_generated(
-                    &request.state_root,
-                    &request.app_id,
-                    request.scope,
-                    &_lock,
-                );
+                observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                 let _ = crate::run::sweep_refresh(&record);
                 Ok(ExecutionReport {
                     outcome: InstallOutcome::RolledBack,
@@ -304,7 +284,7 @@ impl LinuxRuntimeBackend {
         executor
             .register_plan(&request.transaction_plan)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let store = FilesystemTransactionStore::new(&request.state_root);
+        let store = FilesystemTransactionStore::private_at(&request.state_root);
         let open = TransactionCoordinator::new(store)
             .begin(
                 request.app_id.clone(),
@@ -352,12 +332,7 @@ impl LinuxRuntimeBackend {
                         }
                         let _ = ledger;
                     }
-                    let _ = crate::integration::reap_generated(
-                        &request.state_root,
-                        &request.app_id,
-                        request.scope,
-                        &_lock,
-                    );
+                    observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                     Ok(ExecutionReport {
                         outcome: InstallOutcome::Committed,
                         recovery_transaction: None,
@@ -374,12 +349,7 @@ impl LinuxRuntimeBackend {
                 record,
                 outcome: TransactionOutcome::RolledBack,
             }) => {
-                let _ = crate::integration::reap_generated(
-                    &request.state_root,
-                    &request.app_id,
-                    request.scope,
-                    &_lock,
-                );
+                observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                 let _ = crate::run::sweep_refresh(&record);
                 if control.cancellation.is_cancelled() {
                     return Ok(ExecutionReport {
@@ -693,5 +663,19 @@ fn release_cancelled(
             outcome: InstallOutcome::RecoveryRequired,
             recovery_transaction: None,
         }),
+    }
+}
+
+fn observe_reap(
+    state_root: &std::path::Path,
+    app_id: &zup_core::AppId,
+    scope: SelectedScope,
+    lock: &InstallationLock,
+) {
+    if let Err(error) = crate::integration::reap_generated(state_root, app_id, scope, lock) {
+        tracing::warn!(
+            %error,
+            "generated content cleanup will be retried under the installation lock"
+        );
     }
 }

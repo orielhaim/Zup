@@ -273,7 +273,7 @@ impl Fixture {
                 &plan_compiled,
             )
             .map_err(|error| format!("ledger validation: {error}"))?;
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let coordinator = TransactionCoordinator::new(store);
         let record = coordinator
             .begin(
@@ -358,7 +358,7 @@ impl Fixture {
                 &compiled,
             )
             .expect("a plan validates");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
             .begin(
                 plan.app.id.clone(),
@@ -404,7 +404,7 @@ impl Fixture {
                 &compiled,
             )
             .expect("a plan validates");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
             .begin(
                 plan.app.id.clone(),
@@ -420,7 +420,7 @@ impl Fixture {
         &self,
         record: zup_transaction::TransactionRecord,
     ) -> (zup_transaction::TransactionRecord, TransactionOutcome) {
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         let mut executor = LinuxFileExecutor::new()
             .with_payload(DirectoryPayloadSource::new(&self.payload))
             .for_machine()
@@ -454,7 +454,7 @@ impl Fixture {
             .map(|node| node.id.clone())
             .collect();
         assert!(!ids.is_empty(), "the plan holds service work");
-        let store = FilesystemTransactionStore::new(&self.state);
+        let store = FilesystemTransactionStore::private_at(&self.state);
         store
             .update(&record.transaction_id, &mut |journaled| {
                 journaled.phase = TransactionPhase::Applying;
@@ -906,7 +906,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
         operation.payload = zup_linux::encode_payload(&payload).expect("a payload encodes");
     }
     let compiled = compile_transaction(&input).expect("a transaction compiles");
-    let store = FilesystemTransactionStore::new(&fixture.state);
+    let store = FilesystemTransactionStore::private_at(&fixture.state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
         .begin(

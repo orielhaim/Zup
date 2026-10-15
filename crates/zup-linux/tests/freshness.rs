@@ -77,7 +77,7 @@ fn a_held_lock_blocks_repair_and_a_later_plan_is_checked_again() {
     let state = scratch.path().join("state");
     std::fs::create_dir_all(&state).expect("state");
     let pending = plan();
-    let open = TransactionCoordinator::new(FilesystemTransactionStore::new(&state))
+    let open = TransactionCoordinator::new(FilesystemTransactionStore::private_at(&state))
         .begin(
             app_id(),
             SelectedScope::User,
@@ -85,7 +85,7 @@ fn a_held_lock_blocks_repair_and_a_later_plan_is_checked_again() {
             pending.clone(),
         )
         .expect("journal");
-    let journal = FilesystemTransactionStore::new(&state)
+    let journal = FilesystemTransactionStore::private_at(&state)
         .load(&open.record().transaction_id)
         .expect("journal reads");
     drop(open);
@@ -115,7 +115,7 @@ fn a_held_lock_blocks_repair_and_a_later_plan_is_checked_again() {
         "contention is busy, not a stale execution: {:?}",
         report.outcome
     );
-    let still = FilesystemTransactionStore::new(&state)
+    let still = FilesystemTransactionStore::private_at(&state)
         .load(&journal.transaction_id)
         .expect("the journal was not repaired while the lock was held");
     assert_eq!(still.phase, journal.phase);

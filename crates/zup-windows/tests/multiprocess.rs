@@ -134,7 +134,7 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
     let payload_overlay_root = payload_overlay_root.as_deref();
     let plan = if let Some(id) = recovery_id {
         use zup_transaction::TransactionStore;
-        zup_transaction::FilesystemTransactionStore::new(state_root)
+        zup_transaction::FilesystemTransactionStore::private_at(state_root)
             .load(&zup_transaction::TransactionId::from_uuid(id))
             .expect("recovery journal")
             .plan

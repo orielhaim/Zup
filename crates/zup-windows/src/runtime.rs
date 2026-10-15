@@ -121,7 +121,10 @@ impl WindowsRuntimeBackend {
         scope: SelectedScope,
         transaction_id: TransactionId,
     ) -> Result<Self, String> {
-        let record = FilesystemTransactionStore::new(state_root)
+        if scope == SelectedScope::Machine {
+            return Self::from_path(payload_root, None).map_err(|error| error.to_string());
+        }
+        let record = FilesystemTransactionStore::private_at(state_root)
             .load(&transaction_id)
             .map_err(|error| error.to_string())?;
         let identity = PayloadOverlayIdentity::from_transaction(
@@ -734,7 +737,8 @@ impl WindowsRuntimeBackend {
             }
         }
 
-        let needs_authorization = request.transaction_plan.requires_authorization();
+        let needs_authorization = request.scope == SelectedScope::Machine
+            || request.transaction_plan.requires_authorization();
         let already_authorized = if needs_authorization {
             Some(
                 crate::is_process_elevated()
@@ -881,8 +885,11 @@ async fn run_elevated_worker(
     let mut server =
         crate::PipeServer::create(&pipe).map_err(|e| SessionError::Protocol(e.to_string()))?;
 
-    let plan = if let Some(id) = request.recovery_id {
-        let record = FilesystemTransactionStore::new(&request.state_root)
+    let machine_recovery = request.scope == SelectedScope::Machine && request.recovery_id.is_some();
+    let plan = if machine_recovery {
+        request.transaction_plan.clone()
+    } else if let Some(id) = request.recovery_id {
+        let record = FilesystemTransactionStore::private_at(&request.state_root)
             .load(&id)
             .map_err(|e| SessionError::Transaction(e.to_string()))?;
         if record.app_id != request.app_id
@@ -925,7 +932,8 @@ async fn run_elevated_worker(
     } else {
         request.transaction_plan.clone()
     };
-    let has_lifecycle = plan.uninstall
+    let has_lifecycle = machine_recovery
+        || plan.uninstall
         || !plan.retired_keys.is_empty()
         || plan.nodes.iter().any(|node| {
             matches!(
@@ -936,20 +944,32 @@ async fn run_elevated_worker(
                 }
             )
         });
-    let has_backend = plan.nodes.iter().any(|node| {
-        matches!(
-            node.kind,
-            zup_transaction::NodeKind::BackendOperation { .. }
-                | zup_transaction::NodeKind::BackendRemoval { .. }
-        )
-    });
+    let has_backend = machine_recovery
+        || plan.nodes.iter().any(|node| {
+            matches!(
+                node.kind,
+                zup_transaction::NodeKind::BackendOperation { .. }
+                    | zup_transaction::NodeKind::BackendRemoval { .. }
+            )
+        });
     if plan.target != request.target {
         return Err(SessionError::PlanInvalid(
             "transaction plan target does not match runtime request".into(),
         ));
     }
-    let plan_json =
-        serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?;
+    let plan_json = if machine_recovery {
+        serde_json::json!({
+            "kind": crate::worker_rt::MACHINE_RECOVERY_INTENT,
+            "transaction_id": request.recovery_id.map(|id| id.to_string()),
+            "app_id": request.app_id.to_string(),
+            "app_version": request.app_version.to_string(),
+            "scope": "machine",
+            "target": request.target,
+        })
+        .to_string()
+    } else {
+        serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?
+    };
     let total_work = transaction_work_total(&plan);
     let _ = events.send(RuntimeEvent::Progress {
         completed: 0,
@@ -1136,7 +1156,10 @@ fn validate_runtime_request(
     let Some(id) = request.recovery_id else {
         return validate_request(request, backend);
     };
-    let record = FilesystemTransactionStore::new(&request.state_root)
+    if request.scope == SelectedScope::Machine {
+        return Ok(());
+    }
+    let record = FilesystemTransactionStore::private_at(&request.state_root)
         .load(&id)
         .map_err(|error| SessionError::Transaction(error.to_string()))?;
     if record.app_id != request.app_id
@@ -1291,27 +1314,50 @@ fn execute_local_blocking_with_events_inner(
             SelectedScope::Machine => "machine",
         },
     );
-    let _lock = match InstallationLock::try_acquire(&request.state_root, &lock_key) {
+    let machine = if request.scope == SelectedScope::Machine {
+        match crate::machine_authority::MachineRoot::acquire() {
+            Ok(machine) => Some(machine),
+            Err(error) => return InstallOutcome::Failed(error.to_string()),
+        }
+    } else {
+        None
+    };
+    let state_root = machine
+        .as_ref()
+        .map(|machine| machine.path().to_path_buf())
+        .unwrap_or_else(|| request.state_root.clone());
+    let lock_result = match &machine {
+        Some(machine) => machine
+            .try_lock(&lock_key)
+            .map_err(|error| error.to_string()),
+        None => {
+            InstallationLock::try_acquire(&state_root, &lock_key).map_err(|error| error.to_string())
+        }
+    };
+    let _lock = match lock_result {
         Ok(Some(lock)) => lock,
-
         Ok(None) => {
             return InstallOutcome::Busy {
                 operation: "another maintenance operation",
             };
         }
-        Err(e) => return InstallOutcome::Failed(e.to_string()),
+        Err(error) => return InstallOutcome::Failed(error),
     };
 
-    let store = FilesystemTransactionStore::new(&request.state_root);
-    let coordinator = TransactionCoordinator::new(store);
+    let store = match &machine {
+        Some(machine) => machine.transaction_store(),
+        None => FilesystemTransactionStore::private_at(&state_root),
+    };
+    let coordinator = TransactionCoordinator::new(store.clone());
     if let Some(id) = request.recovery_id {
-        let record = match FilesystemTransactionStore::new(&request.state_root).load(&id) {
+        let record = match store.load(&id) {
             Ok(record)
                 if record.app_id == request.app_id
                     && record.scope == request.scope
                     && record.app_version == request.app_version
                     && record.target == request.target
-                    && record.plan == request.transaction_plan =>
+                    && (request.scope == SelectedScope::Machine
+                        || record.plan == request.transaction_plan) =>
             {
                 record
             }
@@ -1333,13 +1379,9 @@ fn execute_local_blocking_with_events_inner(
             blocked_paths: crate::plan_mutating_paths(&record.plan, &request.target),
         };
         note_plan_files(&mut executor.inner, &record.plan);
-        return match zup_transaction::recover(
-            record,
-            &FilesystemTransactionStore::new(&request.state_root),
-            &mut executor,
-        ) {
+        return match zup_transaction::recover(record, &store, &mut executor) {
             Ok((record, TransactionOutcome::Committed)) => {
-                match InstallLedgerStore::new(&request.state_root)
+                match InstallLedgerStore::new(&state_root)
                     .repair_committed(&request.app_id, request.scope)
                 {
                     Ok(_) => {
@@ -1354,13 +1396,13 @@ fn execute_local_blocking_with_events_inner(
             Err(error) => InstallOutcome::Failed(error.to_string()),
         };
     }
-    if let Err(e) = InstallLedgerStore::new(&request.state_root)
-        .repair_committed(&request.app_id, request.scope)
+    if let Err(e) =
+        InstallLedgerStore::new(&state_root).repair_committed(&request.app_id, request.scope)
     {
         return InstallOutcome::Failed(e.to_string());
     }
     let plan = request.transaction_plan.clone();
-    if let Err(e) = InstallLedgerStore::new(&request.state_root).validate_plan(
+    if let Err(e) = InstallLedgerStore::new(&state_root).validate_plan(
         &request.app_id,
         request.scope,
         &request.app_version,
@@ -1435,7 +1477,7 @@ fn execute_local_blocking_with_events_inner(
             record,
             outcome: TransactionOutcome::Committed,
         }) => {
-            match InstallLedgerStore::new(&request.state_root).publish_committed(
+            match InstallLedgerStore::new(&state_root).publish_committed(
                 &record,
                 request.scope,
                 record_release(&request),

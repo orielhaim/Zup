@@ -113,7 +113,16 @@ impl InstallLedgerStore {
                 });
             }
         };
-        let journals = FilesystemTransactionStore::new(&self.root);
+        let journals = if scope == SelectedScope::Machine {
+            crate::machine_authority::MachineRoot::acquire()
+                .map_err(|error| LedgerError::Io {
+                    path: self.root.clone(),
+                    source: std::io::Error::other(error),
+                })?
+                .transaction_store()
+        } else {
+            FilesystemTransactionStore::private_at(&self.root)
+        };
         let mut committed = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| LedgerError::Io {
@@ -852,7 +861,7 @@ fn cleanup_application_state(
             });
         }
     };
-    let store = FilesystemTransactionStore::new(root);
+    let store = FilesystemTransactionStore::private_at(root);
     for entry in entries {
         let entry = entry.map_err(|source| LedgerError::Io {
             path: transactions.clone(),

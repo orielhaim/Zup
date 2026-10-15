@@ -1034,7 +1034,7 @@ fn machine_interrupted_transaction_recovers_first() {
     let (intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
     let _ = intent;
     let coordinator = zup_transaction::TransactionCoordinator::new(
-        zup_transaction::FilesystemTransactionStore::new(&roots.state),
+        zup_transaction::FilesystemTransactionStore::private_at(&roots.state),
     );
     let app = app_id();
     let version = semver::Version::parse("1.0.0").expect("a version");
@@ -1071,7 +1071,7 @@ fn machine_interrupted_transaction_recovers_first() {
         .expect("an installation is recorded");
     assert_eq!(ledger.version.to_string(), "1.0.0");
 
-    let store = zup_transaction::FilesystemTransactionStore::new(&roots.state);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&roots.state);
     let mut terminal = 0;
     for entry in std::fs::read_dir(roots.state.join("transactions")).expect("transactions") {
         let entry = entry.expect("an entry");

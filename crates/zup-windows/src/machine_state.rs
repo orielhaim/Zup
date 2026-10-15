@@ -25,7 +25,7 @@ fn ensure_user_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     }
-    private_fs::PrivateDir::ensure(path)
+    zup_transaction::ensure_private_dir(path)
         .map_err(|error| io_error(path, std::io::Error::other(error)))?;
     canonical(path)
 }
@@ -48,17 +48,17 @@ pub fn resolve_state_root(
 ) -> Result<PathBuf, MachineStateError> {
     match explicit {
         Some(path) if scope == SelectedScope::Machine => {
-            if path.exists() || path.is_absolute() {
-                if path.exists() {
-                    ensure_state_root(&path)
-                } else {
-                    Ok(path)
-                }
-            } else {
-                std::env::current_dir()
-                    .map_err(|source| io_error(&path, source))
-                    .map(|directory| directory.join(path))
+            let authoritative = default_state_root(SelectedScope::Machine)?;
+            if path != authoritative {
+                return Err(MachineStateError::Io {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "machine state is the elevated worker's root, never a caller path",
+                    ),
+                });
             }
+            Ok(authoritative)
         }
         Some(path) => ensure_state_root(&path),
         None => default_state_root(scope),

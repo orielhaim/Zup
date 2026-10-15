@@ -441,7 +441,7 @@ impl LinuxLedgerStore {
                 return Err(PathError::io(&(directory), source).into());
             }
         };
-        let journals = zup_transaction::FilesystemTransactionStore::new(&self.root);
+        let journals = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
         let mut committed = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| PathError::io(&(directory.clone()), source))?;
@@ -857,7 +857,7 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
             return Err(PathError::io(&(transactions), source).into());
         }
     };
-    let store = zup_transaction::FilesystemTransactionStore::new(root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(root);
     for entry in entries {
         let entry = entry.map_err(|source| PathError::io(&(transactions.clone()), source))?;
         let Some(id) = entry

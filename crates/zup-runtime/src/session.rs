@@ -148,7 +148,7 @@ pub enum RecoveryStatus {
 }
 
 pub fn discover_recovery(state_root: &Path) -> Vec<RecoveryStatus> {
-    let store = FilesystemTransactionStore::new(state_root);
+    let store = FilesystemTransactionStore::private_at(state_root);
     let mut out = Vec::new();
     let tx_dir = state_root.join("transactions");
     let Ok(entries) = std::fs::read_dir(&tx_dir) else {

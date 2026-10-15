@@ -704,7 +704,7 @@ fn recover_one(
         rustix::process::geteuid().as_raw(),
     )
     .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    let store = zup_transaction::FilesystemTransactionStore::new(state_root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(state_root);
     let record = zup_transaction::TransactionStore::load(
         &store,
         &zup_transaction::TransactionId::from_uuid(id),
@@ -1051,7 +1051,7 @@ fn execute_prepared(
         ControlGate::FailClosed(error) => return Err(error),
     }
 
-    let store = zup_transaction::FilesystemTransactionStore::new(&prepared.state_root);
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&prepared.state_root);
     let open = zup_transaction::TransactionCoordinator::new(store)
         .begin(
             prepared.target_plan.app.id.clone(),
@@ -1108,14 +1108,15 @@ fn execute_prepared(
         }
     };
     if settled.outcome != zup_transaction::TransactionOutcome::Committed {
-        if settled.outcome == zup_transaction::TransactionOutcome::RolledBack {
-            crate::integration::reap_generated(
+        if settled.outcome == zup_transaction::TransactionOutcome::RolledBack
+            && let Err(error) = crate::integration::reap_generated(
                 &prepared.state_root,
                 &app_id,
                 SelectedScope::Machine,
                 &prepared._lock,
             )
-            .map_err(|error| IpcError::Transaction(error.to_string()))?;
+        {
+            tracing::warn!(%error, "generated content remains until the next locked cleanup");
         }
         return Ok(settled_name(&settled, cancelled));
     }
@@ -1132,13 +1133,15 @@ fn execute_prepared(
         return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
     }
     let record = settled.record;
-    crate::integration::reap_generated(
+    if let Err(error) = crate::integration::reap_generated(
         &prepared.state_root,
         &app_id,
         SelectedScope::Machine,
         &prepared._lock,
-    )
-    .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    ) {
+        tracing::warn!(%error, "committed install left generated content for a later cleanup");
+        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    }
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
     let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
         Ok(ledger) => ledger,
