@@ -296,7 +296,13 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
         );
     }
     let lock_key = InstallationLock::lock_key(&app_id_text, "user");
-    assert!(!state.path().join(format!("{lock_key}.lock")).exists());
+    assert!(
+        !state
+            .path()
+            .join("locks")
+            .join(format!("{lock_key}.lock"))
+            .exists()
+    );
 }
 
 /// The plugin payload overlay is a scratch area. A file left there after a

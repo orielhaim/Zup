@@ -116,6 +116,7 @@ xdg = "3"
 
 # Build / filesystem
 atomic-write-file = "0.3"
+private-fs = "0.2.0"
 walkdir = "2"
 directories = "6"
 globset = "0.4"

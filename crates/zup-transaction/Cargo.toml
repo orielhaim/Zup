@@ -7,8 +7,8 @@ repository.workspace = true
 description = "Transaction graph, durable record, and recovery engine for zup"
 
 [dependencies]
-atomic-write-file.workspace = true
 jiff.workspace = true
+private-fs.workspace = true
 miette.workspace = true
 petgraph.workspace = true
 semver.workspace = true
@@ -19,6 +19,9 @@ thiserror.workspace = true
 tracing.workspace = true
 zup-core.workspace = true
 zup-platform.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

@@ -21,6 +21,7 @@ path = "src/bin/test_gui_close_preset.rs"
 required-features = ["test-support"]
 
 [dependencies]
+private-fs.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

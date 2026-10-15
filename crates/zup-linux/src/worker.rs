@@ -714,8 +714,12 @@ fn recover_one(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
-    let generated = crate::integration::generated_for_plan(state_root, &record.plan)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let generated = if crate::integration::phase_keeps_generated(record.phase) {
+        crate::integration::generated_for_plan(state_root, app_id, record.scope, &record.plan)
+            .map_err(|error| IpcError::Transaction(error.to_string()))?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let payload = crate::run::RunnerPayload::from_prepared(
         carrier.package().payload_source(),
         carrier_path.to_path_buf(),
@@ -751,6 +755,8 @@ fn recover_one(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     match outcome {
         zup_transaction::TransactionOutcome::Committed => {
+            crate::integration::reap_generated(state_root, app_id, record.scope)
+                .map_err(|error| IpcError::Transaction(error.to_string()))?;
             let ledger = ledger_store_publish(state_root, &record)?;
 
             if !record.plan.uninstall {
@@ -761,7 +767,11 @@ fn recover_one(
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
             Ok(())
         }
-        zup_transaction::TransactionOutcome::RolledBack => Ok(()),
+        zup_transaction::TransactionOutcome::RolledBack => {
+            crate::integration::reap_generated(state_root, app_id, SelectedScope::Machine)
+                .map_err(|error| IpcError::Transaction(error.to_string()))?;
+            Ok(())
+        }
         zup_transaction::TransactionOutcome::RecoveryRequired => Err(IpcError::Transaction(
             format!("transaction {transaction} requires recovery"),
         )),
@@ -965,6 +975,17 @@ fn execute_prepared(
     fault: WorkerFault,
 ) -> Result<ExecutionVerdict, IpcError> {
     let lock_key = zup_transaction::InstallationLock::lock_key(&prepared.app_id, "machine");
+    let app_id = zup_core::AppId::new(&prepared.app_id)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    crate::integration::reap_generated(&prepared.state_root, &app_id, SelectedScope::Machine)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    crate::integration::stage_generated(
+        &prepared.state_root,
+        &app_id,
+        SelectedScope::Machine,
+        &prepared.payload.generated,
+    )
+    .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
         prepared.payload.installer.clone(),
@@ -1065,6 +1086,14 @@ fn execute_prepared(
         }
     };
     if settled.outcome != zup_transaction::TransactionOutcome::Committed {
+        if settled.outcome == zup_transaction::TransactionOutcome::RolledBack {
+            crate::integration::reap_generated(
+                &prepared.state_root,
+                &app_id,
+                SelectedScope::Machine,
+            )
+            .map_err(|error| IpcError::Transaction(error.to_string()))?;
+        }
         return Ok(settled_name(&settled, cancelled));
     }
     if fault == WorkerFault::DisconnectAfterCommit {
@@ -1080,6 +1109,8 @@ fn execute_prepared(
         return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
     }
     let record = settled.record;
+    crate::integration::reap_generated(&prepared.state_root, &app_id, SelectedScope::Machine)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
     let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
         Ok(ledger) => ledger,

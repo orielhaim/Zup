@@ -312,8 +312,9 @@ fn report_name(outcome: &InstallOutcome) -> String {
 }
 
 fn store_ledger(path: &Path, ledger: &InstallLedger) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("ledger directory");
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(ledger).expect("ledger")).expect("ledger");
+    zup_transaction::write_private_durable(
+        path,
+        &serde_json::to_vec_pretty(ledger).expect("ledger"),
+    )
+    .expect("ledger");
 }

@@ -170,7 +170,13 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
         );
     }
     let lock_key = InstallationLock::lock_key(&app.id, "user");
-    assert!(!state.path().join(format!("{lock_key}.lock")).exists());
+    assert!(
+        !state
+            .path()
+            .join("locks")
+            .join(format!("{lock_key}.lock"))
+            .exists()
+    );
 }
 
 #[test]

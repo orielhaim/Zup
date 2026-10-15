@@ -291,12 +291,20 @@ fn a_lock_marker_is_removed_only_when_nobody_holds_it() {
         .expect("first lock");
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
     assert!(
-        dir.path().join(format!("{key}.lock")).exists(),
+        dir.path()
+            .join("locks")
+            .join(format!("{key}.lock"))
+            .exists(),
         "a held lock's marker is not somebody else's to delete"
     );
     drop(held);
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
-    assert!(!dir.path().join(format!("{key}.lock")).exists());
+    assert!(
+        !dir.path()
+            .join("locks")
+            .join(format!("{key}.lock"))
+            .exists()
+    );
 
     InstallationLock::remove_if_unheld(dir.path(), &key).unwrap();
 }

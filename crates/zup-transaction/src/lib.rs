@@ -6,6 +6,7 @@ mod id;
 mod input;
 mod lock;
 mod plan;
+mod private;
 mod record;
 mod storage;
 
@@ -25,6 +26,7 @@ pub use plan::{
     Dependency, NodeKind, NodeMeta, Phase, TRANSACTION_PLAN_SCHEMA, TransactionAudit,
     TransactionNode, TransactionPlan, TransactionPlanError, compile_transaction,
 };
+pub use private::{read_at as read_private_file, write_durable_at as write_private_durable};
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, StoreError,
     TransactionPhase, TransactionRecord,

@@ -21,10 +21,19 @@ pub fn ensure_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
     canonical(path)
 }
 
+fn ensure_user_state_root(path: &Path) -> Result<PathBuf, MachineStateError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    private_fs::PrivateDir::ensure(path)
+        .map_err(|error| io_error(path, std::io::Error::other(error)))?;
+    canonical(path)
+}
+
 pub fn default_state_root(scope: SelectedScope) -> Result<PathBuf, MachineStateError> {
     match scope {
         SelectedScope::User => {
-            ensure_state_root(&host_dirs::user_data()?.join(zup_transaction::STATE_FOLDER))
+            ensure_user_state_root(&host_dirs::user_data()?.join(zup_transaction::STATE_FOLDER))
         }
         SelectedScope::Machine => {
             let base = host_dirs::shared_data()?;

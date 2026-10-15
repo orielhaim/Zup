@@ -68,8 +68,11 @@ pub fn user_state_root() -> Result<PathBuf, PathError> {
 }
 
 fn create_user_root(base: Option<PathBuf>) -> Result<PathBuf, PathError> {
-    let root = base.ok_or(PathError::NoStateHome)?.join(STATE_FOLDER);
-    std::fs::create_dir_all(&root).map_err(|source| io_error(&root, source))?;
+    let base = base.ok_or(PathError::NoStateHome)?;
+    std::fs::create_dir_all(&base).map_err(|source| io_error(&base, source))?;
+    let root = base.join(STATE_FOLDER);
+    private_fs::PrivateDir::ensure(&root)
+        .map_err(|error| io_error(&root, std::io::Error::other(error)))?;
     canonical(&root)
 }
 

@@ -137,15 +137,23 @@ fn validate(
     ledger: Option<InstallLedger>,
 ) -> Result<(), String> {
     let store = zup_windows::InstallLedgerStore::new(state_root);
-    std::fs::create_dir_all(state_root.join("installations")).ok();
     match ledger {
         Some(ledger) => {
             let name = store.path_for(&app_id(), scope);
-            std::fs::write(
-                &name,
-                serde_json::to_vec(&ledger).expect("the ledger serializes"),
-            )
-            .expect("the ledger is written");
+            if scope == SelectedScope::User {
+                zup_transaction::write_private_durable(
+                    &name,
+                    &serde_json::to_vec(&ledger).expect("the ledger serializes"),
+                )
+                .expect("the ledger is written");
+            } else {
+                std::fs::create_dir_all(name.parent().expect("parent")).ok();
+                std::fs::write(
+                    &name,
+                    serde_json::to_vec(&ledger).expect("the ledger serializes"),
+                )
+                .expect("the ledger is written");
+            }
         }
         None => {
             let name = store.path_for(&app_id(), scope);
@@ -391,10 +399,9 @@ fn the_persisted_window_is_the_runtime_model() {
 fn a_ledger_of_a_superseded_format_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let store = zup_windows::InstallLedgerStore::new(state_root.path());
-    std::fs::create_dir_all(state_root.path().join("installations")).expect("the directory");
-    std::fs::write(
-        store.path_for(&app_id(), SelectedScope::User),
-        serde_json::to_vec(&serde_json::json!({
+    zup_transaction::write_private_durable(
+        &store.path_for(&app_id(), SelectedScope::User),
+        &serde_json::to_vec(&serde_json::json!({
             "schema": 1,
             "app_id": "com.zup.test-ui",
             "scope": "user",

@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::private;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -50,20 +52,14 @@ impl InstallationLock {
     }
 
     pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, LockError> {
-        std::fs::create_dir_all(state_root).map_err(|source| LockError::Io {
-            path: state_root.display().to_string(),
-            source,
-        })?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path(state_root, key))
-            .map_err(|source| LockError::Io {
-                path: state_root.display().to_string(),
+        let path = lock_path(state_root, key);
+        let directory = lock_dir(state_root)?;
+        let file = private::open_lock(&directory, &format!("{key}.lock")).map_err(|source| {
+            LockError::Io {
+                path: path.display().to_string(),
                 source,
-            })?;
+            }
+        })?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self {
                 file,
@@ -78,13 +74,21 @@ impl InstallationLock {
             return Ok(());
         };
         let path = lock_path(state_root, key);
-        match std::fs::remove_file(&path) {
+        let directory = lock_dir(state_root)?;
+        match directory.remove_file(format!("{key}.lock"), private_fs::Durability::Full) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
+            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+            }
+            Err(private_fs::Error::Removal { source, .. }) => {
                 return Err(LockError::Io {
                     path: path.display().to_string(),
-                    source,
+                    source: std::io::Error::other(source),
+                });
+            }
+            Err(error) => {
+                return Err(LockError::Io {
+                    path: path.display().to_string(),
+                    source: std::io::Error::other(error),
                 });
             }
         }
@@ -103,8 +107,16 @@ impl Drop for InstallationLock {
     }
 }
 
-fn lock_path(state_root: &Path, key: &str) -> std::path::PathBuf {
-    state_root.join(format!("{key}.lock"))
+fn lock_dir(state_root: &Path) -> Result<private_fs::PrivateDir, LockError> {
+    let path = state_root.join("locks");
+    private::ensure_dir(&path).map_err(|source| LockError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+fn lock_path(state_root: &Path, key: &str) -> PathBuf {
+    state_root.join("locks").join(format!("{key}.lock"))
 }
 
 fn sanitize(value: &str) -> String {

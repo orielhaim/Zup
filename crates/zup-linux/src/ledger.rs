@@ -45,7 +45,7 @@ impl LinuxLedgerStore {
         scope: SelectedScope,
     ) -> Result<Option<InstallLedger>, ExecError> {
         let path = self.path_for(app_id, scope);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_ledger(&path, scope) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(PathError::io(&(path), source).into()),
@@ -425,7 +425,7 @@ impl LinuxLedgerStore {
         ledger.committed_transaction = record.transaction_id.to_string();
         let path = self.path_for(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
-        write_ledger(&path, &bytes)?;
+        write_ledger(&path, &bytes, scope)?;
         cleanup_committed_files(record)?;
 
         cleanup_removed_directories(record)?;
@@ -681,7 +681,18 @@ fn publish_service_node(
     Ok(())
 }
 
-fn write_ledger(path: &Path, bytes: &[u8]) -> Result<(), ExecError> {
+fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
+    if scope == SelectedScope::User {
+        return zup_transaction::read_private_file(path);
+    }
+    std::fs::read(path)
+}
+
+fn write_ledger(path: &Path, bytes: &[u8], scope: SelectedScope) -> Result<(), ExecError> {
+    if scope == SelectedScope::User {
+        return zup_transaction::write_private_durable(path, bytes)
+            .map_err(|error| PathError::io(path, error).into());
+    }
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

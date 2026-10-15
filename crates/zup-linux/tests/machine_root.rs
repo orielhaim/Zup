@@ -199,7 +199,7 @@ fn root_machine_state_ownership_and_modes() {
     for directory in [
         roots.state.clone(),
         roots.state.join("installations"),
-        roots.state.join("generated"),
+        roots.state.join("objects"),
     ] {
         if directory.exists() {
             assert_eq!(uid_of(&directory), 0, "{}", directory.display());
@@ -223,6 +223,7 @@ fn root_machine_state_ownership_and_modes() {
 
     let lock = roots
         .state
+        .join("locks")
         .join("zup-install-com_example_tool-machine.lock");
     if lock.exists() {
         assert_eq!(uid_of(&lock), 0);

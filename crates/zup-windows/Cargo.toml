@@ -35,6 +35,7 @@ zup-transaction.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 directories.workspace = true
+private-fs.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
 serde.workspace = true
 serde_json.workspace = true

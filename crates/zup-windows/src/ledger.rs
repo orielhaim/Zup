@@ -78,7 +78,7 @@ impl InstallLedgerStore {
         scope: SelectedScope,
     ) -> Result<Option<InstallLedger>, LedgerError> {
         let path = self.path_for(app_id, scope);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_ledger(&path, scope) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(LedgerError::Io { path, source }),
@@ -646,12 +646,28 @@ impl InstallLedgerStore {
         ledger.committed_transaction = record.transaction_id.to_string();
         let path = self.path(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
-        write_durable(Path::new(&path), &bytes)?;
+        if scope == SelectedScope::User {
+            zup_transaction::write_private_durable(Path::new(&path), &bytes).map_err(|source| {
+                LedgerError::Io {
+                    path: PathBuf::from(&path),
+                    source,
+                }
+            })?;
+        } else {
+            write_durable(Path::new(&path), &bytes)?;
+        }
         cleanup_committed_files(record)?;
 
         cleanup_removed_directories(record)?;
         Ok(ledger)
     }
+}
+
+fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
+    if scope == SelectedScope::User {
+        return zup_transaction::read_private_file(path);
+    }
+    std::fs::read(path)
 }
 
 fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, LedgerError> {
