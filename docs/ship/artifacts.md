@@ -28,6 +28,8 @@ For a reproducible size breakdown, run `scripts/ci/installer-size.py` with
 `--cli`, `--toolchain`, and `--output`. The size-only mode in Full Verification
 can measure a selected revision on native Windows and Linux runners.
 
+See [measured installer sizes](installer-size.md) for the frontend and component breakdown.
+
 ## Declare an artifact
 
 ```toml
