@@ -9,6 +9,7 @@ use zup_sdk::preset::prelude::*;
 use zup_sdk::preset::{AssetRef, PresetContext};
 
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub logo: Option<AssetRef>,
     pub accent: Option<Accent>,

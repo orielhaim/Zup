@@ -1,5 +1,4 @@
-#[allow(unused_imports)]
-use zup_sdk::preset::gpui_kit;
+use zup_sdk::preset::gpui_kit as gpui;
 
 use std::collections::BTreeSet;
 use std::rc::Rc;

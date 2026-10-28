@@ -49,10 +49,8 @@ machine = "${location.programs}/Demo App"
 #   cargo xtask toolchain build
 [ui]
 [ui.settings]
-# The one setting the bundled preset reads. It is drawn as a line above the
-# product name, so it is the fastest way to see that a settings edit reached the
-# window: change it, and `zup preview` re-renders without restarting anything.
-hero = "A tiny application you can install, change, repair and remove."
+# Edit the welcome text while preview is running to see it refresh.
+description = "A tiny application you can install, change, repair and remove."
 
 # ---------------------------------------------------------------------------
 # Components

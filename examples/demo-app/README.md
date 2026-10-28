@@ -63,10 +63,10 @@ can reach is a state a real installation can reach.
 
 Things worth trying:
 
-- **Edit `hero` in `zup.toml` while it is open.** The line under the product name
+- **Edit `description` in `zup.toml` while it is open.** The line under the product name
   changes without the window restarting, and without a build. That is the fastest
   proof that a data change and a code change are different things.
-- **Edit it into something invalid** - `hero = 42`. The session reports the
+- **Edit it into something invalid** - `description = 42`. The session reports the
   schema's own refusal, naming the setting, and keeps showing the last settings
   that fitted. A half-finished edit must not cost a working window.
 - **Press the buttons.** Install, Stop, and the state changes are all real
@@ -145,55 +145,27 @@ up-to-date 1.0.0
 update-failed no route to host
 ```
 
-## The logo, and what a preset asset actually is
+## Installer branding
 
-`payload/branding/logo.svg` is a file this application **ships**: the installer
-places it, a plan lists it, a repair restores it and an uninstall removes it.
-
-It is not a *preset asset*, which is a different thing. A preset asset is a file the
-**window itself reads** - a logo the installer draws in its own chrome. It only
-becomes one when the selected preset's settings schema marks it, so that the
-application can say `logo = "branding/logo.svg"` under `[ui.settings]` and have
-Zup resolve, hash and hand over the bytes.
-
-The bundled preset takes exactly one setting, `hero`, and marks nothing as an
-asset. `zup preset inspect` on a packed copy of it says so:
-
-```
-preset        zup-preset-default 0.0.1
-settings      hero (others permitted)
-```
-
-"others permitted" is the honest detail: naming a `logo` setting anyway would
-validate and then be ignored, because the preset would never read it. This project
-ships the logo as a payload file instead, which does something.
-
-To see a real preset asset, point this project at a preset that takes one. In a
-preset's own settings type:
-
-```rust
-#[zup_sdk::preset::settings]
-struct Settings {
-    hero: Option<String>,
-    logo: Option<AssetRef>,
-}
-```
-
-`AssetRef` is what marks the field as a file, so the build knows to resolve it.
-`#[zup_sdk::preset::settings]` is the whole derive story - the preset depends on
-`zup-sdk` and neither `serde` nor `schemars`.
-
-`zup preset pack` that preset, then set in `zup.toml`:
+The bundled preset supports a logo, accent colour, appearance, welcome heading
+and description, and compact, standard or wide initial windows. Unknown settings
+are rejected during validation.
 
 ```toml
-[ui]
-preset = "./aurora.zupui"
+[ui.settings]
+logo = "payload/branding/logo.svg"
+accent = "#3867d6"
+description = "A tiny application you can install, change, repair and remove."
+initial_window_size = "compact"
 ```
 
-and `zup preview` will resolve the file, hash it, materialize it into the
-session's own directory and hand the preset a logical name and verified content -
-never a path into this project. `zup preview` also re-resolves when you edit the
-package, and only replaces the window once the new one has connected.
+A preset logo is verified content read by the installer window. Shipping the same
+file as application payload is a separate choice: payload files are installed,
+repaired and removed through the application lifecycle.
+
+Custom native presets can expose additional settings and declare file settings
+with the SDK's `AssetRef` type. Preview resolves and verifies those assets again
+when the preset package changes.
 
 ## Cleaning up
 

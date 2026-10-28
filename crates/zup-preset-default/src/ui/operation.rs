@@ -1,5 +1,4 @@
-#[allow(unused_imports)]
-use zup_sdk::preset::gpui_kit;
+use zup_sdk::preset::gpui_kit as gpui;
 
 use zup_sdk::preset::gpui_kit::assets::IconName;
 use zup_sdk::preset::gpui_kit::component::progress::Progress;

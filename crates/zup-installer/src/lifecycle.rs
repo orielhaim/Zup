@@ -204,7 +204,9 @@ fn run_handoff(
         zup_acquire::HandoffMode::Install => LifecycleAction::Install,
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
-        zup_acquire::HandoffMode::Repair => LifecycleAction::Repair { force_files: false },
+        zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
+            force_files: args.force_files,
+        },
     };
     if let Some(action) = named_action(request)
         && expected != action
