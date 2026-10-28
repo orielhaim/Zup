@@ -372,4 +372,26 @@ fn committed_cleanup_is_retried_until_recovery_can_complete() {
         assert!(!old.exists());
         assert!(current.exists());
     }
+    let store = FilesystemTransactionStore::private_at(&state);
+    let mut newer = store.load(request.recovery_id.as_ref().unwrap()).unwrap();
+    newer.transaction_id = zup_transaction::TransactionId::new_v7();
+    newer.app_version = semver::Version::new(1, 1, 0);
+    let newer_directory = root.join("1.1.0");
+    std::fs::create_dir(&newer_directory).unwrap();
+    store.create(&newer).unwrap();
+    let ledger = zup_linux::LinuxLedgerStore::new(&state);
+    ledger
+        .publish_committed(&newer, SelectedScope::User)
+        .unwrap();
+    let report = backend.execute_blocking(&request, &control).unwrap();
+    assert!(matches!(report.outcome, InstallOutcome::Committed));
+    assert_eq!(
+        ledger
+            .load(&app_id(), SelectedScope::User)
+            .unwrap()
+            .unwrap()
+            .version,
+        newer.app_version
+    );
+    assert!(newer_directory.exists());
 }
