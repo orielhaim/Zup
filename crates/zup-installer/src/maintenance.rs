@@ -78,10 +78,9 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
         ));
     }
 
-    if context.is_live_console()
-        && !args.non_interactive
-        && !args.yes
-        && args.output == OutputArg::Human
+    if context
+        .with_output(args.output())
+        .may_prompt(args.non_interactive, args.yes)
         && !crate::frontend::confirm_uninstall()?
     {
         return Err(crate::frontend::cancelled());
@@ -106,14 +105,13 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
         args.state_root.as_deref(),
     )?;
     let output = args.output();
-    let policy = if args.non_interactive
-        || args.yes
-        || args.output != OutputArg::Human
-        || !context.is_live_console()
+    let policy = if context
+        .with_output(args.output())
+        .may_prompt(args.non_interactive, args.yes)
     {
-        ExecutionPolicy::NonInteractive
-    } else {
         ExecutionPolicy::Interactive
+    } else {
+        ExecutionPolicy::NonInteractive
     };
 
     let prepared = match &build {

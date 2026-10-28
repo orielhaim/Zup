@@ -31,10 +31,21 @@ use zup_presentation::ProcessOutcome;
 use crate::run::RuntimeContext;
 
 pub fn process_exit_code(error: &miette::Report) -> i32 {
-    if let Some(failure) = error.downcast_ref::<terminal::Failure>() {
-        return failure.outcome.code();
+    error_outcome(error).code()
+}
+
+pub(crate) fn error_outcome(error: &miette::Report) -> ProcessOutcome {
+    if let Some(failure) = error.downcast_ref::<terminal::ReportedFailure>() {
+        return failure.0.outcome;
     }
-    ProcessOutcome::from_message(&error.to_string()).code()
+    if let Some(failure) = error.downcast_ref::<terminal::Failure>() {
+        return failure.outcome;
+    }
+    #[cfg(windows)]
+    if let Some(error) = error.downcast_ref::<execute::ExecutionError>() {
+        return error.outcome();
+    }
+    ProcessOutcome::from_message(&error.to_string())
 }
 
 pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
@@ -49,7 +60,7 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
         let result = cli::dispatch(cli, context);
         if let Err(error) = &result
             && !execute::already_reported(error)
-            && error.downcast_ref::<terminal::Failure>().is_none()
+            && error.downcast_ref::<terminal::ReportedFailure>().is_none()
         {
             emit_failure(output, error);
         }
@@ -87,7 +98,7 @@ pub fn command() -> clap::Command {
 fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) {
     use zup_presentation::{DiagnosticPresentation, InstallerEvent, InstallerResult};
 
-    let outcome = ProcessOutcome::from_message(&error.to_string());
+    let outcome = error_outcome(error);
     match output {
         zup_presentation::OutputFormat::Human => {}
         zup_presentation::OutputFormat::Json => {
@@ -106,9 +117,9 @@ fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) 
                 outcome,
                 code: outcome.code(),
                 message: error.to_string(),
-                diagnostic: Some(DiagnosticPresentation::from_message(
+                diagnostic: Some(DiagnosticPresentation::for_outcome(
+                    outcome,
                     &error.to_string(),
-                    outcome == ProcessOutcome::RecoveryRequired,
                 )),
             };
             if let Ok(value) = serde_json::to_string(&event) {

@@ -110,6 +110,11 @@ pub(crate) struct Failure {
     pub outcome: ProcessOutcome,
     pub message: String,
 }
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct ReportedFailure(pub Failure);
+impl miette::Diagnostic for ReportedFailure {}
+
 impl miette::Diagnostic for Failure {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(
@@ -205,10 +210,7 @@ pub(crate) fn run_cli<H: SessionHost>(
     let result = drive(&mut host, &cli, interactive, &mut report);
     let outcome = match &result {
         Ok(outcome) => zup_session::process_outcome(outcome),
-        Err(error) => error
-            .downcast_ref::<Failure>()
-            .map(|error| error.outcome)
-            .unwrap_or_else(|| ProcessOutcome::from_message(&error.to_string())),
+        Err(error) => crate::error_outcome(error),
     };
     let message = match &result {
         Err(error) => Some(error.to_string()),
@@ -226,26 +228,26 @@ pub(crate) fn run_cli<H: SessionHost>(
         (message, detail) => message.or(detail),
     };
     if let Err(error) = report.finish() {
-        return Err(Failure {
+        return Err(ReportedFailure(Failure {
             outcome: if outcome == ProcessOutcome::Success {
                 ProcessOutcome::Failure
             } else {
                 outcome
             },
             message: error.to_string(),
-        }
+        })
         .into());
     }
     if outcome == ProcessOutcome::Success {
         Ok(())
     } else {
-        Err(Failure {
+        Err(ReportedFailure(Failure {
             outcome,
             message: report
                 .result
                 .message
                 .unwrap_or_else(|| format!("{outcome:?}")),
-        }
+        })
         .into())
     }
 }

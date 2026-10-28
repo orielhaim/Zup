@@ -21,7 +21,10 @@ pub fn console() -> ExitCode {
     match run_frontend(Frontend::Console) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if error.downcast_ref::<crate::terminal::Failure>().is_none() {
+            if error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+            {
                 eprintln!("{error}");
             }
             failure_exit(&error)
@@ -33,7 +36,10 @@ pub fn headless() -> ExitCode {
     match run_frontend(Frontend::Headless) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if error.downcast_ref::<crate::terminal::Failure>().is_none() {
+            if error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+            {
                 eprintln!("{error}");
             }
             failure_exit(&error)

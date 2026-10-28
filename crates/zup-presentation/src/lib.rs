@@ -1273,11 +1273,31 @@ mod tests {
     #[test]
     fn diagnostics_follow_typed_outcomes() {
         for message in ["blocked by running applications", "ownership drift"] {
-            assert_eq!(DiagnosticPresentation::from_message(message, true).kind, DiagnosticKind::Recovery);
+            assert_eq!(
+                DiagnosticPresentation::from_message(message, true).kind,
+                DiagnosticKind::Recovery
+            );
         }
-        assert_eq!(DiagnosticPresentation::for_outcome(ProcessOutcome::InstallationBusy, "ownership drift").kind, DiagnosticKind::Blocked);
-        assert_eq!(DiagnosticPresentation::for_outcome(ProcessOutcome::OwnershipConflict, "running application").kind, DiagnosticKind::Conflict);
-        assert_eq!(DiagnosticPresentation::from_message("blocked by running applications", false).kind, DiagnosticKind::Blocked);
+        assert_eq!(
+            DiagnosticPresentation::for_outcome(
+                ProcessOutcome::InstallationBusy,
+                "ownership drift"
+            )
+            .kind,
+            DiagnosticKind::Blocked
+        );
+        assert_eq!(
+            DiagnosticPresentation::for_outcome(
+                ProcessOutcome::OwnershipConflict,
+                "running application"
+            )
+            .kind,
+            DiagnosticKind::Conflict
+        );
+        assert_eq!(
+            DiagnosticPresentation::from_message("blocked by running applications", false).kind,
+            DiagnosticKind::Blocked
+        );
     }
 
     #[test]
